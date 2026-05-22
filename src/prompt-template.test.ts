@@ -7,6 +7,8 @@ describe("renderPrompt", () => {
       GH_ISSUE: "42",
       TITLE: "Contact list",
       SLICE_DIR: ".kiro/specs/contacts/slices/01-foo",
+      SLICE_BODY: "Implement the contact list component",
+      RELEVANT_FILES: "src/app.ts\nsrc/util.ts",
     });
     expect(out).toContain("#42");
     expect(out).toContain('"Contact list"');
@@ -20,6 +22,7 @@ describe("renderPrompt", () => {
       SLICE_DIR: "specs/slices/01",
       ROUND: 2,
       REVISION_NOTE: "",
+      RELEVANT_FILES: "",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).not.toContain("{{");
@@ -30,6 +33,8 @@ describe("renderPrompt", () => {
       renderPrompt("explorer", {
         GH_ISSUE: "1",
         TITLE: "x",
+        SLICE_BODY: "body",
+        RELEVANT_FILES: "",
       } as never),
     ).toThrow(/SLICE_DIR/);
   });
@@ -38,13 +43,14 @@ describe("renderPrompt", () => {
     expect(() =>
       renderPrompt("evaluator-qa", {
         SLICE_DIR: "x",
+        RELEVANT_FILES: "",
         EXTRA: "y",
       }),
     ).toThrow(/EXTRA/);
   });
 
   it("loads all eight pipeline templates", () => {
-    expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d" })).toBeTruthy();
+    expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "" })).toBeTruthy();
     expect(
       renderPrompt("planner", {
         GH_ISSUE: "1",
@@ -52,15 +58,16 @@ describe("renderPrompt", () => {
         SLICE_DIR: "d",
         ROUND: 1,
         REVISION_NOTE: "",
+        RELEVANT_FILES: "",
       }),
     ).toBeTruthy();
     expect(
-      renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1 }),
+      renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "" }),
     ).toBeTruthy();
-    expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "" })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d" })).toBeTruthy();
+    expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "" })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d" })).toBeTruthy();
-    expect(renderPrompt("architect-review", { SPECS_DIR: "s" })).toBeTruthy();
-    expect(renderPrompt("pm-review", { SPECS_DIR: "s" })).toBeTruthy();
+    expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
+    expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
   });
 });
