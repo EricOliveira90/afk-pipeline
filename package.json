@@ -1,0 +1,33 @@
+{
+  "name": "afk-pipeline",
+  "version": "0.1.0",
+  "description": "Automated multi-agent orchestration pipeline for PRD slices",
+  "type": "module",
+  "bin": {
+    "afk": "./dist/afk.js",
+    "afk-claude": "./dist/afk-claude.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
+    "dev": "tsx src/afk.ts",
+    "dev:claude": "tsx src/afk-claude.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "agents"
+  ],
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
