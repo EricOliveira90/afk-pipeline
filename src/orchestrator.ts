@@ -281,6 +281,8 @@ async function runSlice(
   // Relative path to the specs dir (for PRD reference).
   const relSpecsDir = specsDir.replace(/\\/g, "/");
 
+  const tag = `[afk] Slice #${slice.ghIssue} (${slice.title})`;
+
   logger.setSliceStatus(slice.ghIssue, {
     title: slice.title,
     status: "RUNNING",
@@ -302,6 +304,7 @@ async function runSlice(
         ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
         : `Fetch the issue body with: gh issue view ${slice.ghIssue}`;
 
+      console.error(`${tag}: exploring...`);
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
         role: "explorer",
@@ -325,6 +328,7 @@ async function runSlice(
     if (contractStatus !== "LOCKED") {
       for (let round = 1; round <= MAX_CONTRACT_ROUNDS; round++) {
         // Planner drafts/revises
+        console.error(`${tag}: planning (round ${round}/${MAX_CONTRACT_ROUNDS})...`);
         const plannerLog = logger.agentLog(slice.number, "planner", round);
         await invoke({
           role: "planner",
@@ -345,6 +349,7 @@ async function runSlice(
         plannerLog.end();
 
         // Evaluator reviews contract
+        console.error(`${tag}: evaluating contract (round ${round}/${MAX_CONTRACT_ROUNDS})...`);
         const evalLog = logger.agentLog(
           slice.number,
           "evaluator-contract",
@@ -371,6 +376,7 @@ async function runSlice(
           break;
         }
         if (verdict === "ESCALATE" || round === MAX_CONTRACT_ROUNDS) {
+          console.error(`${tag}: ESCALATE — contract negotiation failed`);
           logger.setSliceStatus(slice.ghIssue, {
             status: "STUCK",
             evalRounds: round,
@@ -397,6 +403,7 @@ async function runSlice(
       logger.setSliceStatus(slice.ghIssue, { genRounds: round });
 
       // Generator implements
+      console.error(`${tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
       const genLog = logger.agentLog(slice.number, "generator", round);
       await invoke({
         role: "generator",
@@ -414,6 +421,7 @@ async function runSlice(
       genLog.end();
 
       // Evaluator grades
+      console.error(`${tag}: evaluating QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
       const evalLog = logger.agentLog(slice.number, "evaluator-qa", round);
       await invoke({
         role: "evaluator-qa",
@@ -456,12 +464,14 @@ async function runSlice(
           }
         }
 
+        console.error(`${tag}: tests pass — committed`);
         logger.setSliceStatus(slice.ghIssue, { status: "PASS" });
         return "PASS";
       }
 
       if (round === MAX_GENERATOR_ROUNDS) {
         // Generator writes stuck.md on final failure
+        console.error(`${tag}: stuck — running fallback generator...`);
         const stuckLog = logger.agentLog(slice.number, "generator-stuck");
         await invoke({
           role: "generator-stuck",
@@ -471,6 +481,7 @@ async function runSlice(
         });
         stuckLog.end();
 
+        console.error(`${tag}: STUCK — QA failed after ${MAX_GENERATOR_ROUNDS} rounds`);
         logger.setSliceStatus(slice.ghIssue, {
           status: "STUCK",
           error: `QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
