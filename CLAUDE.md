@@ -1,6 +1,6 @@
 # AFK Pipeline
 
-Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD slices autonomously. Consumed by other projects via `pnpm add -D git+https://...`.
+Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD slices autonomously. Consumed by other projects via `pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git`.
 
 ## Directory map
 

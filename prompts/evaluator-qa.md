@@ -8,24 +8,13 @@ can't grade its own work.
 Before reviewing, read these files. Grading "convention compliance"
 without reading the conventions is a hand-wave.
 
-**Always read (Tier 1):**
-- `CONTEXT.md`
-- `docs/ARCHITECTURE.md`
-- `docs/CONVENTIONS.md`
+{{RELEVANT_FILES}}
+
+Also read:
 - `{{SLICE_DIR}}/contract.md` (must be `Status: LOCKED`)
 - `{{SLICE_DIR}}/handoff.md`
 - Every ADR cited by the PRD or contract. Grep both for `docs/adr/`
   references and read each one.
-
-**Read when relevant (Tier 2):**
-- `docs/PRODUCT.md` (Lifecycle Model and Product Principles sections)
-- `docs/product/ui-ux-principles.md` — for UI slices
-- `docs/adr/0010-dual-write-structured-logging.md` — to grade logging
-  coverage on mutations
-- `docs/adr/0008-multi-tenant-from-day-one.md` — to grade RLS on any
-  data-touching slice
-- `docs/adr/0011-per-clinic-feature-flags.md` — when the slice
-  introduces or relies on flags
 
 Hard rules:
 - **Skeptical by default.** Praise nothing that isn't specifically

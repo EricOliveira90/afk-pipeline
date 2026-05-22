@@ -1,24 +1,25 @@
 #!/usr/bin/env node
-import { resolve, dirname, basename } from "node:path";
+import { resolve, basename, join } from "node:path";
+import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
 import { runPipeline } from "./orchestrator.js";
 import { claudeProvider } from "./claude.js";
 
 function usage(): never {
   console.error(
-    `Usage: afk-claude --issues <path-to-issues.md> [--dry-run]`,
+    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  let issuesPath: string | undefined;
+  let prdDirArg: string | undefined;
   let dryRun = false;
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--issues" && args[i + 1]) {
-      issuesPath = args[++i];
+    if (args[i] === "--prd-dir" && args[i + 1]) {
+      prdDirArg = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
     } else if (args[i] === "--help" || args[i] === "-h") {
@@ -26,25 +27,35 @@ async function main() {
     }
   }
 
-  if (!issuesPath) usage();
+  if (!prdDirArg) usage();
 
-  const resolvedPath = resolve(issuesPath);
+  const prdDir = resolve(prdDirArg);
   const repoRoot = resolve(".");
 
-  const specsDir = dirname(resolvedPath)
+  if (!existsSync(join(prdDir, "prd.md"))) {
+    console.error(`Error: ${prdDir}/prd.md not found`);
+    process.exit(2);
+  }
+  if (!existsSync(join(prdDir, "issues.md"))) {
+    console.error(`Error: ${prdDir}/issues.md not found`);
+    process.exit(2);
+  }
+
+  const prdSlug = basename(prdDir);
+  const specsDir = prdDir
     .replace(repoRoot + "\\", "")
     .replace(repoRoot + "/", "")
     .replace(/\\/g, "/");
-  const prdSlug = basename(specsDir);
+  const issuesPath = join(prdDir, "issues.md");
 
   console.log(`AFK Pipeline (Claude Code backend)`);
   console.log(`  PRD: ${prdSlug}`);
-  console.log(`  Issues: ${resolvedPath}`);
+  console.log(`  PRD dir: ${prdDir}`);
   console.log(`  Repo: ${repoRoot}`);
   console.log(`  Dry run: ${dryRun}`);
   console.log();
 
-  const slices = parseIssuesMd(resolvedPath);
+  const slices = parseIssuesMd(issuesPath);
   const dag = buildDAG(slices);
 
   const afkCount = [...dag.slices.values()].filter(
@@ -113,6 +124,7 @@ async function main() {
   const result = await runPipeline({
     repoRoot,
     prdSlug,
+    prdDir,
     specsDir,
     dag,
     dryRun,

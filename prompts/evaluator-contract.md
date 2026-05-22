@@ -6,21 +6,12 @@ is: *is this contract testable and boundary-tight as written?*
 Before reviewing, read these files. You can't grade alignment with the
 project without knowing what the project says.
 
-**Always read (Tier 1):**
-- `CONTEXT.md`
-- `docs/ARCHITECTURE.md`
-- `docs/CONVENTIONS.md`
+{{RELEVANT_FILES}}
+
+Also read:
 - The PRD at `{{SPECS_DIR}}/prd.md`
 - Every ADR cited by the PRD or contract. Grep both for `docs/adr/`
   references and read each one.
-
-**Read when relevant (Tier 2):**
-- `docs/PRODUCT.md` (Lifecycle Model and Product Principles sections)
-- `docs/product/ui-ux-principles.md` — if the slice has any UI surface
-- `docs/adr/0008-multi-tenant-from-day-one.md` — if the slice touches
-  data with RLS implications
-- `docs/adr/0011-per-clinic-feature-flags.md` — if the slice introduces
-  or relies on feature flags
 
 ACCEPT criteria — every one must hold:
 - Every "In scope" item has a matching "Test plan" entry that could fail.

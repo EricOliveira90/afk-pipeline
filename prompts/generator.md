@@ -8,25 +8,15 @@ separate agent precisely so you don't grade your own work.
 Before touching code, read these files. The implementation you produce
 must be consistent with the patterns and decisions they document.
 
-**Always read (Tier 1):**
-- `CONTEXT.md`
-- `docs/CONVENTIONS.md`
-- `docs/ARCHITECTURE.md`
+{{RELEVANT_FILES}}
+
+Also read:
 - The locked contract at `{{SLICE_DIR}}/contract.md` (if `Status` is not
   `LOCKED`, stop and report)
 - The slice's `{{SLICE_DIR}}/context.md` (explorer output)
 - Every ADR cited by the contract. Grep the contract for `docs/adr/`
   references and read each one.
 - Sibling slices' `handoff.md` files for relevant gotchas
-
-**Read when relevant (Tier 2):**
-- `docs/adr/0010-dual-write-structured-logging.md` — almost always
-  relevant for mutations
-- `docs/adr/0003-hybrid-auth-pattern.md` — almost always relevant for
-  mutations
-- `docs/product/ui-ux-principles.md` — if implementing UI
-- `docs/adr/0014-external-system-identifiers.md` — if the slice touches
-  importers or external system IDs
 
 Hard rules:
 - **Contract boundary is law.** If you spot a bug or cleanup opportunity

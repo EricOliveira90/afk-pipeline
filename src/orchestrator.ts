@@ -9,6 +9,7 @@ import { CancelledError } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
+import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 
 import { loadRunState, saveSliceState, isSliceComplete } from "./run-state.js";
 
@@ -170,6 +171,7 @@ function sliceTouchedMigrations(
 export interface PipelineConfig {
   repoRoot: string;
   prdSlug: string;
+  prdDir: string; // absolute path to the PRD folder
   specsDir: string; // e.g. .kiro/specs/<prd-slug>
   dag: DAG;
   dryRun?: boolean;
@@ -241,8 +243,9 @@ async function runSlice(
   slice: Slice,
   logger: Logger,
   featBranch: string,
+  relevantFilesBlock: string,
 ): Promise<"PASS" | "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED"> {
-  const { repoRoot, prdSlug, specsDir, signal } = config;
+  const { repoRoot, prdSlug, prdDir, specsDir, signal } = config;
   const provider = config.provider ?? kiroProvider;
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
     const result = await provider.invoke({
@@ -293,6 +296,11 @@ async function runSlice(
     // --- Step 1: Explorer ---
     const contextPath = join(absSliceDir, "context.md");
     if (!existsSync(contextPath)) {
+      const localSliceContent = readSliceFile(prdDir, slice.number);
+      const sliceBodyNote = localSliceContent
+        ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
+        : `Fetch the issue body with: gh issue view ${slice.ghIssue}`;
+
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
         role: "explorer",
@@ -300,6 +308,8 @@ async function runSlice(
           GH_ISSUE: slice.ghIssue,
           TITLE: slice.title,
           SLICE_DIR: relSliceDir,
+          RELEVANT_FILES: relevantFilesBlock,
+          SLICE_BODY: sliceBodyNote,
         }),
         cwd: worktreeDir,
         logStream,
@@ -322,6 +332,7 @@ async function runSlice(
             SPECS_DIR: relSpecsDir,
             SLICE_DIR: relSliceDir,
             ROUND: round,
+            RELEVANT_FILES: relevantFilesBlock,
             REVISION_NOTE:
               round > 1
                 ? `Revise based on evaluator feedback in ${relSliceDir}/contract.md.`
@@ -344,6 +355,7 @@ async function runSlice(
             SPECS_DIR: relSpecsDir,
             SLICE_DIR: relSliceDir,
             ROUND: round,
+            RELEVANT_FILES: relevantFilesBlock,
           }),
           cwd: worktreeDir,
           logStream: evalLog,
@@ -389,6 +401,7 @@ async function runSlice(
         role: "generator",
         prompt: renderPrompt("generator", {
           SLICE_DIR: relSliceDir,
+          RELEVANT_FILES: relevantFilesBlock,
           RETRY_NOTE:
             round > 1
               ? `This is retry round ${round}. Read ${relSliceDir}/qa-report.md for findings to fix.`
@@ -403,7 +416,7 @@ async function runSlice(
       const evalLog = logger.agentLog(slice.number, "evaluator-qa", round);
       await invoke({
         role: "evaluator-qa",
-        prompt: renderPrompt("evaluator-qa", { SLICE_DIR: relSliceDir }),
+        prompt: renderPrompt("evaluator-qa", { SLICE_DIR: relSliceDir, RELEVANT_FILES: relevantFilesBlock }),
         cwd: worktreeDir,
         logStream: evalLog,
       });
@@ -486,7 +499,7 @@ async function runSlice(
 export async function runPipeline(
   config: PipelineConfig,
 ): Promise<PipelineResult> {
-  const { repoRoot, prdSlug, specsDir, dag, signal } = config;
+  const { repoRoot, prdSlug, prdDir, specsDir, dag, signal } = config;
   const provider = config.provider ?? kiroProvider;
   const loggerSlug =
     provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
@@ -502,6 +515,7 @@ export async function runPipeline(
       },
     });
   const featBranch = featureBranch(prdSlug, provider);
+  const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
 
   // Initialize feature branch. Prefer `prd/<slug>` as the base if it
   // exists — that branch holds the human-authored `prd.md` + `issues.md`
@@ -565,7 +579,7 @@ export async function runPipeline(
     const sliceOutcomes = await Promise.allSettled(
       toRun.map(async (id) => {
         const slice = dag.slices.get(id)!;
-        const result = await runSlice(config, slice, logger, featBranch);
+        const result = await runSlice(config, slice, logger, featBranch, relevantFilesBlock);
         return { id, result };
       }),
     );
@@ -744,7 +758,7 @@ export async function runPipeline(
         await invoke({
           role: "architect-review",
           agent: "architect-review",
-          prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir }),
+          prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
           cwd: reviewDir,
           logStream: archLog,
         });
@@ -764,7 +778,7 @@ export async function runPipeline(
         await invoke({
           role: "pm-review",
           agent: "pm-review",
-          prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir }),
+          prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
           cwd: reviewDir,
           logStream: pmLog,
         });

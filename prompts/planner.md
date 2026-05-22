@@ -8,23 +8,14 @@ boundary and the acceptance bar.
 Before drafting any contract, read these files. The contract you produce
 must be consistent with what they say.
 
-**Always read (Tier 1):**
-- `CONTEXT.md` (project-wide vocabulary and conventions)
-- `docs/PRODUCT.md`
-- `docs/ARCHITECTURE.md`
-- `docs/CONVENTIONS.md`
+{{RELEVANT_FILES}}
+
+Also read:
 - The PRD at `{{SPECS_DIR}}/prd.md`
 - The GH issue body — fetch with `gh issue view {{GH_ISSUE}}`
 - Every ADR cited by the PRD (e.g. `docs/adr/0011-*.md`). Grep the PRD
   for `docs/adr/` references and read each one.
 - The explorer's `{{SLICE_DIR}}/context.md` (if it exists)
-
-**Read when relevant (Tier 2):**
-- `docs/product/milestones.md` — always
-- `docs/product/triage-workflow.md` — always
-- `docs/product/ui-ux-principles.md` — if the slice has any UI surface
-- `docs/product/growth-playbooks.md` — if the slice touches the
-  initiative engine or growth playbooks
 
 Hard rules:
 - **Boundary-first.** If you can't clearly name what is NOT in this slice,

@@ -7,9 +7,17 @@ Be specific (file paths, line numbers, function names), be concise (under
 ~100 lines, prioritize what's actionable), and report facts only — no
 opinions, no design recommendations.
 
+# Required reading
+
+Before investigating, read these project files for context:
+
+{{RELEVANT_FILES}}
+
 # Task
 
 Slice: GH issue #{{GH_ISSUE}} — "{{TITLE}}"
+
+{{SLICE_BODY}}
 
 Investigate the codebase for this slice. At minimum, surface:
 - **Relevant files** — source, tests, schemas, routes that relate to the
