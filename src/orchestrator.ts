@@ -15,6 +15,7 @@ import { loadRunState, saveSliceState, isSliceComplete } from "./run-state.js";
 
 const MAX_CONTRACT_ROUNDS = 3;
 const MAX_GENERATOR_ROUNDS = 3;
+const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 
 /**
  * Pre-ship sanity gate steps, in order. Each step maps to a `package.json`
@@ -565,10 +566,34 @@ export async function runPipeline(
   // dependents so they don't run against a missing foundation. Slices
   // whose blocker is in `failed` will simply never become ready and the
   // loop will exit once no toRun remain.
+  let wave = 0;
   while (true) {
-    const ready = dag.ready(completed);
-    const toRun = ready.filter((id) => !failed.has(id));
+    wave++;
+
+    // Wave-transition watchdog: race the readiness check + dispatch
+    // against a timeout. If the event loop is blocked (dangling promise,
+    // unresolved stream), the timeout rejects and we crash with diagnostics.
+    const readyResult = await Promise.race([
+      Promise.resolve().then(() => {
+        const ready = dag.ready(completed);
+        return ready.filter((id) => !failed.has(id));
+      }),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(
+            `[afk] Pipeline hung before wave ${wave} started (>${WAVE_TRANSITION_TIMEOUT_MS / 1000}s).\n` +
+            `Completed: [${[...completed].join(", ")}]\n` +
+            `Failed: [${[...failed].join(", ")}]\n`
+          ));
+        }, WAVE_TRANSITION_TIMEOUT_MS);
+        timer.unref();
+      }),
+    ]);
+
+    const toRun = readyResult;
     if (toRun.length === 0) break;
+
+    console.error(`[afk] Wave ${wave}: dispatching ${toRun.length} slice(s) [${toRun.join(", ")}]`);
 
     // Phase 1: run ready slices in parallel. Each slice operates in its
     // own worktree, so this is safe to parallelize. We deliberately do
