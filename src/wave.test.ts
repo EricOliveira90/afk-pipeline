@@ -12,7 +12,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runWave, type SliceOutcome } from "./wave.js";
+import { runWave } from "./wave.js";
 import { makeAsyncMutex } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { Logger } from "./logger.js";
@@ -213,7 +213,7 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    expect(outcomes.get("100")).toBe("PASS");
+    expect(outcomes.get("100")?.phase).toBe("PASS");
   }, 30_000);
 
   it("returns STUCK when QA fails after max rounds", async () => {
@@ -238,7 +238,7 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    expect(outcomes.get("200")).toBe("STUCK");
+    expect(outcomes.get("200")?.phase).toBe("STUCK");
   }, 30_000);
 
   it("lane-cancels successors when predecessor fails", async () => {
@@ -265,8 +265,8 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    expect(outcomes.get("301")).toBe("STUCK");
-    expect(outcomes.get("302")).toBe("LANE-CANCELLED");
+    expect(outcomes.get("301")?.phase).toBe("STUCK");
+    expect(outcomes.get("302")?.phase).toBe("LANE-CANCELLED");
   }, 60_000);
 
   it("runs disjoint slices in parallel lanes", async () => {
@@ -293,8 +293,8 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    expect(outcomes.get("401")).toBe("PASS");
-    expect(outcomes.get("402")).toBe("PASS");
+    expect(outcomes.get("401")?.phase).toBe("PASS");
+    expect(outcomes.get("402")?.phase).toBe("PASS");
   }, 30_000);
 
   it("returns CANCELLED for all slices when signal fires during Phase A", async () => {
@@ -356,8 +356,8 @@ describe("runWave", () => {
 
     // Both slices should be CANCELLED — one rejected with CancelledError,
     // the other caught by the post-Phase-A signal check.
-    expect(outcomes.get("501")).toBe("CANCELLED");
-    expect(outcomes.get("502")).toBe("CANCELLED");
+    expect(outcomes.get("501")?.phase).toBe("CANCELLED");
+    expect(outcomes.get("502")?.phase).toBe("CANCELLED");
   }, 30_000);
 
   it("collapses wave to one lane when a slice has undeclared files", async () => {
@@ -452,7 +452,7 @@ describe("runWave", () => {
     });
 
     // Both should pass (serial within one lane, no failure).
-    expect(outcomes.get("601")).toBe("PASS");
-    expect(outcomes.get("602")).toBe("PASS");
+    expect(outcomes.get("601")?.phase).toBe("PASS");
+    expect(outcomes.get("602")?.phase).toBe("PASS");
   }, 60_000);
 });

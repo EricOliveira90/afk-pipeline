@@ -17,14 +17,21 @@ import {
 } from "./orchestrator.js";
 import { kiroProvider } from "./kiro.js";
 
-export type SliceOutcome =
+export type WaveOutcomePhase =
   | "PASS"
   | "STUCK"
+  | "ESCALATE"
   | "ERROR"
   | "CANCELLED"
   | "CONFLICT"
-  | "LANE-CANCELLED"
-  | "NO-COMMITS";
+  | "LANE-CANCELLED";
+
+export type WaveOutcome =
+  | { phase: "PASS" }
+  | {
+      phase: Exclude<WaveOutcomePhase, "PASS">;
+      error: string;
+    };
 
 export interface WaveInput {
   waveNumber: number;
@@ -39,8 +46,10 @@ export interface WaveInput {
 }
 
 export interface WaveResult {
-  outcomes: Map<string, SliceOutcome>;
+  outcomes: Map<string, WaveOutcome>;
 }
+
+const PASS: WaveOutcome = { phase: "PASS" };
 
 export async function runWave(input: WaveInput): Promise<WaveResult> {
   const {
@@ -56,7 +65,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   } = input;
   const { repoRoot, prdSlug, signal } = config;
   const provider = config.provider ?? kiroProvider;
-  const outcomes = new Map<string, SliceOutcome>();
+  const outcomes = new Map<string, WaveOutcome>();
 
   console.error(
     `[afk] Wave ${waveNumber}: dispatching ${readyIds.length} slice(s) [${readyIds.join(", ")}]`,
@@ -96,9 +105,12 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
     if (r.status === "rejected") {
       if (isCancelled(r.reason, signal)) {
-        outcomes.set(id, "CANCELLED");
+        outcomes.set(id, { phase: "CANCELLED", error: "Cancelled by user" });
       } else {
-        outcomes.set(id, "ERROR");
+        outcomes.set(id, {
+          phase: "ERROR",
+          error: `Unhandled rejection in negotiate: ${r.reason}`,
+        });
       }
       continue;
     }
@@ -109,13 +121,24 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
       continue;
     }
 
-    // STUCK / ESCALATE / ERROR / CANCELLED
+    // Phase A returns ESCALATE / STUCK / ERROR / CANCELLED on non-LOCKED.
     if (result === "CANCELLED") {
-      outcomes.set(id, "CANCELLED");
+      outcomes.set(id, { phase: "CANCELLED", error: "Cancelled by user" });
     } else if (result === "ESCALATE") {
-      outcomes.set(id, "STUCK");
+      outcomes.set(id, {
+        phase: "ESCALATE",
+        error: "Contract negotiation escalated after max rounds",
+      });
+    } else if (result === "STUCK") {
+      outcomes.set(id, {
+        phase: "STUCK",
+        error: "Contract not locked after negotiation",
+      });
     } else {
-      outcomes.set(id, result);
+      outcomes.set(id, {
+        phase: "ERROR",
+        error: "Negotiation returned ERROR",
+      });
     }
   }
 
@@ -123,7 +146,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   if (signal?.aborted) {
     for (const id of readyIds) {
       if (!outcomes.has(id)) {
-        outcomes.set(id, "CANCELLED");
+        outcomes.set(id, { phase: "CANCELLED", error: "Cancelled by user" });
       }
     }
     return { outcomes };
@@ -182,60 +205,64 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             }
             const negotiate = await runSliceNegotiate(ctx);
             if (negotiate !== "LOCKED") {
-              outcomes.set(
-                id,
-                negotiate === "ESCALATE" ? "STUCK" : negotiate,
-              );
-              for (let k = i + 1; k < lane.length; k++) {
-                outcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-              }
+              outcomes.set(id, negotiateRefreshOutcome(negotiate));
+              cancelLaneSuccessors(outcomes, lane, i);
               return;
             }
           } catch (err) {
             if (isCancelled(err, signal)) {
-              outcomes.set(id, "CANCELLED");
-            } else {
-              logger.setSliceStatus(id, {
-                status: "STUCK",
-                error: err instanceof Error ? err.message : String(err),
+              outcomes.set(id, {
+                phase: "CANCELLED",
+                error: "Cancelled by user",
               });
-              outcomes.set(id, "ERROR");
+            } else {
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.markError(id, msg);
+              outcomes.set(id, { phase: "ERROR", error: msg });
             }
-            for (let k = i + 1; k < lane.length; k++) {
-              outcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-            }
+            cancelLaneSuccessors(outcomes, lane, i);
             return;
           }
         }
 
         // Run Phase B.
-        let outcome: "PASS" | "STUCK" | "ERROR" | "CANCELLED";
+        let outcome: WaveOutcome;
         try {
-          outcome = await runSliceExecute(ctx);
+          const phaseB = await runSliceExecute(ctx);
+          outcome =
+            phaseB === "PASS"
+              ? PASS
+              : phaseB === "CANCELLED"
+                ? { phase: "CANCELLED", error: "Cancelled by user" }
+                : phaseB === "STUCK"
+                  ? {
+                      phase: "STUCK",
+                      error: "Phase B returned STUCK",
+                    }
+                  : { phase: "ERROR", error: "Phase B returned ERROR" };
         } catch (err) {
-          outcome = isCancelled(err, signal) ? "CANCELLED" : "ERROR";
-          if (outcome === "ERROR") {
-            logger.setSliceStatus(id, {
-              status: "STUCK",
-              error: err instanceof Error ? err.message : String(err),
-            });
+          if (isCancelled(err, signal)) {
+            outcome = { phase: "CANCELLED", error: "Cancelled by user" };
+          } else {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.markError(id, msg);
+            outcome = { phase: "ERROR", error: msg };
           }
         }
 
-        if (outcome !== "PASS") {
+        if (outcome.phase !== "PASS") {
           outcomes.set(id, outcome);
-          for (let k = i + 1; k < lane.length; k++) {
-            outcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-          }
+          cancelLaneSuccessors(outcomes, lane, i);
           return;
         }
 
         // PASS — merge under the mutex.
         if (!git.hasCommitsAhead(repoRoot, branch, featBranch)) {
-          outcomes.set(id, "NO-COMMITS");
-          for (let k = i + 1; k < lane.length; k++) {
-            outcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-          }
+          outcomes.set(id, {
+            phase: "ERROR",
+            error: `Branch ${branch} has no commits ahead of ${featBranch} — generator produced no output`,
+          });
+          cancelLaneSuccessors(outcomes, lane, i);
           return;
         }
 
@@ -255,10 +282,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           ),
         );
         if (!merged) {
-          outcomes.set(id, "CONFLICT");
-          for (let k = i + 1; k < lane.length; k++) {
-            outcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-          }
+          outcomes.set(id, {
+            phase: "CONFLICT",
+            error: `Merge conflict merging ${branch} into ${featBranch}`,
+          });
+          cancelLaneSuccessors(outcomes, lane, i);
           return;
         }
 
@@ -266,10 +294,45 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
         );
 
-        outcomes.set(id, "PASS");
+        outcomes.set(id, PASS);
       }
     }),
   );
 
   return { outcomes };
+}
+
+function negotiateRefreshOutcome(
+  result: "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED",
+): WaveOutcome {
+  switch (result) {
+    case "CANCELLED":
+      return { phase: "CANCELLED", error: "Cancelled by user" };
+    case "ESCALATE":
+      return {
+        phase: "ESCALATE",
+        error: "Contract negotiation escalated after max rounds",
+      };
+    case "STUCK":
+      return {
+        phase: "STUCK",
+        error: "Contract not locked after negotiation",
+      };
+    case "ERROR":
+      return { phase: "ERROR", error: "Negotiation refresh returned ERROR" };
+  }
+}
+
+function cancelLaneSuccessors(
+  outcomes: Map<string, WaveOutcome>,
+  lane: Slice[],
+  failedIndex: number,
+) {
+  for (let k = failedIndex + 1; k < lane.length; k++) {
+    outcomes.set(lane[k]!.ghIssue, {
+      phase: "LANE-CANCELLED",
+      error:
+        "Lane predecessor failed; rerun the pipeline after fixing the predecessor",
+    });
+  }
 }
