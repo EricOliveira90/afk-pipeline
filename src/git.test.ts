@@ -13,6 +13,7 @@ import {
   branchExists,
   findWorktreeForBranch,
   getDefaultBranch,
+  mergeSliceBranch,
   removeWorktree,
 } from "./git.js";
 
@@ -247,5 +248,72 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
     removeWorktree(repoDir, wt);
     // Second call must not throw.
     expect(() => removeWorktree(repoDir, wt)).not.toThrow();
+  });
+});
+
+describe("git.mergeSliceBranch — MergeResult", { timeout: 30_000 }, () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-merge-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    writeFileSync(join(repoDir, "file.txt"), "base content\n");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("returns { status: 'merged' } on clean merge", () => {
+    git(repoDir, ["checkout", "-b", "feat"]);
+    git(repoDir, ["checkout", "main"]);
+    git(repoDir, ["checkout", "-b", "slice"]);
+    writeFileSync(join(repoDir, "new-file.txt"), "slice work\n");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "slice commit"]);
+    git(repoDir, ["checkout", "main"]);
+
+    const scratchDir = join(repoDir, "scratch-merge");
+    const result = mergeSliceBranch(repoDir, "slice", "feat", scratchDir);
+    expect(result).toEqual({ status: "merged" });
+  });
+
+  it("returns { status: 'conflict', details } on merge conflict", () => {
+    git(repoDir, ["checkout", "-b", "feat"]);
+    writeFileSync(join(repoDir, "file.txt"), "feat version\n");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "feat change"]);
+
+    git(repoDir, ["checkout", "main"]);
+    git(repoDir, ["checkout", "-b", "slice"]);
+    writeFileSync(join(repoDir, "file.txt"), "slice version\n");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "slice change"]);
+    git(repoDir, ["checkout", "main"]);
+
+    const scratchDir = join(repoDir, "scratch-merge");
+    const result = mergeSliceBranch(repoDir, "slice", "feat", scratchDir);
+    expect(result.status).toBe("conflict");
+    if (result.status === "conflict") {
+      expect(result.details).toBeTruthy();
+    }
+  });
+
+  it("returns { status: 'merged' } when using existing worktree (fast path)", () => {
+    git(repoDir, ["checkout", "-b", "feat"]);
+    git(repoDir, ["checkout", "-b", "slice"]);
+    writeFileSync(join(repoDir, "new-file.txt"), "slice work\n");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "slice commit"]);
+    git(repoDir, ["checkout", "feat"]);
+
+    const scratchDir = join(repoDir, "scratch-merge");
+    const result = mergeSliceBranch(repoDir, "slice", "feat", scratchDir);
+    expect(result).toEqual({ status: "merged" });
+    expect(existsSync(scratchDir)).toBe(false);
   });
 });
