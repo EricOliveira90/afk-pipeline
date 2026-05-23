@@ -7,6 +7,18 @@ export interface Slice {
   type: "HITL" | "AFK";
   blockedBy: string[];
   userStories: string;
+  /**
+   * Repo-relative paths the planner declared in `contract.md`'s
+   * "Files expected to change" section. Populated mid-pipeline by the
+   * orchestrator (Phase A → contract read), not by `parseIssuesMd`.
+   *
+   * `undefined` means the contract didn't declare files (missing/empty
+   * section, `<unknown>` opt-out, or `<rough list>` placeholder); the
+   * lane partitioner treats this as conflicting with every other slice
+   * in the wave. An empty array means the planner explicitly declared
+   * "no files change" — partitioner places the slice in its own lane.
+   */
+  files?: string[];
 }
 
 export interface DAG {

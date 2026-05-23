@@ -127,6 +127,32 @@ Generator implementation has max 3 rounds (1 initial + 2 retries).
 When max rounds are exhausted, the pipeline stops the slice, writes
 `stuck.md`, preserves the worktree, and continues with other slices.
 
+**Lane**:
+A serial chain of slices in a single wave whose declared file lists
+overlap (transitive closure on shared files). Lanes run in parallel;
+within a lane, each slice runs to completion and merges into the
+**feature branch** before the next lane-mate starts. Computed by
+`partitionLanes` from each slice's `contract.md` "Files expected to
+change". See ADR 0005.
+_Avoid_: "batch", "group" (too generic), "wave" (a wave contains lanes,
+not the other way around)
+
+**Lane leader**:
+The first slice in a lane (by ascending slice number). Negotiates its
+contract during the wave's parallel Phase A like any other slice;
+unlike non-leaders, it does not pay the cost of a second negotiate
+pass on a refreshed base.
+_Avoid_: "lane head"
+
+**Lane-cancelled**:
+A slice deferred by the orchestrator because an earlier lane-mate
+failed (STUCK / ESCALATE / ERROR / CONFLICT). Recorded as the
+`LANE-CANCELLED` status. Distinct from **cancellation** (user-initiated)
+and **escalation** (the agent gave up). Lane-cancelled slices are
+re-eligible on the next pipeline run once the predecessor is fixed.
+_Avoid_: "skipped" (HITL slices are skipped; lane-cancelled is
+deferral, not skip), "blocked" (DAG-blocked is a separate concept)
+
 **Pre-ship sanity gate**:
 The post-merge check that runs the project's `typecheck`, `lint`, and
 test scripts against the merged feature branch before the guardian

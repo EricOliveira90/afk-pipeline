@@ -24,7 +24,8 @@ export interface SliceStatus {
     | "CONFLICT"
     | "RUNNING"
     | "PENDING"
-    | "CANCELLED";
+    | "CANCELLED"
+    | "LANE-CANCELLED";
   genRounds: number;
   evalRounds: number;
   branch: string;
@@ -142,6 +143,7 @@ export class Logger {
       RUNNING: "🔄",
       PENDING: "⏳",
       CANCELLED: "🚫",
+      "LANE-CANCELLED": "⛔",
     };
 
     const totals = this.runLog.totals;

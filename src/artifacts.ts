@@ -115,6 +115,66 @@ export function readReviewVerdict(reviewPath: string): ReviewVerdict {
   return "UNKNOWN";
 }
 
+/**
+ * Read the planner's declared file list from `## Files expected to change`
+ * in `contract.md`. Used by the lane partitioner to detect file-overlap
+ * between sibling slices in a wave.
+ *
+ * Return semantics:
+ * - `undefined` — the contract file is missing OR the section heading is
+ *   absent. The partitioner treats this as "conflicts with everything"
+ *   (worst-case fold into the shared undeclared lane).
+ * - `[]` — section is present but produced no usable paths (empty,
+ *   `<rough list>` placeholder, `<unknown>` opt-out). The partitioner
+ *   treats this as "no overlap with anything" — slice runs alone.
+ *
+ * Path extraction handles bullets `- path` and `* path`, optional backtick
+ * wrapping, and trailing prose annotations:
+ *   - `src/cli.py (rename to support recipe group)` → `src/cli.py`
+ *   - `` `src/lanes.ts` (new) `` → `src/lanes.ts`
+ * Lines whose extracted token is itself an angle-bracket placeholder
+ * (`<unknown>`, `<rough list>`) are skipped.
+ */
+export function readContractFiles(contractPath: string): string[] | undefined {
+  const content = readIfExists(contractPath);
+  if (content === null) return undefined;
+
+  const headingRe = /^##\s+Files expected to change\s*$/im;
+  const headingMatch = content.match(headingRe);
+  if (!headingMatch || headingMatch.index === undefined) return undefined;
+
+  const after = content.slice(headingMatch.index + headingMatch[0].length);
+  const nextHeading = after.match(/^##\s+/m);
+  const body =
+    nextHeading && nextHeading.index !== undefined
+      ? after.slice(0, nextHeading.index)
+      : after;
+
+  const files: string[] = [];
+  for (const rawLine of body.split(/\r?\n/)) {
+    const bullet = rawLine.match(/^\s*[-*]\s+(.+?)\s*$/);
+    if (!bullet) continue;
+    const item = bullet[1]!.trim();
+
+    // Skip placeholders like <rough list>, <unknown>.
+    if (/^<[^>]*>$/.test(item)) continue;
+
+    let path: string;
+    if (item.startsWith("`")) {
+      const close = item.indexOf("`", 1);
+      if (close < 0) continue;
+      path = item.slice(1, close).trim();
+    } else {
+      const stopIdx = item.search(/[\s(]/);
+      path = (stopIdx < 0 ? item : item.slice(0, stopIdx)).trim();
+    }
+
+    if (path && !/^<[^>]*>$/.test(path)) files.push(path);
+  }
+
+  return files;
+}
+
 export function hasStuckFile(sliceDir: string): boolean {
   return existsSync(`${sliceDir}/stuck.md`);
 }

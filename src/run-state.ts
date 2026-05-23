@@ -2,7 +2,14 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 export interface SliceState {
-  status: "PASS" | "STUCK" | "CONFLICT" | "ESCALATE" | "ERROR" | "CANCELLED";
+  status:
+    | "PASS"
+    | "STUCK"
+    | "CONFLICT"
+    | "ESCALATE"
+    | "ERROR"
+    | "CANCELLED"
+    | "LANE-CANCELLED";
   branch?: string;
   mergedToFeature?: boolean;
 }

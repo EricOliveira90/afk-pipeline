@@ -53,7 +53,18 @@ structure:
 - <thing that might seem related but is NOT this slice>
 
 ## Files expected to change
-- <rough list>
+<!--
+  Format rules (the orchestrator parses this list to detect file-overlap
+  with sibling slices in the same wave — see docs/adr/0005-file-overlap-lanes.md):
+    - One bullet per file. Path-only. Backticks optional.
+    - Use exact repo-relative paths (e.g. `src/cli.py`, not `cli.py` or `the CLI module`).
+    - You MAY add a short parenthesised note after the path (e.g. `src/cli.py (rename)`); the parser strips it.
+    - Do NOT prose-describe scope here — that goes in "Scope lock" above.
+    - If you genuinely cannot enumerate the files yet, write a single
+      bullet `- <unknown>`. The orchestrator will treat the slice as
+      conflicting with every sibling and serialise it. Prefer enumerating.
+-->
+- <unknown>
 
 ## New patterns / deps / schema (if any)
 - <list anything new, OR write "None — uses existing patterns">

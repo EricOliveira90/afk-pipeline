@@ -230,3 +230,27 @@ export function deleteBranch(repoRoot: string, branch: string) {
     // Branch doesn't exist or can't be deleted
   }
 }
+
+/**
+ * Tear down `branch`'s worktree (if any) and recreate it from `base`,
+ * so the next slice in a lane starts from the latest predecessor-merged
+ * feature branch instead of the stale wave-start base. The branch is
+ * deleted and recreated to guarantee its tip equals `base`'s tip — a
+ * `git reset --hard` inside the existing worktree would also work, but
+ * deleting + recreating reuses the well-tested `createWorktree` /
+ * `removeWorktree` path that already handles the Windows cleanup edge
+ * cases (pnpm `node_modules/.pnpm` stragglers, junction symlinks).
+ *
+ * Caller is responsible for re-creating any per-slice scratch files
+ * (context.md, contract.md) inside the new worktree.
+ */
+export function recreateWorktreeFromBase(
+  repoRoot: string,
+  branch: string,
+  worktreeDir: string,
+  base: string,
+): void {
+  removeWorktree(repoRoot, worktreeDir);
+  deleteBranch(repoRoot, branch);
+  createWorktree(repoRoot, branch, worktreeDir, base);
+}
