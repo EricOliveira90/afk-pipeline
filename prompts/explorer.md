@@ -22,6 +22,11 @@ Slice: GH issue #{{GH_ISSUE}} — "{{TITLE}}"
 Investigate the codebase for this slice. At minimum, surface:
 - **Relevant files** — source, tests, schemas, routes that relate to the
   slice. One-line description of each.
+- **Existing behavior in touched files** — for any file the slice is
+  likely to modify, list what it currently does that a reader would
+  expect to keep working (e.g., CLI flags, exported functions, routes,
+  visible UI elements, config keys). This is the baseline the slice must
+  preserve unless the contract explicitly says otherwise.
 - **Patterns in use** — conventions the surrounding code follows. Quote
   short examples if they help the generator.
 - **Test infrastructure** — where tests live, what utilities/fixtures

@@ -24,6 +24,12 @@ Hard rules:
   "Gotchas" so the next planner can slice it.
 - **No scope expansion.** If the contract is wrong, STOP and request a
   planner re-invocation. Don't silently enlarge the slice.
+- **Preserve existing functionality.** Behaviors named in the contract's
+  "Existing behavior to preserve" list — and any existing behavior in
+  touched files, even if not enumerated — must keep working. You may
+  only remove or alter existing behavior if it appears under "Changes to
+  existing behavior" in the contract. If a refactor seems to require
+  removing something not listed, STOP and request planner re-invocation.
 - **TDD per behavior.** Vertical tracer-bullets — one behavior → one
   test (RED) → one implementation (GREEN) → next. Never write all
   tests first, then all code.

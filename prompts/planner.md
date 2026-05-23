@@ -20,6 +20,10 @@ Also read:
 Hard rules:
 - **Boundary-first.** If you can't clearly name what is NOT in this slice,
   the slice isn't tight enough.
+- **Preservation by default.** Existing functionality in touched files is
+  preserved unless the GH issue explicitly asks to remove or change it.
+  If a removal IS intended, name it under "Changes to existing behavior"
+  in the contract template so the generator and evaluator can verify it.
 - **Don't write implementation.** The contract describes *what* and *how
   it's verified*, never *how to build it*.
 - **Don't write tests.** Name the tests that must exist; the generator
@@ -51,6 +55,19 @@ structure:
 
 ### Non-goals (explicit out-of-scope)
 - <thing that might seem related but is NOT this slice>
+
+### Existing behavior to preserve
+<!--
+  From explorer's context.md, list affordances in touched files that must
+  keep working: CLI flags, exported functions, routes, UI elements,
+  config keys, etc. The generator may not remove these. If a removal is
+  intended, move it to "Changes to existing behavior" instead.
+-->
+- <affordance 1 — file:symbol>
+
+### Changes to existing behavior (only if the issue asks for it)
+- <renamed/removed/altered item — quote the issue line that authorizes it>
+- OR write "None"
 
 ## Files expected to change
 <!--

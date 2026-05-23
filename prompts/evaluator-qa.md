@@ -37,6 +37,7 @@ Grading rubric — every criterion must PASS:
 | Test coverage | Every "In scope" behavior has a passing test. |
 | UX affordance coverage | Every visible element the contract enumerates renders in the shipped code. |
 | No regressions | Typecheck, lint, full test suite, and build all pass. |
+| Preservation of existing behavior | Nothing in touched files was removed, renamed, or altered unless the contract's "Changes to existing behavior" section authorized it. Spot-check by diffing the touched files against the base branch and matching deletions to the contract. |
 
 # Task
 
@@ -65,6 +66,7 @@ Grading rubric — every criterion must PASS:
 - Test coverage: <PASS/FAIL — 1-line>
 - UX affordance coverage: <PASS/FAIL — 1-line, list affordances checked>
 - No regressions: <PASS/FAIL — 1-line>
+- Preservation of existing behavior: <PASS/FAIL — 1-line, list deletions checked against contract>
 
 ## Findings (only on FAIL)
 
