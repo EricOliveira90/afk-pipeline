@@ -46,6 +46,8 @@ export interface RunLog {
   prdSlug: string;
   startedAt: Date;
   finishedAt?: Date;
+  /** Feature branch the slices merge into. Set by the orchestrator. */
+  featureBranch?: string;
   slices: Map<string, SliceStatus>;
   totals: Map<string, SliceTotals>;
   architectVerdict?: string;
@@ -111,6 +113,15 @@ export class Logger {
   setReviewVerdicts(architect?: string, pm?: string) {
     if (architect) this.runLog.architectVerdict = architect;
     if (pm) this.runLog.pmVerdict = pm;
+  }
+
+  setFeatureBranch(name: string) {
+    this.runLog.featureBranch = name;
+  }
+
+  /** Snapshot of a slice's current status, or undefined if not tracked. */
+  getSliceStatus(ghIssue: string): SliceStatus | undefined {
+    return this.runLog.slices.get(ghIssue);
   }
 
   setSanityGate(result: SanityGateResult) {
@@ -201,5 +212,157 @@ ${prUrl ? `PR: ${prUrl}` : ""}
 
     writeFileSync(join(this.logDir, "run-summary.md"), summary);
     return summary;
+  }
+
+  /**
+   * Grouped, human-scan-friendly summary block for stdout. Unlike
+   * `writeSummary`, this returns immediately without writing to disk —
+   * safe to call from a `finally` block on any pipeline exit path
+   * (success, slice failures, or thrown error mid-run).
+   */
+  formatConsoleSummary(): string {
+    const {
+      prdSlug,
+      startedAt,
+      finishedAt,
+      featureBranch,
+      slices,
+      architectVerdict,
+      pmVerdict,
+      sanityGate,
+      prUrl,
+    } = this.runLog;
+
+    const endTime = finishedAt ?? new Date();
+    const durationMs = endTime.getTime() - startedAt.getTime();
+    const totalSec = Math.floor(durationMs / 1000);
+    const mm = Math.floor(totalSec / 60);
+    const ss = totalSec % 60;
+    const duration = `${mm}m${ss.toString().padStart(2, "0")}s`;
+
+    const all = [...slices.values()];
+    const succeeded = all.filter((s) => s.status === "PASS");
+    const failed = all.filter(
+      (s) =>
+        s.status === "STUCK" ||
+        s.status === "FAIL" ||
+        s.status === "CONFLICT",
+    );
+    const cancelled = all.filter(
+      (s) => s.status === "CANCELLED" || s.status === "LANE-CANCELLED",
+    );
+    const skipped = all.filter((s) => s.status === "SKIPPED");
+    const inFlight = all.filter(
+      (s) => s.status === "RUNNING" || s.status === "PENDING",
+    );
+
+    const lines: string[] = [];
+    lines.push(`=== AFK Pipeline Summary — ${prdSlug} ===`);
+    lines.push(`Duration: ${duration}`);
+    lines.push("");
+
+    const featLabel = featureBranch ?? "(unknown)";
+
+    lines.push(`Succeeded (${succeeded.length}):`);
+    if (succeeded.length === 0) {
+      lines.push("  (none)");
+    } else {
+      for (const s of succeeded) {
+        lines.push(
+          `  ✅ #${s.ghIssue} ${s.title} — merged into ${featLabel}`,
+        );
+      }
+    }
+    lines.push("");
+
+    lines.push(`Failed / Stuck (${failed.length}):`);
+    if (failed.length === 0) {
+      lines.push("  (none)");
+    } else {
+      for (const s of failed) {
+        const icon =
+          s.status === "STUCK"
+            ? "🔴"
+            : s.status === "CONFLICT"
+              ? "⚠️"
+              : "❌";
+        lines.push(
+          `  ${icon} #${s.ghIssue} ${s.title} [${s.status}] — branch preserved: ${s.branch || "(unknown)"}`,
+        );
+        if (s.error) lines.push(`       reason: ${s.error}`);
+      }
+    }
+    lines.push("");
+
+    if (cancelled.length > 0) {
+      lines.push(`Cancelled (${cancelled.length}):`);
+      for (const s of cancelled) {
+        const icon = s.status === "LANE-CANCELLED" ? "⛔" : "🚫";
+        lines.push(`  ${icon} #${s.ghIssue} ${s.title} [${s.status}]`);
+      }
+      lines.push("");
+    }
+
+    if (skipped.length > 0) {
+      lines.push(`Skipped — HITL (${skipped.length}):`);
+      for (const s of skipped) {
+        lines.push(`  ⏭️ #${s.ghIssue} ${s.title}`);
+      }
+      lines.push("");
+    }
+
+    if (inFlight.length > 0) {
+      lines.push(`In flight when summary was emitted (${inFlight.length}):`);
+      for (const s of inFlight) {
+        lines.push(`  🔄 #${s.ghIssue} ${s.title} [${s.status}]`);
+      }
+      lines.push("");
+    }
+
+    lines.push("Branches:");
+    lines.push(`  feature: ${featLabel}`);
+    const preservedBranches = [...failed, ...cancelled]
+      .map((s) => s.branch)
+      .filter((b): b is string => !!b && b !== "—");
+    if (preservedBranches.length > 0) {
+      lines.push(`  preserved per-slice: ${preservedBranches.join(", ")}`);
+    }
+    lines.push("");
+
+    lines.push("Ready to merge:");
+    const sanityLine = sanityGate
+      ? sanityGate.ok
+        ? "PASS"
+        : `FAIL (${sanityGate.failures.join(", ")})`
+      : "N/A";
+    lines.push(`  Pre-ship sanity gate: ${sanityLine}`);
+    lines.push(`  Architect review: ${architectVerdict ?? "N/A"}`);
+    lines.push(`  PM review: ${pmVerdict ?? "N/A"}`);
+
+    const shipVerdicts = ["SHIP", "ACCEPT-WITH-NOTES"];
+    const sanityOk = !!sanityGate?.ok;
+    const archOk = !!architectVerdict && shipVerdicts.includes(architectVerdict);
+    const pmOk = !!pmVerdict && shipVerdicts.includes(pmVerdict);
+
+    if (prUrl && sanityOk && archOk && pmOk) {
+      lines.push(`  PR: ${prUrl}`);
+    } else {
+      const reasons: string[] = [];
+      if (failed.length > 0) reasons.push(`${failed.length} slice(s) failed`);
+      if (cancelled.length > 0) reasons.push(`${cancelled.length} cancelled`);
+      if (sanityGate && !sanityGate.ok) reasons.push("sanity gate failed");
+      if (!sanityGate) reasons.push("sanity gate not run");
+      if (sanityGate?.ok) {
+        if (!architectVerdict) reasons.push("architect review not run");
+        else if (!archOk) reasons.push(`architect verdict ${architectVerdict}`);
+        if (!pmVerdict) reasons.push("PM review not run");
+        else if (!pmOk) reasons.push(`PM verdict ${pmVerdict}`);
+      }
+      const reasonText =
+        reasons.length > 0 ? reasons.join("; ") : "reviews incomplete";
+      lines.push(`  Not ready: ${reasonText}`);
+    }
+
+    return lines.join("\n");
   }
 }

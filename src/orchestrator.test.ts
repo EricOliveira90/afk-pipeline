@@ -12,7 +12,12 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeAsyncMutex, runPipeline, runPreShipSanity } from "./orchestrator.js";
+import {
+  makeAsyncMutex,
+  runPipeline,
+  runPreShipSanity,
+  PipelineError,
+} from "./orchestrator.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import type {
   AgentProvider,
@@ -611,3 +616,188 @@ function lastTimestamp(
   }
   return last;
 }
+
+/**
+ * Tests for the end-of-run summary report. Cover the three exit paths:
+ * happy success, slice failure, and uncaught throw mid-run.
+ */
+describe("runPipeline summary report", () => {
+  it("groups succeeded slices and reports 'not ready' when reviews are unparseable", async () => {
+    const repo = makeRepo();
+    const slug = "summary-success";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "5001",
+        title: "Only",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const dag = buildDAG(slices);
+
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "5001",
+        {
+          files: ["src/only.txt"],
+          qaPasses: true,
+          outputFile: "src/only.txt",
+          outputContent: "only",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices, records });
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag,
+      provider,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
+    expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
+    expect(result.consoleSummary).toContain("#5001 Only");
+    expect(result.consoleSummary).toContain(`merged into feat-stub/${slug}`);
+    expect(result.consoleSummary).toMatch(/Failed \/ Stuck \(0\)/);
+    // No package.json in fixture → sanity gate skipped (returns ok); reviews
+    // are no-ops in the stub → verdicts UNKNOWN → not ready.
+    expect(result.consoleSummary).toContain("Not ready");
+  }, 60_000);
+
+  it("groups failed slices under Failed/Stuck with the error reason", async () => {
+    const repo = makeRepo();
+    const slug = "summary-fail";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "6001",
+        title: "Will fail",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const dag = buildDAG(slices);
+
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "6001",
+        {
+          files: ["src/x.txt"],
+          qaPasses: false,
+          outputFile: "src/x.txt",
+          outputContent: "x",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices, records });
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag,
+      provider,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.consoleSummary).toMatch(/Failed \/ Stuck \(1\)/);
+    expect(result.consoleSummary).toContain("#6001 Will fail");
+    expect(result.consoleSummary).toContain("[STUCK]");
+    // Branch is preserved on failure; the stub uses provider.name="stub".
+    expect(result.consoleSummary).toContain(`afk-stub/${slug}-slice-01-`);
+    expect(result.consoleSummary).toContain("Not ready");
+  }, 60_000);
+
+  it("emits a PipelineError carrying the partial summary when an uncaught error fires mid-run", async () => {
+    const repo = makeRepo();
+    const slug = "summary-throw";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "7001",
+        title: "Passes then review explodes",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const dag = buildDAG(slices);
+
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "7001",
+        {
+          files: ["src/y.txt"],
+          qaPasses: true,
+          outputFile: "src/y.txt",
+          outputContent: "y",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+
+    // Wrap the stub so the post-impl architect-review invocation throws.
+    // That call is outside the per-slice try/catch — this is exactly the
+    // exit path that previously skipped the summary.
+    const explodingProvider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "architect-review") {
+          throw new Error("simulated architect-review failure");
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    let caught: unknown;
+    try {
+      await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider: explodingProvider,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(PipelineError);
+    const err = caught as PipelineError;
+    expect(err.partialResult.success).toBe(false);
+    expect(err.partialResult.consoleSummary).toContain(
+      `AFK Pipeline Summary — ${slug}`,
+    );
+    // The slice itself completed before the review died, so it should
+    // appear in the Succeeded group of the partial summary.
+    expect(err.partialResult.consoleSummary).toMatch(/Succeeded \(1\)/);
+    expect(err.partialResult.consoleSummary).toContain("#7001");
+    // The cause is the original error.
+    expect(err.cause).toBeInstanceOf(Error);
+    expect((err.cause as Error).message).toContain(
+      "simulated architect-review failure",
+    );
+    // The markdown summary file should also have been written despite
+    // the throw — same finally-emit semantics.
+    const summaryPath = join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md");
+    expect(existsSync(summaryPath)).toBe(true);
+  }, 60_000);
+});

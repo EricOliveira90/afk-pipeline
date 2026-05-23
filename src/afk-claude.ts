@@ -2,7 +2,7 @@
 import { resolve, basename, join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
-import { runPipeline } from "./orchestrator.js";
+import { runPipeline, PipelineError } from "./orchestrator.js";
 import { claudeProvider } from "./claude.js";
 
 function usage(): never {
@@ -121,29 +121,41 @@ async function main() {
   };
   process.on("SIGINT", onSigint);
 
-  const result = await runPipeline({
-    repoRoot,
-    prdSlug,
-    prdDir,
-    specsDir,
-    dag,
-    dryRun,
-    provider: claudeProvider,
-    signal: controller.signal,
-  });
+  let result;
+  try {
+    result = await runPipeline({
+      repoRoot,
+      prdSlug,
+      prdDir,
+      specsDir,
+      dag,
+      dryRun,
+      provider: claudeProvider,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    process.off("SIGINT", onSigint);
+    if (err instanceof PipelineError) {
+      console.log("\n" + err.partialResult.consoleSummary);
+      console.error("\nPipeline aborted by unhandled error:");
+      console.error(err.cause instanceof Error ? err.cause.stack ?? err.cause.message : String(err.cause));
+      process.exit(1);
+    }
+    throw err;
+  }
 
   process.off("SIGINT", onSigint);
 
-  console.log("\n" + result.summary);
+  console.log("\n" + result.consoleSummary);
 
   if (!result.success) {
     console.error(
-      "Pipeline completed with failures. Check logs and stuck.md files.",
+      "\nPipeline completed with failures. Check logs and stuck.md files.",
     );
     process.exit(1);
   }
 
-  console.log("Pipeline completed successfully.");
+  console.log("\nPipeline completed successfully.");
 }
 
 main().catch((err) => {

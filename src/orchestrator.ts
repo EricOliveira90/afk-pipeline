@@ -193,7 +193,26 @@ export interface PipelineConfig {
 
 export interface PipelineResult {
   success: boolean;
+  /** Markdown summary written to `.afk/logs/<slug>/run-summary.md`. */
   summary: string;
+  /** Grouped, scan-friendly summary for stdout. */
+  consoleSummary: string;
+}
+
+/**
+ * Thrown by `runPipeline` when an exception escapes the per-slice
+ * try/catch blocks. Carries the partial `PipelineResult` so the CLI
+ * can still emit a summary instead of just `Fatal error: …`.
+ */
+export class PipelineError extends Error {
+  readonly cause: unknown;
+  readonly partialResult: PipelineResult;
+  constructor(cause: unknown, partialResult: PipelineResult) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "PipelineError";
+    this.cause = cause;
+    this.partialResult = partialResult;
+  }
 }
 
 function sliceDir(specsDir: string, slice: Slice): string {
@@ -653,8 +672,10 @@ export async function runPipeline(
       },
     });
   const featBranch = featureBranch(prdSlug, provider);
+  logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
 
+  try {
   // Detect the repo's default branch (main / master / etc.) once so
   // every base reference below — feat-branch init, review-worktree
   // creation, gh pr base — agrees on the same target.
@@ -1159,14 +1180,17 @@ export async function runPipeline(
 
         // Architect review
         const archLog = logger.agentLog("all", "architect-review");
-        await invoke({
-          role: "architect-review",
-          agent: "architect-review",
-          prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-          cwd: reviewDir,
-          logStream: archLog,
-        });
-        archLog.end();
+        try {
+          await invoke({
+            role: "architect-review",
+            agent: "architect-review",
+            prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
+            cwd: reviewDir,
+            logStream: archLog,
+          });
+        } finally {
+          await new Promise<void>((res) => archLog.end(() => res()));
+        }
 
         const archPath = join(reviewDir, specsDir, "review-architect.md");
         const archVerdict = artifacts.readReviewVerdict(archPath);
@@ -1179,14 +1203,17 @@ export async function runPipeline(
 
         // PM review
         const pmLog = logger.agentLog("all", "pm-review");
-        await invoke({
-          role: "pm-review",
-          agent: "pm-review",
-          prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-          cwd: reviewDir,
-          logStream: pmLog,
-        });
-        pmLog.end();
+        try {
+          await invoke({
+            role: "pm-review",
+            agent: "pm-review",
+            prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
+            cwd: reviewDir,
+            logStream: pmLog,
+          });
+        } finally {
+          pmLog.end();
+        }
 
         const pmPath = join(reviewDir, specsDir, "review-pm.md");
         const pmVerdict = artifacts.readReviewVerdict(pmPath);
@@ -1251,8 +1278,39 @@ export async function runPipeline(
     }
   }
 
-  const summary = logger.writeSummary();
-  const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
+    const summary = logger.writeSummary();
+    const consoleSummary = logger.formatConsoleSummary();
+    const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
 
-  return { success: allSuccess, summary };
+    return { success: allSuccess, summary, consoleSummary };
+  } catch (err) {
+    // Mark any slice still in flight as STUCK so the summary doesn't
+    // misreport them as RUNNING/PENDING. Status keys we touch here
+    // are the only mutation; persistent run-state already reflects
+    // whatever progress slice loops were able to record.
+    for (const [id, slice] of dag.slices) {
+      if (slice.type === "HITL") continue;
+      const status = logger.getSliceStatus(id)?.status;
+      if (status === "RUNNING" || status === "PENDING" || !status) {
+        logger.setSliceStatus(id, {
+          title: slice.title,
+          status: "STUCK",
+          error: "Pipeline aborted before slice finished",
+        });
+      }
+    }
+    let summary = "";
+    try {
+      summary = logger.writeSummary();
+    } catch {
+      // best effort — never let summary writing eat the original error
+    }
+    const consoleSummary = logger.formatConsoleSummary();
+    const partial: PipelineResult = {
+      success: false,
+      summary,
+      consoleSummary,
+    };
+    throw new PipelineError(err, partial);
+  }
 }
