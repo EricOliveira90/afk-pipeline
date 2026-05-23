@@ -346,11 +346,14 @@ export function makeSliceContext(
   const { repoRoot, prdSlug, specsDir, signal } = config;
   const provider = config.provider ?? kiroProvider;
   const branch = sliceBranch(prdSlug, slice, provider);
+  // Short worktree dir name to stay under Windows' 260-char MAX_PATH.
+  // The full title remains in the branch name (visible in PRs and git
+  // log) — the dir just needs to be unique per slice within the run.
   const worktreeDir = join(
     repoRoot,
     ".afk",
     "worktrees",
-    branch.replace(/\//g, "-"),
+    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
   );
   const relSliceDir = join(
     specsDir,
@@ -1055,9 +1058,20 @@ export async function runPipeline(
             return;
           }
 
+          // Short scratch-worktree dir to stay under Windows MAX_PATH.
+          const scratchMergeDir = join(
+            repoRoot,
+            ".afk",
+            `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+          );
           const merged = await mergeMutex(() =>
             Promise.resolve(
-              git.mergeSliceBranch(repoRoot, branch, featBranch),
+              git.mergeSliceBranch(
+                repoRoot,
+                branch,
+                featBranch,
+                scratchMergeDir,
+              ),
             ),
           );
           if (!merged) {

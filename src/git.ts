@@ -200,8 +200,11 @@ export function findWorktreeForBranch(
  * If `featureBranch` is already checked out in some worktree (commonly
  * the main repo working tree), we merge there directly — `git worktree add`
  * would otherwise fail with "<branch> is already used by worktree at <path>".
- * Otherwise we create a scratch worktree under `.afk/merge-…` to keep the
+ * Otherwise we create a scratch worktree at `scratchMergeDir` to keep the
  * main working tree undisturbed, and clean it up afterward.
+ *
+ * `scratchMergeDir` is chosen by the caller so it can keep the path short
+ * (Windows MAX_PATH).
  *
  * Returns true on success, false on merge conflict (merge aborted).
  */
@@ -209,6 +212,7 @@ export function mergeSliceBranch(
   repoRoot: string,
   sliceBranch: string,
   featureBranch: string,
+  scratchMergeDir: string,
 ): boolean {
   const existingWorktree = findWorktreeForBranch(repoRoot, featureBranch);
 
@@ -217,11 +221,7 @@ export function mergeSliceBranch(
   if (existingWorktree) {
     mergeDir = existingWorktree;
   } else {
-    mergeDir = join(
-      repoRoot,
-      ".afk",
-      "merge-" + sliceBranch.replace(/\//g, "-"),
-    );
+    mergeDir = scratchMergeDir;
     if (existsSync(mergeDir)) {
       git(["worktree", "remove", mergeDir, "--force"], { cwd: repoRoot });
     }

@@ -6,6 +6,10 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
+import { killProcessTree } from "./kill-tree.js";
+
+/** See claude.ts for rationale. */
+const FORCE_KILL_GRACE_MS = 10_000;
 
 /**
  * Invoke kiro-cli chat in headless mode with a specific agent and prompt.
@@ -49,9 +53,19 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let killed = false;
     let cancelled = false;
 
+    const scheduleForceKill = () => {
+      const timer = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          killProcessTree(proc);
+        }
+      }, FORCE_KILL_GRACE_MS);
+      timer.unref();
+    };
+
     const onAbort = () => {
       cancelled = true;
       proc.kill("SIGTERM");
+      scheduleForceKill();
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -61,6 +75,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       onTimeout: () => {
         killed = true;
         proc.kill("SIGTERM");
+        scheduleForceKill();
       },
       onWarning: onIdleWarning,
     });

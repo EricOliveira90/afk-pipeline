@@ -23,7 +23,13 @@ export function createIdleWatcher(opts: IdleWatcherOptions): IdleWatcher {
   let warningCount = 0;
 
   const startTimers = () => {
-    timeoutHandle = setTimeout(opts.onTimeout, opts.idleTimeoutMs);
+    timeoutHandle = setTimeout(() => {
+      // Stop the warning interval before delegating: if onTimeout's
+      // SIGTERM doesn't kill the child (Windows reality), the watcher
+      // would otherwise log idle warnings forever.
+      clearTimers();
+      opts.onTimeout();
+    }, opts.idleTimeoutMs);
     if (opts.onWarning) {
       warningHandle = setInterval(() => {
         warningCount++;

@@ -25,9 +25,12 @@ Hard rules:
   reproducible test step are not findings.
 - **Don't prescribe the fix.** Name the gap; the generator chooses how
   to close it.
-- **Run tests with `{{TEST_COMMAND}}`** — this is the project's test
-  script as discovered from `package.json`. Don't substitute another
-  command; if it fails, that's a real failure to surface.
+- **Run tests with `{{TEST_COMMAND}}` verbatim** — this is the project's
+  test script as discovered from `package.json`. Do NOT add flags
+  (`--run`, `--watch`, `--watchAll`, `--ci`, `-u`, etc.). Do NOT
+  invoke `jest`, `vitest`, or `npm test` directly. If `{{TEST_COMMAND}}`
+  fails, that's the failure to report — don't try to "fix it" by
+  changing the invocation.
 
 Grading rubric — every criterion must PASS:
 

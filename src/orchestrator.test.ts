@@ -269,15 +269,14 @@ function writePrdFixture(repoDir: string, slug: string): { prdDir: string; specs
 
 /**
  * Extract the slice's gh issue id from a worktree path. Worktrees live
- * at `.afk/worktrees/<branch-with-slashes-as-dashes>/`, and the slice
- * branch contains `slice-<number>-<slug>`. Branch names embed the
- * slice *number* (e.g. "01"), but tests use ghIssue == number, so we
- * can look up by branch fragment directly.
+ * at `.afk/worktrees/<prefix>-<prd-slug>-s<NN>/` (truncated form, see
+ * `makeSliceContext`); we match the trailing `-s<NN>` segment.
  */
 function sliceFromCwd(cwd: string, slices: Slice[]): Slice | null {
   const norm = cwd.replace(/\\/g, "/").toLowerCase();
   for (const s of slices) {
-    if (norm.includes(`slice-${s.number}-`)) return s;
+    const re = new RegExp(`-s${s.number}(?:$|/)`);
+    if (re.test(norm)) return s;
   }
   return null;
 }

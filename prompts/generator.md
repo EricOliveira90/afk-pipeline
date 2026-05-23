@@ -40,9 +40,12 @@ Hard rules:
   evaluator's call.
 - **Implement every visible affordance the contract names.** Missing a
   user-visible element listed in "In scope" is a FAIL, not an oversight.
-- **Run tests with `{{TEST_COMMAND}}`** — this is the project's test
-  script as discovered from `package.json`. Don't substitute another
-  command (no flag tweaks, no direct `jest`/`vitest` invocations).
+- **Run tests with `{{TEST_COMMAND}}` verbatim** — this is the project's
+  test script as discovered from `package.json`. Do NOT add flags
+  (`--run`, `--watch`, `--watchAll`, `--ci`, `-u`, etc.). Do NOT
+  invoke `jest`, `vitest`, or `npm test` directly. If `{{TEST_COMMAND}}`
+  fails, that's the failure to report — don't try to "fix it" by
+  changing the invocation.
 
 # Task
 

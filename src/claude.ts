@@ -7,6 +7,14 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
+import { killProcessTree } from "./kill-tree.js";
+
+/**
+ * After SIGTERM, give the child this long to exit cleanly before we
+ * force-kill the whole tree. Important on Windows where SIGTERM on a
+ * shell-wrapped process doesn't propagate to the wrapped binary.
+ */
+const FORCE_KILL_GRACE_MS = 10_000;
 
 interface ClaudeInvokeOptions extends InvokeOptions {
   /** Model alias or full ID. Default: opus */
@@ -141,9 +149,19 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
     let toolCapExceeded = false;
     let cancelled = false;
 
+    const scheduleForceKill = () => {
+      const timer = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          killProcessTree(proc);
+        }
+      }, FORCE_KILL_GRACE_MS);
+      timer.unref();
+    };
+
     const onAbort = () => {
       cancelled = true;
       proc.kill("SIGTERM");
+      scheduleForceKill();
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -153,6 +171,7 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
       onTimeout: () => {
         killed = true;
         proc.kill("SIGTERM");
+        scheduleForceKill();
       },
       onWarning: onIdleWarning,
     });
@@ -191,6 +210,7 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
               toolCapExceeded = true;
               killed = true;
               proc.kill("SIGTERM");
+              scheduleForceKill();
             }
           }
           onStreamEvent?.(event);
