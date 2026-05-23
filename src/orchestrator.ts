@@ -11,8 +11,14 @@ import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave } from "./wave.js";
+import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
 
-import { loadRunState, saveSliceState, isSliceComplete } from "./run-state.js";
+import {
+  loadRunState,
+  saveSliceState,
+  isSliceComplete,
+  projectForPersistence,
+} from "./run-state.js";
 
 const MAX_CONTRACT_ROUNDS = 3;
 const MAX_GENERATOR_ROUNDS = 3;
@@ -411,11 +417,13 @@ export async function runSliceNegotiate(
   const { config, slice, logger, featBranch, relevantFilesBlock, invoke } = ctx;
   const { repoRoot, prdDir, signal } = config;
 
-  logger.setSliceStatus(slice.ghIssue, {
-    title: slice.title,
-    status: "RUNNING",
-    branch: ctx.branch,
-  });
+  logger.transitionTo(
+    slice.ghIssue,
+    lifecycle.running(
+      { ghIssue: slice.ghIssue, title: slice.title, branch: ctx.branch },
+      logger.getSliceProgress(slice.ghIssue),
+    ),
+  );
 
   try {
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, featBranch);
@@ -500,11 +508,11 @@ export async function runSliceNegotiate(
         if (verdict === "ACCEPT" || contractStatus === "LOCKED") break;
         if (verdict === "ESCALATE" || round === MAX_CONTRACT_ROUNDS) {
           console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
-          logger.setSliceStatus(slice.ghIssue, {
-            status: "STUCK",
-            evalRounds: round,
-            error: "Contract negotiation escalated after max rounds",
-          });
+          logger.bumpEvalRound(slice.ghIssue, round);
+          logger.markEscalated(
+            slice.ghIssue,
+            "Contract negotiation escalated after max rounds",
+          );
           return "ESCALATE";
         }
       }
@@ -512,25 +520,19 @@ export async function runSliceNegotiate(
 
     contractStatus = artifacts.readContractStatus(contractPath);
     if (contractStatus !== "LOCKED") {
-      logger.setSliceStatus(slice.ghIssue, {
-        status: "STUCK",
-        error: "Contract not locked after negotiation",
-      });
+      logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
       return "STUCK";
     }
     return "LOCKED";
   } catch (err) {
     if (isCancelled(err, signal)) {
-      logger.setSliceStatus(slice.ghIssue, {
-        status: "CANCELLED",
-        error: "Cancelled by user",
-      });
+      logger.markCancelled(slice.ghIssue, "Cancelled by user");
       return "CANCELLED";
     }
-    logger.setSliceStatus(slice.ghIssue, {
-      status: "STUCK",
-      error: err instanceof Error ? err.message : String(err),
-    });
+    logger.markError(
+      slice.ghIssue,
+      err instanceof Error ? err.message : String(err),
+    );
     return "ERROR";
   }
 }
@@ -550,7 +552,7 @@ export async function runSliceExecute(
     const qaPath = join(ctx.absSliceDir, "qa-report.md");
 
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
-      logger.setSliceStatus(slice.ghIssue, { genRounds: round });
+      logger.bumpGenRound(slice.ghIssue, round);
 
       console.error(
         `${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
@@ -588,7 +590,7 @@ export async function runSliceExecute(
       });
       evalLog.end();
 
-      logger.setSliceStatus(slice.ghIssue, { evalRounds: round });
+      logger.bumpEvalRound(slice.ghIssue, round);
 
       const qaVerdict = artifacts.readQAVerdict(qaPath);
       if (qaVerdict === "PASS") {
@@ -609,16 +611,23 @@ export async function runSliceExecute(
         if (touchedMigrations) {
           const migrationCheck = verifyMigrationSync(repoRoot);
           if (!migrationCheck.ok) {
-            logger.setSliceStatus(slice.ghIssue, {
-              status: "STUCK",
-              error: `Migration sync check failed: ${migrationCheck.error}`,
-            });
+            logger.markStuck(
+              slice.ghIssue,
+              `Migration sync check failed: ${migrationCheck.error}`,
+            );
             return "STUCK";
           }
         }
 
         console.error(`${ctx.tag}: tests pass — committed`);
-        logger.setSliceStatus(slice.ghIssue, { status: "PASS" });
+        logger.transitionTo(
+          slice.ghIssue,
+          lifecycle.pass(
+            { ghIssue: slice.ghIssue, title: slice.title, branch: ctx.branch },
+            logger.getSliceProgress(slice.ghIssue),
+            false,
+          ),
+        );
         return "PASS";
       }
 
@@ -636,10 +645,10 @@ export async function runSliceExecute(
         console.error(
           `${ctx.tag}: STUCK — QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
         );
-        logger.setSliceStatus(slice.ghIssue, {
-          status: "STUCK",
-          error: `QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
-        });
+        logger.markStuck(
+          slice.ghIssue,
+          `QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
+        );
         return "STUCK";
       }
     }
@@ -647,16 +656,13 @@ export async function runSliceExecute(
     return "STUCK"; // Should not reach here
   } catch (err) {
     if (isCancelled(err, signal)) {
-      logger.setSliceStatus(slice.ghIssue, {
-        status: "CANCELLED",
-        error: "Cancelled by user",
-      });
+      logger.markCancelled(slice.ghIssue, "Cancelled by user");
       return "CANCELLED";
     }
-    logger.setSliceStatus(slice.ghIssue, {
-      status: "STUCK",
-      error: err instanceof Error ? err.message : String(err),
-    });
+    logger.markError(
+      slice.ghIssue,
+      err instanceof Error ? err.message : String(err),
+    );
     return "ERROR";
   }
 }
@@ -737,11 +743,10 @@ export async function runPipeline(
   // Mark HITL slices as skipped
   for (const [id, slice] of dag.slices) {
     if (slice.type === "HITL") {
-      logger.setSliceStatus(id, {
-        title: slice.title,
-        status: "SKIPPED",
-        branch: "—",
-      });
+      logger.transitionTo(
+        id,
+        lifecycle.skipped({ ghIssue: id, title: slice.title, branch: "—" }),
+      );
     }
   }
 
@@ -763,12 +768,16 @@ export async function runPipeline(
   for (const [id, slice] of dag.slices) {
     if (isSliceComplete(runState, id)) {
       completed.add(id);
-      logger.setSliceStatus(id, {
-        title: slice.title,
-        status: "PASS",
-        branch:
-          runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider),
-      });
+      const branch =
+        runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
+      logger.transitionTo(
+        id,
+        lifecycle.pass(
+          { ghIssue: id, title: slice.title, branch },
+          { genRounds: 0, evalRounds: 0 },
+          true,
+        ),
+      );
       console.log(`  Skipping #${id} ${slice.title} (already completed)`);
     }
   }
@@ -840,59 +849,47 @@ export async function runPipeline(
     for (const [id, outcome] of outcomes) {
       const slice = dag.slices.get(id)!;
       const branch = sliceBranch(prdSlug, slice, provider);
+      const sliceId: SliceIdentity = {
+        ghIssue: id,
+        title: slice.title,
+        branch,
+      };
+      const progress = logger.getSliceProgress(id);
 
-      if (outcome === "PASS") {
-        saveSliceState(repoRoot, loggerSlug, id, {
-          status: "PASS",
-          branch,
-          mergedToFeature: true,
-        });
+      if (outcome.phase === "PASS") {
+        const passed = lifecycle.pass(sliceId, progress, true);
+        logger.transitionTo(id, passed);
+        saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(passed)!);
         completed.add(id);
         continue;
       }
 
-      if (outcome === "LANE-CANCELLED") {
-        logger.setSliceStatus(id, {
-          status: "LANE-CANCELLED",
-          error:
-            "Lane predecessor failed; rerun the pipeline after fixing the predecessor",
-        });
-        saveSliceState(repoRoot, loggerSlug, id, {
-          status: "LANE-CANCELLED",
-          branch,
-        });
-        laneCancelled.add(id);
-        continue;
-      }
+      // All non-PASS outcomes carry an error message from wave.ts.
+      const failedLifecycle =
+        outcome.phase === "LANE-CANCELLED"
+          ? lifecycle.laneCancelled(sliceId, progress, outcome.error)
+          : outcome.phase === "CANCELLED"
+            ? lifecycle.cancelled(sliceId, progress, outcome.error)
+            : outcome.phase === "CONFLICT"
+              ? lifecycle.conflict(sliceId, progress, outcome.error)
+              : outcome.phase === "ESCALATE"
+                ? lifecycle.escalate(sliceId, progress, outcome.error)
+                : outcome.phase === "ERROR"
+                  ? lifecycle.error(sliceId, progress, outcome.error)
+                  : lifecycle.stuck(sliceId, progress, outcome.error);
 
-      // All other outcomes — record failure.
-      let status:
-        | "STUCK"
-        | "ERROR"
-        | "CANCELLED"
-        | "CONFLICT" = "STUCK";
-      let error: string | undefined;
-      if (outcome === "CANCELLED") {
-        status = "CANCELLED";
-        error = "Cancelled by user";
-      } else if (outcome === "CONFLICT") {
-        status = "CONFLICT";
-        error = `Merge conflict merging ${branch} into ${featBranch}`;
-      } else if (outcome === "NO-COMMITS") {
-        status = "ERROR";
-        error = `Branch ${branch} has no commits ahead of ${featBranch} — generator produced no output`;
-      } else if (outcome === "ERROR") {
-        status = "ERROR";
+      logger.transitionTo(id, failedLifecycle);
+      saveSliceState(
+        repoRoot,
+        loggerSlug,
+        id,
+        projectForPersistence(failedLifecycle)!,
+      );
+      if (outcome.phase === "LANE-CANCELLED") {
+        laneCancelled.add(id);
+      } else {
+        failed.add(id);
       }
-      logger.setSliceStatus(id, {
-        status: (status === "ERROR" ? "STUCK" : status) as any,
-        ...(error ? { error } : {}),
-      });
-      saveSliceState(repoRoot, loggerSlug, id, {
-        status: status as any,
-        branch,
-      });
-      failed.add(id);
     }
 
     // If cancelled, mark anything not yet completed/failed as CANCELLED
@@ -902,15 +899,19 @@ export async function runPipeline(
       for (const [id, slice] of dag.slices) {
         if (slice.type === "HITL") continue;
         if (completed.has(id) || failed.has(id)) continue;
-        logger.setSliceStatus(id, {
-          title: slice.title,
-          status: "CANCELLED",
-          branch: sliceBranch(prdSlug, slice, provider),
-        });
-        saveSliceState(repoRoot, loggerSlug, id, {
-          status: "CANCELLED",
-          branch: sliceBranch(prdSlug, slice, provider),
-        });
+        const branch = sliceBranch(prdSlug, slice, provider);
+        const cancelled = lifecycle.cancelled(
+          { ghIssue: id, title: slice.title, branch },
+          logger.getSliceProgress(id),
+          "Cancelled by user",
+        );
+        logger.transitionTo(id, cancelled);
+        saveSliceState(
+          repoRoot,
+          loggerSlug,
+          id,
+          projectForPersistence(cancelled)!,
+        );
         failed.add(id);
       }
       break;
@@ -1087,13 +1088,18 @@ export async function runPipeline(
     // whatever progress slice loops were able to record.
     for (const [id, slice] of dag.slices) {
       if (slice.type === "HITL") continue;
-      const status = logger.getSliceStatus(id)?.status;
-      if (status === "RUNNING" || status === "PENDING" || !status) {
-        logger.setSliceStatus(id, {
-          title: slice.title,
-          status: "STUCK",
-          error: "Pipeline aborted before slice finished",
-        });
+      const cur = logger.getSlice(id);
+      if (!cur) {
+        logger.transitionTo(
+          id,
+          lifecycle.stuck(
+            { ghIssue: id, title: slice.title, branch: "" },
+            { genRounds: 0, evalRounds: 0 },
+            "Pipeline aborted before slice finished",
+          ),
+        );
+      } else if (cur.phase === "RUNNING" || cur.phase === "PENDING") {
+        logger.markStuck(id, "Pipeline aborted before slice finished");
       }
     }
     let summary = "";

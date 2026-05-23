@@ -6,30 +6,21 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import {
+  assertNever,
+  bucketFor,
+  lifecycle,
+  statusIconFor,
+  summaryStatusLabel,
+  type SliceIdentity,
+  type SliceLifecycle,
+  type SliceProgress,
+} from "./slice-lifecycle.js";
 
 /** Sum of invocation stats across all agent invocations for a slice. */
 export interface SliceTotals {
   costUsd: number;
   toolCallCount: number;
-}
-
-export interface SliceStatus {
-  ghIssue: string;
-  title: string;
-  status:
-    | "PASS"
-    | "FAIL"
-    | "STUCK"
-    | "SKIPPED"
-    | "CONFLICT"
-    | "RUNNING"
-    | "PENDING"
-    | "CANCELLED"
-    | "LANE-CANCELLED";
-  genRounds: number;
-  evalRounds: number;
-  branch: string;
-  error?: string;
 }
 
 /**
@@ -48,13 +39,15 @@ export interface RunLog {
   finishedAt?: Date;
   /** Feature branch the slices merge into. Set by the orchestrator. */
   featureBranch?: string;
-  slices: Map<string, SliceStatus>;
+  slices: Map<string, SliceLifecycle>;
   totals: Map<string, SliceTotals>;
   architectVerdict?: string;
   pmVerdict?: string;
   sanityGate?: SanityGateResult;
   prUrl?: string;
 }
+
+const ZERO_PROGRESS: SliceProgress = { genRounds: 0, evalRounds: 0 };
 
 export class Logger {
   private logDir: string;
@@ -98,16 +91,83 @@ export class Logger {
     return createWriteStream(join(this.logDir, filename), { flags: "a" });
   }
 
-  setSliceStatus(ghIssue: string, status: Partial<SliceStatus>) {
-    const existing = this.runLog.slices.get(ghIssue) ?? {
+  /**
+   * Replace a slice's lifecycle state. The full variant is required, so
+   * the type system rejects invalid transitions (e.g. PASS without
+   * `mergedToFeature`).
+   */
+  transitionTo(ghIssue: string, next: SliceLifecycle) {
+    this.runLog.slices.set(ghIssue, next);
+  }
+
+  /** Increment generator-round counter without changing phase. Throws on
+   * SKIPPED — HITL slices have no generator rounds. */
+  bumpGenRound(ghIssue: string, round: number) {
+    const cur = this.requireWithProgress(ghIssue, "bumpGenRound");
+    this.runLog.slices.set(ghIssue, {
+      ...cur,
+      progress: { ...cur.progress, genRounds: round },
+    });
+  }
+
+  /** Increment evaluator-round counter without changing phase. */
+  bumpEvalRound(ghIssue: string, round: number) {
+    const cur = this.requireWithProgress(ghIssue, "bumpEvalRound");
+    this.runLog.slices.set(ghIssue, {
+      ...cur,
+      progress: { ...cur.progress, evalRounds: round },
+    });
+  }
+
+  /** Move slice to STUCK, preserving identity and progress. */
+  markStuck(ghIssue: string, error: string) {
+    const cur = this.requireSlice(ghIssue, "markStuck");
+    const id = identityOf(cur);
+    const progress = progressOf(cur) ?? ZERO_PROGRESS;
+    this.runLog.slices.set(ghIssue, lifecycle.stuck(id, progress, error));
+  }
+
+  /** Move slice to CANCELLED, preserving identity and progress. */
+  markCancelled(ghIssue: string, error: string) {
+    const cur = this.requireSlice(ghIssue, "markCancelled");
+    const id = identityOf(cur);
+    const progress = progressOf(cur) ?? ZERO_PROGRESS;
+    this.runLog.slices.set(ghIssue, lifecycle.cancelled(id, progress, error));
+  }
+
+  /** Move slice to ESCALATE, preserving identity and progress. */
+  markEscalated(ghIssue: string, error: string) {
+    const cur = this.requireSlice(ghIssue, "markEscalated");
+    const id = identityOf(cur);
+    const progress = progressOf(cur) ?? ZERO_PROGRESS;
+    this.runLog.slices.set(ghIssue, lifecycle.escalate(id, progress, error));
+  }
+
+  /** Move slice to ERROR, preserving identity and progress. */
+  markError(ghIssue: string, error: string) {
+    const cur = this.requireSlice(ghIssue, "markError");
+    const id = identityOf(cur);
+    const progress = progressOf(cur) ?? ZERO_PROGRESS;
+    this.runLog.slices.set(ghIssue, lifecycle.error(id, progress, error));
+  }
+
+  /** Move slice to CONFLICT, preserving identity and progress. */
+  markConflict(ghIssue: string, error: string) {
+    const cur = this.requireSlice(ghIssue, "markConflict");
+    const id = identityOf(cur);
+    const progress = progressOf(cur) ?? ZERO_PROGRESS;
+    this.runLog.slices.set(ghIssue, lifecycle.conflict(id, progress, error));
+  }
+
+  /** Move slice to LANE-CANCELLED, preserving identity and progress. */
+  markLaneCancelled(ghIssue: string, error: string) {
+    const cur = this.requireSlice(ghIssue, "markLaneCancelled");
+    const id = identityOf(cur);
+    const progress = progressOf(cur) ?? ZERO_PROGRESS;
+    this.runLog.slices.set(
       ghIssue,
-      title: "",
-      status: "PENDING" as const,
-      genRounds: 0,
-      evalRounds: 0,
-      branch: "",
-    };
-    this.runLog.slices.set(ghIssue, { ...existing, ...status });
+      lifecycle.laneCancelled(id, progress, error),
+    );
   }
 
   setReviewVerdicts(architect?: string, pm?: string) {
@@ -119,9 +179,15 @@ export class Logger {
     this.runLog.featureBranch = name;
   }
 
-  /** Snapshot of a slice's current status, or undefined if not tracked. */
-  getSliceStatus(ghIssue: string): SliceStatus | undefined {
+  /** Snapshot of a slice's current lifecycle, or undefined if not tracked. */
+  getSlice(ghIssue: string): SliceLifecycle | undefined {
     return this.runLog.slices.get(ghIssue);
+  }
+
+  /** Current progress counters, or zeros if the slice isn't tracked yet. */
+  getSliceProgress(ghIssue: string): SliceProgress {
+    const cur = this.runLog.slices.get(ghIssue);
+    return cur ? (progressOf(cur) ?? ZERO_PROGRESS) : ZERO_PROGRESS;
   }
 
   setSanityGate(result: SanityGateResult) {
@@ -130,6 +196,25 @@ export class Logger {
 
   setPrUrl(url: string) {
     this.runLog.prUrl = url;
+  }
+
+  private requireSlice(ghIssue: string, op: string): SliceLifecycle {
+    const cur = this.runLog.slices.get(ghIssue);
+    if (!cur) {
+      throw new Error(`Logger.${op}: slice ${ghIssue} is not tracked yet`);
+    }
+    return cur;
+  }
+
+  private requireWithProgress(
+    ghIssue: string,
+    op: string,
+  ): Exclude<SliceLifecycle, { phase: "SKIPPED" }> {
+    const cur = this.requireSlice(ghIssue, op);
+    if (cur.phase === "SKIPPED") {
+      throw new Error(`Logger.${op}: cannot bump rounds on a SKIPPED slice`);
+    }
+    return cur;
   }
 
   writeSummary() {
@@ -145,36 +230,15 @@ export class Logger {
       prUrl,
     } = this.runLog;
 
-    const statusIcon: Record<string, string> = {
-      PASS: "✅",
-      FAIL: "❌",
-      STUCK: "🔴",
-      SKIPPED: "⏭️",
-      CONFLICT: "⚠️",
-      RUNNING: "🔄",
-      PENDING: "⏳",
-      CANCELLED: "🚫",
-      "LANE-CANCELLED": "⛔",
-    };
-
     const totals = this.runLog.totals;
     let runCost = 0;
     let runToolCalls = 0;
     const rows = [...slices.values()]
       .map((s) => {
-        const icon = statusIcon[s.status] ?? "❓";
-        const rounds =
-          s.status === "SKIPPED"
-            ? "—"
-            : `gen:${s.genRounds} eval:${s.evalRounds}`;
-        const branchInfo =
-          s.status === "PASS"
-            ? "merged"
-            : s.status === "STUCK" || s.status === "CONFLICT"
-              ? "preserved"
-              : s.status === "SKIPPED"
-                ? "—"
-                : s.branch;
+        const icon = statusIconFor(s.phase);
+        const label = summaryStatusLabel(s.phase);
+        const rounds = roundsCellFor(s);
+        const branchInfo = branchInfoFor(s);
         const t = totals.get(s.ghIssue);
         const cost = t && t.costUsd > 0 ? `$${t.costUsd.toFixed(4)}` : "—";
         const tools = t ? String(t.toolCallCount) : "—";
@@ -182,7 +246,7 @@ export class Logger {
           runCost += t.costUsd;
           runToolCalls += t.toolCallCount;
         }
-        return `| ${s.ghIssue} ${s.title} | ${icon} ${s.status} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
+        return `| ${s.ghIssue} ${s.title} | ${icon} ${label} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
       })
       .join("\n");
 
@@ -241,20 +305,11 @@ ${prUrl ? `PR: ${prUrl}` : ""}
     const duration = `${mm}m${ss.toString().padStart(2, "0")}s`;
 
     const all = [...slices.values()];
-    const succeeded = all.filter((s) => s.status === "PASS");
-    const failed = all.filter(
-      (s) =>
-        s.status === "STUCK" ||
-        s.status === "FAIL" ||
-        s.status === "CONFLICT",
-    );
-    const cancelled = all.filter(
-      (s) => s.status === "CANCELLED" || s.status === "LANE-CANCELLED",
-    );
-    const skipped = all.filter((s) => s.status === "SKIPPED");
-    const inFlight = all.filter(
-      (s) => s.status === "RUNNING" || s.status === "PENDING",
-    );
+    const succeeded = all.filter((s) => bucketFor(s.phase) === "succeeded");
+    const failed = all.filter((s) => bucketFor(s.phase) === "failed");
+    const cancelled = all.filter((s) => bucketFor(s.phase) === "cancelled");
+    const skipped = all.filter((s) => bucketFor(s.phase) === "skipped");
+    const inFlight = all.filter((s) => bucketFor(s.phase) === "inFlight");
 
     const lines: string[] = [];
     lines.push(`=== AFK Pipeline Summary — ${prdSlug} ===`);
@@ -280,16 +335,13 @@ ${prUrl ? `PR: ${prUrl}` : ""}
       lines.push("  (none)");
     } else {
       for (const s of failed) {
-        const icon =
-          s.status === "STUCK"
-            ? "🔴"
-            : s.status === "CONFLICT"
-              ? "⚠️"
-              : "❌";
+        const icon = statusIconFor(s.phase);
+        const label = summaryStatusLabel(s.phase);
+        const branch = s.branch || "(unknown)";
         lines.push(
-          `  ${icon} #${s.ghIssue} ${s.title} [${s.status}] — branch preserved: ${s.branch || "(unknown)"}`,
+          `  ${icon} #${s.ghIssue} ${s.title} [${label}] — branch preserved: ${branch}`,
         );
-        if (s.error) lines.push(`       reason: ${s.error}`);
+        if ("error" in s && s.error) lines.push(`       reason: ${s.error}`);
       }
     }
     lines.push("");
@@ -297,8 +349,9 @@ ${prUrl ? `PR: ${prUrl}` : ""}
     if (cancelled.length > 0) {
       lines.push(`Cancelled (${cancelled.length}):`);
       for (const s of cancelled) {
-        const icon = s.status === "LANE-CANCELLED" ? "⛔" : "🚫";
-        lines.push(`  ${icon} #${s.ghIssue} ${s.title} [${s.status}]`);
+        const icon = statusIconFor(s.phase);
+        const label = summaryStatusLabel(s.phase);
+        lines.push(`  ${icon} #${s.ghIssue} ${s.title} [${label}]`);
       }
       lines.push("");
     }
@@ -314,7 +367,7 @@ ${prUrl ? `PR: ${prUrl}` : ""}
     if (inFlight.length > 0) {
       lines.push(`In flight when summary was emitted (${inFlight.length}):`);
       for (const s of inFlight) {
-        lines.push(`  🔄 #${s.ghIssue} ${s.title} [${s.status}]`);
+        lines.push(`  🔄 #${s.ghIssue} ${s.title} [${s.phase}]`);
       }
       lines.push("");
     }
@@ -364,5 +417,53 @@ ${prUrl ? `PR: ${prUrl}` : ""}
     }
 
     return lines.join("\n");
+  }
+}
+
+function identityOf(s: SliceLifecycle): SliceIdentity {
+  return { ghIssue: s.ghIssue, title: s.title, branch: s.branch };
+}
+
+function progressOf(s: SliceLifecycle): SliceProgress | null {
+  return s.phase === "SKIPPED" ? null : s.progress;
+}
+
+function roundsCellFor(s: SliceLifecycle): string {
+  switch (s.phase) {
+    case "SKIPPED":
+      return "—";
+    case "PENDING":
+    case "RUNNING":
+    case "PASS":
+    case "STUCK":
+    case "ESCALATE":
+    case "ERROR":
+    case "CONFLICT":
+    case "CANCELLED":
+    case "LANE-CANCELLED":
+      return `gen:${s.progress.genRounds} eval:${s.progress.evalRounds}`;
+    default:
+      return assertNever(s);
+  }
+}
+
+function branchInfoFor(s: SliceLifecycle): string {
+  switch (s.phase) {
+    case "PASS":
+      return "merged";
+    case "STUCK":
+    case "CONFLICT":
+      return "preserved";
+    case "SKIPPED":
+      return "—";
+    case "PENDING":
+    case "RUNNING":
+    case "ESCALATE":
+    case "ERROR":
+    case "CANCELLED":
+    case "LANE-CANCELLED":
+      return s.branch;
+    default:
+      return assertNever(s);
   }
 }

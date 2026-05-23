@@ -541,8 +541,8 @@ describe("runPipeline lane scheduling", () => {
       "utf-8",
     );
     const state = JSON.parse(stateRaw);
-    expect(state.slices["2001"].status).toBe("STUCK");
-    expect(state.slices["2002"].status).toBe("LANE-CANCELLED");
+    expect(state.slices["2001"].phase).toBe("STUCK");
+    expect(state.slices["2002"].phase).toBe("LANE-CANCELLED");
   }, 60_000);
 
   it("runs disjoint-file slices in parallel lanes (timestamps interleave)", async () => {
@@ -608,8 +608,8 @@ describe("runPipeline lane scheduling", () => {
       "utf-8",
     );
     const state = JSON.parse(stateRaw);
-    expect(state.slices["3001"].status).toBe("PASS");
-    expect(state.slices["3002"].status).toBe("PASS");
+    expect(state.slices["3001"].phase).toBe("PASS");
+    expect(state.slices["3002"].phase).toBe("PASS");
 
     // Phase A invocations should overlap: one slice's planner starts
     // before the other's planner finishes (parallel lane leaders).
