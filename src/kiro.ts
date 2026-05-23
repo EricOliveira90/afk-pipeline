@@ -20,7 +20,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     prompt,
     cwd,
     logStream,
-    idleTimeoutMs = 600_000,
+    idleTimeoutMs = 180_000,
     idleWarningIntervalMs = 60_000,
     signal,
     onIdleWarning,

@@ -35,6 +35,30 @@ const SANITY_STEPS: ReadonlyArray<{
   { name: "tests", scripts: ["test:run", "test"] },
 ];
 
+function readPackageScripts(cwd: string): Record<string, string> | null {
+  try {
+    const pkgRaw = readFileSync(join(cwd, "package.json"), "utf-8");
+    return (JSON.parse(pkgRaw).scripts ?? {}) as Record<string, string>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves the consumer project's test command from its `package.json`.
+ * Prefers `test:run` (Vitest convention for one-shot, non-watch runs) over
+ * `test`. Returns `undefined` if neither exists or `package.json` is
+ * missing — callers fall back to a literal `pnpm test` and let the agent
+ * report the absence. Shared with the pre-ship sanity gate so the QA
+ * evaluator and the gate can't pick different runners.
+ */
+export function resolveTestCommand(cwd: string): string | undefined {
+  const scripts = readPackageScripts(cwd);
+  if (!scripts) return undefined;
+  const scriptName = ["test:run", "test"].find((s) => scripts[s] != null);
+  return scriptName ? `pnpm ${scriptName}` : undefined;
+}
+
 /**
  * Pre-ship sanity gate: runs the project's typecheck + lint + tests against
  * the merged feature branch in `cwd`, before opening the PR. This is the
@@ -50,11 +74,8 @@ export function runPreShipSanity(cwd: string): {
   ok: boolean;
   failures: string[];
 } {
-  let scripts: Record<string, string> = {};
-  try {
-    const pkgRaw = readFileSync(join(cwd, "package.json"), "utf-8");
-    scripts = (JSON.parse(pkgRaw).scripts ?? {}) as Record<string, string>;
-  } catch {
+  const scripts = readPackageScripts(cwd);
+  if (!scripts) {
     // No package.json (or unreadable) — nothing to gate on.
     return { ok: true, failures: [] };
   }
@@ -302,6 +323,13 @@ export interface SliceContext {
   relSliceDir: string;
   relSpecsDir: string;
   tag: string;
+  /**
+   * Test command discovered from the consumer's `package.json` (e.g.
+   * `pnpm test:run` or `pnpm test`). Falls back to `pnpm test` when no
+   * test script is defined. Injected into generator + evaluator-qa
+   * prompts so they don't hardcode a runner-specific flag.
+   */
+  testCommand: string;
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0],
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -313,6 +341,7 @@ export function makeSliceContext(
   logger: Logger,
   featBranch: string,
   relevantFilesBlock: string,
+  testCommand: string,
 ): SliceContext {
   const { repoRoot, prdSlug, specsDir, signal } = config;
   const provider = config.provider ?? kiroProvider;
@@ -358,6 +387,7 @@ export function makeSliceContext(
     relSliceDir,
     relSpecsDir,
     tag,
+    testCommand,
     invoke,
   };
 }
@@ -528,6 +558,7 @@ export async function runSliceExecute(
         prompt: renderPrompt("generator", {
           SLICE_DIR: ctx.relSliceDir,
           RELEVANT_FILES: relevantFilesBlock,
+          TEST_COMMAND: ctx.testCommand,
           RETRY_NOTE:
             round > 1
               ? `This is retry round ${round}. Read ${ctx.relSliceDir}/qa-report.md for findings to fix.`
@@ -547,6 +578,7 @@ export async function runSliceExecute(
         prompt: renderPrompt("evaluator-qa", {
           SLICE_DIR: ctx.relSliceDir,
           RELEVANT_FILES: relevantFilesBlock,
+          TEST_COMMAND: ctx.testCommand,
         }),
         cwd: ctx.worktreeDir,
         logStream: evalLog,
@@ -639,6 +671,7 @@ async function runSlice(
   logger: Logger,
   featBranch: string,
   relevantFilesBlock: string,
+  testCommand: string,
 ): Promise<"PASS" | "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED"> {
   const ctx = makeSliceContext(
     config,
@@ -646,6 +679,7 @@ async function runSlice(
     logger,
     featBranch,
     relevantFilesBlock,
+    testCommand,
   );
   const negotiate = await runSliceNegotiate(ctx);
   if (negotiate !== "LOCKED") return negotiate;
@@ -674,6 +708,10 @@ export async function runPipeline(
   const featBranch = featureBranch(prdSlug, provider);
   logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
+  // Resolve the consumer project's test command once per run. Falls back
+  // to `pnpm test` when no test script is defined — matches the pre-ship
+  // gate's forgiving stance.
+  const testCommand = resolveTestCommand(repoRoot) ?? "pnpm test";
 
   try {
   // Detect the repo's default branch (main / master / etc.) once so
@@ -792,7 +830,14 @@ export async function runPipeline(
       const slice = dag.slices.get(id)!;
       ctxById.set(
         id,
-        makeSliceContext(config, slice, logger, featBranch, relevantFilesBlock),
+        makeSliceContext(
+          config,
+          slice,
+          logger,
+          featBranch,
+          relevantFilesBlock,
+          testCommand,
+        ),
       );
     }
 

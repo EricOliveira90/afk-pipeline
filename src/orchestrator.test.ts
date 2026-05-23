@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   makeAsyncMutex,
+  resolveTestCommand,
   runPipeline,
   runPreShipSanity,
   PipelineError,
@@ -109,6 +110,37 @@ describe("runPreShipSanity", () => {
     const result = runPreShipSanity(dir);
     expect(result.ok).toBe(false);
     expect(result.failures).toEqual(["typecheck", "lint"]);
+  });
+});
+
+/**
+ * Tests for `resolveTestCommand`. Shared with the pre-ship gate so the
+ * QA evaluator and the gate can't pick different runners — these cases
+ * pin the same `test:run` → `test` priority `runPreShipSanity` uses.
+ */
+describe("resolveTestCommand", () => {
+  it("prefers `test:run` over `test`", () => {
+    const dir = makeProject({
+      "test:run": "vitest run",
+      test: "vitest",
+    });
+    expect(resolveTestCommand(dir)).toBe("pnpm test:run");
+  });
+
+  it("falls back to `test` when `test:run` is absent (Jest projects)", () => {
+    const dir = makeProject({ test: "jest" });
+    expect(resolveTestCommand(dir)).toBe("pnpm test");
+  });
+
+  it("returns undefined when neither script is defined", () => {
+    const dir = makeProject({ build: "tsc" });
+    expect(resolveTestCommand(dir)).toBeUndefined();
+  });
+
+  it("returns undefined when package.json is missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "afk-resolve-"));
+    tempDirs.push(dir);
+    expect(resolveTestCommand(dir)).toBeUndefined();
   });
 });
 

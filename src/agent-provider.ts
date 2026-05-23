@@ -28,10 +28,18 @@ export interface InvokeOptions {
   cwd: string;
   /** Optional log stream to write raw stdout to */
   logStream?: WriteStream;
-  /** Idle timeout in ms — hard kill threshold. Default: 600_000 (10 min) */
+  /** Idle timeout in ms — hard kill threshold. Default: 180_000 (3 min). See ADR 0007. */
   idleTimeoutMs?: number;
   /** Idle-warning interval in ms. Default: 60_000 (1 min). See CONTEXT.md "Idle warning". */
   idleWarningIntervalMs?: number;
+  /**
+   * Hard cap on tool calls per invocation — kills the session when
+   * exceeded. Catches "talky" loops where the agent keeps emitting
+   * tool calls without making progress (which never trips the idle
+   * watcher). Default: 100. Only enforced by providers that parse
+   * a structured stream. See ADR 0007.
+   */
+  maxToolCalls?: number;
   /** Cancellation signal — when fired, the spawned process is killed. */
   signal?: AbortSignal;
   /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */

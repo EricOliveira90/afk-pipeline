@@ -25,7 +25,9 @@ Hard rules:
   reproducible test step are not findings.
 - **Don't prescribe the fix.** Name the gap; the generator chooses how
   to close it.
-- **When running tests, use `pnpm test --run`** (not `pnpm test`).
+- **Run tests with `{{TEST_COMMAND}}`** — this is the project's test
+  script as discovered from `package.json`. Don't substitute another
+  command; if it fails, that's a real failure to surface.
 
 Grading rubric — every criterion must PASS:
 
@@ -43,7 +45,7 @@ Grading rubric — every criterion must PASS:
 
 1. Complete the **Required reading** above.
 2. Read the diff against the base branch.
-3. Run the full quality gate (typecheck, lint, `pnpm test --run`, build).
+3. Run the full quality gate (typecheck, lint, `{{TEST_COMMAND}}`, build).
    Any failure here = FAIL on its own.
 4. Grade against the rubric above.
 5. Write `{{SLICE_DIR}}/qa-report.md`:

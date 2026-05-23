@@ -95,8 +95,9 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
     prompt,
     cwd,
     logStream,
-    idleTimeoutMs = 600_000,
+    idleTimeoutMs = 180_000,
     idleWarningIntervalMs = 60_000,
+    maxToolCalls = 100,
     signal,
     onIdleWarning,
     onStreamEvent,
@@ -137,6 +138,7 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
     let costUsd: number | undefined;
     let toolCallCount = 0;
     let killed = false;
+    let toolCapExceeded = false;
     let cancelled = false;
 
     const onAbort = () => {
@@ -183,7 +185,14 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
         }
 
         for (const event of parseStreamLine(line)) {
-          if (event.type === "tool_call") toolCallCount++;
+          if (event.type === "tool_call") {
+            toolCallCount++;
+            if (!toolCapExceeded && toolCallCount > maxToolCalls) {
+              toolCapExceeded = true;
+              killed = true;
+              proc.kill("SIGTERM");
+            }
+          }
           onStreamEvent?.(event);
         }
       }
@@ -206,6 +215,12 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
       const exitCode = code ?? 1;
       if (cancelled) {
         reject(new CancelledError(`Agent ${role} cancelled`));
+      } else if (toolCapExceeded) {
+        reject(
+          new Error(
+            `Agent ${role} exceeded ${maxToolCalls} tool calls — killed`,
+          ),
+        );
       } else if (killed) {
         reject(
           new Error(

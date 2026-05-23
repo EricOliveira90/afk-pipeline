@@ -40,8 +40,9 @@ Hard rules:
   evaluator's call.
 - **Implement every visible affordance the contract names.** Missing a
   user-visible element listed in "In scope" is a FAIL, not an oversight.
-- **When running tests, use `pnpm test --run`** (not `pnpm test`) to
-  avoid watch mode.
+- **Run tests with `{{TEST_COMMAND}}`** — this is the project's test
+  script as discovered from `package.json`. Don't substitute another
+  command (no flag tweaks, no direct `jest`/`vitest` invocations).
 
 # Task
 
