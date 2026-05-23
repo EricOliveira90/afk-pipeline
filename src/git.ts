@@ -9,6 +9,41 @@ export function currentBranch(cwd: string): string {
   return git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
 }
 
+/**
+ * Detects the repo's default branch (the integration target — what most
+ * projects call `main` or `master`).
+ *
+ * Cascade:
+ *   1. `origin/HEAD` symbolic ref — authoritative when the remote was set
+ *      up by `git clone` (covers the common case).
+ *   2. Local `main`, then `master` — covers `git init`-created repos
+ *      where `origin/HEAD` was never set.
+ *   3. Throw — refusing to guess. Falling back to the *current* HEAD
+ *      would be wrong: HEAD might be a feature branch, and using it as
+ *      the integration base would silently corrupt the slice graph.
+ */
+export function getDefaultBranch(cwd: string): string {
+  try {
+    const ref = git(["symbolic-ref", "refs/remotes/origin/HEAD"], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const prefix = "refs/remotes/origin/";
+    if (ref.startsWith(prefix)) return ref.slice(prefix.length);
+  } catch {
+    // origin/HEAD not set — fall through to local probes.
+  }
+
+  for (const candidate of ["main", "master"]) {
+    if (branchExists(cwd, candidate)) return candidate;
+  }
+
+  throw new Error(
+    "Could not determine default branch. Set it with " +
+      "`git remote set-head origin --auto`, or create a local `main` or `master` branch.",
+  );
+}
+
 /** Returns true if the local branch exists. */
 export function branchExists(cwd: string, branch: string): boolean {
   try {
@@ -22,7 +57,7 @@ export function branchExists(cwd: string, branch: string): boolean {
   }
 }
 
-export function createBranch(cwd: string, branch: string, from = "main") {
+export function createBranch(cwd: string, branch: string, from: string) {
   try {
     git(["rev-parse", "--verify", branch], {
       cwd,
@@ -38,7 +73,7 @@ export function createWorktree(
   repoRoot: string,
   branch: string,
   worktreeDir: string,
-  from = "main",
+  from: string,
 ) {
   if (existsSync(worktreeDir)) return;
   createBranch(repoRoot, branch, from);

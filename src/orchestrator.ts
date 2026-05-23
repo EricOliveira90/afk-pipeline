@@ -655,14 +655,21 @@ export async function runPipeline(
   const featBranch = featureBranch(prdSlug, provider);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
 
+  // Detect the repo's default branch (main / master / etc.) once so
+  // every base reference below — feat-branch init, review-worktree
+  // creation, gh pr base — agrees on the same target.
+  const defaultBranch = git.getDefaultBranch(repoRoot);
+
   // Initialize feature branch. Prefer `prd/<slug>` as the base if it
   // exists — that branch holds the human-authored `prd.md` + `issues.md`
   // that the planner/generator agents read from the worktree. If we
-  // initialize from `main`, worktrees won't have those files and the
-  // planner will operate blind. Falls back to `main` when no PRD branch
-  // is present (e.g., PRD inlined directly on main).
+  // initialize from the default branch, worktrees won't have those files
+  // and the planner will operate blind. Falls back to the default branch
+  // when no PRD branch is present (e.g., PRD inlined directly on it).
   const prdBranch = `prd/${prdSlug}`;
-  const baseBranch = git.branchExists(repoRoot, prdBranch) ? prdBranch : "main";
+  const baseBranch = git.branchExists(repoRoot, prdBranch)
+    ? prdBranch
+    : defaultBranch;
   git.createBranch(repoRoot, featBranch, baseBranch);
 
   // Mark HITL slices as skipped
@@ -1124,7 +1131,7 @@ export async function runPipeline(
         "worktrees",
         `${featBranch.replace(/\//g, "-")}-review`,
       );
-      git.createWorktree(repoRoot, featBranch, reviewDir);
+      git.createWorktree(repoRoot, featBranch, reviewDir, defaultBranch);
       cleanupReviewDir = true;
     }
 
@@ -1221,7 +1228,7 @@ export async function runPipeline(
                 "create",
                 "--draft",
                 "--base",
-                "main",
+                defaultBranch,
                 "--head",
                 featBranch,
                 "--title",

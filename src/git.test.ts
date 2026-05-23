@@ -9,7 +9,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { branchExists, findWorktreeForBranch, removeWorktree } from "./git.js";
+import {
+  branchExists,
+  findWorktreeForBranch,
+  getDefaultBranch,
+  removeWorktree,
+} from "./git.js";
 
 /**
  * Regression tests for git.branchExists.
@@ -59,6 +64,82 @@ describe("git.branchExists", () => {
     // before initializing feat from it. Remote-only branches should not
     // count.
     expect(branchExists(repoDir, "origin/main")).toBe(false);
+  });
+});
+
+describe("git.getDefaultBranch", () => {
+  let repoDir: string;
+  let originDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-default-"));
+    originDir = mkdtempSync(join(tmpdir(), "afk-default-origin-"));
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(originDir, { recursive: true, force: true });
+  });
+
+  function initBare(branch: string): void {
+    // A bare repo with HEAD pointing at `refs/heads/<branch>` so cloning
+    // it produces a working copy whose `origin/HEAD` resolves to that
+    // branch — the exact shape `getDefaultBranch` reads.
+    git(originDir, ["init", "--bare", `--initial-branch=${branch}`]);
+    // Bare repos have no commits yet; we need a commit on the branch so
+    // `git clone` can resolve origin/HEAD. Easiest: clone, commit, push.
+    const seedDir = mkdtempSync(join(tmpdir(), "afk-default-seed-"));
+    try {
+      git(seedDir, ["clone", originDir, "."]);
+      git(seedDir, ["config", "user.email", "test@example.com"]);
+      git(seedDir, ["config", "user.name", "Test"]);
+      git(seedDir, ["checkout", "-b", branch]);
+      git(seedDir, ["commit", "--allow-empty", "-m", "root"]);
+      git(seedDir, ["push", "-u", "origin", branch]);
+    } finally {
+      rmSync(seedDir, { recursive: true, force: true });
+    }
+  }
+
+  it("returns the branch from origin/HEAD when set to main", () => {
+    initBare("main");
+    git(repoDir, ["clone", originDir, "."]);
+    expect(getDefaultBranch(repoDir)).toBe("main");
+  });
+
+  it("returns the branch from origin/HEAD when set to master", () => {
+    // The exact bug from the issue: repo's primary branch is master,
+    // not main, and the orchestrator must not hardcode `main`.
+    initBare("master");
+    git(repoDir, ["clone", originDir, "."]);
+    expect(getDefaultBranch(repoDir)).toBe("master");
+  });
+
+  it("falls back to local master when origin/HEAD is unset", () => {
+    git(repoDir, ["init", "--initial-branch=master"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+    expect(getDefaultBranch(repoDir)).toBe("master");
+  });
+
+  it("prefers local main over master when both exist and no origin", () => {
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+    git(repoDir, ["branch", "master"]);
+    expect(getDefaultBranch(repoDir)).toBe("main");
+  });
+
+  it("throws when no canonical default branch can be found", () => {
+    git(repoDir, ["init", "--initial-branch=develop"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+    expect(() => getDefaultBranch(repoDir)).toThrow(
+      /Could not determine default branch/,
+    );
   });
 });
 
