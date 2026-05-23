@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
@@ -10,7 +10,7 @@ import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
-import { partitionLanes, type Lane } from "./lanes.js";
+import { runWave } from "./wave.js";
 
 import { loadRunState, saveSliceState, isSliceComplete } from "./run-state.js";
 
@@ -255,7 +255,7 @@ function slugify(s: string): string {
  * `kiro` keeps the legacy `afk/…` / `feat/…` prefixes for backwards
  * compat; every other provider gets its name appended.
  */
-function sliceBranchPrefix(provider: AgentProvider): string {
+export function sliceBranchPrefix(provider: AgentProvider): string {
   return provider.name === "kiro" ? "afk" : `afk-${provider.name}`;
 }
 
@@ -263,7 +263,7 @@ function featureBranchPrefix(provider: AgentProvider): string {
   return provider.name === "kiro" ? "feat" : `feat-${provider.name}`;
 }
 
-function sliceBranch(
+export function sliceBranch(
   prdSlug: string,
   slice: Slice,
   provider: AgentProvider,
@@ -275,7 +275,7 @@ function featureBranch(prdSlug: string, provider: AgentProvider): string {
   return `${featureBranchPrefix(provider)}/${prdSlug}`;
 }
 
-function isCancelled(err: unknown, signal?: AbortSignal): boolean {
+export function isCancelled(err: unknown, signal?: AbortSignal): boolean {
   return err instanceof CancelledError || signal?.aborted === true;
 }
 
@@ -792,9 +792,9 @@ export async function runPipeline(
   // Slices whose blocker is in `failed` will simply never become
   // ready and the loop will exit once no toRun remain.
   const mergeMutex = makeAsyncMutex();
-  let wave = 0;
+  let waveNumber = 0;
   while (true) {
-    wave++;
+    waveNumber++;
 
     // Wave-transition watchdog: race the readiness check against a
     // timeout. If the event loop is blocked (dangling promise,
@@ -810,7 +810,7 @@ export async function runPipeline(
       new Promise<never>((_, reject) => {
         const timer = setTimeout(() => {
           reject(new Error(
-            `[afk] Pipeline hung before wave ${wave} started (>${WAVE_TRANSITION_TIMEOUT_MS / 1000}s).\n` +
+            `[afk] Pipeline hung before wave ${waveNumber} started (>${WAVE_TRANSITION_TIMEOUT_MS / 1000}s).\n` +
             `Completed: [${[...completed].join(", ")}]\n` +
             `Failed: [${[...failed].join(", ")}]\n`
           ));
@@ -822,277 +822,22 @@ export async function runPipeline(
     const toRun = readyResult;
     if (toRun.length === 0) break;
 
-    console.error(
-      `[afk] Wave ${wave}: dispatching ${toRun.length} slice(s) [${toRun.join(", ")}]`,
-    );
-
-    // Build a SliceContext per slice. Worktrees are not yet created —
-    // `runSliceNegotiate` does that.
-    const ctxById = new Map<string, SliceContext>();
-    for (const id of toRun) {
-      const slice = dag.slices.get(id)!;
-      ctxById.set(
-        id,
-        makeSliceContext(
-          config,
-          slice,
-          logger,
-          featBranch,
-          relevantFilesBlock,
-          testCommand,
-        ),
-      );
-    }
-
-    // --- Phase A: negotiate in parallel. ---
-    // All slices read the same wave-start base, so it's safe to spin
-    // up worktrees concurrently. The contract for each slice is what
-    // the lane partitioner reads next.
-    const negotiateOutcomes = await Promise.allSettled(
-      toRun.map(async (id) => {
-        const ctx = ctxById.get(id)!;
-        const result = await runSliceNegotiate(ctx);
-        return { id, result };
-      }),
-    );
-
-    // Collect slices that landed at LOCKED. Mark the rest as failed
-    // (rejection / non-LOCKED outcome) so they don't enter Phase B
-    // and don't pollute the lane partitioner.
-    const lockedIds: string[] = [];
-    for (let i = 0; i < negotiateOutcomes.length; i++) {
-      const r = negotiateOutcomes[i]!;
-      const id = toRun[i]!;
-      const slice = dag.slices.get(id)!;
-      const branch = sliceBranch(prdSlug, slice, provider);
-
-      if (r.status === "rejected") {
-        failed.add(id);
-        if (isCancelled(r.reason, signal)) {
-          logger.setSliceStatus(id, {
-            status: "CANCELLED",
-            error: "Cancelled by user",
-          });
-          saveSliceState(repoRoot, loggerSlug, id, {
-            status: "CANCELLED",
-            branch,
-          });
-        } else {
-          logger.setSliceStatus(id, {
-            status: "STUCK",
-            error: `Unhandled rejection in negotiate: ${r.reason}`,
-          });
-          saveSliceState(repoRoot, loggerSlug, id, {
-            status: "ERROR" as any,
-            branch,
-          });
-        }
-        continue;
-      }
-
-      const { result } = r.value;
-      if (result === "LOCKED") {
-        lockedIds.push(id);
-        continue;
-      }
-
-      // STUCK / ESCALATE / ERROR / CANCELLED — mark and skip.
-      failed.add(id);
-      saveSliceState(repoRoot, loggerSlug, id, {
-        status: result as any,
-        branch,
-      });
-    }
-
-    // Cancellation short-circuit between phases — see ADR 0003.
-    if (signal?.aborted) {
-      for (const [id, slice] of dag.slices) {
-        if (slice.type === "HITL") continue;
-        if (completed.has(id) || failed.has(id)) continue;
-        logger.setSliceStatus(id, {
-          title: slice.title,
-          status: "CANCELLED",
-          branch: sliceBranch(prdSlug, slice, provider),
-        });
-        saveSliceState(repoRoot, loggerSlug, id, {
-          status: "CANCELLED",
-          branch: sliceBranch(prdSlug, slice, provider),
-        });
-        failed.add(id);
-      }
-      break;
-    }
-
-    // --- Read each LOCKED slice's "Files expected to change" list. ---
-    // Attached on the shared dag.slices entry so the partitioner sees
-    // it via Slice.files. Missing/empty section → undefined → folded
-    // into the conservative undeclared bucket (see ADR 0005).
-    const readyForLanes: Slice[] = [];
-    for (const id of lockedIds) {
-      const slice = dag.slices.get(id)!;
-      const ctx = ctxById.get(id)!;
-      const contractPath = join(ctx.absSliceDir, "contract.md");
-      slice.files = artifacts.readContractFiles(contractPath);
-      readyForLanes.push(slice);
-    }
-
-    // --- Partition into lanes. ---
-    const lanes = partitionLanes(readyForLanes);
-    if (lanes.length > 0) {
-      console.error(
-        `[afk] Wave ${wave}: ${lanes.length} lane(s) — ${lanes
-          .map((l) => `[${l.map((s) => `#${s.ghIssue}`).join(", ")}]`)
-          .join(" ")}`,
-      );
-    }
-
-    // --- Run each lane. Lanes are independent; slices within a lane
-    // are serial. The mutex around merge + worktree-remove serialises
-    // those operations across lanes (they all share the feat-branch
-    // checkout). ---
-    type LaneSliceOutcome =
-      | "PASS"
-      | "STUCK"
-      | "ERROR"
-      | "CANCELLED"
-      | "CONFLICT"
-      | "LANE-CANCELLED"
-      | "NO-COMMITS";
-    const laneSliceOutcomes = new Map<string, LaneSliceOutcome>();
-
-    await Promise.all(
-      lanes.map(async (lane) => {
-        for (let i = 0; i < lane.length; i++) {
-          const slice = lane[i]!;
-          const id = slice.ghIssue;
-          const branch = sliceBranch(prdSlug, slice, provider);
-          let ctx = ctxById.get(id)!;
-
-          // Lane successor refresh: the predecessor has already merged
-          // into featBranch under the mutex. Tear down the stale
-          // wave-start worktree and recreate from the now-fresh feat
-          // tip; drop the stale context.md / contract.md so the
-          // explorer + planner re-derive scope on the new base.
-          if (i > 0) {
-            try {
-              console.error(
-                `[afk] Refreshing slice #${id} for lane successor on new base`,
-              );
-              git.recreateWorktreeFromBase(
-                repoRoot,
-                ctx.branch,
-                ctx.worktreeDir,
-                featBranch,
-              );
-              mkdirSync(ctx.absSliceDir, { recursive: true });
-              for (const f of ["context.md", "contract.md"]) {
-                try {
-                  rmSync(join(ctx.absSliceDir, f), { force: true });
-                } catch {
-                  // best effort
-                }
-              }
-              const negotiate = await runSliceNegotiate(ctx);
-              if (negotiate !== "LOCKED") {
-                laneSliceOutcomes.set(
-                  id,
-                  negotiate === "ESCALATE" ? "STUCK" : negotiate,
-                );
-                // Lane-cancel the rest.
-                for (let k = i + 1; k < lane.length; k++) {
-                  laneSliceOutcomes.set(
-                    lane[k]!.ghIssue,
-                    "LANE-CANCELLED",
-                  );
-                }
-                return;
-              }
-            } catch (err) {
-              if (isCancelled(err, signal)) {
-                laneSliceOutcomes.set(id, "CANCELLED");
-              } else {
-                logger.setSliceStatus(id, {
-                  status: "STUCK",
-                  error: err instanceof Error ? err.message : String(err),
-                });
-                laneSliceOutcomes.set(id, "ERROR");
-              }
-              for (let k = i + 1; k < lane.length; k++) {
-                laneSliceOutcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-              }
-              return;
-            }
-          }
-
-          // Run Phase B.
-          let outcome: "PASS" | "STUCK" | "ERROR" | "CANCELLED";
-          try {
-            outcome = await runSliceExecute(ctx);
-          } catch (err) {
-            outcome = isCancelled(err, signal) ? "CANCELLED" : "ERROR";
-            if (outcome === "ERROR") {
-              logger.setSliceStatus(id, {
-                status: "STUCK",
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
-          }
-
-          if (outcome !== "PASS") {
-            laneSliceOutcomes.set(id, outcome);
-            for (let k = i + 1; k < lane.length; k++) {
-              laneSliceOutcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-            }
-            return;
-          }
-
-          // PASS — merge under the mutex so concurrent lanes don't
-          // race on the shared feat-branch checkout. Then remove the
-          // worktree (also under the mutex; some Windows worktree
-          // states interact with concurrent operations on `.git/`).
-          if (!git.hasCommitsAhead(repoRoot, branch, featBranch)) {
-            laneSliceOutcomes.set(id, "NO-COMMITS");
-            for (let k = i + 1; k < lane.length; k++) {
-              laneSliceOutcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-            }
-            return;
-          }
-
-          // Short scratch-worktree dir to stay under Windows MAX_PATH.
-          const scratchMergeDir = join(
-            repoRoot,
-            ".afk",
-            `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
-          );
-          const merged = await mergeMutex(() =>
-            Promise.resolve(
-              git.mergeSliceBranch(
-                repoRoot,
-                branch,
-                featBranch,
-                scratchMergeDir,
-              ),
-            ),
-          );
-          if (!merged) {
-            laneSliceOutcomes.set(id, "CONFLICT");
-            for (let k = i + 1; k < lane.length; k++) {
-              laneSliceOutcomes.set(lane[k]!.ghIssue, "LANE-CANCELLED");
-            }
-            return;
-          }
-
-          await mergeMutex(() =>
-            Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
-          );
-
-          laneSliceOutcomes.set(id, "PASS");
-        }
-      }),
-    );
+    // Run the wave: Phase A (negotiate) → lane partition → Phase B
+    // (execute + merge). Returns per-slice outcomes for persistence.
+    const { outcomes } = await runWave({
+      waveNumber,
+      readyIds: toRun,
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock,
+      testCommand,
+      mergeMutex,
+    });
 
     // --- Persist results from this wave. ---
-    for (const [id, outcome] of laneSliceOutcomes) {
+    for (const [id, outcome] of outcomes) {
       const slice = dag.slices.get(id)!;
       const branch = sliceBranch(prdSlug, slice, provider);
 
@@ -1107,12 +852,6 @@ export async function runPipeline(
       }
 
       if (outcome === "LANE-CANCELLED") {
-        // Defer this run; persist LANE-CANCELLED so a *fresh*
-        // pipeline invocation (after the predecessor is fixed by a
-        // human) re-evaluates the slice naturally — the saved state
-        // has `mergedToFeature: false`, so it won't be in `completed`.
-        // Within this run, `laneCancelled` filters it out of
-        // `dag.ready` so we don't spin.
         logger.setSliceStatus(id, {
           status: "LANE-CANCELLED",
           error:
@@ -1178,7 +917,6 @@ export async function runPipeline(
     }
 
     // If no progress was made this round, we're stuck.
-    // Same DAG rule as above: only `completed` unblocks.
     const newReady = dag.ready(completed);
     const newToRun = newReady.filter(
       (id) => !failed.has(id) && !laneCancelled.has(id),
