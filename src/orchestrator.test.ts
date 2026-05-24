@@ -17,7 +17,6 @@ import {
   resolveTestCommand,
   runPipeline,
   runPreShipSanity,
-  PipelineError,
 } from "./orchestrator.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import type {
