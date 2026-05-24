@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
@@ -167,4 +167,37 @@ export function hasStuckFile(sliceDir: string): boolean {
 
 export function hasPassingQA(sliceDir: string): boolean {
   return readQAVerdict(`${sliceDir}/qa-report.md`) === "PASS";
+}
+
+/**
+ * Write `**Status:** LOCKED` into `contract.md`. Replaces an existing
+ * Status line in place; inserts one after the H1 heading if absent.
+ *
+ * Owned by the orchestrator: callers run this after the contract
+ * evaluator returns `ACCEPT`. Agents do not edit Status. See ADR 0008.
+ */
+export function lockContract(contractPath: string): void {
+  const content = existsSync(contractPath)
+    ? readFileSync(contractPath, "utf-8")
+    : "";
+
+  const statusRe = /^\*\*Status:\*\*\s*\S+\s*$/im;
+  let next: string;
+
+  if (statusRe.test(content)) {
+    next = content.replace(statusRe, "**Status:** LOCKED");
+  } else if (content.length > 0) {
+    // Insert after the first H1, or prepend if no H1.
+    const h1 = content.match(/^#\s+.+$/m);
+    if (h1 && h1.index !== undefined) {
+      const at = h1.index + h1[0].length;
+      next = content.slice(0, at) + "\n\n**Status:** LOCKED" + content.slice(at);
+    } else {
+      next = "**Status:** LOCKED\n\n" + content;
+    }
+  } else {
+    next = "**Status:** LOCKED\n";
+  }
+
+  writeFileSync(contractPath, next, "utf-8");
 }
