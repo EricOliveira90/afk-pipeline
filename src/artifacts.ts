@@ -184,7 +184,7 @@ export function lockContract(contractPath: string): void {
     ? readFileSync(contractPath, "utf-8")
     : "";
 
-  const statusRe = /^\*\*Status:\*\*\s*\S+\s*$/im;
+  const statusRe = /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/im;
   let next: string;
 
   if (statusRe.test(content)) {
