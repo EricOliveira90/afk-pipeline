@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
@@ -21,27 +21,13 @@ export function readContractStatus(contractPath: string): ContractStatus {
   const content = readIfExists(contractPath);
   if (!content) return "UNKNOWN";
 
-  // Check explicit Status field
   const status = matchField(content, /\*\*Status:\*\*\s*(\S+)/i);
-  if (status?.toUpperCase() === "LOCKED") return "LOCKED";
+  if (!status) return "NEGOTIATING";
 
-  // If contract exists, check if evaluator accepted (overrides NEGOTIATING/DRAFT)
-  if (content.length > 0) {
-    const verdict = readEvaluatorVerdict(contractPath);
-    if (verdict === "ACCEPT") return "LOCKED";
-  }
-
-  // Return explicit status if present
-  if (status) {
-    const upper = status.toUpperCase();
-    if (upper === "NEGOTIATING") return "NEGOTIATING";
-    if (upper === "DRAFT") return "DRAFT";
-  }
-
-  // Contract exists but no status and no accept → needs review
-  if (content.length > 0) return "NEGOTIATING";
-
-  return "UNKNOWN";
+  const upper = status.toUpperCase();
+  if (upper === "LOCKED") return "LOCKED";
+  if (upper === "DRAFT") return "DRAFT";
+  return "NEGOTIATING";
 }
 
 export function readEvaluatorVerdict(
@@ -181,4 +167,40 @@ export function hasStuckFile(sliceDir: string): boolean {
 
 export function hasPassingQA(sliceDir: string): boolean {
   return readQAVerdict(`${sliceDir}/qa-report.md`) === "PASS";
+}
+
+/**
+ * Write `**Status:** LOCKED` into `contract.md`. Replaces the first
+ * matching `**Status:**` line in document order — including one nested
+ * in a fenced code block, though contracts in production format have
+ * exactly one Status line at the top. Inserts a Status line after the
+ * H1 heading if none is present.
+ *
+ * Owned by the orchestrator: callers run this after the contract
+ * evaluator returns `ACCEPT`. Agents do not edit Status. See ADR 0008.
+ */
+export function lockContract(contractPath: string): void {
+  const content = existsSync(contractPath)
+    ? readFileSync(contractPath, "utf-8")
+    : "";
+
+  const statusRe = /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/im;
+  let next: string;
+
+  if (statusRe.test(content)) {
+    next = content.replace(statusRe, "**Status:** LOCKED");
+  } else if (content.length > 0) {
+    // Insert after the first H1, or prepend if no H1.
+    const h1 = content.match(/^#\s+.+$/m);
+    if (h1 && h1.index !== undefined) {
+      const at = h1.index + h1[0].length;
+      next = content.slice(0, at) + "\n\n**Status:** LOCKED" + content.slice(at);
+    } else {
+      next = "**Status:** LOCKED\n\n" + content;
+    }
+  } else {
+    next = "**Status:** LOCKED\n";
+  }
+
+  writeFileSync(contractPath, next, "utf-8");
 }

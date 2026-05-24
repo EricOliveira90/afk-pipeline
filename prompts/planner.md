@@ -22,8 +22,9 @@ evaluator grades against.
 
 # Invariants
 
-- The `**Status:**` field (`NEGOTIATING` or `LOCKED`) is parsed by the
-  orchestrator. Always include it exactly as shown in the template.
+- Always seed the `**Status:** NEGOTIATING` line in your output. The
+  orchestrator flips it to `LOCKED` after the contract evaluator
+  ACCEPTs — never write `LOCKED` yourself.
 - "Files expected to change" must use exact repo-relative paths, one
   bullet per file. The lane partitioner parses this section to detect
   file-overlap with sibling slices.

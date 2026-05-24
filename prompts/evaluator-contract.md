@@ -47,5 +47,5 @@ VERDICT: ACCEPT | REVISE
 
 ### If ACCEPT:
 Contract is testable, UAT-verifiable, and feasible in one session.
-Planner: flip Status to LOCKED.
+The orchestrator will flip **Status:** to LOCKED automatically — you do not need to.
 ```
