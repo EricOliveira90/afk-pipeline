@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
+import type { StreamEvent } from "./agent-provider.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 
@@ -9,7 +10,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 // Imported AFTER the mock is wired.
-const { invoke, parseStreamLine } = await import("./claude.js");
+const { handleStreamEvent, invoke, parseStreamLine } = await import("./claude.js");
 
 interface FakeProc extends EventEmitter {
   stdin: Writable;
@@ -102,5 +103,73 @@ describe("invoke maxToolCalls cap", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stats.toolCallCount).toBe(2);
     expect(proc.kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleStreamEvent", () => {
+  function makeCounters() {
+    const resets: number[] = [];
+    const events: StreamEvent[] = [];
+    return {
+      watcher: {
+        reset: () => resets.push(Date.now()),
+        stop: () => {},
+      },
+      onStreamEvent: (e: StreamEvent) => events.push(e),
+      resets,
+      events,
+    };
+  }
+
+  it("calls watcher.reset() for a tool_call event", () => {
+    const c = makeCounters();
+    const result = handleStreamEvent({
+      event: { type: "tool_call", name: "Bash", args: "echo x" },
+      watcher: c.watcher,
+      toolCallCount: 0,
+      maxToolCalls: 100,
+      onStreamEvent: c.onStreamEvent,
+    });
+    expect(c.resets.length).toBe(1);
+    expect(result.toolCallCount).toBe(1);
+    expect(result.capExceeded).toBe(false);
+    expect(c.events).toEqual([{ type: "tool_call", name: "Bash", args: "echo x" }]);
+  });
+
+  it("does NOT call watcher.reset() for a text event", () => {
+    const c = makeCounters();
+    handleStreamEvent({
+      event: { type: "text", text: "thinking..." },
+      watcher: c.watcher,
+      toolCallCount: 0,
+      maxToolCalls: 100,
+      onStreamEvent: c.onStreamEvent,
+    });
+    expect(c.resets.length).toBe(0);
+  });
+
+  it("flags capExceeded when tool calls exceed maxToolCalls", () => {
+    const c = makeCounters();
+    const result = handleStreamEvent({
+      event: { type: "tool_call", name: "Bash", args: "x" },
+      watcher: c.watcher,
+      toolCallCount: 100,
+      maxToolCalls: 100,
+      onStreamEvent: c.onStreamEvent,
+    });
+    expect(result.toolCallCount).toBe(101);
+    expect(result.capExceeded).toBe(true);
+  });
+
+  it("forwards the event to onStreamEvent before counting", () => {
+    const c = makeCounters();
+    handleStreamEvent({
+      event: { type: "result", result: "done" },
+      watcher: c.watcher,
+      toolCallCount: 0,
+      maxToolCalls: 100,
+      onStreamEvent: c.onStreamEvent,
+    });
+    expect(c.events).toEqual([{ type: "result", result: "done" }]);
   });
 });
