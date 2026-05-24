@@ -271,7 +271,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           ".afk",
           `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
         );
-        const merged = await mergeMutex(() =>
+        const mergeResult = await mergeMutex(() =>
           Promise.resolve(
             git.mergeSliceBranch(
               repoRoot,
@@ -281,13 +281,16 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             ),
           ),
         );
-        if (!merged) {
+        if (mergeResult.status === "conflict") {
           outcomes.set(id, {
             phase: "CONFLICT",
-            error: `Merge conflict merging ${branch} into ${featBranch}`,
+            error: mergeResult.details,
           });
           cancelLaneSuccessors(outcomes, lane, i);
           return;
+        }
+        if (mergeResult.cleanupWarning) {
+          console.error(`[afk] Warning: ${mergeResult.cleanupWarning}`);
         }
 
         await mergeMutex(() =>

@@ -5,6 +5,18 @@ import { join } from "node:path";
 const git = (args: string[], opts?: ExecFileSyncOptions): string =>
   (execFileSync("git", args, { encoding: "utf-8", ...opts }) as string).trim();
 
+export type MergeResult =
+  | { status: "merged"; cleanupWarning?: string }
+  | { status: "conflict"; details: string };
+
+function execErrorDetails(err: unknown): string {
+  const stderr = (err as { stderr?: string })?.stderr?.trim();
+  if (stderr) return stderr;
+  const stdout = (err as { stdout?: string })?.stdout?.trim();
+  if (stdout) return stdout;
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function currentBranch(cwd: string): string {
   return git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
 }
@@ -205,15 +217,13 @@ export function findWorktreeForBranch(
  *
  * `scratchMergeDir` is chosen by the caller so it can keep the path short
  * (Windows MAX_PATH).
- *
- * Returns true on success, false on merge conflict (merge aborted).
  */
 export function mergeSliceBranch(
   repoRoot: string,
   sliceBranch: string,
   featureBranch: string,
   scratchMergeDir: string,
-): boolean {
+): MergeResult {
   const existingWorktree = findWorktreeForBranch(repoRoot, featureBranch);
 
   let mergeDir: string;
@@ -229,25 +239,30 @@ export function mergeSliceBranch(
     cleanupWorktree = true;
   }
 
+  let result: MergeResult;
   try {
     git(["merge", sliceBranch, "--no-edit"], { cwd: mergeDir });
-    return true;
-  } catch {
+    result = { status: "merged" };
+  } catch (err: unknown) {
     try {
       git(["merge", "--abort"], { cwd: mergeDir });
     } catch {
       // Already clean
     }
-    return false;
-  } finally {
-    if (cleanupWorktree) {
-      try {
-        git(["worktree", "remove", mergeDir, "--force"], { cwd: repoRoot });
-      } catch {
-        // Best effort
-      }
+    result = { status: "conflict", details: execErrorDetails(err) };
+  }
+
+  if (cleanupWorktree) {
+    removeWorktree(repoRoot, mergeDir);
+    if (existsSync(mergeDir) && result.status === "merged") {
+      result = {
+        status: "merged",
+        cleanupWarning: `Worktree directory still exists after cleanup: ${mergeDir}`,
+      };
     }
   }
+
+  return result;
 }
 
 export function pruneWorktrees(repoRoot: string) {
