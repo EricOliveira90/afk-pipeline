@@ -203,6 +203,82 @@ A failed dependency holds its dependents — fix the broken slice and re-run.
 | architect-review | `.kiro/agents/architect-review.md` or `.claude/agents/architect-review.md` |
 | pm-review | `.kiro/agents/pm-review.md` or `.claude/agents/pm-review.md` |
 
+## Setting up guardian reviews
+
+After every AFK slice merges into the feature branch, two guardian
+agents review the result before a PR is opened:
+`architect-review` (structural patterns, conventions) and `pm-review`
+(PRD intent vs reality). Each writes a verdict file the orchestrator
+parses to decide whether to ship.
+
+This section covers what a consuming project needs in place before its
+first AFK run.
+
+### The contract (what AFK actually requires)
+
+Two files, in the consuming project:
+
+- `.claude/agents/architect-review.md` — guardian persona for the
+  architect review. Loaded by Claude Code via `claude --agent`.
+- `.claude/agents/pm-review.md` — guardian persona for the PM review.
+
+That's it. AFK passes `{{SPECS_DIR}}` and `{{RELEVANT_FILES}}` (from
+`prd.md`'s `## Relevant Files` section) to both prompts. The persona
+files decide what else to read.
+
+### Recommended doc surface
+
+The persona templates ship in this repo assume your project has these
+files. They aren't required by AFK itself — your personas can point
+anywhere — but adapting the templates as-is means they'll reach for:
+
+- `CONTEXT.md` — ubiquitous language / glossary
+- `docs/PRODUCT.md` — product decisions and user stories
+- `docs/ARCHITECTURE.md` — expensive-to-reverse technical decisions
+- `docs/CONVENTIONS.md` — cheap-to-reverse code conventions
+
+If your project uses different paths, edit the templates to match.
+
+### Templates
+
+Copy from this package's `templates/agents/` into your project's
+`.claude/agents/`:
+
+```bash
+mkdir -p .claude/agents
+cp node_modules/afk-pipeline/templates/agents/architect-review.md .claude/agents/
+cp node_modules/afk-pipeline/templates/agents/pm-review.md .claude/agents/
+```
+
+Then customize: replace doc paths if your project differs, and tune
+the "what to focus on" sections for your project's risk profile.
+
+### Read-only contract and parallel execution
+
+The two reviews run **concurrently** on a shared worktree. Both
+templates declare a read-only contract: the only writable output is
+the verdict file (`review-architect.md` / `review-pm.md`). If you
+customize a persona to edit source from a guardian, you risk a race
+between the two reviewers. Keep guardians read-only.
+
+A failed or crashed review yields an `UNKNOWN` verdict and does NOT
+abort the pipeline. The other review still completes; the PR is gated
+off (only `SHIP` and `ACCEPT-WITH-NOTES` open a PR).
+
+### Pre-flight checklist
+
+Before your first `npx afk-claude` run with reviews enabled:
+
+- [ ] `.claude/agents/architect-review.md` exists and references your
+      architecture/conventions docs.
+- [ ] `.claude/agents/pm-review.md` exists and references your
+      product/PRD docs.
+- [ ] Both personas declare they only write `review-architect.md` /
+      `review-pm.md` and do NOT edit source. (Templates do this.)
+- [ ] Both personas include the verdict invariant line:
+      `**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP`.
+- [ ] Your `prd.md` has a `## Relevant Files` section.
+
 ## Choosing a Backend
 
 | Backend | Strengths | Trade-offs |

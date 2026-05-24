@@ -17,7 +17,6 @@ import {
   resolveTestCommand,
   runPipeline,
   runPreShipSanity,
-  PipelineError,
 } from "./orchestrator.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import type {
@@ -753,7 +752,7 @@ describe("runPipeline summary report", () => {
     expect(result.consoleSummary).toContain("Not ready");
   }, 60_000);
 
-  it("emits a PipelineError carrying the partial summary when an uncaught error fires mid-run", async () => {
+  it("surfaces a thrown architect-review as UNKNOWN verdict without aborting the pipeline", async () => {
     const repo = makeRepo();
     const slug = "summary-throw";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -762,7 +761,7 @@ describe("runPipeline summary report", () => {
       {
         number: "01",
         ghIssue: "7001",
-        title: "Passes then review explodes",
+        title: "Passes then architect review explodes",
         type: "AFK",
         blockedBy: [],
         userStories: "",
@@ -784,9 +783,8 @@ describe("runPipeline summary report", () => {
     const records: InvocationRecord[] = [];
     const baseProvider = buildStubProvider({ fixtures, slices, records });
 
-    // Wrap the stub so the post-impl architect-review invocation throws.
-    // That call is outside the per-slice try/catch — this is exactly the
-    // exit path that previously skipped the summary.
+    // Wrap the stub so the architect-review invocation throws, but PM
+    // review still runs (it's a no-op in the stub → UNKNOWN verdict).
     const explodingProvider: AgentProvider = {
       name: baseProvider.name,
       async invoke(options) {
@@ -797,37 +795,84 @@ describe("runPipeline summary report", () => {
       },
     };
 
-    let caught: unknown;
-    try {
-      await runPipeline({
-        repoRoot: repo,
-        prdSlug: slug,
-        prdDir,
-        specsDir,
-        dag,
-        provider: explodingProvider,
-      });
-    } catch (err) {
-      caught = err;
-    }
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag,
+      provider: explodingProvider,
+    });
 
-    expect(caught).toBeInstanceOf(PipelineError);
-    const err = caught as PipelineError;
-    expect(err.partialResult.success).toBe(false);
-    expect(err.partialResult.consoleSummary).toContain(
-      `AFK Pipeline Summary — ${slug}`,
-    );
-    // The slice itself completed before the review died, so it should
-    // appear in the Succeeded group of the partial summary.
-    expect(err.partialResult.consoleSummary).toMatch(/Succeeded \(1\)/);
-    expect(err.partialResult.consoleSummary).toContain("#7001");
-    // The cause is the original error.
-    expect(err.cause).toBeInstanceOf(Error);
-    expect((err.cause as Error).message).toContain(
-      "simulated architect-review failure",
-    );
-    // The markdown summary file should also have been written despite
-    // the throw — same finally-emit semantics.
+    // Pipeline returns normally; the slice succeeded.
+    expect(result.success).toBe(true);
+    expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
+    expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
+    expect(result.consoleSummary).toContain("#7001");
+    // No PR opened — neither verdict was SHIP/ACCEPT-WITH-NOTES.
+    expect(result.consoleSummary).toContain("Not ready");
+    // Summary file written.
+    const summaryPath = join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md");
+    expect(existsSync(summaryPath)).toBe(true);
+  }, 60_000);
+
+  it("surfaces both reviews failing as two UNKNOWN verdicts without aborting", async () => {
+    const repo = makeRepo();
+    const slug = "summary-both-throw";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "8001",
+        title: "Passes then both reviews explode",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const dag = buildDAG(slices);
+
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "8001",
+        {
+          files: ["src/z.txt"],
+          qaPasses: true,
+          outputFile: "src/z.txt",
+          outputContent: "z",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+
+    const bothExplodingProvider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "architect-review") {
+          throw new Error("simulated architect failure");
+        }
+        if (options.role === "pm-review") {
+          throw new Error("simulated pm failure");
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag,
+      provider: bothExplodingProvider,
+    });
+
+    // Pipeline still returns normally.
+    expect(result.success).toBe(true);
+    expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
+    expect(result.consoleSummary).toContain("Not ready");
     const summaryPath = join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md");
     expect(existsSync(summaryPath)).toBe(true);
   }, 60_000);

@@ -976,51 +976,74 @@ export async function runPipeline(
       } else {
         console.log("  ✅ Pre-ship sanity gate passed.");
 
-        // Architect review
-        const archLog = logger.agentLog("all", "architect-review");
-        try {
-          await invoke({
-            role: "architect-review",
-            agent: "architect-review",
-            prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-            cwd: reviewDir,
-            logStream: archLog,
-          });
-        } finally {
-          await new Promise<void>((res) => archLog.end(() => res()));
-        }
+        const runArchitectReview = async (): Promise<artifacts.ReviewVerdict> => {
+          const log = logger.agentLog("all", "architect-review");
+          try {
+            await invoke({
+              role: "architect-review",
+              agent: "architect-review",
+              prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
+              cwd: reviewDir,
+              logStream: log,
+            });
+          } finally {
+            await new Promise<void>((res) => log.end(() => res()));
+          }
+          const path = join(reviewDir, specsDir, "review-architect.md");
+          const verdict = artifacts.readReviewVerdict(path);
+          if (verdict === "UNKNOWN") {
+            console.warn(
+              `  ⚠️  Could not parse architect review verdict from ${path} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+            );
+          }
+          return verdict;
+        };
 
-        const archPath = join(reviewDir, specsDir, "review-architect.md");
-        const archVerdict = artifacts.readReviewVerdict(archPath);
-        if (archVerdict === "UNKNOWN") {
+        const runPmReview = async (): Promise<artifacts.ReviewVerdict> => {
+          const log = logger.agentLog("all", "pm-review");
+          try {
+            await invoke({
+              role: "pm-review",
+              agent: "pm-review",
+              prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
+              cwd: reviewDir,
+              logStream: log,
+            });
+          } finally {
+            await new Promise<void>((res) => log.end(() => res()));
+          }
+          const path = join(reviewDir, specsDir, "review-pm.md");
+          const verdict = artifacts.readReviewVerdict(path);
+          if (verdict === "UNKNOWN") {
+            console.warn(
+              `  ⚠️  Could not parse PM review verdict from ${path} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+            );
+          }
+          return verdict;
+        };
+
+        const [archSettled, pmSettled] = await Promise.allSettled([
+          runArchitectReview(),
+          runPmReview(),
+        ]);
+
+        const archVerdict: artifacts.ReviewVerdict =
+          archSettled.status === "fulfilled" ? archSettled.value : "UNKNOWN";
+        const pmVerdict: artifacts.ReviewVerdict =
+          pmSettled.status === "fulfilled" ? pmSettled.value : "UNKNOWN";
+
+        if (archSettled.status === "rejected") {
           console.warn(
-            `  ⚠️  Could not parse architect review verdict from ${archPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+            `  ⚠️  Architect review failed: ${archSettled.reason instanceof Error ? archSettled.reason.message : String(archSettled.reason)}. Treating as UNKNOWN (no PR will be opened).`,
           );
         }
-        logger.setReviewVerdicts(archVerdict);
-
-        // PM review
-        const pmLog = logger.agentLog("all", "pm-review");
-        try {
-          await invoke({
-            role: "pm-review",
-            agent: "pm-review",
-            prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-            cwd: reviewDir,
-            logStream: pmLog,
-          });
-        } finally {
-          pmLog.end();
-        }
-
-        const pmPath = join(reviewDir, specsDir, "review-pm.md");
-        const pmVerdict = artifacts.readReviewVerdict(pmPath);
-        if (pmVerdict === "UNKNOWN") {
+        if (pmSettled.status === "rejected") {
           console.warn(
-            `  ⚠️  Could not parse PM review verdict from ${pmPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+            `  ⚠️  PM review failed: ${pmSettled.reason instanceof Error ? pmSettled.reason.message : String(pmSettled.reason)}. Treating as UNKNOWN (no PR will be opened).`,
           );
         }
-        logger.setReviewVerdicts(undefined, pmVerdict);
+
+        logger.setReviewVerdicts(archVerdict, pmVerdict);
 
         // Create draft PR if both reviews pass
         const shipVerdicts = ["SHIP", "ACCEPT-WITH-NOTES"];
