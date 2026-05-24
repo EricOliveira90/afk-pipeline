@@ -999,9 +999,6 @@ export async function runPipeline(
           return verdict;
         };
 
-        const archVerdict = await runArchitectReview();
-        logger.setReviewVerdicts(archVerdict);
-
         const runPmReview = async (): Promise<artifacts.ReviewVerdict> => {
           const log = logger.agentLog("all", "pm-review");
           try {
@@ -1025,8 +1022,28 @@ export async function runPipeline(
           return verdict;
         };
 
-        const pmVerdict = await runPmReview();
-        logger.setReviewVerdicts(undefined, pmVerdict);
+        const [archSettled, pmSettled] = await Promise.allSettled([
+          runArchitectReview(),
+          runPmReview(),
+        ]);
+
+        const archVerdict: artifacts.ReviewVerdict =
+          archSettled.status === "fulfilled" ? archSettled.value : "UNKNOWN";
+        const pmVerdict: artifacts.ReviewVerdict =
+          pmSettled.status === "fulfilled" ? pmSettled.value : "UNKNOWN";
+
+        if (archSettled.status === "rejected") {
+          console.warn(
+            `  ⚠️  Architect review failed: ${archSettled.reason instanceof Error ? archSettled.reason.message : String(archSettled.reason)}. Treating as UNKNOWN (no PR will be opened).`,
+          );
+        }
+        if (pmSettled.status === "rejected") {
+          console.warn(
+            `  ⚠️  PM review failed: ${pmSettled.reason instanceof Error ? pmSettled.reason.message : String(pmSettled.reason)}. Treating as UNKNOWN (no PR will be opened).`,
+          );
+        }
+
+        logger.setReviewVerdicts(archVerdict, pmVerdict);
 
         // Create draft PR if both reviews pass
         const shipVerdicts = ["SHIP", "ACCEPT-WITH-NOTES"];
