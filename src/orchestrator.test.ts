@@ -877,3 +877,141 @@ describe("runPipeline summary report", () => {
     expect(existsSync(summaryPath)).toBe(true);
   }, 60_000);
 });
+
+/**
+ * Regression test for the orchestrator-owned contract Status flip. The
+ * planner is supposed to flip Status to LOCKED on ACCEPT, but it doesn't
+ * reliably — when it forgets, the next phase's generator reads
+ * `Status: NEGOTIATING` and bails. The orchestrator must own the flip.
+ */
+describe("orchestrator-owned contract status", () => {
+  it("locks the contract on ACCEPT even when planner leaves Status NEGOTIATING", async () => {
+    const repo = makeRepo();
+    const slug = "024-test";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "1",
+        title: "First slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const dag = buildDAG(slices);
+
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "1",
+        {
+          files: ["src/foo.txt"],
+          qaPasses: true,
+          outputFile: "src/foo.txt",
+          outputContent: "ok",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+    // Capture the contract on disk right before the generator runs —
+    // this is the moment that proves the orchestrator flipped Status to
+    // LOCKED at the Phase A → Phase B handoff. On success the worktree
+    // is cleaned up after merge, so we can't read the contract
+    // afterwards; capturing here pins the on-disk state.
+    let contractAtGeneratorTime: string | null = null;
+
+    // Wrap the provider so planner writes NEGOTIATING (the bug we're
+    // reproducing) and evaluator-contract appends ACCEPT but never
+    // touches Status. Other roles defer to the base stub.
+    const buggyProvider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const slice = sliceFromCwd(opts.cwd, slices);
+        const sliceArtifactDir = slice
+          ? findSliceArtifactDir(opts.cwd, slice.number)
+          : null;
+        if (opts.role === "planner" && sliceArtifactDir) {
+          writeFileSync(
+            join(sliceArtifactDir, "contract.md"),
+            [
+              "# Slice Contract — first slice",
+              "",
+              "**Status:** NEGOTIATING",
+              "**Negotiation round:** 1",
+              "",
+              "## Files expected to change",
+              "- src/foo.txt",
+              "",
+              "## Scope lock",
+              "trivial",
+              "",
+            ].join("\n"),
+            "utf-8",
+          );
+          records.push({
+            role: opts.role,
+            cwd: opts.cwd,
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+            ghIssue: slice!.ghIssue,
+          });
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        if (opts.role === "evaluator-contract" && sliceArtifactDir) {
+          const path = join(sliceArtifactDir, "contract.md");
+          const cur = existsSync(path) ? readFileSync(path, "utf-8") : "";
+          writeFileSync(
+            path,
+            cur + "\n## Evaluator feedback — round 1\n\nVERDICT: ACCEPT\n",
+            "utf-8",
+          );
+          records.push({
+            role: opts.role,
+            cwd: opts.cwd,
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+            ghIssue: slice!.ghIssue,
+          });
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        if (opts.role === "generator" && sliceArtifactDir) {
+          // Snapshot the contract right before the generator runs.
+          // By this point the orchestrator should have locked it.
+          const path = join(sliceArtifactDir, "contract.md");
+          contractAtGeneratorTime = existsSync(path)
+            ? readFileSync(path, "utf-8")
+            : null;
+        }
+        return baseProvider.invoke(opts);
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag,
+      provider: buggyProvider,
+    });
+
+    // Sanity: Phase B started — generator actually ran. In the buggy
+    // pre-fix state Phase A returns STUCK and the generator never runs,
+    // so this is the load-bearing assertion that the orchestrator owned
+    // the Status flip.
+    expect(records.some((r) => r.role === "generator")).toBe(true);
+
+    // The contract observed at Phase A → Phase B handoff must say
+    // LOCKED — even though the planner wrote NEGOTIATING and never
+    // updated it.
+    expect(contractAtGeneratorTime).not.toBeNull();
+    expect(contractAtGeneratorTime!).toMatch(
+      /^\*\*Status:\*\*\s*LOCKED\s*$/m,
+    );
+    expect(contractAtGeneratorTime!).not.toMatch(
+      /\*\*Status:\*\*\s*NEGOTIATING/,
+    );
+  }, 60_000);
+});
