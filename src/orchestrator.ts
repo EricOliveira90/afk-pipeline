@@ -504,8 +504,13 @@ export async function runSliceNegotiate(
         evalLog.end();
 
         const verdict = artifacts.readEvaluatorVerdict(contractPath);
+        if (verdict === "ACCEPT") {
+          artifacts.lockContract(contractPath);
+          contractStatus = "LOCKED";
+          break;
+        }
         contractStatus = artifacts.readContractStatus(contractPath);
-        if (verdict === "ACCEPT" || contractStatus === "LOCKED") break;
+        if (contractStatus === "LOCKED") break;
         if (verdict === "ESCALATE" || round === MAX_CONTRACT_ROUNDS) {
           console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
           logger.bumpEvalRound(slice.ghIssue, round);
