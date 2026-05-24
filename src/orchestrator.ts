@@ -25,6 +25,16 @@ const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 
 /**
+ * Idle timeout for generator and evaluator-qa invocations. These two
+ * roles routinely shell out to a project's full test suite, which on
+ * larger codebases can produce no stdout for several minutes (vitest
+ * collecting fixtures, Jest type-checking). The provider default of
+ * 180 s is too tight; 600 s avoids killing healthy sessions without
+ * sacrificing the wedge-detection role of the floor. See ADR 0008.
+ */
+const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
+
+/**
  * Pre-ship sanity gate steps, in order. Each step maps to a `package.json`
  * script name and a fallback. Steps whose primary AND fallback are absent
  * from `package.json` are skipped (not failed) — projects that don't have
@@ -576,6 +586,7 @@ export async function runSliceExecute(
         }),
         cwd: ctx.worktreeDir,
         logStream: genLog,
+        idleTimeoutMs: SLOW_AGENT_IDLE_TIMEOUT_MS,
       });
       genLog.end();
 
@@ -592,6 +603,7 @@ export async function runSliceExecute(
         }),
         cwd: ctx.worktreeDir,
         logStream: evalLog,
+        idleTimeoutMs: SLOW_AGENT_IDLE_TIMEOUT_MS,
       });
       evalLog.end();
 
