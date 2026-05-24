@@ -229,7 +229,7 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
       reject(err);
     });
 
-    proc.on("close", (code) => {
+    proc.on("exit", (code) => {
       watcher.stop();
       signal?.removeEventListener("abort", onAbort);
       const exitCode = code ?? 1;

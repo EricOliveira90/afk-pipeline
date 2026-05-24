@@ -25,8 +25,8 @@ function makeFakeProc(): FakeProc {
   proc.stdout = new Readable({ read() {} });
   proc.stderr = new Readable({ read() {} });
   proc.kill = vi.fn(() => {
-    // Mirror spawn semantics: kill triggers a `close` on the next tick.
-    setImmediate(() => proc.emit("close", null));
+    // Mirror spawn semantics: kill triggers an `exit` on the next tick.
+    setImmediate(() => proc.emit("exit", null));
     return true;
   });
   return proc;
@@ -96,7 +96,7 @@ describe("invoke maxToolCalls cap", () => {
     // fire before closing, otherwise the buffered chunks are dropped.
     await new Promise((r) => setImmediate(r));
     proc.stdout.push(null); // EOF
-    proc.emit("close", 0);
+    proc.emit("exit", 0);
 
     const result = await promise;
     expect(result.exitCode).toBe(0);
