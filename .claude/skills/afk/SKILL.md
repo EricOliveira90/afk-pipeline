@@ -30,7 +30,7 @@ npx afk-claude --issues .kiro/specs/<prd-slug>/issues.md
 - Agent backend authenticated: `kiro-cli login` (Kiro) or `claude login` (Claude Code)
 - `git`, `pnpm` on PATH
 - Project conventions: `CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/CONVENTIONS.md`, `docs/PRODUCT.md`
-- For guardian reviews: `.kiro/agents/{architect-review,pm-review}.md` or `.claude/agents/` equivalent
+- For guardian reviews: `.kiro/agents/{architect-review,pm-review}.md` or `.claude/agents/` equivalent — copy from `templates/agents/` in this package
 
 ## Input Format (issues.md)
 
@@ -61,7 +61,7 @@ generator → implements via TDD, commits (max 3 rounds with evaluator-qa)
 
 - **Resumable**: re-run the same command to skip completed slices
 - **Parallel**: independent slices run concurrently; file-overlap slices serialized in lanes
-- **Post-merge gates**: `pnpm typecheck && pnpm lint && pnpm test` → architect + PM review → draft PR
+- **Post-merge gates**: `pnpm typecheck && pnpm lint && pnpm test` → architect + PM reviews (run concurrently) → draft PR. A crashed review surfaces as `UNKNOWN` and gates the PR off without aborting the pipeline.
 - **Cancellation**: Ctrl-C kills agents cleanly; second Ctrl-C hard-exits
 
 ## Detailed Reference

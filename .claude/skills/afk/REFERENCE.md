@@ -56,13 +56,15 @@ main
 Once all AFK slices pass:
 
 1. **Pre-ship sanity**: `pnpm typecheck && pnpm lint && pnpm test:run` (or `test`). Skips any step not defined in `package.json`.
-2. **Guardian reviews** (only if sanity passes):
-   - `architect-review` — reviews against `docs/ARCHITECTURE.md`
-   - `pm-review` — reviews against `docs/PRODUCT.md`
+2. **Guardian reviews** (only if sanity passes) — run concurrently via `Promise.allSettled` on a shared worktree:
+   - `architect-review` — reviews against `docs/ARCHITECTURE.md`, writes `review-architect.md`
+   - `pm-review` — reviews against `docs/PRODUCT.md`, writes `review-pm.md`
+
+   Both templates declare a read-only contract (write only the verdict file) so the shared worktree is safe.
 3. **PR creation** (only if both guardians say SHIP or ACCEPT-WITH-NOTES):
    - Opens draft PR via `gh pr create --draft`
 
-If either guardian says FIX-BEFORE-SHIP, no PR is opened.
+If either guardian says FIX-BEFORE-SHIP, no PR is opened. If a guardian crashes or its verdict is unparseable, that verdict becomes `UNKNOWN` — the surviving review still completes, the pipeline still returns success, but the PR is gated off.
 
 ## Error Handling
 
@@ -74,6 +76,7 @@ If either guardian says FIX-BEFORE-SHIP, no PR is opened.
 | Agent idle timeout (10 min default) | Agent killed, slice → STUCK |
 | Pre-ship sanity fails | Skip guardians + PR; recorded in run-summary.md |
 | Guardian says FIX-BEFORE-SHIP | No PR; review files still written |
+| Guardian crashes or verdict unparseable | Verdict → UNKNOWN; no PR; other review still completes |
 | HITL slice | Skipped entirely |
 | Ctrl-C | In-flight agents killed, remaining → CANCELLED |
 | Crash / interruption | Re-run to resume from last state |
@@ -91,12 +94,22 @@ Both share the orchestrator, prompts, artifact format, and DAG semantics.
 
 ## Guardian Agent Setup
 
-Create agent config files in your project:
+Generic templates ship with this package at `templates/agents/`. Copy them into your project and adapt:
+
+```bash
+mkdir -p .claude/agents   # or .kiro/agents for the Kiro backend
+cp node_modules/afk-pipeline/templates/agents/architect-review.md .claude/agents/
+cp node_modules/afk-pipeline/templates/agents/pm-review.md .claude/agents/
+```
 
 **For Kiro backend** — `.kiro/agents/architect-review.md` and `.kiro/agents/pm-review.md`
 **For Claude Code backend** — `.claude/agents/architect-review.md` and `.claude/agents/pm-review.md`
 
 These files define persona, tool grants, and project-specific context for the post-implementation reviewers. The pipeline passes `--agent <name>` to the CLI when invoking guardian roles.
+
+**Both templates declare a read-only contract** — they write only their verdict file (`review-architect.md` / `review-pm.md`) and never edit source. This is what makes shared-worktree parallelism safe. If you customize a persona to edit source from a guardian, you risk a race between the two reviewers.
+
+**Required invariant** — each persona must produce a line `**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP` (bold, with colon) in its output file. The orchestrator parses this to gate PR creation. The templates handle this; if you write your own, preserve it.
 
 ## Convenience Scripts
 
@@ -131,6 +144,6 @@ Checklist for a consuming project:
 4. Ensure `package.json` has `typecheck`, `lint`, and `test` (or `test:run`) scripts
 5. Author PRD at `.kiro/specs/<prd-slug>/prd.md`
 6. Slice PRD into issues.md (use the `to-issues` skill or do manually)
-7. Create guardian agent configs if desired (`.kiro/agents/` or `.claude/agents/`)
+7. Create guardian agent configs (copy from `node_modules/afk-pipeline/templates/agents/` into `.kiro/agents/` or `.claude/agents/`)
 8. Run `npx afk --issues .kiro/specs/<prd-slug>/issues.md --dry-run` to validate
 9. Run `npx afk --issues .kiro/specs/<prd-slug>/issues.md` and walk away

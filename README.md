@@ -20,7 +20,7 @@ pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 - `git`, `pnpm` on PATH
 - Repo conventions:
   - `CONTEXT.md` and `docs/{ARCHITECTURE,CONVENTIONS,PRODUCT}.md` for the agents to read
-  - For **guardian reviews**: `.kiro/agents/<name>.md` (Kiro) or `.claude/agents/<name>.md` (Claude Code)
+  - For **guardian reviews**: `.kiro/agents/<name>.md` (Kiro) or `.claude/agents/<name>.md` (Claude Code) — copy from `templates/agents/`, see [Setting up guardian reviews](#setting-up-guardian-reviews)
 
 ## Quick Start
 
@@ -90,12 +90,18 @@ Once every AFK slice passes:
 Pre-ship sanity gate  → pnpm typecheck && pnpm lint && pnpm test:run (or test)
      ├── FAIL → skip guardians + PR (failing steps recorded in run-summary.md)
      └── PASS ↓
-@architect-review  → reviews against ARCHITECTURE.md → review-architect.md
-@pm-review         → reviews against PRODUCT.md → review-pm.md
+     ┌────────────────────────────────────┐
+     │  parallel (Promise.allSettled)     │
+     │  @architect-review → review-architect.md │
+     │  @pm-review        → review-pm.md        │
+     └────────────────────────────────────┘
      ↓
 Both SHIP or ACCEPT-WITH-NOTES → opens draft PR via `gh pr create`
 Either FIX-BEFORE-SHIP        → stops; no PR opened
+Either crashes / unparseable  → verdict UNKNOWN; no PR; surviving review still recorded
 ```
+
+The two reviews share the post-impl worktree and run concurrently. The persona templates declare a read-only contract (write only the verdict file) so shared-worktree parallelism is safe — see [Setting up guardian reviews](#setting-up-guardian-reviews).
 
 ### Parallelisation
 
@@ -178,6 +184,7 @@ Logs: `.afk/logs/<prd-slug>/` (per-invocation stdout + `run-summary.md` with sta
 | Agent idle timeout (10 min) | Agent killed, slice → STUCK |
 | Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md |
 | Guardian says FIX-BEFORE-SHIP | No PR; review files still written |
+| Guardian crashes or verdict unparseable | Verdict → UNKNOWN; no PR; other review still completes |
 | HITL slice | Skipped entirely |
 | Ctrl-C | In-flight agents killed, remaining → CANCELLED |
 | Pipeline crash | Re-run to resume |
