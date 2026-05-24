@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readContractFiles, readContractStatus, readReviewVerdict } from "./artifacts.js";
+import { lockContract, readContractFiles, readContractStatus, readReviewVerdict } from "./artifacts.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -259,5 +259,41 @@ describe("readContractStatus", () => {
 
   it("returns UNKNOWN when the file is missing", () => {
     expect(readContractStatus("/nonexistent/path/contract.md")).toBe("UNKNOWN");
+  });
+});
+
+describe("lockContract", () => {
+  it("flips **Status:** NEGOTIATING to LOCKED in place", () => {
+    withContractFile(
+      `# Slice\n\n**Status:** NEGOTIATING\n**Negotiation round:** 1\n\n## Scope lock\nFoo.\n`,
+      (p) => {
+        lockContract(p);
+        expect(readContractStatus(p)).toBe("LOCKED");
+        const content = readFileSync(p, "utf-8");
+        expect(content).toContain("**Status:** LOCKED");
+        expect(content).not.toContain("**Status:** NEGOTIATING");
+        // Other fields preserved.
+        expect(content).toContain("**Negotiation round:** 1");
+        expect(content).toContain("## Scope lock");
+      },
+    );
+  });
+
+  it("is idempotent when Status is already LOCKED", () => {
+    withContractFile(
+      `# Slice\n\n**Status:** LOCKED\n\n## Scope lock\nFoo.\n`,
+      (p) => {
+        lockContract(p);
+        const content = readFileSync(p, "utf-8");
+        expect(content.match(/\*\*Status:\*\*/g)?.length).toBe(1);
+      },
+    );
+  });
+
+  it("inserts the Status field if absent (defensive — should never happen in prod)", () => {
+    withContractFile(`# Slice Contract\n\n## Scope lock\nFoo.\n`, (p) => {
+      lockContract(p);
+      expect(readContractStatus(p)).toBe("LOCKED");
+    });
   });
 });
