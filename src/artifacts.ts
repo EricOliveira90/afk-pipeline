@@ -170,8 +170,11 @@ export function hasPassingQA(sliceDir: string): boolean {
 }
 
 /**
- * Write `**Status:** LOCKED` into `contract.md`. Replaces an existing
- * Status line in place; inserts one after the H1 heading if absent.
+ * Write `**Status:** LOCKED` into `contract.md`. Replaces the first
+ * matching `**Status:**` line in document order — including one nested
+ * in a fenced code block, though contracts in production format have
+ * exactly one Status line at the top. Inserts a Status line after the
+ * H1 heading if none is present.
  *
  * Owned by the orchestrator: callers run this after the contract
  * evaluator returns `ACCEPT`. Agents do not edit Status. See ADR 0008.
