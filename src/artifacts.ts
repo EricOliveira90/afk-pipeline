@@ -21,27 +21,13 @@ export function readContractStatus(contractPath: string): ContractStatus {
   const content = readIfExists(contractPath);
   if (!content) return "UNKNOWN";
 
-  // Check explicit Status field
   const status = matchField(content, /\*\*Status:\*\*\s*(\S+)/i);
-  if (status?.toUpperCase() === "LOCKED") return "LOCKED";
+  if (!status) return "NEGOTIATING";
 
-  // If contract exists, check if evaluator accepted (overrides NEGOTIATING/DRAFT)
-  if (content.length > 0) {
-    const verdict = readEvaluatorVerdict(contractPath);
-    if (verdict === "ACCEPT") return "LOCKED";
-  }
-
-  // Return explicit status if present
-  if (status) {
-    const upper = status.toUpperCase();
-    if (upper === "NEGOTIATING") return "NEGOTIATING";
-    if (upper === "DRAFT") return "DRAFT";
-  }
-
-  // Contract exists but no status and no accept → needs review
-  if (content.length > 0) return "NEGOTIATING";
-
-  return "UNKNOWN";
+  const upper = status.toUpperCase();
+  if (upper === "LOCKED") return "LOCKED";
+  if (upper === "DRAFT") return "DRAFT";
+  return "NEGOTIATING";
 }
 
 export function readEvaluatorVerdict(
