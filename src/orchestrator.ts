@@ -1002,27 +1002,30 @@ export async function runPipeline(
         const archVerdict = await runArchitectReview();
         logger.setReviewVerdicts(archVerdict);
 
-        // PM review
-        const pmLog = logger.agentLog("all", "pm-review");
-        try {
-          await invoke({
-            role: "pm-review",
-            agent: "pm-review",
-            prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-            cwd: reviewDir,
-            logStream: pmLog,
-          });
-        } finally {
-          pmLog.end();
-        }
+        const runPmReview = async (): Promise<artifacts.ReviewVerdict> => {
+          const log = logger.agentLog("all", "pm-review");
+          try {
+            await invoke({
+              role: "pm-review",
+              agent: "pm-review",
+              prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
+              cwd: reviewDir,
+              logStream: log,
+            });
+          } finally {
+            await new Promise<void>((res) => log.end(() => res()));
+          }
+          const path = join(reviewDir, specsDir, "review-pm.md");
+          const verdict = artifacts.readReviewVerdict(path);
+          if (verdict === "UNKNOWN") {
+            console.warn(
+              `  ⚠️  Could not parse PM review verdict from ${path} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+            );
+          }
+          return verdict;
+        };
 
-        const pmPath = join(reviewDir, specsDir, "review-pm.md");
-        const pmVerdict = artifacts.readReviewVerdict(pmPath);
-        if (pmVerdict === "UNKNOWN") {
-          console.warn(
-            `  ⚠️  Could not parse PM review verdict from ${pmPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
-          );
-        }
+        const pmVerdict = await runPmReview();
         logger.setReviewVerdicts(undefined, pmVerdict);
 
         // Create draft PR if both reviews pass
