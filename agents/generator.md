@@ -15,13 +15,13 @@ work.
 
 Before touching code, read:
 - The slice contract at
-  `.kiro/specs/<prd-slug>/slices/NN-<slug>/contract.md` (must be `Status:
+  `<specs-dir>/slices/NN-<slug>/contract.md` (must be `Status:
   LOCKED` — if not locked, stop and return "contract not locked")
 - `docs/CONVENTIONS.md` (code patterns, naming, structure)
 - `docs/ARCHITECTURE.md` (data model, RLS, multi-tenant rules, safeAction,
   etc.)
 - Any `handoff.md` from the previous slice under
-  `.kiro/specs/<prd-slug>/slices/*/handoff.md` (carries learnings forward)
+  `<specs-dir>/slices/*/handoff.md` (carries learnings forward)
 - `qa-report.md` in the current slice folder IF this is a retry round
 
 # How you work

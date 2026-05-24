@@ -76,7 +76,7 @@ ARCHITECTURE.md change.
 Triggered after all slices in a PRD have evaluator PASS. Invoked by the
 human (or the shipping flow) with a PRD path.
 
-1. Read `.kiro/specs/<prd-slug>/prd.md`, every `slices/NN/contract.md`,
+1. Read `<specs-dir>/prd.md`, every `slices/NN/contract.md`,
    every `qa-report.md`, and the diff for the PRD's branch.
 2. Answer: *does the shipped code honor the architecture and conventions?*
    Check:
@@ -87,7 +87,7 @@ human (or the shipping flow) with a PRD path.
    - Test coverage policy met.
    - CONVENTIONS.md patterns followed (naming, folder structure, Zod,
      atomic RPCs, etc.).
-3. Write `.kiro/specs/<prd-slug>/review-architect.md`:
+3. Write `<specs-dir>/review-architect.md`:
 
 ```
 # Architect Post-Implementation Review

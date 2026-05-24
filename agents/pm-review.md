@@ -24,7 +24,7 @@ Your source documents:
 - docs/prds/02-scheduling-integration.md
 - docs/prds/03-ops-polish.md
 - docs/product-spec.md (pre-cascade historical reference; not authoritative)
-- .kiro/specs/designer-handoff-roadmap.md
+- <specs-dir>/designer-handoff-roadmap.md
 - designer-to-dev-handoff/design-brief.md + DEV-HANDOFF.md (clinic UI/UX source of truth)
 - TODOS.md (dev task backlog — A/B feature ideas migrated to docs/product/feature-backlog.md)
 - docs/BUSINESS.md + docs/business/* (business constraints — read only, never edit)
@@ -80,14 +80,14 @@ human. Keep response ≤ 10 lines.
 Triggered after all slices in a PRD have evaluator PASS. Invoked by the
 human (or the shipping flow) with a PRD path.
 
-1. Read `.kiro/specs/<prd-slug>/prd.md`, every `slices/NN/contract.md`,
+1. Read `<specs-dir>/prd.md`, every `slices/NN/contract.md`,
    every `qa-report.md`, and the diff for the PRD's branch.
 2. Answer: *did the shipped thing deliver the PRD intent?* Check:
    - All user stories from the PRD addressed.
    - Persona experience intact (owner / secretary / therapist).
    - Scope didn't drift — deferred items stayed deferred.
    - Milestone boundaries honored (no M2+ features crept into M1).
-3. Write `.kiro/specs/<prd-slug>/review-pm.md`:
+3. Write `<specs-dir>/review-pm.md`:
 
 ```
 # PM Post-Implementation Review

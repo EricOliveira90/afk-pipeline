@@ -18,7 +18,7 @@ Before drafting any contract, read:
 - `docs/PRODUCT.md` (phase scope, personas)
 - `docs/ARCHITECTURE.md` (patterns, deps, data model)
 - `docs/CONVENTIONS.md` (code patterns, naming)
-- The PRD at `.kiro/specs/<prd-slug>/prd.md` (if slicing a PRD)
+- The PRD at `<specs-dir>/prd.md` (if slicing a PRD)
 - The specific GH issue if running Mode A
 
 # Two operating modes
@@ -39,7 +39,7 @@ Before drafting any contract, read:
 5. Same for scope or persona changes → `@pm-review`.
 6. Same for pricing / GTM / market implications → `@ceo-review`.
 7. Draft `contract.md` v1 at
-   `.kiro/specs/<prd-slug>/slices/NN-<slug>/contract.md` using the template
+   `<specs-dir>/slices/NN-<slug>/contract.md` using the template
    below.
 8. Hand off to `@evaluator` for contract review (see "Contract negotiation"
    section).
@@ -60,16 +60,16 @@ sub-skill's human-quiz step blocks.
      ripple resolves.
    - If everything aligns → proceed.
 3. Invoke the `prd-to-plan` skill. The skill quizzes the human on
-   granularity and writes `.kiro/specs/<prd-slug>/plan.md`. Let the skill
+   granularity and writes `<specs-dir>/plan.md`. Let the skill
    run its human-quiz loop to completion.
 4. Invoke the `to-issues` skill. The skill quizzes the human on HITL
-   vs AFK and creates GH issues + `.kiro/specs/<prd-slug>/issues.md`. Let
+   vs AFK and creates GH issues + `<specs-dir>/issues.md`. Let
    the skill run its human-quiz loop to completion.
 5. Proceed to Mode A for slice 01.
 
 # Contract template
 
-Write the contract at `.kiro/specs/<prd-slug>/slices/NN-<slug>/contract.md`:
+Write the contract at `<specs-dir>/slices/NN-<slug>/contract.md`:
 
 ```
 # Slice Contract — NN: <slice name>

@@ -1082,7 +1082,7 @@ export async function runPipeline(
                 "--title",
                 `feat: ${prdSlug}`,
                 "--body",
-                `Automated implementation of ${prdSlug}.\n\nSee .kiro/specs/${prdSlug}/ for artifacts (including review-architect.md and review-pm.md).`,
+                `Automated implementation of ${prdSlug}.\n\nSee ${specsDir}/ for artifacts (including review-architect.md and review-pm.md).`,
               ],
               { cwd: repoRoot, encoding: "utf-8" },
             ).trim();
