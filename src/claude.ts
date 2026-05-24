@@ -91,6 +91,38 @@ export function parseStreamLine(line: string): StreamEvent[] {
 }
 
 /**
+ * Per-event handler for the parsed stream. Centralises the idle-watcher
+ * reset and the tool-call cap so they can be unit-tested without
+ * spawning a child process. See ADR 0008.
+ *
+ * Idle reset on `tool_call` matters because the agent may emit a Bash
+ * tool_call and then wait silently while the harness backgrounds the
+ * command — chunks of stdout from the agent stop, but the session is
+ * healthy. Without this reset, a long `pnpm test` invocation would
+ * trip the idle floor and the agent would be killed mid-implementation.
+ */
+export function handleStreamEvent(args: {
+  event: StreamEvent;
+  watcher: { reset: () => void };
+  toolCallCount: number;
+  maxToolCalls: number;
+  onStreamEvent?: (e: StreamEvent) => void;
+}): { toolCallCount: number; capExceeded: boolean } {
+  const { event, watcher, maxToolCalls, onStreamEvent } = args;
+  let { toolCallCount } = args;
+  let capExceeded = false;
+
+  if (event.type === "tool_call") {
+    watcher.reset();
+    toolCallCount++;
+    if (toolCallCount > maxToolCalls) capExceeded = true;
+  }
+
+  onStreamEvent?.(event);
+  return { toolCallCount, capExceeded };
+}
+
+/**
  * Invoke `claude -p` in non-interactive mode with a specific agent and prompt.
  * Streams stream-json output line-by-line, parses events, and surfaces them
  * via onStreamEvent. The final `result` event carries cost/usage; we surface
@@ -204,16 +236,20 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
         }
 
         for (const event of parseStreamLine(line)) {
-          if (event.type === "tool_call") {
-            toolCallCount++;
-            if (!toolCapExceeded && toolCallCount > maxToolCalls) {
-              toolCapExceeded = true;
-              killed = true;
-              proc.kill("SIGTERM");
-              scheduleForceKill();
-            }
+          const next = handleStreamEvent({
+            event,
+            watcher,
+            toolCallCount,
+            maxToolCalls,
+            onStreamEvent,
+          });
+          toolCallCount = next.toolCallCount;
+          if (next.capExceeded && !toolCapExceeded) {
+            toolCapExceeded = true;
+            killed = true;
+            proc.kill("SIGTERM");
+            scheduleForceKill();
           }
-          onStreamEvent?.(event);
         }
       }
     });
