@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readContractFiles, readReviewVerdict } from "./artifacts.js";
+import { readContractFiles, readContractStatus, readReviewVerdict } from "./artifacts.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -221,5 +221,43 @@ describe("readContractFiles", () => {
       `## Files expected to change\n* src/cli.py\n* src/lanes.ts\n`,
       (p) => expect(readContractFiles(p)).toEqual(["src/cli.py", "src/lanes.ts"]),
     );
+  });
+});
+
+describe("readContractStatus", () => {
+  it("returns LOCKED when the Status field is literally LOCKED", () => {
+    withContractFile(
+      `# Slice Contract\n\n**Status:** LOCKED\n\n## Scope lock\nFoo.\n`,
+      (p) => expect(readContractStatus(p)).toBe("LOCKED"),
+    );
+  });
+
+  it("returns NEGOTIATING when Status is NEGOTIATING — even if evaluator wrote ACCEPT", () => {
+    withContractFile(
+      [
+        `# Slice Contract`,
+        ``,
+        `**Status:** NEGOTIATING`,
+        ``,
+        `## Scope lock`,
+        `Foo.`,
+        ``,
+        `## Evaluator feedback — round 1`,
+        ``,
+        `VERDICT: ACCEPT`,
+      ].join("\n"),
+      (p) => expect(readContractStatus(p)).toBe("NEGOTIATING"),
+    );
+  });
+
+  it("returns NEGOTIATING when Status is missing entirely", () => {
+    withContractFile(
+      `# Slice Contract\n\n## Scope lock\nFoo.\n`,
+      (p) => expect(readContractStatus(p)).toBe("NEGOTIATING"),
+    );
+  });
+
+  it("returns UNKNOWN when the file is missing", () => {
+    expect(readContractStatus("/nonexistent/path/contract.md")).toBe("UNKNOWN");
   });
 });
