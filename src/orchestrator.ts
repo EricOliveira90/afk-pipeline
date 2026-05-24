@@ -976,27 +976,30 @@ export async function runPipeline(
       } else {
         console.log("  ✅ Pre-ship sanity gate passed.");
 
-        // Architect review
-        const archLog = logger.agentLog("all", "architect-review");
-        try {
-          await invoke({
-            role: "architect-review",
-            agent: "architect-review",
-            prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-            cwd: reviewDir,
-            logStream: archLog,
-          });
-        } finally {
-          await new Promise<void>((res) => archLog.end(() => res()));
-        }
+        const runArchitectReview = async (): Promise<artifacts.ReviewVerdict> => {
+          const log = logger.agentLog("all", "architect-review");
+          try {
+            await invoke({
+              role: "architect-review",
+              agent: "architect-review",
+              prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
+              cwd: reviewDir,
+              logStream: log,
+            });
+          } finally {
+            await new Promise<void>((res) => log.end(() => res()));
+          }
+          const path = join(reviewDir, specsDir, "review-architect.md");
+          const verdict = artifacts.readReviewVerdict(path);
+          if (verdict === "UNKNOWN") {
+            console.warn(
+              `  ⚠️  Could not parse architect review verdict from ${path} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+            );
+          }
+          return verdict;
+        };
 
-        const archPath = join(reviewDir, specsDir, "review-architect.md");
-        const archVerdict = artifacts.readReviewVerdict(archPath);
-        if (archVerdict === "UNKNOWN") {
-          console.warn(
-            `  ⚠️  Could not parse architect review verdict from ${archPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
-          );
-        }
+        const archVerdict = await runArchitectReview();
         logger.setReviewVerdicts(archVerdict);
 
         // PM review
