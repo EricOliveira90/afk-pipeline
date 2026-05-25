@@ -507,6 +507,61 @@ describe("runWave", () => {
     }
   }, 60_000);
 
+  // Regression for the silent-corruption bug: when the slice branch
+  // does NOT exist after the generator returns, that's a different
+  // failure mode than "branch exists but is at the same tip as
+  // featBranch". The first means the worktree was corrupted and
+  // commits leaked to the parent repo's HEAD; the second is a true
+  // no-output run. The wave must surface them distinctly so operators
+  // can investigate the right thing.
+  it("flags ERROR with branch-missing message when slice branch does not exist", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "901", title: "Branch gone", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["901", { files: ["src/g.txt"], qaPasses: true, outputFile: "src/g.txt", outputContent: "g" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(repo, "wave-branch-gone", slices, fixtures);
+
+    // Simulate the corruption: branch was never registered. Note we
+    // mock branchExists to return false specifically for the slice
+    // branch — the feature branch must continue to be reported as
+    // existing or other call sites would break.
+    const realBranchExists = gitModule.branchExists;
+    const spy = vi
+      .spyOn(gitModule, "branchExists")
+      .mockImplementation((cwd, branch) => {
+        if (branch.includes("slice-01-")) return false;
+        return realBranchExists(cwd, branch);
+      });
+
+    try {
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["901"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      const outcome = outcomes.get("901");
+      expect(outcome?.phase).toBe("ERROR");
+      if (outcome?.phase === "ERROR") {
+        expect(outcome.error).toMatch(/does not exist/i);
+        // Must NOT collapse to the generic no-commits message — that's
+        // exactly the symptom the bug presented as.
+        expect(outcome.error).not.toContain("no commits ahead");
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30_000);
+
   // Sister regression: the existing "generator produced no output"
   // guard must keep working. When `hasCommitsAhead` reports `false`
   // (slice tip is already at featBranch), the slice gets ERROR with

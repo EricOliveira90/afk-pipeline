@@ -437,6 +437,7 @@ export async function runSliceNegotiate(
 
   try {
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, featBranch);
+    git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
     mkdirSync(ctx.absSliceDir, { recursive: true });
 
     // --- Step 1: Explorer ---
@@ -968,6 +969,7 @@ export async function runPipeline(
         `${featBranch.replace(/\//g, "-")}-review`,
       );
       git.createWorktree(repoRoot, featBranch, reviewDir, defaultBranch);
+      git.assertWorktreeRegistered(repoRoot, featBranch, reviewDir);
       cleanupReviewDir = true;
     }
 

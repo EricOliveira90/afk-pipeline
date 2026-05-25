@@ -10,7 +10,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertWorktreeRegistered,
   branchExists,
+  createWorktree,
   findWorktreeForBranch,
   getDefaultBranch,
   hasCommitsAhead,
@@ -363,5 +365,136 @@ describe("git.hasCommitsAhead", () => {
     git(repoDir, ["commit", "--allow-empty", "-m", "feat work"]);
     expect(() => hasCommitsAhead(repoDir, "feat", "no-such-base")).not.toThrow();
     expect(hasCommitsAhead(repoDir, "feat", "no-such-base")).toBe(false);
+  });
+});
+
+/**
+ * Regression tests for the silent-corruption bug where `createWorktree`
+ * would no-op on any pre-existing directory at the worktree path. If a
+ * previous run's cleanup failed (Windows file lock, antivirus) the on-disk
+ * dir leaked, but `git worktree list` no longer registered it. The next
+ * run's `existsSync` short-circuit then dispatched the agent into a
+ * non-worktree directory, and `git commit` walked up to the parent repo's
+ * `.git`, leaking commits onto whatever branch the user had checked out.
+ *
+ * The fix: refuse to reuse a path unless git agrees it is the worktree
+ * for the requested branch.
+ */
+describe("git.createWorktree", { timeout: 30_000 }, () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-cw-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("creates a worktree from the given base branch when path does not exist", () => {
+    const wt = join(repoDir, "wt-fresh");
+    createWorktree(repoDir, "feat/fresh", wt, "main");
+    expect(existsSync(wt)).toBe(true);
+    const list = git(repoDir, ["worktree", "list", "--porcelain"]);
+    expect(list).toContain("feat/fresh");
+  });
+
+  it("is idempotent when the path is already a registered worktree for the branch", () => {
+    const wt = join(repoDir, "wt-idem");
+    createWorktree(repoDir, "feat/idem", wt, "main");
+    expect(() =>
+      createWorktree(repoDir, "feat/idem", wt, "main"),
+    ).not.toThrow();
+    // Still exactly one entry for the branch.
+    const list = git(repoDir, ["worktree", "list", "--porcelain"]);
+    const matches = list.match(/refs\/heads\/feat\/idem/g) ?? [];
+    expect(matches.length).toBe(1);
+  });
+
+  it("throws when path exists but is not a registered git worktree", () => {
+    // Simulate the leaked-dir state: a plain directory at the worktree
+    // path, no `.git` file, git's admin state has no record of it.
+    const wt = join(repoDir, "wt-stale");
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, "stale-file.txt"), "leftover from a prior run");
+
+    expect(() => createWorktree(repoDir, "feat/stale", wt, "main")).toThrow(
+      /not a registered git worktree/i,
+    );
+
+    // The branch must NOT have been created — that would mean we silently
+    // accepted the corrupt state and made it look real.
+    expect(branchExists(repoDir, "feat/stale")).toBe(false);
+  });
+
+  it("throws when path is a worktree but checked out on a different branch", () => {
+    // This catches the "stale dir from a previous slice" variant: the
+    // dir is registered with git but for the WRONG branch. Reusing it
+    // would dispatch the agent against the wrong base.
+    const wt = join(repoDir, "wt-mismatch");
+    git(repoDir, ["branch", "feat/other", "main"]);
+    git(repoDir, ["worktree", "add", wt, "feat/other"]);
+
+    expect(() =>
+      createWorktree(repoDir, "feat/expected", wt, "main"),
+    ).toThrow(/not a registered git worktree/i);
+    expect(branchExists(repoDir, "feat/expected")).toBe(false);
+  });
+});
+
+/**
+ * Pre-dispatch invariant check: before any agent runs in `worktreeDir`,
+ * confirm git agrees the directory is the worktree for `branch`. Layered
+ * defense — `createWorktree` enforces it on creation; this helper lets
+ * call sites enforce it again right before dispatch (and after
+ * `recreateWorktreeFromBase`, which delegates to `createWorktree` but
+ * adds a removeWorktree → deleteBranch → createWorktree sequence that
+ * leaves more windows for filesystem races).
+ */
+describe("git.assertWorktreeRegistered", { timeout: 30_000 }, () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-assert-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("does not throw when the path is the registered worktree for the branch", () => {
+    const wt = join(repoDir, "wt-ok");
+    git(repoDir, ["branch", "feat/ok"]);
+    git(repoDir, ["worktree", "add", wt, "feat/ok"]);
+    expect(() =>
+      assertWorktreeRegistered(repoDir, "feat/ok", wt),
+    ).not.toThrow();
+  });
+
+  it("throws when the branch has no registered worktree", () => {
+    const wt = join(repoDir, "wt-missing");
+    git(repoDir, ["branch", "feat/missing"]);
+    // No worktree add — branch exists, no worktree.
+    expect(() =>
+      assertWorktreeRegistered(repoDir, "feat/missing", wt),
+    ).toThrow(/not registered/i);
+  });
+
+  it("throws when the branch is registered at a different path", () => {
+    const real = join(repoDir, "wt-real");
+    const expected = join(repoDir, "wt-expected");
+    git(repoDir, ["branch", "feat/elsewhere"]);
+    git(repoDir, ["worktree", "add", real, "feat/elsewhere"]);
+    expect(() =>
+      assertWorktreeRegistered(repoDir, "feat/elsewhere", expected),
+    ).toThrow(/registered at .* expected/i);
   });
 });
