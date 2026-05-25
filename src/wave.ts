@@ -257,47 +257,68 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         }
 
         // PASS — merge under the mutex.
-        if (!git.hasCommitsAhead(repoRoot, branch, featBranch)) {
-          outcomes.set(id, {
-            phase: "ERROR",
-            error: `Branch ${branch} has no commits ahead of ${featBranch} — generator produced no output`,
-          });
-          cancelLaneSuccessors(outcomes, lane, i);
-          return;
-        }
+        //
+        // The post-merge block is wrapped so a thrown git error
+        // (missing branch, locked index, anything) becomes this
+        // slice's ERROR outcome instead of rejecting the wave's
+        // outer Promise.all and aborting sibling lanes still in
+        // flight. See ADR 0009.
+        try {
+          if (!git.hasCommitsAhead(repoRoot, branch, featBranch)) {
+            outcomes.set(id, {
+              phase: "ERROR",
+              error: `Branch ${branch} has no commits ahead of ${featBranch} — generator produced no output`,
+            });
+            cancelLaneSuccessors(outcomes, lane, i);
+            return;
+          }
 
-        const scratchMergeDir = join(
-          repoRoot,
-          ".afk",
-          `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
-        );
-        const mergeResult = await mergeMutex(() =>
-          Promise.resolve(
-            git.mergeSliceBranch(
-              repoRoot,
-              branch,
-              featBranch,
-              scratchMergeDir,
+          const scratchMergeDir = join(
+            repoRoot,
+            ".afk",
+            `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+          );
+          const mergeResult = await mergeMutex(() =>
+            Promise.resolve(
+              git.mergeSliceBranch(
+                repoRoot,
+                branch,
+                featBranch,
+                scratchMergeDir,
+              ),
             ),
-          ),
-        );
-        if (mergeResult.status === "conflict") {
-          outcomes.set(id, {
-            phase: "CONFLICT",
-            error: mergeResult.details,
-          });
+          );
+          if (mergeResult.status === "conflict") {
+            outcomes.set(id, {
+              phase: "CONFLICT",
+              error: mergeResult.details,
+            });
+            cancelLaneSuccessors(outcomes, lane, i);
+            return;
+          }
+          if (mergeResult.cleanupWarning) {
+            console.error(`[afk] Warning: ${mergeResult.cleanupWarning}`);
+          }
+
+          await mergeMutex(() =>
+            Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
+          );
+
+          outcomes.set(id, PASS);
+        } catch (err) {
+          if (isCancelled(err, signal)) {
+            outcomes.set(id, {
+              phase: "CANCELLED",
+              error: "Cancelled by user",
+            });
+          } else {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.markError(id, msg);
+            outcomes.set(id, { phase: "ERROR", error: msg });
+          }
           cancelLaneSuccessors(outcomes, lane, i);
           return;
         }
-        if (mergeResult.cleanupWarning) {
-          console.error(`[afk] Warning: ${mergeResult.cleanupWarning}`);
-        }
-
-        await mergeMutex(() =>
-          Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
-        );
-
-        outcomes.set(id, PASS);
       }
     }),
   );

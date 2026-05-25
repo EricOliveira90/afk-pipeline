@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -16,6 +16,7 @@ import { runWave } from "./wave.js";
 import { makeAsyncMutex } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { Logger } from "./logger.js";
+import * as gitModule from "./git.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -455,4 +456,97 @@ describe("runWave", () => {
     expect(outcomes.get("601")?.phase).toBe("PASS");
     expect(outcomes.get("602")?.phase).toBe("PASS");
   }, 60_000);
+
+  // Regression for the PRD 024 crash: when one lane's post-merge git
+  // call threw, the whole `Promise.all` rejected, aborting the
+  // `runWave` and any sibling lane mid-flight. The wave loop must
+  // contain post-merge errors per-slice so independent lanes are
+  // unaffected.
+  it("contains a post-merge git failure to its own slice; sibling lane still passes", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "701", title: "Doomed", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "702", title: "Survivor", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["701", { files: ["src/doomed.txt"], qaPasses: true, outputFile: "src/doomed.txt", outputContent: "doomed" }],
+      ["702", { files: ["src/survivor.txt"], qaPasses: true, outputFile: "src/survivor.txt", outputContent: "survivor" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(repo, "wave-resilience", slices, fixtures);
+
+    // Inject a thrown error into slice 701's post-merge `hasCommitsAhead`
+    // call. Slice 702's call must still succeed and the wave must
+    // return normally with both outcomes recorded.
+    const real = gitModule.hasCommitsAhead;
+    const spy = vi.spyOn(gitModule, "hasCommitsAhead").mockImplementation(
+      (repoRoot, source, target) => {
+        if (source.includes("slice-01-")) {
+          throw new Error("simulated post-merge git failure");
+        }
+        return real(repoRoot, source, target);
+      },
+    );
+
+    try {
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["701", "702"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      expect(outcomes.get("701")?.phase).toBe("ERROR");
+      expect(outcomes.get("702")?.phase).toBe("PASS");
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
+  // Sister regression: the existing "generator produced no output"
+  // guard must keep working. When `hasCommitsAhead` reports `false`
+  // (slice tip is already at featBranch), the slice gets ERROR with
+  // the no-commits message — the resilience fix must not paper over
+  // that path.
+  it("flags ERROR with no-commits message when hasCommitsAhead returns false", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "801", title: "Empty output", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["801", { files: ["src/x.txt"], qaPasses: true, outputFile: "src/x.txt", outputContent: "x" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(repo, "wave-empty", slices, fixtures);
+
+    const spy = vi
+      .spyOn(gitModule, "hasCommitsAhead")
+      .mockImplementation(() => false);
+
+    try {
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["801"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      const outcome = outcomes.get("801");
+      expect(outcome?.phase).toBe("ERROR");
+      if (outcome?.phase === "ERROR") {
+        expect(outcome.error).toContain("no commits ahead");
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30_000);
 });
+

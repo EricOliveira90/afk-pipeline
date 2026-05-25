@@ -13,6 +13,7 @@ import {
   branchExists,
   findWorktreeForBranch,
   getDefaultBranch,
+  hasCommitsAhead,
   mergeSliceBranch,
   removeWorktree,
 } from "./git.js";
@@ -315,5 +316,52 @@ describe("git.mergeSliceBranch — MergeResult", { timeout: 30_000 }, () => {
     const result = mergeSliceBranch(repoDir, "slice", "feat", scratchDir);
     expect(result).toEqual({ status: "merged" });
     expect(existsSync(scratchDir)).toBe(false);
+  });
+});
+
+describe("git.hasCommitsAhead", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-ahead-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("returns true when source has commits the target lacks", () => {
+    git(repoDir, ["checkout", "-b", "feat"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "feat work"]);
+    expect(hasCommitsAhead(repoDir, "feat", "main")).toBe(true);
+  });
+
+  it("returns false when source equals target", () => {
+    git(repoDir, ["branch", "feat"]);
+    expect(hasCommitsAhead(repoDir, "feat", "main")).toBe(false);
+  });
+
+  // Regression for the PRD 024 crash: the slice branch can disappear
+  // between merge-success and the next post-merge check (e.g. the agent
+  // rewrote it locally, an out-of-band cleanup ran, or a sibling step
+  // deleted the ref). `rev-list` against a missing ref exits non-zero,
+  // and the previous implementation let the throw escape — taking down
+  // the whole wave (including unrelated sibling lanes still in flight).
+  // The post-merge guard's intent — "treat this slice as having
+  // produced no output" — is exactly what `false` already conveys.
+  it("returns false when the source branch does not exist", () => {
+    expect(() => hasCommitsAhead(repoDir, "no-such-branch", "main")).not.toThrow();
+    expect(hasCommitsAhead(repoDir, "no-such-branch", "main")).toBe(false);
+  });
+
+  it("returns false when the target branch does not exist", () => {
+    git(repoDir, ["checkout", "-b", "feat"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "feat work"]);
+    expect(() => hasCommitsAhead(repoDir, "feat", "no-such-base")).not.toThrow();
+    expect(hasCommitsAhead(repoDir, "feat", "no-such-base")).toBe(false);
   });
 });
