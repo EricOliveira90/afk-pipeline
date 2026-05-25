@@ -139,16 +139,30 @@ export function commitAll(cwd: string, message: string) {
   git(["commit", "-m", message, "--no-verify"], { cwd });
 }
 
-/** Returns true if source has commits that target doesn't. */
+/**
+ * Returns true if source has commits that target doesn't.
+ *
+ * Returns `false` (not throws) when either ref is missing — the
+ * caller's invariant of interest is "does source contribute new
+ * commits", and a missing ref contributes none. Throwing here would
+ * propagate up through `runWave`'s post-merge step (see ADR 0009)
+ * and abort sibling lanes still in flight; instead we let the caller
+ * report ERROR for that one slice and continue.
+ */
 export function hasCommitsAhead(
   repoRoot: string,
   source: string,
   target: string,
 ): boolean {
-  const count = git(["rev-list", "--count", `${target}..${source}`], {
-    cwd: repoRoot,
-  });
-  return parseInt(count, 10) > 0;
+  try {
+    const count = git(["rev-list", "--count", `${target}..${source}`], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return parseInt(count, 10) > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
