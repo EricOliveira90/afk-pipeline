@@ -81,15 +81,83 @@ export function createBranch(cwd: string, branch: string, from: string) {
   }
 }
 
+/** Compare two filesystem paths case-insensitively on Windows, with normalised slashes. */
+function pathEquals(a: string, b: string): boolean {
+  const normalise = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const na = normalise(a);
+  const nb = normalise(b);
+  return process.platform === "win32"
+    ? na.toLowerCase() === nb.toLowerCase()
+    : na === nb;
+}
+
+/**
+ * Create a git worktree for `branch` at `worktreeDir`, branching off `from`.
+ *
+ * Refuses to silently reuse a pre-existing path. If `worktreeDir` exists,
+ * it must be a real git worktree registered for `branch`; otherwise we
+ * throw rather than dispatch agents into a non-worktree directory whose
+ * `git commit` would walk up to the parent repo's `.git` and corrupt the
+ * caller's checked-out branch.
+ *
+ * Background: prior implementations short-circuited on `existsSync`. When
+ * a previous run's cleanup failed (Windows file lock, antivirus stragglers
+ * in `node_modules/.pnpm/`), the on-disk dir survived but git's admin
+ * state was already pruned. The next run treated the leftover as valid,
+ * the slice "branch" was never created, and every commit landed on the
+ * user's HEAD branch. The fix is to verify, not trust, on-disk state.
+ */
 export function createWorktree(
   repoRoot: string,
   branch: string,
   worktreeDir: string,
   from: string,
 ) {
-  if (existsSync(worktreeDir)) return;
+  if (existsSync(worktreeDir)) {
+    const registered = findWorktreeForBranch(repoRoot, branch);
+    if (registered && pathEquals(registered, worktreeDir)) return;
+    throw new Error(
+      `Path exists but is not a registered git worktree for branch ${branch}: ${worktreeDir}. ` +
+        `A previous run likely left a stale directory after a cleanup failure ` +
+        `(common on Windows with pnpm node_modules or antivirus locks). ` +
+        `Verify the directory has no uncommitted work, remove it manually, and re-run.`,
+    );
+  }
   createBranch(repoRoot, branch, from);
   git(["worktree", "add", worktreeDir, branch], { cwd: repoRoot });
+}
+
+/**
+ * Assert that `worktreeDir` is the git-registered worktree for `branch`.
+ * Throws otherwise.
+ *
+ * Layered defense alongside `createWorktree`'s built-in check. Call this
+ * right before dispatching an agent against a worktree — `createWorktree`
+ * enforces the invariant at creation time, but `recreateWorktreeFromBase`
+ * (the lane-successor refresh path) does a `removeWorktree → deleteBranch
+ * → createWorktree` sequence whose intermediate states leave room for
+ * filesystem races on Windows. Re-checking just before dispatch makes
+ * silent corruption impossible to cross the agent boundary.
+ */
+export function assertWorktreeRegistered(
+  repoRoot: string,
+  branch: string,
+  worktreeDir: string,
+): void {
+  const registered = findWorktreeForBranch(repoRoot, branch);
+  if (!registered) {
+    throw new Error(
+      `Worktree for branch ${branch} is not registered with git. ` +
+        `Expected at ${worktreeDir}. Likely causes: previous cleanup left a ` +
+        `stale directory, antivirus / path-length / permissions blocked ` +
+        `'git worktree add', or the worktree was removed out-of-band.`,
+    );
+  }
+  if (!pathEquals(registered, worktreeDir)) {
+    throw new Error(
+      `Worktree for branch ${branch} is registered at ${registered}, expected ${worktreeDir}.`,
+    );
+  }
 }
 
 export function removeWorktree(repoRoot: string, worktreeDir: string) {

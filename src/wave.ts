@@ -195,6 +195,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               ctx.worktreeDir,
               featBranch,
             );
+            git.assertWorktreeRegistered(
+              repoRoot,
+              ctx.branch,
+              ctx.worktreeDir,
+            );
             mkdirSync(ctx.absSliceDir, { recursive: true });
             for (const f of ["context.md", "contract.md"]) {
               try {
@@ -264,6 +269,25 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         // outer Promise.all and aborting sibling lanes still in
         // flight. See ADR 0009.
         try {
+          // Distinguish "branch missing" from "0 commits ahead". A
+          // missing slice branch after a successful generator run is
+          // the signature of the silent-corruption bug (worktree was
+          // not registered with git, agent's commits leaked to the
+          // parent repo's HEAD branch). Surface it loudly so the
+          // operator investigates the corruption rather than chasing
+          // a phantom no-output run. See ADR 0010.
+          if (!git.branchExists(repoRoot, branch)) {
+            outcomes.set(id, {
+              phase: "ERROR",
+              error:
+                `Slice branch ${branch} does not exist after generator completed. ` +
+                `The slice's worktree may have been corrupted: commits may have leaked ` +
+                `to the parent repo's currently checked-out branch. ` +
+                `Inspect 'git reflog --all' and 'git worktree list --porcelain' before re-running.`,
+            });
+            cancelLaneSuccessors(outcomes, lane, i);
+            return;
+          }
           if (!git.hasCommitsAhead(repoRoot, branch, featBranch)) {
             outcomes.set(id, {
               phase: "ERROR",
