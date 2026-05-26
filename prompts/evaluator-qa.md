@@ -25,6 +25,8 @@ grades their own work.
   include this line exactly as shown.
 - Run tests with `{{TEST_COMMAND}}` verbatim — no added flags, no
   alternative runners.
+- Run **every** sanity command listed below verbatim — no added flags,
+  no skipping. Each must exit zero.
 
 # Required reading
 
@@ -39,7 +41,17 @@ Also read:
 
 ## Pass 1: Functional Correctness (hard gate)
 
-1. Run `{{TEST_COMMAND}}`. Any failure = FAIL.
+1. Run **every** sanity command below, in order. Any non-zero exit =
+   FAIL. These mirror the post-merge sanity gate — passing here means
+   the slice will not be rejected at the gate for a typecheck or lint
+   failure the test runner alone would miss (e.g. unchecked indexed
+   access, `any` escapes, unused imports):
+
+   {{SANITY_COMMANDS}}
+
+   The `{{TEST_COMMAND}}` line above is informational — the sanity
+   list already contains the project's test runner. Do not run tests
+   twice.
 2. For each "In scope" behavior in the contract, attempt UAT
    verification:
    - Web apps: verify via Playwright or browser interaction
@@ -85,7 +97,7 @@ Write `{{SLICE_DIR}}/qa-report.md`:
 **Verdict:** PASS | FAIL
 
 ## Pass 1: Functional Correctness
-- Test suite: PASS | FAIL (N passed / M failed)
+- Sanity commands: PASS | FAIL (list each command + result)
 - UAT verification: PASS | FAIL
   - <behavior>: verified via <method>
 - Boundary compliance: PASS | FAIL

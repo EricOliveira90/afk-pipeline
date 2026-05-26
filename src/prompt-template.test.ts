@@ -45,6 +45,7 @@ describe("renderPrompt", () => {
         SLICE_DIR: "x",
         RELEVANT_FILES: "",
         TEST_COMMAND: "pnpm test",
+        SANITY_COMMANDS: "",
         EXTRA: "y",
       }),
     ).toThrow(/EXTRA/);
@@ -66,7 +67,7 @@ describe("renderPrompt", () => {
       renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "" }),
     ).toBeTruthy();
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", TEST_COMMAND: "pnpm test" })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", TEST_COMMAND: "pnpm test" })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", TEST_COMMAND: "pnpm test", SANITY_COMMANDS: "" })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d" })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
