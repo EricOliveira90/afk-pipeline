@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   makeAsyncMutex,
+  resolveSanityCommands,
   resolveTestCommand,
   runPipeline,
   runPreShipSanity,
@@ -140,6 +141,76 @@ describe("resolveTestCommand", () => {
     const dir = mkdtempSync(join(tmpdir(), "afk-resolve-"));
     tempDirs.push(dir);
     expect(resolveTestCommand(dir)).toBeUndefined();
+  });
+});
+
+/**
+ * Drift test: the command set the evaluator-qa is told to run MUST equal
+ * the command set the post-merge sanity gate runs. If they diverge, a
+ * slice can pass QA on code the gate then rejects (the failure mode that
+ * motivated this fix: typecheck/lint violations passing through QA
+ * because QA only ran tests). Walks several package.json shapes; for
+ * each, the scripts `runPreShipSanity` attempts via `execFileSync` must
+ * exactly match — same scripts, same order — what `resolveSanityCommands`
+ * reports.
+ */
+describe("evaluator-qa sanity command set matches the post-merge gate", () => {
+  function recordedRuns(dir: string): string[] {
+    // Use scripts that record their own name to a marker file as they
+    // run, so we can read back the exact sequence runPreShipSanity
+    // executed against this fixture without mocking execFileSync.
+    const marker = join(dir, "ran.log");
+    const scripts = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")).scripts as Record<string, string>;
+    const rewritten: Record<string, string> = {};
+    for (const [name, body] of Object.entries(scripts)) {
+      const exit = body.includes("process.exit(1)") ? 1 : 0;
+      rewritten[name] = `node -e "require('fs').appendFileSync('${marker.replace(/\\/g, "\\\\")}', '${name}\\n'); process.exit(${exit})"`;
+    }
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "fixture", scripts: rewritten }),
+      "utf-8",
+    );
+    runPreShipSanity(dir);
+    if (!existsSync(marker)) return [];
+    return readFileSync(marker, "utf-8").trim().split("\n").filter(Boolean);
+  }
+
+  it("matches when all three steps are defined", () => {
+    const dir = makeProject({
+      typecheck: "node -e \"process.exit(0)\"",
+      lint: "node -e \"process.exit(0)\"",
+      "test:run": "node -e \"process.exit(0)\"",
+    });
+    const reported = resolveSanityCommands(dir);
+    const ran = recordedRuns(dir);
+    expect(reported).toEqual(ran.map((s) => `pnpm run ${s}`));
+    expect(reported).toEqual(["pnpm run typecheck", "pnpm run lint", "pnpm run test:run"]);
+  });
+
+  it("matches when lint is absent (skipped step is reported in neither)", () => {
+    const dir = makeProject({
+      typecheck: "node -e \"process.exit(0)\"",
+      "test:run": "node -e \"process.exit(0)\"",
+    });
+    const reported = resolveSanityCommands(dir);
+    const ran = recordedRuns(dir);
+    expect(reported).toEqual(ran.map((s) => `pnpm run ${s}`));
+    expect(reported).toEqual(["pnpm run typecheck", "pnpm run test:run"]);
+  });
+
+  it("matches when only the `test` fallback is defined", () => {
+    const dir = makeProject({ test: "node -e \"process.exit(0)\"" });
+    const reported = resolveSanityCommands(dir);
+    const ran = recordedRuns(dir);
+    expect(reported).toEqual(ran.map((s) => `pnpm run ${s}`));
+    expect(reported).toEqual(["pnpm run test"]);
+  });
+
+  it("matches when no scripts are defined (both report empty)", () => {
+    const dir = makeProject({ build: "tsc" });
+    expect(resolveSanityCommands(dir)).toEqual([]);
+    expect(recordedRuns(dir)).toEqual([]);
   });
 });
 

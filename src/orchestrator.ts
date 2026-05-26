@@ -76,6 +76,26 @@ export function resolveTestCommand(cwd: string): string | undefined {
 }
 
 /**
+ * Returns the exact `pnpm run <script>` invocations the pre-ship sanity
+ * gate would execute against `cwd`, in the gate's order. Walks the same
+ * `SANITY_STEPS` constant `runPreShipSanity` walks, applying the same
+ * "skip steps whose primary AND fallback are absent" rule. Used to
+ * inject the same command set into the evaluator-qa prompt so a slice
+ * cannot pass QA on a state the gate would later reject for a typecheck
+ * or lint failure. Returns `[]` when `package.json` is missing.
+ */
+export function resolveSanityCommands(cwd: string): string[] {
+  const scripts = readPackageScripts(cwd);
+  if (!scripts) return [];
+  const cmds: string[] = [];
+  for (const step of SANITY_STEPS) {
+    const scriptName = step.scripts.find((s) => scripts[s] != null);
+    if (scriptName) cmds.push(`pnpm run ${scriptName}`);
+  }
+  return cmds;
+}
+
+/**
  * Pre-ship sanity gate: runs the project's typecheck + lint + tests against
  * the merged feature branch in `cwd`, before opening the PR. This is the
  * same guard a human's pre-push hook would apply — necessary because every
@@ -346,6 +366,15 @@ export interface SliceContext {
    * prompts so they don't hardcode a runner-specific flag.
    */
   testCommand: string;
+  /**
+   * Bullet list (newline-joined) of every `pnpm run <script>` the
+   * pre-ship sanity gate would run against the consumer project, in the
+   * gate's order. Injected into the evaluator-qa prompt so the QA pass
+   * exercises the same typecheck + lint + tests check the gate uses,
+   * preventing a slice from passing QA on code the post-merge gate
+   * would later reject. Empty string when no scripts are defined.
+   */
+  sanityCommandsBlock: string;
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0],
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -380,6 +409,12 @@ export function makeSliceContext(
   const relSpecsDir = specsDir.replace(/\\/g, "/");
   const tag = `[afk] Slice #${slice.ghIssue} (${slice.title})`;
 
+  const sanityCommands = resolveSanityCommands(repoRoot);
+  const sanityCommandsBlock =
+    sanityCommands.length > 0
+      ? sanityCommands.map((c) => `- \`${c}\``).join("\n")
+      : "(no typecheck/lint/test scripts defined in this project — skip)";
+
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
     const result = await provider.invoke({
       ...opts,
@@ -407,6 +442,7 @@ export function makeSliceContext(
     relSpecsDir,
     tag,
     testCommand,
+    sanityCommandsBlock,
     invoke,
   };
 }
@@ -601,6 +637,7 @@ export async function runSliceExecute(
           SLICE_DIR: ctx.relSliceDir,
           RELEVANT_FILES: relevantFilesBlock,
           TEST_COMMAND: ctx.testCommand,
+          SANITY_COMMANDS: ctx.sanityCommandsBlock,
         }),
         cwd: ctx.worktreeDir,
         logStream: evalLog,
