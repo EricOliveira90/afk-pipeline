@@ -42,6 +42,18 @@ export interface InvokeOptions {
   maxToolCalls?: number;
   /** Cancellation signal — when fired, the spawned process is killed. */
   signal?: AbortSignal;
+  /**
+   * Run the underlying CLI in "bare" mode — strips plugin hooks,
+   * MCP servers, and CLAUDE.md auto-discovery. Used for guardian
+   * reviews where third-party `SessionStart` hooks (e.g. the
+   * `superpowers:using-superpowers` plugin) inject directives that
+   * coerce the agent into emitting fake `<tool_use>` text and
+   * exiting after one turn — see ADR 0011. The persona must be
+   * carried in the prompt; `agent` is ignored. Provider-specific:
+   * only the `claude` provider implements this; other providers
+   * silently ignore it.
+   */
+  bare?: boolean;
   /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */
   onIdleWarning?: (minutes: number) => void;
   /** Called for each parsed stream event. Only fires when the provider implements parseStreamLine. */

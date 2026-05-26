@@ -53,6 +53,62 @@ describe("parseStreamLine", () => {
   });
 });
 
+describe("invoke spawn args", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("default invocation passes --agent and skips permissions", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+
+    const promise = invoke({
+      role: "planner",
+      agent: "planner",
+      prompt: "go",
+      cwd: "/tmp/x",
+    });
+    proc.stdout.push(null);
+    proc.emit("exit", 0);
+    await promise;
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args).toContain("--agent");
+    expect(args).toContain("planner");
+    expect(args).toContain("--dangerously-skip-permissions");
+    expect(args).not.toContain("--bare");
+  });
+
+  it("bare invocation passes --bare, drops --agent, and adds --tools default", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+
+    const promise = invoke({
+      role: "architect-review",
+      agent: "architect-review",
+      bare: true,
+      prompt: "go",
+      cwd: "/tmp/x",
+    });
+    proc.stdout.push(null);
+    proc.emit("exit", 0);
+    await promise;
+
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args).toContain("--bare");
+    expect(args).toContain("--tools");
+    expect(args[args.indexOf("--tools") + 1]).toBe("default");
+    // --bare drops CLAUDE.md auto-discovery, so cwd context is added
+    // explicitly.
+    expect(args).toContain("--add-dir");
+    expect(args[args.indexOf("--add-dir") + 1]).toBe("/tmp/x");
+    // --bare strips plugin-loaded agents, so passing --agent would
+    // resolve to the default agent and waste a CLI flag.
+    expect(args).not.toContain("--agent");
+  });
+});
+
 describe("invoke maxToolCalls cap", () => {
   beforeEach(() => {
     spawnMock.mockReset();
