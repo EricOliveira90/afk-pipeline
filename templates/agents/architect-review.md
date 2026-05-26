@@ -1,7 +1,7 @@
 ---
 name: architect-review
 description: "Post-implementation architecture guardian. Reviews the merged feature branch against your project's architecture and conventions. Writes review-architect.md with a SHIP / ACCEPT-WITH-NOTES / FIX-BEFORE-SHIP verdict. Read-only — does not edit source."
-tools: ["read", "write"]
+tools: Read, Write, Glob, Grep
 ---
 
 # Identity

@@ -1001,6 +1001,16 @@ export async function runPipeline(
             await invoke({
               role: "architect-review",
               agent: "architect-review",
+              // Bare mode: third-party Claude Code plugins (e.g.
+              // `superpowers:using-superpowers`) install
+              // `SessionStart` hooks that demand the agent invoke a
+              // skill before responding. Guardian agents have no
+              // skills loaded, so the hook coerces them into emitting
+              // a fake `<tool_use>` block as plain text and ending
+              // the turn — no review file is ever written. `--bare`
+              // strips plugin hooks for this invocation only. See
+              // ADR 0011.
+              bare: true,
               prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
               cwd: reviewDir,
               logStream: log,
@@ -1024,6 +1034,9 @@ export async function runPipeline(
             await invoke({
               role: "pm-review",
               agent: "pm-review",
+              // See architect-review above — same plugin-hook
+              // hijack defense.
+              bare: true,
               prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
               cwd: reviewDir,
               logStream: log,

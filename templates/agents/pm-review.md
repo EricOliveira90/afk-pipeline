@@ -1,7 +1,7 @@
 ---
 name: pm-review
 description: "Post-implementation product guardian. Verifies the shipped feature delivers the PRD's intent. Writes review-pm.md with a SHIP / ACCEPT-WITH-NOTES / FIX-BEFORE-SHIP verdict. Read-only — does not edit source."
-tools: ["read", "write"]
+tools: Read, Write, Glob, Grep
 ---
 
 # Identity

@@ -144,6 +144,8 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
     model = "opus",
   } = options;
 
+  const bare = options.bare === true;
+
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new CancelledError());
@@ -153,16 +155,38 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
     // Pass the prompt via stdin instead of argv. Avoids Windows cmd.exe
     // argv-reparsing breakage where prompts containing `:`, `"`, `&`, `(`,
     // `)`, etc. get truncated or mangled.
-    const args = [
-      "-p",
-      ...(agent ? ["--agent", agent] : []),
-      "--dangerously-skip-permissions",
-      "--model",
-      model,
-      "--output-format",
-      "stream-json",
-      "--verbose",
-    ];
+    //
+    // `--bare` mode strips plugin SessionStart hooks (which can hijack
+    // the agent into producing fake `<tool_use>` text — see ADR 0011),
+    // MCP servers, and CLAUDE.md auto-discovery. In return we re-grant
+    // the standard tool set and `cwd` access explicitly, and drop
+    // `--agent` because plugin-provided agents are not loaded in bare
+    // mode (the persona has to live in the prompt).
+    const args = bare
+      ? [
+          "-p",
+          "--bare",
+          "--tools",
+          "default",
+          "--add-dir",
+          cwd,
+          "--dangerously-skip-permissions",
+          "--model",
+          model,
+          "--output-format",
+          "stream-json",
+          "--verbose",
+        ]
+      : [
+          "-p",
+          ...(agent ? ["--agent", agent] : []),
+          "--dangerously-skip-permissions",
+          "--model",
+          model,
+          "--output-format",
+          "stream-json",
+          "--verbose",
+        ];
 
     const proc = spawn("claude", args, {
       cwd,
