@@ -14,13 +14,13 @@ Autonomous multi-agent orchestration: PRD → sliced issues → draft PR. You de
 pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 
 # Preview execution plan
-npx afk --issues .kiro/specs/<prd-slug>/issues.md --dry-run
+npx afk --prd-dir docs/prds/<prd-slug> --dry-run
 
 # Run (Kiro backend)
-npx afk --issues .kiro/specs/<prd-slug>/issues.md
+npx afk --prd-dir docs/prds/<prd-slug>
 
 # Run (Claude Code backend)
-npx afk-claude --issues .kiro/specs/<prd-slug>/issues.md
+npx afk-claude --prd-dir docs/prds/<prd-slug>
 ```
 
 ## Prerequisites
