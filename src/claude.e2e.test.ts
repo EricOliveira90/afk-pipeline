@@ -36,9 +36,16 @@ e2e("guardian invocation end-to-end", () => {
         "  (bold, with colon).",
         "",
         "# Task",
-        `Read source.txt in the current directory. Write review.md with`,
+        `Read source.txt in the current directory. Then write review.md with`,
         `a one-line verdict (SHIP is fine for this fixture) and a one-`,
         `sentence rationale. Do not ask questions.`,
+        "",
+        "**How to write the file:** Use the Bash tool with a heredoc:",
+        "```",
+        "cat << 'REVIEW_EOF' > review.md",
+        "<your review content here>",
+        "REVIEW_EOF",
+        "```",
       ].join("\n");
 
       const result = await invoke({

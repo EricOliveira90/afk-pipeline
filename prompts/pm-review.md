@@ -35,6 +35,17 @@ Also read:
 
 # Task
 
-Verify each PRD requirement is delivered in the implementation. Write
-`{{SPECS_DIR}}/review-pm.md` with your verdict and findings. Focus on
-user outcomes, not code patterns.
+Verify each PRD requirement is delivered in the implementation then write your
+review to `{{SPECS_DIR}}/review-pm.md`. Focus on user outcomes, not code
+patterns.
+
+**How to write the file:** Use the Bash tool with a heredoc:
+```
+cat << 'REVIEW_EOF' > {{SPECS_DIR}}/review-pm.md
+<your review content here>
+REVIEW_EOF
+```
+
+After writing, verify with `cat {{SPECS_DIR}}/review-pm.md | head -5`
+to confirm the verdict line is present. Do not repeat the review body in your
+final message — only confirm the file was written and state the verdict.

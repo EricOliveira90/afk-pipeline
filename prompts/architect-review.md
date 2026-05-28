@@ -34,5 +34,16 @@ Also read:
 
 # Task
 
-Review the merged code from all slices. Write `{{SPECS_DIR}}/review-architect.md`
-with your verdict and findings. Focus on patterns, not style.
+Review the merged code from all slices then write your review to
+`{{SPECS_DIR}}/review-architect.md`. Focus on patterns, not style.
+
+**How to write the file:** Use the Bash tool with a heredoc:
+```
+cat << 'REVIEW_EOF' > {{SPECS_DIR}}/review-architect.md
+<your review content here>
+REVIEW_EOF
+```
+
+After writing, verify with `cat {{SPECS_DIR}}/review-architect.md | head -5`
+to confirm the verdict line is present. Do not repeat the review body in your
+final message — only confirm the file was written and state the verdict.
