@@ -13,10 +13,13 @@ import {
   assertWorktreeRegistered,
   branchExists,
   createWorktree,
+  findMigrationPrefixCollisions,
   findWorktreeForBranch,
   getDefaultBranch,
   hasCommitsAhead,
+  listMigrationFiles,
   mergeSliceBranch,
+  migrationPrefixCollisions,
   removeWorktree,
 } from "./git.js";
 
@@ -496,5 +499,98 @@ describe("git.assertWorktreeRegistered", { timeout: 30_000 }, () => {
     expect(() =>
       assertWorktreeRegistered(repoDir, "feat/elsewhere", expected),
     ).toThrow(/registered at .* expected/i);
+  });
+});
+
+
+describe("findMigrationPrefixCollisions (pure)", () => {
+  it("flags a shared prefix with a different filename", () => {
+    expect(
+      findMigrationPrefixCollisions(["043_users.sql"], ["043_orders.sql"]),
+    ).toEqual(["043"]);
+  });
+
+  it("does not flag a slice re-touching its own migration (same filename)", () => {
+    expect(
+      findMigrationPrefixCollisions(["043_users.sql"], ["043_users.sql"]),
+    ).toEqual([]);
+  });
+
+  it("does not flag distinct prefixes", () => {
+    expect(
+      findMigrationPrefixCollisions(["042_a.sql"], ["043_b.sql"]),
+    ).toEqual([]);
+  });
+
+  it("ignores files without a numeric prefix", () => {
+    expect(
+      findMigrationPrefixCollisions(["README.md"], ["seed.sql"]),
+    ).toEqual([]);
+  });
+
+  it("returns each colliding prefix once, sorted", () => {
+    expect(
+      findMigrationPrefixCollisions(
+        ["043_a.sql", "044_c.sql"],
+        ["044_d.sql", "043_b.sql", "043_e.sql"],
+      ),
+    ).toEqual(["043", "044"]);
+  });
+});
+
+describe("git.listMigrationFiles / migrationPrefixCollisions", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  function addMigration(name: string, body = "select 1;") {
+    const dir = join(repoDir, "supabase", "migrations");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, name), body);
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", `add ${name}`]);
+  }
+
+  it("lists migration basenames on a ref", () => {
+    addMigration("042_init.sql");
+    expect(listMigrationFiles(repoDir, "main")).toEqual(["042_init.sql"]);
+  });
+
+  it("returns empty for a ref with no migrations", () => {
+    expect(listMigrationFiles(repoDir, "main")).toEqual([]);
+  });
+
+  it("detects a colliding prefix between a slice branch and the feature branch", () => {
+    addMigration("042_init.sql"); // shared history
+    git(repoDir, ["branch", "feat/x"]);
+    git(repoDir, ["checkout", "-b", "afk/slice"]);
+    addMigration("043_orders.sql");
+    git(repoDir, ["checkout", "feat/x"]);
+    addMigration("043_users.sql"); // same prefix, different file
+
+    expect(migrationPrefixCollisions(repoDir, "afk/slice", "feat/x")).toEqual([
+      "043",
+    ]);
+  });
+
+  it("does not flag when the slice adds a fresh prefix", () => {
+    addMigration("042_init.sql");
+    git(repoDir, ["branch", "feat/x"]);
+    git(repoDir, ["checkout", "-b", "afk/slice"]);
+    addMigration("043_orders.sql");
+
+    expect(migrationPrefixCollisions(repoDir, "afk/slice", "feat/x")).toEqual(
+      [],
+    );
   });
 });

@@ -234,6 +234,77 @@ export function hasCommitsAhead(
 }
 
 /**
+ * List files under `supabase/migrations/` on a given ref (branch/commit).
+ * Returns basenames only. Empty array if the path or ref is absent — a
+ * ref with no migrations contributes no collisions.
+ */
+export function listMigrationFiles(repoRoot: string, ref: string): string[] {
+  try {
+    const output = git(
+      ["ls-tree", "-r", "--name-only", ref, "--", "supabase/migrations/"],
+      { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
+    );
+    return output
+      .split(/\r?\n/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map((p) => p.slice(p.lastIndexOf("/") + 1));
+  } catch {
+    return [];
+  }
+}
+
+/** Extract the leading numeric prefix of a migration filename, or null. */
+function migrationPrefix(filename: string): string | null {
+  const m = /^(\d+)/.exec(filename);
+  return m ? m[1]! : null;
+}
+
+/**
+ * Pure: numeric prefixes the slice introduces that already exist on the
+ * feature branch under a *different* filename. Same prefix + same filename
+ * is the slice re-touching a migration it already owns (not a collision);
+ * same prefix + different filename is the integration-time schema-ordering
+ * collision we must block. See Bug 2.
+ */
+export function findMigrationPrefixCollisions(
+  featFiles: string[],
+  sliceFiles: string[],
+): string[] {
+  const featByPrefix = new Map<string, Set<string>>();
+  for (const f of featFiles) {
+    const p = migrationPrefix(f);
+    if (!p) continue;
+    (featByPrefix.get(p) ?? featByPrefix.set(p, new Set()).get(p)!).add(f);
+  }
+  const collisions = new Set<string>();
+  for (const f of sliceFiles) {
+    const p = migrationPrefix(f);
+    if (!p) continue;
+    const existing = featByPrefix.get(p);
+    if (existing && !existing.has(f)) collisions.add(p);
+  }
+  return [...collisions].sort();
+}
+
+/**
+ * Numeric migration prefixes the slice branch would collide with on the
+ * feature branch. Empty array = safe to merge. Compares committed trees
+ * (no working-tree state), so it's deterministic under parallelism when
+ * called inside the merge mutex against the current feature-branch tip.
+ */
+export function migrationPrefixCollisions(
+  repoRoot: string,
+  sliceBranch: string,
+  featureBranch: string,
+): string[] {
+  return findMigrationPrefixCollisions(
+    listMigrationFiles(repoRoot, featureBranch),
+    listMigrationFiles(repoRoot, sliceBranch),
+  );
+}
+
+/**
  * Merge a source branch into a target branch.
  * Returns true on success, false on conflict.
  */
