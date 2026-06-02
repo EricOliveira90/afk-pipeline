@@ -302,16 +302,27 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             ".afk",
             `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
           );
-          const mergeResult = await mergeMutex(() =>
-            Promise.resolve(
-              git.mergeSliceBranch(
-                repoRoot,
-                branch,
-                featBranch,
-                scratchMergeDir,
-              ),
-            ),
-          );
+          // Collision check + merge share one critical section: checking
+          // against the feature-branch tip and then merging must be atomic,
+          // or a sibling lane could merge a colliding prefix in between.
+          const mergeResult = await mergeMutex(() => {
+            const collisions = git.migrationPrefixCollisions(
+              repoRoot,
+              branch,
+              featBranch,
+            );
+            if (collisions.length > 0) {
+              return Promise.resolve<git.MergeResult>({
+                status: "conflict",
+                details:
+                  `Migration prefix collision: ${collisions.join(", ")} already exists on ${featBranch} ` +
+                  `under a different filename. Renumber this slice's migration(s) to the next free prefix and re-run.`,
+              });
+            }
+            return Promise.resolve(
+              git.mergeSliceBranch(repoRoot, branch, featBranch, scratchMergeDir),
+            );
+          });
           if (mergeResult.status === "conflict") {
             outcomes.set(id, {
               phase: "CONFLICT",

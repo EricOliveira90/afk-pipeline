@@ -2,11 +2,21 @@
 import { resolve, basename, join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
-import { runPipeline, PipelineError } from "./orchestrator.js";
+import {
+  runPipeline,
+  PipelineError,
+  type MigrationValidation,
+} from "./orchestrator.js";
+
+const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
+  "skip",
+  "local-stack",
+  "linked",
+];
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--migration-validation <skip|local-stack|linked>]`,
   );
   process.exit(2);
 }
@@ -15,12 +25,22 @@ async function main() {
   const args = process.argv.slice(2);
   let prdDirArg: string | undefined;
   let dryRun = false;
+  let migrationValidation: MigrationValidation | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--prd-dir" && args[i + 1]) {
       prdDirArg = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
+    } else if (args[i] === "--migration-validation" && args[i + 1]) {
+      const mode = args[++i] as MigrationValidation;
+      if (!MIGRATION_MODES.includes(mode)) {
+        console.error(
+          `Error: --migration-validation must be one of ${MIGRATION_MODES.join(", ")}`,
+        );
+        process.exit(2);
+      }
+      migrationValidation = mode;
     } else if (args[i] === "--help" || args[i] === "-h") {
       usage();
     }
@@ -135,6 +155,7 @@ async function main() {
       specsDir,
       dag,
       dryRun,
+      migrationValidation,
       signal: controller.signal,
     });
   } catch (err) {

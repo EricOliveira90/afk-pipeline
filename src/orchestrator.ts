@@ -134,39 +134,92 @@ export function runPreShipSanity(cwd: string): {
 }
 
 /**
- * Verifies that every local migration file has been applied to the linked
- * remote Supabase project. Catches the failure mode where a prior slice's
- * `db:push` recorded a version in `schema_migrations` without actually
- * creating the table (silent prefix collision, aborted push, etc.).
+/**
+ * How the post-PASS migration gate validates a slice's new migrations.
  *
- * Returns `{ ok: true }` if everything is in sync, or `{ ok: false, error }`
- * with a human-readable description of the drift.
- *
- * MUST be run from a cwd where the Supabase CLI is installed and the project
- * is linked (i.e. the main repo root, not a worktree — worktrees don't get
- * `node_modules`, `.env.local`, or `supabase/.temp/linked-project.json`
- * because they're all gitignored).
+ *  - `"skip"`        — no gate (default). The consumer's CI already
+ *                      validates migrations per-branch (see PR #350), so
+ *                      the in-pipeline gate is redundant; leaving it on
+ *                      can only produce false STUCKs for net-new
+ *                      migrations the pipeline never pushes.
+ *  - `"local-stack"` — boot a throwaway DB-only Supabase stack in the
+ *                      slice worktree; `supabase start` auto-applies that
+ *                      branch's `supabase/migrations/**`. Clean apply ==
+ *                      valid. No remote, no push, no cross-branch
+ *                      contamination. Requires Docker on the AFK host.
+ *  - `"linked"`      — legacy: compare local migrations against a linked
+ *                      cloud remote. Unsatisfiable for net-new migrations
+ *                      (the pipeline never pushes) — opt-in only, never the
+ *                      gating default.
  */
-function verifyMigrationSync(
-  cwd: string,
-): { ok: true } | { ok: false; error: string } {
+export type MigrationValidation = "skip" | "local-stack" | "linked";
+
+export const DEFAULT_MIGRATION_VALIDATION: MigrationValidation = "skip";
+
+type MigrationCheck = { ok: true } | { ok: false; error: string };
+
+/** DB-only services for an ephemeral migration-apply stack (mirrors PR #350). */
+const LOCAL_STACK_EXCLUDE =
+  "studio,realtime,storage-api,imgproxy,edge-runtime,logflare,vector,mailpit,postgrest";
+
+/**
+ * Apply this worktree's `supabase/migrations/**` to a throwaway local
+ * stack. A clean `supabase start` means the migrations are valid. `stop`
+ * always runs in `finally`. If Docker is unavailable we skip with a
+ * warning rather than STUCK — a missing optional validator must not fail
+ * a slice that already passed QA.
+ */
+function verifyMigrationLocalStack(cwd: string): MigrationCheck {
+  try {
+    execFileSync("pnpm", ["supabase", "start", "-x", LOCAL_STACK_EXCLUDE], {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/docker/i.test(msg) && /(not running|cannot connect|daemon|found)/i.test(msg)) {
+      console.error(
+        `[afk] Docker unavailable — skipping local-stack migration check: ${msg}`,
+      );
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: `Migrations failed to apply on ephemeral local stack: ${msg}`,
+    };
+  } finally {
+    try {
+      execFileSync("pnpm", ["supabase", "stop", "--no-backup"], {
+        cwd,
+        stdio: "ignore",
+      });
+    } catch {
+      // Best effort — leftover containers get reaped on the next start.
+    }
+  }
+}
+
+/**
+ * Legacy linked-remote drift check. Flags any local migration row with no
+ * matching remote. MUST run from a cwd where the Supabase project is linked
+ * (worktrees aren't), and is unsatisfiable for net-new migrations the
+ * pipeline never pushes — hence opt-in only.
+ */
+function verifyMigrationLinked(cwd: string): MigrationCheck {
   try {
     const output = execFileSync(
       "pnpm",
       ["supabase", "migration", "list", "--linked"],
       { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
     );
-    // The CLI prints a markdown-ish table. Rows with a Local value but
-    // empty Remote indicate drift. We look for lines of the form:
-    //   │ 011   │        │ 011        │
-    // Strip ANSI, split lines, parse columns.
     const lines = output
       .replace(/\u001b\[[0-9;]*m/g, "")
       .split(/\r?\n/)
       .filter((l) => /^\s*[│|]/.test(l) && /\d/.test(l));
     const missing: string[] = [];
     for (const line of lines) {
-      // Columns separated by │ or | — take first two after leading separator.
       const parts = line
         .split(/[│|]/)
         .map((p) => p.trim())
@@ -186,10 +239,25 @@ function verifyMigrationSync(
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      error: `Could not verify migration sync: ${msg}`,
-    };
+    return { ok: false, error: `Could not verify migration sync: ${msg}` };
+  }
+}
+
+/**
+ * Dispatch the migration gate by mode. `cwd` MUST be the slice worktree
+ * (where the unmerged migration lives), not `repoRoot`.
+ */
+export function verifyMigrationSync(
+  cwd: string,
+  mode: MigrationValidation,
+): MigrationCheck {
+  switch (mode) {
+    case "skip":
+      return { ok: true };
+    case "local-stack":
+      return verifyMigrationLocalStack(cwd);
+    case "linked":
+      return verifyMigrationLinked(cwd);
   }
 }
 
@@ -240,6 +308,13 @@ export interface PipelineConfig {
    * provider.
    */
   provider?: AgentProvider;
+  /**
+   * Post-PASS migration gate mode. Defaults to `"skip"` — the consumer's
+   * CI validates migrations per-branch, so the in-pipeline gate is
+   * redundant and the legacy `"linked"` path can only false-STUCK net-new
+   * migrations. See {@link MigrationValidation}.
+   */
+  migrationValidation?: MigrationValidation;
   /**
    * Cancellation signal. When fired (typically from SIGINT), in-flight
    * agent invocations are killed and remaining slices are marked
@@ -598,7 +673,7 @@ export async function runSliceExecute(
   ctx: SliceContext,
 ): Promise<"PASS" | "STUCK" | "ERROR" | "CANCELLED"> {
   const { config, slice, logger, featBranch, relevantFilesBlock, invoke } = ctx;
-  const { repoRoot, signal } = config;
+  const { signal } = config;
 
   try {
     const qaPath = join(ctx.absSliceDir, "qa-report.md");
@@ -659,12 +734,10 @@ export async function runSliceExecute(
           );
         }
 
-        const touchedMigrations = sliceTouchedMigrations(
-          ctx.worktreeDir,
-          featBranch,
-        );
-        if (touchedMigrations) {
-          const migrationCheck = verifyMigrationSync(repoRoot);
+        const migrationMode =
+          config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
+        if (migrationMode !== "skip" && sliceTouchedMigrations(ctx.worktreeDir, featBranch)) {
+          const migrationCheck = verifyMigrationSync(ctx.worktreeDir, migrationMode);
           if (!migrationCheck.ok) {
             logger.markStuck(
               slice.ghIssue,
