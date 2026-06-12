@@ -180,6 +180,16 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
       : [
           "-p",
           ...(agent ? ["--agent", agent] : []),
+          // Isolate subagents from the invoking session's MCP servers. Unlike
+          // `--bare` (above), the `--agent` path keeps MCP auto-discovery, so
+          // user-level servers (andes/builder/slack/etc.) connect into each
+          // `claude -p` child non-deterministically. That floods the agent's
+          // toolset past its frontmatter `tools` allowlist and lets it spawn
+          // nested Agent subagents — whose activity emits no tool_call events,
+          // so the idle watcher kills the process and negotiate returns ERROR.
+          // Strict = load only --mcp-config servers (none), so the per-agent
+          // allowlist holds and the toolset is deterministic.
+          "--strict-mcp-config",
           "--dangerously-skip-permissions",
           "--model",
           model,
