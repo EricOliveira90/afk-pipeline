@@ -43,6 +43,13 @@ export interface InvokeOptions {
   /** Cancellation signal — when fired, the spawned process is killed. */
   signal?: AbortSignal;
   /**
+   * Model alias or full ID to invoke this agent with. Provider-specific:
+   * only the `claude` provider reads this (passed through as `--model`);
+   * other providers silently ignore it. Defaults to the provider's own
+   * default when omitted.
+   */
+  model?: string;
+  /**
    * Run the underlying CLI in "bare" mode — strips plugin hooks,
    * MCP servers, and CLAUDE.md auto-discovery. Used for guardian
    * reviews where third-party `SessionStart` hooks (e.g. the

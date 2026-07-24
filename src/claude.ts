@@ -16,10 +16,8 @@ import { killProcessTree } from "./kill-tree.js";
  */
 const FORCE_KILL_GRACE_MS = 10_000;
 
-interface ClaudeInvokeOptions extends InvokeOptions {
-  /** Model alias or full ID. Default: opus */
-  model?: string;
-}
+/** Default model for Claude Code invocations when `InvokeOptions.model` is omitted. */
+const DEFAULT_MODEL = "claude-fable-5";
 
 /** Tools whose calls we surface as stream events. Mirrors src/AgentProvider.ts. */
 const TOOL_ARG_FIELDS: Record<string, string> = {
@@ -128,7 +126,7 @@ export function handleStreamEvent(args: {
  * via onStreamEvent. The final `result` event carries cost/usage; we surface
  * cost on the resolved value.
  */
-export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
+export function invoke(options: InvokeOptions): Promise<InvokeResult> {
   const {
     role,
     agent,
@@ -141,7 +139,7 @@ export function invoke(options: ClaudeInvokeOptions): Promise<InvokeResult> {
     signal,
     onIdleWarning,
     onStreamEvent,
-    model = "opus",
+    model = DEFAULT_MODEL,
   } = options;
 
   const bare = options.bare === true;
