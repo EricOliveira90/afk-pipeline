@@ -730,12 +730,13 @@ describe("runPipeline lane scheduling", () => {
     expect(state.slices["3001"].phase).toBe("PASS");
     expect(state.slices["3002"].phase).toBe("PASS");
 
-    // Phase A invocations should overlap: one slice's planner starts
-    // before the other's planner finishes (parallel lane leaders).
-    const a = firstTimestamp(records, "3001", "planner");
-    const aEnd = lastTimestamp(records, "3001", "planner");
-    const b = firstTimestamp(records, "3002", "planner");
-    const bEnd = lastTimestamp(records, "3002", "planner");
+    // Phase A invocations should overlap: one slice's explorer starts
+    // before the other's explorer finishes. Later phases can be separated
+    // by synchronous worktree and filesystem operations on a loaded host.
+    const a = firstTimestamp(records, "3001", "explorer");
+    const aEnd = lastTimestamp(records, "3001", "explorer");
+    const b = firstTimestamp(records, "3002", "explorer");
+    const bEnd = lastTimestamp(records, "3002", "explorer");
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
     // Overlap iff a < bEnd && b < aEnd.
