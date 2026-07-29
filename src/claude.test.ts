@@ -77,6 +77,7 @@ describe("invoke spawn args", () => {
     expect(args).toContain("--agent");
     expect(args).toContain("planner");
     expect(args).toContain("--dangerously-skip-permissions");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-opus-5");
     expect(args).not.toContain("--bare");
   });
 

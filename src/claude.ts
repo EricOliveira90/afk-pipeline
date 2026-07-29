@@ -17,7 +17,7 @@ import { killProcessTree } from "./kill-tree.js";
 const FORCE_KILL_GRACE_MS = 10_000;
 
 /** Default model for Claude Code invocations when `InvokeOptions.model` is omitted. */
-const DEFAULT_MODEL = "claude-fable-5";
+const DEFAULT_MODEL = "claude-opus-5";
 
 /** Tools whose calls we surface as stream events. Mirrors src/AgentProvider.ts. */
 const TOOL_ARG_FIELDS: Record<string, string> = {
