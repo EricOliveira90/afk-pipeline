@@ -1,6 +1,7 @@
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, type WriteStream } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { finished } from "node:stream/promises";
 import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
@@ -23,6 +24,15 @@ import {
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
+
+async function closeAgentLog(log: WriteStream): Promise<void> {
+  log.end();
+  try {
+    await finished(log);
+  } catch {
+    // Agent logs are best-effort and must not mask the invocation outcome.
+  }
+}
 
 /**
  * Idle timeout for generator and evaluator-qa invocations. These two
@@ -658,8 +668,7 @@ export async function runSliceNegotiate(
         }),
         cwd: ctx.worktreeDir,
         logStream,
-      });
-      logStream.end();
+      }).finally(() => closeAgentLog(logStream));
     }
 
     // --- Step 2: Planner (contract negotiation) ---
@@ -699,8 +708,7 @@ export async function runSliceNegotiate(
           }),
           cwd: ctx.worktreeDir,
           logStream: plannerLog,
-        });
-        plannerLog.end();
+        }).finally(() => closeAgentLog(plannerLog));
 
         console.error(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
@@ -724,8 +732,7 @@ export async function runSliceNegotiate(
           }),
           cwd: ctx.worktreeDir,
           logStream: evalLog,
-        });
-        evalLog.end();
+        }).finally(() => closeAgentLog(evalLog));
 
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
@@ -862,8 +869,7 @@ export async function runSliceExecute(
         cwd: ctx.worktreeDir,
         logStream: genLog,
         idleTimeoutMs: SLOW_AGENT_IDLE_TIMEOUT_MS,
-      });
-      genLog.end();
+      }).finally(() => closeAgentLog(genLog));
 
       console.error(
         `${ctx.tag}: evaluating QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
@@ -880,8 +886,7 @@ export async function runSliceExecute(
         cwd: ctx.worktreeDir,
         logStream: evalLog,
         idleTimeoutMs: SLOW_AGENT_IDLE_TIMEOUT_MS,
-      });
-      evalLog.end();
+      }).finally(() => closeAgentLog(evalLog));
 
       logger.bumpEvalRound(slice.ghIssue, round);
 
@@ -930,8 +935,7 @@ export async function runSliceExecute(
           prompt: renderPrompt("generator-stuck", { SLICE_DIR: ctx.relSliceDir }),
           cwd: ctx.worktreeDir,
           logStream: stuckLog,
-        });
-        stuckLog.end();
+        }).finally(() => closeAgentLog(stuckLog));
 
         console.error(
           `${ctx.tag}: STUCK — QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
@@ -1288,7 +1292,7 @@ export async function runPipeline(
               logStream: log,
             });
           } finally {
-            await new Promise<void>((res) => log.end(() => res()));
+            await closeAgentLog(log);
           }
           const path = join(reviewDir, specsDir, "review-architect.md");
           const verdict = artifacts.readReviewVerdict(path);
@@ -1314,7 +1318,7 @@ export async function runPipeline(
               logStream: log,
             });
           } finally {
-            await new Promise<void>((res) => log.end(() => res()));
+            await closeAgentLog(log);
           }
           const path = join(reviewDir, specsDir, "review-pm.md");
           const verdict = artifacts.readReviewVerdict(path);
