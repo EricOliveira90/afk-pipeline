@@ -119,9 +119,11 @@ function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
-        const path = join(sliceArtifactDir, "contract.md");
-        const existing = existsSync(path) ? readFileSync(path, "utf-8") : "";
-        writeFileSync(path, existing + "\n\n**Verdict:** ACCEPT\n", "utf-8");
+        writeFileSync(
+          join(sliceArtifactDir, "feedback-r1.md"),
+          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+          "utf-8",
+        );
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         const round = (generatorRounds.get(ghIssue) ?? 0) + 1;
         generatorRounds.set(ghIssue, round);
@@ -401,9 +403,11 @@ describe("runWave", () => {
             );
           }
         } else if (role === "evaluator-contract" && sliceArtifactDir) {
-          const path = join(sliceArtifactDir, "contract.md");
-          const existing = existsSync(path) ? readFileSync(path, "utf-8") : "";
-          writeFileSync(path, existing + "\n\n**Verdict:** ACCEPT\n", "utf-8");
+          writeFileSync(
+            join(sliceArtifactDir, "feedback-r1.md"),
+            "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+            "utf-8",
+          );
         } else if (role === "generator" && sliceArtifactDir) {
           const outFile = ghIssue === "601" ? "src/a.txt" : "src/b.txt";
           const outPath = join(cwd, outFile);

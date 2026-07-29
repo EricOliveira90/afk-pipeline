@@ -35,7 +35,8 @@ Also read:
 
 # Task
 
-Read `{{SLICE_DIR}}/contract.md` and append the following section:
+Read `{{SLICE_DIR}}/contract.md` and write the following to
+`{{SLICE_DIR}}/feedback-r{{ROUND}}.md`:
 
 ```
 ## Evaluator feedback — round {{ROUND}}

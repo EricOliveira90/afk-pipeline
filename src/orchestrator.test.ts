@@ -14,12 +14,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   makeAsyncMutex,
+  makeSliceContext,
   resolveSanityCommands,
   resolveTestCommand,
   runPipeline,
+  runSliceNegotiate,
   runPreShipSanity,
 } from "./orchestrator.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
+import { Logger } from "./logger.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -395,12 +398,9 @@ function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
-        // Append ACCEPT verdict to existing contract.md.
-        const path = join(sliceArtifactDir, "contract.md");
-        const existing = existsSync(path) ? readFileSync(path, "utf-8") : "";
         writeFileSync(
-          path,
-          existing + "\n\n**Verdict:** ACCEPT\n",
+          join(sliceArtifactDir, "feedback-r1.md"),
+          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
           "utf-8",
         );
       } else if (role === "generator" && sliceArtifactDir && fixture) {
@@ -949,6 +949,101 @@ describe("runPipeline summary report", () => {
   }, 60_000);
 });
 
+/** Round feedback must stay separate from the contract specification. */
+describe("round-scoped contract feedback", () => {
+  it("advances after REVISE using only the previous feedback file", async () => {
+    const repo = makeRepo();
+    const slug = "feedback-rounds";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const issuesDir = join(prdDir, "issues");
+    mkdirSync(issuesDir, { recursive: true });
+    writeFileSync(
+      join(issuesDir, "01-local.md"),
+      "Local issue details: preserve notification ordering.\n",
+      "utf-8",
+    );
+
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9001",
+      title: "Feedback isolation",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const plannerPrompts: string[] = [];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          plannerPrompts.push(opts.prompt);
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            [
+              "# Slice Contract",
+              "",
+              "**Status:** NEGOTIATING",
+              `**Negotiation round:** ${plannerRounds}`,
+              "",
+              "## Files expected to change",
+              "- src/example.ts",
+              "",
+            ].join("\n"),
+            "utf-8",
+          );
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
+          writeFileSync(
+            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
+            `## Evaluator feedback — round ${evaluatorRounds}\n\nVERDICT: ${verdict}\n`,
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      { repoRoot: repo, prdSlug: slug, prdDir, specsDir, dag, provider },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    await expect(runSliceNegotiate(ctx)).resolves.toBe("LOCKED");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(plannerRounds).toBe(2);
+    expect(evaluatorRounds).toBe(2);
+    expect(plannerPrompts[0]).toContain("Local issue details");
+    expect(plannerPrompts[0]).not.toContain("gh issue view 9001");
+    expect(plannerPrompts[1]).toContain("feedback-r1.md");
+    expect(plannerPrompts[1]).not.toContain("feedback-r2.md");
+
+    const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
+    expect(contract).toMatch(/^\*\*Status:\*\*\s*LOCKED\s*$/m);
+    expect(contract).not.toContain("## Evaluator feedback");
+    expect(readFileSync(join(ctx.absSliceDir, "feedback-r1.md"), "utf-8")).toContain(
+      "VERDICT: REVISE",
+    );
+    expect(readFileSync(join(ctx.absSliceDir, "feedback-r2.md"), "utf-8")).toContain(
+      "VERDICT: ACCEPT",
+    );
+  });
+});
+
 /**
  * Regression test for the orchestrator-owned contract Status flip. The
  * planner is supposed to flip Status to LOCKED on ACCEPT, but it doesn't
@@ -994,7 +1089,7 @@ describe("orchestrator-owned contract status", () => {
     let contractAtGeneratorTime: string | null = null;
 
     // Wrap the provider so planner writes NEGOTIATING (the bug we're
-    // reproducing) and evaluator-contract appends ACCEPT but never
+    // reproducing) and evaluator-contract writes ACCEPT separately but never
     // touches Status. Other roles defer to the base stub.
     const buggyProvider: AgentProvider = {
       name: baseProvider.name,
@@ -1031,11 +1126,9 @@ describe("orchestrator-owned contract status", () => {
           return { exitCode: 0, stdout: "", stats: {} };
         }
         if (opts.role === "evaluator-contract" && sliceArtifactDir) {
-          const path = join(sliceArtifactDir, "contract.md");
-          const cur = existsSync(path) ? readFileSync(path, "utf-8") : "";
           writeFileSync(
-            path,
-            cur + "\n## Evaluator feedback — round 1\n\nVERDICT: ACCEPT\n",
+            join(sliceArtifactDir, "feedback-r1.md"),
+            "## Evaluator feedback — round 1\n\nVERDICT: ACCEPT\n",
             "utf-8",
           );
           records.push({
@@ -1084,5 +1177,6 @@ describe("orchestrator-owned contract status", () => {
     expect(contractAtGeneratorTime!).not.toMatch(
       /\*\*Status:\*\*\s*NEGOTIATING/,
     );
+    expect(contractAtGeneratorTime!).not.toContain("## Evaluator feedback");
   }, 60_000);
 });

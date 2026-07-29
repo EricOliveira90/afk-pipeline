@@ -31,18 +31,14 @@ export function readContractStatus(contractPath: string): ContractStatus {
 }
 
 export function readEvaluatorVerdict(
-  contractPath: string,
+  feedbackPath: string,
 ): "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN" {
-  const content = readIfExists(contractPath);
+  const content = readIfExists(feedbackPath);
   if (!content) return "UNKNOWN";
-  // Look for VERDICT or Verdict in evaluator feedback sections
-  const verdictMatches = content.match(
-    /(?:VERDICT|Verdict)[:\s]*\*?\*?\s*(ACCEPT|REVISE|ESCALATE)/gi,
+  const match = content.match(
+    /\bVERDICT(?:\s*:\s*|\s+)\*{0,2}\s*(ACCEPT|REVISE|ESCALATE)\b/i,
   );
-  if (!verdictMatches || verdictMatches.length === 0) return "UNKNOWN";
-  // Use the last verdict found
-  const last = verdictMatches[verdictMatches.length - 1]!;
-  const v = last.match(/(ACCEPT|REVISE|ESCALATE)/i)?.[1]?.toUpperCase();
+  const v = match?.[1]?.toUpperCase();
   if (v === "ACCEPT") return "ACCEPT";
   if (v === "REVISE") return "REVISE";
   if (v === "ESCALATE") return "ESCALATE";

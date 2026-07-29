@@ -23,6 +23,7 @@ describe("renderPrompt", () => {
       ROUND: 2,
       REVISION_NOTE: "",
       RELEVANT_FILES: "",
+      SLICE_BODY: "Local issue body",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).not.toContain("{{");
@@ -61,6 +62,7 @@ describe("renderPrompt", () => {
         ROUND: 1,
         REVISION_NOTE: "",
         RELEVANT_FILES: "",
+        SLICE_BODY: "Fetch with gh",
       }),
     ).toBeTruthy();
     expect(

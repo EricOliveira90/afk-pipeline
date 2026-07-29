@@ -19,6 +19,10 @@ evaluator grades against.
    or the issue text. No untethered requirements.
 5. **Conciseness serves the reader.** The generator reads this contract
    every invocation. Aim for 60 lines — scannable, not exhaustive.
+6. **The contract is a specification, not a transcript.** Rewrite the
+   contract in place. Never append evaluator feedback, negotiation history,
+   or resolution tables to `contract.md`. If a resolution table is useful
+   while revising, write it to `{{SLICE_DIR}}/resolutions-r{{ROUND}}.md`.
 
 # Invariants
 
@@ -35,14 +39,19 @@ evaluator grades against.
 
 Also read:
 - The PRD at `{{SPECS_DIR}}/prd.md`
-- The GH issue body — fetch with `gh issue view {{GH_ISSUE}}`
+- The slice issue body:
+
+{{SLICE_BODY}}
+
 - Every ADR cited by the PRD (grep for `docs/adr/` references)
 - The explorer's `{{SLICE_DIR}}/context.md` (if it exists)
 
 # Task
 
 Draft the contract for GH issue #{{GH_ISSUE}}. Complete the required
-reading first. Then write `{{SLICE_DIR}}/contract.md`:
+reading first. Never create a GitHub issue. Then rewrite
+`{{SLICE_DIR}}/contract.md` as a concise specification (target: about 60
+lines), not an accumulated review transcript:
 
 ```
 # Slice Contract — <slice name>

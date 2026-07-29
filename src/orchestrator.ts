@@ -552,13 +552,12 @@ export async function runSliceNegotiate(
     mkdirSync(ctx.absSliceDir, { recursive: true });
 
     // --- Step 1: Explorer ---
+    const localSliceContent = readSliceFile(prdDir, slice.number);
+    const sliceBodyNote = localSliceContent
+      ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
+      : `No local issue manifest was found. Fetch the issue body with: gh issue view ${slice.ghIssue}`;
     const contextPath = join(ctx.absSliceDir, "context.md");
     if (!existsSync(contextPath)) {
-      const localSliceContent = readSliceFile(prdDir, slice.number);
-      const sliceBodyNote = localSliceContent
-        ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
-        : `Fetch the issue body with: gh issue view ${slice.ghIssue}`;
-
       console.error(`${ctx.tag}: exploring...`);
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
@@ -595,9 +594,10 @@ export async function runSliceNegotiate(
             SLICE_DIR: ctx.relSliceDir,
             ROUND: round,
             RELEVANT_FILES: relevantFilesBlock,
+            SLICE_BODY: sliceBodyNote,
             REVISION_NOTE:
               round > 1
-                ? `Revise based on evaluator feedback in ${ctx.relSliceDir}/contract.md.`
+                ? `Revise based only on evaluator feedback in ${ctx.relSliceDir}/feedback-r${round - 1}.md.`
                 : "",
           }),
           cwd: ctx.worktreeDir,
@@ -626,7 +626,8 @@ export async function runSliceNegotiate(
         });
         evalLog.end();
 
-        const verdict = artifacts.readEvaluatorVerdict(contractPath);
+        const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
+        const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
         if (verdict === "ACCEPT") {
           artifacts.lockContract(contractPath);
           contractStatus = "LOCKED";

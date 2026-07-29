@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lockContract, readContractFiles, readContractStatus, readReviewVerdict } from "./artifacts.js";
+import {
+  lockContract,
+  readContractFiles,
+  readContractStatus,
+  readEvaluatorVerdict,
+  readReviewVerdict,
+} from "./artifacts.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -23,6 +29,24 @@ function withTempFile(content: string, fn: (path: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe("readEvaluatorVerdict", () => {
+  it("parses both bold-colon spellings from a feedback file", () => {
+    withTempFile("Review prose\n\n**Verdict:** ACCEPT\n", (p) =>
+      expect(readEvaluatorVerdict(p)).toBe("ACCEPT"),
+    );
+    withTempFile("**Verdict: REVISE**\n", (p) =>
+      expect(readEvaluatorVerdict(p)).toBe("REVISE"),
+    );
+  });
+
+  it("returns UNKNOWN for missing or garbled feedback without throwing", () => {
+    expect(readEvaluatorVerdict("/nonexistent/feedback-r1.md")).toBe("UNKNOWN");
+    withTempFile("Verdict: looks good\n", (p) =>
+      expect(readEvaluatorVerdict(p)).toBe("UNKNOWN"),
+    );
+  });
+});
 
 describe("readReviewVerdict", () => {
   let cleanup: Array<() => void> = [];
