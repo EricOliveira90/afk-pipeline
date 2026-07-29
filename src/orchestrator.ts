@@ -12,6 +12,7 @@ import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave } from "./wave.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
+import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
   loadRunState,
@@ -20,7 +21,6 @@ import {
   projectForPersistence,
 } from "./run-state.js";
 
-const MAX_CONTRACT_ROUNDS = 3;
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 
@@ -302,6 +302,8 @@ export interface PipelineConfig {
   specsDir: string; // e.g. .kiro/specs/<prd-slug>
   dag: DAG;
   dryRun?: boolean;
+  /** Contract negotiation cap before convergence may grant one extra round. */
+  maxContractRounds?: number;
   /**
    * Agent provider. Drives branch namespacing (via `provider.name`) and
    * the spawn/parse logic for agent invocations. Defaults to the Kiro
@@ -526,6 +528,55 @@ export function makeSliceContext(
   };
 }
 
+export interface ContractExtensionEvidence {
+  previousGapCount: number | null;
+  currentGapCount: number | null;
+  reRaisedGapCount: number | null;
+  extensionAlreadyGranted: boolean;
+}
+
+export type ContractExtensionAssessment =
+  | { grant: true; reason: string }
+  | { grant: false; reason: string };
+
+export function assessContractExtension(
+  evidence: ContractExtensionEvidence,
+): ContractExtensionAssessment {
+  const {
+    previousGapCount,
+    currentGapCount,
+    reRaisedGapCount,
+    extensionAlreadyGranted,
+  } = evidence;
+  if (extensionAlreadyGranted) {
+    return { grant: false, reason: "the one-round extension was already used" };
+  }
+  if (
+    previousGapCount === null ||
+    currentGapCount === null ||
+    reRaisedGapCount === null
+  ) {
+    return { grant: false, reason: "gap metrics are missing or malformed" };
+  }
+  if (reRaisedGapCount > 0) {
+    return {
+      grant: false,
+      reason: `${reRaisedGapCount} gap(s) from the prior round were re-raised`,
+    };
+  }
+  if (currentGapCount >= previousGapCount) {
+    const trend = currentGapCount === previousGapCount ? "flat" : "rising";
+    return {
+      grant: false,
+      reason: `gap count is ${trend} (${previousGapCount} -> ${currentGapCount})`,
+    };
+  }
+  return {
+    grant: true,
+    reason: `gap count decreased (${previousGapCount} -> ${currentGapCount}) with no re-raised gaps`,
+  };
+}
+
 function preserveContractNegotiationFailure(
   ctx: SliceContext,
   outcome: "ESCALATE" | "STUCK",
@@ -614,14 +665,22 @@ export async function runSliceNegotiate(
     // --- Step 2: Planner (contract negotiation) ---
     const contractPath = join(ctx.absSliceDir, "contract.md");
     let contractStatus = artifacts.readContractStatus(contractPath);
+    const maxContractRounds = config.maxContractRounds ?? DEFAULT_MAX_CONTRACT_ROUNDS;
+    if (!Number.isSafeInteger(maxContractRounds) || maxContractRounds < 1) {
+      throw new Error("maxContractRounds must be a positive integer");
+    }
+    let allowedContractRounds = maxContractRounds;
+    let extensionGranted = false;
+    let previousMetrics: artifacts.EvaluatorFeedbackMetrics | null = null;
     let lastRound = 0;
     let lastVerdict: artifacts.EvaluatorVerdict = "UNKNOWN";
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
+    const capDecisions: string[] = [];
 
     if (contractStatus !== "LOCKED") {
-      for (let round = 1; round <= MAX_CONTRACT_ROUNDS; round++) {
+      for (let round = 1; round <= allowedContractRounds; round++) {
         console.error(
-          `${ctx.tag}: planning (round ${round}/${MAX_CONTRACT_ROUNDS})...`,
+          `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
         );
         const plannerLog = logger.agentLog(slice.number, "planner", round);
         await invoke({
@@ -644,7 +703,7 @@ export async function runSliceNegotiate(
         plannerLog.end();
 
         console.error(
-          `${ctx.tag}: evaluating contract (round ${round}/${MAX_CONTRACT_ROUNDS})...`,
+          `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
         );
         const evalLog = logger.agentLog(
           slice.number,
@@ -658,6 +717,10 @@ export async function runSliceNegotiate(
             SLICE_DIR: ctx.relSliceDir,
             ROUND: round,
             RELEVANT_FILES: relevantFilesBlock,
+            PREVIOUS_FEEDBACK_NOTE:
+              round > 1
+                ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
+                : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
           }),
           cwd: ctx.worktreeDir,
           logStream: evalLog,
@@ -666,6 +729,7 @@ export async function runSliceNegotiate(
 
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
+        const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
         lastRound = round;
         lastVerdict = verdict;
         lastFeedbackPath = feedbackPath;
@@ -676,27 +740,61 @@ export async function runSliceNegotiate(
         }
         contractStatus = artifacts.readContractStatus(contractPath);
         if (contractStatus === "LOCKED") break;
-        if (verdict === "ESCALATE" || round === MAX_CONTRACT_ROUNDS) {
-          console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
-          const capDecision =
-            verdict === "ESCALATE"
-              ? "Evaluator explicitly escalated; no cap extension was considered."
-              : `Round cap ${MAX_CONTRACT_ROUNDS} reached; no extension was granted.`;
-          preserveContractNegotiationFailure(
-            ctx,
-            "ESCALATE",
-            round,
-            verdict,
-            feedbackPath,
-            capDecision,
+
+        if (verdict === "ESCALATE") {
+          capDecisions.push(
+            "Evaluator explicitly escalated; no cap extension was considered.",
           );
-          logger.bumpEvalRound(slice.ghIssue, round);
-          logger.markEscalated(
-            slice.ghIssue,
-            "Contract negotiation escalated after max rounds",
+          console.error(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
+        } else if (round === allowedContractRounds) {
+          const assessment =
+            verdict === "REVISE"
+              ? assessContractExtension({
+                  previousGapCount: previousMetrics?.gapCount ?? null,
+                  currentGapCount: metrics.gapCount,
+                  reRaisedGapCount: metrics.reRaisedGapCount,
+                  extensionAlreadyGranted: extensionGranted,
+                })
+              : {
+                  grant: false as const,
+                  reason: `verdict was ${verdict}, not REVISE`,
+                };
+          if (assessment.grant) {
+            extensionGranted = true;
+            allowedContractRounds = maxContractRounds + 1;
+            capDecisions.push(
+              `Granted one extra round because ${assessment.reason}.`,
+            );
+            console.error(
+              `${ctx.tag}: granting contract round ${allowedContractRounds}: ${assessment.reason}`,
+            );
+            previousMetrics = metrics;
+            continue;
+          }
+          capDecisions.push(`Extension refused: ${assessment.reason}.`);
+          console.error(
+            `${ctx.tag}: contract round extension refused: ${assessment.reason}`,
           );
-          return "ESCALATE";
+        } else {
+          previousMetrics = metrics;
+          continue;
         }
+
+        console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+        preserveContractNegotiationFailure(
+          ctx,
+          "ESCALATE",
+          round,
+          verdict,
+          feedbackPath,
+          capDecisions.join(" "),
+        );
+        logger.bumpEvalRound(slice.ghIssue, round);
+        logger.markEscalated(
+          slice.ghIssue,
+          `Contract negotiation escalated after ${round} round(s)`,
+        );
+        return "ESCALATE";
       }
     }
 
@@ -708,7 +806,9 @@ export async function runSliceNegotiate(
         lastRound,
         lastVerdict,
         lastFeedbackPath,
-        "Negotiation ended without a locked contract.",
+        capDecisions.length > 0
+          ? capDecisions.join(" ")
+          : "The configured round cap was not reached.",
       );
       logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
       return "STUCK";

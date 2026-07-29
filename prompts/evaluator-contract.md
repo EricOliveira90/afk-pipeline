@@ -22,6 +22,9 @@ verified, executed, and delivered in a single agent session.
 
 - Output exactly `VERDICT: ACCEPT` or `VERDICT: REVISE` — the
   orchestrator parses this line.
+- Output `GAPS: <n>` with the number of currently unresolved gaps.
+- Output `RE_RAISED_GAPS: <n>` with the number of current gaps that
+  materially repeat a gap from the immediately previous round.
 - On REVISE: cite the section and quote the offending text. Vague
   feedback ("could be clearer") is not a finding.
 
@@ -31,6 +34,7 @@ verified, executed, and delivered in a single agent session.
 
 Also read:
 - The PRD at `{{SPECS_DIR}}/prd.md`
+- {{PREVIOUS_FEEDBACK_NOTE}}
 - Every ADR cited by the PRD or contract (grep for `docs/adr/`)
 
 # Task
@@ -42,6 +46,8 @@ Read `{{SLICE_DIR}}/contract.md` and write the following to
 ## Evaluator feedback — round {{ROUND}}
 
 VERDICT: ACCEPT | REVISE
+GAPS: <non-negative integer>
+RE_RAISED_GAPS: <non-negative integer>
 
 ### If REVISE, specific gaps:
 - <gap — quote the problematic line, explain which principle it violates>

@@ -66,7 +66,7 @@ describe("renderPrompt", () => {
       }),
     ).toBeTruthy();
     expect(
-      renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "" }),
+      renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "", PREVIOUS_FEEDBACK_NOTE: "No previous round." }),
     ).toBeTruthy();
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", TEST_COMMAND: "pnpm test" })).toBeTruthy();
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", TEST_COMMAND: "pnpm test", SANITY_COMMANDS: "" })).toBeTruthy();

@@ -7,6 +7,10 @@ import {
   PipelineError,
   type MigrationValidation,
 } from "./orchestrator.js";
+import {
+  DEFAULT_MAX_CONTRACT_ROUNDS,
+  parseMaxContractRounds,
+} from "./cli-options.js";
 import { claudeProvider } from "./claude.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
@@ -17,7 +21,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--migration-validation <skip|local-stack|linked>]`,
+    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>]`,
   );
   process.exit(2);
 }
@@ -27,12 +31,20 @@ async function main() {
   let prdDirArg: string | undefined;
   let dryRun = false;
   let migrationValidation: MigrationValidation | undefined;
+  let maxContractRounds = DEFAULT_MAX_CONTRACT_ROUNDS;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--prd-dir" && args[i + 1]) {
       prdDirArg = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
+    } else if (args[i] === "--max-contract-rounds") {
+      try {
+        maxContractRounds = parseMaxContractRounds(args[++i]);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(2);
+      }
     } else if (args[i] === "--migration-validation" && args[i + 1]) {
       const mode = args[++i] as MigrationValidation;
       if (!MIGRATION_MODES.includes(mode)) {
@@ -73,6 +85,7 @@ async function main() {
   console.log(`  PRD dir: ${prdDir}`);
   console.log(`  Repo: ${repoRoot}`);
   console.log(`  Dry run: ${dryRun}`);
+  console.log(`  Max contract rounds: ${maxContractRounds}`);
   console.log();
 
   const slices = parseIssuesMd(issuesPath);
@@ -150,6 +163,7 @@ async function main() {
       specsDir,
       dag,
       dryRun,
+      maxContractRounds,
       provider: claudeProvider,
       migrationValidation,
       signal: controller.signal,

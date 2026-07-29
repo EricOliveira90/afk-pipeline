@@ -15,6 +15,7 @@ import {
   readContractFiles,
   readContractStatus,
   preserveNegotiationFailure,
+  readEvaluatorFeedbackMetrics,
   readEvaluatorVerdict,
   readReviewVerdict,
 } from "./artifacts.js";
@@ -47,6 +48,21 @@ describe("readEvaluatorVerdict", () => {
     withTempFile("**Verdict: REVISE**\n", (p) =>
       expect(readEvaluatorVerdict(p)).toBe("REVISE"),
     );
+  });
+
+  it("parses explicit gap and re-raised-gap counts", () => {
+    withTempFile("VERDICT: REVISE\nGAPS: 3\nRE_RAISED_GAPS: 1\n", (p) => {
+      expect(readEvaluatorFeedbackMetrics(p)).toEqual({
+        gapCount: 3,
+        reRaisedGapCount: 1,
+      });
+    });
+    withTempFile("VERDICT: REVISE\n", (p) => {
+      expect(readEvaluatorFeedbackMetrics(p)).toEqual({
+        gapCount: null,
+        reRaisedGapCount: null,
+      });
+    });
   });
 
   it("returns UNKNOWN for missing or garbled feedback without throwing", () => {

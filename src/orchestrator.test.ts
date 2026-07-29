@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assessContractExtension,
   makeAsyncMutex,
   makeSliceContext,
   resolveSanityCommands,
@@ -221,6 +222,54 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
  * Tests for `makeAsyncMutex`. The mutex serialises lane merges across
  * concurrently-running lanes; correctness here pins that contract.
  */
+describe("assessContractExtension", () => {
+  it("grants a converging round", () => {
+    expect(
+      assessContractExtension({
+        previousGapCount: 6,
+        currentGapCount: 3,
+        reRaisedGapCount: 0,
+        extensionAlreadyGranted: false,
+      }),
+    ).toMatchObject({ grant: true });
+  });
+
+  it("refuses flat or rising gap counts", () => {
+    for (const currentGapCount of [3, 4]) {
+      expect(
+        assessContractExtension({
+          previousGapCount: 3,
+          currentGapCount,
+          reRaisedGapCount: 0,
+          extensionAlreadyGranted: false,
+        }).grant,
+      ).toBe(false);
+    }
+  });
+
+  it("refuses a re-raised gap despite a lower count", () => {
+    expect(
+      assessContractExtension({
+        previousGapCount: 6,
+        currentGapCount: 2,
+        reRaisedGapCount: 1,
+        extensionAlreadyGranted: false,
+      }),
+    ).toMatchObject({ grant: false, reason: expect.stringContaining("re-raised") });
+  });
+
+  it("never grants a second extension", () => {
+    expect(
+      assessContractExtension({
+        previousGapCount: 3,
+        currentGapCount: 1,
+        reRaisedGapCount: 0,
+        extensionAlreadyGranted: true,
+      }),
+    ).toMatchObject({ grant: false, reason: expect.stringContaining("already used") });
+  });
+});
+
 describe("makeAsyncMutex", () => {
   it("serialises two concurrent acquirers in submission order", async () => {
     const lock = makeAsyncMutex();
@@ -1041,6 +1090,81 @@ describe("round-scoped contract feedback", () => {
     expect(readFileSync(join(ctx.absSliceDir, "feedback-r2.md"), "utf-8")).toContain(
       "VERDICT: ACCEPT",
     );
+  });
+
+  it("grants exactly one extra round to a converging negotiation", async () => {
+    const repo = makeRepo();
+    const slug = "converging-contract";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9003",
+      title: "Converging contract",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          const verdict = evaluatorRounds === 3 ? "ACCEPT" : "REVISE";
+          const gaps = evaluatorRounds === 1 ? 4 : evaluatorRounds === 2 ? 2 : 0;
+          writeFileSync(
+            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
+            `VERDICT: ${verdict}\nGAPS: ${gaps}\nRE_RAISED_GAPS: 0\n`,
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(runSliceNegotiate(ctx)).resolves.toBe("LOCKED");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(plannerRounds).toBe(3);
+      expect(evaluatorRounds).toBe(3);
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain(
+        "granting contract round 3",
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("keeps ESCALATE when archive copying fails and leaves stuck.md", async () => {

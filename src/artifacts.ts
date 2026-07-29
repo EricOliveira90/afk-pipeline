@@ -54,6 +54,28 @@ export function readEvaluatorVerdict(
   return "UNKNOWN";
 }
 
+export interface EvaluatorFeedbackMetrics {
+  gapCount: number | null;
+  reRaisedGapCount: number | null;
+}
+
+export function readEvaluatorFeedbackMetrics(
+  feedbackPath: string,
+): EvaluatorFeedbackMetrics {
+  const content = readIfExists(feedbackPath);
+  if (!content) return { gapCount: null, reRaisedGapCount: null };
+  const gap = content.match(
+    /^\s*\*{0,2}GAPS\s*:\s*\*{0,2}\s*(\d+)\b/im,
+  )?.[1];
+  const reRaised = content.match(
+    /^\s*\*{0,2}RE_RAISED_GAPS\s*:\s*\*{0,2}\s*(\d+)\b/im,
+  )?.[1];
+  return {
+    gapCount: gap === undefined ? null : Number(gap),
+    reRaisedGapCount: reRaised === undefined ? null : Number(reRaised),
+  };
+}
+
 export function readQAVerdict(qaReportPath: string): QAVerdict {
   const content = readIfExists(qaReportPath);
   if (!content) return "UNKNOWN";
