@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -1041,6 +1041,71 @@ describe("round-scoped contract feedback", () => {
     expect(readFileSync(join(ctx.absSliceDir, "feedback-r2.md"), "utf-8")).toContain(
       "VERDICT: ACCEPT",
     );
+  });
+
+  it("keeps ESCALATE when archive copying fails and leaves stuck.md", async () => {
+    const repo = makeRepo();
+    const slug = "archive-failure";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9002",
+      title: "Archive failure",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+        } else if (opts.role === "evaluator-contract") {
+          writeFileSync(
+            join(artifactDir, "feedback-r1.md"),
+            "VERDICT: ESCALATE\n\n### If REVISE, specific gaps:\n- Clarify the issue body.\n",
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const archiveParent = join(repo, ".afk", "artifacts");
+    mkdirSync(archiveParent, { recursive: true });
+    writeFileSync(join(archiveParent, `${slug}-stub`), "blocked", "utf-8");
+    const ctx = makeSliceContext(
+      { repoRoot: repo, prdSlug: slug, prdDir, specsDir, dag, provider },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(runSliceNegotiate(ctx)).resolves.toBe("ESCALATE");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const stuckPath = join(ctx.absSliceDir, "stuck.md");
+      expect(existsSync(stuckPath)).toBe(true);
+      expect(readFileSync(stuckPath, "utf-8")).toContain("Clarify the issue body.");
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain(
+        "failed to archive negotiation artifacts",
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 

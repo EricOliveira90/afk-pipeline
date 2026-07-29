@@ -1,11 +1,20 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  hasStuckFile,
   lockContract,
   readContractFiles,
   readContractStatus,
+  preserveNegotiationFailure,
   readEvaluatorVerdict,
   readReviewVerdict,
 } from "./artifacts.js";
@@ -45,6 +54,103 @@ describe("readEvaluatorVerdict", () => {
     withTempFile("Verdict: looks good\n", (p) =>
       expect(readEvaluatorVerdict(p)).toBe("UNKNOWN"),
     );
+  });
+});
+
+describe("preserveNegotiationFailure", () => {
+  function makeFailureFixture() {
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-preserve-"));
+    const sliceDir = join(repoRoot, ".afk", "worktrees", "slice", "spec", "slices", "01-demo");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(join(sliceDir, "contract.md"), "# Contract\n\n**Status:** NEGOTIATING\n", "utf-8");
+    writeFileSync(join(sliceDir, "context.md"), "# Context\n", "utf-8");
+    writeFileSync(join(sliceDir, "feedback-r1.md"), "VERDICT: REVISE\n", "utf-8");
+    writeFileSync(
+      join(sliceDir, "feedback-r2.md"),
+      "VERDICT: REVISE\n\n### If REVISE, specific gaps:\n- Add an issue-body acceptance clause.\n",
+      "utf-8",
+    );
+    return { repoRoot, sliceDir };
+  }
+
+  it("writes actionable ESCALATE details and archives every negotiation artifact", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    try {
+      const result = preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "demo-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 2,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        capDecision: "Round cap reached; extension refused because gaps were flat.",
+      });
+
+      expect(result.archived).toBe(true);
+      expect(hasStuckFile(sliceDir)).toBe(true);
+      const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
+      expect(stuck).toContain("#7001 Notification foundation");
+      expect(stuck).toContain("Final verdict: VERDICT: REVISE");
+      expect(stuck).toContain("Add an issue-body acceptance clause.");
+      expect(stuck).toContain(".afk/artifacts/demo-stub/slice-01/contract.md");
+
+      rmSync(sliceDir, { recursive: true, force: true });
+      for (const name of [
+        "contract.md",
+        "context.md",
+        "feedback-r1.md",
+        "feedback-r2.md",
+        "stuck.md",
+      ]) {
+        expect(existsSync(join(result.archiveDir, name))).toBe(true);
+      }
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("writes STUCK details and warns without throwing when archiving fails", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    const warnings: string[] = [];
+    try {
+      const blockedRunDir = join(repoRoot, ".afk", "artifacts", "blocked-run");
+      mkdirSync(join(repoRoot, ".afk", "artifacts"), { recursive: true });
+      writeFileSync(blockedRunDir, "not a directory", "utf-8");
+
+      const result = preserveNegotiationFailure(
+        {
+          repoRoot,
+          runSlug: "blocked-run",
+          sliceDir,
+          sliceNumber: "01",
+          ghIssue: "7001",
+          title: "Notification foundation",
+          round: 2,
+          outcome: "STUCK",
+          verdict: "UNKNOWN",
+          feedbackPath: join(sliceDir, "feedback-r2.md"),
+          contractPath: join(sliceDir, "contract.md"),
+          contextPath: join(sliceDir, "context.md"),
+        },
+        (message) => warnings.push(message),
+      );
+
+      expect(result.archived).toBe(false);
+      expect(hasStuckFile(sliceDir)).toBe(true);
+      expect(readFileSync(join(sliceDir, "stuck.md"), "utf-8")).toContain(
+        "Outcome: STUCK",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("failed to archive negotiation artifacts");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 });
 

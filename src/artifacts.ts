@@ -1,6 +1,15 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { join, relative } from "node:path";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
+export type EvaluatorVerdict = "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
 export type ReviewVerdict =
   | "SHIP"
@@ -32,7 +41,7 @@ export function readContractStatus(contractPath: string): ContractStatus {
 
 export function readEvaluatorVerdict(
   feedbackPath: string,
-): "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN" {
+): EvaluatorVerdict {
   const content = readIfExists(feedbackPath);
   if (!content) return "UNKNOWN";
   const match = content.match(
@@ -155,6 +164,137 @@ export function readContractFiles(contractPath: string): string[] | undefined {
   }
 
   return files;
+}
+
+export interface NegotiationFailureDetails {
+  repoRoot: string;
+  runSlug: string;
+  sliceDir: string;
+  sliceNumber: string;
+  ghIssue: string;
+  title: string;
+  round: number;
+  outcome: "ESCALATE" | "STUCK";
+  verdict: EvaluatorVerdict;
+  feedbackPath: string;
+  contractPath: string;
+  contextPath: string;
+  capDecision?: string;
+}
+
+export interface NegotiationArchiveResult {
+  archiveDir: string;
+  archived: boolean;
+  error?: string;
+}
+
+export function negotiationArchiveDir(
+  repoRoot: string,
+  runSlug: string,
+  sliceNumber: string,
+): string {
+  return join(repoRoot, ".afk", "artifacts", runSlug, `slice-${sliceNumber}`);
+}
+
+export function archiveNegotiationArtifacts(
+  sliceDir: string,
+  archiveDir: string,
+): void {
+  mkdirSync(archiveDir, { recursive: true });
+  const feedbackFiles = existsSync(sliceDir)
+    ? readdirSync(sliceDir)
+        .filter((name) => /^feedback-r\d+\.md$/i.test(name))
+        .sort()
+    : [];
+  const names = ["contract.md", "context.md", ...feedbackFiles, "stuck.md"];
+  for (const name of names) {
+    const source = join(sliceDir, name);
+    if (existsSync(source)) cpSync(source, join(archiveDir, name));
+  }
+}
+
+function displayPath(repoRoot: string, path: string): string {
+  return relative(repoRoot, path).replace(/\\/g, "/");
+}
+
+function unresolvedGaps(feedback: string | null): string {
+  if (!feedback) {
+    return "(No feedback file was produced; inspect the evaluator log.)";
+  }
+  const section = feedback.match(
+    /### If REVISE, specific gaps:\s*([\s\S]*?)(?=\n### |$)/i,
+  )?.[1]?.trim();
+  return section || feedback.trim();
+}
+
+export function preserveNegotiationFailure(
+  details: NegotiationFailureDetails,
+  warn: (message: string) => void = (message) => console.error(message),
+): NegotiationArchiveResult {
+  const {
+    repoRoot,
+    runSlug,
+    sliceDir,
+    sliceNumber,
+    ghIssue,
+    title,
+    round,
+    outcome,
+    verdict,
+    feedbackPath,
+    contractPath,
+    contextPath,
+    capDecision,
+  } = details;
+  const archiveDir = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
+  const feedback = readIfExists(feedbackPath);
+  const verdictText =
+    feedback?.split(/\r?\n/).find((line) => /\bVERDICT\b/i.test(line))?.trim() ??
+    `VERDICT: ${verdict}`;
+  const stuckPath = join(sliceDir, "stuck.md");
+  const archiveContract = join(archiveDir, "contract.md");
+  const archiveContext = join(archiveDir, "context.md");
+  const archiveFeedback = join(archiveDir, `feedback-r${round}.md`);
+  const stuck = [
+    "# Contract negotiation stuck",
+    "",
+    `- Slice: #${ghIssue} ${title}`,
+    `- Outcome: ${outcome}`,
+    `- Round: ${round}`,
+    `- Final verdict: ${verdictText}`,
+    `- Round-cap decision: ${capDecision ?? "No extension decision was recorded."}`,
+    "",
+    "## Unresolved gaps",
+    "",
+    unresolvedGaps(feedback),
+    "",
+    "## Next action",
+    "",
+    "Update the source issue body (the local issue manifest when present, otherwise the GitHub issue) to close the unresolved acceptance and test-plan gaps above, then rerun the slice.",
+    "",
+    "## Artifact locations",
+    "",
+    `- Working contract: ${displayPath(repoRoot, contractPath)}`,
+    `- Working context: ${displayPath(repoRoot, contextPath)}`,
+    `- Working feedback: ${displayPath(repoRoot, feedbackPath)}`,
+    `- Archive directory: ${displayPath(repoRoot, archiveDir)}`,
+    `- Archived contract: ${displayPath(repoRoot, archiveContract)}`,
+    `- Archived context: ${displayPath(repoRoot, archiveContext)}`,
+    `- Archived feedback: ${displayPath(repoRoot, archiveFeedback)}`,
+    "",
+  ].join("\n");
+  writeFileSync(stuckPath, stuck, "utf-8");
+
+  try {
+    archiveNegotiationArtifacts(sliceDir, archiveDir);
+    return { archiveDir, archived: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    warn(
+      `[afk] Warning: failed to archive negotiation artifacts to ${displayPath(repoRoot, archiveDir)}: ${error}`,
+    );
+    return { archiveDir, archived: false, error };
+  }
 }
 
 export function hasStuckFile(sliceDir: string): boolean {

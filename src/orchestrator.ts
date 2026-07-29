@@ -374,6 +374,10 @@ function featureBranchPrefix(provider: AgentProvider): string {
   return provider.name === "kiro" ? "feat" : `feat-${provider.name}`;
 }
 
+function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
+  return provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
+}
+
 export function sliceBranch(
   prdSlug: string,
   slice: Slice,
@@ -522,6 +526,37 @@ export function makeSliceContext(
   };
 }
 
+function preserveContractNegotiationFailure(
+  ctx: SliceContext,
+  outcome: "ESCALATE" | "STUCK",
+  round: number,
+  verdict: artifacts.EvaluatorVerdict,
+  feedbackPath: string,
+  capDecision: string,
+): void {
+  const provider = ctx.config.provider ?? kiroProvider;
+  const result = artifacts.preserveNegotiationFailure({
+    repoRoot: ctx.config.repoRoot,
+    runSlug: pipelineRunSlug(ctx.config.prdSlug, provider),
+    sliceDir: ctx.absSliceDir,
+    sliceNumber: ctx.slice.number,
+    ghIssue: ctx.slice.ghIssue,
+    title: ctx.slice.title,
+    round,
+    outcome,
+    verdict,
+    feedbackPath,
+    contractPath: join(ctx.absSliceDir, "contract.md"),
+    contextPath: join(ctx.absSliceDir, "context.md"),
+    capDecision,
+  });
+  if (result.archived) {
+    console.error(
+      `${ctx.tag}: archived negotiation artifacts to ${result.archiveDir}`,
+    );
+  }
+}
+
 /**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
@@ -579,6 +614,9 @@ export async function runSliceNegotiate(
     // --- Step 2: Planner (contract negotiation) ---
     const contractPath = join(ctx.absSliceDir, "contract.md");
     let contractStatus = artifacts.readContractStatus(contractPath);
+    let lastRound = 0;
+    let lastVerdict: artifacts.EvaluatorVerdict = "UNKNOWN";
+    let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
 
     if (contractStatus !== "LOCKED") {
       for (let round = 1; round <= MAX_CONTRACT_ROUNDS; round++) {
@@ -628,6 +666,9 @@ export async function runSliceNegotiate(
 
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
+        lastRound = round;
+        lastVerdict = verdict;
+        lastFeedbackPath = feedbackPath;
         if (verdict === "ACCEPT") {
           artifacts.lockContract(contractPath);
           contractStatus = "LOCKED";
@@ -637,6 +678,18 @@ export async function runSliceNegotiate(
         if (contractStatus === "LOCKED") break;
         if (verdict === "ESCALATE" || round === MAX_CONTRACT_ROUNDS) {
           console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+          const capDecision =
+            verdict === "ESCALATE"
+              ? "Evaluator explicitly escalated; no cap extension was considered."
+              : `Round cap ${MAX_CONTRACT_ROUNDS} reached; no extension was granted.`;
+          preserveContractNegotiationFailure(
+            ctx,
+            "ESCALATE",
+            round,
+            verdict,
+            feedbackPath,
+            capDecision,
+          );
           logger.bumpEvalRound(slice.ghIssue, round);
           logger.markEscalated(
             slice.ghIssue,
@@ -649,6 +702,14 @@ export async function runSliceNegotiate(
 
     contractStatus = artifacts.readContractStatus(contractPath);
     if (contractStatus !== "LOCKED") {
+      preserveContractNegotiationFailure(
+        ctx,
+        "STUCK",
+        lastRound,
+        lastVerdict,
+        lastFeedbackPath,
+        "Negotiation ended without a locked contract.",
+      );
       logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
       return "STUCK";
     }
@@ -831,8 +892,7 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
   const { repoRoot, prdSlug, prdDir, specsDir, dag, signal } = config;
   const provider = config.provider ?? kiroProvider;
-  const loggerSlug =
-    provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
+  const loggerSlug = pipelineRunSlug(prdSlug, provider);
   const logger = new Logger(repoRoot, loggerSlug);
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     provider.invoke({
