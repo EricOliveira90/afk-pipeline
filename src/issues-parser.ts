@@ -70,11 +70,18 @@ export function parseIssuesMd(path: string): Slice[] {
             .map((s) => s.trim().replace("#", ""))
             .filter(Boolean);
 
+    const type = cells[3]!.trim().toUpperCase();
+    if (type !== "AFK" && type !== "HITL") {
+      throw new Error(
+        `Invalid slice type "${cells[3]!.trim()}" for slice ${cells[0]!.trim()}; expected AFK or HITL`,
+      );
+    }
+
     slices.push({
       number: cells[0]!.trim(),
       ghIssue: cells[1]!.trim().replace("#", ""),
       title: cells[2]!.trim(),
-      type: cells[3]!.trim().toUpperCase() as "HITL" | "AFK",
+      type,
       blockedBy,
       userStories: cells[5]?.trim() ?? "",
     });

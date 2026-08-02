@@ -457,3 +457,43 @@ export function recreateWorktreeFromBase(
   deleteBranch(repoRoot, branch);
   createWorktree(repoRoot, branch, worktreeDir, base);
 }
+
+/** Resolve a branch or ref to its commit SHA, or null when it is absent. */
+export function resolveCommit(repoRoot: string, ref: string): string | null {
+  try {
+    return git(["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Repo-relative migration paths added between the run base and final ref. */
+export function listAddedMigrationFiles(
+  repoRoot: string,
+  base: string,
+  head: string,
+): string[] {
+  try {
+    const output = git(
+      [
+        "diff",
+        "--name-only",
+        "--diff-filter=A",
+        `${base}...${head}`,
+        "--",
+        "supabase/migrations/",
+      ],
+      { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
+    );
+    return output
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}

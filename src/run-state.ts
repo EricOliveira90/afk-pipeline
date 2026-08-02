@@ -5,6 +5,7 @@ import {
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
+import type { PersistedRunScope } from "./slice-scope.js";
 
 /** Phases that get persisted. RUNNING / PENDING never touch disk. */
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
@@ -26,6 +27,8 @@ export interface RunState {
   version: 1;
   prdSlug: string;
   featureBranch: string;
+  /** Immutable executable slice identities resolved at the first run. */
+  scope?: PersistedRunScope;
   slices: Record<string, PersistedSliceState>;
 }
 
@@ -53,6 +56,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     version?: unknown;
     prdSlug?: string;
     featureBranch?: string;
+    scope?: PersistedRunScope;
     slices?: Record<string, unknown>;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
@@ -63,7 +67,13 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
     }
-    return { version: 1, prdSlug, featureBranch, slices };
+    return {
+      version: 1,
+      prdSlug,
+      featureBranch,
+      ...(r.scope !== undefined ? { scope: r.scope } : {}),
+      slices,
+    };
   }
 
   // v0: per-slice `status` instead of `phase`. Rename and validate.
@@ -89,7 +99,13 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ...(v.error !== undefined ? { error: v.error } : {}),
     };
   }
-  return { version: 1, prdSlug, featureBranch, slices };
+  return {
+    version: 1,
+    prdSlug,
+    featureBranch,
+    ...(r.scope !== undefined ? { scope: r.scope } : {}),
+    slices,
+  };
 }
 
 function validateV1Slice(id: string, val: unknown): PersistedSliceState {

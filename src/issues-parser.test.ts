@@ -90,4 +90,15 @@ describe("DAG.ready() — regression for PRD 012 run-1", () => {
       },
     );
   });
+  it("rejects slice types other than AFK or HITL", () => {
+    withIssuesFile(
+      `# Issues
+
+| Slice | GH Issue | Title | Type | Blocked by | User stories covered |
+|-------|----------|-------|------|------------|----------------------|
+| 01 | #300 | Unsafe type | AUTO | — | 1 |
+`,
+      (p) => expect(() => parseIssuesMd(p)).toThrow(/expected AFK or HITL/),
+    );
+  });
 });

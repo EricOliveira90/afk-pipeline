@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MAX_CONTRACT_ROUNDS,
   parseMaxContractRounds,
+  parseSliceSelection,
 } from "./cli-options.js";
 
 describe("parseMaxContractRounds", () => {
@@ -18,6 +19,18 @@ describe("parseMaxContractRounds", () => {
     "rejects invalid value %s",
     (value) => {
       expect(() => parseMaxContractRounds(value)).toThrow(/positive integer/);
+    },
+  );
+});
+describe("parseSliceSelection", () => {
+  it("accepts a comma-separated list and preserves zero padding", () => {
+    expect(parseSliceSelection("01, 02,04")).toEqual(["01", "02", "04"]);
+  });
+
+  it.each([undefined, "", "01,two", "01,"])(
+    "rejects invalid value %s",
+    (value) => {
+      expect(() => parseSliceSelection(value)).toThrow(/--slices/);
     },
   );
 });

@@ -743,6 +743,58 @@ describe("runPipeline lane scheduling", () => {
     const overlap = a! < bEnd! && b! < aEnd!;
     expect(overlap).toBe(true);
   }, 60_000);
+  it("runs only the explicitly selected AFK scope and writes its handoff", async () => {
+    const repo = makeRepo();
+    const slug = "scope-selection";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "4001", title: "Selected", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "4002", title: "Unselected", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "03", ghIssue: "4003", title: "Manual", type: "HITL", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["4001", { files: ["src/selected.txt"], qaPasses: true, outputFile: "src/selected.txt", outputContent: "selected" }],
+      ["4002", { files: ["src/unselected.txt"], qaPasses: true, outputFile: "src/unselected.txt", outputContent: "unselected" }],
+    ]);
+    const records: InvocationRecord[] = [];
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      selectedSliceNumbers: ["01"],
+      provider: buildStubProvider({ fixtures, slices, records }),
+    });
+
+    expect(result.success).toBe(true);
+    expect(records.some((record) => record.ghIssue === "4001")).toBe(true);
+    expect(records.some((record) => record.ghIssue === "4002")).toBe(false);
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.scope).toEqual({
+      mode: "explicit",
+      slices: [{ number: "01", ghIssue: "4001" }],
+    });
+
+    const handoff = JSON.parse(
+      readFileSync(join(repo, ".afk", "logs", `${slug}-stub`, "handoff.json"), "utf-8"),
+    );
+    expect(handoff.runStatus).toBe("SUCCEEDED");
+    expect(handoff.selectedSlices).toMatchObject([
+      { number: "01", ghIssue: "4001", status: "PASS" },
+    ]);
+    expect(handoff.skippedSlices).toMatchObject([
+      { number: "02", ghIssue: "4002", reason: "not-selected" },
+      { number: "03", ghIssue: "4003", reason: "hitl" },
+    ]);
+    expect(handoff.featureBranch).toBe(`feat-stub/${slug}`);
+    expect(handoff.finalCommitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(handoff.githubIssuesToClose).toEqual(["4001"]);
+  }, 60_000);
 });
 
 function firstTimestamp(

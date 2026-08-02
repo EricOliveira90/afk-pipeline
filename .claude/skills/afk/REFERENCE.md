@@ -25,6 +25,7 @@ Logs go to `.afk/logs/<prd-slug>/`:
 ```
 .afk/logs/<prd-slug>/
 ├── run-summary.md                # human-readable status table + cost totals
+├── handoff.json                  # machine-readable terminal handoff
 ├── slice-01-explorer.log
 ├── slice-01-planner-r1.log
 ├── slice-01-evaluator-contract-r1.log
@@ -34,7 +35,7 @@ Logs go to `.afk/logs/<prd-slug>/`:
 └── slice-all-pm-review.log
 ```
 
-Run state (for resumability): `.afk/run-state.json`
+Run state (for resumability): `.afk/state/<run-slug>.json`
 
 ## Branch Strategy
 
@@ -122,6 +123,7 @@ Add to your project's `package.json`:
     "afk": "afk --prd-dir .kiro/specs/<prd-slug>",
     "afk:claude": "afk-claude --prd-dir .kiro/specs/<prd-slug>",
     "afk:codex": "afk-codex --prd-dir .kiro/specs/<prd-slug>",
+    "afk:codex:scoped": "afk-codex --prd-dir .kiro/specs/<prd-slug> --slices 01,02,03,04",
     "afk:dry": "afk --prd-dir .kiro/specs/<prd-slug> --dry-run"
   }
 }
@@ -129,12 +131,16 @@ Add to your project's `package.json`:
 
 ## Resumability
 
-State persists in `.afk/run-state.json`, keyed by PRD slug + provider name.
+State persists in `.afk/state/<run-slug>.json`, with provider-specific run slugs.
 
+- `--slices 01,02,03,04` selects manifest slice numbers; every selected slice must be `AFK`.
+- `HITL` selection is rejected and has no force override.
+- The first non-dry run persists the resolved scope. Retries without `--slices` reuse it, and a different explicit selection is rejected.
 - Slices at PASS (merged branch + green qa-report) are skipped on re-run.
 - Stuck/cancelled slices retry from on-disk artifact state.
 - Contract negotiation resumes from last `contract.md`.
 - Generator retries pick up last `qa-report.md` findings.
+- `handoff.json` contains selected/skipped scope, skip reasons, final branch/SHA, added migrations, closing issues, and draft PR metadata.
 
 ## Setting Up a Project for AFK
 

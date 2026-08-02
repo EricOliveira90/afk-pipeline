@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   loadRunState,
   saveSliceState,
+  saveRunState,
   isSliceComplete,
   adaptLoadedState,
 } from "./run-state.js";
@@ -129,5 +130,21 @@ describe("loadRunState + saveSliceState end-to-end", () => {
       featureBranch: "feat/fresh",
       slices: {},
     });
+  });
+  it("preserves the resolved scope across later slice-state saves", () => {
+    const repo = makeRepo();
+    const state = loadRunState(repo, "scoped");
+    state.scope = {
+      mode: "explicit",
+      slices: [{ number: "01", ghIssue: "100" }],
+    };
+    saveRunState(repo, state);
+
+    saveSliceState(repo, "scoped", "100", {
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+
+    expect(loadRunState(repo, "scoped").scope).toEqual(state.scope);
   });
 });

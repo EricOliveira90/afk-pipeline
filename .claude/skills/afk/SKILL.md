@@ -24,6 +24,9 @@ npx afk-claude --prd-dir .kiro/specs/<prd-slug>
 
 # Run (Codex backend)
 npx afk-codex --prd-dir .kiro/specs/<prd-slug>
+
+# Run an explicit AFK-only scope
+npx afk-codex --prd-dir .kiro/specs/<prd-slug> --slices 01,02,03,04
 ```
 
 ## Prerequisites
@@ -48,6 +51,7 @@ npx afk-codex --prd-dir .kiro/specs/<prd-slug>
 ```
 
 - **AFK** = pipeline runs it. **HITL** = skipped (needs human).
+- `--slices` accepts comma-separated manifest slice numbers. It rejects HITL slices.
 - **Blocked by** = `—` for none, or comma-separated issue numbers for DAG deps.
 
 ## Pipeline Flow (per slice)
@@ -62,7 +66,8 @@ generator → implements via TDD, commits (max 3 rounds with evaluator-qa)
 
 ## Key Behaviors
 
-- **Resumable**: re-run the same command to skip completed slices
+- **Resumable**: resolved scope is persisted; re-run to skip completed slices without expanding scope
+- **Terminal handoff**: `.afk/logs/<run-slug>/handoff.json` records branch/SHA, migrations, closing issues, skips, and draft PR metadata
 - **Parallel**: independent slices run concurrently; file-overlap slices serialized in lanes
 - **Post-merge gates**: `pnpm typecheck && pnpm lint && pnpm test` → architect + PM reviews (run concurrently) → draft PR. A crashed review surfaces as `UNKNOWN` and gates the PR off without aborting the pipeline.
 - **Cancellation**: Ctrl-C kills agents cleanly; second Ctrl-C hard-exits

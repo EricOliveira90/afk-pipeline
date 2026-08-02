@@ -10,7 +10,9 @@ import {
 import {
   DEFAULT_MAX_CONTRACT_ROUNDS,
   parseMaxContractRounds,
+  parseSliceSelection,
 } from "./cli-options.js";
+import { resolveRunScope } from "./slice-scope.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -20,7 +22,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>]`,
   );
   process.exit(2);
 }
@@ -30,6 +32,7 @@ async function main() {
   let prdDirArg: string | undefined;
   let dryRun = false;
   let migrationValidation: MigrationValidation | undefined;
+  let selectedSliceNumbers: string[] | undefined;
   let maxContractRounds = DEFAULT_MAX_CONTRACT_ROUNDS;
 
   for (let i = 0; i < args.length; i++) {
@@ -37,6 +40,13 @@ async function main() {
       prdDirArg = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
+    } else if (args[i] === "--slices") {
+      try {
+        selectedSliceNumbers = parseSliceSelection(args[++i]);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(2);
+      }
     } else if (args[i] === "--max-contract-rounds") {
       try {
         maxContractRounds = parseMaxContractRounds(args[++i]);
@@ -85,11 +95,16 @@ async function main() {
   console.log(`  Repo: ${repoRoot}`);
   console.log(`  Dry run: ${dryRun}`);
   console.log(`  Max contract rounds: ${maxContractRounds}`);
+  console.log(
+    `  Requested slices: ${selectedSliceNumbers?.join(", ") ?? "all AFK"}`,
+  );
   console.log();
 
   // Parse issues and build DAG
   const slices = parseIssuesMd(issuesPath);
   const dag = buildDAG(slices);
+  const previewScope = resolveRunScope(slices, selectedSliceNumbers);
+  const previewDag = buildDAG(previewScope.selected);
 
   const afkCount = [...dag.slices.values()].filter(
     (s) => s.type === "AFK",
@@ -119,21 +134,22 @@ async function main() {
     const completed = new Set<string>();
     let wave = 1;
     while (true) {
-      const ready = dag.ready(completed);
+      const ready = previewDag.ready(completed);
       if (ready.length === 0) break;
       console.log(`  Wave ${wave}:`);
       for (const id of ready) {
-        const slice = dag.slices.get(id)!;
+        const slice = previewDag.slices.get(id)!;
         console.log(`    #${id} ${slice.title}`);
         completed.add(id);
       }
       wave++;
     }
 
-    const hitl = [...dag.slices.values()].filter((s) => s.type === "HITL");
-    if (hitl.length > 0) {
-      console.log(`\n  Skipped (HITL):`);
-      for (const s of hitl) console.log(`    #${s.ghIssue} ${s.title}`);
+    if (previewScope.skipped.length > 0) {
+      console.log(`\n  Skipped:`);
+      for (const { slice, reason } of previewScope.skipped) {
+        console.log(`    #${slice.ghIssue} ${slice.title} (${reason})`);
+      }
     }
 
     console.log("\nDry run complete. No changes made.");
@@ -169,6 +185,7 @@ async function main() {
       dag,
       dryRun,
       maxContractRounds,
+      selectedSliceNumbers,
       migrationValidation,
       signal: controller.signal,
     });

@@ -10,3 +10,14 @@ export function parseMaxContractRounds(value: string | undefined): number {
   }
   return rounds;
 }
+
+export function parseSliceSelection(value: string | undefined): string[] {
+  if (value === undefined || value.trim() === "") {
+    throw new Error("--slices requires a comma-separated list of slice numbers");
+  }
+  const values = value.split(",").map((part) => part.trim());
+  if (values.some((part) => !/^\d+$/.test(part))) {
+    throw new Error("--slices must contain only comma-separated slice numbers");
+  }
+  return values;
+}

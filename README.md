@@ -42,6 +42,9 @@ npx afk-claude --prd-dir .kiro/specs/contacts-crud
 
 # OR — run (Codex backend)
 npx afk-codex --prd-dir .kiro/specs/contacts-crud
+
+# Run only slices 01-04 (all must be declared AFK)
+npx afk-codex --prd-dir .kiro/specs/contacts-crud --slices 01,02,03,04
 ```
 
 Ctrl-C cancels cleanly: in-flight agents are killed, remaining slices are marked CANCELLED, worktrees are preserved. A second Ctrl-C hard-exits.
@@ -63,6 +66,7 @@ The pipeline reads a markdown file with a dependency table:
 - **Type `AFK`** — the pipeline runs it autonomously.
 - **Type `HITL`** — skipped; reserved for slices that need a human.
 - **Blocked by** — `—` for none, or comma-separated issue numbers for DAG dependencies.
+- `--slices` selects manifest slice numbers, not GitHub issue numbers. Selecting a `HITL` slice is rejected; there is no force override.
 
 ## How It Works
 
@@ -140,6 +144,7 @@ Branch prefixes are namespaced per provider: `afk/` + `feat/` for Kiro, `afk-cla
 npx afk        --prd-dir .kiro/specs/<prd-slug>
 npx afk-claude --prd-dir .kiro/specs/<prd-slug>
 npx afk-codex  --prd-dir .kiro/specs/<prd-slug>
+npx afk-codex  --prd-dir .kiro/specs/<prd-slug> --slices 01,02,03,04
 npx afk        --prd-dir <path> --dry-run
 ```
 
@@ -158,7 +163,9 @@ Convenience scripts for your `package.json`:
 
 ## Resumability
 
-State persists in `.afk/run-state.json`, keyed by PRD slug + provider name. Re-run the same command to resume — completed slices are skipped, stuck slices retry from their artifact state.
+State persists in `.afk/state/<run-slug>.json`, where the run slug includes the provider for non-Kiro backends. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and stuck slices retry from their artifact state.
+
+A retry with no `--slices` argument reuses the persisted scope. Supplying a different selection is rejected so a changed manifest or command cannot silently expand the run. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
 
 ## Artifacts
 
@@ -179,6 +186,8 @@ State persists in `.afk/run-state.json`, keyed by PRD slug + provider name. Re-r
 ```
 
 Logs: `.afk/logs/<run-slug>/` (per-invocation stdout + `run-summary.md` with status table and cost totals). Non-Kiro providers suffix the run slug, for example `<prd-slug>-codex`.
+
+Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. This versioned JSON artifact records run status, selected slice outcomes, skipped slices and reasons, feature branch, final commit SHA, newly added migration paths, GitHub issues to close, and draft PR number/URL when available. The generated draft PR body includes `Closes #<issue>` for each selected slice.
 
 ## Error Handling
 

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, type WriteStream } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { finished } from "node:stream/promises";
-import { type Slice, type DAG } from "./issues-parser.js";
+import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import type { AgentProvider } from "./agent-provider.js";
@@ -17,10 +17,17 @@ import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
   loadRunState,
+  saveRunState,
   saveSliceState,
   isSliceComplete,
   projectForPersistence,
 } from "./run-state.js";
+import { resolveRunScope, type ResolvedRunScope } from "./slice-scope.js";
+import {
+  parseDraftPrNumber,
+  writeTerminalHandoff,
+  type RunStatus,
+} from "./handoff.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -312,6 +319,8 @@ export interface PipelineConfig {
   specsDir: string; // e.g. .kiro/specs/<prd-slug>
   dag: DAG;
   dryRun?: boolean;
+  /** Slice numbers explicitly requested by the CLI, if any. */
+  selectedSliceNumbers?: string[];
   /** Contract negotiation cap before convergence may grant one extra round. */
   maxContractRounds?: number;
   /**
@@ -993,7 +1002,14 @@ async function runSlice(
 export async function runPipeline(
   config: PipelineConfig,
 ): Promise<PipelineResult> {
-  const { repoRoot, prdSlug, prdDir, specsDir, dag, signal } = config;
+  const {
+    repoRoot,
+    prdSlug,
+    prdDir,
+    specsDir,
+    dag: manifestDag,
+    signal,
+  } = config;
   const provider = config.provider ?? kiroProvider;
   const loggerSlug = pipelineRunSlug(prdSlug, provider);
   const logger = new Logger(repoRoot, loggerSlug);
@@ -1014,8 +1030,57 @@ export async function runPipeline(
   // to `pnpm test` when no test script is defined — matches the pre-ship
   // gate's forgiving stance.
   const testCommand = resolveTestCommand(repoRoot) ?? "pnpm test";
+  let scope: ResolvedRunScope | undefined;
+  let baseBranch: string | undefined;
+  let draftPrUrl: string | null = null;
+  let draftPrNumber: number | null = null;
+
+  const emitHandoff = (runStatus: RunStatus): void => {
+    if (!scope) return;
+    const finalCommitSha = git.resolveCommit(repoRoot, featBranch);
+    writeTerminalHandoff(repoRoot, loggerSlug, {
+      version: 1,
+      runStatus,
+      selectedSlices: scope.selected.map((slice) => ({
+        number: slice.number,
+        ghIssue: slice.ghIssue,
+        title: slice.title,
+        type: "AFK",
+        status: logger.getSlice(slice.ghIssue)?.phase ?? "NOT-RUN",
+      })),
+      skippedSlices: scope.skipped.map(({ slice, reason }) => ({
+        number: slice.number,
+        ghIssue: slice.ghIssue,
+        title: slice.title,
+        type: slice.type,
+        reason,
+      })),
+      featureBranch: featBranch,
+      finalCommitSha,
+      migrationFilesCreated:
+        baseBranch && finalCommitSha
+          ? git.listAddedMigrationFiles(repoRoot, baseBranch, featBranch)
+          : [],
+      githubIssuesToClose: scope.selected.map((slice) => slice.ghIssue),
+      draftPr: {
+        number: draftPrNumber ?? parseDraftPrNumber(draftPrUrl),
+        url: draftPrUrl,
+      },
+    });
+  };
 
   try {
+  const runState = loadRunState(repoRoot, loggerSlug);
+  scope = resolveRunScope(
+    [...manifestDag.slices.values()],
+    config.selectedSliceNumbers,
+    runState.scope,
+  );
+  runState.scope = scope.persisted;
+  runState.featureBranch = featBranch;
+  saveRunState(repoRoot, runState);
+  const dag = buildDAG(scope.selected);
+
   // Detect the repo's default branch (main / master / etc.) once so
   // every base reference below — feat-branch init, review-worktree
   // creation, gh pr base — agrees on the same target.
@@ -1028,13 +1093,13 @@ export async function runPipeline(
   // and the planner will operate blind. Falls back to the default branch
   // when no PRD branch is present (e.g., PRD inlined directly on it).
   const prdBranch = `prd/${prdSlug}`;
-  const baseBranch = git.branchExists(repoRoot, prdBranch)
+  baseBranch = git.branchExists(repoRoot, prdBranch)
     ? prdBranch
     : defaultBranch;
   git.createBranch(repoRoot, featBranch, baseBranch);
 
-  // Mark HITL slices as skipped
-  for (const [id, slice] of dag.slices) {
+  // Mark manifest HITL slices as skipped for the human-readable summary.
+  for (const [id, slice] of manifestDag.slices) {
     if (slice.type === "HITL") {
       logger.transitionTo(
         id,
@@ -1053,9 +1118,6 @@ export async function runPipeline(
   // human resolution of the predecessor first.
   const laneCancelled = new Set<string>();
 
-  // Load persistent run state for resumability
-  const runState = loadRunState(repoRoot, loggerSlug);
-  runState.featureBranch = featBranch;
 
   // Restore completed slices from persistent state
   for (const [id, slice] of dag.slices) {
@@ -1389,13 +1451,33 @@ export async function runPipeline(
                 "--title",
                 `feat: ${prdSlug}`,
                 "--body",
-                `Automated implementation of ${prdSlug}.\n\nSee ${specsDir}/ for artifacts (including review-architect.md and review-pm.md).`,
+                `Automated implementation of ${prdSlug}.\n\nSee ${specsDir}/ for artifacts (including review-architect.md and review-pm.md).\n\n${scope.selected.map((slice) => `Closes #${slice.ghIssue}`).join("\n")}`,
               ],
               { cwd: repoRoot, encoding: "utf-8" },
             ).trim();
+            draftPrUrl = prUrl;
+            draftPrNumber = parseDraftPrNumber(prUrl);
             logger.setPrUrl(prUrl);
           } catch {
-            // PR creation is best-effort
+            // Creation may fail because a PR already exists for this branch.
+            // Recover its URL so resumed runs still produce complete handoff data.
+            try {
+              const existing = JSON.parse(
+                execFileSync(
+                  "gh",
+                  ["pr", "view", featBranch, "--json", "number,url"],
+                  { cwd: repoRoot, encoding: "utf-8" },
+                ),
+              ) as { number?: number; url?: string };
+              if (existing.url) {
+                draftPrUrl = existing.url;
+                draftPrNumber =
+                  existing.number ?? parseDraftPrNumber(existing.url);
+                logger.setPrUrl(existing.url);
+              }
+            } catch {
+              // PR creation and lookup are best-effort.
+            }
           }
         }
       }
@@ -1409,6 +1491,9 @@ export async function runPipeline(
     const summary = logger.writeSummary();
     const consoleSummary = logger.formatConsoleSummary();
     const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
+    emitHandoff(
+      signal?.aborted ? "ABORTED" : allSuccess ? "SUCCEEDED" : "FAILED",
+    );
 
     return { success: allSuccess, summary, consoleSummary };
   } catch (err) {
@@ -1416,8 +1501,8 @@ export async function runPipeline(
     // misreport them as RUNNING/PENDING. Status keys we touch here
     // are the only mutation; persistent run-state already reflects
     // whatever progress slice loops were able to record.
-    for (const [id, slice] of dag.slices) {
-      if (slice.type === "HITL") continue;
+    for (const slice of scope?.selected ?? []) {
+      const id = slice.ghIssue;
       const cur = logger.getSlice(id);
       if (!cur) {
         logger.transitionTo(
@@ -1439,6 +1524,11 @@ export async function runPipeline(
       // best effort — never let summary writing eat the original error
     }
     const consoleSummary = logger.formatConsoleSummary();
+    try {
+      emitHandoff("ABORTED");
+    } catch {
+      // Best effort on an already-failing path.
+    }
     const partial: PipelineResult = {
       success: false,
       summary,
