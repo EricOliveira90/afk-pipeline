@@ -2,7 +2,7 @@
 
 `AgentProvider` exposes `parseStreamLine?(line: string): StreamEvent[]`
 as an **optional** method. Providers whose CLI emits a structured stream
-(today: `claude --output-format stream-json`; future: codex `--json`)
+(today: `claude --output-format stream-json` and `codex exec --json`)
 implement it and surface typed **stream events** to the orchestrator.
 Providers whose CLI emits opaque stdout (today: kiro) leave it
 undefined; the orchestrator falls back to treating the stream as plain
@@ -28,10 +28,10 @@ import and wire up two correlated objects for one capability.
 
 **Why `StreamEvent` mirrors Sandcastle's `ParsedStreamEvent` shape:**
 the discriminated union (`text | tool_call | result | session_id`) is
-already battle-tested in `src/AgentProvider.ts`. When codex eventually
-joins as an afk provider, `parseCodexStreamLine` from the parent
-codebase lifts in almost verbatim. Mirroring the shape preserves that
-portability.
+already battle-tested in `src/AgentProvider.ts`. Codex maps
+`thread.started`, agent-message items, and command-execution items into
+this same shape. Error and failed-turn records reject the provider
+invocation instead of becoming ordinary stream events.
 
 **Consumption model:** the orchestrator passes `onStreamEvent` through
 `InvokeOptions`; providers that parse call it for each event during
@@ -49,7 +49,7 @@ those into **slice totals** and **run totals** in run-summary.md.
   — cleaner separation of "how to spawn" vs. "how to parse." Rejected:
   the parser is consumed inside `invoke()`'s stdout loop; splitting it
   onto a second object is friction without benefit while afk has only
-  one stream-parsing provider.
+  two stream-parsing providers.
 - **Return `StreamEvent[]` on `InvokeResult` instead of a real-time
   callback** — simpler signature. Rejected: idle-warning reset
   semantics and per-slice log routing both need events as they

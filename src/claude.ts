@@ -16,8 +16,8 @@ import { killProcessTree } from "./kill-tree.js";
  */
 const FORCE_KILL_GRACE_MS = 10_000;
 
-/** Default model for Claude Code invocations when `InvokeOptions.model` is omitted. */
 const DEFAULT_MODEL = "claude-opus-5";
+const EXPLORER_MODEL = "claude-sonnet-5";
 
 /** Tools whose calls we surface as stream events. Mirrors src/AgentProvider.ts. */
 const TOOL_ARG_FIELDS: Record<string, string> = {
@@ -139,10 +139,11 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     signal,
     onIdleWarning,
     onStreamEvent,
-    model = DEFAULT_MODEL,
   } = options;
 
   const bare = options.bare === true;
+  const model =
+    options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {

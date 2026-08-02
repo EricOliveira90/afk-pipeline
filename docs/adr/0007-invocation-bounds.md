@@ -1,15 +1,15 @@
 # Per-invocation bounds: idle floor + tool-call ceiling
 
-Each Claude/Kiro invocation is bounded by two independent caps:
+Each provider invocation is bounded by two independent caps:
 
 - **Idle floor.** `idleTimeoutMs` defaults to **180_000** (3 min). No
   stdout/stderr for that long → `SIGTERM`. Set in `src/claude.ts` and
-  `src/kiro.ts`.
+  `src/kiro.ts`, and `src/codex.ts`.
 - **Tool-call ceiling.** `maxToolCalls` defaults to **100**. The
   `(N+1)`th tool_call event triggers `SIGTERM`. Enforced in
-  `src/claude.ts` only, where the structured stream gives a clean
-  signal; Kiro doesn't parse a stream (see ADR 0004) so the floor is
-  its only guard.
+  `src/claude.ts` and `src/codex.ts`, where the structured streams give
+  a clean signal. Kiro doesn't parse a stream (see ADR 0004), so the
+  floor is its only guard.
 
 Both errors come back through the same `provider.invoke` rejection path
 that `runSliceNegotiate` and `runSliceExecute` already catch — a capped
@@ -39,8 +39,8 @@ Idle timeout and tool-call ceiling fail in opposite directions:
   progress. Tool-call ceiling catches this. Idle timeout can't,
   because every chunk resets it.
 
-A single cap leaves one surface uncovered. Both together cost two
-counters and ~10 lines of code in `claude.ts`.
+A single cap leaves one surface uncovered. Both structured providers
+therefore count tool calls as their JSONL events arrive.
 
 ## Why these defaults
 
@@ -55,8 +55,9 @@ operations that genuinely need longer.
 tool calls (read source, write code, run tests, write report). 100 is
 ~2.5× the observed ceiling — high enough that legitimate slices don't
 trip it, low enough that a runaway loop stops within seconds rather
-than minutes. Tied to `claude.ts`'s existing `toolCallCount` counter,
-so the cost is one comparison per tool_use event.
+than minutes. Claude counts `tool_use` events and Codex counts
+`command_execution` start events, avoiding a second count when a command
+later completes.
 
 ## Why not semantic loop detection
 

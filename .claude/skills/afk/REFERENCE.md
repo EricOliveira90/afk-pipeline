@@ -2,7 +2,7 @@
 
 ## Artifacts
 
-All slice artifacts live under `.kiro/specs/<prd-slug>/` (or `.claude/specs/` for the Claude backend):
+All slice artifacts live under the directory passed via `--prd-dir`, conventionally `.kiro/specs/<prd-slug>/`:
 
 ```
 .kiro/specs/<prd-slug>/
@@ -47,7 +47,7 @@ main
 ```
 
 - Feature branch created from `prd/<prd-slug>` if it exists, otherwise from default branch.
-- Branch prefixes are namespaced per backend: `afk/` + `feat/` (Kiro), `afk-claude/` + `feat-claude/` (Claude Code).
+- Branch prefixes are namespaced per provider: `afk/` + `feat/` (Kiro), `afk-claude-code/` + `feat-claude-code/` (Claude Code), and `afk-codex/` + `feat-codex/` (Codex).
 - On PASS: slice branch merges into feature branch; worktree removed.
 - On conflict: worktree preserved for manual resolution.
 
@@ -88,24 +88,25 @@ A failed dependency holds its dependents — they won't run until the blocker is
 | Backend | Strengths | Trade-offs |
 |---------|-----------|------------|
 | Kiro | Default; persona-rich agent configs | Opaque stream — no cost/tool-call stats |
-| Claude Code | Streamed JSON; surfaces cost + tool calls in run-summary | Requires `claude` CLI auth; configs in `.claude/agents/` |
+| Claude Code | Streamed JSON; Sonnet explorer, Opus otherwise; cost + tool calls in run-summary | Requires `claude` CLI auth |
+| Codex | Ephemeral JSONL; prompt-only guardians; tool-call stats | Managed CLI auth; fixed `openai.gpt-5.6-sol` model |
 
-Both share the orchestrator, prompts, artifact format, and DAG semantics.
+All share the orchestrator, prompts, artifact format, and DAG semantics. Codex uses medium reasoning effort for explorer and high for every other role. Failures never trigger provider fallback.
 
 ## Guardian Agent Setup
 
-Generic templates ship with this package at `templates/agents/`. Copy them into your project and adapt:
+Generic Kiro templates ship with this package at `templates/agents/`. Copy them into your project and adapt:
 
 ```bash
-mkdir -p .claude/agents   # or .kiro/agents for the Kiro backend
-cp node_modules/afk-pipeline/templates/agents/architect-review.md .claude/agents/
-cp node_modules/afk-pipeline/templates/agents/pm-review.md .claude/agents/
+mkdir -p .kiro/agents
+cp node_modules/afk-pipeline/templates/agents/architect-review.md .kiro/agents/
+cp node_modules/afk-pipeline/templates/agents/pm-review.md .kiro/agents/
 ```
 
-**For Kiro backend** — `.kiro/agents/architect-review.md` and `.kiro/agents/pm-review.md`
-**For Claude Code backend** — `.claude/agents/architect-review.md` and `.claude/agents/pm-review.md`
+**For Kiro** — `.kiro/agents/architect-review.md` and `.kiro/agents/pm-review.md` are loaded by name.
+**For Claude Code and Codex** — no project agent files are required. Complete guardian personas are carried in AFK's prompt templates; Codex treats `agent` and `bare` options as no-ops.
 
-These files define persona, tool grants, and project-specific context for the post-implementation reviewers. The pipeline passes `--agent <name>` to the CLI when invoking guardian roles.
+The Kiro files define persona, tool grants, and project-specific context for post-implementation reviewers. Claude Code and Codex receive the same review contract from the rendered prompt instead.
 
 **Both templates declare a read-only contract** — they write only their verdict file (`review-architect.md` / `review-pm.md`) and never edit source. This is what makes shared-worktree parallelism safe. If you customize a persona to edit source from a guardian, you risk a race between the two reviewers.
 
@@ -118,9 +119,10 @@ Add to your project's `package.json`:
 ```json
 {
   "scripts": {
-    "afk": "afk --issues .kiro/specs/<prd-slug>/issues.md",
-    "afk:claude": "afk-claude --issues .kiro/specs/<prd-slug>/issues.md",
-    "afk:dry": "afk --issues .kiro/specs/<prd-slug>/issues.md --dry-run"
+    "afk": "afk --prd-dir .kiro/specs/<prd-slug>",
+    "afk:claude": "afk-claude --prd-dir .kiro/specs/<prd-slug>",
+    "afk:codex": "afk-codex --prd-dir .kiro/specs/<prd-slug>",
+    "afk:dry": "afk --prd-dir .kiro/specs/<prd-slug> --dry-run"
   }
 }
 ```
@@ -144,6 +146,6 @@ Checklist for a consuming project:
 4. Ensure `package.json` has `typecheck`, `lint`, and `test` (or `test:run`) scripts
 5. Author PRD at `.kiro/specs/<prd-slug>/prd.md`
 6. Slice PRD into issues.md (use the `to-issues` skill or do manually)
-7. Create guardian agent configs (copy from `node_modules/afk-pipeline/templates/agents/` into `.kiro/agents/` or `.claude/agents/`)
-8. Run `npx afk --issues .kiro/specs/<prd-slug>/issues.md --dry-run` to validate
-9. Run `npx afk --issues .kiro/specs/<prd-slug>/issues.md` and walk away
+7. For Kiro, create guardian agent configs in `.kiro/agents/`; Claude Code and Codex use bundled prompts
+8. Run `npx afk --prd-dir .kiro/specs/<prd-slug> --dry-run` to validate
+9. Run the chosen provider command with `--prd-dir .kiro/specs/<prd-slug>`

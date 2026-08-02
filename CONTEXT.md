@@ -1,14 +1,14 @@
 # AFK Pipeline
 
 Automated multi-agent orchestration pipeline that implements PRD slices
-using Kiro CLI agents, with worktree-based branch isolation and
-artifact-driven control flow.
+through Kiro, Claude Code, or Codex, with worktree-based branch isolation
+and artifact-driven control flow.
 
 ## Language
 
 **AFK Pipeline**:
-The orchestration script that runs Kiro agents autonomously to implement
-PRD slices without human interaction.
+The orchestration script that runs provider-backed agents autonomously to
+implement PRD slices without human interaction.
 _Avoid_: "sandbox", "sandcastle", "CI pipeline"
 
 **Slice**:
@@ -34,12 +34,13 @@ _Avoid_: "integration branch", "develop"
 **Agent invocation**:
 A single non-interactive call to an agent system (e.g. `kiro-cli chat
 --no-interactive --trust-all-tools --agent <name>` or `claude -p --agent
-<name>`). The atomic execution unit.
+<name>`, or `codex exec --json --ephemeral ... -`). The atomic execution
+unit.
 _Avoid_: "iteration", "run", "session"
 
 **Agent provider**:
 A pluggable adapter that knows how to invoke a specific agent system
-(Kiro, Claude Code) — builds the spawn command, parses streamed output,
+(Kiro, Claude Code, Codex) — builds the spawn command, parses streamed output,
 and contributes its `name` to branch namespacing. Injected into
 `runPipeline` so backends are swappable without orchestrator changes.
 Stream parsing is opt-in per provider (see **stream event** + ADR 0004).
@@ -59,7 +60,8 @@ producing no stdout. Reached only after many **idle warnings**.
 **Stream event**:
 A typed event parsed from a provider's streamed stdout — one of
 `text`, `tool_call`, `result`, `session_id`. Only providers that emit
-structured streams (e.g. `claude --output-format stream-json`)
+structured streams (e.g. `claude --output-format stream-json` or
+`codex exec --json`)
 implement parsing; for others the stream is treated as opaque stdout.
 See ADR 0004.
 _Avoid_: "agent stream event" (the AgentProvider scope is implicit)

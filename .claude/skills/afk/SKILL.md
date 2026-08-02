@@ -14,23 +14,26 @@ Autonomous multi-agent orchestration: PRD → sliced issues → draft PR. You de
 pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 
 # Preview execution plan
-npx afk --issues .kiro/specs/<prd-slug>/issues.md --dry-run
+npx afk --prd-dir .kiro/specs/<prd-slug> --dry-run
 
 # Run (Kiro backend)
-npx afk --issues .kiro/specs/<prd-slug>/issues.md
+npx afk --prd-dir .kiro/specs/<prd-slug>
 
 # Run (Claude Code backend)
-npx afk-claude --issues .kiro/specs/<prd-slug>/issues.md
+npx afk-claude --prd-dir .kiro/specs/<prd-slug>
+
+# Run (Codex backend)
+npx afk-codex --prd-dir .kiro/specs/<prd-slug>
 ```
 
 ## Prerequisites
 
 - Node.js 22+
 - GitHub CLI authenticated (`gh auth login`)
-- Agent backend authenticated: `kiro-cli login` (Kiro) or `claude login` (Claude Code)
+- Agent provider authenticated: `kiro-cli login` (Kiro), `claude login` (Claude Code), or existing Codex CLI managed authentication
 - `git`, `pnpm` on PATH
 - Project conventions: `CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/CONVENTIONS.md`, `docs/PRODUCT.md`
-- For guardian reviews: `.kiro/agents/{architect-review,pm-review}.md` or `.claude/agents/` equivalent — copy from `templates/agents/` in this package
+- For Kiro guardian reviews: `.kiro/agents/{architect-review,pm-review}.md`. Claude Code and Codex guardians use complete bundled prompts.
 
 ## Input Format (issues.md)
 

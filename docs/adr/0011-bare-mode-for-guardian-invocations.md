@@ -129,3 +129,11 @@ not pre-emptively.
 - Widening `--bare` to other roles. Wait for evidence of hijack
   rather than over-isolate sessions that may legitimately want MCP /
   CLAUDE.md context.
+
+## Codex behavior
+
+Codex has no AFK agent-file mode: `agent` and `bare` are deliberate
+no-ops in `codexProvider`. Guardian identity, required reading, output
+path, and verdict invariant are all carried by AFK's complete prompt
+templates. This avoids a dependency on `.codex/agents` files while
+preserving the same guardian artifact contract.

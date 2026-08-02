@@ -81,6 +81,39 @@ describe("invoke spawn args", () => {
     expect(args).not.toContain("--bare");
   });
 
+  it("uses Sonnet for explorer and Opus for other roles", async () => {
+    const explorerProc = makeFakeProc();
+    const plannerProc = makeFakeProc();
+    spawnMock
+      .mockReturnValueOnce(explorerProc)
+      .mockReturnValueOnce(plannerProc);
+
+    const explorerPromise = invoke({
+      role: "explorer",
+      prompt: "explore",
+      cwd: "/tmp/x",
+    });
+    explorerProc.emit("exit", 0);
+    await explorerPromise;
+
+    const plannerPromise = invoke({
+      role: "planner",
+      prompt: "plan",
+      cwd: "/tmp/x",
+    });
+    plannerProc.emit("exit", 0);
+    await plannerPromise;
+
+    const explorerArgs = spawnMock.mock.calls[0]![1] as string[];
+    const plannerArgs = spawnMock.mock.calls[1]![1] as string[];
+    expect(explorerArgs[explorerArgs.indexOf("--model") + 1]).toBe(
+      "claude-sonnet-5",
+    );
+    expect(plannerArgs[plannerArgs.indexOf("--model") + 1]).toBe(
+      "claude-opus-5",
+    );
+  });
+
   it("bare invocation passes --bare, drops --agent, and adds --tools default", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);

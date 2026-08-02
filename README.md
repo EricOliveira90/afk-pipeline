@@ -17,10 +17,11 @@ pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 - One of the supported agent backends, authenticated:
   - [Kiro CLI](https://kiro.dev) — `kiro-cli login` (default backend)
   - [Claude Code CLI](https://github.com/anthropics/claude-code) — `claude login`
+  - [Codex CLI](https://github.com/openai/codex) — use the CLI's existing managed authentication
 - `git`, `pnpm` on PATH
 - Repo conventions:
   - `CONTEXT.md` and `docs/{ARCHITECTURE,CONVENTIONS,PRODUCT}.md` for the agents to read
-  - For **guardian reviews**: `.kiro/agents/<name>.md` (Kiro) or `.claude/agents/<name>.md` (Claude Code) — copy from `templates/agents/`, see [Setting up guardian reviews](#setting-up-guardian-reviews)
+  - For **Kiro guardian reviews**: `.kiro/agents/<name>.md` — copy from `templates/agents/`, see [Setting up guardian reviews](#setting-up-guardian-reviews). Claude Code and Codex use complete bundled prompt templates.
 
 ## Quick Start
 
@@ -31,13 +32,16 @@ pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 #    (the to-issues skill can do this, or do it manually)
 
 # 3. Preview the execution plan
-npx afk --issues .kiro/specs/contacts-crud/issues.md --dry-run
+npx afk --prd-dir .kiro/specs/contacts-crud --dry-run
 
 # 4. Run (Kiro backend)
-npx afk --issues .kiro/specs/contacts-crud/issues.md
+npx afk --prd-dir .kiro/specs/contacts-crud
 
 # OR — run (Claude Code backend)
-npx afk-claude --issues .kiro/specs/contacts-crud/issues.md
+npx afk-claude --prd-dir .kiro/specs/contacts-crud
+
+# OR — run (Codex backend)
+npx afk-codex --prd-dir .kiro/specs/contacts-crud
 ```
 
 Ctrl-C cancels cleanly: in-flight agents are killed, remaining slices are marked CANCELLED, worktrees are preserved. A second Ctrl-C hard-exits.
@@ -128,14 +132,15 @@ main
       └── afk/contacts-crud-slice-04-contact-csv-import
 ```
 
-Branch prefixes are namespaced per provider (`afk/` + `feat/` for Kiro, `afk-claude/` + `feat-claude/` for Claude Code) so both can run on the same PRD without collisions.
+Branch prefixes are namespaced per provider: `afk/` + `feat/` for Kiro, `afk-claude-code/` + `feat-claude-code/` for Claude Code, and `afk-codex/` + `feat-codex/` for Codex. Logs and run state use the same provider namespace, so providers can run on the same PRD without collisions.
 
 ## CLI Usage
 
 ```bash
-npx afk        --issues .kiro/specs/<prd-slug>/issues.md
-npx afk-claude --issues .kiro/specs/<prd-slug>/issues.md
-npx afk        --issues <path> --dry-run
+npx afk        --prd-dir .kiro/specs/<prd-slug>
+npx afk-claude --prd-dir .kiro/specs/<prd-slug>
+npx afk-codex  --prd-dir .kiro/specs/<prd-slug>
+npx afk        --prd-dir <path> --dry-run
 ```
 
 Convenience scripts for your `package.json`:
@@ -143,9 +148,10 @@ Convenience scripts for your `package.json`:
 ```json
 {
   "scripts": {
-    "afk": "afk --issues .kiro/specs/<prd-slug>/issues.md",
-    "afk:claude": "afk-claude --issues .kiro/specs/<prd-slug>/issues.md",
-    "afk:dry": "afk --issues .kiro/specs/<prd-slug>/issues.md --dry-run"
+    "afk": "afk --prd-dir .kiro/specs/<prd-slug>",
+    "afk:claude": "afk-claude --prd-dir .kiro/specs/<prd-slug>",
+    "afk:codex": "afk-codex --prd-dir .kiro/specs/<prd-slug>",
+    "afk:dry": "afk --prd-dir .kiro/specs/<prd-slug> --dry-run"
   }
 }
 ```
@@ -172,7 +178,7 @@ State persists in `.afk/run-state.json`, keyed by PRD slug + provider name. Re-r
 └── review-pm.md                 # post-impl PM review
 ```
 
-Logs: `.afk/logs/<prd-slug>/` (per-invocation stdout + `run-summary.md` with status table and cost totals).
+Logs: `.afk/logs/<run-slug>/` (per-invocation stdout + `run-summary.md` with status table and cost totals). Non-Kiro providers suffix the run slug, for example `<prd-slug>-codex`.
 
 ## Error Handling
 
@@ -203,12 +209,12 @@ A failed dependency holds its dependents — fix the broken slice and re-run.
 | evaluator (QA) | `prompts/evaluator-qa.md` |
 | generator | `prompts/generator.md` |
 
-**Agent-config roles** — post-implementation guardians load persona + tool grants from your project:
+**Guardian roles** — post-implementation reviews always receive complete prompt templates. Kiro also loads project agent configs; Claude Code runs guardians in `--bare` mode and Codex ignores `agent`/`bare`, so neither requires project agent files:
 
 | Agent | Location |
 |-------|----------|
-| architect-review | `.kiro/agents/architect-review.md` or `.claude/agents/architect-review.md` |
-| pm-review | `.kiro/agents/pm-review.md` or `.claude/agents/pm-review.md` |
+| architect-review | `prompts/architect-review.md`; optional Kiro config at `.kiro/agents/architect-review.md` |
+| pm-review | `prompts/pm-review.md`; optional Kiro config at `.kiro/agents/pm-review.md` |
 
 ## Setting up guardian reviews
 
@@ -223,15 +229,15 @@ first AFK run.
 
 ### The contract (what AFK actually requires)
 
-Two files, in the consuming project:
+Kiro expects two files in the consuming project:
 
-- `.claude/agents/architect-review.md` — guardian persona for the
-  architect review. Loaded by Claude Code via `claude --agent`.
-- `.claude/agents/pm-review.md` — guardian persona for the PM review.
+- `.kiro/agents/architect-review.md` — guardian persona for the architect review.
+- `.kiro/agents/pm-review.md` — guardian persona for the PM review.
 
-That's it. AFK passes `{{SPECS_DIR}}` and `{{RELEVANT_FILES}}` (from
-`prd.md`'s `## Relevant Files` section) to both prompts. The persona
-files decide what else to read.
+Claude Code and Codex do not require these files. Their guardians use
+AFK's complete `prompts/architect-review.md` and `prompts/pm-review.md`
+templates. AFK passes `{{SPECS_DIR}}` and `{{RELEVANT_FILES}}` (from
+`prd.md`'s `## Relevant Files` section) to both prompts.
 
 ### Recommended doc surface
 
@@ -248,13 +254,13 @@ If your project uses different paths, edit the templates to match.
 
 ### Templates
 
-Copy from this package's `templates/agents/` into your project's
-`.claude/agents/`:
+For Kiro, copy from this package's `templates/agents/` into your project's
+`.kiro/agents/`:
 
 ```bash
-mkdir -p .claude/agents
-cp node_modules/afk-pipeline/templates/agents/architect-review.md .claude/agents/
-cp node_modules/afk-pipeline/templates/agents/pm-review.md .claude/agents/
+mkdir -p .kiro/agents
+cp node_modules/afk-pipeline/templates/agents/architect-review.md .kiro/agents/
+cp node_modules/afk-pipeline/templates/agents/pm-review.md .kiro/agents/
 ```
 
 Then customize: replace doc paths if your project differs, and tune
@@ -274,11 +280,11 @@ off (only `SHIP` and `ACCEPT-WITH-NOTES` open a PR).
 
 ### Pre-flight checklist
 
-Before your first `npx afk-claude` run with reviews enabled:
+Before your first run with reviews enabled:
 
-- [ ] `.claude/agents/architect-review.md` exists and references your
+- [ ] For Kiro, `.kiro/agents/architect-review.md` exists and references your
       architecture/conventions docs.
-- [ ] `.claude/agents/pm-review.md` exists and references your
+- [ ] For Kiro, `.kiro/agents/pm-review.md` exists and references your
       product/PRD docs.
 - [ ] Both personas declare they only write `review-architect.md` /
       `review-pm.md` and do NOT edit source. (Templates do this.)
@@ -291,9 +297,10 @@ Before your first `npx afk-claude` run with reviews enabled:
 | Backend | Strengths | Trade-offs |
 |---------|-----------|------------|
 | Kiro | Default; persona-rich agent configs | Opaque stream — no cost/tool-call stats |
-| Claude Code | Streamed JSON; surfaces cost + tool calls in run-summary.md | Requires `claude` CLI auth; agent configs in `.claude/agents/` |
+| Claude Code | Streamed JSON; Opus for most roles and Sonnet for explorer; cost + tool calls in run-summary.md | Requires `claude` CLI auth |
+| Codex | Ephemeral JSONL sessions; tool-call stats; prompt-only guardians | Requires managed CLI auth; fixed `openai.gpt-5.6-sol` model |
 
-Both share the orchestrator, prompts, artifact format, and DAG semantics.
+All providers share the orchestrator, prompts, artifact format, and DAG semantics. Codex runs `explorer` at medium reasoning effort and every other role at high effort. Provider failures are explicit and never fall back to another provider.
 
 ## Claude Code Skill
 
@@ -310,6 +317,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0005** — File-overlap lanes for merge safety
 - **ADR 0006** — Default branch detection cascade
 - **ADR 0007** — Invocation bounds (tool-call cap + idle timeout)
+- **ADR 0013** — Codex provider command, model policy, prompts, and JSONL behavior
 
 ## Development
 
@@ -318,8 +326,12 @@ pnpm install
 pnpm build          # compile to dist/
 pnpm test           # run tests
 pnpm typecheck      # type-check without emitting
-pnpm dev -- --issues <path>         # run locally via tsx (Kiro)
-pnpm dev:claude -- --issues <path>  # run locally via tsx (Claude Code)
+pnpm dev -- --prd-dir <path>         # run locally via tsx (Kiro)
+pnpm dev:claude -- --prd-dir <path>  # run locally via tsx (Claude Code)
+pnpm dev:codex -- --prd-dir <path>   # run locally via tsx (Codex)
+
+# Opt-in real Codex CLI smoke test (creates a temporary Git repository)
+AFK_CODEX_E2E=1 pnpm test src/codex.e2e.test.ts
 ```
 
 ## Glossary

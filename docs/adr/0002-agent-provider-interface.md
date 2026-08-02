@@ -2,12 +2,13 @@
 
 We collapsed the duplicated `kiro.ts` and `claude.ts` invokers into a
 single `AgentProvider` interface, mirroring Sandcastle's pattern. Each
-provider declares a `name` (`"kiro"`, `"claude-code"`), an `invoke()`
+provider declares a `name` (`"kiro"`, `"claude-code"`, `"codex"`), an `invoke()`
 function that handles the spawn / idle-timer / stream parsing, and any
 provider-specific stdout parsing (e.g. cost extraction for Claude). The
 orchestrator no longer carries a `Backend` discriminator — provider
 identity flows through `provider.name`, including for branch namespacing
-(`afk/<slug>` for Kiro, `afk-claude-code/<slug>` for Claude).
+(`afk/<slug>` for Kiro, `afk-claude-code/<slug>` for Claude, and
+`afk-codex/<slug>` for Codex).
 
 **Why one interface instead of two modules:** the two invokers were ~90%
 identical (spawn, idle reset, log streaming, exit handling). Adding a
@@ -38,3 +39,10 @@ orchestrator API.
 - **Drop per-backend namespacing entirely** — simplest, but breaks
   resumability for anyone with both Kiro and Claude branches in flight.
   Rejected: cost of the breaking change > savings.
+
+## Codex addition
+
+Codex uses the same interface and the stable name `codex`. That name
+isolates slice branches, feature branches, logs, and run state. Codex
+provider errors reject `invoke()` directly; the orchestrator never falls
+back silently to Kiro or Claude.

@@ -44,9 +44,9 @@ export interface InvokeOptions {
   signal?: AbortSignal;
   /**
    * Model alias or full ID to invoke this agent with. Provider-specific:
-   * only the `claude` provider reads this (passed through as `--model`);
-   * other providers silently ignore it. Defaults to the provider's own
-   * default when omitted.
+   * only the `claude` provider reads this (passed through as `--model`).
+   * Codex and Kiro silently ignore it. Defaults to the provider's own
+   * role-based policy when omitted.
    */
   model?: string;
   /**
@@ -57,8 +57,8 @@ export interface InvokeOptions {
    * coerce the agent into emitting fake `<tool_use>` text and
    * exiting after one turn — see ADR 0011. The persona must be
    * carried in the prompt; `agent` is ignored. Provider-specific:
-   * only the `claude` provider implements this; other providers
-   * silently ignore it.
+   * only the `claude` provider implements this; Codex and Kiro silently
+   * ignore it.
    */
   bare?: boolean;
   /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */

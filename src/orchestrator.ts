@@ -658,7 +658,6 @@ export async function runSliceNegotiate(
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
         role: "explorer",
-        model: "claude-sonnet-5",
         prompt: renderPrompt("explorer", {
           GH_ISSUE: slice.ghIssue,
           TITLE: slice.title,
