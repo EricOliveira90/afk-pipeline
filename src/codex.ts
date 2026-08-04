@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -25,6 +28,65 @@ function eventError(obj: JsonObject): string | undefined {
   if (typeof obj.message === "string") return obj.message;
   if (typeof error?.message === "string") return error.message;
   return undefined;
+}
+
+/** Find an AWS profile whose credential_process delegates to managed Codex. */
+export function findManagedCodexAwsProfile(
+  awsConfig: string,
+): string | undefined {
+  let profile: string | undefined;
+
+  for (const rawLine of awsConfig.split(/\r?\n/)) {
+    const section = rawLine.match(/^\s*\[(?:profile\s+)?([^\]]+)\]\s*$/i);
+    if (section) {
+      profile = section[1]?.trim();
+      continue;
+    }
+
+    const setting = rawLine.match(/^\s*credential_process\s*=\s*(.+?)\s*$/i);
+    if (
+      profile &&
+      setting?.[1] &&
+      /\bcodex(?:\.exe)?["']?\s+credential-process(?:\s|$)/i.test(setting[1])
+    ) {
+      return profile;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Toolbox's top-level Codex wrapper can use managed credentials directly, but
+ * nested codex processes need an AWS SDK source they can inherit. Select the
+ * generated credential_process profile without resolving or copying secrets.
+ */
+export function resolveCodexSpawnEnv(
+  env: NodeJS.ProcessEnv,
+  readConfig: (path: string) => string = (path) =>
+    readFileSync(path, "utf-8"),
+): NodeJS.ProcessEnv {
+  const hasCredentialSource = Boolean(
+    env.AWS_PROFILE ||
+      env.AWS_DEFAULT_PROFILE ||
+      env.AWS_BEARER_TOKEN_BEDROCK ||
+      (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY) ||
+      (env.AWS_WEB_IDENTITY_TOKEN_FILE && env.AWS_ROLE_ARN) ||
+      env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI ||
+      env.AWS_CONTAINER_CREDENTIALS_FULL_URI,
+  );
+  if (hasCredentialSource) {
+    return env;
+  }
+
+  const configPath =
+    env.AWS_CONFIG_FILE ?? join(homedir(), ".aws", "config");
+  try {
+    const profile = findManagedCodexAwsProfile(readConfig(configPath));
+    return profile ? { ...env, AWS_PROFILE: profile } : env;
+  } catch {
+    return env;
+  }
 }
 
 export class CodexProviderError extends Error {
@@ -148,6 +210,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     ];
     const proc = spawn("codex", args, {
       cwd,
+      env: resolveCodexSpawnEnv(process.env),
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
     });

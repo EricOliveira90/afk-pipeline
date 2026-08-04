@@ -20,11 +20,16 @@ codex exec --json --ephemeral \
   -c model_reasoning_effort="<effort>" -
 ```
 
-The prompt is written to stdin. AFK does not inject API keys or other
-credentials. `explorer` uses `medium` reasoning effort; every other role
-uses `high`. The model ID is passed literally. `InvokeOptions.model`,
-`agent`, and `bare` are ignored by this provider so callers cannot drift
-from this policy.
+The prompt is written to stdin. AFK does not inject API keys or resolved
+credentials. If no inheritable Bedrock credential environment variable is
+present, AFK looks in the shared AWS config for the managed Codex
+`credential_process` profile and sets `AWS_PROFILE` for the child. This is
+required because Toolbox's direct managed authentication is not inherited by
+nested `codex exec` processes. Explicit AWS profiles, Bedrock API keys, static
+environment credentials, web identity, and container credentials take
+precedence. `explorer` uses `medium` reasoning effort; every other role uses
+`high`. The model ID is passed literally. `InvokeOptions.model`, `agent`, and
+`bare` are ignored by this provider so callers cannot drift from this policy.
 
 `--ephemeral` makes every invocation independent. The full-trust flag is
 consistent with AFK's worktree isolation model and lets generator and

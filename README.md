@@ -17,7 +17,7 @@ pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 - One of the supported agent backends, authenticated:
   - [Kiro CLI](https://kiro.dev) — `kiro-cli login` (default backend)
   - [Claude Code CLI](https://github.com/anthropics/claude-code) — `claude login`
-  - [Codex CLI](https://github.com/openai/codex) — use the CLI's existing managed authentication
+  - [Codex CLI](https://github.com/openai/codex) — use managed authentication or an inheritable Bedrock source (`AWS_PROFILE`, Bedrock API key, or AWS environment credentials). AFK automatically selects a managed Codex `credential_process` profile from the shared AWS config when available.
 - `git`, `pnpm` on PATH
 - Repo conventions:
   - `CONTEXT.md` and `docs/{ARCHITECTURE,CONVENTIONS,PRODUCT}.md` for the agents to read

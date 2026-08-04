@@ -12,9 +12,11 @@ vi.mock("node:child_process", () => ({
 
 const {
   codexProvider,
+  findManagedCodexAwsProfile,
   handleStreamEvent,
   invoke,
   parseStreamLine,
+  resolveCodexSpawnEnv,
 } = await import("./codex.js");
 
 interface FakeProc extends EventEmitter {
@@ -146,6 +148,9 @@ describe("Codex command construction", () => {
       expect.objectContaining({ cwd: "/tmp/repo" }),
     );
     expect(proc.stdinText).toBe("prompt with & shell characters");
+    expect(spawnMock.mock.calls[0]![2]).toEqual(
+      expect.objectContaining({ env: expect.any(Object) }),
+    );
     const args = spawnMock.mock.calls[0]![1] as string[];
     expect(args).not.toContain("ignored-agent");
     expect(args).not.toContain("ignored-model");
@@ -176,6 +181,65 @@ describe("Codex command construction", () => {
     expect(spawnMock.mock.calls[1]![1]).toContain(
       'model_reasoning_effort="high"',
     );
+  });
+});
+
+describe("Codex Bedrock credential inheritance", () => {
+  it("finds a managed Codex credential_process profile", () => {
+    expect(
+      findManagedCodexAwsProfile(`
+[profile unrelated]
+credential_process = helper credentials
+
+[profile managed-codex]
+credential_process = "C:\\Program Files\\Codex\\codex.exe" credential-process
+`),
+    ).toBe("managed-codex");
+  });
+
+  it("selects the managed profile when no inheritable source is set", () => {
+    const readConfig = vi.fn(() => `
+[profile managed-codex]
+credential_process = codex credential-process
+`);
+
+    expect(
+      resolveCodexSpawnEnv(
+        { AWS_CONFIG_FILE: "/custom/aws-config", OTHER: "kept" },
+        readConfig,
+      ),
+    ).toEqual({
+      AWS_CONFIG_FILE: "/custom/aws-config",
+      AWS_PROFILE: "managed-codex",
+      OTHER: "kept",
+    });
+    expect(readConfig).toHaveBeenCalledWith("/custom/aws-config");
+  });
+
+  it.each([
+    { AWS_PROFILE: "configured" },
+    { AWS_DEFAULT_PROFILE: "configured" },
+    { AWS_BEARER_TOKEN_BEDROCK: "configured" },
+    { AWS_ACCESS_KEY_ID: "id", AWS_SECRET_ACCESS_KEY: "secret" },
+    { AWS_WEB_IDENTITY_TOKEN_FILE: "token", AWS_ROLE_ARN: "role" },
+    { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/credentials" },
+    { AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://credentials" },
+  ])("preserves an existing credential source: $env", (env) => {
+    const readConfig = vi.fn();
+
+    expect(resolveCodexSpawnEnv(env, readConfig)).toBe(env);
+    expect(readConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a partial static credential as usable", () => {
+    const env = { AWS_ACCESS_KEY_ID: "id-only" };
+
+    expect(
+      resolveCodexSpawnEnv(
+        env,
+        () => `[profile managed]\ncredential_process = codex credential-process`,
+      ),
+    ).toEqual({ ...env, AWS_PROFILE: "managed" });
   });
 });
 
