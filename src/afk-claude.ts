@@ -13,6 +13,7 @@ import {
   parseSliceSelection,
 } from "./cli-options.js";
 import { resolveRunScope } from "./slice-scope.js";
+import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { claudeProvider } from "./claude.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
@@ -23,13 +24,21 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>]`,
+    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
   );
   process.exit(2);
 }
 
 async function main() {
   const args = process.argv.slice(2);
+  let runtimeOptions;
+  try {
+    runtimeOptions = parsePipelineRuntimeOptions(args);
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(2);
+  }
+
   let prdDirArg: string | undefined;
   let dryRun = false;
   let migrationValidation: MigrationValidation | undefined;
@@ -184,6 +193,7 @@ async function main() {
       provider: claudeProvider,
       migrationValidation,
       signal: controller.signal,
+      ...runtimeOptions,
     });
   } catch (err) {
     process.off("SIGINT", onSigint);

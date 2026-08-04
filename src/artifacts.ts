@@ -11,6 +11,7 @@ import { join, relative } from "node:path";
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
 export type EvaluatorVerdict = "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
+export type QAFailureClass = "NONE" | "IMPLEMENTATION" | "INFRASTRUCTURE";
 export type ReviewVerdict =
   | "SHIP"
   | "ACCEPT-WITH-NOTES"
@@ -88,6 +89,28 @@ export function readQAVerdict(qaReportPath: string): QAVerdict {
   if (v === "PASS") return "PASS";
   if (v === "FAIL") return "FAIL";
   return "UNKNOWN";
+}
+
+export function readQAFailureClass(qaReportPath: string): QAFailureClass {
+  const content = readIfExists(qaReportPath);
+  if (!content) return "IMPLEMENTATION";
+  const value = matchField(
+    content,
+    /\*\*Failure class:\*\*\s*(NONE|IMPLEMENTATION|INFRASTRUCTURE)/i,
+  )?.toUpperCase();
+  if (value === "NONE" || value === "INFRASTRUCTURE") return value;
+  // Backwards-compatible and fail-closed: an unclassified FAIL remains an
+  // implementation failure and still consumes one of the three QA rounds.
+  return "IMPLEMENTATION";
+}
+
+export function archiveQAReport(
+  reportPath: string,
+  archivePath: string,
+): boolean {
+  if (!existsSync(reportPath)) return false;
+  cpSync(reportPath, archivePath);
+  return true;
 }
 
 export function readQARound(qaReportPath: string): number {

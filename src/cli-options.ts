@@ -21,3 +21,79 @@ export function parseSliceSelection(value: string | undefined): string[] {
   }
   return values;
 }
+
+export interface PipelineRuntimeOptions {
+  commandTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
+  infrastructureRetries?: number;
+  sharedPreview?: {
+    verifyMigrationCommand: string;
+    applyMigrationCommand: string;
+    lockPath?: string;
+  };
+}
+
+function optionValue(args: readonly string[], flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`${flag} requires a value`);
+  }
+  return value;
+}
+
+function parseIntegerOption(
+  value: string | undefined,
+  flag: string,
+  allowZero: boolean,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${flag} must be ${allowZero ? "a non-negative" : "a positive"} integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || (allowZero ? parsed < 0 : parsed < 1)) {
+    throw new Error(`${flag} must be ${allowZero ? "a non-negative" : "a positive"} integer`);
+  }
+  return parsed;
+}
+
+/** Parse runtime controls shared by all AFK provider CLIs. */
+export function parsePipelineRuntimeOptions(
+  args: readonly string[],
+): PipelineRuntimeOptions {
+  const commandTimeoutMs = parseIntegerOption(
+    optionValue(args, "--command-timeout-ms"),
+    "--command-timeout-ms",
+    false,
+  );
+  const heartbeatIntervalMs = parseIntegerOption(
+    optionValue(args, "--heartbeat-interval-ms"),
+    "--heartbeat-interval-ms",
+    false,
+  );
+  const infrastructureRetries = parseIntegerOption(
+    optionValue(args, "--infrastructure-retries"),
+    "--infrastructure-retries",
+    true,
+  );
+  const verifyMigrationCommand = optionValue(args, "--preview-verify-command");
+  const applyMigrationCommand = optionValue(args, "--preview-apply-command");
+  if ((verifyMigrationCommand === undefined) !== (applyMigrationCommand === undefined)) {
+    throw new Error("--preview-verify-command and --preview-apply-command must be provided together");
+  }
+
+  return {
+    commandTimeoutMs,
+    heartbeatIntervalMs,
+    infrastructureRetries,
+    sharedPreview: verifyMigrationCommand && applyMigrationCommand
+      ? {
+          verifyMigrationCommand,
+          applyMigrationCommand,
+          lockPath: optionValue(args, "--preview-lock-path"),
+        }
+      : undefined,
+  };
+}

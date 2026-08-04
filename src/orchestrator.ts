@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, type WriteStream } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, type WriteStream } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { finished } from "node:stream/promises";
 import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
@@ -16,6 +16,10 @@ import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
+  runHeartbeatCommand,
+  withCrossProcessLock,
+} from "./command-runtime.js";
+import {
   loadRunState,
   saveRunState,
   saveSliceState,
@@ -31,6 +35,10 @@ import {
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
+const DEFAULT_INFRASTRUCTURE_RETRIES = 2;
+const DEFAULT_COMMAND_TIMEOUT_MS = 600_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
+
 
 async function closeAgentLog(log: WriteStream): Promise<void> {
   log.end();
@@ -312,6 +320,15 @@ function sliceTouchedMigrations(
   }
 }
 
+export interface SharedPreviewConfig {
+  /** Deterministic command that validates migrations before remote apply. */
+  verifyMigrationCommand: string;
+  /** The only command allowed to apply migrations to the shared preview. */
+  applyMigrationCommand: string;
+  /** Defaults to .afk/locks/shared-preview.lock under repoRoot. */
+  lockPath?: string;
+}
+
 export interface PipelineConfig {
   repoRoot: string;
   prdSlug: string;
@@ -336,6 +353,15 @@ export interface PipelineConfig {
    * migrations. See {@link MigrationValidation}.
    */
   migrationValidation?: MigrationValidation;
+  /** Inactivity timeout for agents and central preview commands. */
+  commandTimeoutMs?: number;
+  /** Activity polling and lock-heartbeat interval. */
+  heartbeatIntervalMs?: number;
+  /** Retries per QA stage that do not consume implementation rounds. */
+  infrastructureRetries?: number;
+  /** Enables remote UAT after deterministic QA. */
+  sharedPreview?: SharedPreviewConfig;
+
   /**
    * Cancellation signal. When fired (typically from SIGINT), in-flight
    * agent invocations are killed and remaining slices are marked
@@ -475,6 +501,8 @@ export interface SliceContext {
    * would later reject. Empty string when no scripts are defined.
    */
   sanityCommandsBlock: string;
+  /** Handoffs from declared dependency slices only. */
+  siblingHandoffsBlock: string;
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0],
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -514,6 +542,15 @@ export function makeSliceContext(
     sanityCommands.length > 0
       ? sanityCommands.map((c) => `- \`${c}\``).join("\n")
       : "(no typecheck/lint/test scripts defined in this project — skip)";
+  const siblingHandoffs = slice.blockedBy
+    .map((issue) => config.dag.slices.get(issue))
+    .filter((dependency): dependency is Slice => dependency !== undefined)
+    .map((dependency) =>
+      `${specsDir.replace(/\\/g, "/")}/slices/${dependency.number}-${slugify(dependency.title)}/handoff.md`,
+    );
+  const siblingHandoffsBlock = siblingHandoffs.length > 0
+    ? siblingHandoffs.map((path) => `- \`${path}\``).join("\n")
+    : "(none — this slice declares no AFK dependencies)";
 
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
     const result = await provider.invoke({
@@ -543,6 +580,7 @@ export function makeSliceContext(
     tag,
     testCommand,
     sanityCommandsBlock,
+    siblingHandoffsBlock,
     invoke,
   };
 }
@@ -847,83 +885,183 @@ export async function runSliceNegotiate(
  * generator loop. Does **not** merge the slice branch into the feature
  * branch — that's the orchestrator's job, under a mutex.
  */
-export async function runSliceExecute(
+export type QAStageResult =
+  | { outcome: "PASS"; report: string }
+  | { outcome: "IMPLEMENTATION"; report: string };
+
+export async function runQAStage(
   ctx: SliceContext,
-): Promise<"PASS" | "STUCK" | "ERROR" | "CANCELLED"> {
-  const { config, slice, logger, featBranch, relevantFilesBlock, invoke } = ctx;
-  const { signal } = config;
+  round: number,
+  stage: "deterministic" | "shared-preview",
+  previousReports: readonly string[],
+): Promise<QAStageResult> {
+  const { config, slice, logger, invoke } = ctx;
+  const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
+  if (!Number.isSafeInteger(infrastructureRetries) || infrastructureRetries < 0) {
+    throw new Error("infrastructureRetries must be a non-negative integer");
+  }
+  const commandTimeoutMs = config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const heartbeatIntervalMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+  const reportName = stage === "deterministic" ? "qa-report.md" : "uat-report.md";
+  const reportPath = join(ctx.absSliceDir, reportName);
+  const reportDisplayPath = `${ctx.relSliceDir}/${reportName}`;
+  const scope = stage === "deterministic"
+    ? "Deterministic slice QA only. Do not access a shared preview database or run remote UAT."
+    : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
 
-  try {
-    const qaPath = join(ctx.absSliceDir, "qa-report.md");
+  for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
+    const invokeEvaluator = async () => {
+      rmSync(reportPath, { force: true });
+      if (stage === "shared-preview") {
+        const preview = config.sharedPreview!;
+        const commandOptions = {
+          cwd: ctx.worktreeDir,
+          inactivityTimeoutMs: commandTimeoutMs,
+          heartbeatIntervalMs,
+          signal: config.signal,
+          onOutput: (text: string) => process.stderr.write(text),
+        };
+        await runHeartbeatCommand(preview.verifyMigrationCommand, commandOptions);
+        await runHeartbeatCommand(preview.applyMigrationCommand, commandOptions);
+      }
 
-    for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
-      logger.bumpGenRound(slice.ghIssue, round);
-
-      console.error(
-        `${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
-      );
-      const genLog = logger.agentLog(slice.number, "generator", round);
-      await invoke({
-        role: "generator",
-        prompt: renderPrompt("generator", {
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: relevantFilesBlock,
-          TEST_COMMAND: ctx.testCommand,
-          RETRY_NOTE:
-            round > 1
-              ? `This is retry round ${round}. Read ${ctx.relSliceDir}/qa-report.md for findings to fix.`
-              : "",
-        }),
-        cwd: ctx.worktreeDir,
-        logStream: genLog,
-        idleTimeoutMs: SLOW_AGENT_IDLE_TIMEOUT_MS,
-      }).finally(() => closeAgentLog(genLog));
-
-      console.error(
-        `${ctx.tag}: evaluating QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
-      );
-      const evalLog = logger.agentLog(slice.number, "evaluator-qa", round);
+      const logRole = stage === "deterministic" ? "evaluator-qa" : "evaluator-uat";
+      const evalLog = logger.agentLog(slice.number, logRole, round * 10 + attempt);
       await invoke({
         role: "evaluator-qa",
         prompt: renderPrompt("evaluator-qa", {
           SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: relevantFilesBlock,
+          RELEVANT_FILES: ctx.relevantFilesBlock,
+          SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
           TEST_COMMAND: ctx.testCommand,
           SANITY_COMMANDS: ctx.sanityCommandsBlock,
+          QA_SCOPE: scope,
+          REPORT_PATH: reportDisplayPath,
+          PREVIOUS_QA_REPORTS: previousReports.length > 0
+            ? previousReports.map((path) => `- \`${path}\``).join("\n")
+            : "(none)",
+          COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
+          HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
         }),
         cwd: ctx.worktreeDir,
         logStream: evalLog,
-        idleTimeoutMs: SLOW_AGENT_IDLE_TIMEOUT_MS,
+        idleTimeoutMs: commandTimeoutMs,
+        idleWarningIntervalMs: heartbeatIntervalMs,
       }).finally(() => closeAgentLog(evalLog));
+    };
+
+    try {
+      if (stage === "shared-preview") {
+        const lockPath = config.sharedPreview!.lockPath ??
+          join(config.repoRoot, ".afk", "locks", "shared-preview.lock");
+        await withCrossProcessLock(
+          lockPath,
+          {
+            acquireTimeoutMs: commandTimeoutMs,
+            heartbeatIntervalMs,
+            staleAfterMs: commandTimeoutMs * 2,
+            signal: config.signal,
+          },
+          invokeEvaluator,
+        );
+      } else {
+        await invokeEvaluator();
+      }
+    } catch (error) {
+      if (isCancelled(error, config.signal)) throw error;
+      if (attempt <= infrastructureRetries) {
+        console.error(`${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`);
+        continue;
+      }
+      throw new Error(
+        `${stage} infrastructure failed after ${attempt} attempt(s): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const archiveName = stage === "deterministic"
+      ? `qa-report-r${round}-a${attempt}.md`
+      : `uat-report-r${round}-a${attempt}.md`;
+    const archivePath = join(ctx.absSliceDir, archiveName);
+    if (!artifacts.archiveQAReport(reportPath, archivePath)) {
+      if (attempt <= infrastructureRetries) continue;
+      throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
+    }
+    const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
+    const verdict = artifacts.readQAVerdict(reportPath);
+    if (verdict === "PASS") return { outcome: "PASS", report: archiveDisplayPath };
+    if (artifacts.readQAFailureClass(reportPath) === "INFRASTRUCTURE") {
+      if (attempt <= infrastructureRetries) {
+        console.error(`${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`);
+        continue;
+      }
+      throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
+    }
+    return { outcome: "IMPLEMENTATION", report: archiveDisplayPath };
+  }
+
+  throw new Error(`${stage} QA exhausted without a result`);
+}
+
+export async function runSliceExecute(
+  ctx: SliceContext,
+): Promise<"PASS" | "STUCK" | "ERROR" | "CANCELLED"> {
+  const { config, slice, logger, featBranch, invoke } = ctx;
+  const { signal } = config;
+  const qaReports: string[] = [];
+
+  try {
+    for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
+      logger.bumpGenRound(slice.ghIssue, round);
+      console.error(`${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      const genLog = logger.agentLog(slice.number, "generator", round);
+      const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
+      const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+      await invoke({
+        role: "generator",
+        prompt: renderPrompt("generator", {
+          SLICE_DIR: ctx.relSliceDir,
+          RELEVANT_FILES: ctx.relevantFilesBlock,
+          SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+          TEST_COMMAND: ctx.testCommand,
+          RETRY_NOTE: round > 1
+            ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
+            : "",
+        }),
+        cwd: ctx.worktreeDir,
+        logStream: genLog,
+        idleTimeoutMs: timeoutMs,
+        idleWarningIntervalMs: heartbeatMs,
+      }).finally(() => closeAgentLog(genLog));
+
+      console.error(`${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      const deterministic = await runQAStage(ctx, round, "deterministic", qaReports);
+      let implementationFailed = deterministic.outcome === "IMPLEMENTATION";
+      qaReports.push(deterministic.report);
+      if (deterministic.outcome !== "IMPLEMENTATION" && config.sharedPreview) {
+        console.error(`${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+        const remote = await runQAStage(ctx, round, "shared-preview", qaReports);
+        qaReports.push(remote.report);
+        if (remote.outcome === "IMPLEMENTATION") {
+          implementationFailed = true;
+        }
+      }
 
       logger.bumpEvalRound(slice.ghIssue, round);
-
-      const qaVerdict = artifacts.readQAVerdict(qaPath);
-      if (qaVerdict === "PASS") {
-        // Commit FIRST — drift / post-hooks should not discard code that
-        // already passed QA. The commit is preserved on the slice branch
-        // either way.
+      if (!implementationFailed) {
         if (git.hasUncommittedChanges(ctx.worktreeDir)) {
-          git.commitAll(
-            ctx.worktreeDir,
-            `feat(#${slice.ghIssue}): ${slice.title}`,
-          );
+          git.commitAll(ctx.worktreeDir, `feat(#${slice.ghIssue}): ${slice.title}`);
         }
 
-        const migrationMode =
-          config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
-        if (migrationMode !== "skip" && sliceTouchedMigrations(ctx.worktreeDir, featBranch)) {
+        const migrationMode = config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
+        if (!config.sharedPreview && migrationMode !== "skip" && sliceTouchedMigrations(ctx.worktreeDir, featBranch)) {
           const migrationCheck = verifyMigrationSync(ctx.worktreeDir, migrationMode);
           if (!migrationCheck.ok) {
-            logger.markStuck(
-              slice.ghIssue,
-              `Migration sync check failed: ${migrationCheck.error}`,
-            );
+            logger.markStuck(slice.ghIssue, `Migration sync check failed: ${migrationCheck.error}`);
             return "STUCK";
           }
         }
 
-        console.error(`${ctx.tag}: tests pass — committed`);
+        console.error(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
         logger.transitionTo(
           slice.ghIssue,
           lifecycle.pass(
@@ -940,36 +1078,27 @@ export async function runSliceExecute(
         const stuckLog = logger.agentLog(slice.number, "generator-stuck");
         await invoke({
           role: "generator-stuck",
-          prompt: renderPrompt("generator-stuck", { SLICE_DIR: ctx.relSliceDir }),
+          prompt: renderPrompt("generator-stuck", {
+            SLICE_DIR: ctx.relSliceDir,
+            QA_REPORTS: qaReports.map((path) => `- \`${path}\``).join("\n"),
+          }),
           cwd: ctx.worktreeDir,
           logStream: stuckLog,
         }).finally(() => closeAgentLog(stuckLog));
-
-        console.error(
-          `${ctx.tag}: STUCK — QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
-        );
-        logger.markStuck(
-          slice.ghIssue,
-          `QA failed after ${MAX_GENERATOR_ROUNDS} rounds`,
-        );
+        logger.markStuck(slice.ghIssue, `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`);
         return "STUCK";
       }
     }
-
-    return "STUCK"; // Should not reach here
+    return "STUCK";
   } catch (err) {
     if (isCancelled(err, signal)) {
       logger.markCancelled(slice.ghIssue, "Cancelled by user");
       return "CANCELLED";
     }
-    logger.markError(
-      slice.ghIssue,
-      err instanceof Error ? err.message : String(err),
-    );
+    logger.markError(slice.ghIssue, err instanceof Error ? err.message : String(err));
     return "ERROR";
   }
 }
-
 /**
  * Legacy single-call wrapper: negotiate → execute. Kept for callers
  * (and tests) that don't need the lane-aware split. The new wave loop

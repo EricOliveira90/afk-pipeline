@@ -327,6 +327,41 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0006** — Default branch detection cascade
 - **ADR 0007** — Invocation bounds (tool-call cap + idle timeout)
 - **ADR 0013** — Codex provider command, model policy, prompts, and JSONL behavior
+- **ADR 0014** — PRD 070 QA classification and shared-preview isolation
+
+## QA Rounds and Shared Preview
+
+AFK preserves the three-round cap for implementation failures. Evaluator
+reports classify failures as `IMPLEMENTATION` or `INFRASTRUCTURE`.
+Infrastructure failures retry without invoking the generator or advancing the
+round (two retries by default). Each attempt is preserved beside the live report:
+
+- `qa-report-r<round>-a<attempt>.md` for deterministic slice QA
+- `uat-report-r<round>-a<attempt>.md` for shared-preview UAT
+
+Pass 1 evaluators continue through independent checks and return all findings in
+one report. Retry generators receive complete prior QA report history. Only
+handoffs from declared `blockedBy` dependencies are included in generator and
+evaluator context.
+
+Shared-preview UAT is opt-in and separate from deterministic QA. Configure it by
+providing both central migration commands:
+
+```bash
+npx afk-codex --prd-dir .kiro/specs/<prd-slug> \
+  --command-timeout-ms 900000 \
+  --heartbeat-interval-ms 30000 \
+  --infrastructure-retries 2 \
+  --preview-verify-command "pnpm db:preview:verify" \
+  --preview-apply-command "pnpm db:preview:apply"
+```
+
+AFK acquires `.afk/locks/shared-preview.lock` across verification, apply, and
+remote UAT, so separate AFK processes cannot run shared-database tests
+concurrently. Use `--preview-lock-path` when multiple repositories target the
+same preview; they must all point to the same absolute lock path. Command and
+agent timeouts measure output inactivity, so stdout/stderr heartbeats keep a
+healthy long-running command alive.
 
 ## Development
 
