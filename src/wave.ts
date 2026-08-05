@@ -51,6 +51,13 @@ export interface WaveResult {
 
 const PASS: WaveOutcome = { phase: "PASS" };
 
+export function executionLanes(
+  lanes: Slice[][],
+  serialLanes: boolean | undefined,
+): Slice[][] {
+  return serialLanes ? [lanes.flat()] : lanes;
+}
+
 export async function runWave(input: WaveInput): Promise<WaveResult> {
   const {
     waveNumber,
@@ -164,9 +171,10 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
   // --- Partition into lanes. ---
   const lanes = partitionLanes(readyForLanes);
+  const lanesToRun = executionLanes(lanes, config.serialLanes);
   if (lanes.length > 0) {
     console.error(
-      `[afk] Wave ${waveNumber}: ${lanes.length} lane(s) — ${lanes
+      `[afk] Wave ${waveNumber}: ${lanesToRun.length} lane(s)${config.serialLanes ? " (serial)" : ""} — ${lanesToRun
         .map((l) => `[${l.map((s) => `#${s.ghIssue}`).join(", ")}]`)
         .join(" ")}`,
     );
@@ -176,7 +184,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   // are serial. The mutex around merge + worktree-remove serialises
   // those operations across lanes. ---
   await Promise.all(
-    lanes.map(async (lane) => {
+    lanesToRun.map(async (lane) => {
       for (let i = 0; i < lane.length; i++) {
         const slice = lane[i]!;
         const id = slice.ghIssue;

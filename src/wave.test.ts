@@ -12,7 +12,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runWave } from "./wave.js";
+import { executionLanes, runWave } from "./wave.js";
 import { makeAsyncMutex } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { Logger } from "./logger.js";
@@ -194,6 +194,14 @@ function setupWave(
 }
 
 describe("runWave", () => {
+  it("flattens independent lanes in deterministic order when serial execution is enabled", () => {
+    const one = { number: "01", ghIssue: "101", title: "One", type: "AFK", blockedBy: [], userStories: "" } as Slice;
+    const two = { number: "02", ghIssue: "102", title: "Two", type: "AFK", blockedBy: [], userStories: "" } as Slice;
+
+    expect(executionLanes([[one], [two]], true)).toEqual([[one, two]]);
+    expect(executionLanes([[one], [two]], false)).toEqual([[one], [two]]);
+  });
+
   it("returns PASS for a single slice that passes QA", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [

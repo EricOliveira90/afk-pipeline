@@ -51,6 +51,10 @@ describe("parsePipelineRuntimeOptions", () => {
     });
   });
 
+  it("enables serial lane execution explicitly", () => {
+    expect(parsePipelineRuntimeOptions(["--serial-lanes"]).serialLanes).toBe(true);
+  });
+
   it("requires preview verify and apply commands together", () => {
     expect(() =>
       parsePipelineRuntimeOptions(["--preview-verify-command", "pnpm db:verify"]),

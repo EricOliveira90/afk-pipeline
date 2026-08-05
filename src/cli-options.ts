@@ -26,6 +26,8 @@ export interface PipelineRuntimeOptions {
   commandTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   infrastructureRetries?: number;
+  /** Execute otherwise independent slice lanes one at a time. */
+  serialLanes?: boolean;
   sharedPreview?: {
     verifyMigrationCommand: string;
     applyMigrationCommand: string;
@@ -78,6 +80,7 @@ export function parsePipelineRuntimeOptions(
     "--infrastructure-retries",
     true,
   );
+  const serialLanes = args.includes("--serial-lanes");
   const verifyMigrationCommand = optionValue(args, "--preview-verify-command");
   const applyMigrationCommand = optionValue(args, "--preview-apply-command");
   if ((verifyMigrationCommand === undefined) !== (applyMigrationCommand === undefined)) {
@@ -88,6 +91,7 @@ export function parsePipelineRuntimeOptions(
     commandTimeoutMs,
     heartbeatIntervalMs,
     infrastructureRetries,
+    serialLanes,
     sharedPreview: verifyMigrationCommand && applyMigrationCommand
       ? {
           verifyMigrationCommand,

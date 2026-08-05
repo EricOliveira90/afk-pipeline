@@ -359,6 +359,8 @@ export interface PipelineConfig {
   heartbeatIntervalMs?: number;
   /** Retries per QA stage that do not consume implementation rounds. */
   infrastructureRetries?: number;
+  /** Execute independent lanes serially to avoid shared-service contention. */
+  serialLanes?: boolean;
   /** Enables remote UAT after deterministic QA. */
   sharedPreview?: SharedPreviewConfig;
 
