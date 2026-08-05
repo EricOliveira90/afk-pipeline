@@ -44,9 +44,9 @@ export interface InvokeOptions {
   signal?: AbortSignal;
   /**
    * Model alias or full ID to invoke this agent with. Provider-specific:
-   * only the `claude` provider reads this (passed through as `--model`).
-   * Codex and Kiro silently ignore it. Defaults to the provider's own
-   * role-based policy when omitted.
+   * the `claude` and `kiro` providers read this (passed through as
+   * `--model`). Codex silently ignores it. Defaults to the provider's
+   * own role-based policy when omitted.
    */
   model?: string;
   /**

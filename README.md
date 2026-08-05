@@ -305,7 +305,7 @@ Before your first run with reviews enabled:
 
 | Backend | Strengths | Trade-offs |
 |---------|-----------|------------|
-| Kiro | Default; persona-rich agent configs | Opaque stream — no cost/tool-call stats |
+| Kiro | Default; persona-rich agent configs; Fable for most roles and Sonnet for explorer | Opaque stream — no cost/tool-call stats |
 | Claude Code | Streamed JSON; Opus for most roles and Sonnet for explorer; cost + tool calls in run-summary.md | Requires `claude` CLI auth |
 | Codex | Ephemeral JSONL sessions; tool-call stats; prompt-only guardians | Requires managed CLI auth; fixed `openai.gpt-5.6-sol` model |
 

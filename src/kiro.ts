@@ -12,6 +12,14 @@ import { killProcessTree } from "./kill-tree.js";
 const FORCE_KILL_GRACE_MS = 10_000;
 
 /**
+ * Role-based model policy, mirroring claude.ts: the read-only explorer
+ * runs on the cheaper Sonnet; every other role gets the stronger model.
+ * Model IDs match `kiro-cli chat --list-models`.
+ */
+const DEFAULT_MODEL = "claude-fable-5";
+const EXPLORER_MODEL = "claude-sonnet-5";
+
+/**
  * Invoke kiro-cli chat in headless mode with a specific agent and prompt.
  * Streams stdout line-by-line for liveness detection. Kiro doesn't emit a
  * structured stream — see ADR 0004 for why we don't implement
@@ -36,10 +44,15 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       return;
     }
 
+    const model =
+      options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
+
     const args = [
       "chat",
       "--no-interactive",
       "--trust-all-tools",
+      "--model",
+      model,
       ...(agent ? ["--agent", agent] : []),
       prompt,
     ];
