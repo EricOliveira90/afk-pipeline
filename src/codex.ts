@@ -96,6 +96,18 @@ export class CodexProviderError extends Error {
   }
 }
 
+/**
+ * Codex emits `type: "error"` records for recoverable transport drops while
+ * it retries internally, e.g. `Reconnecting... 1/5 (stream disconnected
+ * before completion: ...)`. These must not kill the invocation: Codex either
+ * recovers and continues the turn, or exhausts its retries and reports a
+ * terminal `turn.failed` / nonzero exit. Only messages carrying the retry
+ * counter are treated as recoverable, so unknown error shapes stay terminal.
+ */
+export function isRecoverableStreamError(message: string): boolean {
+  return /^\s*reconnecting\b\D*\d+\s*\/\s*\d+/i.test(message);
+}
+
 /** Parse one `codex exec --json` JSONL record. */
 export function parseStreamLine(line: string): StreamEvent[] {
   if (!line.trimStart().startsWith("{")) return [];
@@ -109,10 +121,12 @@ export function parseStreamLine(line: string): StreamEvent[] {
 
   const eventType = typeof obj.type === "string" ? obj.type : "";
   if (eventType === "error" || eventType.endsWith(".failed")) {
-    throw new CodexProviderError(
-      eventType || "error",
-      eventError(obj) ?? "the CLI reported an unspecified failure",
-    );
+    const message =
+      eventError(obj) ?? "the CLI reported an unspecified failure";
+    if (eventType === "error" && isRecoverableStreamError(message)) {
+      return [];
+    }
+    throw new CodexProviderError(eventType || "error", message);
   }
 
   if (

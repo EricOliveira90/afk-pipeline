@@ -15,6 +15,7 @@ const {
   findManagedCodexAwsProfile,
   handleStreamEvent,
   invoke,
+  isRecoverableStreamError,
   parseStreamLine,
   resolveCodexSpawnEnv,
 } = await import("./codex.js");
@@ -105,10 +106,55 @@ describe("Codex JSONL parsing", () => {
       parseStreamLine('{"type":"error","message":"authentication expired"}'),
     ).toThrow("Codex error: authentication expired");
     expect(() =>
+      parseStreamLine('{"type":"error","message":"Internal server error"}'),
+    ).toThrow("Codex error: Internal server error");
+    expect(() =>
       parseStreamLine(
         '{"type":"turn.failed","error":{"message":"model unavailable"}}',
       ),
     ).toThrow("Codex turn.failed: model unavailable");
+  });
+
+  it("ignores recoverable reconnect error events while Codex retries", () => {
+    expect(
+      parseStreamLine(
+        JSON.stringify({
+          type: "error",
+          message:
+            "Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      parseStreamLine(
+        JSON.stringify({
+          type: "error",
+          message:
+            "Reconnecting... 5/5 (stream disconnected before completion: failed to load AWS credentials: the credential provider was not enabled)",
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps reconnect wording terminal for turn.failed records", () => {
+    expect(() =>
+      parseStreamLine(
+        JSON.stringify({
+          type: "turn.failed",
+          error: { message: "Reconnecting... 5/5 (gave up)" },
+        }),
+      ),
+    ).toThrow("Codex turn.failed: Reconnecting... 5/5 (gave up)");
+  });
+
+  it("classifies only retry-counter messages as recoverable", () => {
+    expect(isRecoverableStreamError("Reconnecting... 1/5 (reason)")).toBe(
+      true,
+    );
+    expect(isRecoverableStreamError("reconnecting 2/5")).toBe(true);
+    expect(isRecoverableStreamError("Internal server error")).toBe(false);
+    expect(isRecoverableStreamError("Reconnecting failed")).toBe(false);
+    expect(isRecoverableStreamError("")).toBe(false);
   });
 });
 
@@ -303,6 +349,63 @@ describe("Codex invocation lifecycle", () => {
     const promise = invoke({ role: "planner", prompt: "go", cwd: "/tmp" });
     proc.stdout.push(jsonLine({ type: "error", message: "login required" }));
     await expect(promise).rejects.toThrow("Codex error: login required");
+  });
+
+  it("survives a reconnect error event and resolves on success", async () => {
+    const proc = makeFakeProc();
+    const events: StreamEvent[] = [];
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({
+      role: "generator",
+      prompt: "go",
+      cwd: "/tmp",
+      onStreamEvent: (event) => events.push(event),
+    });
+
+    proc.stdout.push(
+      commandLine("pnpm test") +
+        jsonLine({
+          type: "error",
+          message:
+            "Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)",
+        }) +
+        jsonLine({
+          type: "item.completed",
+          item: { type: "agent_message", text: "recovered and finished" },
+        }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    exit(proc, 0);
+
+    const result = await promise;
+    expect(result.exitCode).toBe(0);
+    expect(result.stats.toolCallCount).toBe(1);
+    expect(proc.kill).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      { type: "tool_call", name: "command_execution", args: "pnpm test" },
+      { type: "result", result: "recovered and finished" },
+    ]);
+  });
+
+  it("still fails terminally after reconnects when the turn fails", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp" });
+
+    proc.stdout.push(
+      jsonLine({
+        type: "error",
+        message: "Reconnecting... 5/5 (stream disconnected before completion)",
+      }) +
+        jsonLine({
+          type: "turn.failed",
+          error: { message: "Internal server error" },
+        }),
+    );
+    await expect(promise).rejects.toThrow(
+      "Codex turn.failed: Internal server error",
+    );
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("includes stderr in nonzero-exit errors", async () => {
