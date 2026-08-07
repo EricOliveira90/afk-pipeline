@@ -28,6 +28,13 @@ export interface PipelineRuntimeOptions {
   infrastructureRetries?: number;
   /** Execute otherwise independent slice lanes one at a time. */
   serialLanes?: boolean;
+  /**
+   * Open the draft PR despite an unfavorable PM verdict, recording the
+   * human override and both guardian verdicts in the PR body (ADR 0015).
+   * Requires a favorable architect verdict; only a real FIX-BEFORE-SHIP
+   * PM verdict can be overridden — infrastructure failures cannot.
+   */
+  openPrOnOverride?: boolean;
   sharedPreview?: {
     verifyMigrationCommand: string;
     applyMigrationCommand: string;
@@ -81,6 +88,7 @@ export function parsePipelineRuntimeOptions(
     true,
   );
   const serialLanes = args.includes("--serial-lanes");
+  const openPrOnOverride = args.includes("--open-pr-on-override");
   const verifyMigrationCommand = optionValue(args, "--preview-verify-command");
   const applyMigrationCommand = optionValue(args, "--preview-apply-command");
   if ((verifyMigrationCommand === undefined) !== (applyMigrationCommand === undefined)) {
@@ -92,6 +100,7 @@ export function parsePipelineRuntimeOptions(
     heartbeatIntervalMs,
     infrastructureRetries,
     serialLanes,
+    openPrOnOverride,
     sharedPreview: verifyMigrationCommand && applyMigrationCommand
       ? {
           verifyMigrationCommand,

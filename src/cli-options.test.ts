@@ -55,6 +55,13 @@ describe("parsePipelineRuntimeOptions", () => {
     expect(parsePipelineRuntimeOptions(["--serial-lanes"]).serialLanes).toBe(true);
   });
 
+  it("enables the PM-verdict PR override explicitly and defaults it off", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--open-pr-on-override"]).openPrOnOverride,
+    ).toBe(true);
+    expect(parsePipelineRuntimeOptions([]).openPrOnOverride).toBe(false);
+  });
+
   it("requires preview verify and apply commands together", () => {
     expect(() =>
       parsePipelineRuntimeOptions(["--preview-verify-command", "pnpm db:verify"]),
