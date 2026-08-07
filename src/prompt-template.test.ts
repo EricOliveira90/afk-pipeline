@@ -78,6 +78,6 @@ describe("renderPrompt", () => {
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", PREVIOUS_QA_REPORTS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
-    expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
+    expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
   });
 });

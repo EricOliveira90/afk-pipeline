@@ -43,8 +43,14 @@ export interface RunLog {
   totals: Map<string, SliceTotals>;
   architectVerdict?: string;
   pmVerdict?: string;
+  /** Failure detail (e.g. the agent's stderr line) for a failed architect review. */
+  architectDetail?: string;
+  /** Failure detail (e.g. the agent's stderr line) for a failed PM review. */
+  pmDetail?: string;
   sanityGate?: SanityGateResult;
   prUrl?: string;
+  /** Set when the PR was opened via --open-pr-on-override (ADR 0015). */
+  prOverrideNote?: string;
 }
 
 const ZERO_PROGRESS: SliceProgress = { genRounds: 0, evalRounds: 0 };
@@ -170,9 +176,28 @@ export class Logger {
     );
   }
 
-  setReviewVerdicts(architect?: string, pm?: string) {
-    if (architect) this.runLog.architectVerdict = architect;
-    if (pm) this.runLog.pmVerdict = pm;
+  /**
+   * Record full review outcomes, including the failure detail (typically
+   * the failing agent's stderr line) that must surface in the run
+   * summary — not only in launcher stderr. See ADR 0015.
+   */
+  setReviewOutcomes(
+    architect?: { outcome: string; detail?: string },
+    pm?: { outcome: string; detail?: string },
+  ) {
+    if (architect) {
+      this.runLog.architectVerdict = architect.outcome;
+      this.runLog.architectDetail = sanitizeDetail(architect.detail);
+    }
+    if (pm) {
+      this.runLog.pmVerdict = pm.outcome;
+      this.runLog.pmDetail = sanitizeDetail(pm.detail);
+    }
+  }
+
+  /** Note that the PR was opened despite an unfavorable PM verdict. */
+  setPrOverrideNote(note: string) {
+    this.runLog.prOverrideNote = note;
   }
 
   setFeatureBranch(name: string) {
@@ -226,8 +251,11 @@ export class Logger {
       slices,
       architectVerdict,
       pmVerdict,
+      architectDetail,
+      pmDetail,
       sanityGate,
       prUrl,
+      prOverrideNote,
     } = this.runLog;
 
     const totals = this.runLog.totals;
@@ -269,9 +297,9 @@ Pre-ship sanity gate: ${
           : `FAIL (${sanityGate.failures.join(", ")})`
         : "N/A"
     }
-Architect review: ${architectVerdict ?? "N/A"}
-PM review: ${pmVerdict ?? "N/A"}
-${prUrl ? `PR: ${prUrl}` : ""}
+Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}
+PM review: ${pmVerdict ?? "N/A"}${pmDetail ? ` — ${pmDetail}` : ""}
+${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
 `;
 
     writeFileSync(join(this.logDir, "run-summary.md"), summary);
@@ -293,8 +321,11 @@ ${prUrl ? `PR: ${prUrl}` : ""}
       slices,
       architectVerdict,
       pmVerdict,
+      architectDetail,
+      pmDetail,
       sanityGate,
       prUrl,
+      prOverrideNote,
     } = this.runLog;
 
     const endTime = finishedAt ?? new Date();
@@ -389,16 +420,22 @@ ${prUrl ? `PR: ${prUrl}` : ""}
         : `FAIL (${sanityGate.failures.join(", ")})`
       : "N/A";
     lines.push(`  Pre-ship sanity gate: ${sanityLine}`);
-    lines.push(`  Architect review: ${architectVerdict ?? "N/A"}`);
-    lines.push(`  PM review: ${pmVerdict ?? "N/A"}`);
+    lines.push(
+      `  Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}`,
+    );
+    lines.push(
+      `  PM review: ${pmVerdict ?? "N/A"}${pmDetail ? ` — ${pmDetail}` : ""}`,
+    );
 
     const shipVerdicts = ["SHIP", "ACCEPT-WITH-NOTES"];
+    const infraOutcomes = ["NEVER_RAN", "DIED_MID_RUN"];
     const sanityOk = !!sanityGate?.ok;
     const archOk = !!architectVerdict && shipVerdicts.includes(architectVerdict);
     const pmOk = !!pmVerdict && shipVerdicts.includes(pmVerdict);
 
-    if (prUrl && sanityOk && archOk && pmOk) {
+    if (prUrl && (prOverrideNote || (sanityOk && archOk && pmOk))) {
       lines.push(`  PR: ${prUrl}`);
+      if (prOverrideNote) lines.push(`  ${prOverrideNote}`);
     } else {
       const reasons: string[] = [];
       if (failed.length > 0) reasons.push(`${failed.length} slice(s) failed`);
@@ -407,9 +444,19 @@ ${prUrl ? `PR: ${prUrl}` : ""}
       if (!sanityGate) reasons.push("sanity gate not run");
       if (sanityGate?.ok) {
         if (!architectVerdict) reasons.push("architect review not run");
-        else if (!archOk) reasons.push(`architect verdict ${architectVerdict}`);
+        else if (!archOk)
+          reasons.push(
+            infraOutcomes.includes(architectVerdict)
+              ? `architect review ${architectVerdict}`
+              : `architect verdict ${architectVerdict}`,
+          );
         if (!pmVerdict) reasons.push("PM review not run");
-        else if (!pmOk) reasons.push(`PM verdict ${pmVerdict}`);
+        else if (!pmOk)
+          reasons.push(
+            infraOutcomes.includes(pmVerdict)
+              ? `PM review ${pmVerdict}`
+              : `PM verdict ${pmVerdict}`,
+          );
       }
       const reasonText =
         reasons.length > 0 ? reasons.join("; ") : "reviews incomplete";
@@ -422,6 +469,17 @@ ${prUrl ? `PR: ${prUrl}` : ""}
 
 function identityOf(s: SliceLifecycle): SliceIdentity {
   return { ghIssue: s.ghIssue, title: s.title, branch: s.branch };
+}
+
+/**
+ * Collapse a failure detail (often multi-line agent stderr) to a single
+ * bounded line so it can sit inline in run-summary.md.
+ */
+function sanitizeDetail(detail: string | undefined): string | undefined {
+  if (!detail) return undefined;
+  const collapsed = detail.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return undefined;
+  return collapsed.length > 400 ? `${collapsed.slice(0, 397)}...` : collapsed;
 }
 
 function progressOf(s: SliceLifecycle): SliceProgress | null {

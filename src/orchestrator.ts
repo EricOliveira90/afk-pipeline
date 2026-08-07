@@ -23,8 +23,10 @@ import {
   loadRunState,
   saveRunState,
   saveSliceState,
+  saveReviewPhase,
   isSliceComplete,
   projectForPersistence,
+  type PersistedReviewPhase,
 } from "./run-state.js";
 import { resolveRunScope, type ResolvedRunScope } from "./slice-scope.js";
 import {
@@ -156,6 +158,120 @@ export function runPreShipSanity(cwd: string): {
     }
   }
   return { ok: failures.length === 0, failures };
+}
+
+/** Outcome of one guardian review run, with failure detail when it died. */
+export interface ReviewRunResult {
+  outcome: artifacts.ReviewOutcome;
+  /**
+   * The failing invocation's error message — for the codex provider this
+   * includes the agent's stderr (e.g. the codex-wrapper spawn error).
+   * Surfaced in run-summary.md, not only in launcher stderr. ADR 0015.
+   */
+  detail?: string;
+}
+
+/**
+ * Render the run's slice scope for the PM review prompt (ADR 0015): the
+ * PM guardian must separate blockers within the selected slices from
+ * PRD-level gaps that belong to skipped (typically HITL) slices — a PRD
+ * with HITL slices would otherwise dead-end at FIX-BEFORE-SHIP forever.
+ */
+export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
+  const lines: string[] = [];
+  lines.push("This run implemented ONLY the following slices:");
+  lines.push("");
+  for (const slice of scope.selected) {
+    lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title}`);
+  }
+  if (scope.skipped.length > 0) {
+    lines.push("");
+    lines.push(
+      "The following manifest slices were NOT executed by this run and are out of scope for this branch:",
+    );
+    lines.push("");
+    for (const { slice, reason } of scope.skipped) {
+      const label =
+        reason === "hitl"
+          ? "HITL — reserved for a human; AFK never runs it"
+          : "not selected for this run";
+      lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title} (${label})`);
+    }
+  } else {
+    lines.push("");
+    lines.push("No manifest slices were skipped — the full manifest ran.");
+  }
+  return lines.join("\n");
+}
+
+/** Draft-PR decision for the post-review gate. See ADR 0015. */
+export interface PrCreationPlan {
+  /** Whether the draft PR should be opened. */
+  open: boolean;
+  /** True when opened via --open-pr-on-override despite the PM verdict. */
+  overridden: boolean;
+  title: string;
+  body: string;
+  /** One-line note for logs and run-summary.md when overridden. */
+  overrideNote?: string;
+}
+
+/**
+ * Decide whether the draft PR opens, and build its title/body.
+ *
+ * Normal gate: both guardian outcomes favorable (SHIP or
+ * ACCEPT-WITH-NOTES). With `openPrOnOverride`, a real FIX-BEFORE-SHIP PM
+ * verdict can be overridden — but only when the architect verdict is
+ * favorable, and never for infrastructure failures or UNPARSEABLE (an
+ * override records disagreement with a judgment, not absence of one).
+ * The override and both verdicts are recorded in the PR body.
+ */
+export function buildPrCreationPlan(args: {
+  prdSlug: string;
+  specsDir: string;
+  architect: artifacts.ReviewOutcome;
+  pm: artifacts.ReviewOutcome;
+  openPrOnOverride: boolean;
+  closesIssues: readonly string[];
+}): PrCreationPlan {
+  const archOk = artifacts.isFavorableReviewOutcome(args.architect);
+  const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
+  const overridden =
+    args.openPrOnOverride && archOk && !pmOk && args.pm === "FIX-BEFORE-SHIP";
+  const open = (archOk && pmOk) || overridden;
+  const specsPath = args.specsDir.replace(/\\/g, "/");
+
+  const sections: string[] = [
+    `Automated implementation of ${args.prdSlug}.`,
+    `See ${specsPath}/ for artifacts (including review-architect.md and review-pm.md).`,
+  ];
+  if (overridden) {
+    sections.push(
+      [
+        "## Human override (--open-pr-on-override)",
+        "",
+        "This draft PR was opened by explicit operator override despite an unfavorable PM verdict.",
+        "",
+        `- Architect review: **${args.architect}**`,
+        `- PM review: **${args.pm}** (overridden)`,
+        "",
+        `Read ${specsPath}/review-pm.md for the blocking findings before merging.`,
+      ].join("\n"),
+    );
+  }
+  sections.push(
+    args.closesIssues.map((issue) => `Closes #${issue}`).join("\n"),
+  );
+
+  return {
+    open,
+    overridden,
+    title: `feat: ${args.prdSlug}`,
+    body: sections.join("\n\n"),
+    overrideNote: overridden
+      ? `PR opened via --open-pr-on-override despite PM verdict ${args.pm} (architect: ${args.architect}).`
+      : undefined,
+  };
 }
 
 /**
@@ -361,6 +477,13 @@ export interface PipelineConfig {
   infrastructureRetries?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
+  /**
+   * Open the draft PR despite an unfavorable PM verdict, recording the
+   * override and both guardian verdicts in the PR body. Only a real
+   * FIX-BEFORE-SHIP PM verdict can be overridden, and only when the
+   * architect verdict is favorable. See ADR 0015.
+   */
+  openPrOnOverride?: boolean;
   /** Enables remote UAT after deterministic QA. */
   sharedPreview?: SharedPreviewConfig;
 
@@ -1454,7 +1577,21 @@ export async function runPipeline(
       // reviews and the PR: there's no point asking architect/PM to grade
       // code that won't pass the basic quality gate.
       console.log("Running pre-ship sanity gate...");
-      const sanity = runPreShipSanity(reviewDir);
+      // Cache the gate by the reviewed tree's SHA (ADR 0015): a re-entry
+      // run against the same content — e.g. after a review infrastructure
+      // failure, or when only docs/review commits landed — must not pay
+      // the full typecheck+lint+tests cost again. Only PASS is cached.
+      const treeShaBefore = git.resolveTree(reviewDir);
+      const cachedSanity = runState.reviewPhase?.sanity;
+      let sanity: { ok: boolean; failures: string[] };
+      if (treeShaBefore && cachedSanity?.treeSha === treeShaBefore) {
+        sanity = { ok: true, failures: [] };
+        console.log(
+          `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
+        );
+      } else {
+        sanity = runPreShipSanity(reviewDir);
+      }
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
         console.error(
@@ -1463,106 +1600,222 @@ export async function runPipeline(
       } else {
         console.log("  ✅ Pre-ship sanity gate passed.");
 
-        const runArchitectReview = async (): Promise<artifacts.ReviewVerdict> => {
-          const log = logger.agentLog("all", "architect-review");
-          try {
-            await invoke({
-              role: "architect-review",
-              agent: "architect-review",
-              // Bare mode: third-party Claude Code plugins (e.g.
-              // `superpowers:using-superpowers`) install
-              // `SessionStart` hooks that demand the agent invoke a
-              // skill before responding. Guardian agents have no
-              // skills loaded, so the hook coerces them into emitting
-              // a fake `<tool_use>` block as plain text and ending
-              // the turn — no review file is ever written. `--bare`
-              // strips plugin hooks for this invocation only. See
-              // ADR 0011.
-              bare: true,
-              prompt: renderPrompt("architect-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-              cwd: reviewDir,
-              logStream: log,
-            });
-          } finally {
-            await closeAgentLog(log);
-          }
-          const path = join(reviewDir, specsDir, "review-architect.md");
-          const verdict = artifacts.readReviewVerdict(path);
-          if (verdict === "UNKNOWN") {
-            console.warn(
-              `  ⚠️  Could not parse architect review verdict from ${path} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
+        const reviewRetries =
+          config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
+        // Reviews inspect diffs and may run narrowly-scoped commands;
+        // give them the same generous inactivity budget as generator /
+        // evaluator-qa instead of the 180 s provider default that killed
+        // the PRD 070 PM review mid-run.
+        const reviewIdleTimeoutMs =
+          config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
+        const reviewHeartbeatMs =
+          config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+        const runScopeBlock = buildReviewScopeBlock(scope);
+        const headShaBefore = git.resolveCommit(reviewDir, "HEAD");
+
+        /**
+         * Run one guardian review with ADR 0014-style infrastructure
+         * retries. NEVER_RAN / DIED_MID_RUN failures retry within the
+         * run; only UNPARSEABLE and real verdicts are terminal. Throws
+         * only on cancellation.
+         */
+        const runGuardianReview = async (
+          kind: "architect" | "pm",
+        ): Promise<ReviewRunResult> => {
+          const role = kind === "architect" ? "architect-review" : "pm-review";
+          const label = kind === "architect" ? "Architect" : "PM";
+          const reviewFileName =
+            kind === "architect" ? "review-architect.md" : "review-pm.md";
+          const prompt =
+            kind === "architect"
+              ? renderPrompt("architect-review", {
+                  SPECS_DIR: relSpecsDir,
+                  RELEVANT_FILES: relevantFilesBlock,
+                })
+              : renderPrompt("pm-review", {
+                  SPECS_DIR: relSpecsDir,
+                  RELEVANT_FILES: relevantFilesBlock,
+                  RUN_SCOPE: runScopeBlock,
+                });
+          let lastFailure: ReviewRunResult = { outcome: "NEVER_RAN" };
+          for (let attempt = 1; attempt <= reviewRetries + 1; attempt++) {
+            const log = logger.agentLog(
+              "all",
+              role,
+              attempt > 1 ? attempt : undefined,
             );
-          }
-          return verdict;
-        };
-
-        const runPmReview = async (): Promise<artifacts.ReviewVerdict> => {
-          const log = logger.agentLog("all", "pm-review");
-          try {
-            await invoke({
-              role: "pm-review",
-              agent: "pm-review",
-              // See architect-review above — same plugin-hook
-              // hijack defense.
-              bare: true,
-              prompt: renderPrompt("pm-review", { SPECS_DIR: relSpecsDir, RELEVANT_FILES: relevantFilesBlock }),
-              cwd: reviewDir,
-              logStream: log,
-            });
-          } finally {
-            await closeAgentLog(log);
-          }
-          const path = join(reviewDir, specsDir, "review-pm.md");
-          const verdict = artifacts.readReviewVerdict(path);
-          if (verdict === "UNKNOWN") {
-            console.warn(
-              `  ⚠️  Could not parse PM review verdict from ${path} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNKNOWN (no PR will be opened).`,
-            );
-          }
-          return verdict;
-        };
-
-        const [archSettled, pmSettled] = await Promise.allSettled([
-          runArchitectReview(),
-          runPmReview(),
-        ]);
-
-        const archVerdict: artifacts.ReviewVerdict =
-          archSettled.status === "fulfilled" ? archSettled.value : "UNKNOWN";
-        const pmVerdict: artifacts.ReviewVerdict =
-          pmSettled.status === "fulfilled" ? pmSettled.value : "UNKNOWN";
-
-        if (archSettled.status === "rejected") {
-          console.warn(
-            `  ⚠️  Architect review failed: ${archSettled.reason instanceof Error ? archSettled.reason.message : String(archSettled.reason)}. Treating as UNKNOWN (no PR will be opened).`,
-          );
-        }
-        if (pmSettled.status === "rejected") {
-          console.warn(
-            `  ⚠️  PM review failed: ${pmSettled.reason instanceof Error ? pmSettled.reason.message : String(pmSettled.reason)}. Treating as UNKNOWN (no PR will be opened).`,
-          );
-        }
-
-        logger.setReviewVerdicts(archVerdict, pmVerdict);
-
-        // Create draft PR if both reviews pass
-        const shipVerdicts = ["SHIP", "ACCEPT-WITH-NOTES"];
-        if (
-          shipVerdicts.includes(archVerdict) &&
-          shipVerdicts.includes(pmVerdict)
-        ) {
-          try {
-            // First: commit the review files from the review worktree
-            // to the feature branch. Without this step the reviews are
-            // written to the worktree and then deleted on cleanup —
-            // the feature branch never sees them, which breaks the
-            // shipping.md pre-merge checklist.
-            if (git.hasUncommittedChanges(reviewDir)) {
-              git.commitAll(
-                reviewDir,
-                `docs(${prdSlug}): add post-impl guardian reviews`,
+            let sawOutput = false;
+            try {
+              await invoke({
+                role,
+                agent: role,
+                // Bare mode: third-party Claude Code plugins (e.g.
+                // `superpowers:using-superpowers`) install `SessionStart`
+                // hooks that demand the agent invoke a skill before
+                // responding. Guardian agents have no skills loaded, so
+                // the hook coerces them into emitting a fake `<tool_use>`
+                // block as plain text and ending the turn — no review
+                // file is ever written. `--bare` strips plugin hooks for
+                // this invocation only. See ADR 0011.
+                bare: true,
+                prompt,
+                cwd: reviewDir,
+                logStream: log,
+                idleTimeoutMs: reviewIdleTimeoutMs,
+                idleWarningIntervalMs: reviewHeartbeatMs,
+                onStreamEvent: () => {
+                  sawOutput = true;
+                },
+              });
+            } catch (error) {
+              if (isCancelled(error, signal)) throw error;
+              const failureClass = artifacts.classifyReviewFailure(
+                error,
+                sawOutput,
+              );
+              const message =
+                error instanceof Error ? error.message : String(error);
+              lastFailure = { outcome: failureClass, detail: message };
+              if (attempt <= reviewRetries) {
+                console.error(
+                  `  ⚠️  ${label} review ${failureClass}: ${message}. Infrastructure retry ${attempt}/${reviewRetries}.`,
+                );
+                continue;
+              }
+              console.error(
+                `  ⚠️  ${label} review ${failureClass} after ${attempt} attempt(s): ${message}. No PR will be opened.`,
+              );
+              return lastFailure;
+            } finally {
+              await closeAgentLog(log);
+            }
+            const reviewPath = join(reviewDir, specsDir, reviewFileName);
+            const verdict = artifacts.readReviewVerdict(reviewPath);
+            if (verdict === "UNPARSEABLE") {
+              console.warn(
+                `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
               );
             }
+            return { outcome: verdict };
+          }
+          return lastFailure;
+        };
+
+        /** Reuse a favorable verdict recorded against the current HEAD. */
+        const reuseCachedReview = (
+          cached: { headSha: string; verdict: "SHIP" | "ACCEPT-WITH-NOTES" } | undefined,
+          label: string,
+        ): ReviewRunResult | undefined => {
+          if (cached && headShaBefore && cached.headSha === headShaBefore) {
+            console.log(
+              `  ↩️  Reusing cached ${label} review verdict ${cached.verdict} for unchanged HEAD ${headShaBefore.slice(0, 12)}.`,
+            );
+            return { outcome: cached.verdict };
+          }
+          return undefined;
+        };
+        const cachedArch = reuseCachedReview(
+          runState.reviewPhase?.architect,
+          "architect",
+        );
+        const cachedPm = reuseCachedReview(runState.reviewPhase?.pm, "PM");
+
+        let archResult: ReviewRunResult;
+        let pmResult: ReviewRunResult;
+        if (config.serialLanes) {
+          // --serial-lanes also serializes the two guardian reviews:
+          // operators pass it precisely to avoid concurrent agent
+          // processes contending for shared local resources.
+          archResult = cachedArch ?? (await runGuardianReview("architect"));
+          pmResult = cachedPm ?? (await runGuardianReview("pm"));
+        } else {
+          const [archSettled, pmSettled] = await Promise.allSettled([
+            cachedArch ? Promise.resolve(cachedArch) : runGuardianReview("architect"),
+            cachedPm ? Promise.resolve(cachedPm) : runGuardianReview("pm"),
+          ]);
+          // runGuardianReview only rejects on cancellation — propagate
+          // after both settle so neither rejection goes unobserved.
+          if (archSettled.status === "rejected") throw archSettled.reason;
+          if (pmSettled.status === "rejected") throw pmSettled.reason;
+          archResult = archSettled.value;
+          pmResult = pmSettled.value;
+        }
+
+        logger.setReviewOutcomes(archResult, pmResult);
+
+        // Commit guardian artifacts regardless of verdict (ADR 0015).
+        // review-architect.md / review-pm.md and any governance-log
+        // append the guardians made are evidence either way; leaving
+        // them dirty in the review worktree breaks consumer flows that
+        // require a clean tree after the reviewed SHA (e.g. UAT
+        // verify-draft) and loses them entirely when the scratch
+        // worktree is removed below.
+        if (git.hasUncommittedChanges(reviewDir)) {
+          try {
+            git.commitAll(
+              reviewDir,
+              `docs(${prdSlug}): add post-impl guardian reviews`,
+            );
+          } catch (error) {
+            // On Windows, `git status` can report phantom modifications
+            // when only line endings differ; `git add` normalizes them
+            // away and the commit fails with "nothing to commit". If the
+            // tree is clean after the attempt there was nothing real to
+            // record — any other failure must surface.
+            if (git.hasUncommittedChanges(reviewDir)) throw error;
+          }
+        }
+
+        // Refresh the cheap re-entry cache (ADR 0015) against the
+        // post-commit state: the review commit is docs-only, so a
+        // passing sanity gate carries over to the new tree, and
+        // favorable verdicts are recorded against the new HEAD so an
+        // unchanged re-entry can skip them.
+        const headShaAfter = git.resolveCommit(reviewDir, "HEAD");
+        const treeShaAfter = git.resolveTree(reviewDir);
+        const nextReviewPhase: PersistedReviewPhase = {};
+        if (sanity.ok && treeShaAfter) {
+          nextReviewPhase.sanity = { treeSha: treeShaAfter, ok: true };
+        }
+        if (headShaAfter) {
+          if (artifacts.isFavorableReviewOutcome(archResult.outcome)) {
+            nextReviewPhase.architect = {
+              headSha: headShaAfter,
+              verdict: archResult.outcome,
+            };
+          }
+          if (artifacts.isFavorableReviewOutcome(pmResult.outcome)) {
+            nextReviewPhase.pm = {
+              headSha: headShaAfter,
+              verdict: pmResult.outcome,
+            };
+          }
+        }
+        saveReviewPhase(
+          repoRoot,
+          loggerSlug,
+          Object.keys(nextReviewPhase).length > 0
+            ? nextReviewPhase
+            : undefined,
+        );
+
+        // Create the draft PR when both reviews are favorable, or when
+        // the operator explicitly overrides an unfavorable PM verdict
+        // (--open-pr-on-override, ADR 0015).
+        const prPlan = buildPrCreationPlan({
+          prdSlug,
+          specsDir,
+          architect: archResult.outcome,
+          pm: pmResult.outcome,
+          openPrOnOverride: config.openPrOnOverride === true,
+          closesIssues: scope.selected.map((slice) => slice.ghIssue),
+        });
+        if (prPlan.open) {
+          if (prPlan.overridden) {
+            console.warn(`  ⚠️  ${prPlan.overrideNote}`);
+            logger.setPrOverrideNote(prPlan.overrideNote!);
+          }
+          try {
             // Push the feature branch (includes the review commit)
             execFileSync("git", ["push", "-u", "origin", featBranch], {
               cwd: repoRoot,
@@ -1580,9 +1833,9 @@ export async function runPipeline(
                 "--head",
                 featBranch,
                 "--title",
-                `feat: ${prdSlug}`,
+                prPlan.title,
                 "--body",
-                `Automated implementation of ${prdSlug}.\n\nSee ${specsDir}/ for artifacts (including review-architect.md and review-pm.md).\n\n${scope.selected.map((slice) => `Closes #${slice.ghIssue}`).join("\n")}`,
+                prPlan.body,
               ],
               { cwd: repoRoot, encoding: "utf-8" },
             ).trim();

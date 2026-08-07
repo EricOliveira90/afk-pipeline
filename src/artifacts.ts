@@ -12,11 +12,76 @@ export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
 export type EvaluatorVerdict = "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
 export type QAFailureClass = "NONE" | "IMPLEMENTATION" | "INFRASTRUCTURE";
+/**
+ * Verdict parsed from a guardian review file. `UNPARSEABLE` means the
+ * agent finished but the review file is missing or carries no
+ * recognizable verdict marker. Terminal: the agent had its chance and
+ * produced an ambiguous result — re-running would grade a fresh
+ * opinion, not recover a lost one. See ADR 0015.
+ */
 export type ReviewVerdict =
   | "SHIP"
   | "ACCEPT-WITH-NOTES"
   | "FIX-BEFORE-SHIP"
-  | "UNKNOWN";
+  | "UNPARSEABLE";
+
+/**
+ * Full outcome of one guardian review, extending real verdicts with the
+ * infrastructure failure classes of ADR 0015 (mirroring ADR 0014's QA
+ * failure classes):
+ *
+ * - `NEVER_RAN`    — the agent process died before producing any
+ *                    structured output (spawn/wrapper failures, e.g. an
+ *                    AWS-config persist race). Infrastructure-class:
+ *                    retried within the run.
+ * - `DIED_MID_RUN` — the agent showed real activity and was then killed
+ *                    (idle watcher, tool cap) or exited nonzero.
+ *                    Infrastructure-class: retried within the run.
+ *
+ * Only `UNPARSEABLE` and the three real verdicts are terminal.
+ */
+export type ReviewOutcome = ReviewVerdict | "NEVER_RAN" | "DIED_MID_RUN";
+
+export type ReviewFailureClass = "NEVER_RAN" | "DIED_MID_RUN";
+
+/** Outcomes that allow the draft PR to open. */
+export function isFavorableReviewOutcome(
+  outcome: ReviewOutcome,
+): outcome is "SHIP" | "ACCEPT-WITH-NOTES" {
+  return outcome === "SHIP" || outcome === "ACCEPT-WITH-NOTES";
+}
+
+/** Infrastructure-class review outcomes retry within the run (ADR 0015). */
+export function isReviewInfrastructureFailure(
+  outcome: ReviewOutcome,
+): outcome is ReviewFailureClass {
+  return outcome === "NEVER_RAN" || outcome === "DIED_MID_RUN";
+}
+
+/**
+ * Classify a rejected guardian review invocation.
+ *
+ * - An idle-watcher or tool-cap kill always means the agent was doing
+ *   real work before dying: `DIED_MID_RUN`.
+ * - Otherwise the class hinges on whether the invocation produced any
+ *   parsed stream activity before failing (`sawOutput`, fed by the
+ *   provider's `onStreamEvent`). A wrapper that dies at spawn — e.g.
+ *   `codex-wrapper: error: failed to persist AWS config file` — never
+ *   emits a structured event, so it classifies as `NEVER_RAN`.
+ *
+ * Providers without stream parsing never report activity; their exit
+ * failures conservatively classify as `NEVER_RAN`. That is safe because
+ * both classes share identical retry semantics — only reporting differs.
+ */
+export function classifyReviewFailure(
+  error: unknown,
+  sawOutput: boolean,
+): ReviewFailureClass {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/idle for .+killed/i.test(message)) return "DIED_MID_RUN";
+  if (/exceeded \d+ tool calls/i.test(message)) return "DIED_MID_RUN";
+  return sawOutput ? "DIED_MID_RUN" : "NEVER_RAN";
+}
 
 function readIfExists(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf-8") : null;
@@ -122,7 +187,7 @@ export function readQARound(qaReportPath: string): number {
 
 export function readReviewVerdict(reviewPath: string): ReviewVerdict {
   const content = readIfExists(reviewPath);
-  if (!content) return "UNKNOWN";
+  if (!content) return "UNPARSEABLE";
   // Accept several formats seen in the wild from guardian agents:
   //   **Verdict:** SHIP
   //   *Verdict:* SHIP
@@ -134,7 +199,7 @@ export function readReviewVerdict(reviewPath: string): ReviewVerdict {
   const pattern = /^\s*#{0,6}\s*\*{0,3}\s*Verdict\s*:?\s*\*{0,3}\s*([^\n]+)/im;
   const m = content.match(pattern);
   const captured = m?.[1]?.trim() ?? null;
-  if (!captured) return "UNKNOWN";
+  if (!captured) return "UNPARSEABLE";
   // Strip any leftover markdown emphasis (e.g. "**SHIP**") and normalize.
   const upper = captured.replace(/\*+/g, "").trim().toUpperCase();
   if (upper === "SHIP") return "SHIP";
@@ -148,7 +213,7 @@ export function readReviewVerdict(reviewPath: string): ReviewVerdict {
     upper.startsWith("FIX BEFORE SHIP")
   )
     return "FIX-BEFORE-SHIP";
-  return "UNKNOWN";
+  return "UNPARSEABLE";
 }
 
 /**

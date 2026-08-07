@@ -10,7 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  classifyReviewFailure,
   hasStuckFile,
+  isFavorableReviewOutcome,
+  isReviewInfrastructureFailure,
   lockContract,
   readContractFiles,
   readContractStatus,
@@ -192,10 +195,10 @@ describe("readReviewVerdict", () => {
       );
     });
 
-    it("returns UNKNOWN when no Verdict line is present (bug-fixes-tiers-1-3 both)", () => {
+    it("returns UNPARSEABLE when no Verdict line is present (bug-fixes-tiers-1-3 both)", () => {
       withTempFile(
         `# Architect Review\n\nCritical finding: slice 01 has 5 of 8 requirements completely unimplemented.\n\nThe two blockers must be fixed before the client demo.\n`,
-        (p) => expect(readReviewVerdict(p)).toBe("UNKNOWN"),
+        (p) => expect(readReviewVerdict(p)).toBe("UNPARSEABLE"),
       );
     });
   });
@@ -257,19 +260,19 @@ describe("readReviewVerdict", () => {
   });
 
   describe("negative cases", () => {
-    it("returns UNKNOWN when the file does not exist", () => {
-      expect(readReviewVerdict("/nonexistent/path/review.md")).toBe("UNKNOWN");
+    it("returns UNPARSEABLE when the file does not exist", () => {
+      expect(readReviewVerdict("/nonexistent/path/review.md")).toBe("UNPARSEABLE");
     });
 
-    it("returns UNKNOWN when the verdict value is unrecognized", () => {
+    it("returns UNPARSEABLE when the verdict value is unrecognized", () => {
       withTempFile(`**Verdict:** MAYBE\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("UNKNOWN"),
+        expect(readReviewVerdict(p)).toBe("UNPARSEABLE"),
       );
     });
 
-    it("returns UNKNOWN for a file with only prose", () => {
+    it("returns UNPARSEABLE for a file with only prose", () => {
       withTempFile(`# Review\n\nLooks fine to me.\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("UNKNOWN"),
+        expect(readReviewVerdict(p)).toBe("UNPARSEABLE"),
       );
     });
   });
@@ -441,5 +444,69 @@ describe("lockContract", () => {
       lockContract(p);
       expect(readContractStatus(p)).toBe("LOCKED");
     });
+  });
+});
+
+
+/**
+ * ADR 0015 review failure classes. The classifier turns a rejected
+ * guardian invocation into NEVER_RAN (died at spawn, before any parsed
+ * output) or DIED_MID_RUN (killed after real activity) — both
+ * infrastructure-class and retried, unlike terminal UNPARSEABLE.
+ */
+describe("classifyReviewFailure", () => {
+  it("classifies a spawn-style wrapper failure with no output as NEVER_RAN", () => {
+    // Verbatim failure shape from the PRD 070 run (attempt 8).
+    const error = new Error(
+      "Agent pm-review exited with code 1: codex-wrapper: error: failed to persist AWS config file: failed to persist temporary file: Access is denied. (os error 5)",
+    );
+    expect(classifyReviewFailure(error, false)).toBe("NEVER_RAN");
+  });
+
+  it("classifies a nonzero exit after real stream activity as DIED_MID_RUN", () => {
+    const error = new Error("Agent pm-review exited with code 1: boom");
+    expect(classifyReviewFailure(error, true)).toBe("DIED_MID_RUN");
+  });
+
+  it("classifies an idle-watcher kill as DIED_MID_RUN even without observed output", () => {
+    // codex uses "- killed", claude/kiro use "— killed"; both must match.
+    expect(
+      classifyReviewFailure(new Error("Agent pm-review idle for 600s - killed"), false),
+    ).toBe("DIED_MID_RUN");
+    expect(
+      classifyReviewFailure(new Error("Agent pm-review idle for 600s — killed"), false),
+    ).toBe("DIED_MID_RUN");
+  });
+
+  it("classifies a tool-cap kill as DIED_MID_RUN", () => {
+    expect(
+      classifyReviewFailure(
+        new Error("Agent architect-review exceeded 100 tool calls - killed"),
+        false,
+      ),
+    ).toBe("DIED_MID_RUN");
+  });
+
+  it("classifies non-Error rejections without output as NEVER_RAN", () => {
+    expect(classifyReviewFailure("ENOENT", false)).toBe("NEVER_RAN");
+  });
+});
+
+describe("review outcome predicates", () => {
+  it("treats only SHIP and ACCEPT-WITH-NOTES as favorable", () => {
+    expect(isFavorableReviewOutcome("SHIP")).toBe(true);
+    expect(isFavorableReviewOutcome("ACCEPT-WITH-NOTES")).toBe(true);
+    expect(isFavorableReviewOutcome("FIX-BEFORE-SHIP")).toBe(false);
+    expect(isFavorableReviewOutcome("UNPARSEABLE")).toBe(false);
+    expect(isFavorableReviewOutcome("NEVER_RAN")).toBe(false);
+    expect(isFavorableReviewOutcome("DIED_MID_RUN")).toBe(false);
+  });
+
+  it("treats only NEVER_RAN and DIED_MID_RUN as infrastructure failures", () => {
+    expect(isReviewInfrastructureFailure("NEVER_RAN")).toBe(true);
+    expect(isReviewInfrastructureFailure("DIED_MID_RUN")).toBe(true);
+    expect(isReviewInfrastructureFailure("UNPARSEABLE")).toBe(false);
+    expect(isReviewInfrastructureFailure("FIX-BEFORE-SHIP")).toBe(false);
+    expect(isReviewInfrastructureFailure("SHIP")).toBe(false);
   });
 });

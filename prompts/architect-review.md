@@ -23,6 +23,11 @@ protect the codebase's long-term health.
   `**Verdict:** ACCEPT-WITH-NOTES` or `**Verdict:** FIX-BEFORE-SHIP`
   (bold, with colon). This is parsed by the orchestrator. Do not use a
   markdown heading for it.
+- The pre-ship sanity gate (typecheck, lint, and the full test suite)
+  already PASSED against this exact tree immediately before this review.
+  Do NOT re-run the full test suite — it is slow and its result is
+  already known. Run only narrowly-scoped commands (single test files,
+  greps, typecheck of a specific concern) when you need fresh evidence.
 
 # Required reading
 

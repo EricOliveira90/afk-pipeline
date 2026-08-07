@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assessContractExtension,
+  buildPrCreationPlan,
+  buildReviewScopeBlock,
   makeAsyncMutex,
   makeSliceContext,
   resolveSanityCommands,
@@ -925,7 +927,7 @@ describe("runPipeline summary report", () => {
     expect(result.consoleSummary).toContain("Not ready");
   }, 60_000);
 
-  it("surfaces a thrown architect-review as UNKNOWN verdict without aborting the pipeline", async () => {
+  it("surfaces a thrown architect-review as a NEVER_RAN outcome without aborting the pipeline", async () => {
     const repo = makeRepo();
     const slug = "summary-throw";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -956,13 +958,18 @@ describe("runPipeline summary report", () => {
     const records: InvocationRecord[] = [];
     const baseProvider = buildStubProvider({ fixtures, slices, records });
 
-    // Wrap the stub so the architect-review invocation throws, but PM
-    // review still runs (it's a no-op in the stub → UNKNOWN verdict).
+    // Wrap the stub so the architect-review invocation throws with a
+    // spawn-style error (no output produced), but PM review still runs
+    // (it's a no-op in the stub → UNPARSEABLE verdict).
+    let architectAttempts = 0;
     const explodingProvider: AgentProvider = {
       name: baseProvider.name,
       async invoke(options) {
         if (options.role === "architect-review") {
-          throw new Error("simulated architect-review failure");
+          architectAttempts++;
+          throw new Error(
+            "Agent architect-review exited with code 1: codex-wrapper: error: failed to persist AWS config file: Access is denied. (os error 5)",
+          );
         }
         return baseProvider.invoke(options);
       },
@@ -975,6 +982,7 @@ describe("runPipeline summary report", () => {
       specsDir,
       dag,
       provider: explodingProvider,
+      infrastructureRetries: 1,
     });
 
     // Pipeline returns normally; the slice succeeded.
@@ -982,14 +990,20 @@ describe("runPipeline summary report", () => {
     expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("#7001");
-    // No PR opened — neither verdict was SHIP/ACCEPT-WITH-NOTES.
+    // Spawn-style failures are infrastructure-class: retried within the
+    // run (ADR 0015), then reported as NEVER_RAN with the stderr detail.
+    expect(architectAttempts).toBe(2);
     expect(result.consoleSummary).toContain("Not ready");
-    // Summary file written.
+    expect(result.consoleSummary).toContain("architect review NEVER_RAN");
+    // Summary file written, and it carries the failing agent's stderr line.
     const summaryPath = join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md");
     expect(existsSync(summaryPath)).toBe(true);
+    const summary = readFileSync(summaryPath, "utf-8");
+    expect(summary).toContain("Architect review: NEVER_RAN — Agent architect-review exited with code 1: codex-wrapper:");
+    expect(summary).toContain("PM review: UNPARSEABLE");
   }, 60_000);
 
-  it("surfaces both reviews failing as two UNKNOWN verdicts without aborting", async () => {
+  it("surfaces both reviews failing as two infrastructure outcomes without aborting", async () => {
     const repo = makeRepo();
     const slug = "summary-both-throw";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -1040,12 +1054,15 @@ describe("runPipeline summary report", () => {
       specsDir,
       dag,
       provider: bothExplodingProvider,
+      infrastructureRetries: 0,
     });
 
     // Pipeline still returns normally.
     expect(result.success).toBe(true);
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("Not ready");
+    expect(result.consoleSummary).toContain("architect review NEVER_RAN");
+    expect(result.consoleSummary).toContain("PM review NEVER_RAN");
     const summaryPath = join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md");
     expect(existsSync(summaryPath)).toBe(true);
   }, 60_000);
@@ -1421,4 +1438,455 @@ describe("orchestrator-owned contract status", () => {
     );
     expect(contractAtGeneratorTime!).not.toContain("## Evaluator feedback");
   }, 60_000);
+});
+
+
+/**
+ * Post-merge guardian review phase hardening (ADR 0015): review failure
+ * classes and infrastructure retries, always-committed review artifacts,
+ * scope-aware PM prompts, PM-verdict override, and cheap re-entry caching.
+ */
+describe("post-merge guardian review phase (ADR 0015)", () => {
+  /** Write a guardian review file into the review worktree's specs dir. */
+  function writeReviewFile(
+    cwd: string,
+    slug: string,
+    fileName: string,
+    verdict: string,
+  ): void {
+    const dir = join(cwd, ".kiro", "specs", slug);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, fileName),
+      `# Guardian Review\n\n**Verdict:** ${verdict}\n\nFindings here.\n`,
+      "utf-8",
+    );
+  }
+
+  function makePassingSliceSetup(slug: string, ghIssue: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue,
+        title: "Passing slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        ghIssue,
+        {
+          files: ["src/out.txt"],
+          qaPasses: true,
+          outputFile: "src/out.txt",
+          outputContent: "out",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+    return { repo, prdDir, specsDir, slices, records, baseProvider };
+  }
+
+  it("retries an infrastructure-failed review within the run and records the recovered verdict", async () => {
+    const slug = "review-retry";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makePassingSliceSetup(slug, "7101");
+
+    let architectAttempts = 0;
+    const reviewOptions: InvokeOptions[] = [];
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "architect-review") {
+          reviewOptions.push(options);
+          architectAttempts++;
+          if (architectAttempts === 1) {
+            // Spawn-style wrapper failure: no output produced.
+            throw new Error(
+              "Agent architect-review exited with code 1: codex-wrapper: error: failed to persist AWS config file",
+            );
+          }
+          writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        if (options.role === "pm-review") {
+          // Unfavorable real verdict so no PR/push path is exercised.
+          writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      infrastructureRetries: 1,
+    });
+
+    expect(result.success).toBe(true);
+    // The first failure did not become terminal: the retry recovered SHIP.
+    expect(architectAttempts).toBe(2);
+    expect(result.consoleSummary).toContain("Architect review: SHIP");
+    expect(result.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
+    expect(result.consoleSummary).toContain("Not ready");
+    // Reviews run with the slow-agent inactivity budget, not the 180 s
+    // provider default that killed the PRD 070 PM review mid-run.
+    expect(reviewOptions[0]!.idleTimeoutMs).toBe(600_000);
+  }, 60_000);
+
+  it("classifies an idle-kill after real activity as DIED_MID_RUN", async () => {
+    const slug = "review-idle-kill";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makePassingSliceSetup(slug, "7102");
+
+    let pmAttempts = 0;
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "pm-review") {
+          pmAttempts++;
+          throw new Error("Agent pm-review idle for 600s - killed");
+        }
+        if (options.role === "architect-review") {
+          writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      infrastructureRetries: 1,
+    });
+
+    expect(result.success).toBe(true);
+    expect(pmAttempts).toBe(2);
+    expect(result.consoleSummary).toContain("PM review DIED_MID_RUN");
+    const summary = readFileSync(
+      join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md"),
+      "utf-8",
+    );
+    expect(summary).toContain("PM review: DIED_MID_RUN — Agent pm-review idle for 600s - killed");
+  }, 60_000);
+
+  it("commits guardian review artifacts to the feature branch even when Not ready", async () => {
+    const slug = "review-commit-notready";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makePassingSliceSetup(slug, "7103");
+
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "architect-review") {
+          writeReviewFile(options.cwd, slug, "review-architect.md", "ACCEPT-WITH-NOTES");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        if (options.role === "pm-review") {
+          writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
+          // Guardians also append to a governance log in consumer repos.
+          const govDir = join(options.cwd, "docs", "governance");
+          mkdirSync(govDir, { recursive: true });
+          writeFileSync(join(govDir, "log.md"), "review entry\n", "utf-8");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.consoleSummary).toContain("Not ready");
+    // The Not-ready outcome must still leave the evidence committed on
+    // the feature branch — nothing dirty in the (removed) review worktree.
+    const featBranch = `feat-stub/${slug}`;
+    const log = git(repo, ["log", "--format=%s", featBranch]);
+    expect(log).toContain(`docs(${slug}): add post-impl guardian reviews`);
+    const pmReview = git(repo, [
+      "show",
+      `${featBranch}:.kiro/specs/${slug}/review-pm.md`,
+    ]);
+    expect(pmReview).toContain("FIX-BEFORE-SHIP");
+    const archReview = git(repo, [
+      "show",
+      `${featBranch}:.kiro/specs/${slug}/review-architect.md`,
+    ]);
+    expect(archReview).toContain("ACCEPT-WITH-NOTES");
+    const governance = git(repo, [
+      "show",
+      `${featBranch}:docs/governance/log.md`,
+    ]);
+    expect(governance).toContain("review entry");
+  }, 60_000);
+
+  it("passes the run scope (selected vs skipped HITL) into the PM review prompt", async () => {
+    const slug = "review-scope";
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "7201",
+        title: "Selected AFK slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "7202",
+        title: "Activate paid production services",
+        type: "HITL",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "7201",
+        {
+          files: ["src/scope.txt"],
+          qaPasses: true,
+          outputFile: "src/scope.txt",
+          outputContent: "scope",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+
+    let pmPrompt: string | undefined;
+    let architectPrompt: string | undefined;
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "pm-review") pmPrompt = options.prompt;
+        if (options.role === "architect-review") architectPrompt = options.prompt;
+        return baseProvider.invoke(options);
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    expect(pmPrompt).toBeDefined();
+    expect(pmPrompt!).toContain("01 (#7201) Selected AFK slice");
+    expect(pmPrompt!).toContain(
+      "02 (#7202) Activate paid production services (HITL — reserved for a human; AFK never runs it)",
+    );
+    expect(pmPrompt!).toContain("MUST NOT drive the verdict");
+    // The architect prompt is scope-free; only the PM judges PRD coverage.
+    expect(architectPrompt).toBeDefined();
+    expect(architectPrompt!).not.toContain("Activate paid production services");
+  }, 60_000);
+
+  it("cheap re-entry: reuses the sanity gate for an unchanged tree and skips favorable reviews for an unchanged HEAD", async () => {
+    const slug = "review-reentry";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makePassingSliceSetup(slug, "7301");
+
+    // A sanity `tests` step that counts its executions via a marker file.
+    const marker = join(repo, ".afk-sanity-marker.txt").replace(/\\/g, "/");
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify(
+        {
+          name: "consumer-fixture",
+          private: true,
+          scripts: {
+            "test:run": `node -e "require('fs').appendFileSync('${marker}','x')"`,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add sanity script"]);
+
+    let architectRuns = 0;
+    let pmRuns = 0;
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "architect-review") {
+          architectRuns++;
+          writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        if (options.role === "pm-review") {
+          pmRuns++;
+          writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      provider,
+    };
+
+    const first = await runPipeline({ ...config, dag: buildDAG(slices) });
+    expect(first.success).toBe(true);
+    const gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
+    expect(gateRunsAfterFirst).toBe(1);
+    expect(architectRuns).toBe(1);
+    expect(pmRuns).toBe(1);
+
+    // Re-entry with nothing changed: the gate result is cached against
+    // the (post-review-commit) tree and the favorable architect verdict
+    // against the unchanged HEAD; only the unfavorable PM review re-runs.
+    const second = await runPipeline({ ...config, dag: buildDAG(slices) });
+    expect(second.success).toBe(true);
+    expect(readFileSync(marker, "utf-8").length).toBe(1);
+    expect(architectRuns).toBe(1);
+    expect(pmRuns).toBe(2);
+    expect(second.consoleSummary).toContain("Architect review: SHIP");
+    expect(second.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
+  }, 120_000);
+});
+
+describe("buildReviewScopeBlock", () => {
+  const slice = (number: string, ghIssue: string, title: string, type: "AFK" | "HITL"): Slice => ({
+    number,
+    ghIssue,
+    title,
+    type,
+    blockedBy: [],
+    userStories: "",
+  });
+
+  it("lists selected slices and skipped slices with their reasons", () => {
+    const block = buildReviewScopeBlock({
+      persisted: { mode: "explicit", slices: [{ number: "01", ghIssue: "1" }] },
+      selected: [slice("01", "1", "Do the thing", "AFK")],
+      skipped: [
+        { slice: slice("02", "2", "Human ceremony", "HITL"), reason: "hitl" },
+        { slice: slice("03", "3", "Deferred work", "AFK"), reason: "not-selected" },
+      ],
+    });
+    expect(block).toContain("- 01 (#1) Do the thing");
+    expect(block).toContain(
+      "- 02 (#2) Human ceremony (HITL — reserved for a human; AFK never runs it)",
+    );
+    expect(block).toContain("- 03 (#3) Deferred work (not selected for this run)");
+  });
+
+  it("notes when nothing was skipped", () => {
+    const block = buildReviewScopeBlock({
+      persisted: { mode: "all-afk", slices: [{ number: "01", ghIssue: "1" }] },
+      selected: [slice("01", "1", "Everything", "AFK")],
+      skipped: [],
+    });
+    expect(block).toContain("No manifest slices were skipped");
+  });
+});
+
+describe("buildPrCreationPlan", () => {
+  const base = {
+    prdSlug: "demo",
+    specsDir: ".kiro/specs/demo",
+    closesIssues: ["41", "42"],
+  };
+
+  it("opens without override when both outcomes are favorable", () => {
+    const plan = buildPrCreationPlan({
+      ...base,
+      architect: "SHIP",
+      pm: "ACCEPT-WITH-NOTES",
+      openPrOnOverride: false,
+    });
+    expect(plan.open).toBe(true);
+    expect(plan.overridden).toBe(false);
+    expect(plan.overrideNote).toBeUndefined();
+    expect(plan.body).not.toContain("Human override");
+    expect(plan.body).toContain("Closes #41");
+    expect(plan.body).toContain("Closes #42");
+  });
+
+  it("stays closed on an unfavorable PM verdict without the flag", () => {
+    const plan = buildPrCreationPlan({
+      ...base,
+      architect: "SHIP",
+      pm: "FIX-BEFORE-SHIP",
+      openPrOnOverride: false,
+    });
+    expect(plan.open).toBe(false);
+  });
+
+  it("overrides a real FIX-BEFORE-SHIP PM verdict and records both verdicts in the body", () => {
+    const plan = buildPrCreationPlan({
+      ...base,
+      architect: "ACCEPT-WITH-NOTES",
+      pm: "FIX-BEFORE-SHIP",
+      openPrOnOverride: true,
+    });
+    expect(plan.open).toBe(true);
+    expect(plan.overridden).toBe(true);
+    expect(plan.body).toContain("## Human override (--open-pr-on-override)");
+    expect(plan.body).toContain("- Architect review: **ACCEPT-WITH-NOTES**");
+    expect(plan.body).toContain("- PM review: **FIX-BEFORE-SHIP** (overridden)");
+    expect(plan.body).toContain("review-pm.md");
+    expect(plan.overrideNote).toContain("--open-pr-on-override");
+  });
+
+  it("never overrides an unfavorable architect verdict", () => {
+    const plan = buildPrCreationPlan({
+      ...base,
+      architect: "FIX-BEFORE-SHIP",
+      pm: "FIX-BEFORE-SHIP",
+      openPrOnOverride: true,
+    });
+    expect(plan.open).toBe(false);
+    expect(plan.overridden).toBe(false);
+  });
+
+  it.each(["NEVER_RAN", "DIED_MID_RUN", "UNPARSEABLE"] as const)(
+    "never overrides a %s PM outcome — overrides record disagreement with a judgment, not absence of one",
+    (pm) => {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect: "SHIP",
+        pm,
+        openPrOnOverride: true,
+      });
+      expect(plan.open).toBe(false);
+      expect(plan.overridden).toBe(false);
+    },
+  );
 });
