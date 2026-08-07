@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentProvider,
@@ -86,6 +92,61 @@ export function resolveCodexSpawnEnv(
     return profile ? { ...env, AWS_PROFILE: profile } : env;
   } catch {
     return env;
+  }
+}
+
+/** Env plus the teardown that removes any per-invocation temp state. */
+export interface PreparedCodexEnv {
+  env: NodeJS.ProcessEnv;
+  cleanup: () => void;
+}
+
+const NO_CLEANUP = () => {};
+
+/**
+ * Build the child env for one codex invocation, giving it a private copy
+ * of the AWS config file.
+ *
+ * The codex wrapper persists the file named by `AWS_CONFIG_FILE` (default
+ * `~/.aws/config`) via a write-temp-then-rename. When two invocations run
+ * concurrently — the architect and PM guardian reviews always used to —
+ * the renames race and the loser dies at spawn with `failed to persist
+ * AWS config file: … Access is denied. (os error 5)` (PRD 070, ADR 0015).
+ * Pointing each child at its own throwaway copy removes the shared file.
+ *
+ * Wrapper writes land in the copy and are discarded on cleanup; that is
+ * intended — ephemeral agent invocations must not mutate the operator's
+ * real AWS config. Any failure to isolate falls back to the shared file
+ * rather than blocking the invocation.
+ */
+export function prepareCodexSpawnEnv(
+  env: NodeJS.ProcessEnv,
+  readConfig?: (path: string) => string,
+): PreparedCodexEnv {
+  const resolved = readConfig
+    ? resolveCodexSpawnEnv(env, readConfig)
+    : resolveCodexSpawnEnv(env);
+  const sourcePath =
+    resolved.AWS_CONFIG_FILE ?? join(homedir(), ".aws", "config");
+  try {
+    if (!existsSync(sourcePath)) {
+      return { env: resolved, cleanup: NO_CLEANUP };
+    }
+    const scratchDir = mkdtempSync(join(tmpdir(), "afk-codex-aws-"));
+    const configCopy = join(scratchDir, "config");
+    copyFileSync(sourcePath, configCopy);
+    return {
+      env: { ...resolved, AWS_CONFIG_FILE: configCopy },
+      cleanup: () => {
+        try {
+          rmSync(scratchDir, { recursive: true, force: true });
+        } catch {
+          // Temp cleanup is best-effort; the OS reaps tmpdir eventually.
+        }
+      },
+    };
+  } catch {
+    return { env: resolved, cleanup: NO_CLEANUP };
   }
 }
 
@@ -222,9 +283,10 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       `model_reasoning_effort="${reasoningEffort}"`,
       "-",
     ];
+    const preparedEnv = prepareCodexSpawnEnv(process.env);
     const proc = spawn("codex", args, {
       cwd,
-      env: resolveCodexSpawnEnv(process.env),
+      env: preparedEnv.env,
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
     });
@@ -322,6 +384,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     proc.on("error", (error) => {
       watcher.stop();
       signal?.removeEventListener("abort", onAbort);
+      preparedEnv.cleanup();
       reject(error);
     });
 
@@ -329,6 +392,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       processLine(buffer.trim());
       watcher.stop();
       signal?.removeEventListener("abort", onAbort);
+      preparedEnv.cleanup();
       const exitCode = code ?? 1;
 
       if (cancelled) {

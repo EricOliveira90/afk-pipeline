@@ -1,4 +1,13 @@
 import { EventEmitter } from "node:events";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "./agent-provider.js";
@@ -17,6 +26,7 @@ const {
   invoke,
   isRecoverableStreamError,
   parseStreamLine,
+  prepareCodexSpawnEnv,
   resolveCodexSpawnEnv,
 } = await import("./codex.js");
 
@@ -469,5 +479,113 @@ describe("Codex provider metadata and event handling", () => {
     expect(result).toEqual({ toolCallCount: 1, capExceeded: false });
     expect(reset).toHaveBeenCalledOnce();
     expect(onStreamEvent).toHaveBeenCalledOnce();
+  });
+});
+
+
+/**
+ * ADR 0015: the codex wrapper persists the file named by AWS_CONFIG_FILE.
+ * Concurrent invocations sharing that file race on the persist rename and
+ * the loser dies at spawn ("failed to persist AWS config file: … Access is
+ * denied. (os error 5)" — observed in the PRD 070 run). Each invocation
+ * must therefore get its own throwaway copy.
+ */
+describe("prepareCodexSpawnEnv AWS config isolation", () => {
+  function makeConfigDir(content: string): { dir: string; source: string } {
+    const dir = mkdtempSync(join(tmpdir(), "afk-awscfg-"));
+    const source = join(dir, "config");
+    writeFileSync(source, content, "utf-8");
+    return { dir, source };
+  }
+
+  it("gives each invocation its own temp copy of AWS_CONFIG_FILE and cleans it up", () => {
+    const { dir, source } = makeConfigDir("[profile p]\nregion = us-east-1\n");
+    const env: NodeJS.ProcessEnv = { AWS_CONFIG_FILE: source };
+    const a = prepareCodexSpawnEnv(env);
+    const b = prepareCodexSpawnEnv(env);
+    try {
+      expect(a.env.AWS_CONFIG_FILE).toBeDefined();
+      expect(a.env.AWS_CONFIG_FILE).not.toBe(source);
+      expect(b.env.AWS_CONFIG_FILE).not.toBe(source);
+      // The regression: two concurrent invocations must never share a file.
+      expect(a.env.AWS_CONFIG_FILE).not.toBe(b.env.AWS_CONFIG_FILE);
+      expect(readFileSync(a.env.AWS_CONFIG_FILE!, "utf-8")).toBe(
+        readFileSync(source, "utf-8"),
+      );
+      const aCopy = a.env.AWS_CONFIG_FILE!;
+      a.cleanup();
+      expect(existsSync(aCopy)).toBe(false);
+      // Cleanup never touches the operator's real config.
+      expect(existsSync(source)).toBe(true);
+    } finally {
+      a.cleanup();
+      b.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still resolves the managed codex profile while isolating the config copy", () => {
+    const { dir, source } = makeConfigDir(
+      '[profile codex-managed]\ncredential_process = codex credential-process\n',
+    );
+    const prepared = prepareCodexSpawnEnv({ AWS_CONFIG_FILE: source });
+    try {
+      expect(prepared.env.AWS_PROFILE).toBe("codex-managed");
+      expect(prepared.env.AWS_CONFIG_FILE).not.toBe(source);
+    } finally {
+      prepared.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the shared env when the config file does not exist", () => {
+    const missing = join(tmpdir(), "afk-awscfg-does-not-exist", "config");
+    const prepared = prepareCodexSpawnEnv({ AWS_CONFIG_FILE: missing });
+    expect(prepared.env.AWS_CONFIG_FILE).toBe(missing);
+    expect(() => prepared.cleanup()).not.toThrow();
+  });
+});
+
+describe("codex invoke AWS config isolation (regression: PRD 070 persist race)", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("spawns concurrent invocations with distinct config copies and removes them on exit", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "afk-awscfg-invoke-"));
+    const source = join(dir, "config");
+    writeFileSync(source, "[profile p]\nregion = us-east-1\n", "utf-8");
+    const saved = process.env.AWS_CONFIG_FILE;
+    process.env.AWS_CONFIG_FILE = source;
+    try {
+      const procA = makeFakeProc();
+      const procB = makeFakeProc();
+      spawnMock.mockReturnValueOnce(procA).mockReturnValueOnce(procB);
+
+      const promiseA = invoke({ role: "architect-review", prompt: "go", cwd: "/tmp" });
+      const promiseB = invoke({ role: "pm-review", prompt: "go", cwd: "/tmp" });
+
+      const envA = (spawnMock.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }).env;
+      const envB = (spawnMock.mock.calls[1]![2] as { env: NodeJS.ProcessEnv }).env;
+      expect(envA.AWS_CONFIG_FILE).not.toBe(source);
+      expect(envB.AWS_CONFIG_FILE).not.toBe(source);
+      expect(envA.AWS_CONFIG_FILE).not.toBe(envB.AWS_CONFIG_FILE);
+      expect(existsSync(envA.AWS_CONFIG_FILE!)).toBe(true);
+      expect(existsSync(envB.AWS_CONFIG_FILE!)).toBe(true);
+
+      exit(procA, 0);
+      exit(procB, 0);
+      await promiseA;
+      await promiseB;
+
+      // Per-invocation copies are reaped once the child exits.
+      expect(existsSync(envA.AWS_CONFIG_FILE!)).toBe(false);
+      expect(existsSync(envB.AWS_CONFIG_FILE!)).toBe(false);
+      expect(existsSync(source)).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.AWS_CONFIG_FILE;
+      else process.env.AWS_CONFIG_FILE = saved;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
