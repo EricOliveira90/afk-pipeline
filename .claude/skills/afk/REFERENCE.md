@@ -65,7 +65,7 @@ Once all AFK slices pass:
 3. **PR creation** (only if both guardians say SHIP or ACCEPT-WITH-NOTES):
    - Opens draft PR via `gh pr create --draft`
 
-If either guardian says FIX-BEFORE-SHIP, no PR is opened. If a guardian crashes or its verdict is unparseable, that verdict becomes `UNKNOWN` — the surviving review still completes, the pipeline still returns success, but the PR is gated off.
+If either guardian says FIX-BEFORE-SHIP, no PR is opened (unless the operator passes `--open-pr-on-override`, which opens the draft PR anyway and records the override plus both verdicts in the PR body — only a real FIX-BEFORE-SHIP PM verdict with a favorable architect verdict can be overridden). Review failures are classified (ADR 0015): an agent that dies before producing output is `NEVER_RAN`, one killed after real activity is `DIED_MID_RUN` — both retry within the run via `--infrastructure-retries` — while a finished review with no verdict marker is terminal `UNPARSEABLE`. The surviving review still completes, review artifacts are committed to the feature branch regardless of verdict, the pipeline still returns success, but the PR is gated off.
 
 ## Error Handling
 
@@ -76,8 +76,10 @@ If either guardian says FIX-BEFORE-SHIP, no PR is opened. If a guardian crashes 
 | Merge conflict | Slice → CONFLICT, branches preserved |
 | Agent idle timeout (10 min default) | Agent killed, slice → STUCK |
 | Pre-ship sanity fails | Skip guardians + PR; recorded in run-summary.md |
-| Guardian says FIX-BEFORE-SHIP | No PR; review files still written |
-| Guardian crashes or verdict unparseable | Verdict → UNKNOWN; no PR; other review still completes |
+| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch |
+| Guardian dies before producing output | Outcome → NEVER_RAN; infrastructure retry within the run |
+| Guardian killed mid-run | Outcome → DIED_MID_RUN; infrastructure retry within the run |
+| Guardian verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes |
 | HITL slice | Skipped entirely |
 | Ctrl-C | In-flight agents killed, remaining → CANCELLED |
 | Crash / interruption | Re-run to resume from last state |

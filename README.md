@@ -97,19 +97,30 @@ Once every AFK slice passes:
 ```
 Pre-ship sanity gate  → pnpm typecheck && pnpm lint && pnpm test:run (or test)
      ├── FAIL → skip guardians + PR (failing steps recorded in run-summary.md)
-     └── PASS ↓
-     ┌────────────────────────────────────┐
-     │  parallel (Promise.allSettled)     │
+     └── PASS ↓            (result cached by tree SHA — re-entry with an
+     ┌────────────────────────────────────┐        unchanged tree skips it)
+     │  parallel (serial with --serial-lanes)   │
      │  @architect-review → review-architect.md │
      │  @pm-review        → review-pm.md        │
      └────────────────────────────────────┘
      ↓
+review-*.md + governance-log changes are committed to the feature branch
+regardless of verdict — they are evidence either way.
+     ↓
 Both SHIP or ACCEPT-WITH-NOTES → opens draft PR via `gh pr create`
-Either FIX-BEFORE-SHIP        → stops; no PR opened
-Either crashes / unparseable  → verdict UNKNOWN; no PR; surviving review still recorded
+Either FIX-BEFORE-SHIP        → stops; no PR opened (unless
+                                --open-pr-on-override, see below)
+Agent dies before any output  → outcome NEVER_RAN (infrastructure;
+                                retried within the run)
+Agent killed after real work  → outcome DIED_MID_RUN (infrastructure;
+                                retried within the run)
+Finished but no verdict line  → outcome UNPARSEABLE (terminal); no PR;
+                                surviving review still recorded
 ```
 
-The two reviews share the post-impl worktree and run concurrently. The persona templates declare a read-only contract (write only the verdict file) so shared-worktree parallelism is safe — see [Setting up guardian reviews](#setting-up-guardian-reviews).
+The two reviews share the post-impl worktree and run concurrently (serially under `--serial-lanes`). Each codex invocation gets a private temp copy of `AWS_CONFIG_FILE`, so concurrent wrappers cannot race on persisting the shared config (ADR 0015). The persona templates declare a read-only contract (write only the verdict file) so shared-worktree parallelism is safe — see [Setting up guardian reviews](#setting-up-guardian-reviews).
+
+The PM review is scope-aware: it receives the run's selected slices and the skipped ones (with reasons like HITL), and must not let out-of-scope PRD gaps drive the verdict. A favorable verdict (SHIP / ACCEPT-WITH-NOTES) is cached against the reviewed HEAD; re-entering with an unchanged HEAD skips that review and re-runs only what is unresolved.
 
 ### Parallelisation
 
@@ -145,8 +156,16 @@ npx afk        --prd-dir .kiro/specs/<prd-slug>
 npx afk-claude --prd-dir .kiro/specs/<prd-slug>
 npx afk-codex  --prd-dir .kiro/specs/<prd-slug>
 npx afk-codex  --prd-dir .kiro/specs/<prd-slug> --slices 01,02,03,04
+npx afk-codex  --prd-dir .kiro/specs/<prd-slug> --open-pr-on-override
 npx afk        --prd-dir <path> --dry-run
 ```
+
+`--open-pr-on-override` opens the draft PR even when the PM guardian
+returns `FIX-BEFORE-SHIP` (the architect verdict must still be
+favorable). The override and both verdicts are recorded in the PR body.
+Use it when a PRD's remaining gaps belong to HITL slices outside the
+run's scope. Infrastructure failures and unparseable verdicts are never
+overridden.
 
 Convenience scripts for your `package.json`:
 
@@ -166,6 +185,8 @@ Convenience scripts for your `package.json`:
 State persists in `.afk/state/<run-slug>.json`, where the run slug includes the provider for non-Kiro backends. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and stuck slices retry from their artifact state.
 
 A retry with no `--slices` argument reuses the persisted scope. Supplying a different selection is rejected so a changed manifest or command cannot silently expand the run. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
+
+The state file also caches the post-merge review phase (ADR 0015): a passing pre-ship sanity gate is keyed by the reviewed tree's SHA, and favorable guardian verdicts by the reviewed HEAD. Re-entering a finished run re-executes only what actually changed — typically just the review that previously failed or blocked.
 
 ## Artifacts
 
@@ -198,8 +219,10 @@ Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. Th
 | Merge conflict | Slice → CONFLICT, both branches preserved |
 | Agent idle timeout (10 min) | Agent killed, slice → STUCK |
 | Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md |
-| Guardian says FIX-BEFORE-SHIP | No PR; review files still written |
-| Guardian crashes or verdict unparseable | Verdict → UNKNOWN; no PR; other review still completes |
+| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch |
+| Guardian dies before producing output | Outcome → NEVER_RAN; infrastructure retry within the run (`--infrastructure-retries`); stderr surfaced in run-summary.md |
+| Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
+| Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes |
 | HITL slice | Skipped entirely |
 | Ctrl-C | In-flight agents killed, remaining → CANCELLED |
 | Pipeline crash | Re-run to resume |
@@ -277,15 +300,24 @@ the "what to focus on" sections for your project's risk profile.
 
 ### Read-only contract and parallel execution
 
-The two reviews run **concurrently** on a shared worktree. Both
-templates declare a read-only contract: the only writable output is
-the verdict file (`review-architect.md` / `review-pm.md`). If you
-customize a persona to edit source from a guardian, you risk a race
-between the two reviewers. Keep guardians read-only.
+The two reviews run **concurrently** on a shared worktree (serially
+when `--serial-lanes` is set). Both templates declare a read-only
+contract: the only writable output is the verdict file
+(`review-architect.md` / `review-pm.md`). If you customize a persona to
+edit source from a guardian, you risk a race between the two reviewers.
+Keep guardians read-only.
 
-A failed or crashed review yields an `UNKNOWN` verdict and does NOT
-abort the pipeline. The other review still completes; the PR is gated
-off (only `SHIP` and `ACCEPT-WITH-NOTES` open a PR).
+A failed or crashed review never aborts the pipeline. Failures are
+classified (ADR 0015): `NEVER_RAN` (died before producing output, e.g.
+a wrapper spawn error) and `DIED_MID_RUN` (killed after real activity)
+are infrastructure-class and retry within the run using the
+`--infrastructure-retries` budget; `UNPARSEABLE` (finished, but no
+verdict marker) is terminal. The other review still completes, review
+artifacts are committed to the feature branch regardless of outcome,
+and the PR is gated off (only `SHIP` and `ACCEPT-WITH-NOTES` open a PR,
+unless the operator passes `--open-pr-on-override` to override a real
+`FIX-BEFORE-SHIP` PM verdict — the override and both verdicts are then
+recorded in the PR body).
 
 ### Pre-flight checklist
 
@@ -328,13 +360,16 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0007** — Invocation bounds (tool-call cap + idle timeout)
 - **ADR 0013** — Codex provider command, model policy, prompts, and JSONL behavior
 - **ADR 0014** — PRD 070 QA classification and shared-preview isolation
+- **ADR 0015** — Guardian review failure classes, scope-aware PM review, and cheap re-entry
 
 ## QA Rounds and Shared Preview
 
 AFK preserves the three-round cap for implementation failures. Evaluator
 reports classify failures as `IMPLEMENTATION` or `INFRASTRUCTURE`.
 Infrastructure failures retry without invoking the generator or advancing the
-round (two retries by default). Each attempt is preserved beside the live report:
+round (two retries by default). The same retry budget covers post-merge
+guardian reviews: `NEVER_RAN` and `DIED_MID_RUN` review failures retry within
+the run without becoming terminal (ADR 0015). Each attempt is preserved beside the live report:
 
 - `qa-report-r<round>-a<attempt>.md` for deterministic slice QA
 - `uat-report-r<round>-a<attempt>.md` for shared-preview UAT

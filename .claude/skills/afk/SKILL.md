@@ -69,7 +69,7 @@ generator → implements via TDD, commits (max 3 rounds with evaluator-qa)
 - **Resumable**: resolved scope is persisted; re-run to skip completed slices without expanding scope
 - **Terminal handoff**: `.afk/logs/<run-slug>/handoff.json` records branch/SHA, migrations, closing issues, skips, and draft PR metadata
 - **Parallel**: independent slices run concurrently; file-overlap slices serialized in lanes
-- **Post-merge gates**: `pnpm typecheck && pnpm lint && pnpm test` → architect + PM reviews (run concurrently) → draft PR. A crashed review surfaces as `UNKNOWN` and gates the PR off without aborting the pipeline.
+- **Post-merge gates**: `pnpm typecheck && pnpm lint && pnpm test` → architect + PM reviews (concurrent; serial under `--serial-lanes`) → draft PR. Review failures are classified per ADR 0015: NEVER_RAN / DIED_MID_RUN retry within the run, UNPARSEABLE is terminal; all gate the PR off without aborting the pipeline. Sanity gate and favorable verdicts are cached for cheap re-entry; `--open-pr-on-override` opens the PR despite a PM FIX-BEFORE-SHIP and records the override in the PR body.
 - **Cancellation**: Ctrl-C kills agents cleanly; second Ctrl-C hard-exits
 
 ## Detailed Reference
