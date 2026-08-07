@@ -30,6 +30,65 @@ export interface RunState {
   /** Immutable executable slice identities resolved at the first run. */
   scope?: PersistedRunScope;
   slices: Record<string, PersistedSliceState>;
+  /** Cached post-merge review-phase results for cheap re-entry (ADR 0015). */
+  reviewPhase?: PersistedReviewPhase;
+}
+
+/**
+ * Pre-ship sanity gate result cached by the reviewed tree's SHA. Only
+ * passing results are cached: a FAIL could be an environment flake, and
+ * fixing a real failure changes the tree anyway.
+ */
+export interface PersistedSanityResult {
+  treeSha: string;
+  ok: true;
+}
+
+/** A favorable guardian verdict recorded against the reviewed HEAD. */
+export interface PersistedReviewResult {
+  headSha: string;
+  verdict: "SHIP" | "ACCEPT-WITH-NOTES";
+}
+
+export interface PersistedReviewPhase {
+  sanity?: PersistedSanityResult;
+  architect?: PersistedReviewResult;
+  pm?: PersistedReviewResult;
+}
+
+const FAVORABLE_VERDICTS = new Set(["SHIP", "ACCEPT-WITH-NOTES"]);
+
+function sanitizeReviewResult(value: unknown): PersistedReviewResult | undefined {
+  const v = (value ?? {}) as { headSha?: unknown; verdict?: unknown };
+  if (
+    typeof v.headSha === "string" &&
+    v.headSha.length > 0 &&
+    typeof v.verdict === "string" &&
+    FAVORABLE_VERDICTS.has(v.verdict)
+  ) {
+    return { headSha: v.headSha, verdict: v.verdict as "SHIP" | "ACCEPT-WITH-NOTES" };
+  }
+  return undefined;
+}
+
+/**
+ * Validate a loaded `reviewPhase`, dropping malformed or unfavorable
+ * entries instead of throwing — a broken cache entry must degrade to a
+ * re-run, never block resumption.
+ */
+export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as { sanity?: unknown; architect?: unknown; pm?: unknown };
+  const out: PersistedReviewPhase = {};
+  const sanity = (v.sanity ?? {}) as { treeSha?: unknown; ok?: unknown };
+  if (typeof sanity.treeSha === "string" && sanity.treeSha.length > 0 && sanity.ok === true) {
+    out.sanity = { treeSha: sanity.treeSha, ok: true };
+  }
+  const architect = sanitizeReviewResult(v.architect);
+  if (architect) out.architect = architect;
+  const pm = sanitizeReviewResult(v.pm);
+  if (pm) out.pm = pm;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function statePath(repoRoot: string, prdSlug: string): string {
@@ -58,6 +117,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     featureBranch?: string;
     scope?: PersistedRunScope;
     slices?: Record<string, unknown>;
+    reviewPhase?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -67,12 +127,14 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
     }
+    const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     return {
       version: 1,
       prdSlug,
       featureBranch,
       ...(r.scope !== undefined ? { scope: r.scope } : {}),
       slices,
+      ...(reviewPhase !== undefined ? { reviewPhase } : {}),
     };
   }
 
@@ -188,6 +250,27 @@ export function saveRunState(repoRoot: string, state: RunState) {
   const p = statePath(repoRoot, state.prdSlug);
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(state, null, 2));
+}
+
+/**
+ * Atomically replace the cached review-phase results. Re-reads the file
+ * first (same pattern as `saveSliceState`) so parallel slice updates are
+ * never clobbered. Pass `undefined` to clear the cache.
+ */
+export function saveReviewPhase(
+  repoRoot: string,
+  prdSlug: string,
+  reviewPhase: PersistedReviewPhase | undefined,
+) {
+  const p = statePath(repoRoot, prdSlug);
+  mkdirSync(dirname(p), { recursive: true });
+  const current = loadRunState(repoRoot, prdSlug);
+  if (reviewPhase === undefined) {
+    delete current.reviewPhase;
+  } else {
+    current.reviewPhase = reviewPhase;
+  }
+  writeFileSync(p, JSON.stringify(current, null, 2));
 }
 
 export function markSliceComplete(

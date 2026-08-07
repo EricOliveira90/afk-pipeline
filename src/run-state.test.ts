@@ -12,6 +12,8 @@ import {
   loadRunState,
   saveSliceState,
   saveRunState,
+  saveReviewPhase,
+  sanitizeReviewPhase,
   isSliceComplete,
   adaptLoadedState,
 } from "./run-state.js";
@@ -146,5 +148,104 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     expect(loadRunState(repo, "scoped").scope).toEqual(state.scope);
+  });
+});
+
+
+/** ADR 0015: cheap re-entry cache for the post-merge review phase. */
+describe("review-phase persistence", () => {
+  it("round-trips reviewPhase through saveReviewPhase and loadRunState", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "70", {
+      phase: "PASS",
+      branch: "afk/demo-slice-01",
+      mergedToFeature: true,
+    });
+    saveReviewPhase(repo, "demo", {
+      sanity: { treeSha: "t".repeat(40), ok: true },
+      architect: { headSha: "h".repeat(40), verdict: "SHIP" },
+    });
+
+    const loaded = loadRunState(repo, "demo");
+    // Slice state written earlier is preserved (atomic re-read pattern).
+    expect(isSliceComplete(loaded, "70")).toBe(true);
+    expect(loaded.reviewPhase).toEqual({
+      sanity: { treeSha: "t".repeat(40), ok: true },
+      architect: { headSha: "h".repeat(40), verdict: "SHIP" },
+    });
+
+    // Clearing removes the key entirely.
+    saveReviewPhase(repo, "demo", undefined);
+    expect(loadRunState(repo, "demo").reviewPhase).toBeUndefined();
+  });
+
+  it("saveSliceState preserves an existing reviewPhase", () => {
+    const repo = makeRepo();
+    saveReviewPhase(repo, "demo", {
+      pm: { headSha: "abc123", verdict: "ACCEPT-WITH-NOTES" },
+    });
+    saveSliceState(repo, "demo", "71", {
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(loadRunState(repo, "demo").reviewPhase).toEqual({
+      pm: { headSha: "abc123", verdict: "ACCEPT-WITH-NOTES" },
+    });
+  });
+});
+
+describe("sanitizeReviewPhase", () => {
+  it("keeps well-formed favorable entries", () => {
+    expect(
+      sanitizeReviewPhase({
+        sanity: { treeSha: "abc", ok: true },
+        architect: { headSha: "def", verdict: "SHIP" },
+        pm: { headSha: "def", verdict: "ACCEPT-WITH-NOTES" },
+      }),
+    ).toEqual({
+      sanity: { treeSha: "abc", ok: true },
+      architect: { headSha: "def", verdict: "SHIP" },
+      pm: { headSha: "def", verdict: "ACCEPT-WITH-NOTES" },
+    });
+  });
+
+  it("drops failed sanity results, unfavorable verdicts, and malformed entries", () => {
+    expect(
+      sanitizeReviewPhase({
+        sanity: { treeSha: "abc", ok: false },
+        architect: { headSha: "def", verdict: "FIX-BEFORE-SHIP" },
+        pm: { headSha: 42, verdict: "SHIP" },
+      }),
+    ).toBeUndefined();
+    expect(sanitizeReviewPhase("garbage")).toBeUndefined();
+    expect(sanitizeReviewPhase(null)).toBeUndefined();
+    expect(sanitizeReviewPhase({})).toBeUndefined();
+  });
+
+  it("keeps valid entries while dropping invalid siblings", () => {
+    expect(
+      sanitizeReviewPhase({
+        sanity: { treeSha: "abc", ok: true },
+        pm: { headSha: "", verdict: "SHIP" },
+      }),
+    ).toEqual({ sanity: { treeSha: "abc", ok: true } });
+  });
+
+  it("is applied when loading a v1 state file", () => {
+    const state = adaptLoadedState(
+      {
+        version: 1,
+        featureBranch: "feat/demo",
+        slices: {},
+        reviewPhase: {
+          architect: { headSha: "abc", verdict: "SHIP" },
+          pm: { headSha: "abc", verdict: "FIX-BEFORE-SHIP" },
+        },
+      },
+      "demo",
+    );
+    expect(state.reviewPhase).toEqual({
+      architect: { headSha: "abc", verdict: "SHIP" },
+    });
   });
 });

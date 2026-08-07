@@ -470,6 +470,23 @@ export function resolveCommit(repoRoot: string, ref: string): string | null {
   }
 }
 
+/**
+ * Resolve a ref to its tree SHA, or null when it is absent. The tree SHA
+ * identifies file *content*, independent of commit metadata — the key the
+ * pre-ship sanity gate cache uses so a docs-only review commit with the
+ * same source tree doesn't force a full gate re-run (ADR 0015).
+ */
+export function resolveTree(cwd: string, ref = "HEAD"): string | null {
+  try {
+    return git(["rev-parse", "--verify", `${ref}^{tree}`], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    return null;
+  }
+}
+
 /** Repo-relative migration paths added between the run base and final ref. */
 export function listAddedMigrationFiles(
   repoRoot: string,
