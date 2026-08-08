@@ -14,6 +14,7 @@ import {
 } from "./cli-options.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { resolveRunScope } from "./slice-scope.js";
+import { assertPrdNotOnHold } from "./prd-hold.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -90,6 +91,7 @@ async function main() {
     console.error(`Error: ${prdDir}/issues.md not found`);
     process.exit(2);
   }
+  assertPrdNotOnHold(prdDir);
 
   const prdSlug = basename(prdDir);
   const specsDir = prdDir
