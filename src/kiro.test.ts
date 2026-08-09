@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { join } from "node:path";
+import type { TerminationReport } from "./kill-tree.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const terminateMock = vi.hoisted(() => vi.fn());
 const fsMock = vi.hoisted(() => ({
   mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
@@ -15,6 +17,19 @@ const fsMock = vi.hoisted(() => ({
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
 }));
+
+// Kill paths delegate to the tree terminator (ADR 0020); unit tests
+// stub it and emit `exit` the way a real kill would.
+vi.mock("./kill-tree.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./kill-tree.js")>();
+  return { ...actual, terminateProcessTree: terminateMock };
+});
+
+const CLEAN_KILL: TerminationReport = {
+  rootDead: true,
+  survivors: [],
+  verified: true,
+};
 
 // The provider materialises the worker agent config on disk; keep unit
 // tests off the real home directory.
@@ -39,21 +54,26 @@ interface FakeProc extends EventEmitter {
   stdout: Readable;
   stderr: Readable;
   kill: ReturnType<typeof vi.fn>;
+  unref: ReturnType<typeof vi.fn>;
 }
 
 function makeFakeProc(): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new Readable({ read() {} });
   proc.stderr = new Readable({ read() {} });
-  proc.kill = vi.fn(() => {
-    setImmediate(() => proc.emit("exit", null));
-    return true;
-  });
+  proc.kill = vi.fn(() => true);
+  proc.unref = vi.fn();
   return proc;
 }
 
 beforeEach(() => {
   spawnMock.mockReset();
+  terminateMock.mockReset();
+  // Mirror a successful real kill: the tree dies, `exit` follows.
+  terminateMock.mockImplementation(async (proc: FakeProc) => {
+    setImmediate(() => proc.emit("exit", null));
+    return CLEAN_KILL;
+  });
   fsMock.mkdirSync.mockClear();
   fsMock.writeFileSync.mockClear();
   fsMock.readFileSync.mockReset();
@@ -231,7 +251,7 @@ describe("agent fail-open tripwire", () => {
     await expect(promise).rejects.toThrow(
       /could not load agent config "afk-worker"/,
     );
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
   });
 
   it("catches a marker split across chunk boundaries", async () => {
@@ -283,7 +303,7 @@ describe("liveness and bounds", () => {
       proc.stdout.emit("data", Buffer.from(SPINNER_FRAME));
     }
 
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
     proc.emit("exit", null);
     await expect(promise).rejects.toThrow(/idle for 1s/);
   });
@@ -307,7 +327,7 @@ describe("liveness and bounds", () => {
       vi.advanceTimersByTime(800);
     }
 
-    expect(proc.kill).not.toHaveBeenCalled();
+    expect(terminateMock).not.toHaveBeenCalled();
     proc.emit("exit", 0);
     await expect(promise).resolves.toMatchObject({ exitCode: 0 });
   });
@@ -330,8 +350,90 @@ describe("liveness and bounds", () => {
       vi.advanceTimersByTime(500);
     }
 
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
     proc.emit("exit", null);
     await expect(promise).rejects.toThrow(/wall-clock ceiling/);
+  });
+});
+
+describe("kill termination confirmation (ADR 0020)", () => {
+  it("appends surviving PIDs to the kill error and the log stream", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    terminateMock.mockImplementation(async (p: FakeProc) => {
+      setImmediate(() => p.emit("exit", null));
+      return { rootDead: true, survivors: [4242, 777], verified: true };
+    });
+    const logged: string[] = [];
+    const logStream = { write: (text: string) => logged.push(text) };
+
+    const promise = invoke({
+      role: "planner",
+      prompt: "go",
+      cwd: "/tmp/x",
+      logStream: logStream as never,
+    });
+    proc.stderr.emit(
+      "data",
+      Buffer.from("Error: no agent with name afk-worker found\n"),
+    );
+
+    await expect(promise).rejects.toThrow(
+      /WARNING: 2 process\(es\) survived the kill \(PIDs 4242, 777\)/,
+    );
+    expect(logged.join("")).toContain("survived the kill (PIDs 4242, 777)");
+  });
+
+  it("settles even when the child never emits exit because the root would not die", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    // Root refuses to die: no `exit` will ever fire.
+    terminateMock.mockImplementation(async () => ({
+      rootDead: false,
+      survivors: [1234, 5678],
+      verified: true,
+    }));
+
+    const promise = invoke({
+      role: "planner",
+      prompt: "go",
+      cwd: "/tmp/x",
+    });
+    proc.stderr.emit(
+      "data",
+      Buffer.from("Error: no agent with name afk-worker found\n"),
+    );
+
+    await expect(promise).rejects.toThrow(
+      /survived the kill \(PIDs 1234, 5678\)/,
+    );
+    // The kill path releases our ends of the child's handles so
+    // orphans cannot wedge the orchestrator's event loop at exit.
+    expect(proc.unref).toHaveBeenCalled();
+    expect(proc.stdout.destroyed).toBe(true);
+    expect(proc.stderr.destroyed).toBe(true);
+  });
+
+  it("warns loudly when tree termination could not be verified", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    terminateMock.mockImplementation(async (p: FakeProc) => {
+      setImmediate(() => p.emit("exit", null));
+      return { rootDead: true, survivors: [], verified: false };
+    });
+
+    const promise = invoke({
+      role: "planner",
+      prompt: "go",
+      cwd: "/tmp/x",
+    });
+    proc.stderr.emit(
+      "data",
+      Buffer.from("Error: no agent with name afk-worker found\n"),
+    );
+
+    await expect(promise).rejects.toThrow(
+      /could not verify process-tree termination/,
+    );
   });
 });

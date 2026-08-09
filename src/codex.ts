@@ -16,9 +16,12 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
-import { killProcessTree } from "./kill-tree.js";
+import {
+  formatTerminationWarning,
+  terminateProcessTree,
+  type TerminationReport,
+} from "./kill-tree.js";
 
-const FORCE_KILL_GRACE_MS = 10_000;
 const MODEL = "openai.gpt-5.6-sol";
 
 type JsonObject = Record<string, unknown>;
@@ -304,19 +307,69 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let toolCapExceeded = false;
     let cancelled = false;
     let providerError: Error | undefined;
+    let settled = false;
+    let termination: Promise<TerminationReport> | undefined;
 
-    const scheduleForceKill = () => {
-      const timer = setTimeout(() => {
-        if (proc.exitCode === null && proc.signalCode === null) {
-          killProcessTree(proc);
-        }
-      }, FORCE_KILL_GRACE_MS);
-      timer.unref();
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      watcher.stop();
+      clearTimeout(ceilingTimer);
+      signal?.removeEventListener("abort", onAbort);
+      preparedEnv.cleanup();
+      finish();
     };
 
+    // See kiro.ts / ADR 0020 for the rationale of the shared kill
+    // machinery below: tree-first verified kills, settlement decoupled
+    // from the `exit` event, and stdio release so surviving orphans
+    // cannot hold the orchestrator's event loop open.
+    const releaseChildHandles = () => {
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+      proc.stdin?.destroy();
+      proc.unref();
+    };
+
+    const killedError = (): Error => {
+      if (cancelled) return new CancelledError(`Agent ${role} cancelled`);
+      if (providerError) return providerError;
+      if (toolCapExceeded) {
+        return new Error(
+          `Agent ${role} exceeded ${maxToolCalls} tool calls - killed`,
+        );
+      }
+      if (ceilingHit) {
+        return new Error(
+          `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling - killed`,
+        );
+      }
+      if (killed) {
+        return new Error(
+          `Agent ${role} idle for ${idleTimeoutMs / 1000}s - killed`,
+        );
+      }
+      return new Error(`Agent ${role} was killed`);
+    };
+
+    const settleKill = (report: TerminationReport) =>
+      settle(() => {
+        releaseChildHandles();
+        const error = killedError();
+        const warning = formatTerminationWarning(report);
+        if (warning) {
+          error.message += ` - ${warning}`;
+          logStream?.write(`\n${warning}\n`);
+        }
+        reject(error);
+      });
+
     const stopProcess = () => {
-      proc.kill("SIGTERM");
-      scheduleForceKill();
+      if (termination) return;
+      termination = terminateProcessTree(proc);
+      void termination.then((report) => {
+        if (!report.rootDead) settleKill(report);
+      });
     };
 
     const onAbort = () => {
@@ -393,59 +446,38 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     });
 
     proc.on("error", (error) => {
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      preparedEnv.cleanup();
-      reject(error);
+      settle(() => reject(error));
     });
 
     proc.on("exit", (code) => {
       processLine(buffer.trim());
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      preparedEnv.cleanup();
-      const exitCode = code ?? 1;
-
-      if (cancelled) {
-        reject(new CancelledError(`Agent ${role} cancelled`));
-      } else if (providerError) {
-        reject(providerError);
-      } else if (toolCapExceeded) {
-        reject(
-          new Error(
-            `Agent ${role} exceeded ${maxToolCalls} tool calls - killed`,
-          ),
-        );
-      } else if (ceilingHit) {
-        reject(
-          new Error(
-            `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling - killed`,
-          ),
-        );
-      } else if (killed) {
-        reject(
-          new Error(
-            `Agent ${role} idle for ${idleTimeoutMs / 1000}s - killed`,
-          ),
-        );
-      } else if (exitCode !== 0) {
-        const detail = stderrChunks.join("").trim();
-        reject(
-          new Error(
-            `Agent ${role} exited with code ${exitCode}${
-              detail ? `: ${detail}` : ""
-            }`,
-          ),
-        );
-      } else {
-        resolve({
-          exitCode,
-          stdout: stdoutChunks.join(""),
-          stats: { toolCallCount },
-        });
+      // A kill was issued: hold the outcome until the termination
+      // report confirms (or denies) that the whole tree is gone.
+      if (termination) {
+        void termination.then(settleKill);
+        return;
       }
+      settle(() => {
+        const exitCode = code ?? 1;
+        if (providerError) {
+          reject(providerError);
+        } else if (exitCode !== 0) {
+          const detail = stderrChunks.join("").trim();
+          reject(
+            new Error(
+              `Agent ${role} exited with code ${exitCode}${
+                detail ? `: ${detail}` : ""
+              }`,
+            ),
+          );
+        } else {
+          resolve({
+            exitCode,
+            stdout: stdoutChunks.join(""),
+            stats: { toolCallCount },
+          });
+        }
+      });
     });
   });
 }

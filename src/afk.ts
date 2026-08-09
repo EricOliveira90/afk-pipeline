@@ -222,6 +222,13 @@ async function main() {
   }
 
   console.log("\nPipeline completed successfully.");
+
+  // A process that survived a kill (or a daemon an agent left behind)
+  // can hold inherited stdio pipe handles open and wedge this event
+  // loop at exit. Unref'd on purpose: a clean loop exits naturally
+  // before the timer fires; a wedged loop is the only case where it
+  // triggers. See ADR 0020.
+  setTimeout(() => process.exit(0), 2_000).unref();
 }
 
 main().catch((err) => {

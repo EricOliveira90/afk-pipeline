@@ -2,12 +2,27 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import type { StreamEvent } from "./agent-provider.js";
+import type { TerminationReport } from "./kill-tree.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const terminateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
 }));
+
+// Kill paths delegate to the tree terminator (ADR 0020); unit tests
+// stub it and emit `exit` the way a real kill would.
+vi.mock("./kill-tree.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./kill-tree.js")>();
+  return { ...actual, terminateProcessTree: terminateMock };
+});
+
+const CLEAN_KILL: TerminationReport = {
+  rootDead: true,
+  survivors: [],
+  verified: true,
+};
 
 // Imported AFTER the mock is wired.
 const { handleStreamEvent, invoke, parseStreamLine } = await import("./claude.js");
@@ -17,6 +32,7 @@ interface FakeProc extends EventEmitter {
   stdout: Readable;
   stderr: Readable;
   kill: ReturnType<typeof vi.fn>;
+  unref: ReturnType<typeof vi.fn>;
 }
 
 function makeFakeProc(): FakeProc {
@@ -25,13 +41,19 @@ function makeFakeProc(): FakeProc {
   proc.stdin = new Writable({ write(_c, _e, cb) { cb(); } });
   proc.stdout = new Readable({ read() {} });
   proc.stderr = new Readable({ read() {} });
-  proc.kill = vi.fn(() => {
-    // Mirror spawn semantics: kill triggers an `exit` on the next tick.
-    setImmediate(() => proc.emit("exit", null));
-    return true;
-  });
+  proc.kill = vi.fn(() => true);
+  proc.unref = vi.fn();
   return proc;
 }
+
+beforeEach(() => {
+  terminateMock.mockReset();
+  // Mirror a successful real kill: the tree dies, `exit` follows.
+  terminateMock.mockImplementation(async (proc: FakeProc) => {
+    setImmediate(() => proc.emit("exit", null));
+    return CLEAN_KILL;
+  });
+});
 
 function toolUseLine(name = "Bash", command = "ls"): string {
   return JSON.stringify({
@@ -167,7 +189,7 @@ describe("invoke maxToolCalls cap", () => {
     await expect(promise).rejects.toThrow(
       /Agent evaluator-qa exceeded 2 tool calls — killed/,
     );
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not fire the cap when tool calls stay at or below the limit", async () => {
@@ -192,7 +214,7 @@ describe("invoke maxToolCalls cap", () => {
     const result = await promise;
     expect(result.exitCode).toBe(0);
     expect(result.stats.toolCallCount).toBe(2);
-    expect(proc.kill).not.toHaveBeenCalled();
+    expect(terminateMock).not.toHaveBeenCalled();
   });
 });
 
@@ -225,9 +247,56 @@ describe("invoke maxDurationMs ceiling", () => {
       vi.advanceTimersByTime(5_000);
     }
 
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
     proc.emit("exit", null);
     await expect(promise).rejects.toThrow(/wall-clock ceiling/);
+  });
+
+  it("appends surviving PIDs to the kill error when the tree outlives the kill", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    terminateMock.mockImplementation(async () => ({
+      rootDead: true,
+      survivors: [4242, 777],
+      verified: true,
+    }));
+
+    const promise = invoke({
+      role: "generator",
+      prompt: "build",
+      cwd: "/tmp",
+      idleTimeoutMs: 10_000,
+      maxDurationMs: 30_000,
+    });
+
+    vi.advanceTimersByTime(30_000);
+    proc.emit("exit", null);
+    await expect(promise).rejects.toThrow(
+      /wall-clock ceiling.*WARNING: 2 process\(es\) survived the kill \(PIDs 4242, 777\)/s,
+    );
+  });
+
+  it("settles even when the child never emits exit because the root would not die", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    terminateMock.mockImplementation(async () => ({
+      rootDead: false,
+      survivors: [1234],
+      verified: true,
+    }));
+
+    const promise = invoke({
+      role: "generator",
+      prompt: "build",
+      cwd: "/tmp",
+      idleTimeoutMs: 10_000,
+      maxDurationMs: 30_000,
+    });
+
+    vi.advanceTimersByTime(30_000);
+    // No `exit` is ever emitted — settlement must come from the
+    // termination report alone.
+    await expect(promise).rejects.toThrow(/survived the kill \(PIDs 1234\)/);
   });
 });
 

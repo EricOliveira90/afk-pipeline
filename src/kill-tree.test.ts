@@ -1,0 +1,298 @@
+import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
+import {
+  collectTree,
+  formatTerminationWarning,
+  terminateProcessTree,
+} from "./kill-tree.js";
+
+/**
+ * Minimal stand-in for a spawned child. kill-tree only reads pid,
+ * exitCode and signalCode, and listens for `exit`.
+ */
+interface FakeProc extends EventEmitter {
+  pid: number | undefined;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  kill: ReturnType<typeof vi.fn>;
+}
+
+function makeFakeProc(pid: number | undefined = 100): FakeProc {
+  const proc = new EventEmitter() as FakeProc;
+  proc.pid = pid;
+  proc.exitCode = null;
+  proc.signalCode = null;
+  proc.kill = vi.fn(() => true);
+  return proc;
+}
+
+const asChild = (proc: FakeProc) => proc as unknown as ChildProcess;
+
+/**
+ * A mutable fake Windows process table: pid -> ppid. Kill primitives
+ * mutate it; the injected lister reads it.
+ */
+function makeTable(entries: Array<[number, number]>) {
+  const table = new Map(entries);
+  return {
+    table,
+    listPidPpid: async () => new Map(table),
+    remove(...pids: number[]) {
+      for (const pid of pids) table.delete(pid);
+    },
+  };
+}
+
+const FAST = { pollIntervalMs: 5, confirmTimeoutMs: 40 };
+
+describe("terminateProcessTree on win32", () => {
+  it("tree-kills the live root and confirms every descendant died", async () => {
+    const proc = makeFakeProc(100);
+    // Toolbox shim (100) -> real CLI (200) -> worker child (300);
+    // 999 is an unrelated process that must not be touched.
+    const state = makeTable([
+      [100, 1],
+      [200, 100],
+      [300, 200],
+      [999, 1],
+    ]);
+    const killTree = vi.fn(async (pid: number) => {
+      expect(pid).toBe(100);
+      state.remove(100, 200, 300);
+      proc.exitCode = 1;
+    });
+    const killPid = vi.fn(async () => {});
+
+    const report = await terminateProcessTree(asChild(proc), {
+      platform: "win32",
+      listPidPpid: state.listPidPpid,
+      killTree,
+      killPid,
+      ...FAST,
+    });
+
+    expect(killTree).toHaveBeenCalledTimes(1);
+    expect(killPid).not.toHaveBeenCalled();
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: true });
+    expect(state.table.has(999)).toBe(true);
+    expect(formatTerminationWarning(report)).toBe("");
+  });
+
+  it("force-kills stragglers individually and reports the ones that refuse to die", async () => {
+    const proc = makeFakeProc(100);
+    const state = makeTable([
+      [100, 1],
+      [200, 100],
+      [300, 200],
+    ]);
+    // The tree kill misses the grandchild; the individual kill also fails.
+    const killTree = vi.fn(async () => {
+      state.remove(100, 200);
+      proc.exitCode = 1;
+    });
+    const killPid = vi.fn(async () => {});
+
+    const report = await terminateProcessTree(asChild(proc), {
+      platform: "win32",
+      listPidPpid: state.listPidPpid,
+      killTree,
+      killPid,
+      ...FAST,
+    });
+
+    expect(killPid).toHaveBeenCalledWith(300);
+    expect(report.rootDead).toBe(true);
+    expect(report.survivors).toEqual([300]);
+    expect(formatTerminationWarning(report)).toMatch(
+      /WARNING: 1 process\(es\) survived the kill \(PIDs 300\)/,
+    );
+  });
+
+  it("enumerates orphans through stale parent PIDs after the root already died", async () => {
+    const proc = makeFakeProc(100);
+    proc.exitCode = 1; // shim died on its own; grandchildren carried on
+    // Windows keeps the recorded PPID of orphans pointing at the dead
+    // parent, so the chain 100 -> 200 -> 300 stays navigable.
+    const state = makeTable([
+      [200, 100],
+      [300, 200],
+    ]);
+    const killTree = vi.fn(async () => {}); // taskkill on a dead PID: no-op
+    const killPid = vi.fn(async (pid: number) => state.remove(pid));
+
+    const report = await terminateProcessTree(asChild(proc), {
+      platform: "win32",
+      listPidPpid: state.listPidPpid,
+      killTree,
+      killPid,
+      ...FAST,
+    });
+
+    expect(killPid).toHaveBeenCalledWith(200);
+    expect(killPid).toHaveBeenCalledWith(300);
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: true });
+  });
+
+  it("reports unverified when the process table cannot be listed", async () => {
+    const proc = makeFakeProc(100);
+    const killTree = vi.fn(async () => {
+      proc.exitCode = 1;
+    });
+
+    const report = await terminateProcessTree(asChild(proc), {
+      platform: "win32",
+      listPidPpid: async () => undefined,
+      killTree,
+      killPid: vi.fn(async () => {}),
+      ...FAST,
+    });
+
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: false });
+    expect(formatTerminationWarning(report)).toMatch(
+      /could not verify process-tree termination/,
+    );
+  });
+});
+
+describe("terminateProcessTree on POSIX", () => {
+  it("escalates SIGTERM to SIGKILL after the grace and confirms the exit", async () => {
+    const proc = makeFakeProc(100);
+    proc.kill = vi.fn((signal: NodeJS.Signals) => {
+      if (signal === "SIGKILL") {
+        proc.exitCode = null;
+        proc.signalCode = "SIGKILL";
+        proc.emit("exit", null);
+      }
+      return true;
+    });
+
+    const report = await terminateProcessTree(asChild(proc), {
+      platform: "linux",
+      graceMs: 20,
+      ...FAST,
+    });
+
+    expect(proc.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+    expect(proc.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: true });
+  });
+
+  it("skips SIGKILL when the child exits within the grace", async () => {
+    const proc = makeFakeProc(100);
+    proc.kill = vi.fn((signal: NodeJS.Signals) => {
+      if (signal === "SIGTERM") {
+        setTimeout(() => {
+          proc.exitCode = 0;
+          proc.emit("exit", 0);
+        }, 5);
+      }
+      return true;
+    });
+
+    const report = await terminateProcessTree(asChild(proc), {
+      platform: "linux",
+      graceMs: 100,
+      ...FAST,
+    });
+
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(report.rootDead).toBe(true);
+  });
+});
+
+describe("collectTree", () => {
+  it("walks descendants breadth-first from the root", () => {
+    const table = new Map<number, number>([
+      [100, 1],
+      [200, 100],
+      [300, 200],
+      [400, 100],
+      [999, 1],
+    ]);
+    expect(collectTree(100, table).sort()).toEqual([100, 200, 300, 400].sort());
+  });
+
+  it("is safe against parent-PID cycles fabricated by PID reuse", () => {
+    const table = new Map<number, number>([
+      [100, 200],
+      [200, 100],
+    ]);
+    expect(collectTree(100, table).sort()).toEqual([100, 200].sort());
+  });
+
+  it("omits a dead root but still returns orphans chained to it", () => {
+    const table = new Map<number, number>([
+      [200, 100],
+      [300, 200],
+    ]);
+    expect(collectTree(100, table)).toEqual([200, 300]);
+  });
+});
+
+// Real-process integration proof of the ADR 0020 defect and fix: a
+// parent that spawns a grandchild — the shim shape that survived every
+// production kill. win32 only: the POSIX path deliberately signals the
+// direct child alone (see kill-tree.ts).
+describe.runIf(process.platform === "win32")(
+  "terminateProcessTree against real Windows processes",
+  () => {
+    function isAlive(pid: number): boolean {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    it(
+      "kills a real parent AND its grandchild, and both are verifiably gone",
+      { timeout: 30_000 },
+      async () => {
+        const { spawn: realSpawn } = await import("node:child_process");
+        // Parent prints the grandchild's PID, then both idle for 60s —
+        // only a working tree kill can end them.
+        const parentScript = [
+          "const cp = require('child_process');",
+          "const g = cp.spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], {stdio: 'ignore'});",
+          "console.log('grandchild=' + g.pid);",
+          "setTimeout(()=>{}, 60000);",
+        ].join(" ");
+        const proc = realSpawn(process.execPath, ["-e", parentScript], {
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+
+        const grandchildPid = await new Promise<number>((resolve, reject) => {
+          let out = "";
+          const timer = setTimeout(
+            () => reject(new Error(`no grandchild pid in: ${out}`)),
+            15_000,
+          );
+          proc.stdout!.on("data", (chunk: Buffer) => {
+            out += chunk.toString();
+            const match = /grandchild=(\d+)/.exec(out);
+            if (match) {
+              clearTimeout(timer);
+              resolve(Number(match[1]));
+            }
+          });
+        });
+        expect(isAlive(proc.pid!)).toBe(true);
+        expect(isAlive(grandchildPid)).toBe(true);
+
+        const report = await terminateProcessTree(proc);
+
+        expect(report.rootDead).toBe(true);
+        expect(report.verified).toBe(true);
+        expect(report.survivors).toEqual([]);
+        // Independent proof, not just the report's word: the pre-fix
+        // mechanism (SIGTERM on the parent) left exactly this
+        // grandchild running.
+        expect(isAlive(proc.pid!)).toBe(false);
+        expect(isAlive(grandchildPid)).toBe(false);
+      },
+    );
+  },
+);

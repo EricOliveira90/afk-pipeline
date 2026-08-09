@@ -9,11 +9,12 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
-import { killProcessTree } from "./kill-tree.js";
+import {
+  formatTerminationWarning,
+  terminateProcessTree,
+  type TerminationReport,
+} from "./kill-tree.js";
 import { createProgressFilter } from "./liveness.js";
-
-/** See claude.ts for rationale. */
-const FORCE_KILL_GRACE_MS = 10_000;
 
 /** Wall-clock ceiling default — see ADR 0016 and agent-provider.ts. */
 const DEFAULT_MAX_DURATION_MS = 3_600_000;
@@ -179,19 +180,85 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let ceilingHit = false;
     let agentLoadFailed = false;
     let cancelled = false;
+    let settled = false;
+    let termination: Promise<TerminationReport> | undefined;
 
-    const scheduleForceKill = () => {
-      const timer = setTimeout(() => {
-        if (proc.exitCode === null && proc.signalCode === null) {
-          killProcessTree(proc);
-        }
-      }, FORCE_KILL_GRACE_MS);
-      timer.unref();
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      watcher.stop();
+      clearTimeout(ceilingTimer);
+      signal?.removeEventListener("abort", onAbort);
+      finish();
     };
 
+    /**
+     * Drop our ends of the child's stdio and the process handle from
+     * the event loop. Orphaned grandchildren inherit the pipe write
+     * ends; without this a survived kill holds the orchestrator's
+     * event loop open forever after the run. Kill paths only — natural
+     * exits close their pipes on their own. See ADR 0020.
+     */
+    const releaseChildHandles = () => {
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+      proc.unref();
+    };
+
+    const killedError = (): Error => {
+      if (cancelled) return new CancelledError(`Agent ${role} cancelled`);
+      if (agentLoadFailed) {
+        return new Error(
+          `Agent ${role}: kiro-cli could not load agent config ` +
+            `"${agentName}" and would fall back to the unrestricted ` +
+            `default agent — killed`,
+        );
+      }
+      if (ceilingHit) {
+        return new Error(
+          `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling — killed`,
+        );
+      }
+      if (killed) {
+        return new Error(
+          `Agent ${role} idle for ${idleTimeoutMs / 1000}s — killed`,
+        );
+      }
+      return new Error(`Agent ${role} was killed`);
+    };
+
+    /**
+     * Settle a killed invocation — but only once the termination
+     * report is in, so a terminal outcome is never recorded while the
+     * process tree may still be alive. Survivors are surfaced loudly
+     * in both the rejection and the invocation log.
+     */
+    const settleKill = (report: TerminationReport) =>
+      settle(() => {
+        releaseChildHandles();
+        const error = killedError();
+        const warning = formatTerminationWarning(report);
+        if (warning) {
+          error.message += ` — ${warning}`;
+          logStream?.write(`\n${warning}\n`);
+        }
+        reject(error);
+      });
+
+    /**
+     * Tree-first kill (ADR 0020): terminate and verify the whole tree
+     * while its root is still alive. No SIGTERM-then-grace on Windows —
+     * Node's "SIGTERM" there is already an ungraceful TerminateProcess
+     * of the shim only, which is how zombie agents were born. If even
+     * the root refuses to die, `exit` never fires — settle from the
+     * termination report instead of awaiting the event forever.
+     */
     const stopProcess = () => {
-      proc.kill("SIGTERM");
-      scheduleForceKill();
+      if (termination) return;
+      termination = terminateProcessTree(proc);
+      void termination.then((report) => {
+        if (!report.rootDead) settleKill(report);
+      });
     };
 
     const onAbort = () => {
@@ -252,44 +319,24 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     });
 
     proc.on("error", (err) => {
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(err);
+      settle(() => reject(err));
     });
 
     proc.on("exit", (code) => {
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      const exitCode = code ?? 1;
-      if (cancelled) {
-        reject(new CancelledError(`Agent ${role} cancelled`));
-      } else if (agentLoadFailed) {
-        reject(
-          new Error(
-            `Agent ${role}: kiro-cli could not load agent config ` +
-              `"${agentName}" and would fall back to the unrestricted ` +
-              `default agent — killed`,
-          ),
-        );
-      } else if (ceilingHit) {
-        reject(
-          new Error(
-            `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling — killed`,
-          ),
-        );
-      } else if (killed) {
-        reject(
-          new Error(
-            `Agent ${role} idle for ${idleTimeoutMs / 1000}s — killed`,
-          ),
-        );
-      } else if (exitCode !== 0) {
-        reject(new Error(`Agent ${role} exited with code ${exitCode}`));
-      } else {
-        resolve({ exitCode, stdout: stdoutChunks.join(""), stats: {} });
+      // A kill was issued: hold the outcome until the termination
+      // report confirms (or denies) that the whole tree is gone.
+      if (termination) {
+        void termination.then(settleKill);
+        return;
       }
+      settle(() => {
+        const exitCode = code ?? 1;
+        if (exitCode !== 0) {
+          reject(new Error(`Agent ${role} exited with code ${exitCode}`));
+        } else {
+          resolve({ exitCode, stdout: stdoutChunks.join(""), stats: {} });
+        }
+      });
     });
   });
 }

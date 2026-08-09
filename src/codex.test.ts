@@ -11,13 +11,37 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "./agent-provider.js";
+import type { TerminationReport } from "./kill-tree.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const terminateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
   spawnSync: vi.fn(),
 }));
+
+// Kill paths delegate to the tree terminator (ADR 0020); unit tests
+// stub it and emit `exit` the way a real kill would.
+vi.mock("./kill-tree.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./kill-tree.js")>();
+  return { ...actual, terminateProcessTree: terminateMock };
+});
+
+const CLEAN_KILL: TerminationReport = {
+  rootDead: true,
+  survivors: [],
+  verified: true,
+};
+
+beforeEach(() => {
+  terminateMock.mockReset();
+  // Mirror a successful real kill: the tree dies, `exit` follows.
+  terminateMock.mockImplementation(async (proc: FakeProc) => {
+    setImmediate(() => proc.emit("exit", null));
+    return CLEAN_KILL;
+  });
+});
 
 const {
   codexProvider,
@@ -38,6 +62,7 @@ interface FakeProc extends EventEmitter {
   exitCode: number | null;
   signalCode: NodeJS.Signals | null;
   kill: ReturnType<typeof vi.fn>;
+  unref: ReturnType<typeof vi.fn>;
 }
 
 function makeFakeProc(): FakeProc {
@@ -53,11 +78,8 @@ function makeFakeProc(): FakeProc {
   proc.stderr = new Readable({ read() {} });
   proc.exitCode = null;
   proc.signalCode = null;
-  proc.kill = vi.fn((signal: NodeJS.Signals) => {
-    proc.signalCode = signal;
-    setImmediate(() => proc.emit("exit", null));
-    return true;
-  });
+  proc.kill = vi.fn(() => true);
+  proc.unref = vi.fn();
   return proc;
 }
 
@@ -350,7 +372,7 @@ describe("Codex invocation lifecycle", () => {
     await expect(promise).rejects.toThrow(
       "Agent evaluator-qa exceeded 2 tool calls - killed",
     );
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects provider-reported stdout errors", async () => {
@@ -390,7 +412,7 @@ describe("Codex invocation lifecycle", () => {
     const result = await promise;
     expect(result.exitCode).toBe(0);
     expect(result.stats.toolCallCount).toBe(1);
-    expect(proc.kill).not.toHaveBeenCalled();
+    expect(terminateMock).not.toHaveBeenCalled();
     expect(events).toEqual([
       { type: "tool_call", name: "command_execution", args: "pnpm test" },
       { type: "result", result: "recovered and finished" },
@@ -415,7 +437,7 @@ describe("Codex invocation lifecycle", () => {
     await expect(promise).rejects.toThrow(
       "Codex turn.failed: Internal server error",
     );
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
   });
 
   it("includes stderr in nonzero-exit errors", async () => {
@@ -442,7 +464,7 @@ describe("Codex invocation lifecycle", () => {
     });
     controller.abort();
     await expect(promise).rejects.toMatchObject({ name: "CancelledError" });
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects immediately when already cancelled", async () => {
@@ -489,9 +511,33 @@ describe("Codex maxDurationMs ceiling", () => {
       vi.advanceTimersByTime(5_000);
     }
 
-    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(terminateMock).toHaveBeenCalledTimes(1);
     proc.emit("exit", null);
     await expect(promise).rejects.toThrow(/wall-clock ceiling/);
+  });
+
+  it("appends surviving PIDs to the kill error when the tree outlives the kill", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    terminateMock.mockImplementation(async () => ({
+      rootDead: true,
+      survivors: [31337],
+      verified: true,
+    }));
+
+    const promise = invoke({
+      role: "generator",
+      prompt: "build",
+      cwd: "/tmp",
+      idleTimeoutMs: 10_000,
+      maxDurationMs: 30_000,
+    });
+
+    vi.advanceTimersByTime(30_000);
+    proc.emit("exit", null);
+    await expect(promise).rejects.toThrow(
+      /survived the kill \(PIDs 31337\)/,
+    );
   });
 });
 
