@@ -1890,3 +1890,136 @@ describe("buildPrCreationPlan", () => {
     },
   );
 });
+
+
+/**
+ * Observability (ADR 0017): every run gets its own log directory with a
+ * run.log the orchestrator owns. Phase transitions must be readable
+ * from disk — launcher stdio was lost on Windows (`pnpm exec ... 2>&1`
+ * produced an empty file), leaving hangs indistinguishable from
+ * progress.
+ */
+describe("run.log observability (ADR 0017)", () => {
+  function runDirsOf(repo: string, slug: string): string[] {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    return readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .map((d) => join(parent, d));
+  }
+
+  it("writes phase transitions, lane queueing, verdicts, and outcomes to run.log; agent logs live in the run dir", async () => {
+    const repo = makeRepo();
+    const slug = "runlog";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9101", title: "Lead", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "9102", title: "Follower", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Shared file → one lane → the follower must emit a "queued behind"
+    // line, the exact signal that was missing when a NEGOTIATING slice
+    // looked dropped.
+    const fixtures = new Map<string, SliceFixture>([
+      ["9101", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "lead" }],
+      ["9102", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "follower" }],
+    ]);
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records }),
+    });
+
+    const runDirs = runDirsOf(repo, slug);
+    expect(runDirs.length).toBe(1);
+    const runDir = runDirs[0]!;
+
+    const runLog = readFileSync(join(runDir, "run.log"), "utf-8");
+    // Every line is timestamped.
+    for (const line of runLog.trim().split("\n")) {
+      expect(line).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] /);
+    }
+    // Startup line points at this run's directory.
+    expect(runLog).toContain("Pipeline run started");
+    // Wave and per-slice phase transitions.
+    expect(runLog).toContain("Wave 1: dispatching 2 slice(s)");
+    expect(runLog).toContain("Slice #9101 (Lead): exploring...");
+    // Contract negotiation is observable: verdict and lock per slice.
+    expect(runLog).toContain("contract verdict ACCEPT (round 1/3)");
+    expect(runLog).toContain("Slice #9101 (Lead): contract LOCKED");
+    // Lane queueing is explicit — a waiting successor is distinguishable
+    // from a dropped one.
+    expect(runLog).toContain(
+      "Slice #9102 queued behind #9101 in its lane",
+    );
+    expect(runLog).toContain("not dropped");
+    // Terminal outcomes land in the file too.
+    expect(runLog).toContain(
+      `Slice #9101 (Lead): PASS — merged into feat-stub/${slug}`,
+    );
+    expect(runLog).toContain(
+      `Slice #9102 (Follower): PASS — merged into feat-stub/${slug}`,
+    );
+
+    // Agent invocation logs live inside the run directory…
+    const filesInRunDir = readdirSync(runDir);
+    expect(filesInRunDir).toContain("slice-01-explorer.log");
+    expect(filesInRunDir).toContain("slice-01-generator-r1.log");
+    // …and a per-run summary copy sits next to them.
+    expect(filesInRunDir).toContain("run-summary.md");
+    // The stable summary path is preserved for existing consumers.
+    expect(
+      existsSync(join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md")),
+    ).toBe(true);
+    // No agent logs leak into the shared prd dir (the cross-run append
+    // defect surface).
+    const parentEntries = readdirSync(join(repo, ".afk", "logs", `${slug}-stub`));
+    expect(parentEntries.some((e) => e.endsWith(".log"))).toBe(false);
+  }, 60_000);
+
+  it("a re-run gets a fresh run directory and leaves the first run's logs untouched", async () => {
+    const repo = makeRepo();
+    const slug = "runlog-rerun";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9201", title: "Only", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9201", { files: ["src/only.txt"], qaPasses: true, outputFile: "src/only.txt", outputContent: "only" }],
+    ]);
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    };
+
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+    const [firstDir] = runDirsOf(repo, slug);
+    const firstRunLog = readFileSync(join(firstDir!, "run.log"), "utf-8");
+    const firstGenLog = statSync(join(firstDir!, "slice-01-generator-r1.log"));
+
+    // Second run (resumes: slice already completed — still a run).
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+
+    const dirs = runDirsOf(repo, slug);
+    expect(dirs.length).toBe(2);
+    // First run's files did not change — no cross-run append, so mtime
+    // and size keep meaning what an operator assumes they mean.
+    expect(readFileSync(join(firstDir!, "run.log"), "utf-8")).toBe(firstRunLog);
+    expect(
+      statSync(join(firstDir!, "slice-01-generator-r1.log")).mtimeMs,
+    ).toBe(firstGenLog.mtimeMs);
+    // The second run's run.log records the resume ("already completed").
+    const secondDir = dirs.find((d) => d !== firstDir)!;
+    const secondRunLog = readFileSync(join(secondDir, "run.log"), "utf-8");
+    expect(secondRunLog).toContain("Pipeline run started");
+    expect(secondRunLog).toContain("(already completed)");
+  }, 60_000);
+});

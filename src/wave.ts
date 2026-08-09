@@ -74,7 +74,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   const provider = config.provider ?? kiroProvider;
   const outcomes = new Map<string, WaveOutcome>();
 
-  console.error(
+  logger.phase(
     `[afk] Wave ${waveNumber}: dispatching ${readyIds.length} slice(s) [${readyIds.join(", ")}]`,
   );
 
@@ -173,11 +173,24 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   const lanes = partitionLanes(readyForLanes);
   const lanesToRun = executionLanes(lanes, config.serialLanes);
   if (lanes.length > 0) {
-    console.error(
+    logger.phase(
       `[afk] Wave ${waveNumber}: ${lanesToRun.length} lane(s)${config.serialLanes ? " (serial)" : ""} — ${lanesToRun
         .map((l) => `[${l.map((s) => `#${s.ghIssue}`).join(", ")}]`)
         .join(" ")}`,
     );
+    // Make lane queueing explicit: a successor's artifacts (context.md,
+    // contract.md) will be DELETED and re-negotiated after its
+    // predecessor merges. Without this line, a successor sitting at
+    // `**Status:** NEGOTIATING` is indistinguishable from a slice the
+    // pipeline dropped. See ADR 0017.
+    for (const lane of lanesToRun) {
+      for (let i = 1; i < lane.length; i++) {
+        logger.phase(
+          `[afk] Slice #${lane[i]!.ghIssue} queued behind #${lane[i - 1]!.ghIssue} in its lane — ` +
+            `waiting to re-negotiate on the refreshed base after the predecessor merges (not dropped)`,
+        );
+      }
+    }
   }
 
   // --- Run each lane. Lanes are independent; slices within a lane
@@ -194,7 +207,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         // Lane successor refresh: predecessor has merged into featBranch.
         if (i > 0) {
           try {
-            console.error(
+            logger.phase(
               `[afk] Refreshing slice #${id} for lane successor on new base`,
             );
             git.recreateWorktreeFromBase(
@@ -340,7 +353,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             return;
           }
           if (mergeResult.cleanupWarning) {
-            console.error(`[afk] Warning: ${mergeResult.cleanupWarning}`);
+            logger.phase(`[afk] Warning: ${mergeResult.cleanupWarning}`);
           }
 
           await mergeMutex(() =>

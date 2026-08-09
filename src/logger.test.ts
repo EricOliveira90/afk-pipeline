@@ -1,5 +1,11 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Logger } from "./logger.js";
@@ -145,5 +151,134 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
     expect(md).toContain("| 3 Err | 🔴 STUCK |");
     expect(md).not.toContain("ESCALATE |");
     expect(md).not.toContain("| 3 Err | 🔴 ERROR |");
+  });
+});
+
+
+describe("Logger per-run log separation (ADR 0017)", () => {
+  it("gives each Logger its own run directory under the prd log dir", () => {
+    const repo = makeRepo();
+    const first = new Logger(repo, "reruns");
+    const second = new Logger(repo, "reruns");
+
+    expect(first.runDir).not.toBe(second.runDir);
+    expect(existsSync(first.runDir)).toBe(true);
+    expect(existsSync(second.runDir)).toBe(true);
+    // Both live under .afk/logs/<slug>/ and are named run-<timestamp>.
+    const parent = join(repo, ".afk", "logs", "reruns");
+    const runDirs = readdirSync(parent).filter((d) =>
+      /^run-\d{8}-\d{6}/.test(d),
+    );
+    expect(runDirs.length).toBe(2);
+  });
+
+  it("writes agent logs into the run directory, not the shared prd dir", async () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "agent-logs");
+    const stream = log.agentLog("07", "generator", 1);
+    stream.write("hello from run\n");
+    await new Promise<void>((resolve) => stream.end(resolve));
+
+    const expected = join(log.runDir, "slice-07-generator-r1.log");
+    expect(existsSync(expected)).toBe(true);
+    expect(readFileSync(expected, "utf-8")).toContain("hello from run");
+    // The pre-fix location must NOT receive the log — a re-run appending
+    // to the previous run's file is exactly the defect this prevents.
+    expect(
+      existsSync(join(repo, ".afk", "logs", "agent-logs", "slice-07-generator-r1.log")),
+    ).toBe(false);
+  });
+
+  it("a second run reusing the same filename does not touch the first run's log", async () => {
+    const repo = makeRepo();
+    const run1 = new Logger(repo, "isolation");
+    const s1 = run1.agentLog("07", "generator", 1);
+    s1.write("run one\n");
+    await new Promise<void>((resolve) => s1.end(resolve));
+
+    const run2 = new Logger(repo, "isolation");
+    const s2 = run2.agentLog("07", "generator", 1);
+    s2.write("run two\n");
+    await new Promise<void>((resolve) => s2.end(resolve));
+
+    const first = readFileSync(
+      join(run1.runDir, "slice-07-generator-r1.log"),
+      "utf-8",
+    );
+    const second = readFileSync(
+      join(run2.runDir, "slice-07-generator-r1.log"),
+      "utf-8",
+    );
+    expect(first).toBe("run one\n");
+    expect(second).toBe("run two\n");
+  });
+});
+
+describe("Logger.phase (run.log, ADR 0017)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("appends a timestamped line to run.log and echoes to stderr by default", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "phases");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    log.phase("[afk] Wave 1: dispatching 2 slice(s) [01, 02]");
+
+    expect(errSpy).toHaveBeenCalledWith(
+      "[afk] Wave 1: dispatching 2 slice(s) [01, 02]",
+    );
+    const content = readFileSync(join(log.runDir, "run.log"), "utf-8");
+    // ISO-8601 timestamp prefix, then the message verbatim.
+    expect(content).toMatch(
+      /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[afk\] Wave 1: dispatching 2 slice\(s\) \[01, 02\]\n$/,
+    );
+  });
+
+  it("routes echo through console.log / console.warn when asked", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "phases-via");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    log.phase("stdout line", "log");
+    log.phase("warn line", "warn");
+
+    expect(logSpy).toHaveBeenCalledWith("stdout line");
+    expect(warnSpy).toHaveBeenCalledWith("warn line");
+    const content = readFileSync(join(log.runDir, "run.log"), "utf-8");
+    expect(content).toContain("stdout line");
+    expect(content).toContain("warn line");
+  });
+
+  it("accumulates lines in order across calls", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "phases-order");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    log.phase("first");
+    log.phase("second");
+    const lines = readFileSync(join(log.runDir, "run.log"), "utf-8")
+      .trim()
+      .split("\n");
+    expect(lines[0]).toContain("first");
+    expect(lines[1]).toContain("second");
+  });
+});
+
+describe("Logger.writeSummary per-run copy", () => {
+  it("writes run-summary.md to both the stable path and the run directory", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "summary-copy");
+    log.transitionTo(
+      "1",
+      lifecycle.pass(id("1", "Pass", "afk/1"), PROGRESS, true),
+    );
+    const md = log.writeSummary();
+
+    const stable = join(repo, ".afk", "logs", "summary-copy", "run-summary.md");
+    const perRun = join(log.runDir, "run-summary.md");
+    expect(readFileSync(stable, "utf-8")).toBe(md);
+    expect(readFileSync(perRun, "utf-8")).toBe(md);
   });
 });

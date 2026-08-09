@@ -784,7 +784,7 @@ function preserveContractNegotiationFailure(
     capDecision,
   });
   if (result.archived) {
-    console.error(
+    ctx.logger.phase(
       `${ctx.tag}: archived negotiation artifacts to ${result.archiveDir}`,
     );
   }
@@ -826,7 +826,7 @@ export async function runSliceNegotiate(
       : `No local issue manifest was found. Fetch the issue body with: gh issue view ${slice.ghIssue}`;
     const contextPath = join(ctx.absSliceDir, "context.md");
     if (!existsSync(contextPath)) {
-      console.error(`${ctx.tag}: exploring...`);
+      logger.phase(`${ctx.tag}: exploring...`);
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
         role: "explorer",
@@ -859,7 +859,7 @@ export async function runSliceNegotiate(
 
     if (contractStatus !== "LOCKED") {
       for (let round = 1; round <= allowedContractRounds; round++) {
-        console.error(
+        logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
         );
         const plannerLog = logger.agentLog(slice.number, "planner", round);
@@ -881,7 +881,7 @@ export async function runSliceNegotiate(
           logStream: plannerLog,
         }).finally(() => closeAgentLog(plannerLog));
 
-        console.error(
+        logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
         );
         const evalLog = logger.agentLog(
@@ -908,6 +908,16 @@ export async function runSliceNegotiate(
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
         const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
+        // An UNKNOWN verdict means the evaluator exited without writing
+        // a parseable verdict — surface it instead of silently looping,
+        // so an operator can tell a dropped negotiation from a pending
+        // one. See ADR 0017.
+        logger.phase(
+          `${ctx.tag}: contract verdict ${verdict} (round ${round}/${allowedContractRounds})` +
+            (verdict === "UNKNOWN"
+              ? " — evaluator produced no parseable verdict"
+              : ""),
+        );
         lastRound = round;
         lastVerdict = verdict;
         lastFeedbackPath = feedbackPath;
@@ -923,7 +933,7 @@ export async function runSliceNegotiate(
           capDecisions.push(
             "Evaluator explicitly escalated; no cap extension was considered.",
           );
-          console.error(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
+          logger.phase(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
         } else if (round === allowedContractRounds) {
           const assessment =
             verdict === "REVISE"
@@ -943,14 +953,14 @@ export async function runSliceNegotiate(
             capDecisions.push(
               `Granted one extra round because ${assessment.reason}.`,
             );
-            console.error(
+            logger.phase(
               `${ctx.tag}: granting contract round ${allowedContractRounds}: ${assessment.reason}`,
             );
             previousMetrics = metrics;
             continue;
           }
           capDecisions.push(`Extension refused: ${assessment.reason}.`);
-          console.error(
+          logger.phase(
             `${ctx.tag}: contract round extension refused: ${assessment.reason}`,
           );
         } else {
@@ -958,7 +968,7 @@ export async function runSliceNegotiate(
           continue;
         }
 
-        console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+        logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
         preserveContractNegotiationFailure(
           ctx,
           "ESCALATE",
@@ -989,8 +999,15 @@ export async function runSliceNegotiate(
           : "The configured round cap was not reached.",
       );
       logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
+      // Previously this path was silent — a slice could end negotiation
+      // still NEGOTIATING with no visible trace, indistinguishable from
+      // one awaiting a lane-successor refresh. See ADR 0017.
+      logger.phase(
+        `${ctx.tag}: STUCK — contract not locked after negotiation (last verdict: ${lastVerdict}, round ${lastRound})`,
+      );
       return "STUCK";
     }
+    logger.phase(`${ctx.tag}: contract LOCKED`);
     return "LOCKED";
   } catch (err) {
     if (isCancelled(err, signal)) {
@@ -1095,7 +1112,7 @@ export async function runQAStage(
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
       if (attempt <= infrastructureRetries) {
-        console.error(`${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`);
+        logger.phase(`${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`);
         continue;
       }
       throw new Error(
@@ -1116,7 +1133,7 @@ export async function runQAStage(
     if (verdict === "PASS") return { outcome: "PASS", report: archiveDisplayPath };
     if (artifacts.readQAFailureClass(reportPath) === "INFRASTRUCTURE") {
       if (attempt <= infrastructureRetries) {
-        console.error(`${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`);
+        logger.phase(`${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`);
         continue;
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
@@ -1137,7 +1154,7 @@ export async function runSliceExecute(
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
       logger.bumpGenRound(slice.ghIssue, round);
-      console.error(`${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      logger.phase(`${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
       const genLog = logger.agentLog(slice.number, "generator", round);
       const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
       const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -1158,12 +1175,12 @@ export async function runSliceExecute(
         idleWarningIntervalMs: heartbeatMs,
       }).finally(() => closeAgentLog(genLog));
 
-      console.error(`${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      logger.phase(`${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
       const deterministic = await runQAStage(ctx, round, "deterministic", qaReports);
       let implementationFailed = deterministic.outcome === "IMPLEMENTATION";
       qaReports.push(deterministic.report);
       if (deterministic.outcome !== "IMPLEMENTATION" && config.sharedPreview) {
-        console.error(`${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+        logger.phase(`${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
         const remote = await runQAStage(ctx, round, "shared-preview", qaReports);
         qaReports.push(remote.report);
         if (remote.outcome === "IMPLEMENTATION") {
@@ -1186,7 +1203,7 @@ export async function runSliceExecute(
           }
         }
 
-        console.error(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
+        logger.phase(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
         logger.transitionTo(
           slice.ghIssue,
           lifecycle.pass(
@@ -1199,7 +1216,7 @@ export async function runSliceExecute(
       }
 
       if (round === MAX_GENERATOR_ROUNDS) {
-        console.error(`${ctx.tag}: stuck — running fallback generator...`);
+        logger.phase(`${ctx.tag}: stuck — running fallback generator...`);
         const stuckLog = logger.agentLog(slice.number, "generator-stuck");
         await invoke({
           role: "generator-stuck",
@@ -1267,6 +1284,11 @@ export async function runPipeline(
   const provider = config.provider ?? kiroProvider;
   const loggerSlug = pipelineRunSlug(prdSlug, provider);
   const logger = new Logger(repoRoot, loggerSlug);
+  // First run.log line — tells the operator where this run's logs live
+  // and gives `tail -f` a stable target from second zero.
+  logger.phase(
+    `[afk] Pipeline run started (${provider.name}) — logs: ${logger.runDir}`,
+  );
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     provider.invoke({
       ...opts,
@@ -1387,7 +1409,7 @@ export async function runPipeline(
           true,
         ),
       );
-      console.log(`  Skipping #${id} ${slice.title} (already completed)`);
+      logger.phase(`  Skipping #${id} ${slice.title} (already completed)`, "log");
     }
   }
 
@@ -1470,6 +1492,9 @@ export async function runPipeline(
         logger.transitionTo(id, passed);
         saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(passed)!);
         completed.add(id);
+        logger.phase(
+          `[afk] Slice #${id} (${slice.title}): PASS — merged into ${featBranch}`,
+        );
         continue;
       }
 
@@ -1493,6 +1518,12 @@ export async function runPipeline(
         loggerSlug,
         id,
         projectForPersistence(failedLifecycle)!,
+      );
+      // Every terminal outcome gets a timestamped run.log line so an
+      // operator can always tell WHY a slice stopped — a LANE-CANCELLED
+      // deferral reads differently from a dropped negotiation. ADR 0017.
+      logger.phase(
+        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${outcome.error}`,
       );
       if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
@@ -1576,7 +1607,7 @@ export async function runPipeline(
       // is bypassed throughout the run. Failing here skips the guardian
       // reviews and the PR: there's no point asking architect/PM to grade
       // code that won't pass the basic quality gate.
-      console.log("Running pre-ship sanity gate...");
+      logger.phase("Running pre-ship sanity gate...", "log");
       // Cache the gate by the reviewed tree's SHA (ADR 0015): a re-entry
       // run against the same content — e.g. after a review infrastructure
       // failure, or when only docs/review commits landed — must not pay
@@ -1586,19 +1617,20 @@ export async function runPipeline(
       let sanity: { ok: boolean; failures: string[] };
       if (treeShaBefore && cachedSanity?.treeSha === treeShaBefore) {
         sanity = { ok: true, failures: [] };
-        console.log(
+        logger.phase(
           `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
+          "log",
         );
       } else {
         sanity = runPreShipSanity(reviewDir);
       }
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
-        console.error(
+        logger.phase(
           `  ❌ Pre-ship sanity gate failed: ${sanity.failures.join(", ")}. Skipping guardian reviews and PR creation.`,
         );
       } else {
-        console.log("  ✅ Pre-ship sanity gate passed.");
+        logger.phase("  ✅ Pre-ship sanity gate passed.", "log");
 
         const reviewRetries =
           config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -1677,12 +1709,12 @@ export async function runPipeline(
                 error instanceof Error ? error.message : String(error);
               lastFailure = { outcome: failureClass, detail: message };
               if (attempt <= reviewRetries) {
-                console.error(
+                logger.phase(
                   `  ⚠️  ${label} review ${failureClass}: ${message}. Infrastructure retry ${attempt}/${reviewRetries}.`,
                 );
                 continue;
               }
-              console.error(
+              logger.phase(
                 `  ⚠️  ${label} review ${failureClass} after ${attempt} attempt(s): ${message}. No PR will be opened.`,
               );
               return lastFailure;
@@ -1692,8 +1724,9 @@ export async function runPipeline(
             const reviewPath = join(reviewDir, specsDir, reviewFileName);
             const verdict = artifacts.readReviewVerdict(reviewPath);
             if (verdict === "UNPARSEABLE") {
-              console.warn(
+              logger.phase(
                 `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
+                "warn",
               );
             }
             return { outcome: verdict };
@@ -1707,8 +1740,9 @@ export async function runPipeline(
           label: string,
         ): ReviewRunResult | undefined => {
           if (cached && headShaBefore && cached.headSha === headShaBefore) {
-            console.log(
+            logger.phase(
               `  ↩️  Reusing cached ${label} review verdict ${cached.verdict} for unchanged HEAD ${headShaBefore.slice(0, 12)}.`,
+              "log",
             );
             return { outcome: cached.verdict };
           }
@@ -1812,7 +1846,7 @@ export async function runPipeline(
         });
         if (prPlan.open) {
           if (prPlan.overridden) {
-            console.warn(`  ⚠️  ${prPlan.overrideNote}`);
+            logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
             logger.setPrOverrideNote(prPlan.overrideNote!);
           }
           try {

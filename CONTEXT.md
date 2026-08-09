@@ -46,6 +46,20 @@ and contributes its `name` to branch namespacing. Injected into
 Stream parsing is opt-in per provider (see **stream event** + ADR 0004).
 _Avoid_: "backend", "invoker", "agent driver", "agent adapter"
 
+**Run directory**:
+The per-run log folder `.afk/logs/<prd-slug>/run-<timestamp>/` holding
+that run's agent invocation logs, its **run log**, and an archive copy
+of run-summary.md. A fresh one per pipeline run — a log's mtime and
+size always describe the run that owns the directory. See ADR 0017.
+_Avoid_: "log dir" (ambiguous with the shared `<prd-slug>` parent)
+
+**Run log**:
+The `run.log` file the orchestrator owns inside the **run directory**:
+timestamped phase transitions (waves, per-slice phases, contract
+verdicts, lane queueing, terminal outcomes), written synchronously so
+it stays observable when launcher stdio is lost. See ADR 0017.
+_Avoid_: "console log", "stderr log"
+
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
 process produces no stdout (default: every 60s). Distinct from the
