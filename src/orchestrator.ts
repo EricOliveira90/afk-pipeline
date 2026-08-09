@@ -11,7 +11,7 @@ import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
-import { runWave } from "./wave.js";
+import { runWave, type WaveOutcome } from "./wave.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
@@ -1432,6 +1432,70 @@ export async function runPipeline(
   // Slices whose blocker is in `failed` will simply never become
   // ready and the loop will exit once no toRun remain.
   const mergeMutex = makeAsyncMutex();
+
+  // Persist a slice's terminal outcome the moment it lands. `runWave`
+  // invokes this via `onOutcome` right after each outcome is decided —
+  // for PASS, immediately after the merge and worktree removal — so a
+  // hard-kill mid-wave cannot lose the record of already-merged work.
+  // See ADR 0018.
+  //
+  // The guard set makes the post-wave loop a reconciliation pass: it
+  // re-issues persistence only for outcomes whose immediate write threw
+  // (runWave contains callback errors), and never double-writes or
+  // double-logs. The id is added to the set only after the write
+  // succeeded, so a failed write stays eligible for the retry.
+  //
+  // Concurrency: lanes run in parallel, but `saveSliceState` is a fully
+  // synchronous read-modify-write with no awaits, so two lanes can never
+  // interleave inside it — no lost updates, no mutex needed.
+  const persistedOutcomes = new Set<string>();
+  const persistOutcome = (id: string, outcome: WaveOutcome) => {
+    if (persistedOutcomes.has(id)) return;
+    const slice = dag.slices.get(id)!;
+    const branch = sliceBranch(prdSlug, slice, provider);
+    const sliceId: SliceIdentity = {
+      ghIssue: id,
+      title: slice.title,
+      branch,
+    };
+    const progress = logger.getSliceProgress(id);
+
+    // PASS is only ever reported by runWave after the merge into the
+    // feature branch succeeded, so `mergedToFeature: true` is safe here
+    // and `isSliceComplete` will treat the slice as resumable-complete.
+    const next =
+      outcome.phase === "PASS"
+        ? lifecycle.pass(sliceId, progress, true)
+        : outcome.phase === "LANE-CANCELLED"
+          ? lifecycle.laneCancelled(sliceId, progress, outcome.error)
+          : outcome.phase === "CANCELLED"
+            ? lifecycle.cancelled(sliceId, progress, outcome.error)
+            : outcome.phase === "CONFLICT"
+              ? lifecycle.conflict(sliceId, progress, outcome.error)
+              : outcome.phase === "ESCALATE"
+                ? lifecycle.escalate(sliceId, progress, outcome.error)
+                : outcome.phase === "ERROR"
+                  ? lifecycle.error(sliceId, progress, outcome.error)
+                  : lifecycle.stuck(sliceId, progress, outcome.error);
+
+    logger.transitionTo(id, next);
+    saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
+    persistedOutcomes.add(id);
+
+    // Every terminal outcome gets a timestamped run.log line so an
+    // operator can always tell WHY a slice stopped — a LANE-CANCELLED
+    // deferral reads differently from a dropped negotiation. ADR 0017.
+    if (outcome.phase === "PASS") {
+      logger.phase(
+        `[afk] Slice #${id} (${slice.title}): PASS — merged into ${featBranch}`,
+      );
+    } else {
+      logger.phase(
+        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${outcome.error}`,
+      );
+    }
+  };
+
   let waveNumber = 0;
   while (true) {
     waveNumber++;
@@ -1474,58 +1538,21 @@ export async function runPipeline(
       relevantFilesBlock,
       testCommand,
       mergeMutex,
+      onOutcome: persistOutcome,
     });
 
-    // --- Persist results from this wave. ---
+    // --- Reconcile results from this wave. ---
+    //
+    // Persistence already happened per-slice as each outcome landed
+    // (onOutcome → persistOutcome, ADR 0018). This loop retries any
+    // write that failed mid-wave — persistOutcome is a no-op for ids it
+    // already persisted — and updates the in-memory scheduling sets,
+    // which only matter between waves.
     for (const [id, outcome] of outcomes) {
-      const slice = dag.slices.get(id)!;
-      const branch = sliceBranch(prdSlug, slice, provider);
-      const sliceId: SliceIdentity = {
-        ghIssue: id,
-        title: slice.title,
-        branch,
-      };
-      const progress = logger.getSliceProgress(id);
-
+      persistOutcome(id, outcome);
       if (outcome.phase === "PASS") {
-        const passed = lifecycle.pass(sliceId, progress, true);
-        logger.transitionTo(id, passed);
-        saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(passed)!);
         completed.add(id);
-        logger.phase(
-          `[afk] Slice #${id} (${slice.title}): PASS — merged into ${featBranch}`,
-        );
-        continue;
-      }
-
-      // All non-PASS outcomes carry an error message from wave.ts.
-      const failedLifecycle =
-        outcome.phase === "LANE-CANCELLED"
-          ? lifecycle.laneCancelled(sliceId, progress, outcome.error)
-          : outcome.phase === "CANCELLED"
-            ? lifecycle.cancelled(sliceId, progress, outcome.error)
-            : outcome.phase === "CONFLICT"
-              ? lifecycle.conflict(sliceId, progress, outcome.error)
-              : outcome.phase === "ESCALATE"
-                ? lifecycle.escalate(sliceId, progress, outcome.error)
-                : outcome.phase === "ERROR"
-                  ? lifecycle.error(sliceId, progress, outcome.error)
-                  : lifecycle.stuck(sliceId, progress, outcome.error);
-
-      logger.transitionTo(id, failedLifecycle);
-      saveSliceState(
-        repoRoot,
-        loggerSlug,
-        id,
-        projectForPersistence(failedLifecycle)!,
-      );
-      // Every terminal outcome gets a timestamped run.log line so an
-      // operator can always tell WHY a slice stopped — a LANE-CANCELLED
-      // deferral reads differently from a dropped negotiation. ADR 0017.
-      logger.phase(
-        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${outcome.error}`,
-      );
-      if (outcome.phase === "LANE-CANCELLED") {
+      } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
       } else {
         failed.add(id);

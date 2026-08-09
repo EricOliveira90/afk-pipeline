@@ -60,6 +60,16 @@ verdicts, lane queueing, terminal outcomes), written synchronously so
 it stays observable when launcher stdio is lost. See ADR 0017.
 _Avoid_: "console log", "stderr log"
 
+**Run state**:
+The `.afk/state/<prd-slug>.json` file recording each slice's terminal
+phase for resumption. Written per-slice at the moment the outcome
+lands — PASS immediately after the slice's merge and worktree removal,
+never batched to the end of a wave — so a hard kill mid-wave cannot
+lose the record of already-merged work. A persisted PASS
+(`mergedToFeature: true`) is always safe to skip on re-run. See
+ADR 0018.
+_Avoid_: "state cache", "checkpoint" (it is authoritative, not a cache)
+
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
 process produces no stdout (default: every 60s). Distinct from the

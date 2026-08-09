@@ -2023,3 +2023,117 @@ describe("run.log observability (ADR 0017)", () => {
     expect(secondRunLog).toContain("(already completed)");
   }, 60_000);
 });
+
+
+/**
+ * Per-slice state persistence (ADR 0018). A slice's terminal outcome
+ * must be on disk the moment it lands — for PASS, right after its merge
+ * — not when its wave finishes. Observed failure mode this guards: a
+ * slice merged mid-wave, the process was hard-killed hours later while
+ * its serial lane was still running, and the re-run re-attempted the
+ * already-merged slice against its own output.
+ */
+describe("runPipeline per-slice state persistence", () => {
+  it("persists a mid-wave PASS before the lane successor starts; a crash there resumes skipping exactly that slice", async () => {
+    const repo = makeRepo();
+    const slug = "midwave-persist";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "7001", title: "First", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "7002", title: "Second", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Shared file → one serial lane → 7002 starts only after 7001 merged.
+    const fixtures = new Map<string, SliceFixture>([
+      ["7001", { files: ["src/lane.txt"], qaPasses: true, outputFile: "src/lane.txt", outputContent: "first slice content" }],
+      ["7002", { files: ["src/lane.txt"], qaPasses: true, outputFile: "src/lane.txt", outputContent: "second slice content" }],
+    ]);
+
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+
+    // --- Run 1: "crash" while the lane successor is running. ---
+    // The wrapped provider snapshots the state file at 7002's
+    // lane-refresh explorer (its second explorer invocation — the first
+    // ran during parallel Phase A). That snapshot is byte-for-byte the
+    // disk state a hard kill at that moment would leave. It then keeps
+    // throwing so 7002 cannot complete in this run.
+    let snapshot: string | null = null;
+    const records1: InvocationRecord[] = [];
+    const inner1 = buildStubProvider({ fixtures, slices, records: records1 });
+    let explorer7002Count = 0;
+    const crashingProvider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const slice = sliceFromCwd(options.cwd, slices);
+        if (slice?.ghIssue === "7002" && options.role === "explorer") {
+          explorer7002Count++;
+          if (explorer7002Count >= 2) {
+            if (snapshot === null && existsSync(statePath)) {
+              snapshot = readFileSync(statePath, "utf-8");
+            }
+            throw new Error("simulated hard crash");
+          }
+        }
+        return inner1.invoke(options);
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: crashingProvider,
+    });
+
+    // The core guarantee: while the wave was still open, 7001's PASS
+    // (with mergedToFeature) was already on disk.
+    expect(snapshot).not.toBeNull();
+    const midWaveState = JSON.parse(snapshot!);
+    expect(midWaveState.slices["7001"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(midWaveState.slices["7002"]).toBeUndefined();
+
+    // --- Simulate the hard kill: restore the state file to exactly what
+    // disk held mid-wave (7001 PASS, 7002 absent). Run 1 exited
+    // gracefully and wrote 7002's ERROR; a kill would not have. ---
+    writeFileSync(statePath, snapshot!);
+
+    // --- Run 2: everything passes. ---
+    const records2: InvocationRecord[] = [];
+    const provider2 = buildStubProvider({ fixtures, slices, records: records2 });
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: provider2,
+    });
+
+    expect(result.success).toBe(true);
+    // The re-run skipped exactly the already-merged slice — zero agent
+    // invocations for 7001 — and ran the crashed slice to completion.
+    expect(records2.some((r) => r.ghIssue === "7001")).toBe(false);
+    expect(records2.some((r) => r.ghIssue === "7002")).toBe(true);
+
+    const finalState = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(finalState.slices["7001"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(finalState.slices["7002"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+
+    // The feature branch ends with the successor's content on top —
+    // built on 7001's merge from run 1, which was not re-attempted.
+    git(repo, ["checkout", `feat-stub/${slug}`]);
+    const lane = readFileSync(join(repo, "src", "lane.txt"), "utf-8");
+    expect(lane).toContain("second slice content");
+  }, 120_000);
+});

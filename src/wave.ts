@@ -43,6 +43,21 @@ export interface WaveInput {
   relevantFilesBlock: string;
   testCommand: string;
   mergeMutex: <T>(fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Called the moment a slice's outcome becomes terminal — PASS right
+   * after its merge + worktree removal, failures as soon as they are
+   * decided — so the orchestrator can persist it to disk immediately
+   * instead of waiting for the wave to finish. A long serial lane can
+   * keep a wave open for hours; without immediate persistence, a
+   * hard-kill in that window loses the record of already-merged work
+   * and a re-run re-attempts it against its own output. See ADR 0018.
+   *
+   * Errors thrown by the callback are contained (logged, not
+   * propagated): a failed state write must not abort the lane. The
+   * orchestrator's post-wave reconciliation retries any outcome whose
+   * immediate persistence failed.
+   */
+  onOutcome?: (ghIssue: string, outcome: WaveOutcome) => void;
 }
 
 export interface WaveResult {
@@ -69,10 +84,30 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     relevantFilesBlock,
     testCommand,
     mergeMutex,
+    onOutcome,
   } = input;
   const { repoRoot, prdSlug, signal } = config;
   const provider = config.provider ?? kiroProvider;
   const outcomes = new Map<string, WaveOutcome>();
+
+  // Single funnel for terminal outcomes: update the in-memory map and
+  // notify the orchestrator so it can persist immediately. Containment:
+  // a throwing callback (e.g. state-file write failure) must not take
+  // down the lane — the in-memory outcome still stands and the
+  // post-wave reconciliation loop will retry persistence.
+  const record = (ghIssue: string, outcome: WaveOutcome) => {
+    outcomes.set(ghIssue, outcome);
+    if (!onOutcome) return;
+    try {
+      onOutcome(ghIssue, outcome);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.phase(
+        `[afk] Warning: failed to persist outcome for slice #${ghIssue} mid-wave (${msg}); will retry after the wave`,
+        "warn",
+      );
+    }
+  };
 
   logger.phase(
     `[afk] Wave ${waveNumber}: dispatching ${readyIds.length} slice(s) [${readyIds.join(", ")}]`,
@@ -112,9 +147,9 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
     if (r.status === "rejected") {
       if (isCancelled(r.reason, signal)) {
-        outcomes.set(id, { phase: "CANCELLED", error: "Cancelled by user" });
+        record(id, { phase: "CANCELLED", error: "Cancelled by user" });
       } else {
-        outcomes.set(id, {
+        record(id, {
           phase: "ERROR",
           error: `Unhandled rejection in negotiate: ${r.reason}`,
         });
@@ -130,19 +165,19 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
     // Phase A returns ESCALATE / STUCK / ERROR / CANCELLED on non-LOCKED.
     if (result === "CANCELLED") {
-      outcomes.set(id, { phase: "CANCELLED", error: "Cancelled by user" });
+      record(id, { phase: "CANCELLED", error: "Cancelled by user" });
     } else if (result === "ESCALATE") {
-      outcomes.set(id, {
+      record(id, {
         phase: "ESCALATE",
         error: "Contract negotiation escalated after max rounds",
       });
     } else if (result === "STUCK") {
-      outcomes.set(id, {
+      record(id, {
         phase: "STUCK",
         error: "Contract not locked after negotiation",
       });
     } else {
-      outcomes.set(id, {
+      record(id, {
         phase: "ERROR",
         error: "Negotiation returned ERROR",
       });
@@ -153,7 +188,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   if (signal?.aborted) {
     for (const id of readyIds) {
       if (!outcomes.has(id)) {
-        outcomes.set(id, { phase: "CANCELLED", error: "Cancelled by user" });
+        record(id, { phase: "CANCELLED", error: "Cancelled by user" });
       }
     }
     return { outcomes };
@@ -231,22 +266,22 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             }
             const negotiate = await runSliceNegotiate(ctx);
             if (negotiate !== "LOCKED") {
-              outcomes.set(id, negotiateRefreshOutcome(negotiate));
-              cancelLaneSuccessors(outcomes, lane, i);
+              record(id, negotiateRefreshOutcome(negotiate));
+              cancelLaneSuccessors(record, lane, i);
               return;
             }
           } catch (err) {
             if (isCancelled(err, signal)) {
-              outcomes.set(id, {
+              record(id, {
                 phase: "CANCELLED",
                 error: "Cancelled by user",
               });
             } else {
               const msg = err instanceof Error ? err.message : String(err);
               logger.markError(id, msg);
-              outcomes.set(id, { phase: "ERROR", error: msg });
+              record(id, { phase: "ERROR", error: msg });
             }
-            cancelLaneSuccessors(outcomes, lane, i);
+            cancelLaneSuccessors(record, lane, i);
             return;
           }
         }
@@ -277,8 +312,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         }
 
         if (outcome.phase !== "PASS") {
-          outcomes.set(id, outcome);
-          cancelLaneSuccessors(outcomes, lane, i);
+          record(id, outcome);
+          cancelLaneSuccessors(record, lane, i);
           return;
         }
 
@@ -298,7 +333,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           // operator investigates the corruption rather than chasing
           // a phantom no-output run. See ADR 0010.
           if (!git.branchExists(repoRoot, branch)) {
-            outcomes.set(id, {
+            record(id, {
               phase: "ERROR",
               error:
                 `Slice branch ${branch} does not exist after generator completed. ` +
@@ -306,15 +341,15 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
                 `to the parent repo's currently checked-out branch. ` +
                 `Inspect 'git reflog --all' and 'git worktree list --porcelain' before re-running.`,
             });
-            cancelLaneSuccessors(outcomes, lane, i);
+            cancelLaneSuccessors(record, lane, i);
             return;
           }
           if (!git.hasCommitsAhead(repoRoot, branch, featBranch)) {
-            outcomes.set(id, {
+            record(id, {
               phase: "ERROR",
               error: `Branch ${branch} has no commits ahead of ${featBranch} — generator produced no output`,
             });
-            cancelLaneSuccessors(outcomes, lane, i);
+            cancelLaneSuccessors(record, lane, i);
             return;
           }
 
@@ -345,11 +380,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             );
           });
           if (mergeResult.status === "conflict") {
-            outcomes.set(id, {
+            record(id, {
               phase: "CONFLICT",
               error: mergeResult.details,
             });
-            cancelLaneSuccessors(outcomes, lane, i);
+            cancelLaneSuccessors(record, lane, i);
             return;
           }
           if (mergeResult.cleanupWarning) {
@@ -360,19 +395,19 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
           );
 
-          outcomes.set(id, PASS);
+          record(id, PASS);
         } catch (err) {
           if (isCancelled(err, signal)) {
-            outcomes.set(id, {
+            record(id, {
               phase: "CANCELLED",
               error: "Cancelled by user",
             });
           } else {
             const msg = err instanceof Error ? err.message : String(err);
             logger.markError(id, msg);
-            outcomes.set(id, { phase: "ERROR", error: msg });
+            record(id, { phase: "ERROR", error: msg });
           }
-          cancelLaneSuccessors(outcomes, lane, i);
+          cancelLaneSuccessors(record, lane, i);
           return;
         }
       }
@@ -404,12 +439,12 @@ function negotiateRefreshOutcome(
 }
 
 function cancelLaneSuccessors(
-  outcomes: Map<string, WaveOutcome>,
+  record: (ghIssue: string, outcome: WaveOutcome) => void,
   lane: Slice[],
   failedIndex: number,
 ) {
   for (let k = failedIndex + 1; k < lane.length; k++) {
-    outcomes.set(lane[k]!.ghIssue, {
+    record(lane[k]!.ghIssue, {
       phase: "LANE-CANCELLED",
       error:
         "Lane predecessor failed; rerun the pipeline after fixing the predecessor",
