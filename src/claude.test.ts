@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import type { StreamEvent } from "./agent-provider.js";
@@ -193,6 +193,41 @@ describe("invoke maxToolCalls cap", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stats.toolCallCount).toBe(2);
     expect(proc.kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("invoke maxDurationMs ceiling", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("kills a session that outlives the wall-clock ceiling despite steady output", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+
+    const promise = invoke({
+      role: "generator",
+      prompt: "build",
+      cwd: "/tmp",
+      idleTimeoutMs: 10_000,
+      maxDurationMs: 30_000,
+    });
+
+    // Output every 5s keeps the idle watcher happy forever; only the
+    // ceiling can end this session.
+    for (let i = 0; i < 7; i++) {
+      proc.stdout.emit("data", Buffer.from(`{"type":"noise"}\n`));
+      vi.advanceTimersByTime(5_000);
+    }
+
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    proc.emit("exit", null);
+    await expect(promise).rejects.toThrow(/wall-clock ceiling/);
   });
 });
 

@@ -260,6 +260,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     idleTimeoutMs = 180_000,
     idleWarningIntervalMs = 60_000,
     maxToolCalls = 100,
+    maxDurationMs = 3_600_000,
     signal,
     onIdleWarning,
     onStreamEvent,
@@ -299,6 +300,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let buffer = "";
     let toolCallCount = 0;
     let killed = false;
+    let ceilingHit = false;
     let toolCapExceeded = false;
     let cancelled = false;
     let providerError: Error | undefined;
@@ -332,6 +334,15 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       },
       onWarning: onIdleWarning,
     });
+
+    // Wall-clock ceiling — independent of the idle watcher and the
+    // tool-call cap, so a hung session that keeps emitting output
+    // still dies. See ADR 0016.
+    const ceilingTimer = setTimeout(() => {
+      ceilingHit = true;
+      stopProcess();
+    }, maxDurationMs);
+    ceilingTimer.unref();
 
     const processLine = (line: string) => {
       if (!line) return;
@@ -383,6 +394,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
 
     proc.on("error", (error) => {
       watcher.stop();
+      clearTimeout(ceilingTimer);
       signal?.removeEventListener("abort", onAbort);
       preparedEnv.cleanup();
       reject(error);
@@ -391,6 +403,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     proc.on("exit", (code) => {
       processLine(buffer.trim());
       watcher.stop();
+      clearTimeout(ceilingTimer);
       signal?.removeEventListener("abort", onAbort);
       preparedEnv.cleanup();
       const exitCode = code ?? 1;
@@ -403,6 +416,12 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         reject(
           new Error(
             `Agent ${role} exceeded ${maxToolCalls} tool calls - killed`,
+          ),
+        );
+      } else if (ceilingHit) {
+        reject(
+          new Error(
+            `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling - killed`,
           ),
         );
       } else if (killed) {

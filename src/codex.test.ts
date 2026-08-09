@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "./agent-provider.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -457,6 +457,41 @@ describe("Codex invocation lifecycle", () => {
       }),
     ).rejects.toMatchObject({ name: "CancelledError" });
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Codex maxDurationMs ceiling", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("kills a session that outlives the wall-clock ceiling despite steady output", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+
+    const promise = invoke({
+      role: "generator",
+      prompt: "build",
+      cwd: "/tmp",
+      idleTimeoutMs: 10_000,
+      maxDurationMs: 30_000,
+    });
+
+    // Output every 5s keeps the idle watcher happy forever; only the
+    // ceiling can end this session.
+    for (let i = 0; i < 7; i++) {
+      proc.stdout.emit("data", Buffer.from(jsonLine({ type: "noise" })));
+      vi.advanceTimersByTime(5_000);
+    }
+
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    proc.emit("exit", null);
+    await expect(promise).rejects.toThrow(/wall-clock ceiling/);
   });
 });
 

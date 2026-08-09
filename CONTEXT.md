@@ -55,7 +55,17 @@ _Avoid_: "heartbeat" (implies the agent emits it), "liveness ping"
 
 **Idle timeout**:
 The hard-kill threshold (default: 10 minutes) for an agent invocation
-producing no stdout. Reached only after many **idle warnings**.
+producing no stdout. Reached only after many **idle warnings**. For the
+Kiro provider, "producing stdout" means meaningful output — decorative
+terminal animation (spinner frames) is filtered out of the liveness
+signal. See ADR 0016.
+
+**Wall-clock ceiling**:
+The hard cap (default: 60 minutes) on an agent invocation's total
+runtime, independent of output activity. Backstop for hung sessions
+whose output defeats idle detection. Enforced by all providers via
+`maxDurationMs`. See ADR 0016.
+_Avoid_: "deadline", "max runtime" (use the term above)
 
 **Stream event**:
 A typed event parsed from a provider's streamed stdout — one of
