@@ -43,12 +43,18 @@ describe("parsePipelineRuntimeOptions", () => {
         "--command-timeout-ms", "900000",
         "--heartbeat-interval-ms", "15000",
         "--infrastructure-retries", "4",
+        "--max-agent-duration-ms", "5400000",
       ]),
     ).toMatchObject({
       commandTimeoutMs: 900_000,
       heartbeatIntervalMs: 15_000,
       infrastructureRetries: 4,
+      maxAgentDurationMs: 5_400_000,
     });
+  });
+
+  it("leaves the agent duration ceiling undefined so role-aware defaults apply", () => {
+    expect(parsePipelineRuntimeOptions([]).maxAgentDurationMs).toBeUndefined();
   });
 
   it("enables serial lane execution explicitly", () => {
@@ -86,6 +92,8 @@ describe("parsePipelineRuntimeOptions", () => {
     ["--command-timeout-ms", "0"],
     ["--heartbeat-interval-ms", "abc"],
     ["--infrastructure-retries", "-1"],
+    ["--max-agent-duration-ms", "0"],
+    ["--max-agent-duration-ms", "1.5"],
   ])("rejects invalid %s", (flag, value) => {
     expect(() => parsePipelineRuntimeOptions([flag, value])).toThrow(flag);
   });

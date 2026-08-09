@@ -62,6 +62,19 @@ async function closeAgentLog(log: WriteStream): Promise<void> {
 const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
 
 /**
+ * Wall-clock ceiling for generator and evaluator-qa invocations. The
+ * 60 min provider default (ADR 0016) sits directly on top of the real
+ * duration distribution for heavy slices — measured generator runs on
+ * a consuming project ranged ~41–60+ min, and one healthy generator
+ * with six real commits on its branch was killed at exactly the
+ * ceiling. These two roles get double the budget; short-lived roles
+ * (explorer, planner, evaluator-contract, guardians) keep the provider
+ * default. `--max-agent-duration-ms` overrides both uniformly.
+ * Mirrors the SLOW_AGENT_IDLE_TIMEOUT_MS precedent above. See ADR 0019.
+ */
+const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
+
+/**
  * Pre-ship sanity gate steps, in order. Each step maps to a `package.json`
  * script name and a fallback. Steps whose primary AND fallback are absent
  * from `package.json` are skipped (not failed) — projects that don't have
@@ -475,6 +488,15 @@ export interface PipelineConfig {
   heartbeatIntervalMs?: number;
   /** Retries per QA stage that do not consume implementation rounds. */
   infrastructureRetries?: number;
+  /**
+   * Per-invocation wall-clock ceiling for every agent role, overriding
+   * the role-aware defaults (120 min for generator/evaluator-qa, the
+   * 60 min provider default otherwise). A ceiling kill during slice
+   * execution is terminal for the slice, not infrastructure-retried:
+   * a retry restarts the round from scratch against the same ceiling.
+   * See ADR 0019.
+   */
+  maxAgentDurationMs?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -839,6 +861,7 @@ export async function runSliceNegotiate(
         }),
         cwd: ctx.worktreeDir,
         logStream,
+        maxDurationMs: config.maxAgentDurationMs,
       }).finally(() => closeAgentLog(logStream));
     }
 
@@ -879,6 +902,7 @@ export async function runSliceNegotiate(
           }),
           cwd: ctx.worktreeDir,
           logStream: plannerLog,
+          maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(plannerLog));
 
         logger.phase(
@@ -903,6 +927,7 @@ export async function runSliceNegotiate(
           }),
           cwd: ctx.worktreeDir,
           logStream: evalLog,
+          maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(evalLog));
 
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
@@ -1089,6 +1114,7 @@ export async function runQAStage(
         logStream: evalLog,
         idleTimeoutMs: commandTimeoutMs,
         idleWarningIntervalMs: heartbeatIntervalMs,
+        maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
       }).finally(() => closeAgentLog(evalLog));
     };
 
@@ -1173,6 +1199,7 @@ export async function runSliceExecute(
         logStream: genLog,
         idleTimeoutMs: timeoutMs,
         idleWarningIntervalMs: heartbeatMs,
+        maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
       }).finally(() => closeAgentLog(genLog));
 
       logger.phase(`${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
@@ -1226,6 +1253,7 @@ export async function runSliceExecute(
           }),
           cwd: ctx.worktreeDir,
           logStream: stuckLog,
+          maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(stuckLog));
         logger.markStuck(slice.ghIssue, `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`);
         return "STUCK";
@@ -1237,7 +1265,18 @@ export async function runSliceExecute(
       logger.markCancelled(slice.ghIssue, "Cancelled by user");
       return "CANCELLED";
     }
-    logger.markError(slice.ghIssue, err instanceof Error ? err.message : String(err));
+    const message = err instanceof Error ? err.message : String(err);
+    // A wall-clock ceiling kill is terminal by design, not an
+    // infrastructure failure: a retry restarts the round from scratch
+    // against the same ceiling and doubles the wasted wall-clock.
+    // Point the operator at the remedy instead. Committed work is
+    // preserved on the slice branch. See ADR 0019.
+    logger.markError(
+      slice.ghIssue,
+      /wall-clock ceiling/.test(message)
+        ? `${message}. Terminal by design (ADR 0019): committed work is preserved on ${ctx.branch}; rerun with a larger --max-agent-duration-ms.`
+        : message,
+    );
     return "ERROR";
   }
 }
@@ -1460,6 +1499,21 @@ export async function runPipeline(
     };
     const progress = logger.getSliceProgress(id);
 
+    // The wave layer reports generic labels ("Phase B returned ERROR");
+    // the failure site usually already recorded the specific detail on
+    // the logger via markError/markStuck — e.g. a wall-clock ceiling
+    // kill and its remedy (ADR 0019). When the phases agree, prefer
+    // that detail so state.json and run.log say WHY the slice stopped,
+    // not just where.
+    const current = logger.getSlice(id);
+    const detailOf = (waveError: string): string =>
+      current &&
+      current.phase === outcome.phase &&
+      "error" in current &&
+      current.error
+        ? current.error
+        : waveError;
+
     // PASS is only ever reported by runWave after the merge into the
     // feature branch succeeded, so `mergedToFeature: true` is safe here
     // and `isSliceComplete` will treat the slice as resumable-complete.
@@ -1467,16 +1521,16 @@ export async function runPipeline(
       outcome.phase === "PASS"
         ? lifecycle.pass(sliceId, progress, true)
         : outcome.phase === "LANE-CANCELLED"
-          ? lifecycle.laneCancelled(sliceId, progress, outcome.error)
+          ? lifecycle.laneCancelled(sliceId, progress, detailOf(outcome.error))
           : outcome.phase === "CANCELLED"
-            ? lifecycle.cancelled(sliceId, progress, outcome.error)
+            ? lifecycle.cancelled(sliceId, progress, detailOf(outcome.error))
             : outcome.phase === "CONFLICT"
-              ? lifecycle.conflict(sliceId, progress, outcome.error)
+              ? lifecycle.conflict(sliceId, progress, detailOf(outcome.error))
               : outcome.phase === "ESCALATE"
-                ? lifecycle.escalate(sliceId, progress, outcome.error)
+                ? lifecycle.escalate(sliceId, progress, detailOf(outcome.error))
                 : outcome.phase === "ERROR"
-                  ? lifecycle.error(sliceId, progress, outcome.error)
-                  : lifecycle.stuck(sliceId, progress, outcome.error);
+                  ? lifecycle.error(sliceId, progress, detailOf(outcome.error))
+                  : lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
 
     logger.transitionTo(id, next);
     saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
@@ -1491,7 +1545,7 @@ export async function runPipeline(
       );
     } else {
       logger.phase(
-        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${outcome.error}`,
+        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${detailOf(outcome.error)}`,
       );
     }
   };
@@ -1722,6 +1776,7 @@ export async function runPipeline(
                 logStream: log,
                 idleTimeoutMs: reviewIdleTimeoutMs,
                 idleWarningIntervalMs: reviewHeartbeatMs,
+                maxDurationMs: config.maxAgentDurationMs,
                 onStreamEvent: () => {
                   sawOutput = true;
                 },

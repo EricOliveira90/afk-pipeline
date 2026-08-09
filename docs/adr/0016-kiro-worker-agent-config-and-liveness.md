@@ -1,5 +1,24 @@
 # Kiro worker agent config, spinner-proof liveness, wall-clock ceiling
 
+> **Correction (2026-08-09).** The nested-sub-agent reading of the
+> generator hang below was wrong. Re-examination of the wedged log
+> found zero occurrences of `use_subagent`, `subagent`, `delegate`,
+> and `no agent with name` — no subagent tool was ever invoked, and
+> the managed `afk-worker` config loaded without failing open. The
+> `Dividing up the work...` frames appear immediately after kiro-cli's
+> own parallel tool-batch output (`Operation 1: Reading file...`,
+> `Operation 2: ...`, `Summary: 2 operations processed`): it is
+> kiro-cli's parallel-operation spinner painted while the model
+> stalled mid-turn, not evidence of a nested agent. The decisions
+> stand on corrected grounds — decision 1 remains valid hardening (it
+> removed the leaked MCP servers and the subagent tool from worker
+> sessions), and decision 2's progress filter is what made the real
+> stall visible at all: idle warnings climbed from 1 to 9 minutes
+> where previously every spinner frame reset the watcher forever.
+> Read "nested agent wedged" below as "the model stalled mid-turn
+> while the CLI painted its spinner". See also ADR 0019, which
+> revisits decision 3's 60-minute default.
+
 ## Failure mode
 
 Two consecutive runs of the same PRD hung indefinitely on the Kiro

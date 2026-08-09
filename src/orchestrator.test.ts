@@ -2137,3 +2137,160 @@ describe("runPipeline per-slice state persistence", () => {
     expect(lane).toContain("second slice content");
   }, 120_000);
 });
+
+
+
+/**
+ * Configurable wall-clock ceiling (ADR 0019). The 60 min provider
+ * default killed a healthy generator mid-slice; generator and
+ * evaluator-qa now get a role-aware 120 min default and
+ * `--max-agent-duration-ms` overrides every role uniformly. A ceiling
+ * kill during slice execution is terminal (no infrastructure retry) and
+ * the persisted error points the operator at the remedy.
+ */
+describe("wall-clock ceiling configuration (ADR 0019)", () => {
+  function makeSingleSliceSetup(slug: string, ghIssue: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue,
+        title: "Ceiling slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        ghIssue,
+        {
+          files: ["src/ceiling.txt"],
+          qaPasses: true,
+          outputFile: "src/ceiling.txt",
+          outputContent: "ceiling",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+    return { repo, prdDir, specsDir, slices, baseProvider };
+  }
+
+  /** Wrap the stub to record the maxDurationMs each role received. */
+  function recordingProvider(
+    baseProvider: AgentProvider,
+    seen: Map<string, Array<number | undefined>>,
+  ): AgentProvider {
+    return {
+      name: baseProvider.name,
+      async invoke(options) {
+        const list = seen.get(options.role) ?? [];
+        list.push(options.maxDurationMs);
+        seen.set(options.role, list);
+        return baseProvider.invoke(options);
+      },
+    };
+  }
+
+  it("gives generator and evaluator-qa the slow-agent 120 min ceiling and leaves fast roles on the provider default", async () => {
+    const slug = "ceiling-defaults";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makeSingleSliceSetup(slug, "9301");
+    const seen = new Map<string, Array<number | undefined>>();
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: recordingProvider(baseProvider, seen),
+    });
+
+    expect(result.success).toBe(true);
+    // Slow roles: measured generator durations on a consuming project
+    // ranged ~41–60+ min, so the 60 min provider default sat directly
+    // on the real distribution. These two get double the budget.
+    expect(seen.get("generator")).toEqual([7_200_000]);
+    expect(seen.get("evaluator-qa")).toEqual([7_200_000]);
+    // Fast roles pass no override → the provider's 60 min default applies.
+    for (const role of ["explorer", "planner", "evaluator-contract"]) {
+      expect(seen.get(role), role).toBeDefined();
+      for (const value of seen.get(role)!) expect(value, role).toBeUndefined();
+    }
+  }, 60_000);
+
+  it("applies --max-agent-duration-ms uniformly to every invocation", async () => {
+    const slug = "ceiling-override";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makeSingleSliceSetup(slug, "9302");
+    const seen = new Map<string, Array<number | undefined>>();
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: recordingProvider(baseProvider, seen),
+      maxAgentDurationMs: 5_400_000,
+    });
+
+    expect(result.success).toBe(true);
+    // Every role that ran — slice roles and guardian reviews alike —
+    // received the uniform override.
+    expect(seen.size).toBeGreaterThanOrEqual(5);
+    for (const [role, values] of seen) {
+      for (const value of values) expect(value, role).toBe(5_400_000);
+    }
+    expect(seen.has("generator")).toBe(true);
+    expect(seen.has("architect-review")).toBe(true);
+  }, 60_000);
+
+  it("treats a generator ceiling kill as terminal — no retry — and records the remedy in the persisted error", async () => {
+    const slug = "ceiling-terminal";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makeSingleSliceSetup(slug, "9303");
+
+    let generatorAttempts = 0;
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "generator") {
+          generatorAttempts++;
+          throw new Error(
+            "Agent generator exceeded 7200s wall-clock ceiling — killed",
+          );
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      infrastructureRetries: 2,
+    });
+
+    expect(result.success).toBe(false);
+    // Terminal by design: a retry would restart the round from scratch
+    // against the same ceiling. The infrastructure-retries budget must
+    // not apply to the generator's ceiling kill.
+    expect(generatorAttempts).toBe(1);
+    // Persisted state keeps the ERROR distinction and carries the
+    // operator-facing remedy; the summary collapses ERROR to STUCK.
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices["9303"].phase).toBe("ERROR");
+    expect(state.slices["9303"].error).toContain("wall-clock ceiling");
+    expect(state.slices["9303"].error).toContain("--max-agent-duration-ms");
+    expect(result.consoleSummary).toContain("[STUCK]");
+  }, 60_000);
+});

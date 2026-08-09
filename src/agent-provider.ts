@@ -44,8 +44,10 @@ export interface InvokeOptions {
    * Hard wall-clock ceiling per invocation in ms — kills the session
    * when total runtime exceeds it, regardless of output activity.
    * Backstop for hung sessions whose decorative output (spinners,
-   * animated status lines) defeats idle detection. Default:
-   * 3_600_000 (60 min). Enforced by all providers. See ADR 0016.
+   * animated status lines) defeats idle detection. Provider default:
+   * 3_600_000 (60 min). The orchestrator overrides this per role
+   * (120 min for generator/evaluator-qa) and via
+   * `--max-agent-duration-ms`. See ADR 0016 and ADR 0019.
    */
   maxDurationMs?: number;
   /** Cancellation signal — when fired, the spawned process is killed. */
