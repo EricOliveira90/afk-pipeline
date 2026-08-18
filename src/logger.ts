@@ -2,10 +2,18 @@ import {
   mkdirSync,
   createWriteStream,
   writeFileSync,
+  appendFileSync,
+  existsSync,
   WriteStream,
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import {
+  EVENTS_FILE,
+  EVENTS_SCHEMA_VERSION,
+  serializeRunEvent,
+  type RunEventPayload,
+} from "./run-events.js";
 import {
   assertNever,
   bucketFor,
@@ -55,19 +63,101 @@ export interface RunLog {
 
 const ZERO_PROGRESS: SliceProgress = { genRounds: 0, evalRounds: 0 };
 
+/**
+ * Directory name for one pipeline run's logs, derived from its start
+ * time (e.g. `run-20260808-214501`). A numeric suffix disambiguates
+ * runs that start within the same second (common in tests, possible in
+ * re-entry loops). See ADR 0017.
+ */
+export function runDirNameFor(startedAt: Date, parentDir: string): string {
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  const base =
+    `run-${startedAt.getFullYear()}${pad(startedAt.getMonth() + 1)}${pad(startedAt.getDate())}` +
+    `-${pad(startedAt.getHours())}${pad(startedAt.getMinutes())}${pad(startedAt.getSeconds())}`;
+  let candidate = base;
+  for (let i = 2; existsSync(join(parentDir, candidate)); i++) {
+    candidate = `${base}-${i}`;
+  }
+  return candidate;
+}
+
 export class Logger {
   private logDir: string;
   private runLog: RunLog;
+  /**
+   * Per-run log directory (`.afk/logs/<prd-slug>/run-<timestamp>/`).
+   * Agent invocation logs and run.log live here, so a file's mtime and
+   * size always describe THIS run — re-running the same PRD can no
+   * longer make a stale log look live or a live log look stale by
+   * appending into the previous run's files. See ADR 0017.
+   */
+  readonly runDir: string;
 
   constructor(repoRoot: string, prdSlug: string) {
     this.logDir = join(repoRoot, ".afk", "logs", prdSlug);
     mkdirSync(this.logDir, { recursive: true });
+    const startedAt = new Date();
+    this.runDir = join(this.logDir, runDirNameFor(startedAt, this.logDir));
+    mkdirSync(this.runDir, { recursive: true });
     this.runLog = {
       prdSlug,
-      startedAt: new Date(),
+      startedAt,
       slices: new Map(),
       totals: new Map(),
     };
+    // Structured tee header (spec #26): events.jsonl starts with a
+    // version event, copying the handoff.json convention, so readers
+    // can gate on schema before parsing the rest. Best-effort like all
+    // event writes — a failed write never takes down the pipeline.
+    this.event({ type: "header", version: EVENTS_SCHEMA_VERSION });
+  }
+
+  /**
+   * Tee a structured event into this run's `events.jsonl` (one JSON
+   * line per event, timestamped at append time). Synchronous and
+   * best-effort for the same reasons as `phase()`: freshness is the
+   * point, and logging failure never takes down the pipeline. The
+   * human `run.log` is untouched by this write.
+   */
+  event(payload: RunEventPayload) {
+    try {
+      appendFileSync(
+        join(this.runDir, EVENTS_FILE),
+        serializeRunEvent({ ...payload, ts: new Date().toISOString() }),
+      );
+    } catch {
+      // Best effort — the run.log / console remain the human contract.
+    }
+  }
+
+  /**
+   * Record a pipeline phase transition: appends a timestamped line to
+   * this run's `run.log` and echoes it to the console. The file write
+   * is synchronous (no buffered stream), so the log's mtime and
+   * content are current the moment the line is emitted — an operator
+   * tailing the file sees phase transitions even when the process's
+   * stdio is lost (e.g. `pnpm exec` swallowing stderr on Windows).
+   * Best-effort: a failed file write never takes down the pipeline.
+   *
+   * An optional structured payload tees the same transition into
+   * `events.jsonl` (spec #26) — the human line and its machine form
+   * are emitted by one call site, so they cannot drift apart.
+   */
+  phase(
+    message: string,
+    via: "error" | "log" | "warn" = "error",
+    event?: RunEventPayload,
+  ) {
+    try {
+      appendFileSync(
+        join(this.runDir, "run.log"),
+        `[${new Date().toISOString()}] ${message}\n`,
+      );
+    } catch {
+      // Console echo below still happens.
+    }
+    if (event) this.event(event);
+    console[via](message);
   }
 
   /** Add invocation stats to the running slice totals. */
@@ -90,11 +180,19 @@ export class Logger {
     );
   }
 
-  /** Create a write stream for a specific agent invocation log. */
+  /**
+   * Create a write stream for a specific agent invocation log, inside
+   * this run's directory. Append mode is deliberate: within one run a
+   * filename can be legitimately reopened (a lane successor re-runs
+   * explorer/planner rounds after its refresh) and that history must
+   * not be truncated. Cross-run append — the failure mode where run 3's
+   * generator silently extended run 2's log — is impossible now that
+   * each run has its own directory.
+   */
   agentLog(sliceId: string, agent: string, round?: number): WriteStream {
     const suffix = round != null ? `-r${round}` : "";
     const filename = `slice-${sliceId}-${agent}${suffix}.log`;
-    return createWriteStream(join(this.logDir, filename), { flags: "a" });
+    return createWriteStream(join(this.runDir, filename), { flags: "a" });
   }
 
   /**
@@ -303,6 +401,13 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
 `;
 
     writeFileSync(join(this.logDir, "run-summary.md"), summary);
+    // Per-run archive copy — the stable path above is overwritten by
+    // every run; the copy preserves each run's summary next to its logs.
+    try {
+      writeFileSync(join(this.runDir, "run-summary.md"), summary);
+    } catch {
+      // Best effort — the stable copy above is the contract.
+    }
     return summary;
   }
 

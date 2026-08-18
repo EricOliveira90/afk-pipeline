@@ -361,6 +361,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0013** — Codex provider command, model policy, prompts, and JSONL behavior
 - **ADR 0014** — PRD 070 QA classification and shared-preview isolation
 - **ADR 0015** — Guardian review failure classes, scope-aware PM review, and cheap re-entry
+- **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
 
 ## QA Rounds and Shared Preview
 
@@ -397,6 +398,13 @@ concurrently. Use `--preview-lock-path` when multiple repositories target the
 same preview; they must all point to the same absolute lock path. Command and
 agent timeouts measure output inactivity, so stdout/stderr heartbeats keep a
 healthy long-running command alive.
+
+Every agent invocation also carries a wall-clock ceiling independent of output
+activity (ADR 0016/0019): 120 minutes for generator and evaluator-qa, 60
+minutes for other roles. `--max-agent-duration-ms <n>` overrides the ceiling
+uniformly for all roles. A ceiling kill during slice execution is terminal for
+the slice — rerun with a larger ceiling; committed work is preserved on the
+slice branch.
 
 ## Development
 

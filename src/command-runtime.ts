@@ -8,7 +8,10 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
-import { killProcessTree } from "./kill-tree.js";
+import {
+  formatTerminationWarning,
+  terminateProcessTree,
+} from "./kill-tree.js";
 
 export interface CommandTimeoutOptions {
   cwd: string;
@@ -41,7 +44,20 @@ export function runHeartbeatCommand(
       if (settled || terminalError) return;
       terminalError = error;
       cleanup();
-      killProcessTree(proc);
+      // Tree-first verified kill (ADR 0020). If even the root refuses
+      // to die, `exit` never fires — settle from the termination
+      // report instead of hanging forever. Survivors and verification
+      // failures are surfaced through onOutput.
+      void terminateProcessTree(proc).then((report) => {
+        const warning = formatTerminationWarning(report);
+        if (warning) options.onOutput?.(`\n${warning}\n`);
+        if (!report.rootDead && !settled) {
+          settled = true;
+          reject(
+            new Error(`${error.message}${warning ? ` — ${warning}` : ""}`),
+          );
+        }
+      });
     };
     const heartbeat = setInterval(() => {
       if (Date.now() - lastActivity < options.inactivityTimeoutMs) return;

@@ -46,6 +46,30 @@ and contributes its `name` to branch namespacing. Injected into
 Stream parsing is opt-in per provider (see **stream event** + ADR 0004).
 _Avoid_: "backend", "invoker", "agent driver", "agent adapter"
 
+**Run directory**:
+The per-run log folder `.afk/logs/<prd-slug>/run-<timestamp>/` holding
+that run's agent invocation logs, its **run log**, and an archive copy
+of run-summary.md. A fresh one per pipeline run — a log's mtime and
+size always describe the run that owns the directory. See ADR 0017.
+_Avoid_: "log dir" (ambiguous with the shared `<prd-slug>` parent)
+
+**Run log**:
+The `run.log` file the orchestrator owns inside the **run directory**:
+timestamped phase transitions (waves, per-slice phases, contract
+verdicts, lane queueing, terminal outcomes), written synchronously so
+it stays observable when launcher stdio is lost. See ADR 0017.
+_Avoid_: "console log", "stderr log"
+
+**Run state**:
+The `.afk/state/<prd-slug>.json` file recording each slice's terminal
+phase for resumption. Written per-slice at the moment the outcome
+lands — PASS immediately after the slice's merge and worktree removal,
+never batched to the end of a wave — so a hard kill mid-wave cannot
+lose the record of already-merged work. A persisted PASS
+(`mergedToFeature: true`) is always safe to skip on re-run. See
+ADR 0018.
+_Avoid_: "state cache", "checkpoint" (it is authoritative, not a cache)
+
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
 process produces no stdout (default: every 60s). Distinct from the
@@ -55,7 +79,17 @@ _Avoid_: "heartbeat" (implies the agent emits it), "liveness ping"
 
 **Idle timeout**:
 The hard-kill threshold (default: 10 minutes) for an agent invocation
-producing no stdout. Reached only after many **idle warnings**.
+producing no stdout. Reached only after many **idle warnings**. For the
+Kiro provider, "producing stdout" means meaningful output — decorative
+terminal animation (spinner frames) is filtered out of the liveness
+signal. See ADR 0016.
+
+**Wall-clock ceiling**:
+The hard cap (default: 60 minutes) on an agent invocation's total
+runtime, independent of output activity. Backstop for hung sessions
+whose output defeats idle detection. Enforced by all providers via
+`maxDurationMs`. See ADR 0016.
+_Avoid_: "deadline", "max runtime" (use the term above)
 
 **Stream event**:
 A typed event parsed from a provider's streamed stdout — one of
@@ -147,11 +181,14 @@ pass on a refreshed base.
 _Avoid_: "lane head"
 
 **Lane-cancelled**:
-A slice deferred by the orchestrator because an earlier lane-mate
-failed (STUCK / ESCALATE / ERROR / CONFLICT). Recorded as the
-`LANE-CANCELLED` status. Distinct from **cancellation** (user-initiated)
+A slice deferred by the orchestrator because its lane was halted for
+repository-integrity reasons (a predecessor hit the worktree-corruption
+signature, ADR 0010 / ADR 0024). Recorded as the `LANE-CANCELLED`
+status. Ordinary predecessor failures no longer cancel lane-mates —
+the lane continues and the successor re-negotiates on the real base
+(ADR 0024). Distinct from **cancellation** (user-initiated)
 and **escalation** (the agent gave up). Lane-cancelled slices are
-re-eligible on the next pipeline run once the predecessor is fixed.
+re-eligible on the next pipeline run once the repository is verified.
 _Avoid_: "skipped" (HITL slices are skipped; lane-cancelled is
 deferral, not skip), "blocked" (DAG-blocked is a separate concept)
 

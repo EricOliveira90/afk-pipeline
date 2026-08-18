@@ -26,6 +26,13 @@ export interface PipelineRuntimeOptions {
   commandTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   infrastructureRetries?: number;
+  /**
+   * Per-invocation wall-clock ceiling override, applied uniformly to
+   * every agent role. When absent, role-aware defaults apply: 120 min
+   * for generator and evaluator-qa, the 60 min provider default for
+   * everything else. See ADR 0019.
+   */
+  maxAgentDurationMs?: number;
   /** Execute otherwise independent slice lanes one at a time. */
   serialLanes?: boolean;
   /**
@@ -87,6 +94,11 @@ export function parsePipelineRuntimeOptions(
     "--infrastructure-retries",
     true,
   );
+  const maxAgentDurationMs = parseIntegerOption(
+    optionValue(args, "--max-agent-duration-ms"),
+    "--max-agent-duration-ms",
+    false,
+  );
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
   const verifyMigrationCommand = optionValue(args, "--preview-verify-command");
@@ -99,6 +111,7 @@ export function parsePipelineRuntimeOptions(
     commandTimeoutMs,
     heartbeatIntervalMs,
     infrastructureRetries,
+    maxAgentDurationMs,
     serialLanes,
     openPrOnOverride,
     sharedPreview: verifyMigrationCommand && applyMigrationCommand

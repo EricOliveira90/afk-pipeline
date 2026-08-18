@@ -252,7 +252,7 @@ describe("runWave", () => {
     expect(outcomes.get("200")?.phase).toBe("STUCK");
   }, 30_000);
 
-  it("lane-cancels successors when predecessor fails", async () => {
+  it("continues the lane when a predecessor fails — the successor runs on the unchanged base (ADR 0024)", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
       { number: "01", ghIssue: "301", title: "First", type: "AFK", blockedBy: [], userStories: "" },
@@ -262,7 +262,7 @@ describe("runWave", () => {
       ["301", { files: ["src/shared.txt"], qaPasses: false, outputFile: "src/shared.txt", outputContent: "fail" }],
       ["302", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "ok" }],
     ]);
-    const { config, dag, logger, featBranch } = setupWave(repo, "wave-cancel", slices, fixtures);
+    const { config, dag, logger, featBranch } = setupWave(repo, "wave-continue", slices, fixtures);
 
     const { outcomes } = await runWave({
       waveNumber: 1,
@@ -276,8 +276,19 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
+    // Pre-ADR-0024 behaviour marked 302 LANE-CANCELLED as collateral of
+    // 301's failure. The slices are DAG-independent and the successor
+    // re-negotiates on the featBranch tip either way, so it now runs —
+    // and passes — despite the dead predecessor ahead of it.
     expect(outcomes.get("301")?.phase).toBe("STUCK");
-    expect(outcomes.get("302")?.phase).toBe("LANE-CANCELLED");
+    expect(outcomes.get("302")?.phase).toBe("PASS");
+    // 302's work actually landed on the feature branch.
+    git(repo, ["checkout", featBranch]);
+    const shared = readFileSync(
+      join(repo, "src", "shared.txt"),
+      "utf-8",
+    );
+    expect(shared).toContain("ok");
   }, 60_000);
 
   it("runs disjoint slices in parallel lanes", async () => {
@@ -574,6 +585,56 @@ describe("runWave", () => {
     }
   }, 30_000);
 
+  // The one lane-halting exception ADR 0024 keeps: the ADR 0010
+  // corruption signature. Ordinary failures let the lane continue,
+  // but dispatching more agents into a repo whose worktree
+  // registration already failed silently risks compounding the
+  // damage — successors stay LANE-CANCELLED and an operator goes
+  // first.
+  it("still lane-cancels successors when the predecessor hits the corruption signature", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "911", title: "Corrupted", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "912", title: "Behind", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["911", { files: ["src/c.txt"], qaPasses: true, outputFile: "src/c.txt", outputContent: "c1" }],
+      ["912", { files: ["src/c.txt"], qaPasses: true, outputFile: "src/c.txt", outputContent: "c2" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(repo, "wave-corrupt-halt", slices, fixtures);
+
+    const realBranchExists = gitModule.branchExists;
+    const spy = vi
+      .spyOn(gitModule, "branchExists")
+      .mockImplementation((cwd, branch) => {
+        if (branch.includes("slice-01-")) return false;
+        return realBranchExists(cwd, branch);
+      });
+
+    try {
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["911", "912"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      expect(outcomes.get("911")?.phase).toBe("ERROR");
+      const successor = outcomes.get("912");
+      expect(successor?.phase).toBe("LANE-CANCELLED");
+      if (successor?.phase === "LANE-CANCELLED") {
+        expect(successor.error).toMatch(/corruption signature/i);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
   // Sister regression: the existing "generator produced no output"
   // guard must keep working. When `hasCommitsAhead` reports `false`
   // (slice tip is already at featBranch), the slice gets ERROR with
@@ -617,3 +678,125 @@ describe("runWave", () => {
   }, 30_000);
 });
 
+
+
+/**
+ * Per-slice outcome hook (ADR 0018): runWave must report each slice's
+ * terminal outcome the moment it lands — PASS only after the merge —
+ * so the orchestrator can persist it before the wave finishes. A
+ * throwing callback must be contained, never aborting the lane.
+ */
+describe("runWave onOutcome", () => {
+  it("fires PASS after the merge landed and before the lane successor's refresh starts", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "111", title: "Predecessor", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "112", title: "Successor", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Shared file → one lane → 112 runs strictly after 111 merges.
+    const fixtures = new Map<string, SliceFixture>([
+      ["111", { files: ["src/serial.txt"], qaPasses: true, outputFile: "src/serial.txt", outputContent: "from 111" }],
+      ["112", { files: ["src/serial.txt"], qaPasses: true, outputFile: "src/serial.txt", outputContent: "from 112" }],
+    ]);
+    const { config, dag, logger, featBranch, provider } = setupWave(
+      repo,
+      "wave-onoutcome-order",
+      slices,
+      fixtures,
+    );
+
+    // Wrap the stub provider so invocations and onOutcome calls land in
+    // one ordered event list (Node is single-threaded, so array order
+    // is the real interleaving).
+    const events: string[] = [];
+    let featContentAtPass: string | null = null;
+    config.provider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const slice = sliceFromCwd(options.cwd, slices);
+        events.push(`invoke:${options.role}:${slice?.ghIssue ?? "?"}`);
+        return provider.invoke(options);
+      },
+    };
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["111", "112"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+      onOutcome: (id, outcome) => {
+        events.push(`outcome:${outcome.phase}:${id}`);
+        if (id === "111" && outcome.phase === "PASS") {
+          // PASS must only be reported once the content is actually on
+          // the feature branch — a crash right after this callback must
+          // leave a state file that is safe to resume from.
+          featContentAtPass = git(repo, [
+            "show",
+            `${featBranch}:src/serial.txt`,
+          ]);
+        }
+      },
+    });
+
+    expect(outcomes.get("111")?.phase).toBe("PASS");
+    expect(outcomes.get("112")?.phase).toBe("PASS");
+
+    // Merge-before-callback: the feature branch already held 111's work.
+    expect(featContentAtPass).toContain("from 111");
+
+    // Callback-before-successor: 112's first explorer ran during the
+    // parallel Phase A; its SECOND explorer is the lane-successor
+    // re-negotiation, which must start only after 111's PASS was
+    // reported.
+    const passIdx = events.indexOf("outcome:PASS:111");
+    const explorer112 = events
+      .map((e, i) => (e === "invoke:explorer:112" ? i : -1))
+      .filter((i) => i >= 0);
+    expect(passIdx).toBeGreaterThanOrEqual(0);
+    expect(explorer112.length).toBeGreaterThanOrEqual(2);
+    expect(passIdx).toBeLessThan(explorer112[1]!);
+  }, 60_000);
+
+  it("contains a throwing onOutcome and still records outcomes in-memory", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "121", title: "Only", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["121", { files: ["src/ok.txt"], qaPasses: true, outputFile: "src/ok.txt", outputContent: "ok" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-onoutcome-throws",
+      slices,
+      fixtures,
+    );
+
+    const calls: string[] = [];
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["121"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+      onOutcome: (id, outcome) => {
+        calls.push(`${id}:${outcome.phase}`);
+        throw new Error("state file write failed");
+      },
+    });
+
+    // The callback threw, but the wave neither rejected nor lost the
+    // outcome — the orchestrator's post-wave reconciliation retries.
+    expect(calls).toEqual(["121:PASS"]);
+    expect(outcomes.get("121")?.phase).toBe("PASS");
+  }, 30_000);
+});

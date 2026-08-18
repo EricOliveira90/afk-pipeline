@@ -15,6 +15,7 @@ import {
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { resolveRunScope } from "./slice-scope.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
+import { runStatus } from "./status.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -24,13 +25,24 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
   );
   process.exit(2);
 }
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // One-shot, read-only status view (spec #26). Handled before flag
+  // parsing — the pipeline flags below don't apply to it.
+  if (args[0] === "status") {
+    const { output, exitCode } = runStatus(args.slice(1), resolve("."));
+    // Error output goes to stderr so it's distinguishable from the
+    // rendered view (and from --json documents) in shell pipelines.
+    (exitCode === 0 ? console.log : console.error)(output);
+    process.exit(exitCode);
+  }
+
   let runtimeOptions;
   try {
     runtimeOptions = parsePipelineRuntimeOptions(args);
@@ -224,6 +236,13 @@ async function main() {
   }
 
   console.log("\nPipeline completed successfully.");
+
+  // A process that survived a kill (or a daemon an agent left behind)
+  // can hold inherited stdio pipe handles open and wedge this event
+  // loop at exit. Unref'd on purpose: a clean loop exits naturally
+  // before the timer fires; a wedged loop is the only case where it
+  // triggers. See ADR 0020.
+  setTimeout(() => process.exit(0), 2_000).unref();
 }
 
 main().catch((err) => {

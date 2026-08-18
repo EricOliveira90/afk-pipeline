@@ -316,8 +316,9 @@ describe("makeAsyncMutex", () => {
  * deterministic artifacts. We assert observable lane behaviour:
  *  - Two slices declaring the same file run *serially* (slice B's
  *    Phase A starts after slice A's commit lands on featBranch).
- *  - A failure in lane position 1 marks lane position 2 as
- *    LANE-CANCELLED in run-state.
+ *  - A failure in lane position 1 no longer cancels lane position 2:
+ *    the successor runs on the unchanged base and its PASS persists
+ *    (ADR 0024).
  *  - Two slices with disjoint files run in *parallel* lanes
  *    (interleaved invocation timestamps).
  *
@@ -347,6 +348,12 @@ interface SliceFixture {
    * slice should end up STUCK after MAX_GENERATOR_ROUNDS.
    */
   qaPasses: boolean;
+  /**
+   * Number of leading evaluator-qa invocations that report FAIL with
+   * `**Failure class:** INFRASTRUCTURE` before behaving per `qaPasses`.
+   * Drives the infrastructure-retry warn path without consuming rounds.
+   */
+  qaInfraAttempts?: number;
   /** File the generator should create in the worktree (so commits have content). */
   outputFile: string;
   outputContent: string;
@@ -414,6 +421,8 @@ function buildStubProvider(opts: {
   // Track per-slice generator round so the stub can write fresh content
   // and decide PASS vs FAIL based on the round.
   const generatorRounds = new Map<string, number>();
+  // Per-slice count of evaluator-qa invocations, for qaInfraAttempts.
+  const qaAttempts = new Map<string, number>();
 
   return {
     name: "stub",
@@ -467,12 +476,22 @@ function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "evaluator-qa" && sliceArtifactDir && fixture) {
-        const verdict = fixture.qaPasses ? "PASS" : "FAIL";
-        writeFileSync(
-          join(sliceArtifactDir, "qa-report.md"),
-          `# QA Report\n\n**Verdict:** ${verdict}\n`,
-          "utf-8",
-        );
+        const attempt = (qaAttempts.get(ghIssue) ?? 0) + 1;
+        qaAttempts.set(ghIssue, attempt);
+        if (attempt <= (fixture.qaInfraAttempts ?? 0)) {
+          writeFileSync(
+            join(sliceArtifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** FAIL\n\n**Failure class:** INFRASTRUCTURE\n",
+            "utf-8",
+          );
+        } else {
+          const verdict = fixture.qaPasses ? "PASS" : "FAIL";
+          writeFileSync(
+            join(sliceArtifactDir, "qa-report.md"),
+            `# QA Report\n\n**Verdict:** ${verdict}\n`,
+            "utf-8",
+          );
+        }
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "stuck.md"),
@@ -600,7 +619,7 @@ describe("runPipeline lane scheduling", () => {
     expect(shared).toContain("hello from slice 1002");
   }, 60_000);
 
-  it("marks the lane successor as LANE-CANCELLED when the predecessor fails", async () => {
+  it("persists STUCK for the failed predecessor and PASS for the surviving lane successor (ADR 0024)", async () => {
     const repo = makeRepo();
     const slug = "lanes-cancel";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -663,7 +682,12 @@ describe("runPipeline lane scheduling", () => {
     );
     const state = JSON.parse(stateRaw);
     expect(state.slices["2001"].phase).toBe("STUCK");
-    expect(state.slices["2002"].phase).toBe("LANE-CANCELLED");
+    // Pre-ADR-0024: LANE-CANCELLED collateral. The slices are
+    // DAG-independent, so the successor now survives its dead lane
+    // predecessor, runs on the unchanged feature-branch tip, and its
+    // PASS is persisted as resumable-complete.
+    expect(state.slices["2002"].phase).toBe("PASS");
+    expect(state.slices["2002"].mergedToFeature).toBe(true);
   }, 60_000);
 
   it("runs disjoint-file slices in parallel lanes (timestamps interleave)", async () => {
@@ -1889,4 +1913,650 @@ describe("buildPrCreationPlan", () => {
       expect(plan.overridden).toBe(false);
     },
   );
+});
+
+
+/**
+ * Observability (ADR 0017): every run gets its own log directory with a
+ * run.log the orchestrator owns. Phase transitions must be readable
+ * from disk — launcher stdio was lost on Windows (`pnpm exec ... 2>&1`
+ * produced an empty file), leaving hangs indistinguishable from
+ * progress.
+ */
+describe("run.log observability (ADR 0017)", () => {
+  function runDirsOf(repo: string, slug: string): string[] {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    return readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .map((d) => join(parent, d));
+  }
+
+  it("writes phase transitions, lane queueing, verdicts, and outcomes to run.log; agent logs live in the run dir", async () => {
+    const repo = makeRepo();
+    const slug = "runlog";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9101", title: "Lead", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "9102", title: "Follower", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Shared file → one lane → the follower must emit a "queued behind"
+    // line, the exact signal that was missing when a NEGOTIATING slice
+    // looked dropped.
+    const fixtures = new Map<string, SliceFixture>([
+      ["9101", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "lead" }],
+      ["9102", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "follower" }],
+    ]);
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records }),
+    });
+
+    const runDirs = runDirsOf(repo, slug);
+    expect(runDirs.length).toBe(1);
+    const runDir = runDirs[0]!;
+
+    const runLog = readFileSync(join(runDir, "run.log"), "utf-8");
+    // Every line is timestamped.
+    for (const line of runLog.trim().split("\n")) {
+      expect(line).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] /);
+    }
+    // Startup line points at this run's directory.
+    expect(runLog).toContain("Pipeline run started");
+    // Wave and per-slice phase transitions.
+    expect(runLog).toContain("Wave 1: dispatching 2 slice(s)");
+    expect(runLog).toContain("Slice #9101 (Lead): exploring...");
+    // Contract negotiation is observable: verdict and lock per slice.
+    expect(runLog).toContain("contract verdict ACCEPT (round 1/3)");
+    expect(runLog).toContain("Slice #9101 (Lead): contract LOCKED");
+    // Lane queueing is explicit — a waiting successor is distinguishable
+    // from a dropped one.
+    expect(runLog).toContain(
+      "Slice #9102 queued behind #9101 in its lane",
+    );
+    expect(runLog).toContain("not dropped");
+    // Terminal outcomes land in the file too.
+    expect(runLog).toContain(
+      `Slice #9101 (Lead): PASS — merged into feat-stub/${slug}`,
+    );
+    expect(runLog).toContain(
+      `Slice #9102 (Follower): PASS — merged into feat-stub/${slug}`,
+    );
+
+    // Agent invocation logs live inside the run directory…
+    const filesInRunDir = readdirSync(runDir);
+    expect(filesInRunDir).toContain("slice-01-explorer.log");
+    expect(filesInRunDir).toContain("slice-01-generator-r1.log");
+    // …and a per-run summary copy sits next to them.
+    expect(filesInRunDir).toContain("run-summary.md");
+    // The stable summary path is preserved for existing consumers.
+    expect(
+      existsSync(join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md")),
+    ).toBe(true);
+    // No agent logs leak into the shared prd dir (the cross-run append
+    // defect surface).
+    const parentEntries = readdirSync(join(repo, ".afk", "logs", `${slug}-stub`));
+    expect(parentEntries.some((e) => e.endsWith(".log"))).toBe(false);
+  }, 60_000);
+
+  it("a re-run gets a fresh run directory and leaves the first run's logs untouched", async () => {
+    const repo = makeRepo();
+    const slug = "runlog-rerun";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9201", title: "Only", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9201", { files: ["src/only.txt"], qaPasses: true, outputFile: "src/only.txt", outputContent: "only" }],
+    ]);
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    };
+
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+    const [firstDir] = runDirsOf(repo, slug);
+    const firstRunLog = readFileSync(join(firstDir!, "run.log"), "utf-8");
+    const firstGenLog = statSync(join(firstDir!, "slice-01-generator-r1.log"));
+
+    // Second run (resumes: slice already completed — still a run).
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+
+    const dirs = runDirsOf(repo, slug);
+    expect(dirs.length).toBe(2);
+    // First run's files did not change — no cross-run append, so mtime
+    // and size keep meaning what an operator assumes they mean.
+    expect(readFileSync(join(firstDir!, "run.log"), "utf-8")).toBe(firstRunLog);
+    expect(
+      statSync(join(firstDir!, "slice-01-generator-r1.log")).mtimeMs,
+    ).toBe(firstGenLog.mtimeMs);
+    // The second run's run.log records the resume ("already completed").
+    const secondDir = dirs.find((d) => d !== firstDir)!;
+    const secondRunLog = readFileSync(join(secondDir, "run.log"), "utf-8");
+    expect(secondRunLog).toContain("Pipeline run started");
+    expect(secondRunLog).toContain("(already completed)");
+  }, 60_000);
+});
+
+
+/**
+ * Per-slice state persistence (ADR 0018). A slice's terminal outcome
+ * must be on disk the moment it lands — for PASS, right after its merge
+ * — not when its wave finishes. Observed failure mode this guards: a
+ * slice merged mid-wave, the process was hard-killed hours later while
+ * its serial lane was still running, and the re-run re-attempted the
+ * already-merged slice against its own output.
+ */
+describe("runPipeline per-slice state persistence", () => {
+  it("persists a mid-wave PASS before the lane successor starts; a crash there resumes skipping exactly that slice", async () => {
+    const repo = makeRepo();
+    const slug = "midwave-persist";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "7001", title: "First", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "7002", title: "Second", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Shared file → one serial lane → 7002 starts only after 7001 merged.
+    const fixtures = new Map<string, SliceFixture>([
+      ["7001", { files: ["src/lane.txt"], qaPasses: true, outputFile: "src/lane.txt", outputContent: "first slice content" }],
+      ["7002", { files: ["src/lane.txt"], qaPasses: true, outputFile: "src/lane.txt", outputContent: "second slice content" }],
+    ]);
+
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+
+    // --- Run 1: "crash" while the lane successor is running. ---
+    // The wrapped provider snapshots the state file at 7002's
+    // lane-refresh explorer (its second explorer invocation — the first
+    // ran during parallel Phase A). That snapshot is byte-for-byte the
+    // disk state a hard kill at that moment would leave. It then keeps
+    // throwing so 7002 cannot complete in this run.
+    let snapshot: string | null = null;
+    const records1: InvocationRecord[] = [];
+    const inner1 = buildStubProvider({ fixtures, slices, records: records1 });
+    let explorer7002Count = 0;
+    const crashingProvider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const slice = sliceFromCwd(options.cwd, slices);
+        if (slice?.ghIssue === "7002" && options.role === "explorer") {
+          explorer7002Count++;
+          if (explorer7002Count >= 2) {
+            if (snapshot === null && existsSync(statePath)) {
+              snapshot = readFileSync(statePath, "utf-8");
+            }
+            throw new Error("simulated hard crash");
+          }
+        }
+        return inner1.invoke(options);
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: crashingProvider,
+    });
+
+    // The core guarantee: while the wave was still open, 7001's PASS
+    // (with mergedToFeature) was already on disk.
+    expect(snapshot).not.toBeNull();
+    const midWaveState = JSON.parse(snapshot!);
+    expect(midWaveState.slices["7001"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(midWaveState.slices["7002"]).toBeUndefined();
+
+    // --- Simulate the hard kill: restore the state file to exactly what
+    // disk held mid-wave (7001 PASS, 7002 absent). Run 1 exited
+    // gracefully and wrote 7002's ERROR; a kill would not have. ---
+    writeFileSync(statePath, snapshot!);
+
+    // --- Run 2: everything passes. ---
+    const records2: InvocationRecord[] = [];
+    const provider2 = buildStubProvider({ fixtures, slices, records: records2 });
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: provider2,
+    });
+
+    expect(result.success).toBe(true);
+    // The re-run skipped exactly the already-merged slice — zero agent
+    // invocations for 7001 — and ran the crashed slice to completion.
+    expect(records2.some((r) => r.ghIssue === "7001")).toBe(false);
+    expect(records2.some((r) => r.ghIssue === "7002")).toBe(true);
+
+    const finalState = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(finalState.slices["7001"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(finalState.slices["7002"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+
+    // The feature branch ends with the successor's content on top —
+    // built on 7001's merge from run 1, which was not re-attempted.
+    git(repo, ["checkout", `feat-stub/${slug}`]);
+    const lane = readFileSync(join(repo, "src", "lane.txt"), "utf-8");
+    expect(lane).toContain("second slice content");
+  }, 120_000);
+});
+
+
+
+/**
+ * Configurable wall-clock ceiling (ADR 0019). The 60 min provider
+ * default killed a healthy generator mid-slice; generator and
+ * evaluator-qa now get a role-aware 120 min default and
+ * `--max-agent-duration-ms` overrides every role uniformly. A ceiling
+ * kill during slice execution is terminal (no infrastructure retry) and
+ * the persisted error points the operator at the remedy.
+ */
+describe("wall-clock ceiling configuration (ADR 0019)", () => {
+  function makeSingleSliceSetup(slug: string, ghIssue: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue,
+        title: "Ceiling slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        ghIssue,
+        {
+          files: ["src/ceiling.txt"],
+          qaPasses: true,
+          outputFile: "src/ceiling.txt",
+          outputContent: "ceiling",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+    return { repo, prdDir, specsDir, slices, baseProvider };
+  }
+
+  /** Wrap the stub to record the maxDurationMs each role received. */
+  function recordingProvider(
+    baseProvider: AgentProvider,
+    seen: Map<string, Array<number | undefined>>,
+  ): AgentProvider {
+    return {
+      name: baseProvider.name,
+      async invoke(options) {
+        const list = seen.get(options.role) ?? [];
+        list.push(options.maxDurationMs);
+        seen.set(options.role, list);
+        return baseProvider.invoke(options);
+      },
+    };
+  }
+
+  it("gives generator and evaluator-qa the slow-agent 120 min ceiling and leaves fast roles on the provider default", async () => {
+    const slug = "ceiling-defaults";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makeSingleSliceSetup(slug, "9301");
+    const seen = new Map<string, Array<number | undefined>>();
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: recordingProvider(baseProvider, seen),
+    });
+
+    expect(result.success).toBe(true);
+    // Slow roles: measured generator durations on a consuming project
+    // ranged ~41–60+ min, so the 60 min provider default sat directly
+    // on the real distribution. These two get double the budget.
+    expect(seen.get("generator")).toEqual([7_200_000]);
+    expect(seen.get("evaluator-qa")).toEqual([7_200_000]);
+    // Fast roles pass no override → the provider's 60 min default applies.
+    for (const role of ["explorer", "planner", "evaluator-contract"]) {
+      expect(seen.get(role), role).toBeDefined();
+      for (const value of seen.get(role)!) expect(value, role).toBeUndefined();
+    }
+  }, 60_000);
+
+  it("applies --max-agent-duration-ms uniformly to every invocation", async () => {
+    const slug = "ceiling-override";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makeSingleSliceSetup(slug, "9302");
+    const seen = new Map<string, Array<number | undefined>>();
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: recordingProvider(baseProvider, seen),
+      maxAgentDurationMs: 5_400_000,
+    });
+
+    expect(result.success).toBe(true);
+    // Every role that ran — slice roles and guardian reviews alike —
+    // received the uniform override.
+    expect(seen.size).toBeGreaterThanOrEqual(5);
+    for (const [role, values] of seen) {
+      for (const value of values) expect(value, role).toBe(5_400_000);
+    }
+    expect(seen.has("generator")).toBe(true);
+    expect(seen.has("architect-review")).toBe(true);
+  }, 60_000);
+
+  it("treats a generator ceiling kill as terminal — no retry — and records the remedy in the persisted error", async () => {
+    const slug = "ceiling-terminal";
+    const { repo, prdDir, specsDir, slices, baseProvider } =
+      makeSingleSliceSetup(slug, "9303");
+
+    let generatorAttempts = 0;
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        if (options.role === "generator") {
+          generatorAttempts++;
+          throw new Error(
+            "Agent generator exceeded 7200s wall-clock ceiling — killed",
+          );
+        }
+        return baseProvider.invoke(options);
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      infrastructureRetries: 2,
+    });
+
+    expect(result.success).toBe(false);
+    // Terminal by design: a retry would restart the round from scratch
+    // against the same ceiling. The infrastructure-retries budget must
+    // not apply to the generator's ceiling kill.
+    expect(generatorAttempts).toBe(1);
+    // Persisted state keeps the ERROR distinction and carries the
+    // operator-facing remedy; the summary collapses ERROR to STUCK.
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices["9303"].phase).toBe("ERROR");
+    expect(state.slices["9303"].error).toContain("wall-clock ceiling");
+    expect(state.slices["9303"].error).toContain("--max-agent-duration-ms");
+    expect(result.consoleSummary).toContain("[STUCK]");
+  }, 60_000);
+});
+
+
+/**
+ * Structured events tee (spec #26, slice #27): a pipeline run leaves
+ * `events.jsonl` beside `run.log` in the per-run directory — header
+ * first, then `run-started`, then one `slice-outcome` per terminal
+ * outcome carrying the serialized SliceLifecycle (including the
+ * failure reason). Asserted at the same integration seam as the
+ * run.log tests: real temp repo, stub provider, files on disk.
+ */
+describe("events.jsonl tee (spec #26)", () => {
+  function runDirsOf(repo: string, slug: string): string[] {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    return readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .map((d) => join(parent, d));
+  }
+
+  it("writes header, run-started, and one slice-outcome per terminal outcome", async () => {
+    const repo = makeRepo();
+    const slug = "events";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9401", title: "Passer", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "9402", title: "Failer", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Disjoint files → two lanes; one passes, one fails QA every round
+    // and lands STUCK, so the tee carries a real failure reason.
+    const fixtures = new Map<string, SliceFixture>([
+      ["9401", { files: ["src/a.txt"], qaPasses: true, outputFile: "src/a.txt", outputContent: "a" }],
+      ["9402", { files: ["src/b.txt"], qaPasses: false, outputFile: "src/b.txt", outputContent: "b" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    // events.jsonl sits beside run.log in the run directory.
+    expect(existsSync(join(runDir!, "run.log"))).toBe(true);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    // Header first (version gate), then run-started.
+    expect(lines[0]).toMatchObject({ type: "header", version: 1 });
+    expect(lines[1]).toMatchObject({ type: "run-started", provider: "stub" });
+
+    // One slice-outcome per terminal outcome, serializing the lifecycle.
+    const outcomes = lines.filter((l) => l.type === "slice-outcome");
+    expect(outcomes).toHaveLength(2);
+    const pass = outcomes.find((o) => o.slice.ghIssue === "9401");
+    const stuck = outcomes.find((o) => o.slice.ghIssue === "9402");
+    expect(pass!.slice).toMatchObject({
+      phase: "PASS",
+      title: "Passer",
+      mergedToFeature: true,
+    });
+    expect(stuck!.slice.phase).toBe("STUCK");
+    expect(stuck!.slice.error).toBeTruthy();
+
+    // Every event is timestamped.
+    for (const line of lines) {
+      expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+  }, 60_000);
+
+  it("emits wave-dispatched per wave and paired phase-started/phase-ended per agent invocation with round and verdict", async () => {
+    const repo = makeRepo();
+    const slug = "events-phases";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9501", title: "Only", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9501", { files: ["src/only.txt"], qaPasses: true, outputFile: "src/only.txt", outputContent: "only" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    // Wave dispatch is a typed event carrying the wave number and slices.
+    const waves = lines.filter((l) => l.type === "wave-dispatched");
+    expect(waves).toHaveLength(1);
+    expect(waves[0]).toMatchObject({ wave: 1, slices: ["9501"] });
+
+    // Lane composition is a typed event too (#30: wave/lane order).
+    const lanes = lines.filter((l) => l.type === "lanes-partitioned");
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0]).toMatchObject({ wave: 1, lanes: [["9501"]] });
+
+    // Each agent invocation produces a started/ended pair, in order.
+    const pairFor = (agent: string, round?: number) => {
+      const started = lines.findIndex(
+        (l) =>
+          l.type === "phase-started" &&
+          l.ghIssue === "9501" &&
+          l.agent === agent &&
+          l.round === round,
+      );
+      const ended = lines.findIndex(
+        (l) =>
+          l.type === "phase-ended" &&
+          l.ghIssue === "9501" &&
+          l.agent === agent &&
+          l.round === round,
+      );
+      expect(started, `${agent} phase-started`).toBeGreaterThan(-1);
+      expect(ended, `${agent} phase-ended`).toBeGreaterThan(started);
+      return lines[ended]!;
+    };
+
+    pairFor("explorer", undefined);
+    pairFor("planner", 1);
+    // The contract evaluator's phase-ended carries the verdict.
+    expect(pairFor("evaluator-contract", 1).verdict).toBe("ACCEPT");
+    pairFor("generator", 1);
+    // The QA evaluator's phase-ended carries the outcome verdict.
+    expect(pairFor("evaluator-qa", 1).verdict).toBe("PASS");
+  }, 60_000);
+
+  it("emits warn events for lane continuations, NOT-RUN holds, and prior-run state on re-runs (#29)", async () => {
+    const repo = makeRepo();
+    const slug = "events-warns";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    // A fails (STUCK); B shares a file with A → same lane, continues
+    // after A's failure (ADR 0024); C is DAG-blocked by A → never runs.
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9601", title: "LaneLead", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "9602", title: "LaneMate", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "03", ghIssue: "9603", title: "Dependent", type: "AFK", blockedBy: ["9601"], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9601", { files: ["src/shared.txt"], qaPasses: false, outputFile: "src/shared.txt", outputContent: "lead" }],
+      ["9602", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "mate" }],
+      ["9603", { files: ["src/dep.txt"], qaPasses: true, outputFile: "src/dep.txt", outputContent: "dep" }],
+    ]);
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    };
+
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+
+    const eventsOf = (runDir: string) =>
+      readFileSync(join(runDir, "events.jsonl"), "utf-8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+
+    const [firstDir] = runDirsOf(repo, slug);
+    const firstEvents = eventsOf(firstDir!);
+    const warns = firstEvents.filter((l) => l.type === "warn");
+
+    // Lane continuation is a typed warn with its reason (ADR 0024).
+    const laneWarn = warns.find((w) => w.reason === "lane-continuation");
+    expect(laneWarn).toBeDefined();
+    expect(laneWarn!.ghIssue).toBe("9601");
+    expect(laneWarn!.message).toContain("9602");
+
+    // The DAG-held slice surfaces as a NOT-RUN hold naming its blocker.
+    const holdWarn = warns.find((w) => w.reason === "not-run-hold");
+    expect(holdWarn).toBeDefined();
+    expect(holdWarn!.ghIssue).toBe("9603");
+    expect(holdWarn!.blockedBy).toContain("9601");
+
+    // Re-run: per-slice prior-run state (previous phase + failure
+    // reason) is emitted at run start.
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+    const secondDir = runDirsOf(repo, slug).find((d) => d !== firstDir)!;
+    const priorWarns = eventsOf(secondDir).filter(
+      (l) => l.type === "warn" && l.reason === "prior-run-state",
+    );
+    const stuckPrior = priorWarns.find((w) => w.ghIssue === "9601");
+    expect(stuckPrior).toBeDefined();
+    expect(stuckPrior!.previousPhase).toBe("STUCK");
+    expect(stuckPrior!.previousError).toContain("QA failed");
+    const passPrior = priorWarns.find((w) => w.ghIssue === "9602");
+    expect(passPrior).toBeDefined();
+    expect(passPrior!.previousPhase).toBe("PASS");
+  }, 120_000);
+
+  it("emits an infrastructure-retry warn when QA is retried without consuming a round (#29)", async () => {
+    const repo = makeRepo();
+    const slug = "events-infra";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9701", title: "Flaky", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9701", { files: ["src/f.txt"], qaPasses: true, qaInfraAttempts: 1, outputFile: "src/f.txt", outputContent: "f" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const infraWarn = lines.find(
+      (l) => l.type === "warn" && l.reason === "infrastructure-retry",
+    );
+    expect(infraWarn).toBeDefined();
+    expect(infraWarn!.ghIssue).toBe("9701");
+    // The retry didn't consume the round: the slice still passes.
+    const outcome = lines.find((l) => l.type === "slice-outcome");
+    expect(outcome!.slice.phase).toBe("PASS");
+  }, 60_000);
 });

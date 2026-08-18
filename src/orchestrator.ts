@@ -11,7 +11,7 @@ import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
-import { runWave } from "./wave.js";
+import { runWave, type WaveOutcome } from "./wave.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
@@ -60,6 +60,19 @@ async function closeAgentLog(log: WriteStream): Promise<void> {
  * sacrificing the wedge-detection role of the floor. See ADR 0008.
  */
 const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
+
+/**
+ * Wall-clock ceiling for generator and evaluator-qa invocations. The
+ * 60 min provider default (ADR 0016) sits directly on top of the real
+ * duration distribution for heavy slices — measured generator runs on
+ * a consuming project ranged ~41–60+ min, and one healthy generator
+ * with six real commits on its branch was killed at exactly the
+ * ceiling. These two roles get double the budget; short-lived roles
+ * (explorer, planner, evaluator-contract, guardians) keep the provider
+ * default. `--max-agent-duration-ms` overrides both uniformly.
+ * Mirrors the SLOW_AGENT_IDLE_TIMEOUT_MS precedent above. See ADR 0019.
+ */
+const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
 
 /**
  * Pre-ship sanity gate steps, in order. Each step maps to a `package.json`
@@ -475,6 +488,15 @@ export interface PipelineConfig {
   heartbeatIntervalMs?: number;
   /** Retries per QA stage that do not consume implementation rounds. */
   infrastructureRetries?: number;
+  /**
+   * Per-invocation wall-clock ceiling for every agent role, overriding
+   * the role-aware defaults (120 min for generator/evaluator-qa, the
+   * 60 min provider default otherwise). A ceiling kill during slice
+   * execution is terminal for the slice, not infrastructure-retried:
+   * a retry restarts the round from scratch against the same ceiling.
+   * See ADR 0019.
+   */
+  maxAgentDurationMs?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -784,7 +806,7 @@ function preserveContractNegotiationFailure(
     capDecision,
   });
   if (result.archived) {
-    console.error(
+    ctx.logger.phase(
       `${ctx.tag}: archived negotiation artifacts to ${result.archiveDir}`,
     );
   }
@@ -826,7 +848,12 @@ export async function runSliceNegotiate(
       : `No local issue manifest was found. Fetch the issue body with: gh issue view ${slice.ghIssue}`;
     const contextPath = join(ctx.absSliceDir, "context.md");
     if (!existsSync(contextPath)) {
-      console.error(`${ctx.tag}: exploring...`);
+      logger.phase(`${ctx.tag}: exploring...`, "error", {
+        type: "phase-started",
+        ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
+        agent: "explorer",
+      });
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
         role: "explorer",
@@ -839,7 +866,14 @@ export async function runSliceNegotiate(
         }),
         cwd: ctx.worktreeDir,
         logStream,
+        maxDurationMs: config.maxAgentDurationMs,
       }).finally(() => closeAgentLog(logStream));
+      logger.event({
+        type: "phase-ended",
+        ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
+        agent: "explorer",
+      });
     }
 
     // --- Step 2: Planner (contract negotiation) ---
@@ -859,8 +893,16 @@ export async function runSliceNegotiate(
 
     if (contractStatus !== "LOCKED") {
       for (let round = 1; round <= allowedContractRounds; round++) {
-        console.error(
+        logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "planner",
+            round,
+          },
         );
         const plannerLog = logger.agentLog(slice.number, "planner", round);
         await invoke({
@@ -879,10 +921,26 @@ export async function runSliceNegotiate(
           }),
           cwd: ctx.worktreeDir,
           logStream: plannerLog,
+          maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(plannerLog));
+        logger.event({
+          type: "phase-ended",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          agent: "planner",
+          round,
+        });
 
-        console.error(
+        logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "evaluator-contract",
+            round,
+          },
         );
         const evalLog = logger.agentLog(
           slice.number,
@@ -903,11 +961,31 @@ export async function runSliceNegotiate(
           }),
           cwd: ctx.worktreeDir,
           logStream: evalLog,
+          maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(evalLog));
 
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
         const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
+        // An UNKNOWN verdict means the evaluator exited without writing
+        // a parseable verdict — surface it instead of silently looping,
+        // so an operator can tell a dropped negotiation from a pending
+        // one. See ADR 0017.
+        logger.phase(
+          `${ctx.tag}: contract verdict ${verdict} (round ${round}/${allowedContractRounds})` +
+            (verdict === "UNKNOWN"
+              ? " — evaluator produced no parseable verdict"
+              : ""),
+          "error",
+          {
+            type: "phase-ended",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "evaluator-contract",
+            round,
+            verdict,
+          },
+        );
         lastRound = round;
         lastVerdict = verdict;
         lastFeedbackPath = feedbackPath;
@@ -923,7 +1001,7 @@ export async function runSliceNegotiate(
           capDecisions.push(
             "Evaluator explicitly escalated; no cap extension was considered.",
           );
-          console.error(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
+          logger.phase(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
         } else if (round === allowedContractRounds) {
           const assessment =
             verdict === "REVISE"
@@ -943,14 +1021,14 @@ export async function runSliceNegotiate(
             capDecisions.push(
               `Granted one extra round because ${assessment.reason}.`,
             );
-            console.error(
+            logger.phase(
               `${ctx.tag}: granting contract round ${allowedContractRounds}: ${assessment.reason}`,
             );
             previousMetrics = metrics;
             continue;
           }
           capDecisions.push(`Extension refused: ${assessment.reason}.`);
-          console.error(
+          logger.phase(
             `${ctx.tag}: contract round extension refused: ${assessment.reason}`,
           );
         } else {
@@ -958,7 +1036,7 @@ export async function runSliceNegotiate(
           continue;
         }
 
-        console.error(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+        logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
         preserveContractNegotiationFailure(
           ctx,
           "ESCALATE",
@@ -989,8 +1067,15 @@ export async function runSliceNegotiate(
           : "The configured round cap was not reached.",
       );
       logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
+      // Previously this path was silent — a slice could end negotiation
+      // still NEGOTIATING with no visible trace, indistinguishable from
+      // one awaiting a lane-successor refresh. See ADR 0017.
+      logger.phase(
+        `${ctx.tag}: STUCK — contract not locked after negotiation (last verdict: ${lastVerdict}, round ${lastRound})`,
+      );
       return "STUCK";
     }
+    logger.phase(`${ctx.tag}: contract LOCKED`);
     return "LOCKED";
   } catch (err) {
     if (isCancelled(err, signal)) {
@@ -1072,6 +1157,7 @@ export async function runQAStage(
         logStream: evalLog,
         idleTimeoutMs: commandTimeoutMs,
         idleWarningIntervalMs: heartbeatIntervalMs,
+        maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
       }).finally(() => closeAgentLog(evalLog));
     };
 
@@ -1095,7 +1181,16 @@ export async function runQAStage(
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
       if (attempt <= infrastructureRetries) {
-        console.error(`${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`);
+        logger.phase(
+          `${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
+          "error",
+          {
+            type: "warn",
+            reason: "infrastructure-retry",
+            ghIssue: slice.ghIssue,
+            message: `${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
+          },
+        );
         continue;
       }
       throw new Error(
@@ -1116,7 +1211,16 @@ export async function runQAStage(
     if (verdict === "PASS") return { outcome: "PASS", report: archiveDisplayPath };
     if (artifacts.readQAFailureClass(reportPath) === "INFRASTRUCTURE") {
       if (attempt <= infrastructureRetries) {
-        console.error(`${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`);
+        logger.phase(
+          `${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`,
+          "error",
+          {
+            type: "warn",
+            reason: "infrastructure-retry",
+            ghIssue: slice.ghIssue,
+            message: `${stage} report classified infrastructure; retrying without consuming round ${round}`,
+          },
+        );
         continue;
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
@@ -1137,7 +1241,17 @@ export async function runSliceExecute(
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
       logger.bumpGenRound(slice.ghIssue, round);
-      console.error(`${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      logger.phase(
+        `${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+        "error",
+        {
+          type: "phase-started",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          agent: "generator",
+          round,
+        },
+      );
       const genLog = logger.agentLog(slice.number, "generator", round);
       const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
       const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -1156,15 +1270,59 @@ export async function runSliceExecute(
         logStream: genLog,
         idleTimeoutMs: timeoutMs,
         idleWarningIntervalMs: heartbeatMs,
+        maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
       }).finally(() => closeAgentLog(genLog));
+      logger.event({
+        type: "phase-ended",
+        ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
+        agent: "generator",
+        round,
+      });
 
-      console.error(`${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      logger.phase(
+        `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+        "error",
+        {
+          type: "phase-started",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          agent: "evaluator-qa",
+          round,
+        },
+      );
       const deterministic = await runQAStage(ctx, round, "deterministic", qaReports);
+      logger.event({
+        type: "phase-ended",
+        ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
+        agent: "evaluator-qa",
+        round,
+        verdict: deterministic.outcome,
+      });
       let implementationFailed = deterministic.outcome === "IMPLEMENTATION";
       qaReports.push(deterministic.report);
       if (deterministic.outcome !== "IMPLEMENTATION" && config.sharedPreview) {
-        console.error(`${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+        logger.phase(
+          `${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "evaluator-uat",
+            round,
+          },
+        );
         const remote = await runQAStage(ctx, round, "shared-preview", qaReports);
+        logger.event({
+          type: "phase-ended",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          agent: "evaluator-uat",
+          round,
+          verdict: remote.outcome,
+        });
         qaReports.push(remote.report);
         if (remote.outcome === "IMPLEMENTATION") {
           implementationFailed = true;
@@ -1186,7 +1344,7 @@ export async function runSliceExecute(
           }
         }
 
-        console.error(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
+        logger.phase(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
         logger.transitionTo(
           slice.ghIssue,
           lifecycle.pass(
@@ -1199,7 +1357,12 @@ export async function runSliceExecute(
       }
 
       if (round === MAX_GENERATOR_ROUNDS) {
-        console.error(`${ctx.tag}: stuck — running fallback generator...`);
+        logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
+          type: "phase-started",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          agent: "generator-stuck",
+        });
         const stuckLog = logger.agentLog(slice.number, "generator-stuck");
         await invoke({
           role: "generator-stuck",
@@ -1209,7 +1372,14 @@ export async function runSliceExecute(
           }),
           cwd: ctx.worktreeDir,
           logStream: stuckLog,
+          maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(stuckLog));
+        logger.event({
+          type: "phase-ended",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          agent: "generator-stuck",
+        });
         logger.markStuck(slice.ghIssue, `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`);
         return "STUCK";
       }
@@ -1220,7 +1390,18 @@ export async function runSliceExecute(
       logger.markCancelled(slice.ghIssue, "Cancelled by user");
       return "CANCELLED";
     }
-    logger.markError(slice.ghIssue, err instanceof Error ? err.message : String(err));
+    const message = err instanceof Error ? err.message : String(err);
+    // A wall-clock ceiling kill is terminal by design, not an
+    // infrastructure failure: a retry restarts the round from scratch
+    // against the same ceiling and doubles the wasted wall-clock.
+    // Point the operator at the remedy instead. Committed work is
+    // preserved on the slice branch. See ADR 0019.
+    logger.markError(
+      slice.ghIssue,
+      /wall-clock ceiling/.test(message)
+        ? `${message}. Terminal by design (ADR 0019): committed work is preserved on ${ctx.branch}; rerun with a larger --max-agent-duration-ms.`
+        : message,
+    );
     return "ERROR";
   }
 }
@@ -1267,6 +1448,13 @@ export async function runPipeline(
   const provider = config.provider ?? kiroProvider;
   const loggerSlug = pipelineRunSlug(prdSlug, provider);
   const logger = new Logger(repoRoot, loggerSlug);
+  // First run.log line — tells the operator where this run's logs live
+  // and gives `tail -f` a stable target from second zero.
+  logger.phase(
+    `[afk] Pipeline run started (${provider.name}) — logs: ${logger.runDir}`,
+    "error",
+    { type: "run-started", provider: provider.name, runSlug: loggerSlug },
+  );
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     provider.invoke({
       ...opts,
@@ -1373,6 +1561,25 @@ export async function runPipeline(
   const laneCancelled = new Set<string>();
 
 
+  // Per-slice prior-run state (spec #26): a re-run announces what each
+  // selected slice's previous run left behind — previous phase plus
+  // failure reason — as warn events at run start, so re-runs are not
+  // opaque. Events only: run.log and console output are unchanged.
+  for (const [id, slice] of dag.slices) {
+    const prior = runState.slices[id];
+    if (!prior) continue;
+    logger.event({
+      type: "warn",
+      reason: "prior-run-state",
+      ghIssue: id,
+      previousPhase: prior.phase,
+      previousError: prior.error,
+      message:
+        `#${id} ${slice.title}: prior run ended ${prior.phase}` +
+        (prior.error ? ` — ${prior.error}` : ""),
+    });
+  }
+
   // Restore completed slices from persistent state
   for (const [id, slice] of dag.slices) {
     if (isSliceComplete(runState, id)) {
@@ -1387,7 +1594,7 @@ export async function runPipeline(
           true,
         ),
       );
-      console.log(`  Skipping #${id} ${slice.title} (already completed)`);
+      logger.phase(`  Skipping #${id} ${slice.title} (already completed)`, "log");
     }
   }
 
@@ -1410,6 +1617,89 @@ export async function runPipeline(
   // Slices whose blocker is in `failed` will simply never become
   // ready and the loop will exit once no toRun remain.
   const mergeMutex = makeAsyncMutex();
+
+  // Persist a slice's terminal outcome the moment it lands. `runWave`
+  // invokes this via `onOutcome` right after each outcome is decided —
+  // for PASS, immediately after the merge and worktree removal — so a
+  // hard-kill mid-wave cannot lose the record of already-merged work.
+  // See ADR 0018.
+  //
+  // The guard set makes the post-wave loop a reconciliation pass: it
+  // re-issues persistence only for outcomes whose immediate write threw
+  // (runWave contains callback errors), and never double-writes or
+  // double-logs. The id is added to the set only after the write
+  // succeeded, so a failed write stays eligible for the retry.
+  //
+  // Concurrency: lanes run in parallel, but `saveSliceState` is a fully
+  // synchronous read-modify-write with no awaits, so two lanes can never
+  // interleave inside it — no lost updates, no mutex needed.
+  const persistedOutcomes = new Set<string>();
+  const persistOutcome = (id: string, outcome: WaveOutcome) => {
+    if (persistedOutcomes.has(id)) return;
+    const slice = dag.slices.get(id)!;
+    const branch = sliceBranch(prdSlug, slice, provider);
+    const sliceId: SliceIdentity = {
+      ghIssue: id,
+      title: slice.title,
+      branch,
+    };
+    const progress = logger.getSliceProgress(id);
+
+    // The wave layer reports generic labels ("Phase B returned ERROR");
+    // the failure site usually already recorded the specific detail on
+    // the logger via markError/markStuck — e.g. a wall-clock ceiling
+    // kill and its remedy (ADR 0019). When the phases agree, prefer
+    // that detail so state.json and run.log say WHY the slice stopped,
+    // not just where.
+    const current = logger.getSlice(id);
+    const detailOf = (waveError: string): string =>
+      current &&
+      current.phase === outcome.phase &&
+      "error" in current &&
+      current.error
+        ? current.error
+        : waveError;
+
+    // PASS is only ever reported by runWave after the merge into the
+    // feature branch succeeded, so `mergedToFeature: true` is safe here
+    // and `isSliceComplete` will treat the slice as resumable-complete.
+    const next =
+      outcome.phase === "PASS"
+        ? lifecycle.pass(sliceId, progress, true)
+        : outcome.phase === "LANE-CANCELLED"
+          ? lifecycle.laneCancelled(sliceId, progress, detailOf(outcome.error))
+          : outcome.phase === "CANCELLED"
+            ? lifecycle.cancelled(sliceId, progress, detailOf(outcome.error))
+            : outcome.phase === "CONFLICT"
+              ? lifecycle.conflict(sliceId, progress, detailOf(outcome.error))
+              : outcome.phase === "ESCALATE"
+                ? lifecycle.escalate(sliceId, progress, detailOf(outcome.error))
+                : outcome.phase === "ERROR"
+                  ? lifecycle.error(sliceId, progress, detailOf(outcome.error))
+                  : lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
+
+    logger.transitionTo(id, next);
+    saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
+    persistedOutcomes.add(id);
+
+    // Every terminal outcome gets a timestamped run.log line so an
+    // operator can always tell WHY a slice stopped — a LANE-CANCELLED
+    // deferral reads differently from a dropped negotiation. ADR 0017.
+    if (outcome.phase === "PASS") {
+      logger.phase(
+        `[afk] Slice #${id} (${slice.title}): PASS — merged into ${featBranch}`,
+        "error",
+        { type: "slice-outcome", slice: next },
+      );
+    } else {
+      logger.phase(
+        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${detailOf(outcome.error)}`,
+        "error",
+        { type: "slice-outcome", slice: next },
+      );
+    }
+  };
+
   let waveNumber = 0;
   while (true) {
     waveNumber++;
@@ -1452,49 +1742,21 @@ export async function runPipeline(
       relevantFilesBlock,
       testCommand,
       mergeMutex,
+      onOutcome: persistOutcome,
     });
 
-    // --- Persist results from this wave. ---
+    // --- Reconcile results from this wave. ---
+    //
+    // Persistence already happened per-slice as each outcome landed
+    // (onOutcome → persistOutcome, ADR 0018). This loop retries any
+    // write that failed mid-wave — persistOutcome is a no-op for ids it
+    // already persisted — and updates the in-memory scheduling sets,
+    // which only matter between waves.
     for (const [id, outcome] of outcomes) {
-      const slice = dag.slices.get(id)!;
-      const branch = sliceBranch(prdSlug, slice, provider);
-      const sliceId: SliceIdentity = {
-        ghIssue: id,
-        title: slice.title,
-        branch,
-      };
-      const progress = logger.getSliceProgress(id);
-
+      persistOutcome(id, outcome);
       if (outcome.phase === "PASS") {
-        const passed = lifecycle.pass(sliceId, progress, true);
-        logger.transitionTo(id, passed);
-        saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(passed)!);
         completed.add(id);
-        continue;
-      }
-
-      // All non-PASS outcomes carry an error message from wave.ts.
-      const failedLifecycle =
-        outcome.phase === "LANE-CANCELLED"
-          ? lifecycle.laneCancelled(sliceId, progress, outcome.error)
-          : outcome.phase === "CANCELLED"
-            ? lifecycle.cancelled(sliceId, progress, outcome.error)
-            : outcome.phase === "CONFLICT"
-              ? lifecycle.conflict(sliceId, progress, outcome.error)
-              : outcome.phase === "ESCALATE"
-                ? lifecycle.escalate(sliceId, progress, outcome.error)
-                : outcome.phase === "ERROR"
-                  ? lifecycle.error(sliceId, progress, outcome.error)
-                  : lifecycle.stuck(sliceId, progress, outcome.error);
-
-      logger.transitionTo(id, failedLifecycle);
-      saveSliceState(
-        repoRoot,
-        loggerSlug,
-        id,
-        projectForPersistence(failedLifecycle)!,
-      );
-      if (outcome.phase === "LANE-CANCELLED") {
+      } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
       } else {
         failed.add(id);
@@ -1532,6 +1794,25 @@ export async function runPipeline(
       (id) => !failed.has(id) && !laneCancelled.has(id),
     );
     if (newToRun.length === 0) break;
+  }
+
+  // NOT-RUN dependency holds (spec #26): slices that never became
+  // ready because a blocker failed. They exist only as the handoff's
+  // NOT-RUN fallback — surface them as warn events naming what they
+  // wait on, so the operator sees the hold, not just an absence.
+  for (const [id, slice] of dag.slices) {
+    if (slice.type === "HITL") continue;
+    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) continue;
+    const unresolved = slice.blockedBy.filter((b) => !completed.has(b));
+    logger.event({
+      type: "warn",
+      reason: "not-run-hold",
+      ghIssue: id,
+      blockedBy: unresolved,
+      message:
+        `#${id} ${slice.title}: not run — held by unresolved ` +
+        `dependenc${unresolved.length === 1 ? "y" : "ies"} ${unresolved.map((b) => `#${b}`).join(", ")}`,
+    });
   }
 
   // --- Post-implementation reviews (only if all AFK slices passed) ---
@@ -1576,7 +1857,7 @@ export async function runPipeline(
       // is bypassed throughout the run. Failing here skips the guardian
       // reviews and the PR: there's no point asking architect/PM to grade
       // code that won't pass the basic quality gate.
-      console.log("Running pre-ship sanity gate...");
+      logger.phase("Running pre-ship sanity gate...", "log");
       // Cache the gate by the reviewed tree's SHA (ADR 0015): a re-entry
       // run against the same content — e.g. after a review infrastructure
       // failure, or when only docs/review commits landed — must not pay
@@ -1586,19 +1867,20 @@ export async function runPipeline(
       let sanity: { ok: boolean; failures: string[] };
       if (treeShaBefore && cachedSanity?.treeSha === treeShaBefore) {
         sanity = { ok: true, failures: [] };
-        console.log(
+        logger.phase(
           `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
+          "log",
         );
       } else {
         sanity = runPreShipSanity(reviewDir);
       }
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
-        console.error(
+        logger.phase(
           `  ❌ Pre-ship sanity gate failed: ${sanity.failures.join(", ")}. Skipping guardian reviews and PR creation.`,
         );
       } else {
-        console.log("  ✅ Pre-ship sanity gate passed.");
+        logger.phase("  ✅ Pre-ship sanity gate passed.", "log");
 
         const reviewRetries =
           config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -1663,6 +1945,7 @@ export async function runPipeline(
                 logStream: log,
                 idleTimeoutMs: reviewIdleTimeoutMs,
                 idleWarningIntervalMs: reviewHeartbeatMs,
+                maxDurationMs: config.maxAgentDurationMs,
                 onStreamEvent: () => {
                   sawOutput = true;
                 },
@@ -1677,12 +1960,12 @@ export async function runPipeline(
                 error instanceof Error ? error.message : String(error);
               lastFailure = { outcome: failureClass, detail: message };
               if (attempt <= reviewRetries) {
-                console.error(
+                logger.phase(
                   `  ⚠️  ${label} review ${failureClass}: ${message}. Infrastructure retry ${attempt}/${reviewRetries}.`,
                 );
                 continue;
               }
-              console.error(
+              logger.phase(
                 `  ⚠️  ${label} review ${failureClass} after ${attempt} attempt(s): ${message}. No PR will be opened.`,
               );
               return lastFailure;
@@ -1692,8 +1975,9 @@ export async function runPipeline(
             const reviewPath = join(reviewDir, specsDir, reviewFileName);
             const verdict = artifacts.readReviewVerdict(reviewPath);
             if (verdict === "UNPARSEABLE") {
-              console.warn(
+              logger.phase(
                 `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
+                "warn",
               );
             }
             return { outcome: verdict };
@@ -1707,8 +1991,9 @@ export async function runPipeline(
           label: string,
         ): ReviewRunResult | undefined => {
           if (cached && headShaBefore && cached.headSha === headShaBefore) {
-            console.log(
+            logger.phase(
               `  ↩️  Reusing cached ${label} review verdict ${cached.verdict} for unchanged HEAD ${headShaBefore.slice(0, 12)}.`,
+              "log",
             );
             return { outcome: cached.verdict };
           }
@@ -1812,7 +2097,7 @@ export async function runPipeline(
         });
         if (prPlan.open) {
           if (prPlan.overridden) {
-            console.warn(`  ⚠️  ${prPlan.overrideNote}`);
+            logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
             logger.setPrOverrideNote(prPlan.overrideNote!);
           }
           try {

@@ -7,14 +7,11 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
-import { killProcessTree } from "./kill-tree.js";
-
-/**
- * After SIGTERM, give the child this long to exit cleanly before we
- * force-kill the whole tree. Important on Windows where SIGTERM on a
- * shell-wrapped process doesn't propagate to the wrapped binary.
- */
-const FORCE_KILL_GRACE_MS = 10_000;
+import {
+  formatTerminationWarning,
+  terminateProcessTree,
+  type TerminationReport,
+} from "./kill-tree.js";
 
 const DEFAULT_MODEL = "claude-opus-5";
 const EXPLORER_MODEL = "claude-sonnet-5";
@@ -136,6 +133,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     idleTimeoutMs = 180_000,
     idleWarningIntervalMs = 60_000,
     maxToolCalls = 100,
+    maxDurationMs = 3_600_000,
     signal,
     onIdleWarning,
     onStreamEvent,
@@ -211,22 +209,75 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let costUsd: number | undefined;
     let toolCallCount = 0;
     let killed = false;
+    let ceilingHit = false;
     let toolCapExceeded = false;
     let cancelled = false;
+    let settled = false;
+    let termination: Promise<TerminationReport> | undefined;
 
-    const scheduleForceKill = () => {
-      const timer = setTimeout(() => {
-        if (proc.exitCode === null && proc.signalCode === null) {
-          killProcessTree(proc);
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      watcher.stop();
+      clearTimeout(ceilingTimer);
+      signal?.removeEventListener("abort", onAbort);
+      finish();
+    };
+
+    // See kiro.ts / ADR 0020 for the rationale of the shared kill
+    // machinery below: tree-first verified kills, settlement decoupled
+    // from the `exit` event, and stdio release so surviving orphans
+    // cannot hold the orchestrator's event loop open.
+    const releaseChildHandles = () => {
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+      proc.stdin?.destroy();
+      proc.unref();
+    };
+
+    const killedError = (): Error => {
+      if (cancelled) return new CancelledError(`Agent ${role} cancelled`);
+      if (toolCapExceeded) {
+        return new Error(
+          `Agent ${role} exceeded ${maxToolCalls} tool calls — killed`,
+        );
+      }
+      if (ceilingHit) {
+        return new Error(
+          `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling — killed`,
+        );
+      }
+      if (killed) {
+        return new Error(
+          `Agent ${role} idle for ${idleTimeoutMs / 1000}s — killed`,
+        );
+      }
+      return new Error(`Agent ${role} was killed`);
+    };
+
+    const settleKill = (report: TerminationReport) =>
+      settle(() => {
+        releaseChildHandles();
+        const error = killedError();
+        const warning = formatTerminationWarning(report);
+        if (warning) {
+          error.message += ` — ${warning}`;
+          logStream?.write(`\n${warning}\n`);
         }
-      }, FORCE_KILL_GRACE_MS);
-      timer.unref();
+        reject(error);
+      });
+
+    const stopProcess = () => {
+      if (termination) return;
+      termination = terminateProcessTree(proc);
+      void termination.then((report) => {
+        if (!report.rootDead) settleKill(report);
+      });
     };
 
     const onAbort = () => {
       cancelled = true;
-      proc.kill("SIGTERM");
-      scheduleForceKill();
+      stopProcess();
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -235,11 +286,19 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       idleWarningIntervalMs,
       onTimeout: () => {
         killed = true;
-        proc.kill("SIGTERM");
-        scheduleForceKill();
+        stopProcess();
       },
       onWarning: onIdleWarning,
     });
+
+    // Wall-clock ceiling — independent of the idle watcher and the
+    // tool-call cap, so a hung session that keeps emitting output
+    // still dies. See ADR 0016.
+    const ceilingTimer = setTimeout(() => {
+      ceilingHit = true;
+      stopProcess();
+    }, maxDurationMs);
+    ceilingTimer.unref();
 
     proc.stdout!.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
@@ -280,8 +339,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
           if (next.capExceeded && !toolCapExceeded) {
             toolCapExceeded = true;
             killed = true;
-            proc.kill("SIGTERM");
-            scheduleForceKill();
+            stopProcess();
           }
         }
       }
@@ -293,38 +351,28 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     });
 
     proc.on("error", (err) => {
-      watcher.stop();
-      signal?.removeEventListener("abort", onAbort);
-      reject(err);
+      settle(() => reject(err));
     });
 
     proc.on("exit", (code) => {
-      watcher.stop();
-      signal?.removeEventListener("abort", onAbort);
-      const exitCode = code ?? 1;
-      if (cancelled) {
-        reject(new CancelledError(`Agent ${role} cancelled`));
-      } else if (toolCapExceeded) {
-        reject(
-          new Error(
-            `Agent ${role} exceeded ${maxToolCalls} tool calls — killed`,
-          ),
-        );
-      } else if (killed) {
-        reject(
-          new Error(
-            `Agent ${role} idle for ${idleTimeoutMs / 1000}s — killed`,
-          ),
-        );
-      } else if (exitCode !== 0) {
-        reject(new Error(`Agent ${role} exited with code ${exitCode}`));
-      } else {
-        resolve({
-          exitCode,
-          stdout: stdoutChunks.join(""),
-          stats: { costUsd, toolCallCount },
-        });
+      // A kill was issued: hold the outcome until the termination
+      // report confirms (or denies) that the whole tree is gone.
+      if (termination) {
+        void termination.then(settleKill);
+        return;
       }
+      settle(() => {
+        const exitCode = code ?? 1;
+        if (exitCode !== 0) {
+          reject(new Error(`Agent ${role} exited with code ${exitCode}`));
+        } else {
+          resolve({
+            exitCode,
+            stdout: stdoutChunks.join(""),
+            stats: { costUsd, toolCallCount },
+          });
+        }
+      });
     });
   });
 }

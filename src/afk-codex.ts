@@ -25,7 +25,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
+    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
   );
   process.exit(2);
 }
@@ -220,6 +220,13 @@ async function main() {
   }
 
   console.log("\nPipeline completed successfully.");
+
+  // A process that survived a kill (or a daemon an agent left behind)
+  // can hold inherited stdio pipe handles open and wedge this event
+  // loop at exit. Unref'd on purpose: a clean loop exits naturally
+  // before the timer fires; a wedged loop is the only case where it
+  // triggers. See ADR 0020.
+  setTimeout(() => process.exit(0), 2_000).unref();
 }
 
 main().catch((err) => {
