@@ -7,6 +7,7 @@ import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import type { AgentProvider } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
+import { withTransientRetry } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
@@ -489,6 +490,14 @@ export interface PipelineConfig {
   /** Retries per QA stage that do not consume implementation rounds. */
   infrastructureRetries?: number;
   /**
+   * Total elapsed-time window for retrying provider-classified
+   * transient failures (model temporarily unavailable), measured from
+   * the first such failure per invocation. Retries back off
+   * exponentially (30s → 480s). Default: 15 min. 0 disables.
+   * See ADR 0022.
+   */
+  transientRetryWindowMs?: number;
+  /**
    * Per-invocation wall-clock ceiling for every agent role, overriding
    * the role-aware defaults (120 min for generator/evaluator-qa, the
    * 60 min provider default otherwise). A ceiling kill during slice
@@ -700,15 +709,31 @@ export function makeSliceContext(
     : "(none — this slice declares no AFK dependencies)";
 
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
-    const result = await provider.invoke({
-      ...opts,
-      signal,
-      onIdleWarning: (minutes) => {
-        if (opts.logStream) {
-          logger.writeIdleWarning(opts.logStream, opts.role, minutes);
-        }
+    // Transient model outages (provider-classified) retry here with
+    // backoff instead of failing the slice. See ADR 0022.
+    const result = await withTransientRetry(
+      () =>
+        provider.invoke({
+          ...opts,
+          signal,
+          onIdleWarning: (minutes) => {
+            if (opts.logStream) {
+              logger.writeIdleWarning(opts.logStream, opts.role, minutes);
+            }
+          },
+        }),
+      {
+        windowMs: config.transientRetryWindowMs,
+        signal,
+        onRetry: ({ attempt, delayMs, error }) => {
+          const line =
+            `${tag}: ${opts.role} hit a transient model outage — ` +
+            `retry ${attempt} in ${delayMs / 1000}s (${error.message})`;
+          logger.phase(line);
+          opts.logStream?.write(`\n[afk] ${line}\n`);
+        },
       },
-    });
+    );
     logger.addInvocationStats(slice.ghIssue, result.stats);
     return result;
   };
@@ -1329,15 +1354,28 @@ export async function runPipeline(
     `[afk] Pipeline run started (${provider.name}) — logs: ${logger.runDir}`,
   );
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
-    provider.invoke({
-      ...opts,
-      signal,
-      onIdleWarning: (minutes) => {
-        if (opts.logStream) {
-          logger.writeIdleWarning(opts.logStream, opts.role, minutes);
-        }
+    withTransientRetry(
+      () =>
+        provider.invoke({
+          ...opts,
+          signal,
+          onIdleWarning: (minutes) => {
+            if (opts.logStream) {
+              logger.writeIdleWarning(opts.logStream, opts.role, minutes);
+            }
+          },
+        }),
+      {
+        windowMs: config.transientRetryWindowMs,
+        signal,
+        onRetry: ({ attempt, delayMs, error }) => {
+          logger.phase(
+            `[afk] ${opts.role} hit a transient model outage — ` +
+              `retry ${attempt} in ${delayMs / 1000}s (${error.message})`,
+          );
+        },
       },
-    });
+    );
   const featBranch = featureBranch(prdSlug, provider);
   logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));

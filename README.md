@@ -218,6 +218,7 @@ Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. Th
 | Generator fails QA (3 rounds) | `stuck.md` written, slice → STUCK |
 | Merge conflict | Slice → CONFLICT, both branches preserved |
 | Agent idle timeout (10 min) | Agent killed, slice → STUCK |
+| Model temporarily unavailable | Invocation retried with exponential backoff for up to 15 min (`--transient-retry-window-ms`, ADR 0022) |
 | Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md |
 | Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch |
 | Guardian dies before producing output | Outcome → NEVER_RAN; infrastructure retry within the run (`--infrastructure-retries`); stderr surfaced in run-summary.md |
@@ -361,6 +362,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0013** — Codex provider command, model policy, prompts, and JSONL behavior
 - **ADR 0014** — PRD 070 QA classification and shared-preview isolation
 - **ADR 0015** — Guardian review failure classes, scope-aware PM review, and cheap re-entry
+- **ADR 0022** — Transient model unavailability retried with backoff at the orchestrator
 
 ## QA Rounds and Shared Preview
 

@@ -113,3 +113,28 @@ export class CancelledError extends Error {
     this.name = "CancelledError";
   }
 }
+
+/**
+ * A provider-classified transient failure: the invocation died for a
+ * reason expected to clear on its own — e.g. the backend reporting
+ * "model temporarily unavailable" after the CLI exhausted its own
+ * short internal retries. The orchestrator retries these with
+ * exponential backoff inside a configurable window instead of failing
+ * the slice; every other error still fails fast. See ADR 0022.
+ */
+export class TransientProviderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientProviderError";
+  }
+}
+
+/**
+ * Name-based check so classification survives duplicate module
+ * instances (e.g. a provider bundled separately from the orchestrator).
+ */
+export function isTransientProviderError(
+  err: unknown,
+): err is TransientProviderError {
+  return err instanceof Error && err.name === "TransientProviderError";
+}

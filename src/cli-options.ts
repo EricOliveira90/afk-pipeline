@@ -27,6 +27,12 @@ export interface PipelineRuntimeOptions {
   heartbeatIntervalMs?: number;
   infrastructureRetries?: number;
   /**
+   * Total elapsed-time window for retrying transient model
+   * unavailability per invocation, with exponential backoff.
+   * Default: 15 min. 0 disables. See ADR 0022.
+   */
+  transientRetryWindowMs?: number;
+  /**
    * Per-invocation wall-clock ceiling override, applied uniformly to
    * every agent role. When absent, role-aware defaults apply: 120 min
    * for generator and evaluator-qa, the 60 min provider default for
@@ -94,6 +100,11 @@ export function parsePipelineRuntimeOptions(
     "--infrastructure-retries",
     true,
   );
+  const transientRetryWindowMs = parseIntegerOption(
+    optionValue(args, "--transient-retry-window-ms"),
+    "--transient-retry-window-ms",
+    true,
+  );
   const maxAgentDurationMs = parseIntegerOption(
     optionValue(args, "--max-agent-duration-ms"),
     "--max-agent-duration-ms",
@@ -111,6 +122,7 @@ export function parsePipelineRuntimeOptions(
     commandTimeoutMs,
     heartbeatIntervalMs,
     infrastructureRetries,
+    transientRetryWindowMs,
     maxAgentDurationMs,
     serialLanes,
     openPrOnOverride,
