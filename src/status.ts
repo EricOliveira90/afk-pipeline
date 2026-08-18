@@ -213,10 +213,17 @@ export function runStatus(args: readonly string[], repoRoot: string): StatusResu
       return { output: `Run directory not found: ${runDir}`, exitCode: 1 };
     }
   } else {
+    const logsDir = join(repoRoot, ".afk", "logs");
+    if (!existsSync(logsDir)) {
+      return {
+        output: `No .afk/logs directory under ${repoRoot} — has a pipeline run happened here?`,
+        exitCode: 1,
+      };
+    }
     const latest = findLatestRunDir(repoRoot);
     if (latest === null) {
       return {
-        output: `No runs found under ${join(repoRoot, ".afk", "logs")}.`,
+        output: `No run directories found under ${logsDir} — the PRD folders there contain no run-<timestamp> directories.`,
         exitCode: 1,
       };
     }

@@ -114,6 +114,21 @@ describe("buildPresentSection (filesystem contract)", () => {
     expect(rendered).toMatch(/#9401.*⚠.*15m00s/);
   });
 
+  it("flags a long-open phase with no agent log at all as possibly hung", () => {
+    const root = makeRoot();
+    const runDir = writeRunDir(root, "demo-stub", "run-20260818-100000", inFlightEvents() as unknown as Array<Record<string, unknown>>);
+    // No log file is ever written for 9401's generator — deader than a
+    // stale log after 18 minutes in phase.
+
+    const present = buildPresentSection({ runDir, events: inFlightEvents(), now: NOW });
+
+    const gen = present.active.find((a) => a.ghIssue === "9401")!;
+    expect(gen.lastActivityTs).toBeUndefined();
+    expect(gen.stale).toBe(true);
+    const rendered = renderPresentSection(present).join("\n");
+    expect(rendered).toMatch(/#9401.*⚠.*no agent log after 18m00s/);
+  });
+
   it("treats a slice with a terminal outcome as inactive even if a phase-started never closed", () => {
     const root = makeRoot();
     const events = [

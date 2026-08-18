@@ -193,6 +193,18 @@ describe("afk status zero-arg auto-detect (#31)", () => {
     expect(output.toLowerCase()).toContain("no");
   });
 
+  it("distinguishes an empty PRD logs folder from a missing .afk/logs", () => {
+    const root = makeRoot();
+    // Slug directory exists but holds no run-<timestamp> directories.
+    mkdirSync(join(root, ".afk", "logs", "demo-stub"), { recursive: true });
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).not.toBe(0);
+    expect(output).toContain("No run directories found");
+    expect(output).toContain(join(root, ".afk", "logs"));
+  });
+
   it("--json stays a single valid JSON document (no prose line)", () => {
     const root = makeRoot();
     writeRunDir(

@@ -2424,6 +2424,11 @@ describe("events.jsonl tee (spec #26)", () => {
     expect(waves).toHaveLength(1);
     expect(waves[0]).toMatchObject({ wave: 1, slices: ["9501"] });
 
+    // Lane composition is a typed event too (#30: wave/lane order).
+    const lanes = lines.filter((l) => l.type === "lanes-partitioned");
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0]).toMatchObject({ wave: 1, lanes: [["9501"]] });
+
     // Each agent invocation produces a started/ended pair, in order.
     const pairFor = (agent: string, round?: number) => {
       const started = lines.findIndex(

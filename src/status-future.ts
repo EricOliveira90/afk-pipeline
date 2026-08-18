@@ -71,11 +71,25 @@ export interface FutureWave {
   slices: string[];
 }
 
+/** Lane composition of the current wave (ADR 0005), when known. */
+export interface FutureLanes {
+  wave: number;
+  /** Lanes run in parallel; within a lane, slices run serially in order. */
+  lanes: string[][];
+  serial: boolean;
+}
+
 /** JSON-serializable — `--json` embeds it verbatim. */
 export interface FutureSection {
   pending: FuturePendingSlice[];
   /** Projected waves; empty when the DAG is unavailable. */
   upcomingWaves: FutureWave[];
+  /**
+   * Lane composition of the latest dispatched wave, from the
+   * lanes-partitioned event — null before contracts lock or for runs
+   * that predate the event.
+   */
+  currentLanes: FutureLanes | null;
   /** HITL slices the pipeline skips. */
   skipped: { ghIssue: string; title: string }[];
   /** Degradation notes (e.g. issues.md missing). */
@@ -109,6 +123,8 @@ interface EventFacts {
   warnBlockedBy: Map<string, string[]>;
   /** Every slice reference seen anywhere in the stream. */
   seenSlices: Set<string>;
+  /** Latest lanes-partitioned event, if any. */
+  currentLanes: FutureLanes | null;
 }
 
 function distillEvents(events: RunEvent[]): EventFacts {
@@ -121,12 +137,23 @@ function distillEvents(events: RunEvent[]): EventFacts {
     titles: new Map(),
     warnBlockedBy: new Map(),
     seenSlices: new Set(),
+    currentLanes: null,
   };
   for (const event of events) {
     switch (event.type) {
       case "run-started":
         facts.runSlug = event.runSlug;
         facts.provider = event.provider;
+        break;
+      case "lanes-partitioned":
+        facts.currentLanes = {
+          wave: event.wave,
+          lanes: event.lanes,
+          serial: event.serial === true,
+        };
+        for (const lane of event.lanes) {
+          for (const s of lane) facts.seenSlices.add(s);
+        }
         break;
       case "wave-dispatched":
         facts.maxDispatchedWave = Math.max(facts.maxDispatchedWave, event.wave);
@@ -326,7 +353,13 @@ export function buildFutureSection(input: {
     }
   }
 
-  return { pending, upcomingWaves, skipped, notes };
+  return {
+    pending,
+    upcomingWaves,
+    currentLanes: facts.currentLanes,
+    skipped,
+    notes,
+  };
 }
 
 function renderBlockers(waitsOn: FutureBlockerRef[]): string {
@@ -371,6 +404,15 @@ export function renderFutureSection(future: FutureSection): string[] {
         `    wave ${wave.wave}: ${wave.slices.map((s) => `#${s}`).join(", ")}`,
       );
     }
+  }
+
+  if (future.currentLanes !== null) {
+    const { wave, lanes, serial } = future.currentLanes;
+    lines.push(
+      `  Lanes (wave ${wave}${serial ? ", serial" : ""}): ${lanes
+        .map((lane) => `[${lane.map((s) => `#${s}`).join(" → ")}]`)
+        .join(" ")}`,
+    );
   }
 
   // Pending slices that never enter a projected wave are held by a

@@ -214,6 +214,13 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
       `[afk] Wave ${waveNumber}: ${lanesToRun.length} lane(s)${config.serialLanes ? " (serial)" : ""} — ${lanesToRun
         .map((l) => `[${l.map((s) => `#${s.ghIssue}`).join(", ")}]`)
         .join(" ")}`,
+      "error",
+      {
+        type: "lanes-partitioned",
+        wave: waveNumber,
+        lanes: lanesToRun.map((l) => l.map((s) => s.ghIssue)),
+        serial: config.serialLanes ? true : undefined,
+      },
     );
     // Make lane queueing explicit: a successor's artifacts (context.md,
     // contract.md) will be DELETED and re-negotiated after its

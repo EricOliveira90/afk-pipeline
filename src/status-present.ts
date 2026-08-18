@@ -35,7 +35,10 @@ export interface PresentActiveSlice {
   lastActivityTs?: string;
   /** Size of that log, for "is it still growing?" glances. */
   logBytes?: number;
-  /** Long time-in-phase with a long-silent log — possibly hung. */
+  /**
+   * Long time-in-phase with a long-silent log — or with no log at
+   * all, which is even deader — possibly hung.
+   */
   stale: boolean;
 }
 
@@ -156,8 +159,7 @@ export function buildPresentSection(input: {
       logBytes: log?.size,
       stale:
         timeInPhaseMs >= STALE_AFTER_MS &&
-        silentMs !== null &&
-        silentMs >= STALE_AFTER_MS,
+        (silentMs === null || silentMs >= STALE_AFTER_MS),
     });
   }
   // Stable order for rendering and JSON consumers.
@@ -186,7 +188,11 @@ export function renderPresentSection(present: PresentSection): string[] {
 }
 
 function activityCell(a: PresentActiveSlice): string {
-  if (a.lastActivityTs === undefined) return " — no agent log yet";
+  if (a.lastActivityTs === undefined) {
+    return a.stale
+      ? ` — ⚠ possibly hung: no agent log after ${formatDuration(a.timeInPhaseMs)} in phase`
+      : " — no agent log yet";
+  }
   return a.stale
     ? ` — ⚠ possibly hung: no log activity for ${sinceActivity(a)}`
     : ` — last activity ${sinceActivity(a)} ago`;

@@ -5,7 +5,15 @@
  * what a pipeline run leaves behind.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runStatus } from "./status.js";
@@ -313,15 +321,21 @@ describe("afk status future section integration (#30)", () => {
       "utf-8",
     );
     // Partial run: 9401 mid-pipeline (explorer + planner done), 9402 untouched.
-    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+    const runDir = writeRunDir(root, "demo-stub", "run-20260818-100000", [
       { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
       { type: "run-started", provider: "stub", runSlug: "demo-stub", ts: "2026-08-18T10:00:00.100Z" },
       { type: "wave-dispatched", wave: 1, slices: ["9401"], ts: "2026-08-18T10:00:01.000Z" },
+      { type: "lanes-partitioned", wave: 1, lanes: [["9401"]], ts: "2026-08-18T10:00:01.500Z" },
       { type: "phase-started", ghIssue: "9401", agent: "explorer", ts: "2026-08-18T10:00:02.000Z" },
       { type: "phase-ended", ghIssue: "9401", agent: "explorer", ts: "2026-08-18T10:00:14.000Z" },
       { type: "phase-started", ghIssue: "9401", agent: "planner", round: 1, ts: "2026-08-18T10:00:15.000Z" },
       { type: "phase-ended", ghIssue: "9401", agent: "planner", round: 1, ts: "2026-08-18T10:00:55.000Z" },
     ]);
+    const fixtureBefore = {
+      issues: readFileSync(join(specsDir, "issues.md"), "utf-8"),
+      events: readFileSync(join(runDir, "events.jsonl"), "utf-8"),
+      runDirEntries: readdirSync(runDir).sort(),
+    };
 
     const { output, exitCode } = runStatus([], root);
 
@@ -336,8 +350,20 @@ describe("afk status future section integration (#30)", () => {
     // Wave projection shows what unblocks what.
     expect(output).toMatch(/wave 1: #9401/);
     expect(output).toMatch(/wave 2: #9402/);
+    // Lane composition of the dispatched wave renders too.
+    expect(output).toMatch(/Lanes \(wave 1\): \[#9401\]/);
     // HITL is skipped, not pending work.
     expect(output).toMatch(/Skipped \(HITL\):[\s\S]*#9403/);
+
+    // Read-only: the command changed nothing it read.
+    expect(readFileSync(join(specsDir, "issues.md"), "utf-8")).toBe(
+      fixtureBefore.issues,
+    );
+    expect(readFileSync(join(runDir, "events.jsonl"), "utf-8")).toBe(
+      fixtureBefore.events,
+    );
+    expect(readdirSync(runDir).sort()).toEqual(fixtureBefore.runDirEntries);
+    expect(existsSync(join(root, ".afk", "state"))).toBe(false);
 
     const { output: jsonOut } = runStatus(["--json"], root);
     const model = JSON.parse(jsonOut);

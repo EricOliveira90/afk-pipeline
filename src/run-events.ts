@@ -27,6 +27,18 @@ export type RunEventPayload =
   | { type: "run-started"; provider: string; runSlug: string }
   | { type: "wave-dispatched"; wave: number; slices: string[] }
   | {
+      type: "lanes-partitioned";
+      wave: number;
+      /**
+       * Lane composition for the wave (ADR 0005): lanes run in
+       * parallel; within a lane, slices run serially in the listed
+       * order. Known only mid-run, after contracts declare their
+       * file lists.
+       */
+      lanes: string[][];
+      serial?: boolean;
+    }
+  | {
       type: "phase-started";
       ghIssue: string;
       /**
