@@ -293,3 +293,61 @@ describe("afk status warn events inline (#29)", () => {
     });
   });
 });
+
+
+describe("afk status future section integration (#30)", () => {
+  it("renders remaining phases, upcoming waves, and blocker references; --json carries the future model", () => {
+    const root = makeRoot();
+    // Issues DAG: 02 blocked by 01; 03 is HITL.
+    const specsDir = join(root, ".kiro", "specs", "demo");
+    mkdirSync(specsDir, { recursive: true });
+    writeFileSync(
+      join(specsDir, "issues.md"),
+      [
+        "| Slice | GH Issue | Title | Type | Blocked by | User stories covered |",
+        "|-------|----------|-------|------|------------|----------------------|",
+        "| 01 | 9401 | Lead | AFK | — | 1 |",
+        "| 02 | 9402 | Follower | AFK | 9401 | 2 |",
+        "| 03 | 9403 | Manual | HITL | — | 3 |",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    // Partial run: 9401 mid-pipeline (explorer + planner done), 9402 untouched.
+    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      { type: "run-started", provider: "stub", runSlug: "demo-stub", ts: "2026-08-18T10:00:00.100Z" },
+      { type: "wave-dispatched", wave: 1, slices: ["9401"], ts: "2026-08-18T10:00:01.000Z" },
+      { type: "phase-started", ghIssue: "9401", agent: "explorer", ts: "2026-08-18T10:00:02.000Z" },
+      { type: "phase-ended", ghIssue: "9401", agent: "explorer", ts: "2026-08-18T10:00:14.000Z" },
+      { type: "phase-started", ghIssue: "9401", agent: "planner", round: 1, ts: "2026-08-18T10:00:15.000Z" },
+      { type: "phase-ended", ghIssue: "9401", agent: "planner", round: 1, ts: "2026-08-18T10:00:55.000Z" },
+    ]);
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    expect(output).toContain("Future:");
+    // The in-flight slice lists exactly its remaining phases.
+    expect(output).toMatch(
+      /#9401 Lead — evaluator-contract → generator → evaluator-qa/,
+    );
+    // The dependency-held slice shows its blocker.
+    expect(output).toMatch(/#9402 Follower — .*waits on #9401/);
+    // Wave projection shows what unblocks what.
+    expect(output).toMatch(/wave 1: #9401/);
+    expect(output).toMatch(/wave 2: #9402/);
+    // HITL is skipped, not pending work.
+    expect(output).toMatch(/Skipped \(HITL\):[\s\S]*#9403/);
+
+    const { output: jsonOut } = runStatus(["--json"], root);
+    const model = JSON.parse(jsonOut);
+    expect(model.future.pending.map((p: { ghIssue: string }) => p.ghIssue)).toEqual([
+      "9401",
+      "9402",
+    ]);
+    expect(model.future.upcomingWaves).toEqual([
+      { wave: 1, slices: ["9401"] },
+      { wave: 2, slices: ["9402"] },
+    ]);
+  });
+});

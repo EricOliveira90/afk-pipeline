@@ -13,12 +13,19 @@
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { readRunEvents, type RunEvent } from "./run-events.js";
+import {
+  buildFutureSection,
+  renderFutureSection,
+  type FutureSection,
+} from "./status-future.js";
 
 /** The model the renderer consumes; `--json` emits it verbatim. */
 export interface StatusModel {
   schemaVersion: number;
   runDir: string;
   events: RunEvent[];
+  /** What comes next and what unblocks what (spec #30). */
+  future: FutureSection;
 }
 
 export interface StatusResult {
@@ -52,6 +59,7 @@ export function findLatestRunDir(repoRoot: string): string | null {
 /** Build the status model from a run directory, or explain why not. */
 export function buildStatusModel(
   runDir: string,
+  repoRoot: string,
 ): { ok: true; model: StatusModel } | { ok: false; message: string } {
   const parsed = readRunEvents(runDir);
   if (parsed === null) {
@@ -66,6 +74,7 @@ export function buildStatusModel(
       schemaVersion: parsed.version,
       runDir,
       events: parsed.events,
+      future: buildFutureSection({ repoRoot, runDir, events: parsed.events }),
     },
   };
 }
@@ -167,6 +176,9 @@ export function renderStatus(model: StatusModel): string {
     }
   }
   if (!any) lines.push("  (no events)");
+  lines.push("");
+  lines.push("Future:");
+  lines.push(...renderFutureSection(model.future));
   return lines.join("\n");
 }
 
@@ -207,7 +219,7 @@ export function runStatus(args: readonly string[], repoRoot: string): StatusResu
     autoDetected = true;
   }
 
-  const built = buildStatusModel(runDir);
+  const built = buildStatusModel(runDir, repoRoot);
   if (!built.ok) {
     return { output: built.message, exitCode: 1 };
   }
