@@ -848,7 +848,11 @@ export async function runSliceNegotiate(
       : `No local issue manifest was found. Fetch the issue body with: gh issue view ${slice.ghIssue}`;
     const contextPath = join(ctx.absSliceDir, "context.md");
     if (!existsSync(contextPath)) {
-      logger.phase(`${ctx.tag}: exploring...`);
+      logger.phase(`${ctx.tag}: exploring...`, "error", {
+        type: "phase-started",
+        ghIssue: slice.ghIssue,
+        agent: "explorer",
+      });
       const logStream = logger.agentLog(slice.number, "explorer");
       await invoke({
         role: "explorer",
@@ -863,6 +867,11 @@ export async function runSliceNegotiate(
         logStream,
         maxDurationMs: config.maxAgentDurationMs,
       }).finally(() => closeAgentLog(logStream));
+      logger.event({
+        type: "phase-ended",
+        ghIssue: slice.ghIssue,
+        agent: "explorer",
+      });
     }
 
     // --- Step 2: Planner (contract negotiation) ---
@@ -884,6 +893,13 @@ export async function runSliceNegotiate(
       for (let round = 1; round <= allowedContractRounds; round++) {
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            agent: "planner",
+            round,
+          },
         );
         const plannerLog = logger.agentLog(slice.number, "planner", round);
         await invoke({
@@ -904,9 +920,22 @@ export async function runSliceNegotiate(
           logStream: plannerLog,
           maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(plannerLog));
+        logger.event({
+          type: "phase-ended",
+          ghIssue: slice.ghIssue,
+          agent: "planner",
+          round,
+        });
 
         logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            agent: "evaluator-contract",
+            round,
+          },
         );
         const evalLog = logger.agentLog(
           slice.number,
@@ -942,6 +971,14 @@ export async function runSliceNegotiate(
             (verdict === "UNKNOWN"
               ? " — evaluator produced no parseable verdict"
               : ""),
+          "error",
+          {
+            type: "phase-ended",
+            ghIssue: slice.ghIssue,
+            agent: "evaluator-contract",
+            round,
+            verdict,
+          },
         );
         lastRound = round;
         lastVerdict = verdict;
@@ -1180,7 +1217,16 @@ export async function runSliceExecute(
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
       logger.bumpGenRound(slice.ghIssue, round);
-      logger.phase(`${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      logger.phase(
+        `${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+        "error",
+        {
+          type: "phase-started",
+          ghIssue: slice.ghIssue,
+          agent: "generator",
+          round,
+        },
+      );
       const genLog = logger.agentLog(slice.number, "generator", round);
       const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
       const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -1201,14 +1247,52 @@ export async function runSliceExecute(
         idleWarningIntervalMs: heartbeatMs,
         maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
       }).finally(() => closeAgentLog(genLog));
+      logger.event({
+        type: "phase-ended",
+        ghIssue: slice.ghIssue,
+        agent: "generator",
+        round,
+      });
 
-      logger.phase(`${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+      logger.phase(
+        `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+        "error",
+        {
+          type: "phase-started",
+          ghIssue: slice.ghIssue,
+          agent: "evaluator-qa",
+          round,
+        },
+      );
       const deterministic = await runQAStage(ctx, round, "deterministic", qaReports);
+      logger.event({
+        type: "phase-ended",
+        ghIssue: slice.ghIssue,
+        agent: "evaluator-qa",
+        round,
+        verdict: deterministic.outcome,
+      });
       let implementationFailed = deterministic.outcome === "IMPLEMENTATION";
       qaReports.push(deterministic.report);
       if (deterministic.outcome !== "IMPLEMENTATION" && config.sharedPreview) {
-        logger.phase(`${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`);
+        logger.phase(
+          `${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            agent: "evaluator-uat",
+            round,
+          },
+        );
         const remote = await runQAStage(ctx, round, "shared-preview", qaReports);
+        logger.event({
+          type: "phase-ended",
+          ghIssue: slice.ghIssue,
+          agent: "evaluator-uat",
+          round,
+          verdict: remote.outcome,
+        });
         qaReports.push(remote.report);
         if (remote.outcome === "IMPLEMENTATION") {
           implementationFailed = true;
@@ -1243,7 +1327,11 @@ export async function runSliceExecute(
       }
 
       if (round === MAX_GENERATOR_ROUNDS) {
-        logger.phase(`${ctx.tag}: stuck — running fallback generator...`);
+        logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
+          type: "phase-started",
+          ghIssue: slice.ghIssue,
+          agent: "generator-stuck",
+        });
         const stuckLog = logger.agentLog(slice.number, "generator-stuck");
         await invoke({
           role: "generator-stuck",
@@ -1255,6 +1343,11 @@ export async function runSliceExecute(
           logStream: stuckLog,
           maxDurationMs: config.maxAgentDurationMs,
         }).finally(() => closeAgentLog(stuckLog));
+        logger.event({
+          type: "phase-ended",
+          ghIssue: slice.ghIssue,
+          agent: "generator-stuck",
+        });
         logger.markStuck(slice.ghIssue, `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`);
         return "STUCK";
       }

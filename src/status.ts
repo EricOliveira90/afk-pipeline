@@ -69,12 +69,33 @@ function clock(ts: string): string {
   return ts.length >= 19 ? ts.slice(11, 19) : ts;
 }
 
+/** Compact human duration: 12s, 4m05s, 1h02m. */
+export function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) {
+    return `${totalMin}m${String(totalSec % 60).padStart(2, "0")}s`;
+  }
+  return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}m`;
+}
+
+/** Key that pairs a phase-ended with its phase-started. */
+function phaseKey(e: { ghIssue: string; agent: string; round?: number }): string {
+  return `${e.ghIssue}|${e.agent}|${e.round ?? ""}`;
+}
+
 export function renderStatus(model: StatusModel): string {
   const lines: string[] = [];
   lines.push(`Run: ${model.runDir}`);
   lines.push("");
   lines.push("Past:");
   let any = false;
+  // Start timestamps of phases whose end we haven't rendered yet, so a
+  // phase-ended line can carry its computed duration. Keyed per
+  // slice × agent × round; a re-opened phase (lane successor re-runs)
+  // pairs with its most recent start.
+  const openPhases = new Map<string, string[]>();
   for (const event of model.events) {
     switch (event.type) {
       case "header":
@@ -83,6 +104,33 @@ export function renderStatus(model: StatusModel): string {
         any = true;
         lines.push(`  ${clock(event.ts)}  run started (${event.provider})`);
         break;
+      case "wave-dispatched":
+        any = true;
+        lines.push(
+          `  ${clock(event.ts)}  wave ${event.wave} dispatched — ${event.slices.length} slice(s): ${event.slices.map((s) => `#${s}`).join(", ")}`,
+        );
+        break;
+      case "phase-started": {
+        const starts = openPhases.get(phaseKey(event)) ?? [];
+        starts.push(event.ts);
+        openPhases.set(phaseKey(event), starts);
+        break;
+      }
+      case "phase-ended": {
+        any = true;
+        const starts = openPhases.get(phaseKey(event));
+        const startTs = starts?.pop();
+        const duration =
+          startTs !== undefined
+            ? ` — ${formatDuration(Date.parse(event.ts) - Date.parse(startTs))}`
+            : "";
+        const round = event.round !== undefined ? ` (round ${event.round})` : "";
+        const verdict = event.verdict ? ` — ${event.verdict}` : "";
+        lines.push(
+          `  ${clock(event.ts)}  #${event.ghIssue} ${event.agent}${round}${duration}${verdict}`,
+        );
+        break;
+      }
       case "slice-outcome": {
         any = true;
         const s = event.slice;

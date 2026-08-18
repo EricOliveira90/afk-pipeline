@@ -111,6 +111,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
   logger.phase(
     `[afk] Wave ${waveNumber}: dispatching ${readyIds.length} slice(s) [${readyIds.join(", ")}]`,
+    "error",
+    { type: "wave-dispatched", wave: waveNumber, slices: [...readyIds] },
   );
 
   // Build a SliceContext per slice.

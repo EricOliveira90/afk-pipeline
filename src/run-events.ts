@@ -25,6 +25,26 @@ export const EVENTS_SCHEMA_VERSION = 1;
 export type RunEventPayload =
   | { type: "header"; version: typeof EVENTS_SCHEMA_VERSION }
   | { type: "run-started"; provider: string; runSlug: string }
+  | { type: "wave-dispatched"; wave: number; slices: string[] }
+  | {
+      type: "phase-started";
+      ghIssue: string;
+      /** Agent role for this invocation (explorer, planner, evaluator-contract, generator, evaluator-qa, evaluator-uat, generator-stuck). */
+      agent: string;
+      round?: number;
+    }
+  | {
+      type: "phase-ended";
+      ghIssue: string;
+      agent: string;
+      round?: number;
+      /**
+       * Verdict/outcome where the phase produces one, in the existing
+       * artifact vocabulary: evaluator-contract → ACCEPT/REVISE/
+       * ESCALATE/UNKNOWN; evaluator-qa/-uat → PASS/IMPLEMENTATION.
+       */
+      verdict?: string;
+    }
   | { type: "slice-outcome"; slice: SliceLifecycle };
 
 export type RunEvent = RunEventPayload & {

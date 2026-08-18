@@ -2373,4 +2373,66 @@ describe("events.jsonl tee (spec #26)", () => {
       expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     }
   }, 60_000);
+
+  it("emits wave-dispatched per wave and paired phase-started/phase-ended per agent invocation with round and verdict", async () => {
+    const repo = makeRepo();
+    const slug = "events-phases";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9501", title: "Only", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9501", { files: ["src/only.txt"], qaPasses: true, outputFile: "src/only.txt", outputContent: "only" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    // Wave dispatch is a typed event carrying the wave number and slices.
+    const waves = lines.filter((l) => l.type === "wave-dispatched");
+    expect(waves).toHaveLength(1);
+    expect(waves[0]).toMatchObject({ wave: 1, slices: ["9501"] });
+
+    // Each agent invocation produces a started/ended pair, in order.
+    const pairFor = (agent: string, round?: number) => {
+      const started = lines.findIndex(
+        (l) =>
+          l.type === "phase-started" &&
+          l.ghIssue === "9501" &&
+          l.agent === agent &&
+          l.round === round,
+      );
+      const ended = lines.findIndex(
+        (l) =>
+          l.type === "phase-ended" &&
+          l.ghIssue === "9501" &&
+          l.agent === agent &&
+          l.round === round,
+      );
+      expect(started, `${agent} phase-started`).toBeGreaterThan(-1);
+      expect(ended, `${agent} phase-ended`).toBeGreaterThan(started);
+      return lines[ended]!;
+    };
+
+    pairFor("explorer", undefined);
+    pairFor("planner", 1);
+    // The contract evaluator's phase-ended carries the verdict.
+    expect(pairFor("evaluator-contract", 1).verdict).toBe("ACCEPT");
+    pairFor("generator", 1);
+    // The QA evaluator's phase-ended carries the outcome verdict.
+    expect(pairFor("evaluator-qa", 1).verdict).toBe("PASS");
+  }, 60_000);
 });

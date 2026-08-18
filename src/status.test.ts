@@ -158,4 +158,47 @@ describe("afk status (filesystem contract)", () => {
     expect(exitCode).not.toBe(0);
     expect(output.toLowerCase()).toContain("no");
   });
+
+  it("renders per-slice phase chronology with round, duration, and verdict (#28)", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      { type: "run-started", provider: "stub", runSlug: "demo-stub", ts: "2026-08-18T10:00:00.100Z" },
+      { type: "wave-dispatched", wave: 1, slices: ["9401"], ts: "2026-08-18T10:00:01.000Z" },
+      { type: "phase-started", ghIssue: "9401", agent: "explorer", ts: "2026-08-18T10:00:02.000Z" },
+      { type: "phase-ended", ghIssue: "9401", agent: "explorer", ts: "2026-08-18T10:00:14.000Z" },
+      { type: "phase-started", ghIssue: "9401", agent: "planner", round: 1, ts: "2026-08-18T10:00:15.000Z" },
+      { type: "phase-ended", ghIssue: "9401", agent: "planner", round: 1, ts: "2026-08-18T10:00:55.000Z" },
+      { type: "phase-started", ghIssue: "9401", agent: "evaluator-contract", round: 1, ts: "2026-08-18T10:01:00.000Z" },
+      { type: "phase-ended", ghIssue: "9401", agent: "evaluator-contract", round: 1, verdict: "ACCEPT", ts: "2026-08-18T10:02:05.000Z" },
+      {
+        type: "slice-outcome",
+        slice: lifecycle.pass(
+          { ghIssue: "9401", title: "Passer", branch: "afk/9401" },
+          PROGRESS,
+          true,
+        ),
+        ts: "2026-08-18T10:05:00.000Z",
+      },
+    ]);
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    // Wave dispatch appears in the chronology.
+    expect(output).toMatch(/wave 1\b.*9401/i);
+    // Completed phases render with round, computed duration, and verdict.
+    expect(output).toMatch(/#9401.*explorer.*12s/);
+    expect(output).toMatch(/#9401.*planner.*round 1.*40s/);
+    expect(output).toMatch(/#9401.*evaluator-contract.*round 1.*1m05s.*ACCEPT/);
+    // Chronological order: explorer before planner before evaluator.
+    const explorerIdx = output.indexOf("explorer");
+    const plannerIdx = output.indexOf("planner");
+    const evalIdx = output.indexOf("evaluator-contract");
+    expect(explorerIdx).toBeGreaterThan(-1);
+    expect(plannerIdx).toBeGreaterThan(explorerIdx);
+    expect(evalIdx).toBeGreaterThan(plannerIdx);
+    // The terminal outcome still closes the chronology.
+    expect(output).toContain("PASS");
+  });
 });
