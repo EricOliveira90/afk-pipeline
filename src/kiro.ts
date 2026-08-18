@@ -9,6 +9,7 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
+import { createBusyProbe } from "./busy-probe.js";
 import {
   formatTerminationWarning,
   terminateProcessTree,
@@ -182,6 +183,8 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let cancelled = false;
     let settled = false;
     let termination: Promise<TerminationReport> | undefined;
+    const busyProbe = createBusyProbe(proc.pid);
+    let busyDescendants = 0;
 
     const settle = (finish: () => void) => {
       if (settled) return;
@@ -275,6 +278,23 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         stopProcess();
       },
       onWarning: onIdleWarning,
+      // Silence with a live spawned process is work, not a wedge: the
+      // agent's shell tool may be mid-flight in a long test suite whose
+      // output is piped through a filter. Defer the kill while the
+      // process tree holds PIDs that weren't in the post-spawn
+      // baseline; the wall-clock ceiling still bounds the invocation.
+      // See ADR 0021 / issue #14.
+      shouldDefer: async () => {
+        busyDescendants = await busyProbe.check();
+        return busyDescendants > 0;
+      },
+      onDefer: () => {
+        logStream?.write(
+          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
+            `${busyDescendants} spawned process(es) still running — ` +
+            `deferring idle kill (wall-clock ceiling still applies)\n`,
+        );
+      },
     });
 
     // Wall-clock ceiling — independent of the idle watcher, so a hung

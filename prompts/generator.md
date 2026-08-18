@@ -39,6 +39,12 @@ Do this for each behavior BEFORE writing the RED test.
 
 - Run tests with `{{TEST_COMMAND}}` verbatim. No added flags, no
   alternative test runners.
+- **Let long-running commands stream.** Never pipe a test suite or
+  build through output-buffering filters (`| Select-Object -Last N`,
+  `| tail -n N`, output redirection you read afterwards). A silent
+  suite looks hung to the pipeline's liveness watchdog; streaming
+  output is your heartbeat. If a suite is verbose, prefer the runner's
+  compact reporter (e.g. `--reporter=dot`) over silencing it.
 - If `contract.md` Status is not `LOCKED`, stop and report immediately.
 
 # Required reading

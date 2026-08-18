@@ -4,6 +4,7 @@ import type { ChildProcess } from "node:child_process";
 import {
   collectTree,
   formatTerminationWarning,
+  parsePidPpidOutput,
   terminateProcessTree,
 } from "./kill-tree.js";
 
@@ -296,3 +297,27 @@ describe.runIf(process.platform === "win32")(
     );
   },
 );
+
+
+describe("parsePidPpidOutput", () => {
+  it("parses pid/ppid pairs from both Windows (CRLF) and POSIX (ps, right-aligned) output", () => {
+    const windows = "100 1\r\n200 100\r\n\r\n";
+    expect([...parsePidPpidOutput(windows)]).toEqual([
+      [100, 1],
+      [200, 100],
+    ]);
+
+    // `ps -A -o pid=,ppid=` right-aligns columns with leading spaces.
+    const posix = "    1     0\n  512     1\n 1024   512\n";
+    expect([...parsePidPpidOutput(posix)]).toEqual([
+      [1, 0],
+      [512, 1],
+      [1024, 512],
+    ]);
+  });
+
+  it("ignores malformed lines", () => {
+    const noisy = "header\n100 1\nnot a pid\n200\n300 100 extra\n";
+    expect([...parsePidPpidOutput(noisy)]).toEqual([[100, 1]]);
+  });
+});

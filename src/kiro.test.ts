@@ -295,17 +295,22 @@ describe("liveness and bounds", () => {
       idleWarningIntervalMs: 60_000,
     });
 
+    // Attach the rejection handler before advancing: the timeout path
+    // now consults the (async) busy probe before killing (ADR 0021),
+    // so the rejection can settle mid-loop rather than only after exit.
+    const rejection = expect(promise).rejects.toThrow(/idle for 1s/);
+
     // Spinner paints a frame every 100ms, forever — the pre-fix
     // behaviour reset the watcher on each frame and never fired.
     proc.stdout.emit("data", Buffer.from(SPINNER_FRAME));
     for (let i = 0; i < 12; i++) {
-      vi.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
       proc.stdout.emit("data", Buffer.from(SPINNER_FRAME));
     }
 
     expect(terminateMock).toHaveBeenCalledTimes(1);
     proc.emit("exit", null);
-    await expect(promise).rejects.toThrow(/idle for 1s/);
+    await rejection;
   });
 
   it("real output lines keep resetting the idle watcher", async () => {

@@ -278,11 +278,25 @@ function runCollect(
 }
 
 /**
+ * Parse `pid ppid` pairs (one per line) into a table. Shared by the
+ * PowerShell (Windows) and `ps` (POSIX) listers — both are coerced to
+ * this format at the command line.
+ */
+export function parsePidPpidOutput(stdout: string): Map<number, number> {
+  const table = new Map<number, number>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^(\d+)\s+(\d+)$/.exec(line.trim());
+    if (match) table.set(Number(match[1]), Number(match[2]));
+  }
+  return table;
+}
+
+/**
  * List every process as (pid -> ppid) via CIM. PowerShell rather than
  * `wmic` (removed from current Windows 11) or `tasklist` (localized
  * output). Returns undefined when the listing fails.
  */
-async function defaultListPidPpid(): Promise<Map<number, number> | undefined> {
+async function listPidPpidWin32(): Promise<Map<number, number> | undefined> {
   const result = await runCollect("powershell", [
     "-NoProfile",
     "-NonInteractive",
@@ -290,12 +304,31 @@ async function defaultListPidPpid(): Promise<Map<number, number> | undefined> {
     "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.ParentProcessId }",
   ]);
   if (!result.ok) return undefined;
-  const table = new Map<number, number>();
-  for (const line of result.stdout.split(/\r?\n/)) {
-    const match = /^(\d+)\s+(\d+)$/.exec(line.trim());
-    if (match) table.set(Number(match[1]), Number(match[2]));
-  }
+  const table = parsePidPpidOutput(result.stdout);
   return table.size > 0 ? table : undefined;
+}
+
+/** POSIX equivalent of the CIM listing, via `ps`. */
+async function listPidPpidPosix(): Promise<Map<number, number> | undefined> {
+  const result = await runCollect("ps", ["-A", "-o", "pid=,ppid="]);
+  if (!result.ok) return undefined;
+  const table = parsePidPpidOutput(result.stdout);
+  return table.size > 0 ? table : undefined;
+}
+
+/**
+ * Cross-platform process-table lister. Used by the kill verifier below
+ * and by the busy probe (src/busy-probe.ts) that defers idle kills
+ * while an agent's spawned command is still running.
+ */
+export async function listPidPpid(
+  platform: NodeJS.Platform = process.platform,
+): Promise<Map<number, number> | undefined> {
+  return platform === "win32" ? listPidPpidWin32() : listPidPpidPosix();
+}
+
+async function defaultListPidPpid(): Promise<Map<number, number> | undefined> {
+  return listPidPpidWin32();
 }
 
 async function defaultKillTree(pid: number): Promise<void> {

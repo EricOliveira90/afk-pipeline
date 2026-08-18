@@ -16,6 +16,7 @@ import type {
 } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
+import { createBusyProbe } from "./busy-probe.js";
 import {
   formatTerminationWarning,
   terminateProcessTree,
@@ -309,6 +310,8 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let providerError: Error | undefined;
     let settled = false;
     let termination: Promise<TerminationReport> | undefined;
+    const busyProbe = createBusyProbe(proc.pid);
+    let busyDescendants = 0;
 
     const settle = (finish: () => void) => {
       if (settled) return;
@@ -386,6 +389,22 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         stopProcess();
       },
       onWarning: onIdleWarning,
+      // The tool_call reset (handleStreamEvent) only fires once when a
+      // command STARTS; a suite that then runs silently past the idle
+      // floor still got killed. Defer while the process tree holds
+      // PIDs outside the post-spawn baseline — a live spawned command.
+      // The wall-clock ceiling still bounds the invocation. ADR 0021.
+      shouldDefer: async () => {
+        busyDescendants = await busyProbe.check();
+        return busyDescendants > 0;
+      },
+      onDefer: () => {
+        logStream?.write(
+          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
+            `${busyDescendants} spawned process(es) still running — ` +
+            `deferring idle kill (wall-clock ceiling still applies)\n`,
+        );
+      },
     });
 
     // Wall-clock ceiling — independent of the idle watcher and the
