@@ -583,7 +583,7 @@ function featureBranchPrefix(provider: AgentProvider): string {
   return provider.name === "kiro" ? "feat" : `feat-${provider.name}`;
 }
 
-function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
+export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
   return provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
 }
 

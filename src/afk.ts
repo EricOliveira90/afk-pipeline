@@ -13,6 +13,7 @@ import {
   parseSliceSelection,
 } from "./cli-options.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
+import { runCleanFailedCli } from "./clean-failed.js";
 import { resolveRunScope } from "./slice-scope.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runStatus } from "./status.js";
@@ -25,7 +26,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -33,8 +34,10 @@ function usage(): never {
 async function main() {
   const args = process.argv.slice(2);
 
-  // One-shot, read-only status view (spec #26). Handled before flag
-  // parsing — the pipeline flags below don't apply to it.
+  // Subcommand dispatch (bare first token) — handled before flag
+  // parsing; the pipeline flags below don't apply.
+  //
+  // `status` is the one-shot, read-only run view (spec #26).
   if (args[0] === "status") {
     const { output, exitCode } = runStatus(args.slice(1), resolve("."));
     // Error output goes to stderr so it's distinguishable from the
@@ -42,7 +45,11 @@ async function main() {
     (exitCode === 0 ? console.log : console.error)(output);
     process.exit(exitCode);
   }
-
+  // `clean-failed` removes dead slice worktrees/branches left by
+  // failed runs — see issue #19.
+  if (args[0] === "clean-failed") {
+    process.exit(runCleanFailedCli(args.slice(1)));
+  }
   let runtimeOptions;
   try {
     runtimeOptions = parsePipelineRuntimeOptions(args);

@@ -167,6 +167,22 @@ Use it when a PRD's remaining gaps belong to HITL slices outside the
 run's scope. Infrastructure failures and unparseable verdicts are never
 overridden.
 
+### Cleaning up after failed runs
+
+```bash
+npx afk clean-failed --prd-dir .kiro/specs/<prd-slug> [--dry-run]
+```
+
+Failed and stuck slices preserve their worktree and branch for
+postmortem. Before a re-run, `clean-failed` removes that debris in one
+command: worktrees of every slice in a failure phase (plus unregistered
+leftover directories and scratch merge dirs in the PRD's namespace),
+then the slice branches — but only branches with **no commits ahead of
+the feature branch**; branches carrying unmerged work are kept and
+reported. Other PRDs' and other providers' worktrees are out of scope
+by construction. `--dry-run` prints the plan without touching anything.
+See ADR 0023.
+
 Convenience scripts for your `package.json`:
 
 ```json
@@ -364,6 +380,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0015** — Guardian review failure classes, scope-aware PM review, and cheap re-entry
 - **ADR 0021** — Busy probe: idle kills are deferred while an agent's spawned process is still running
 - **ADR 0022** — Transient model unavailability retried with backoff at the orchestrator
+- **ADR 0023** — `clean-failed` subcommand for dead-slice worktree/branch debris
 - **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
 
 ## QA Rounds and Shared Preview
