@@ -1449,6 +1449,25 @@ export async function runPipeline(
         ),
       );
       logger.phase(`  Skipping #${id} ${slice.title} (already completed)`, "log");
+      continue;
+    }
+    // A slice with a persisted non-complete phase is about to be
+    // retried. Say so — and say why it stopped — before any wave
+    // dispatches. Without this line, an operator diffing the wave
+    // composition against the manifest has no way to tell a retried
+    // slice from a silently dropped one, and no way to see the prior
+    // failure reason without opening .afk/state/<slug>.json by hand.
+    // There is deliberately NO retry cap: failed slices are always
+    // eligible again on the next run. See issue #17.
+    const prior = runState.slices[id];
+    if (prior) {
+      const reason = prior.error ? ` — ${prior.error}` : "";
+      const label =
+        prior.phase === "PASS" ? "PASS (merge did not complete)" : prior.phase;
+      logger.phase(
+        `  Retrying #${id} ${slice.title} (previous run: ${label}${reason})`,
+        "log",
+      );
     }
   }
 
@@ -1644,6 +1663,32 @@ export async function runPipeline(
       (id) => !failed.has(id) && !laneCancelled.has(id),
     );
     if (newToRun.length === 0) break;
+  }
+
+  // Any selected slice that never received an outcome was held back by
+  // an unresolved dependency — dag.ready() simply never surfaced it, so
+  // no wave line, no state entry, and no failure message ever mentioned
+  // it. Spell the hold-back out per slice, naming the blockers, so the
+  // operator doesn't have to reverse-engineer the omission from the
+  // wave composition. See issue #17.
+  for (const [id, slice] of dag.slices) {
+    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) {
+      continue;
+    }
+    const unresolved = slice.blockedBy.filter((dep) => !completed.has(dep));
+    const blockerText =
+      unresolved.length > 0
+        ? unresolved
+            .map((dep) =>
+              dag.slices.has(dep) ? `#${dep}` : `#${dep} (outside run scope)`,
+            )
+            .join(", ")
+        : "(unknown)";
+    logger.phase(
+      `[afk] Slice #${id} (${slice.title}): NOT-RUN — held back by unresolved ` +
+        `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]; ` +
+        `fix the blocker(s) and re-run`,
+    );
   }
 
   // --- Post-implementation reviews (only if all AFK slices passed) ---
