@@ -18,12 +18,20 @@ import {
   renderFutureSection,
   type FutureSection,
 } from "./status-future.js";
+import {
+  buildPresentSection,
+  formatDuration,
+  renderPresentSection,
+  type PresentSection,
+} from "./status-present.js";
 
 /** The model the renderer consumes; `--json` emits it verbatim. */
 export interface StatusModel {
   schemaVersion: number;
   runDir: string;
   events: RunEvent[];
+  /** What is running right now, with derived liveness (spec #32). */
+  present: PresentSection;
   /** What comes next and what unblocks what (spec #30). */
   future: FutureSection;
 }
@@ -74,6 +82,11 @@ export function buildStatusModel(
       schemaVersion: parsed.version,
       runDir,
       events: parsed.events,
+      present: buildPresentSection({
+        runDir,
+        events: parsed.events,
+        now: new Date(),
+      }),
       future: buildFutureSection({ repoRoot, runDir, events: parsed.events }),
     },
   };
@@ -82,17 +95,6 @@ export function buildStatusModel(
 /** hh:mm:ss slice of an ISO timestamp, for compact chronology lines. */
 function clock(ts: string): string {
   return ts.length >= 19 ? ts.slice(11, 19) : ts;
-}
-
-/** Compact human duration: 12s, 4m05s, 1h02m. */
-export function formatDuration(ms: number): string {
-  const totalSec = Math.max(0, Math.round(ms / 1000));
-  if (totalSec < 60) return `${totalSec}s`;
-  const totalMin = Math.floor(totalSec / 60);
-  if (totalMin < 60) {
-    return `${totalMin}m${String(totalSec % 60).padStart(2, "0")}s`;
-  }
-  return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}m`;
 }
 
 /** Key that pairs a phase-ended with its phase-started. */
@@ -176,6 +178,9 @@ export function renderStatus(model: StatusModel): string {
     }
   }
   if (!any) lines.push("  (no events)");
+  lines.push("");
+  lines.push("Present:");
+  lines.push(...renderPresentSection(model.present));
   lines.push("");
   lines.push("Future:");
   lines.push(...renderFutureSection(model.future));

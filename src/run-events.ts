@@ -29,6 +29,12 @@ export type RunEventPayload =
   | {
       type: "phase-started";
       ghIssue: string;
+      /**
+       * The slice's two-digit manifest number — names the agent log
+       * file (`slice-<number>-<agent>[-r<n>].log`) so a status reader
+       * can `stat` the active log for liveness without the DAG.
+       */
+      sliceNumber?: string;
       /** Agent role for this invocation (explorer, planner, evaluator-contract, generator, evaluator-qa, evaluator-uat, generator-stuck). */
       agent: string;
       round?: number;
@@ -36,6 +42,7 @@ export type RunEventPayload =
   | {
       type: "phase-ended";
       ghIssue: string;
+      sliceNumber?: string;
       agent: string;
       round?: number;
       /**

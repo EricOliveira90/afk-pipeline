@@ -851,6 +851,7 @@ export async function runSliceNegotiate(
       logger.phase(`${ctx.tag}: exploring...`, "error", {
         type: "phase-started",
         ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
         agent: "explorer",
       });
       const logStream = logger.agentLog(slice.number, "explorer");
@@ -870,6 +871,7 @@ export async function runSliceNegotiate(
       logger.event({
         type: "phase-ended",
         ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
         agent: "explorer",
       });
     }
@@ -897,6 +899,7 @@ export async function runSliceNegotiate(
           {
             type: "phase-started",
             ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
             agent: "planner",
             round,
           },
@@ -923,6 +926,7 @@ export async function runSliceNegotiate(
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
           agent: "planner",
           round,
         });
@@ -933,6 +937,7 @@ export async function runSliceNegotiate(
           {
             type: "phase-started",
             ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
             agent: "evaluator-contract",
             round,
           },
@@ -975,6 +980,7 @@ export async function runSliceNegotiate(
           {
             type: "phase-ended",
             ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
             agent: "evaluator-contract",
             round,
             verdict,
@@ -1241,6 +1247,7 @@ export async function runSliceExecute(
         {
           type: "phase-started",
           ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
           agent: "generator",
           round,
         },
@@ -1268,6 +1275,7 @@ export async function runSliceExecute(
       logger.event({
         type: "phase-ended",
         ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
         agent: "generator",
         round,
       });
@@ -1278,6 +1286,7 @@ export async function runSliceExecute(
         {
           type: "phase-started",
           ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
           agent: "evaluator-qa",
           round,
         },
@@ -1286,6 +1295,7 @@ export async function runSliceExecute(
       logger.event({
         type: "phase-ended",
         ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
         agent: "evaluator-qa",
         round,
         verdict: deterministic.outcome,
@@ -1299,6 +1309,7 @@ export async function runSliceExecute(
           {
             type: "phase-started",
             ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
             agent: "evaluator-uat",
             round,
           },
@@ -1307,6 +1318,7 @@ export async function runSliceExecute(
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
           agent: "evaluator-uat",
           round,
           verdict: remote.outcome,
@@ -1348,6 +1360,7 @@ export async function runSliceExecute(
         logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
           type: "phase-started",
           ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
           agent: "generator-stuck",
         });
         const stuckLog = logger.agentLog(slice.number, "generator-stuck");
@@ -1364,6 +1377,7 @@ export async function runSliceExecute(
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
           agent: "generator-stuck",
         });
         logger.markStuck(slice.ghIssue, `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`);
