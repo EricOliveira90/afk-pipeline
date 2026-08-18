@@ -3,13 +3,15 @@
  * directory's `events.jsonl`. Renders one chronological pipeline log;
  * `--json` emits the same model the renderer consumes. Never writes.
  *
- * Run selection: with no arguments, auto-detects the most recently
- * active PRD's latest run directory under `.afk/logs/` (run directory
- * names encode their start time — ADR 0017 — so lexicographic order is
- * chronological order).
+ * Run selection: `--run <dir>` renders a specific run directory
+ * (absolute or repo-relative). With no arguments, auto-detects the
+ * most recently active PRD's latest run directory under `.afk/logs/`
+ * (run directory names encode their start time — ADR 0017 — so
+ * lexicographic order is chronological order) and announces which
+ * run it picked.
  */
 import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { readRunEvents, type RunEvent } from "./run-events.js";
 
 /** The model the renderer consumes; `--json` emits it verbatim. */
@@ -60,7 +62,11 @@ export function buildStatusModel(
   }
   return {
     ok: true,
-    model: { schemaVersion: parsed.version, runDir, events: parsed.events },
+    model: {
+      schemaVersion: parsed.version,
+      runDir,
+      events: parsed.events,
+    },
   };
 }
 
@@ -166,18 +172,39 @@ export function renderStatus(model: StatusModel): string {
 
 /**
  * Entry point for the `afk status` subcommand. Pure over the
- * filesystem: run directory (auto-detected under `repoRoot`) in,
- * rendered text / JSON out. Read-only by construction.
+ * filesystem: run directory (`--run <dir>` or auto-detected under
+ * `repoRoot`) in, rendered text / JSON out. Read-only by
+ * construction. `exitCode !== 0` marks `output` as error text the
+ * caller should route to stderr.
  */
 export function runStatus(args: readonly string[], repoRoot: string): StatusResult {
   const json = args.includes("--json");
 
-  const runDir = findLatestRunDir(repoRoot);
-  if (runDir === null) {
-    return {
-      output: `No runs found under ${join(repoRoot, ".afk", "logs")}.`,
-      exitCode: 1,
-    };
+  // Post-mortem selection (#31): `--run <dir>` renders a specific run
+  // directory and bypasses auto-detect. Relative paths resolve
+  // against repoRoot.
+  let runDir: string;
+  let autoDetected = false;
+  const runFlagIdx = args.indexOf("--run");
+  if (runFlagIdx !== -1) {
+    const value = args[runFlagIdx + 1];
+    if (value === undefined || value.startsWith("--")) {
+      return { output: "--run requires a run directory argument.", exitCode: 1 };
+    }
+    runDir = isAbsolute(value) ? value : resolve(repoRoot, value);
+    if (!existsSync(runDir)) {
+      return { output: `Run directory not found: ${runDir}`, exitCode: 1 };
+    }
+  } else {
+    const latest = findLatestRunDir(repoRoot);
+    if (latest === null) {
+      return {
+        output: `No runs found under ${join(repoRoot, ".afk", "logs")}.`,
+        exitCode: 1,
+      };
+    }
+    runDir = latest;
+    autoDetected = true;
   }
 
   const built = buildStatusModel(runDir);
@@ -185,10 +212,17 @@ export function runStatus(args: readonly string[], repoRoot: string): StatusResu
     return { output: built.message, exitCode: 1 };
   }
 
+  if (json) {
+    // A single valid JSON document — the model already carries
+    // runDir, so no prose announcement line.
+    return { output: JSON.stringify(built.model, null, 2), exitCode: 0 };
+  }
+
+  const view = renderStatus(built.model);
   return {
-    output: json
-      ? JSON.stringify(built.model, null, 2)
-      : renderStatus(built.model),
+    output: autoDetected
+      ? `Auto-detected latest run: ${runDir}\n\n${view}`
+      : view,
     exitCode: 0,
   };
 }

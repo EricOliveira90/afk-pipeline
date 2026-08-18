@@ -36,7 +36,9 @@ async function main() {
   // parsing — the pipeline flags below don't apply to it.
   if (args[0] === "status") {
     const { output, exitCode } = runStatus(args.slice(1), resolve("."));
-    console.log(output);
+    // Error output goes to stderr so it's distinguishable from the
+    // rendered view (and from --json documents) in shell pipelines.
+    (exitCode === 0 ? console.log : console.error)(output);
     process.exit(exitCode);
   }
 
