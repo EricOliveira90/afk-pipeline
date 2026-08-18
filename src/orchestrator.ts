@@ -708,6 +708,21 @@ export function makeSliceContext(
           logger.writeIdleWarning(opts.logStream, opts.role, minutes);
         }
       },
+      // Busy-probe deferrals (ADR 0021) become typed warn events so
+      // `afk status` can show why a silent agent wasn't killed. The
+      // provider already writes the human line into the agent log;
+      // run.log stays untouched.
+      onIdleDeferral: ({ silentSeconds, busyProcesses }) => {
+        logger.event({
+          type: "warn",
+          reason: "idle-deferral",
+          ghIssue: slice.ghIssue,
+          message:
+            `${opts.role} silent for ${silentSeconds}s but ` +
+            `${busyProcesses} spawned process(es) still running — ` +
+            `deferring idle kill (wall-clock ceiling still applies)`,
+        });
+      },
     });
     logger.addInvocationStats(slice.ghIssue, result.stats);
     return result;

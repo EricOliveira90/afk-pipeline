@@ -73,6 +73,16 @@ export interface InvokeOptions {
   bare?: boolean;
   /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */
   onIdleWarning?: (minutes: number) => void;
+  /**
+   * Called when an idle kill is deferred because the busy probe found
+   * live spawned processes in the agent's tree (ADR 0021). The
+   * orchestrator tees this into the structured event stream; the
+   * provider also writes a line into the agent log either way.
+   */
+  onIdleDeferral?: (info: {
+    silentSeconds: number;
+    busyProcesses: number;
+  }) => void;
   /** Called for each parsed stream event. Only fires when the provider implements parseStreamLine. */
   onStreamEvent?: (event: StreamEvent) => void;
 }

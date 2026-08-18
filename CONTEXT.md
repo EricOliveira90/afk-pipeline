@@ -82,7 +82,17 @@ The hard-kill threshold (default: 10 minutes) for an agent invocation
 producing no stdout. Reached only after many **idle warnings**. For the
 Kiro provider, "producing stdout" means meaningful output — decorative
 terminal animation (spinner frames) is filtered out of the liveness
-signal. See ADR 0016.
+signal. See ADR 0016. The kill is deferred while the **busy probe**
+reports a live spawned process. See ADR 0021.
+
+**Busy probe**:
+A process-level check consulted when the idle timeout fires: it
+compares the agent's live process tree against a baseline snapshot
+taken shortly after spawn. Fresh descendants mean the agent is silently
+running a command (typically a test suite), and the idle kill is
+deferred — the **wall-clock ceiling** still bounds the invocation.
+See ADR 0021.
+_Avoid_: "liveness probe" (liveness is the output-based signal)
 
 **Wall-clock ceiling**:
 The hard cap (default: 60 minutes) on an agent invocation's total

@@ -354,6 +354,12 @@ interface SliceFixture {
    * Drives the infrastructure-retry warn path without consuming rounds.
    */
   qaInfraAttempts?: number;
+  /**
+   * When true, the stub generator invocation reports one idle-kill
+   * deferral through `onIdleDeferral` — simulating a busy probe that
+   * found live spawned processes (ADR 0021).
+   */
+  simulateIdleDeferral?: boolean;
   /** File the generator should create in the worktree (so commits have content). */
   outputFile: string;
   outputContent: string;
@@ -464,6 +470,9 @@ function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "generator" && sliceArtifactDir && fixture) {
+        if (fixture.simulateIdleDeferral) {
+          options.onIdleDeferral?.({ silentSeconds: 600, busyProcesses: 2 });
+        }
         const round = (generatorRounds.get(ghIssue) ?? 0) + 1;
         generatorRounds.set(ghIssue, round);
         // Write the fixture's output file into the worktree so the
@@ -2556,6 +2565,44 @@ describe("events.jsonl tee (spec #26)", () => {
     expect(infraWarn).toBeDefined();
     expect(infraWarn!.ghIssue).toBe("9701");
     // The retry didn't consume the round: the slice still passes.
+    const outcome = lines.find((l) => l.type === "slice-outcome");
+    expect(outcome!.slice.phase).toBe("PASS");
+  }, 60_000);
+
+  it("emits an idle-deferral warn when the busy probe defers an idle kill (#29 / ADR 0021)", async () => {
+    const repo = makeRepo();
+    const slug = "events-idle";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9801", title: "Busy", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9801", { files: ["src/busy.txt"], qaPasses: true, simulateIdleDeferral: true, outputFile: "src/busy.txt", outputContent: "busy" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const deferral = lines.find(
+      (l) => l.type === "warn" && l.reason === "idle-deferral",
+    );
+    expect(deferral).toBeDefined();
+    expect(deferral!.ghIssue).toBe("9801");
+    expect(deferral!.message).toContain("deferring idle kill");
+    expect(deferral!.message).toContain("2 spawned process(es)");
+    // Deferral is informational: the slice still completes normally.
     const outcome = lines.find((l) => l.type === "slice-outcome");
     expect(outcome!.slice.phase).toBe("PASS");
   }, 60_000);
