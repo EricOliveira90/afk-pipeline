@@ -282,3 +282,95 @@ describe("Logger.writeSummary per-run copy", () => {
     expect(readFileSync(perRun, "utf-8")).toBe(md);
   });
 });
+
+
+/**
+ * Structured events tee (spec #26 / slice #27). Beside the human
+ * run.log, the Logger tees operator-meaningful transitions into
+ * `events.jsonl` in the same run directory: a `version: 1` header
+ * event first (copying the handoff.json convention), then one JSON
+ * line per event, in append order. run.log is byte-for-byte unchanged
+ * by the tee.
+ */
+describe("Logger events tee (events.jsonl)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function eventLines(runDir: string): Array<Record<string, unknown>> {
+    return readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+  }
+
+  it("writes a version-1 header event as the first line of events.jsonl", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "events-header");
+
+    const lines = eventLines(log.runDir);
+    expect(lines[0]).toMatchObject({ type: "header", version: 1 });
+    expect(lines[0]!.ts).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+  });
+
+  it("appends timestamped events in call order after the header", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "events-order");
+
+    log.event({ type: "run-started", provider: "stub", runSlug: "events-order" });
+    log.event({
+      type: "slice-outcome",
+      slice: lifecycle.pass(id("1", "Pass", "afk/1"), PROGRESS, true),
+    });
+
+    const lines = eventLines(log.runDir);
+    expect(lines.map((l) => l.type)).toEqual([
+      "header",
+      "run-started",
+      "slice-outcome",
+    ]);
+    expect(lines[1]).toMatchObject({ provider: "stub" });
+    // The slice-outcome payload serializes the SliceLifecycle variant
+    // verbatim — no parallel status vocabulary.
+    expect(lines[2]!.slice).toEqual(
+      lifecycle.pass(id("1", "Pass", "afk/1"), PROGRESS, true),
+    );
+    for (const line of lines) {
+      expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+  });
+
+  it("phase() with a structured payload tees the event and leaves run.log unchanged", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "events-tee");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    log.phase("[afk] Pipeline run started (stub)", "error", {
+      type: "run-started",
+      provider: "stub",
+      runSlug: "events-tee",
+    });
+
+    // run.log carries exactly the human line — no JSON leakage.
+    const runLog = readFileSync(join(log.runDir, "run.log"), "utf-8");
+    expect(runLog).toMatch(
+      /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[afk\] Pipeline run started \(stub\)\n$/,
+    );
+    // events.jsonl carries the structured form.
+    const lines = eventLines(log.runDir);
+    expect(lines[1]).toMatchObject({ type: "run-started", provider: "stub" });
+  });
+
+  it("phase() without a payload writes nothing to events.jsonl", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "events-nopayload");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    log.phase("[afk] plain human line");
+
+    const lines = eventLines(log.runDir);
+    expect(lines).toHaveLength(1); // header only
+  });
+});

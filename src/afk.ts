@@ -14,6 +14,7 @@ import {
 } from "./cli-options.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { resolveRunScope } from "./slice-scope.js";
+import { runStatus } from "./status.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -30,6 +31,15 @@ function usage(): never {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // One-shot, read-only status view (spec #26). Handled before flag
+  // parsing — the pipeline flags below don't apply to it.
+  if (args[0] === "status") {
+    const { output, exitCode } = runStatus(args.slice(1), resolve("."));
+    console.log(output);
+    process.exit(exitCode);
+  }
+
   let runtimeOptions;
   try {
     runtimeOptions = parsePipelineRuntimeOptions(args);

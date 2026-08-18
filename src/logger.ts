@@ -9,6 +9,12 @@ import {
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
 import {
+  EVENTS_FILE,
+  EVENTS_SCHEMA_VERSION,
+  serializeRunEvent,
+  type RunEventPayload,
+} from "./run-events.js";
+import {
   assertNever,
   bucketFor,
   lifecycle,
@@ -99,6 +105,29 @@ export class Logger {
       slices: new Map(),
       totals: new Map(),
     };
+    // Structured tee header (spec #26): events.jsonl starts with a
+    // version event, copying the handoff.json convention, so readers
+    // can gate on schema before parsing the rest. Best-effort like all
+    // event writes — a failed write never takes down the pipeline.
+    this.event({ type: "header", version: EVENTS_SCHEMA_VERSION });
+  }
+
+  /**
+   * Tee a structured event into this run's `events.jsonl` (one JSON
+   * line per event, timestamped at append time). Synchronous and
+   * best-effort for the same reasons as `phase()`: freshness is the
+   * point, and logging failure never takes down the pipeline. The
+   * human `run.log` is untouched by this write.
+   */
+  event(payload: RunEventPayload) {
+    try {
+      appendFileSync(
+        join(this.runDir, EVENTS_FILE),
+        serializeRunEvent({ ...payload, ts: new Date().toISOString() }),
+      );
+    } catch {
+      // Best effort — the run.log / console remain the human contract.
+    }
   }
 
   /**
@@ -109,8 +138,16 @@ export class Logger {
    * tailing the file sees phase transitions even when the process's
    * stdio is lost (e.g. `pnpm exec` swallowing stderr on Windows).
    * Best-effort: a failed file write never takes down the pipeline.
+   *
+   * An optional structured payload tees the same transition into
+   * `events.jsonl` (spec #26) — the human line and its machine form
+   * are emitted by one call site, so they cannot drift apart.
    */
-  phase(message: string, via: "error" | "log" | "warn" = "error") {
+  phase(
+    message: string,
+    via: "error" | "log" | "warn" = "error",
+    event?: RunEventPayload,
+  ) {
     try {
       appendFileSync(
         join(this.runDir, "run.log"),
@@ -119,6 +156,7 @@ export class Logger {
     } catch {
       // Console echo below still happens.
     }
+    if (event) this.event(event);
     console[via](message);
   }
 

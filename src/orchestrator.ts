@@ -1327,6 +1327,8 @@ export async function runPipeline(
   // and gives `tail -f` a stable target from second zero.
   logger.phase(
     `[afk] Pipeline run started (${provider.name}) — logs: ${logger.runDir}`,
+    "error",
+    { type: "run-started", provider: provider.name, runSlug: loggerSlug },
   );
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     provider.invoke({
@@ -1542,10 +1544,14 @@ export async function runPipeline(
     if (outcome.phase === "PASS") {
       logger.phase(
         `[afk] Slice #${id} (${slice.title}): PASS — merged into ${featBranch}`,
+        "error",
+        { type: "slice-outcome", slice: next },
       );
     } else {
       logger.phase(
         `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${detailOf(outcome.error)}`,
+        "error",
+        { type: "slice-outcome", slice: next },
       );
     }
   };

@@ -2300,3 +2300,77 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
     expect(result.consoleSummary).toContain("[STUCK]");
   }, 60_000);
 });
+
+
+/**
+ * Structured events tee (spec #26, slice #27): a pipeline run leaves
+ * `events.jsonl` beside `run.log` in the per-run directory — header
+ * first, then `run-started`, then one `slice-outcome` per terminal
+ * outcome carrying the serialized SliceLifecycle (including the
+ * failure reason). Asserted at the same integration seam as the
+ * run.log tests: real temp repo, stub provider, files on disk.
+ */
+describe("events.jsonl tee (spec #26)", () => {
+  function runDirsOf(repo: string, slug: string): string[] {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    return readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .map((d) => join(parent, d));
+  }
+
+  it("writes header, run-started, and one slice-outcome per terminal outcome", async () => {
+    const repo = makeRepo();
+    const slug = "events";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9401", title: "Passer", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "9402", title: "Failer", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Disjoint files → two lanes; one passes, one fails QA every round
+    // and lands STUCK, so the tee carries a real failure reason.
+    const fixtures = new Map<string, SliceFixture>([
+      ["9401", { files: ["src/a.txt"], qaPasses: true, outputFile: "src/a.txt", outputContent: "a" }],
+      ["9402", { files: ["src/b.txt"], qaPasses: false, outputFile: "src/b.txt", outputContent: "b" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    // events.jsonl sits beside run.log in the run directory.
+    expect(existsSync(join(runDir!, "run.log"))).toBe(true);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    // Header first (version gate), then run-started.
+    expect(lines[0]).toMatchObject({ type: "header", version: 1 });
+    expect(lines[1]).toMatchObject({ type: "run-started", provider: "stub" });
+
+    // One slice-outcome per terminal outcome, serializing the lifecycle.
+    const outcomes = lines.filter((l) => l.type === "slice-outcome");
+    expect(outcomes).toHaveLength(2);
+    const pass = outcomes.find((o) => o.slice.ghIssue === "9401");
+    const stuck = outcomes.find((o) => o.slice.ghIssue === "9402");
+    expect(pass!.slice).toMatchObject({
+      phase: "PASS",
+      title: "Passer",
+      mergedToFeature: true,
+    });
+    expect(stuck!.slice.phase).toBe("STUCK");
+    expect(stuck!.slice.error).toBeTruthy();
+
+    // Every event is timestamped.
+    for (const line of lines) {
+      expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+  }, 60_000);
+});
