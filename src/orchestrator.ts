@@ -1175,7 +1175,16 @@ export async function runQAStage(
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
       if (attempt <= infrastructureRetries) {
-        logger.phase(`${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`);
+        logger.phase(
+          `${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
+          "error",
+          {
+            type: "warn",
+            reason: "infrastructure-retry",
+            ghIssue: slice.ghIssue,
+            message: `${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
+          },
+        );
         continue;
       }
       throw new Error(
@@ -1196,7 +1205,16 @@ export async function runQAStage(
     if (verdict === "PASS") return { outcome: "PASS", report: archiveDisplayPath };
     if (artifacts.readQAFailureClass(reportPath) === "INFRASTRUCTURE") {
       if (attempt <= infrastructureRetries) {
-        logger.phase(`${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`);
+        logger.phase(
+          `${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`,
+          "error",
+          {
+            type: "warn",
+            reason: "infrastructure-retry",
+            ghIssue: slice.ghIssue,
+            message: `${stage} report classified infrastructure; retrying without consuming round ${round}`,
+          },
+        );
         continue;
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
@@ -1529,6 +1547,25 @@ export async function runPipeline(
   const laneCancelled = new Set<string>();
 
 
+  // Per-slice prior-run state (spec #26): a re-run announces what each
+  // selected slice's previous run left behind — previous phase plus
+  // failure reason — as warn events at run start, so re-runs are not
+  // opaque. Events only: run.log and console output are unchanged.
+  for (const [id, slice] of dag.slices) {
+    const prior = runState.slices[id];
+    if (!prior) continue;
+    logger.event({
+      type: "warn",
+      reason: "prior-run-state",
+      ghIssue: id,
+      previousPhase: prior.phase,
+      previousError: prior.error,
+      message:
+        `#${id} ${slice.title}: prior run ended ${prior.phase}` +
+        (prior.error ? ` — ${prior.error}` : ""),
+    });
+  }
+
   // Restore completed slices from persistent state
   for (const [id, slice] of dag.slices) {
     if (isSliceComplete(runState, id)) {
@@ -1743,6 +1780,25 @@ export async function runPipeline(
       (id) => !failed.has(id) && !laneCancelled.has(id),
     );
     if (newToRun.length === 0) break;
+  }
+
+  // NOT-RUN dependency holds (spec #26): slices that never became
+  // ready because a blocker failed. They exist only as the handoff's
+  // NOT-RUN fallback — surface them as warn events naming what they
+  // wait on, so the operator sees the hold, not just an absence.
+  for (const [id, slice] of dag.slices) {
+    if (slice.type === "HITL") continue;
+    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) continue;
+    const unresolved = slice.blockedBy.filter((b) => !completed.has(b));
+    logger.event({
+      type: "warn",
+      reason: "not-run-hold",
+      ghIssue: id,
+      blockedBy: unresolved,
+      message:
+        `#${id} ${slice.title}: not run — held by unresolved ` +
+        `dependenc${unresolved.length === 1 ? "y" : "ies"} ${unresolved.map((b) => `#${b}`).join(", ")}`,
+    });
   }
 
   // --- Post-implementation reviews (only if all AFK slices passed) ---

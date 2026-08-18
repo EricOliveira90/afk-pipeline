@@ -202,3 +202,59 @@ describe("afk status (filesystem contract)", () => {
     expect(output).toContain("PASS");
   });
 });
+
+
+describe("afk status warn events inline (#29)", () => {
+  it("renders warn events inline at their chronological position, visually distinct", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      { type: "run-started", provider: "stub", runSlug: "demo-stub", ts: "2026-08-18T10:00:00.100Z" },
+      // Prior-run state warns land at run start for re-runs.
+      {
+        type: "warn",
+        reason: "prior-run-state",
+        ghIssue: "9601",
+        previousPhase: "STUCK",
+        previousError: "QA failed after 3 rounds",
+        message: "prior run: STUCK — QA failed after 3 rounds",
+        ts: "2026-08-18T10:00:00.200Z",
+      },
+      { type: "phase-started", ghIssue: "9601", agent: "generator", round: 1, ts: "2026-08-18T10:00:10.000Z" },
+      { type: "phase-ended", ghIssue: "9601", agent: "generator", round: 1, ts: "2026-08-18T10:01:10.000Z" },
+      {
+        type: "warn",
+        reason: "lane-continuation",
+        ghIssue: "9601",
+        message: "failed (STUCK) — its lane continues with #9602",
+        ts: "2026-08-18T10:02:00.000Z",
+      },
+      {
+        type: "warn",
+        reason: "not-run-hold",
+        ghIssue: "9603",
+        blockedBy: ["9601"],
+        message: "not run — held by unresolved dependency #9601",
+        ts: "2026-08-18T10:03:00.000Z",
+      },
+    ]);
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    // Warn lines are visually distinct from phase lines.
+    expect(output).toMatch(/⚠.*#9601.*prior run: STUCK — QA failed after 3 rounds/);
+    expect(output).toMatch(/⚠.*#9601.*lane continues with #9602/);
+    expect(output).toMatch(/⚠.*#9603.*held by unresolved dependency #9601/);
+    // Phase lines carry no warn marker.
+    expect(output).toMatch(/\n\s+10:01:10\s+#9601 generator \(round 1\)/);
+    // Inline chronology: prior-run warn precedes the generator phase,
+    // lane-continuation follows it.
+    const priorIdx = output.indexOf("prior run: STUCK");
+    const genIdx = output.indexOf("generator (round 1)");
+    const laneIdx = output.indexOf("lane continues");
+    expect(priorIdx).toBeGreaterThan(-1);
+    expect(genIdx).toBeGreaterThan(priorIdx);
+    expect(laneIdx).toBeGreaterThan(genIdx);
+  });
+});

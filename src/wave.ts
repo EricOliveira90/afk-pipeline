@@ -255,6 +255,13 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           `[afk] Slice #${lane[failedIndex]!.ghIssue} failed (${phase}) — ` +
             `its lane continues with ${rest.join(", ")} on the current ` +
             `${featBranch} tip (DAG-independent; see ADR 0024)`,
+          "error",
+          {
+            type: "warn",
+            reason: "lane-continuation",
+            ghIssue: lane[failedIndex]!.ghIssue,
+            message: `failed (${phase}) — its lane continues with ${rest.join(", ")}`,
+          },
         );
       };
 

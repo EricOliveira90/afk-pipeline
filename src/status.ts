@@ -131,6 +131,17 @@ export function renderStatus(model: StatusModel): string {
         );
         break;
       }
+      case "warn": {
+        any = true;
+        // Warn lines carry a marker so failure signals stand out from
+        // the phase chronology around them.
+        const who = event.ghIssue !== undefined ? `#${event.ghIssue} ` : "";
+        const message = event.message.startsWith(`#${event.ghIssue} `)
+          ? event.message
+          : `${who}${event.message}`;
+        lines.push(`  ${clock(event.ts)}  ⚠ ${message}`);
+        break;
+      }
       case "slice-outcome": {
         any = true;
         const s = event.slice;

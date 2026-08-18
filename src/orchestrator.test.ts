@@ -348,6 +348,12 @@ interface SliceFixture {
    * slice should end up STUCK after MAX_GENERATOR_ROUNDS.
    */
   qaPasses: boolean;
+  /**
+   * Number of leading evaluator-qa invocations that report FAIL with
+   * `**Failure class:** INFRASTRUCTURE` before behaving per `qaPasses`.
+   * Drives the infrastructure-retry warn path without consuming rounds.
+   */
+  qaInfraAttempts?: number;
   /** File the generator should create in the worktree (so commits have content). */
   outputFile: string;
   outputContent: string;
@@ -415,6 +421,8 @@ function buildStubProvider(opts: {
   // Track per-slice generator round so the stub can write fresh content
   // and decide PASS vs FAIL based on the round.
   const generatorRounds = new Map<string, number>();
+  // Per-slice count of evaluator-qa invocations, for qaInfraAttempts.
+  const qaAttempts = new Map<string, number>();
 
   return {
     name: "stub",
@@ -468,12 +476,22 @@ function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "evaluator-qa" && sliceArtifactDir && fixture) {
-        const verdict = fixture.qaPasses ? "PASS" : "FAIL";
-        writeFileSync(
-          join(sliceArtifactDir, "qa-report.md"),
-          `# QA Report\n\n**Verdict:** ${verdict}\n`,
-          "utf-8",
-        );
+        const attempt = (qaAttempts.get(ghIssue) ?? 0) + 1;
+        qaAttempts.set(ghIssue, attempt);
+        if (attempt <= (fixture.qaInfraAttempts ?? 0)) {
+          writeFileSync(
+            join(sliceArtifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** FAIL\n\n**Failure class:** INFRASTRUCTURE\n",
+            "utf-8",
+          );
+        } else {
+          const verdict = fixture.qaPasses ? "PASS" : "FAIL";
+          writeFileSync(
+            join(sliceArtifactDir, "qa-report.md"),
+            `# QA Report\n\n**Verdict:** ${verdict}\n`,
+            "utf-8",
+          );
+        }
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "stuck.md"),
@@ -2434,5 +2452,106 @@ describe("events.jsonl tee (spec #26)", () => {
     pairFor("generator", 1);
     // The QA evaluator's phase-ended carries the outcome verdict.
     expect(pairFor("evaluator-qa", 1).verdict).toBe("PASS");
+  }, 60_000);
+
+  it("emits warn events for lane continuations, NOT-RUN holds, and prior-run state on re-runs (#29)", async () => {
+    const repo = makeRepo();
+    const slug = "events-warns";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    // A fails (STUCK); B shares a file with A → same lane, continues
+    // after A's failure (ADR 0024); C is DAG-blocked by A → never runs.
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9601", title: "LaneLead", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "9602", title: "LaneMate", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "03", ghIssue: "9603", title: "Dependent", type: "AFK", blockedBy: ["9601"], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9601", { files: ["src/shared.txt"], qaPasses: false, outputFile: "src/shared.txt", outputContent: "lead" }],
+      ["9602", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "mate" }],
+      ["9603", { files: ["src/dep.txt"], qaPasses: true, outputFile: "src/dep.txt", outputContent: "dep" }],
+    ]);
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    };
+
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+
+    const eventsOf = (runDir: string) =>
+      readFileSync(join(runDir, "events.jsonl"), "utf-8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+
+    const [firstDir] = runDirsOf(repo, slug);
+    const firstEvents = eventsOf(firstDir!);
+    const warns = firstEvents.filter((l) => l.type === "warn");
+
+    // Lane continuation is a typed warn with its reason (ADR 0024).
+    const laneWarn = warns.find((w) => w.reason === "lane-continuation");
+    expect(laneWarn).toBeDefined();
+    expect(laneWarn!.ghIssue).toBe("9601");
+    expect(laneWarn!.message).toContain("9602");
+
+    // The DAG-held slice surfaces as a NOT-RUN hold naming its blocker.
+    const holdWarn = warns.find((w) => w.reason === "not-run-hold");
+    expect(holdWarn).toBeDefined();
+    expect(holdWarn!.ghIssue).toBe("9603");
+    expect(holdWarn!.blockedBy).toContain("9601");
+
+    // Re-run: per-slice prior-run state (previous phase + failure
+    // reason) is emitted at run start.
+    await runPipeline({ ...config, dag: buildDAG(slices) });
+    const secondDir = runDirsOf(repo, slug).find((d) => d !== firstDir)!;
+    const priorWarns = eventsOf(secondDir).filter(
+      (l) => l.type === "warn" && l.reason === "prior-run-state",
+    );
+    const stuckPrior = priorWarns.find((w) => w.ghIssue === "9601");
+    expect(stuckPrior).toBeDefined();
+    expect(stuckPrior!.previousPhase).toBe("STUCK");
+    expect(stuckPrior!.previousError).toContain("QA failed");
+    const passPrior = priorWarns.find((w) => w.ghIssue === "9602");
+    expect(passPrior).toBeDefined();
+    expect(passPrior!.previousPhase).toBe("PASS");
+  }, 120_000);
+
+  it("emits an infrastructure-retry warn when QA is retried without consuming a round (#29)", async () => {
+    const repo = makeRepo();
+    const slug = "events-infra";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9701", title: "Flaky", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9701", { files: ["src/f.txt"], qaPasses: true, qaInfraAttempts: 1, outputFile: "src/f.txt", outputContent: "f" }],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const infraWarn = lines.find(
+      (l) => l.type === "warn" && l.reason === "infrastructure-retry",
+    );
+    expect(infraWarn).toBeDefined();
+    expect(infraWarn!.ghIssue).toBe("9701");
+    // The retry didn't consume the round: the slice still passes.
+    const outcome = lines.find((l) => l.type === "slice-outcome");
+    expect(outcome!.slice.phase).toBe("PASS");
   }, 60_000);
 });

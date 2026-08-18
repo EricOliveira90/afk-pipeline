@@ -45,7 +45,31 @@ export type RunEventPayload =
        */
       verdict?: string;
     }
-  | { type: "slice-outcome"; slice: SliceLifecycle };
+  | { type: "slice-outcome"; slice: SliceLifecycle }
+  | {
+      type: "warn";
+      /**
+       * Which warn-class signal this is. One per signal the pipeline
+       * already logs: lane continuation after a member failure
+       * (ADR 0024), QA infrastructure retries that don't consume a
+       * round, per-slice prior-run state at run start (retry
+       * announcement), and NOT-RUN dependency holds.
+       */
+      reason:
+        | "lane-continuation"
+        | "infrastructure-retry"
+        | "prior-run-state"
+        | "not-run-hold";
+      ghIssue?: string;
+      /** Human-readable one-liner rendered inline in the chronology. */
+      message: string;
+      /** prior-run-state: the phase persisted by the previous run. */
+      previousPhase?: string;
+      /** prior-run-state: the failure reason persisted by the previous run. */
+      previousError?: string;
+      /** not-run-hold: unresolved blockers this slice waits on. */
+      blockedBy?: string[];
+    };
 
 export type RunEvent = RunEventPayload & {
   /** ISO-8601 timestamp stamped when the event line was appended. */
