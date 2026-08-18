@@ -8,8 +8,9 @@
  *
  * Payloads serialize the existing `SliceLifecycle` vocabulary — there
  * is no parallel status vocabulary to keep in sync. The schema is
- * versioned and the union is open for new event types (e.g. future
- * heartbeats, #14) without breaking existing consumers.
+ * versioned and the union is open for new event types (e.g. the
+ * future in-invocation liveness signals sketched in #14) without
+ * breaking existing consumers.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
