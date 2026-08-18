@@ -134,12 +134,14 @@ export function renderStatus(model: StatusModel): string {
       case "warn": {
         any = true;
         // Warn lines carry a marker so failure signals stand out from
-        // the phase chronology around them.
-        const who = event.ghIssue !== undefined ? `#${event.ghIssue} ` : "";
-        const message = event.message.startsWith(`#${event.ghIssue} `)
-          ? event.message
-          : `${who}${event.message}`;
-        lines.push(`  ${clock(event.ts)}  ⚠ ${message}`);
+        // the phase chronology around them. Producers may already
+        // prefix the slice reference into the message — don't double it.
+        const prefix =
+          event.ghIssue !== undefined &&
+          !event.message.startsWith(`#${event.ghIssue} `)
+            ? `#${event.ghIssue} `
+            : "";
+        lines.push(`  ${clock(event.ts)}  ⚠ ${prefix}${event.message}`);
         break;
       }
       case "slice-outcome": {

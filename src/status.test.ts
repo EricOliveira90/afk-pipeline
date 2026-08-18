@@ -257,4 +257,39 @@ describe("afk status warn events inline (#29)", () => {
     expect(genIdx).toBeGreaterThan(priorIdx);
     expect(laneIdx).toBeGreaterThan(genIdx);
   });
+
+  it("--json carries phase and warn events verbatim", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      { type: "wave-dispatched", wave: 1, slices: ["9601"], ts: "2026-08-18T10:00:01.000Z" },
+      { type: "phase-started", ghIssue: "9601", agent: "generator", round: 2, ts: "2026-08-18T10:00:10.000Z" },
+      { type: "phase-ended", ghIssue: "9601", agent: "generator", round: 2, ts: "2026-08-18T10:01:10.000Z" },
+      {
+        type: "warn",
+        reason: "not-run-hold",
+        ghIssue: "9603",
+        blockedBy: ["9601"],
+        message: "not run — held by unresolved dependency #9601",
+        ts: "2026-08-18T10:03:00.000Z",
+      },
+    ]);
+
+    const { output, exitCode } = runStatus(["--json"], root);
+
+    expect(exitCode).toBe(0);
+    const model = JSON.parse(output);
+    expect(model.events[1]).toEqual({
+      type: "wave-dispatched",
+      wave: 1,
+      slices: ["9601"],
+      ts: "2026-08-18T10:00:01.000Z",
+    });
+    expect(model.events[2]).toMatchObject({ type: "phase-started", agent: "generator", round: 2 });
+    expect(model.events[4]).toMatchObject({
+      type: "warn",
+      reason: "not-run-hold",
+      blockedBy: ["9601"],
+    });
+  });
 });
