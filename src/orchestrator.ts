@@ -1560,27 +1560,10 @@ export async function runPipeline(
   // human resolution of the predecessor first.
   const laneCancelled = new Set<string>();
 
-
-  // Per-slice prior-run state (spec #26): a re-run announces what each
-  // selected slice's previous run left behind — previous phase plus
-  // failure reason — as warn events at run start, so re-runs are not
-  // opaque. Events only: run.log and console output are unchanged.
-  for (const [id, slice] of dag.slices) {
-    const prior = runState.slices[id];
-    if (!prior) continue;
-    logger.event({
-      type: "warn",
-      reason: "prior-run-state",
-      ghIssue: id,
-      previousPhase: prior.phase,
-      previousError: prior.error,
-      message:
-        `#${id} ${slice.title}: prior run ended ${prior.phase}` +
-        (prior.error ? ` — ${prior.error}` : ""),
-    });
-  }
-
-  // Restore completed slices from persistent state
+  // Restore completed slices from persistent state. Per-slice
+  // prior-run state announcements (issue #17) and their warn events
+  // (spec #26) share one call site each, so the human line and its
+  // machine form cannot drift apart.
   for (const [id, slice] of dag.slices) {
     if (isSliceComplete(runState, id)) {
       completed.add(id);
@@ -1594,7 +1577,44 @@ export async function runPipeline(
           true,
         ),
       );
-      logger.phase(`  Skipping #${id} ${slice.title} (already completed)`, "log");
+      logger.phase(
+        `  Skipping #${id} ${slice.title} (already completed)`,
+        "log",
+        {
+          type: "warn",
+          reason: "prior-run-state",
+          ghIssue: id,
+          previousPhase: "PASS",
+          message: `#${id} ${slice.title}: prior run ended PASS — skipped (already completed)`,
+        },
+      );
+      continue;
+    }
+    // A slice with a persisted non-complete phase is about to be
+    // retried. Say so — and say why it stopped — before any wave
+    // dispatches. Without this line, an operator diffing the wave
+    // composition against the manifest has no way to tell a retried
+    // slice from a silently dropped one, and no way to see the prior
+    // failure reason without opening .afk/state/<slug>.json by hand.
+    // There is deliberately NO retry cap: failed slices are always
+    // eligible again on the next run. See issue #17.
+    const prior = runState.slices[id];
+    if (prior) {
+      const reason = prior.error ? ` — ${prior.error}` : "";
+      const label =
+        prior.phase === "PASS" ? "PASS (merge did not complete)" : prior.phase;
+      logger.phase(
+        `  Retrying #${id} ${slice.title} (previous run: ${label}${reason})`,
+        "log",
+        {
+          type: "warn",
+          reason: "prior-run-state",
+          ghIssue: id,
+          previousPhase: prior.phase,
+          previousError: prior.error,
+          message: `#${id} ${slice.title}: prior run ended ${label}${reason}`,
+        },
+      );
     }
   }
 
@@ -1796,23 +1816,42 @@ export async function runPipeline(
     if (newToRun.length === 0) break;
   }
 
-  // NOT-RUN dependency holds (spec #26): slices that never became
-  // ready because a blocker failed. They exist only as the handoff's
-  // NOT-RUN fallback — surface them as warn events naming what they
-  // wait on, so the operator sees the hold, not just an absence.
+  // Any selected slice that never received an outcome was held back by
+  // an unresolved dependency — dag.ready() simply never surfaced it, so
+  // no wave line, no state entry, and no failure message ever mentioned
+  // it. Spell the hold-back out per slice, naming the blockers, so the
+  // operator doesn't have to reverse-engineer the omission from the
+  // wave composition (issue #17) — and tee the same hold as a typed
+  // warn event for `afk status` (spec #26).
   for (const [id, slice] of dag.slices) {
     if (slice.type === "HITL") continue;
-    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) continue;
-    const unresolved = slice.blockedBy.filter((b) => !completed.has(b));
-    logger.event({
-      type: "warn",
-      reason: "not-run-hold",
-      ghIssue: id,
-      blockedBy: unresolved,
-      message:
-        `#${id} ${slice.title}: not run — held by unresolved ` +
-        `dependenc${unresolved.length === 1 ? "y" : "ies"} ${unresolved.map((b) => `#${b}`).join(", ")}`,
-    });
+    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) {
+      continue;
+    }
+    const unresolved = slice.blockedBy.filter((dep) => !completed.has(dep));
+    const blockerText =
+      unresolved.length > 0
+        ? unresolved
+            .map((dep) =>
+              dag.slices.has(dep) ? `#${dep}` : `#${dep} (outside run scope)`,
+            )
+            .join(", ")
+        : "(unknown)";
+    logger.phase(
+      `[afk] Slice #${id} (${slice.title}): NOT-RUN — held back by unresolved ` +
+        `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]; ` +
+        `fix the blocker(s) and re-run`,
+      "error",
+      {
+        type: "warn",
+        reason: "not-run-hold",
+        ghIssue: id,
+        blockedBy: unresolved,
+        message:
+          `#${id} ${slice.title}: NOT-RUN — held back by unresolved ` +
+          `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`,
+      },
+    );
   }
 
   // --- Post-implementation reviews (only if all AFK slices passed) ---

@@ -2560,3 +2560,163 @@ describe("events.jsonl tee (spec #26)", () => {
     expect(outcome!.slice.phase).toBe("PASS");
   }, 60_000);
 });
+
+
+/**
+ * Issue #17 — re-runs must never silently omit slices. Two gaps are
+ * pinned here: (1) a slice with a persisted failure phase is announced
+ * as a retry (with the prior phase + reason) before any wave runs, and
+ * (2) a slice held back because its dependency never completed gets an
+ * explicit NOT-RUN line naming the blocker. Before this, both cases
+ * were only inferable by diffing the wave composition against the
+ * manifest — the "silent retry cap" mirage from the PRD 075 run.
+ */
+describe("re-run visibility for previously failed and held-back slices (issue #17)", () => {
+  function runLogOf(repo: string, slug: string): string {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const dirs = readdirSync(parent).filter((d) =>
+      /^run-\d{8}-\d{6}/.test(d),
+    );
+    // Latest run dir — tests below only ever need the most recent one.
+    const latest = dirs.sort().at(-1)!;
+    return readFileSync(join(parent, latest, "run.log"), "utf-8");
+  }
+
+  it("announces a retried slice with its prior phase and failure reason", async () => {
+    const repo = makeRepo();
+    const slug = "retry-announce";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "9401",
+        title: "Retried",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "9401",
+        {
+          files: ["src/retry.txt"],
+          qaPasses: true,
+          outputFile: "src/retry.txt",
+          outputContent: "retry",
+        },
+      ],
+    ]);
+
+    // Seed persisted state from a "previous run" that ERRORed. The
+    // state file is keyed by the pipeline run slug (provider-suffixed).
+    const stateDir = join(repo, ".afk", "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, `${slug}-stub.json`),
+      JSON.stringify({
+        version: 1,
+        prdSlug: `${slug}-stub`,
+        featureBranch: `feat-stub/${slug}`,
+        slices: {
+          "9401": {
+            phase: "ERROR",
+            branch: "afk-stub/retry-announce-slice-01-retried",
+            error: "Agent generator idle for 600s — killed",
+          },
+        },
+      }),
+      "utf-8",
+    );
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    const runLog = runLogOf(repo, slug);
+    expect(runLog).toContain(
+      "Retrying #9401 Retried (previous run: ERROR — Agent generator idle for 600s — killed)",
+    );
+    // And the retry actually ran to completion.
+    expect(runLog).toContain("Slice #9401 (Retried): PASS");
+  }, 60_000);
+
+  it("emits an explicit NOT-RUN line naming the unresolved blocker for held-back slices", async () => {
+    const repo = makeRepo();
+    const slug = "heldback";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "9501",
+        title: "Blocker",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "9502",
+        title: "Dependent",
+        type: "AFK",
+        blockedBy: ["9501"],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "9501",
+        {
+          files: ["src/blocker.txt"],
+          qaPasses: true,
+          outputFile: "src/blocker.txt",
+          outputContent: "blocker",
+        },
+      ],
+      [
+        "9502",
+        {
+          files: ["src/dependent.txt"],
+          qaPasses: true,
+          outputFile: "src/dependent.txt",
+          outputContent: "dependent",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const stub = buildStubProvider({ fixtures, slices, records });
+    // The blocker's explorer invocation dies → negotiate rejects →
+    // slice 9501 ERRORs fast, and 9502 must be reported as held back.
+    const provider: AgentProvider = {
+      name: stub.name,
+      async invoke(options) {
+        if (options.role === "explorer" && /-s01(?:$|[\\/])/.test(options.cwd)) {
+          throw new Error("boom: explorer died");
+        }
+        return stub.invoke(options);
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    const runLog = runLogOf(repo, slug);
+    expect(runLog).toContain("Slice #9501 (Blocker): ERROR");
+    expect(runLog).toContain(
+      "Slice #9502 (Dependent): NOT-RUN — held back by unresolved dependency [#9501]; fix the blocker(s) and re-run",
+    );
+  }, 60_000);
+});
