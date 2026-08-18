@@ -33,6 +33,8 @@ export interface PresentActiveSlice {
   timeInPhaseMs: number;
   /** mtime of the freshest matching agent log, when one exists. */
   lastActivityTs?: string;
+  /** now − lastActivityTs at build time: how long the log has been silent. */
+  silentMs?: number;
   /** Size of that log, for "is it still growing?" glances. */
   logBytes?: number;
   /**
@@ -156,6 +158,7 @@ export function buildPresentSection(input: {
       startedTs: phase.startedTs,
       timeInPhaseMs,
       lastActivityTs: log?.mtime.toISOString(),
+      silentMs: silentMs !== null ? Math.max(0, silentMs) : undefined,
       logBytes: log?.size,
       stale:
         timeInPhaseMs >= STALE_AFTER_MS &&
@@ -188,20 +191,12 @@ export function renderPresentSection(present: PresentSection): string[] {
 }
 
 function activityCell(a: PresentActiveSlice): string {
-  if (a.lastActivityTs === undefined) {
+  if (a.lastActivityTs === undefined || a.silentMs === undefined) {
     return a.stale
       ? ` — ⚠ possibly hung: no agent log after ${formatDuration(a.timeInPhaseMs)} in phase`
       : " — no agent log yet";
   }
   return a.stale
-    ? ` — ⚠ possibly hung: no log activity for ${sinceActivity(a)}`
-    : ` — last activity ${sinceActivity(a)} ago`;
-}
-
-/** Silence duration derived from the entry's own timestamps. */
-function sinceActivity(a: PresentActiveSlice): string {
-  const started = Date.parse(a.startedTs);
-  const lastActivity = Date.parse(a.lastActivityTs!);
-  const reference = started + a.timeInPhaseMs; // = `now` used at build time
-  return formatDuration(Math.max(0, reference - lastActivity));
+    ? ` — ⚠ possibly hung: no log activity for ${formatDuration(a.silentMs)}`
+    : ` — last activity ${formatDuration(a.silentMs)} ago`;
 }
