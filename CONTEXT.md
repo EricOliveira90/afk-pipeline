@@ -181,11 +181,14 @@ pass on a refreshed base.
 _Avoid_: "lane head"
 
 **Lane-cancelled**:
-A slice deferred by the orchestrator because an earlier lane-mate
-failed (STUCK / ESCALATE / ERROR / CONFLICT). Recorded as the
-`LANE-CANCELLED` status. Distinct from **cancellation** (user-initiated)
+A slice deferred by the orchestrator because its lane was halted for
+repository-integrity reasons (a predecessor hit the worktree-corruption
+signature, ADR 0010 / ADR 0024). Recorded as the `LANE-CANCELLED`
+status. Ordinary predecessor failures no longer cancel lane-mates —
+the lane continues and the successor re-negotiates on the real base
+(ADR 0024). Distinct from **cancellation** (user-initiated)
 and **escalation** (the agent gave up). Lane-cancelled slices are
-re-eligible on the next pipeline run once the predecessor is fixed.
+re-eligible on the next pipeline run once the repository is verified.
 _Avoid_: "skipped" (HITL slices are skipped; lane-cancelled is
 deferral, not skip), "blocked" (DAG-blocked is a separate concept)
 

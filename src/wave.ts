@@ -222,7 +222,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
       for (let i = 1; i < lane.length; i++) {
         logger.phase(
           `[afk] Slice #${lane[i]!.ghIssue} queued behind #${lane[i - 1]!.ghIssue} in its lane — ` +
-            `waiting to re-negotiate on the refreshed base after the predecessor merges (not dropped)`,
+            `waiting to re-negotiate on the refreshed base after the predecessor completes (not dropped)`,
         );
       }
     }
@@ -230,9 +230,32 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
   // --- Run each lane. Lanes are independent; slices within a lane
   // are serial. The mutex around merge + worktree-remove serialises
-  // those operations across lanes. ---
+  // those operations across lanes.
+  //
+  // A lane member's failure no longer takes its successors with it
+  // (ADR 0024): lane order exists for file-overlap merge safety
+  // (ADR 0005), not dependency ordering — DAG dependents of a failed
+  // slice are already held back by the orchestrator's readiness check.
+  // Each successor refreshes onto the current featBranch tip and
+  // re-negotiates regardless of the predecessor's outcome, so running
+  // it after a predecessor failure is exactly as merge-safe as running
+  // it after a predecessor PASS. Two exceptions still stop the lane:
+  // user cancellation, and the ADR 0010 worktree-corruption signature
+  // (compounding a corrupted git state needs an operator first). ---
   await Promise.all(
     lanesToRun.map(async (lane) => {
+      // Announce that the lane survives a member's failure — the exact
+      // collateral-cancel spot pre-ADR 0024.
+      const continueLane = (failedIndex: number, phase: string) => {
+        const rest = lane.slice(failedIndex + 1).map((s) => `#${s.ghIssue}`);
+        if (rest.length === 0) return;
+        logger.phase(
+          `[afk] Slice #${lane[failedIndex]!.ghIssue} failed (${phase}) — ` +
+            `its lane continues with ${rest.join(", ")} on the current ` +
+            `${featBranch} tip (DAG-independent; see ADR 0024)`,
+        );
+      };
+
       for (let i = 0; i < lane.length; i++) {
         const slice = lane[i]!;
         const id = slice.ghIssue;
@@ -266,9 +289,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             }
             const negotiate = await runSliceNegotiate(ctx);
             if (negotiate !== "LOCKED") {
-              record(id, negotiateRefreshOutcome(negotiate));
-              cancelLaneSuccessors(record, lane, i);
-              return;
+              const outcome = negotiateRefreshOutcome(negotiate);
+              record(id, outcome);
+              if (outcome.phase === "CANCELLED") return;
+              continueLane(i, outcome.phase);
+              continue;
             }
           } catch (err) {
             if (isCancelled(err, signal)) {
@@ -276,13 +301,13 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
                 phase: "CANCELLED",
                 error: "Cancelled by user",
               });
-            } else {
-              const msg = err instanceof Error ? err.message : String(err);
-              logger.markError(id, msg);
-              record(id, { phase: "ERROR", error: msg });
+              return;
             }
-            cancelLaneSuccessors(record, lane, i);
-            return;
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.markError(id, msg);
+            record(id, { phase: "ERROR", error: msg });
+            continueLane(i, "ERROR");
+            continue;
           }
         }
 
@@ -313,8 +338,9 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
         if (outcome.phase !== "PASS") {
           record(id, outcome);
-          cancelLaneSuccessors(record, lane, i);
-          return;
+          if (outcome.phase === "CANCELLED") return;
+          continueLane(i, outcome.phase);
+          continue;
         }
 
         // PASS — merge under the mutex.
@@ -341,6 +367,10 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
                 `to the parent repo's currently checked-out branch. ` +
                 `Inspect 'git reflog --all' and 'git worktree list --porcelain' before re-running.`,
             });
+            // Corruption is the one failure that still stops the lane
+            // (ADR 0024 exception): dispatching more agents against a
+            // repo whose worktree registration already failed silently
+            // risks compounding the damage. Operator first.
             cancelLaneSuccessors(record, lane, i);
             return;
           }
@@ -349,8 +379,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               phase: "ERROR",
               error: `Branch ${branch} has no commits ahead of ${featBranch} — generator produced no output`,
             });
-            cancelLaneSuccessors(record, lane, i);
-            return;
+            continueLane(i, "ERROR");
+            continue;
           }
 
           const scratchMergeDir = join(
@@ -384,8 +414,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               phase: "CONFLICT",
               error: mergeResult.details,
             });
-            cancelLaneSuccessors(record, lane, i);
-            return;
+            continueLane(i, "CONFLICT");
+            continue;
           }
           if (mergeResult.cleanupWarning) {
             logger.phase(`[afk] Warning: ${mergeResult.cleanupWarning}`);
@@ -402,13 +432,13 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               phase: "CANCELLED",
               error: "Cancelled by user",
             });
-          } else {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.markError(id, msg);
-            record(id, { phase: "ERROR", error: msg });
+            return;
           }
-          cancelLaneSuccessors(record, lane, i);
-          return;
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.markError(id, msg);
+          record(id, { phase: "ERROR", error: msg });
+          continueLane(i, "ERROR");
+          continue;
         }
       }
     }),
@@ -438,6 +468,14 @@ function negotiateRefreshOutcome(
   }
 }
 
+/**
+ * Mark every lane member behind `failedIndex` as LANE-CANCELLED.
+ *
+ * Since ADR 0024 this fires only for the ADR 0010 worktree-corruption
+ * signature — ordinary member failures let the lane continue. The
+ * status keeps its ADR 0005 semantics: deferred pending human
+ * attention this run, naturally retried on the next invocation.
+ */
 function cancelLaneSuccessors(
   record: (ghIssue: string, outcome: WaveOutcome) => void,
   lane: Slice[],
@@ -447,7 +485,8 @@ function cancelLaneSuccessors(
     record(lane[k]!.ghIssue, {
       phase: "LANE-CANCELLED",
       error:
-        "Lane predecessor failed; rerun the pipeline after fixing the predecessor",
+        "Lane halted: a predecessor hit the worktree-corruption signature (ADR 0010); " +
+        "investigate the repository state, then rerun the pipeline",
     });
   }
 }

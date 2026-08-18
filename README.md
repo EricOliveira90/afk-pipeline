@@ -361,6 +361,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0013** — Codex provider command, model policy, prompts, and JSONL behavior
 - **ADR 0014** — PRD 070 QA classification and shared-preview isolation
 - **ADR 0015** — Guardian review failure classes, scope-aware PM review, and cheap re-entry
+- **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
 
 ## QA Rounds and Shared Preview
 

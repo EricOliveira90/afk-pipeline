@@ -112,6 +112,11 @@ incentive for the planner to enumerate when it can.
 
 ## `LANE-CANCELLED` status
 
+> **Partially superseded by ADR 0024:** lanes now continue past a
+> failed member (the successor re-negotiates on the real base), and
+> `LANE-CANCELLED` fires only when the lane halts for the ADR 0010
+> worktree-corruption signature. The status semantics below stand.
+
 If any slice in a lane fails (STUCK / ESCALATE / ERROR / CONFLICT),
 the remaining lane-mates are marked **LANE-CANCELLED** and the lane
 stops. Other lanes continue. Rationale: a successor would either

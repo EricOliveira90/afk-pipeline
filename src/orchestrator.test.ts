@@ -316,8 +316,9 @@ describe("makeAsyncMutex", () => {
  * deterministic artifacts. We assert observable lane behaviour:
  *  - Two slices declaring the same file run *serially* (slice B's
  *    Phase A starts after slice A's commit lands on featBranch).
- *  - A failure in lane position 1 marks lane position 2 as
- *    LANE-CANCELLED in run-state.
+ *  - A failure in lane position 1 no longer cancels lane position 2:
+ *    the successor runs on the unchanged base and its PASS persists
+ *    (ADR 0024).
  *  - Two slices with disjoint files run in *parallel* lanes
  *    (interleaved invocation timestamps).
  *
@@ -600,7 +601,7 @@ describe("runPipeline lane scheduling", () => {
     expect(shared).toContain("hello from slice 1002");
   }, 60_000);
 
-  it("marks the lane successor as LANE-CANCELLED when the predecessor fails", async () => {
+  it("persists STUCK for the failed predecessor and PASS for the surviving lane successor (ADR 0024)", async () => {
     const repo = makeRepo();
     const slug = "lanes-cancel";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -663,7 +664,12 @@ describe("runPipeline lane scheduling", () => {
     );
     const state = JSON.parse(stateRaw);
     expect(state.slices["2001"].phase).toBe("STUCK");
-    expect(state.slices["2002"].phase).toBe("LANE-CANCELLED");
+    // Pre-ADR-0024: LANE-CANCELLED collateral. The slices are
+    // DAG-independent, so the successor now survives its dead lane
+    // predecessor, runs on the unchanged feature-branch tip, and its
+    // PASS is persisted as resumable-complete.
+    expect(state.slices["2002"].phase).toBe("PASS");
+    expect(state.slices["2002"].mergedToFeature).toBe(true);
   }, 60_000);
 
   it("runs disjoint-file slices in parallel lanes (timestamps interleave)", async () => {
