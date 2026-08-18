@@ -13,6 +13,7 @@ import {
   parseSliceSelection,
 } from "./cli-options.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
+import { runCleanFailedCli } from "./clean-failed.js";
 import { resolveRunScope } from "./slice-scope.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
@@ -23,13 +24,18 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
 
 async function main() {
   const args = process.argv.slice(2);
+  // Subcommand dispatch (bare first token). `clean-failed` removes dead
+  // slice worktrees/branches left by failed runs — see issue #19.
+  if (args[0] === "clean-failed") {
+    process.exit(runCleanFailedCli(args.slice(1)));
+  }
   let runtimeOptions;
   try {
     runtimeOptions = parsePipelineRuntimeOptions(args);

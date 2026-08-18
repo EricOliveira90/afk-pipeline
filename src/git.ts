@@ -330,31 +330,37 @@ export function mergeBranch(
 }
 
 /**
+ * All registered worktrees with the branch each has checked out (null
+ * for detached HEAD). Parses `git worktree list --porcelain`.
+ */
+export function listWorktrees(
+  repoRoot: string,
+): Array<{ path: string; branch: string | null }> {
+  const output = git(["worktree", "list", "--porcelain"], { cwd: repoRoot });
+  const result: Array<{ path: string; branch: string | null }> = [];
+  for (const block of output.split(/\r?\n\r?\n/)) {
+    let path: string | null = null;
+    let branch: string | null = null;
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+      else if (line.startsWith("branch refs/heads/"))
+        branch = line.slice("branch refs/heads/".length);
+    }
+    if (path) result.push({ path, branch });
+  }
+  return result;
+}
+
+/**
  * Find an existing worktree that has the given branch checked out, if any.
  * Returns the worktree path or null.
- *
- * Parses `git worktree list --porcelain`, which emits blocks like:
- *   worktree /path/to/repo
- *   HEAD abcd…
- *   branch refs/heads/main
- *   <blank line>
  */
 export function findWorktreeForBranch(
   repoRoot: string,
   branch: string,
 ): string | null {
-  const output = git(["worktree", "list", "--porcelain"], { cwd: repoRoot });
-  const blocks = output.split(/\r?\n\r?\n/);
-  for (const block of blocks) {
-    const lines = block.split(/\r?\n/);
-    let path: string | null = null;
-    let foundBranch: string | null = null;
-    for (const line of lines) {
-      if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
-      else if (line.startsWith("branch refs/heads/"))
-        foundBranch = line.slice("branch refs/heads/".length);
-    }
-    if (path && foundBranch === branch) return path;
+  for (const wt of listWorktrees(repoRoot)) {
+    if (wt.branch === branch) return wt.path;
   }
   return null;
 }
