@@ -7,6 +7,7 @@ import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import type { AgentProvider } from "./agent-provider.js";
 import { CancelledError } from "./agent-provider.js";
+import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
@@ -489,6 +490,20 @@ export interface PipelineConfig {
   /** Retries per QA stage that do not consume implementation rounds. */
   infrastructureRetries?: number;
   /**
+   * Total elapsed-time window for retrying provider-classified
+   * transient failures (model temporarily unavailable), measured from
+   * the first such failure per invocation. Retries back off
+   * exponentially (30s → 480s). Default: 15 min. 0 disables.
+   * See ADR 0022.
+   */
+  transientRetryWindowMs?: number;
+  /**
+   * Test seam: overrides the backoff sleep used by transient retries
+   * so integration tests don't wait through real 30s+ delays. Never
+   * set outside tests.
+   */
+  transientRetrySleep?: TransientRetryOptions["sleep"];
+  /**
    * Per-invocation wall-clock ceiling for every agent role, overriding
    * the role-aware defaults (120 min for generator/evaluator-qa, the
    * 60 min provider default otherwise). A ceiling kill during slice
@@ -700,30 +715,57 @@ export function makeSliceContext(
     : "(none — this slice declares no AFK dependencies)";
 
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
-    const result = await provider.invoke({
-      ...opts,
-      signal,
-      onIdleWarning: (minutes) => {
-        if (opts.logStream) {
-          logger.writeIdleWarning(opts.logStream, opts.role, minutes);
-        }
+    // Transient model outages (provider-classified) retry here with
+    // backoff instead of failing the slice. See ADR 0022.
+    const result = await withTransientRetry(
+      () =>
+        provider.invoke({
+          ...opts,
+          signal,
+          onIdleWarning: (minutes) => {
+            if (opts.logStream) {
+              logger.writeIdleWarning(opts.logStream, opts.role, minutes);
+            }
+          },
+          // Busy-probe deferrals (ADR 0021) become typed warn events so
+          // `afk status` can show why a silent agent wasn't killed. The
+          // provider already writes the human line into the agent log;
+          // run.log stays untouched.
+          onIdleDeferral: ({ silentSeconds, busyProcesses }) => {
+            logger.event({
+              type: "warn",
+              reason: "idle-deferral",
+              ghIssue: slice.ghIssue,
+              message:
+                `${opts.role} silent for ${silentSeconds}s but ` +
+                `${busyProcesses} spawned process(es) still running — ` +
+                `deferring idle kill (wall-clock ceiling still applies)`,
+            });
+          },
+        }),
+      {
+        windowMs: config.transientRetryWindowMs,
+        sleep: config.transientRetrySleep,
+        signal,
+        onRetry: ({ attempt, delayMs, error }) => {
+          const line =
+            `${tag}: ${opts.role} hit a transient model outage — ` +
+            `retry ${attempt} in ${delayMs / 1000}s (${error.message})`;
+          // The retry announcement tees a typed backoff warn event
+          // (spec #26 / ADR 0022) from the same call site as its
+          // run.log line.
+          logger.phase(line, "error", {
+            type: "warn",
+            reason: "backoff-retry",
+            ghIssue: slice.ghIssue,
+            message:
+              `${opts.role} hit a transient model outage — ` +
+              `retry ${attempt} in ${delayMs / 1000}s (${error.message})`,
+          });
+          opts.logStream?.write(`\n[afk] ${line}\n`);
+        },
       },
-      // Busy-probe deferrals (ADR 0021) become typed warn events so
-      // `afk status` can show why a silent agent wasn't killed. The
-      // provider already writes the human line into the agent log;
-      // run.log stays untouched.
-      onIdleDeferral: ({ silentSeconds, busyProcesses }) => {
-        logger.event({
-          type: "warn",
-          reason: "idle-deferral",
-          ghIssue: slice.ghIssue,
-          message:
-            `${opts.role} silent for ${silentSeconds}s but ` +
-            `${busyProcesses} spawned process(es) still running — ` +
-            `deferring idle kill (wall-clock ceiling still applies)`,
-        });
-      },
-    });
+    );
     logger.addInvocationStats(slice.ghIssue, result.stats);
     return result;
   };
@@ -1471,15 +1513,37 @@ export async function runPipeline(
     { type: "run-started", provider: provider.name, runSlug: loggerSlug },
   );
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
-    provider.invoke({
-      ...opts,
-      signal,
-      onIdleWarning: (minutes) => {
-        if (opts.logStream) {
-          logger.writeIdleWarning(opts.logStream, opts.role, minutes);
-        }
+    withTransientRetry(
+      () =>
+        provider.invoke({
+          ...opts,
+          signal,
+          onIdleWarning: (minutes) => {
+            if (opts.logStream) {
+              logger.writeIdleWarning(opts.logStream, opts.role, minutes);
+            }
+          },
+        }),
+      {
+        windowMs: config.transientRetryWindowMs,
+        sleep: config.transientRetrySleep,
+        signal,
+        onRetry: ({ attempt, delayMs, error }) => {
+          logger.phase(
+            `[afk] ${opts.role} hit a transient model outage — ` +
+              `retry ${attempt} in ${delayMs / 1000}s (${error.message})`,
+            "error",
+            {
+              type: "warn",
+              reason: "backoff-retry",
+              message:
+                `${opts.role} hit a transient model outage — ` +
+                `retry ${attempt} in ${delayMs / 1000}s (${error.message})`,
+            },
+          );
+        },
       },
-    });
+    );
   const featBranch = featureBranch(prdSlug, provider);
   logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));

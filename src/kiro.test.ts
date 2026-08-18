@@ -37,7 +37,7 @@ vi.mock("node:fs", () => ({ ...fsMock, WriteStream: class {} }));
 vi.mock("node:os", () => ({ homedir: () => "/home/tester" }));
 
 // Imported AFTER the mocks are wired.
-const { invoke, ensureWorkerAgentConfig, KIRO_WORKER_AGENT, WORKER_AGENT_CONFIG } =
+const { invoke, ensureWorkerAgentConfig, KIRO_WORKER_AGENT, WORKER_AGENT_CONFIG, classifyExitError } =
   await import("./kiro.js");
 
 const WORKER_CONFIG_PATH = join(
@@ -439,6 +439,76 @@ describe("kill termination confirmation (ADR 0020)", () => {
 
     await expect(promise).rejects.toThrow(
       /could not verify process-tree termination/,
+    );
+  });
+});
+
+
+/**
+ * Transient-failure classification (ADR 0022, issue #16): kiro-cli
+ * gives up on a model outage after ~30s of internal retries and exits
+ * nonzero with "temporarily unavailable" in its output. The provider
+ * classifies that exit as TransientProviderError so the orchestrator
+ * can retry with real backoff; every other nonzero exit stays a plain
+ * error.
+ */
+describe("transient exit classification", () => {
+  it("classifyExitError returns TransientProviderError when the output tail has the outage marker", () => {
+    const err = classifyExitError(
+      "generator",
+      1,
+      "WARNING: Retry #3, retrying within 10.0s..\nKiro is having trouble responding right now:\n    The model you've selected is temporarily unavailable. Please relaunch with '--model <model_id>' to use a different model.\n",
+    );
+    expect(err.name).toBe("TransientProviderError");
+    expect(err.message).toContain("model temporarily unavailable");
+  });
+
+  it("classifyExitError returns a plain error for other nonzero exits", () => {
+    const err = classifyExitError("generator", 1, "some other failure\n");
+    expect(err.name).toBe("Error");
+    expect(err.message).toBe("Agent generator exited with code 1");
+  });
+
+  it("invoke rejects with TransientProviderError when the CLI dies after an outage", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+
+    const promise = invoke({
+      role: "generator",
+      prompt: "build",
+      cwd: "/tmp/x",
+    });
+
+    proc.stdout.emit(
+      "data",
+      Buffer.from(
+        "The model you've selected is temporarily unavailable. Please relaunch with '--model <model_id>'.\n",
+      ),
+    );
+    proc.emit("exit", 1);
+
+    await expect(promise).rejects.toSatisfy(
+      (e: unknown) => (e as Error).name === "TransientProviderError",
+    );
+  });
+
+  it("invoke rejects with a plain error on a nonzero exit without the marker", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+
+    const promise = invoke({
+      role: "planner",
+      prompt: "plan",
+      cwd: "/tmp/x",
+    });
+
+    proc.stdout.emit("data", Buffer.from("normal output\n"));
+    proc.emit("exit", 3);
+
+    await expect(promise).rejects.toSatisfy(
+      (e: unknown) =>
+        (e as Error).name === "Error" &&
+        (e as Error).message === "Agent planner exited with code 3",
     );
   });
 });

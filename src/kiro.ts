@@ -7,7 +7,7 @@ import type {
   InvokeOptions,
   InvokeResult,
 } from "./agent-provider.js";
-import { CancelledError } from "./agent-provider.js";
+import { CancelledError, TransientProviderError } from "./agent-provider.js";
 import { createIdleWatcher } from "./idle-watcher.js";
 import { createBusyProbe } from "./busy-probe.js";
 import {
@@ -120,6 +120,35 @@ function agentFallbackMarker(agentName: string): string {
 }
 
 /**
+ * Output marker for a backend-side model outage. kiro-cli retries a
+ * handful of times over ~30 s, prints this, and exits nonzero — while
+ * observed outages last minutes. Matching it lets the orchestrator
+ * retry the invocation with real backoff instead of failing the slice
+ * (and the lane behind it). See ADR 0022 and issue #16.
+ */
+const TRANSIENT_OUTPUT_PATTERN = /temporarily unavailable/i;
+
+/** Bounded window of recent output kept for exit-failure classification. */
+const OUTPUT_TAIL_LIMIT = 16_384;
+
+/**
+ * Classify a nonzero exit: transient (model outage marker in the
+ * recent output) vs. everything else. Exported for tests.
+ */
+export function classifyExitError(
+  role: string,
+  exitCode: number,
+  outputTail: string,
+): Error {
+  if (TRANSIENT_OUTPUT_PATTERN.test(outputTail)) {
+    return new TransientProviderError(
+      `Agent ${role} exited with code ${exitCode} — model temporarily unavailable`,
+    );
+  }
+  return new Error(`Agent ${role} exited with code ${exitCode}`);
+}
+
+/**
  * Invoke kiro-cli chat in headless mode with a specific agent and prompt.
  * Streams stdout line-by-line for liveness detection. Kiro doesn't emit a
  * structured stream — see ADR 0004 for why we don't implement
@@ -186,6 +215,12 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     let termination: Promise<TerminationReport> | undefined;
     const busyProbe = createBusyProbe(proc.pid);
     let busyDescendants = 0;
+    // Recent combined output, kept bounded, for classifying a nonzero
+    // exit as transient (model outage) vs. real. See ADR 0022.
+    let outputTail = "";
+    const appendTail = (text: string) => {
+      outputTail = (outputTail + text).slice(-OUTPUT_TAIL_LIMIT);
+    };
 
     const settle = (finish: () => void) => {
       if (settled) return;
@@ -333,6 +368,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       stdoutChunks.push(text);
       logStream?.write(text);
       checkAgentFallback(text);
+      appendTail(text);
       if (stdoutProgress.update(text)) watcher.reset();
     });
 
@@ -340,6 +376,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       const text = chunk.toString();
       logStream?.write(text);
       checkAgentFallback(text);
+      appendTail(text);
       if (stderrProgress.update(text)) watcher.reset();
     });
 
@@ -357,7 +394,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       settle(() => {
         const exitCode = code ?? 1;
         if (exitCode !== 0) {
-          reject(new Error(`Agent ${role} exited with code ${exitCode}`));
+          reject(classifyExitError(role, exitCode, outputTail));
         } else {
           resolve({ exitCode, stdout: stdoutChunks.join(""), stats: {} });
         }

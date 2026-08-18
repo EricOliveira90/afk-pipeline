@@ -31,6 +31,7 @@ import type {
   InvokeOptions,
   InvokeResult,
 } from "./agent-provider.js";
+import { TransientProviderError } from "./agent-provider.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -2603,6 +2604,60 @@ describe("events.jsonl tee (spec #26)", () => {
     expect(deferral!.message).toContain("deferring idle kill");
     expect(deferral!.message).toContain("2 spawned process(es)");
     // Deferral is informational: the slice still completes normally.
+    const outcome = lines.find((l) => l.type === "slice-outcome");
+    expect(outcome!.slice.phase).toBe("PASS");
+  }, 60_000);
+
+  it("emits a backoff-retry warn when a transient model outage is retried (#29 / ADR 0022)", async () => {
+    const repo = makeRepo();
+    const slug = "events-backoff";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "9901", title: "Outage", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["9901", { files: ["src/o.txt"], qaPasses: true, outputFile: "src/o.txt", outputContent: "o" }],
+    ]);
+    const stub = buildStubProvider({ fixtures, slices, records: [] });
+    // First generator invocation dies with a provider-classified
+    // transient outage; the orchestrator retries with backoff.
+    let outageThrown = false;
+    const provider: AgentProvider = {
+      name: stub.name,
+      async invoke(options) {
+        if (options.role === "generator" && !outageThrown) {
+          outageThrown = true;
+          throw new TransientProviderError("model temporarily unavailable");
+        }
+        return stub.invoke(options);
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      // Test seam: skip the real 30s backoff sleep.
+      transientRetrySleep: async () => {},
+    });
+
+    const [runDir] = runDirsOf(repo, slug);
+    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const backoff = lines.find(
+      (l) => l.type === "warn" && l.reason === "backoff-retry",
+    );
+    expect(backoff).toBeDefined();
+    expect(backoff!.ghIssue).toBe("9901");
+    expect(backoff!.message).toContain("transient model outage");
+    expect(backoff!.message).toContain("retry 1");
+    // The retry succeeded: the slice still passes.
     const outcome = lines.find((l) => l.type === "slice-outcome");
     expect(outcome!.slice.phase).toBe("PASS");
   }, 60_000);

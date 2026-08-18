@@ -57,6 +57,23 @@ describe("parsePipelineRuntimeOptions", () => {
     expect(parsePipelineRuntimeOptions([]).maxAgentDurationMs).toBeUndefined();
   });
 
+  it("parses the transient retry window, allowing 0 to disable (ADR 0022)", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--transient-retry-window-ms", "600000"])
+        .transientRetryWindowMs,
+    ).toBe(600_000);
+    expect(
+      parsePipelineRuntimeOptions(["--transient-retry-window-ms", "0"])
+        .transientRetryWindowMs,
+    ).toBe(0);
+    expect(
+      parsePipelineRuntimeOptions([]).transientRetryWindowMs,
+    ).toBeUndefined();
+    expect(() =>
+      parsePipelineRuntimeOptions(["--transient-retry-window-ms", "-5"]),
+    ).toThrow("--transient-retry-window-ms");
+  });
+
   it("enables serial lane execution explicitly", () => {
     expect(parsePipelineRuntimeOptions(["--serial-lanes"]).serialLanes).toBe(true);
   });
