@@ -1003,6 +1003,10 @@ export function prepareSliceWorktree(ctx: SliceContext): void {
     // no teardown — this is the lane-successor refresh arriving right
     // after its own recreateWorktreeFromBase. Recreating again would be
     // wasted work and a misleading "restarting" line in the run log.
+    // A genuine retry can also land here (death before the first
+    // commit, nothing dirty): its worktree is literally identical to a
+    // fresh one, and the retry itself is already announced by
+    // runPipeline's "Retrying #id (previous run: ...)" line.
     const alreadyAtBase =
       facts.worktreeRegistered &&
       git.resolveCommit(repoRoot, ctx.branch) ===

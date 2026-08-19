@@ -74,7 +74,8 @@ Your contract was locked before you died; the world has moved since.
   alternative test runners.
 - **Let long-running commands stream.** Never pipe a test suite or
   build through output-buffering filters. A silent suite looks hung to
-  the pipeline's liveness watchdog; streaming output is your heartbeat.
+  the pipeline's idle-timeout watchdog; streaming output is what keeps
+  the idle timer reset.
 - If `contract.md` Status is not `LOCKED`, stop and report immediately.
 
 # Required reading

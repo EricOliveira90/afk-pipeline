@@ -352,10 +352,12 @@ export function isWorktreeRegistered(
  * was lost. See the design note on issue #15.
  *
  * `excludePaths` (gitignore-style patterns, repo-relative) survive the
- * clean. The caller passes the specs dir so uncommitted slice
- * artifacts (context.md, contract.md, feedback) outlive the reset —
+ * clean. The caller passes the specs dir so *untracked* slice
+ * artifacts (context.md, contract.md, feedback) outlive the clean —
  * the contract is reused verbatim on resume and explorer/planner stay
- * skipped, which is only possible if their artifacts survive.
+ * skipped, which is only possible if their artifacts survive. Tracked
+ * modifications are still reverted by the reset regardless of
+ * excludes; slice artifacts are untracked until a slice passes QA.
  */
 export function resetWorktreeToHead(
   worktreeDir: string,

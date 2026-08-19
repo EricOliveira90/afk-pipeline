@@ -11,7 +11,8 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline } from "./orchestrator.js";
+import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestrator.js";
+import { Logger } from "./logger.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 
@@ -97,6 +98,8 @@ interface PromptRecord {
   dirtyFilePresent: boolean;
   /** Whether the sibling commit that advanced the feature branch was visible. */
   featureFilePresent: boolean;
+  /** Whether BOTH colliding migration files (slice's + feature's) were visible. */
+  migrationCollisionPresent: boolean;
 }
 
 /**
@@ -118,6 +121,9 @@ function buildProvider(opts: {
         prompt: options.prompt,
         dirtyFilePresent: existsSync(join(cwd, "src", "half-written.ts")),
         featureFilePresent: existsSync(join(cwd, "src", "sibling.ts")),
+        migrationCollisionPresent:
+          existsSync(join(cwd, "supabase", "migrations", "125_slice_work.sql")) &&
+          existsSync(join(cwd, "supabase", "migrations", "125_sibling.sql")),
       });
       const artifactDir = findSliceArtifactDir(cwd, "01");
       if (role === "explorer" && artifactDir) {
@@ -177,7 +183,14 @@ describe("retried slice resume (spec #33)", () => {
       generator: (cwd) => {
         mkdirSync(join(cwd, "src"), { recursive: true });
         writeFileSync(join(cwd, "src", "work.ts"), "export const done = 1;\n", "utf-8");
-        git(cwd, ["add", "src/work.ts"]);
+        // The slice claims migration prefix 125 before dying (#38 AC4).
+        mkdirSync(join(cwd, "supabase", "migrations"), { recursive: true });
+        writeFileSync(
+          join(cwd, "supabase", "migrations", "125_slice_work.sql"),
+          "select 1;\n",
+          "utf-8",
+        );
+        git(cwd, ["add", "src/work.ts", "supabase/migrations/125_slice_work.sql"]);
         git(cwd, ["commit", "-m", "feat(#4001): committed before death"]);
         const artifactDir = findSliceArtifactDir(cwd, "01")!;
         writeFileSync(
@@ -210,7 +223,11 @@ describe("retried slice resume (spec #33)", () => {
     git(repo, ["checkout", `feat-stub/${slug}`]);
     mkdirSync(join(repo, "src"), { recursive: true });
     writeFileSync(join(repo, "src", "sibling.ts"), "export const sibling = 1;\n", "utf-8");
-    git(repo, ["add", "src/sibling.ts"]);
+    // A sibling slice claimed the SAME migration prefix under a
+    // different filename while this slice was dead (#38 AC4).
+    mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
+    writeFileSync(join(repo, "supabase", "migrations", "125_sibling.sql"), "select 2;\n", "utf-8");
+    git(repo, ["add", "src/sibling.ts", "supabase/migrations/125_sibling.sql"]);
     git(repo, ["commit", "-m", "feat: sibling slice merged while dead"]);
     git(repo, ["checkout", "main"]);
 
@@ -220,6 +237,13 @@ describe("retried slice resume (spec #33)", () => {
     const resumingProvider = buildProvider({
       records,
       generator: (cwd) => {
+        // Follow the prompt's migration-prefix rule: renumber to the
+        // next free prefix so the slice can merge cleanly.
+        git(cwd, [
+          "mv",
+          "supabase/migrations/125_slice_work.sql",
+          "supabase/migrations/126_slice_work.sql",
+        ]);
         writeFileSync(join(cwd, "src", "finish.ts"), "export const finished = 1;\n", "utf-8");
         git(cwd, ["add", "src/finish.ts"]);
         git(cwd, ["commit", "-m", "feat(#4001): finished after resume"]);
@@ -267,6 +291,10 @@ describe("retried slice resume (spec #33)", () => {
 
     // #38: the fresh handoff (written after the last commit) is spliced
     // in, and the reconciliation rules are present verbatim.
+    // #38 AC4: the worktree really holds a migration-prefix collision
+    // (its own 125_* plus the sibling's 125_* merged in), and the
+    // prompt names the renumber rule.
+    expect(generatorRecord!.migrationCollisionPresent).toBe(true);
     expect(prompt).toContain("Checkpoint: behavior A done, starting behavior B.");
     expect(prompt).toContain("the current tree wins over the contract");
     expect(prompt).toContain("renumber yours to the next free prefix");
@@ -575,4 +603,102 @@ describe("retried slice resume (spec #33)", () => {
       /restarting from base \(no commits beyond base\)/,
     );
   }, 120_000);
+});
+
+
+/**
+ * Cheaper checks at the worktree-preparation seam: `prepareSliceWorktree`
+ * is the exported orchestrator unit that inspects git state, decides,
+ * and mutates the worktree. No agent invocations needed.
+ */
+describe("prepareSliceWorktree", () => {
+  const stubProvider: AgentProvider = {
+    name: "stub",
+    invoke: async () => ({ exitCode: 0, stdout: "", stats: {} }),
+  };
+
+  function makeCtx(
+    repo: string,
+    slug: string,
+    slice: Slice,
+    forceRestart?: string[],
+  ) {
+    return makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir: join(repo, ".kiro", "specs", slug),
+        specsDir: join(".kiro", "specs", slug),
+        dag: buildDAG([slice]),
+        provider: stubProvider,
+        ...(forceRestart ? { forceRestart } : {}),
+      },
+      slice,
+      new Logger(repo, `${slug}-stub`),
+      `feat-stub/${slug}`,
+      "- README.md",
+      "pnpm test",
+    );
+  }
+
+  function sliceAt(number: string, ghIssue: string): Slice {
+    return { number, ghIssue, title: `S${number}`, type: "AFK", blockedBy: [], userStories: "" };
+  }
+
+  /** Create the feature branch, the slice worktree, and one commit in it. */
+  function seedResumableSlice(repo: string, ctx: ReturnType<typeof makeCtx>) {
+    git(repo, ["branch", ctx.featBranch]);
+    execFileSync("git", ["worktree", "add", "-b", ctx.branch, ctx.worktreeDir, ctx.featBranch], {
+      cwd: repo, encoding: "utf-8",
+    });
+    mkdirSync(join(ctx.worktreeDir, "src"), { recursive: true });
+    writeFileSync(join(ctx.worktreeDir, "src", `work-${ctx.slice.number}.ts`), "export {};\n", "utf-8");
+    git(ctx.worktreeDir, ["add", "-A"]);
+    git(ctx.worktreeDir, ["commit", "-m", `feat(#${ctx.slice.ghIssue}): work`]);
+  }
+
+  it("a feature branch that has not moved is a no-op refresh and still resumes (#35)", () => {
+    const repo = makeRepo();
+    const ctx = makeCtx(repo, "noop-refresh", sliceAt("01", "4001"));
+    seedResumableSlice(repo, ctx);
+    const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
+
+    prepareSliceWorktree(ctx);
+
+    // Resumed — and the no-op merge added no commit.
+    expect(ctx.resume).toBeDefined();
+    expect(ctx.resume!.commitsAhead).toBe(1);
+    expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
+  });
+
+  it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", () => {
+    const repo = makeRepo();
+    const slug = "multi-force";
+    const forced = ["01", "4003"]; // slice 01 by number, slice 03 by GH issue
+    const contexts = [
+      makeCtx(repo, slug, sliceAt("01", "4001"), forced),
+      makeCtx(repo, slug, sliceAt("02", "4002"), forced),
+      makeCtx(repo, slug, sliceAt("03", "4003"), forced),
+    ];
+    git(repo, ["branch", contexts[0]!.featBranch]);
+    for (const ctx of contexts) {
+      execFileSync("git", ["worktree", "add", "-b", ctx.branch, ctx.worktreeDir, ctx.featBranch], {
+        cwd: repo, encoding: "utf-8",
+      });
+      mkdirSync(join(ctx.worktreeDir, "src"), { recursive: true });
+      writeFileSync(join(ctx.worktreeDir, "src", `work-${ctx.slice.number}.ts`), "export {};\n", "utf-8");
+      git(ctx.worktreeDir, ["add", "-A"]);
+      git(ctx.worktreeDir, ["commit", "-m", `feat(#${ctx.slice.ghIssue}): work`]);
+    }
+
+    for (const ctx of contexts) prepareSliceWorktree(ctx);
+
+    expect(contexts[0]!.resume).toBeUndefined(); // forced by slice number
+    expect(contexts[1]!.resume).toBeDefined(); // unnamed — resumes
+    expect(contexts[2]!.resume).toBeUndefined(); // forced by GH issue id
+    // Forced slices really went back to base.
+    expect(git(repo, ["rev-parse", contexts[0]!.branch])).toBe(
+      git(repo, ["rev-parse", contexts[0]!.featBranch]),
+    );
+  });
 });
