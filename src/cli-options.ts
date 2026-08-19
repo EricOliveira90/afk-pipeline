@@ -48,6 +48,13 @@ export interface PipelineRuntimeOptions {
    * PM verdict can be overridden — infrastructure failures cannot.
    */
   openPrOnOverride?: boolean;
+  /**
+   * Slices the operator forces to restart from base regardless of
+   * resume eligibility (#37) — for worktrees a human has judged bad.
+   * Values are slice numbers or GH issue ids; repeatable and
+   * comma-separated on the CLI. No --force-resume inverse in v1.
+   */
+  forceRestart?: string[];
   sharedPreview?: {
     verifyMigrationCommand: string;
     applyMigrationCommand: string;
@@ -81,6 +88,33 @@ function parseIntegerOption(
   return parsed;
 }
 
+/**
+ * Collect every occurrence of a repeatable flag, splitting each value
+ * on commas. `--force-restart 05 --force-restart 07,4001` yields
+ * `["05", "07", "4001"]`. Values must be slice numbers or GH issue ids
+ * (digits only — zero padding preserved).
+ */
+function parseForceRestart(args: readonly string[]): string[] | undefined {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== "--force-restart") continue;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--force-restart requires a slice number or GH issue id");
+    }
+    for (const part of value.split(",").map((p) => p.trim())) {
+      if (!/^\d+$/.test(part)) {
+        throw new Error(
+          "--force-restart must be a comma-separated list of slice numbers or GH issue ids",
+        );
+      }
+      values.push(part);
+    }
+    i++;
+  }
+  return values.length > 0 ? values : undefined;
+}
+
 /** Parse runtime controls shared by all AFK provider CLIs. */
 export function parsePipelineRuntimeOptions(
   args: readonly string[],
@@ -112,6 +146,7 @@ export function parsePipelineRuntimeOptions(
   );
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
+  const forceRestart = parseForceRestart(args);
   const verifyMigrationCommand = optionValue(args, "--preview-verify-command");
   const applyMigrationCommand = optionValue(args, "--preview-apply-command");
   if ((verifyMigrationCommand === undefined) !== (applyMigrationCommand === undefined)) {
@@ -126,6 +161,7 @@ export function parsePipelineRuntimeOptions(
     maxAgentDurationMs,
     serialLanes,
     openPrOnOverride,
+    forceRestart,
     sharedPreview: verifyMigrationCommand && applyMigrationCommand
       ? {
           verifyMigrationCommand,

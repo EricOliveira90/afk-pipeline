@@ -120,3 +120,51 @@ describe("parsePipelineRuntimeOptions", () => {
       .toThrow(/requires a value/);
   });
 });
+
+
+/**
+ * --force-restart (#37): operator override that forces named slices to
+ * restart from base regardless of resume eligibility. Repeatable and
+ * comma-separated; values are slice numbers or GH issue ids.
+ */
+describe("parsePipelineRuntimeOptions --force-restart", () => {
+  it("is undefined when the flag is absent", () => {
+    expect(parsePipelineRuntimeOptions([]).forceRestart).toBeUndefined();
+  });
+
+  it("parses a single slice", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--force-restart", "05"]).forceRestart,
+    ).toEqual(["05"]);
+  });
+
+  it("parses a comma-separated list, trimming whitespace", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--force-restart", "05, 4001"]).forceRestart,
+    ).toEqual(["05", "4001"]);
+  });
+
+  it("is repeatable — occurrences accumulate", () => {
+    expect(
+      parsePipelineRuntimeOptions([
+        "--force-restart", "05",
+        "--force-restart", "07",
+      ]).forceRestart,
+    ).toEqual(["05", "07"]);
+  });
+
+  it.each(["", "05,", "abc", "05 07"])(
+    "rejects invalid value %j",
+    (value) => {
+      expect(() =>
+        parsePipelineRuntimeOptions(["--force-restart", value]),
+      ).toThrow(/--force-restart/);
+    },
+  );
+
+  it("rejects a missing value", () => {
+    expect(() => parsePipelineRuntimeOptions(["--force-restart"])).toThrow(
+      /--force-restart/,
+    );
+  });
+});
