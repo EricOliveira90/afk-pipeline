@@ -103,7 +103,7 @@ describe("invoke spawn args", () => {
     expect(args).not.toContain("--bare");
   });
 
-  it("uses Sonnet for explorer and Opus for other roles", async () => {
+  it("uses Opus for every pipeline role", async () => {
     const explorerProc = makeFakeProc();
     const plannerProc = makeFakeProc();
     spawnMock
@@ -129,7 +129,7 @@ describe("invoke spawn args", () => {
     const explorerArgs = spawnMock.mock.calls[0]![1] as string[];
     const plannerArgs = spawnMock.mock.calls[1]![1] as string[];
     expect(explorerArgs[explorerArgs.indexOf("--model") + 1]).toBe(
-      "claude-sonnet-5",
+      "claude-opus-5",
     );
     expect(plannerArgs[plannerArgs.indexOf("--model") + 1]).toBe(
       "claude-opus-5",
@@ -159,6 +159,7 @@ describe("invoke spawn args", () => {
     // explicitly.
     expect(args).toContain("--add-dir");
     expect(args[args.indexOf("--add-dir") + 1]).toBe("/tmp/x");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-opus-5");
     // --bare strips plugin-loaded agents, so passing --agent would
     // resolve to the default agent and waste a CLI flag.
     expect(args).not.toContain("--agent");

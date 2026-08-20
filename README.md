@@ -355,7 +355,7 @@ Before your first run with reviews enabled:
 | Backend | Strengths | Trade-offs |
 |---------|-----------|------------|
 | Kiro | Default; persona-rich agent configs; Fable for most roles and Sonnet for explorer | Opaque stream — no cost/tool-call stats |
-| Claude Code | Streamed JSON; Opus for most roles and Sonnet for explorer; cost + tool calls in run-summary.md | Requires `claude` CLI auth |
+| Claude Code | Streamed JSON; Opus 5 for every pipeline role; cost + tool calls in run-summary.md | Requires `claude` CLI auth |
 | Codex | Ephemeral JSONL sessions; tool-call stats; prompt-only guardians | Requires managed CLI auth; fixed `openai.gpt-5.6-sol` model |
 
 All providers share the orchestrator, prompts, artifact format, and DAG semantics. Codex runs `explorer` at medium reasoning effort and every other role at high effort. Provider failures are explicit and never fall back to another provider.
