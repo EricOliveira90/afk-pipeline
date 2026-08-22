@@ -236,8 +236,13 @@ async function main() {
   console.log("\n" + result.consoleSummary);
 
   if (!result.success) {
+    // A run that dispatched nothing reports why, naming each unrun slice
+    // and its blockers, instead of the generic per-slice failure line
+    // (issue #42). Either way the exit code is unchanged.
     console.error(
-      "\nPipeline completed with failures. Check logs and stuck.md files.",
+      "\n" +
+        (result.failureReason ??
+          "Pipeline completed with failures. Check logs and stuck.md files."),
     );
     process.exit(1);
   }

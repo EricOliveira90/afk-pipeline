@@ -833,6 +833,120 @@ describe("runPipeline lane scheduling", () => {
   }, 60_000);
 });
 
+/**
+ * A run that dispatches nothing must say so and fail (issue #42). The
+ * honest signal is `PipelineResult.success`, and `failureReason` carries
+ * the diagnostic the three entrypoints print before their existing
+ * non-zero exit — the same per-slice hold-back the NOT-RUN log lines
+ * already spell out.
+ */
+describe("runPipeline zero-dispatch outcome (issue #42)", () => {
+  it("is unsuccessful and names every unrun slice with its unresolved blockers", async () => {
+    const repo = makeRepo();
+    const slug = "zero-dispatch-blocked";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "5001",
+        title: "Held back",
+        type: "AFK",
+        blockedBy: ["4999"],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "5002",
+        title: "Also held back",
+        type: "AFK",
+        blockedBy: ["5001"],
+        userStories: "",
+      },
+    ];
+    const records: InvocationRecord[] = [];
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: new Map<string, SliceFixture>(),
+        slices,
+        records,
+      }),
+    });
+
+    // Nothing was dispatched, so no agent was ever invoked — including
+    // the guardian reviewers, which must not grade an untouched branch.
+    expect(records).toEqual([]);
+    expect(result.success).toBe(false);
+    const reason = result.failureReason ?? "";
+    expect(reason).toContain("no slices");
+    expect(reason).toContain("#5001 Held back");
+    expect(reason).toContain("#4999 (outside run scope)");
+    expect(reason).toContain("#5002 Also held back");
+    expect(reason).toContain("#5001");
+  }, 60_000);
+
+  it("stays successful when it dispatched nothing because every slice was already complete", async () => {
+    const repo = makeRepo();
+    const slug = "zero-dispatch-complete";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "5101",
+        title: "Done last run",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    // A prior run merged the slice. Its persisted PASS is authoritative,
+    // so this run has nothing to dispatch and that is not a failure.
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      join(repo, ".afk", "state", `${slug}-stub.json`),
+      JSON.stringify({
+        version: 1,
+        prdSlug: `${slug}-stub`,
+        featureBranch: `feat-stub/${slug}`,
+        slices: {
+          "5101": {
+            phase: "PASS",
+            branch: `afk-stub/${slug}-s01`,
+            mergedToFeature: true,
+          },
+        },
+      }),
+      "utf-8",
+    );
+    const records: InvocationRecord[] = [];
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: new Map<string, SliceFixture>(),
+        slices,
+        records,
+      }),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.failureReason).toBeUndefined();
+    // No slice work ran; only the post-merge guardian reviews.
+    expect(
+      records.every((record) => record.role.endsWith("-review")),
+    ).toBe(true);
+  }, 60_000);
+});
+
 function firstTimestamp(
   records: InvocationRecord[],
   ghIssue: string,
