@@ -619,6 +619,25 @@ export function sliceWorktreeDir(
   );
 }
 
+/**
+ * Throwaway checkout the merge of a slice branch happens in when the
+ * feature branch has no worktree of its own. Shared by the wave's first
+ * merge attempt and the next run's merge-only recovery (ADR 0025), which
+ * must target the same directory.
+ */
+export function sliceScratchMergeDir(
+  repoRoot: string,
+  prdSlug: string,
+  slice: Slice,
+  provider: AgentProvider,
+): string {
+  return join(
+    repoRoot,
+    ".afk",
+    `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+  );
+}
+
 function featureBranch(prdSlug: string, provider: AgentProvider): string {
   return `${featureBranchPrefix(provider)}/${prdSlug}`;
 }
@@ -1662,6 +1681,14 @@ export async function runPipeline(
   // merge-only recovery pass tries the merge again before any agent runs.
   const mergePending = new Set<string>();
 
+  /**
+   * A slice this run will not dispatch again, for any reason short of
+   * success. One predicate so a new hold-back reason is one edit, not
+   * three filter sites plus a sweep condition.
+   */
+  const heldBack = (id: string): boolean =>
+    failed.has(id) || laneCancelled.has(id) || mergePending.has(id);
+
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
   // (spec #26) share one call site each, so the human line and its
@@ -1882,6 +1909,9 @@ export async function runPipeline(
   // current feature-branch tip, exactly as the original attempt did: this
   // recovery is no less safe than the merge it is repeating.
   for (const [id, slice] of dag.slices) {
+    // Ctrl-C during recovery stops it where it stands; the wave loop's
+    // abort sweep marks whatever is left (ADR 0003).
+    if (signal?.aborted) break;
     const prior = runState.slices[id];
     if (prior?.phase !== "MERGE-PENDING") continue;
 
@@ -1914,10 +1944,11 @@ export async function runPipeline(
       continue;
     }
 
-    const scratchMergeDir = join(
+    const scratchMergeDir = sliceScratchMergeDir(
       repoRoot,
-      ".afk",
-      `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+      prdSlug,
+      slice,
+      provider,
     );
     const attempt = await mergeMutex(() =>
       Promise.resolve(
@@ -1979,12 +2010,7 @@ export async function runPipeline(
     const readyResult = await Promise.race([
       Promise.resolve().then(() => {
         const ready = dag.ready(completed);
-        return ready.filter(
-          (id) =>
-            !failed.has(id) &&
-            !laneCancelled.has(id) &&
-            !mergePending.has(id),
-        );
+        return ready.filter((id) => !heldBack(id));
       }),
       new Promise<never>((_, reject) => {
         const timer = setTimeout(() => {
@@ -2063,10 +2089,7 @@ export async function runPipeline(
 
     // If no progress was made this round, we're stuck.
     const newReady = dag.ready(completed);
-    const newToRun = newReady.filter(
-      (id) =>
-        !failed.has(id) && !laneCancelled.has(id) && !mergePending.has(id),
-    );
+    const newToRun = newReady.filter((id) => !heldBack(id));
     if (newToRun.length === 0) break;
   }
 
@@ -2079,14 +2102,7 @@ export async function runPipeline(
   // warn event for `afk status` (spec #26).
   for (const [id, slice] of dag.slices) {
     if (slice.type === "HITL") continue;
-    if (
-      completed.has(id) ||
-      failed.has(id) ||
-      laneCancelled.has(id) ||
-      mergePending.has(id)
-    ) {
-      continue;
-    }
+    if (completed.has(id) || heldBack(id)) continue;
     const unresolved = slice.blockedBy.filter((dep) => !completed.has(dep));
     const blockerText =
       unresolved.length > 0

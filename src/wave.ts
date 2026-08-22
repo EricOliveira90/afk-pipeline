@@ -12,7 +12,7 @@ import {
   runSliceNegotiate,
   runSliceExecute,
   sliceBranch,
-  sliceBranchPrefix,
+  sliceScratchMergeDir,
   isCancelled,
 } from "./orchestrator.js";
 import { kiroProvider } from "./kiro.js";
@@ -267,7 +267,10 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     lanesToRun.map(async (lane) => {
       // Announce that the lane survives a member's failure — the exact
       // collateral-cancel spot pre-ADR 0024.
-      const continueLane = (failedIndex: number, phase: string) => {
+      const continueLane = (
+        failedIndex: number,
+        phase: Exclude<WaveOutcomePhase, "PASS">,
+      ) => {
         const rest = lane.slice(failedIndex + 1).map((s) => `#${s.ghIssue}`);
         if (rest.length === 0) return;
         // A deferred merge is not a failure — say so, or the operator
@@ -415,10 +418,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             continue;
           }
 
-          const scratchMergeDir = join(
+          const scratchMergeDir = sliceScratchMergeDir(
             repoRoot,
-            ".afk",
-            `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+            prdSlug,
+            slice,
+            provider,
           );
           // Collision check + merge share one critical section: checking
           // against the feature-branch tip and then merging must be atomic,
@@ -482,7 +486,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
 function negotiateRefreshOutcome(
   result: "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED",
-): WaveOutcome {
+): Exclude<WaveOutcome, { phase: "PASS" }> {
   switch (result) {
     case "CANCELLED":
       return { phase: "CANCELLED", error: "Cancelled by user" };

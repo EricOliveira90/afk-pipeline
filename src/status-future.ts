@@ -271,7 +271,7 @@ export function buildFutureSection(input: {
   }
 
   /** Phase that ended a slice's work this run, if any. */
-  const failurePhaseOf = (ghIssue: string): string | undefined => {
+  const terminalPhaseOf = (ghIssue: string): string | undefined => {
     const phase = facts.outcomePhase.get(ghIssue);
     return phase !== undefined && TERMINAL_THIS_RUN_PHASES.has(phase)
       ? phase
@@ -288,11 +288,11 @@ export function buildFutureSection(input: {
 
   /** Why a blocker still blocks, for waitsOn annotations. */
   const blockerStatus = (ghIssue: string): string => {
-    const failure = failurePhaseOf(ghIssue);
-    if (failure === "MERGE-PENDING") {
+    const terminal = terminalPhaseOf(ghIssue);
+    if (terminal === "MERGE-PENDING") {
       return "MERGE-PENDING — the next run retries the merge";
     }
-    if (failure !== undefined) return failure;
+    if (terminal !== undefined) return terminal;
     if (hitl.has(ghIssue)) return "HITL";
     if (facts.hasPhaseEvents.has(ghIssue)) return "in flight";
     return "pending";
@@ -310,7 +310,7 @@ export function buildFutureSection(input: {
         continue;
       }
       if (completed.has(id)) continue;
-      if (failurePhaseOf(id) !== undefined) continue; // terminal this run
+      if (terminalPhaseOf(id) !== undefined) continue; // terminal this run
       pending.push({
         ghIssue: id,
         title: slice.title,
@@ -350,7 +350,7 @@ export function buildFutureSection(input: {
     // Degraded mode: derive pending slices from the event stream alone.
     for (const id of facts.seenSlices) {
       if (completed.has(id)) continue;
-      if (failurePhaseOf(id) !== undefined) continue;
+      if (terminalPhaseOf(id) !== undefined) continue;
       if (hitl.has(id)) {
         skipped.push({ ghIssue: id, title: facts.titles.get(id) ?? "" });
         continue;
