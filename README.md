@@ -228,14 +228,18 @@ Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. Th
 
 ## Exit Status
 
-`afk`, `afk-claude`, and `afk-codex` all exit 0 only when the run
-produced a shippable branch — every selected slice merged **and** a draft
-PR opened. All slices passing is not enough: a failed pre-ship sanity
-gate, or a guardian verdict that is unfavorable or absent, exits non-zero
-with a one-line reason so wrapper scripts and CI notice. The one
-exception is `--open-pr-on-override`: when it opened the draft PR despite
+`afk`, `afk-claude`, and `afk-codex` all exit 0 only when the run cleared
+every gate to shipping. All slices passing is not enough: a failed
+pre-ship sanity gate, or a guardian verdict that is unfavorable or absent
+(`UNPARSEABLE`, or an infrastructure class whose retries were exhausted),
+exits non-zero with a one-line reason so wrapper scripts and CI notice.
+`--open-pr-on-override` is the exception: when it cleared the gate despite
 an unfavorable PM verdict, the run exits 0 and the override note is
-recorded in the PR body and `run-summary.md` (ADR 0015). There is no
+recorded in the PR body and `run-summary.md` (ADR 0015).
+
+The gate is the decision to open the draft PR, not the `git push` /
+`gh pr create` calls that follow it — those stay best-effort, so a run
+with no `origin` or no `gh` auth still exits 0. There is no
 per-failure-class exit code; a second Ctrl-C still exits 130.
 
 ## Error Handling

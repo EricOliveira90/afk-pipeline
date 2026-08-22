@@ -1890,19 +1890,75 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       const { repo, prdDir, specsDir, slices, baseProvider } =
         makePassingSliceSetup(slug, "7402");
 
-      // The bare stub writes no review file at all, so both verdicts come
-      // back UNPARSEABLE — an absent judgment, not an unfavorable one.
+      // The PM finishes and writes a review, but with no recognizable
+      // verdict marker — an absent judgment, not an unfavorable one, and
+      // not an override the operator can record disagreement with.
+      const provider: AgentProvider = {
+        name: baseProvider.name,
+        async invoke(options) {
+          if (options.role === "architect-review") {
+            writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          if (options.role === "pm-review") {
+            const dir = join(options.cwd, ".kiro", "specs", slug);
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(
+              join(dir, "review-pm.md"),
+              "# Guardian Review\n\nI reviewed the branch and have thoughts.\n",
+              "utf-8",
+            );
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          return baseProvider.invoke(options);
+        },
+      };
+
       const result = await runPipeline({
         repoRoot: repo,
         prdSlug: slug,
         prdDir,
         specsDir,
         dag: buildDAG(slices),
-        provider: baseProvider,
+        // Even with the override flag on, an absent judgment is not
+        // overridable (ADR 0015) — so the run stays unsuccessful.
+        openPrOnOverride: true,
+        provider,
       });
 
       expect(result.success).toBe(false);
-      expect(result.failureReason).toContain("UNPARSEABLE");
+      expect(result.failureReason).toContain("PM: UNPARSEABLE");
+    }, 60_000);
+
+    it("is unsuccessful when cancellation landed after the last merge but before the ship gates", async () => {
+      const slug = "exit-cancelled-preship";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7406");
+
+      // Abort as soon as the slice's QA lands: the merge completes, so
+      // every slice is PASS, but the sanity gate and guardians never run.
+      const controller = new AbortController();
+      const provider: AgentProvider = {
+        name: baseProvider.name,
+        async invoke(options) {
+          const result = await baseProvider.invoke(options);
+          if (options.role === "evaluator-qa") controller.abort();
+          return result;
+        },
+      };
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider,
+        signal: controller.signal,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("cancelled");
     }, 60_000);
 
     it("is unsuccessful when the pre-ship sanity gate failed, naming the failing step", async () => {

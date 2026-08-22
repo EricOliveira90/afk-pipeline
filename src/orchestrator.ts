@@ -557,6 +557,18 @@ export interface PipelineResult {
 }
 
 /**
+ * The line every entrypoint prints for an unsuccessful run. Lives here,
+ * next to the result it reads, so `afk`, `afk-claude`, and `afk-codex`
+ * cannot drift apart: the exit contract is the same for all three, and
+ * ADR 0015 keeps it free of per-binary logic.
+ */
+export function formatRunFailure(result: PipelineResult): string {
+  return result.failureReason
+    ? `Pipeline did not ship: ${result.failureReason}`
+    : "Pipeline completed with failures. Check logs and stuck.md files.";
+}
+
+/**
  * Thrown by `runPipeline` when an exception escapes the per-slice
  * try/catch blocks. Carries the partial `PipelineResult` so the CLI
  * can still emit a summary instead of just `Fatal error: …`.
@@ -1961,7 +1973,20 @@ export async function runPipeline(
   const afkSlices = [...dag.slices.values()].filter((s) => s.type === "AFK");
   const allPassed = afkSlices.every((s) => completed.has(s.ghIssue));
 
-  if (allPassed && afkSlices.length > 0 && !signal?.aborted) {
+  /** Every slice merged, so the branch is ready for the ship gates. */
+  const readyForShipGates = allPassed && afkSlices.length > 0;
+
+  if (readyForShipGates && signal?.aborted) {
+    // Cancelled in the window between the last merge and the post-merge
+    // phase: every slice passed, but nothing gated or reviewed the feature
+    // branch and no PR opened, so the run did not ship (issue #43). The
+    // cancellation exit path itself is untouched — a second Ctrl-C still
+    // hard-exits 130 before this is ever read.
+    shipBlocker =
+      "cancelled before the pre-ship sanity gate and guardian reviews ran";
+  }
+
+  if (readyForShipGates && !signal?.aborted) {
     // Reviews need a worktree on the feature branch. Prefer an existing
     // checkout (commonly the main repo) — `git worktree add` refuses to
     // check out the same branch twice. Fall back to a scratch worktree
@@ -2018,9 +2043,10 @@ export async function runPipeline(
       }
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
-        shipBlocker = `pre-ship sanity gate failed (${sanity.failures.join(", ")}) — guardian reviews and PR creation were skipped`;
+        const failedSteps = sanity.failures.join(", ");
+        shipBlocker = `pre-ship sanity gate failed (${failedSteps}) — guardian reviews and PR creation were skipped`;
         logger.phase(
-          `  ❌ Pre-ship sanity gate failed: ${sanity.failures.join(", ")}. Skipping guardian reviews and PR creation.`,
+          `  ❌ Pre-ship sanity gate failed: ${failedSteps}. Skipping guardian reviews and PR creation.`,
         );
       } else {
         logger.phase("  ✅ Pre-ship sanity gate passed.", "log");

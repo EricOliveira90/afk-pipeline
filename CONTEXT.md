@@ -214,10 +214,11 @@ and the run is a **blocked ship**.
 _Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
 
 **Blocked ship**:
-A run whose slices all passed and merged but which produced no draft PR —
-a failed **pre-ship sanity gate**, or a guardian verdict that was
-unfavorable or absent (`UNPARSEABLE` / an exhausted infrastructure
-retry). Reported as an unsuccessful `PipelineResult` with a
+A run whose slices all passed and merged but which never cleared the gate
+to a draft PR — a failed **pre-ship sanity gate**, a guardian verdict that
+was unfavorable or absent (`UNPARSEABLE` / an exhausted infrastructure
+retry), or a **cancellation** that landed before those gates ran.
+Reported as an unsuccessful `PipelineResult` with a
 `failureReason`, so `afk`, `afk-claude`, and `afk-codex` all exit
 non-zero. A draft PR opened by `--open-pr-on-override` is not a blocked
 ship: the recorded override note is the operator's acknowledgement, and

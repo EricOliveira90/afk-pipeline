@@ -3,6 +3,7 @@ import { resolve, basename, join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
 import {
+  formatRunFailure,
   runPipeline,
   PipelineError,
   type MigrationValidation,
@@ -219,14 +220,7 @@ async function main() {
   console.log("\n" + result.consoleSummary);
 
   if (!result.success) {
-    // A blocked ship verdict or a failed pre-ship sanity gate is a failure
-    // even when every slice passed, and `failureReason` is the only place
-    // that says so (issue #43).
-    console.error(
-      result.failureReason
-        ? `\nPipeline did not ship: ${result.failureReason}`
-        : "\nPipeline completed with failures. Check logs and stuck.md files.",
-    );
+    console.error("\n" + formatRunFailure(result));
     process.exit(1);
   }
 
