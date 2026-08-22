@@ -804,7 +804,10 @@ describe("runPipeline lane scheduling", () => {
       provider: buildStubProvider({ fixtures, slices, records }),
     });
 
-    expect(result.success).toBe(true);
+    // The selected slice passed and merged; the run itself is unsuccessful
+    // because the stub's no-op reviews leave no verdict to ship on
+    // (issue #43) — which is why the handoff below records FAILED.
+    expect(result.success).toBe(false);
     expect(records.some((record) => record.ghIssue === "4001")).toBe(true);
     expect(records.some((record) => record.ghIssue === "4002")).toBe(false);
 
@@ -819,7 +822,7 @@ describe("runPipeline lane scheduling", () => {
     const handoff = JSON.parse(
       readFileSync(join(repo, ".afk", "logs", `${slug}-stub`, "handoff.json"), "utf-8"),
     );
-    expect(handoff.runStatus).toBe("SUCCEEDED");
+    expect(handoff.runStatus).toBe("FAILED");
     expect(handoff.selectedSlices).toMatchObject([
       { number: "01", ghIssue: "4001", status: "PASS" },
     ]);
@@ -901,7 +904,8 @@ describe("runPipeline summary report", () => {
       provider,
     });
 
-    expect(result.success).toBe(true);
+    // Unsuccessful: the slice passed but nothing shipped (issue #43).
+    expect(result.success).toBe(false);
     expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("#5001 Only");
@@ -1019,8 +1023,10 @@ describe("runPipeline summary report", () => {
       infrastructureRetries: 1,
     });
 
-    // Pipeline returns normally; the slice succeeded.
-    expect(result.success).toBe(true);
+    // Pipeline returns normally; the slice succeeded. The run does not:
+    // no draft PR opened, so the exit signal is unsuccessful (issue #43).
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toContain("NEVER_RAN");
     expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("#7001");
@@ -1091,8 +1097,10 @@ describe("runPipeline summary report", () => {
       infrastructureRetries: 0,
     });
 
-    // Pipeline still returns normally.
-    expect(result.success).toBe(true);
+    // Pipeline still returns normally, but the run is unsuccessful: both
+    // verdicts are absent, so nothing shipped (issue #43).
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toContain("NEVER_RAN");
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("Not ready");
     expect(result.consoleSummary).toContain("architect review NEVER_RAN");
@@ -1567,7 +1575,9 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       infrastructureRetries: 1,
     });
 
-    expect(result.success).toBe(true);
+    // The PM blocked, so the run is unsuccessful (issue #43) — but that is
+    // a verdict, not the infrastructure failure this test is about.
+    expect(result.success).toBe(false);
     // The first failure did not become terminal: the retry recovered SHIP.
     expect(architectAttempts).toBe(2);
     expect(result.consoleSummary).toContain("Architect review: SHIP");
@@ -1609,7 +1619,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       infrastructureRetries: 1,
     });
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(pmAttempts).toBe(2);
     expect(result.consoleSummary).toContain("PM review DIED_MID_RUN");
     const summary = readFileSync(
@@ -1652,7 +1662,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       provider,
     });
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(result.consoleSummary).toContain("Not ready");
     // The Not-ready outcome must still leave the evidence committed on
     // the feature branch — nothing dirty in the (removed) review worktree.
@@ -1795,8 +1805,10 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       provider,
     };
 
+    // Both runs end on the unfavorable PM verdict, so neither ships
+    // (issue #43); what this test asserts is the re-entry cost.
     const first = await runPipeline({ ...config, dag: buildDAG(slices) });
-    expect(first.success).toBe(true);
+    expect(first.success).toBe(false);
     const gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
     expect(gateRunsAfterFirst).toBe(1);
     expect(architectRuns).toBe(1);
@@ -1806,13 +1818,181 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     // the (post-review-commit) tree and the favorable architect verdict
     // against the unchanged HEAD; only the unfavorable PM review re-runs.
     const second = await runPipeline({ ...config, dag: buildDAG(slices) });
-    expect(second.success).toBe(true);
+    expect(second.success).toBe(false);
     expect(readFileSync(marker, "utf-8").length).toBe(1);
     expect(architectRuns).toBe(1);
     expect(pmRuns).toBe(2);
     expect(second.consoleSummary).toContain("Architect review: SHIP");
     expect(second.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
   }, 120_000);
+
+  /**
+   * A run that ends without a shippable branch must not report success
+   * (issue #43). `PipelineResult.success` used to be computed purely from
+   * slice outcomes, so all-slices-PASS plus a FIX-BEFORE-SHIP PM verdict
+   * exited 0 and wrapper scripts could not tell a shipped run from a
+   * blocked one. All-slices-PASS is now necessary but not sufficient.
+   */
+  describe("honest exit signal (issue #43)", () => {
+    /** Wire both guardian reviews to fixed verdicts over the passing stub. */
+    function withVerdicts(
+      slug: string,
+      baseProvider: AgentProvider,
+      verdicts: { architect?: string; pm?: string },
+    ): AgentProvider {
+      return {
+        name: baseProvider.name,
+        async invoke(options) {
+          if (options.role === "architect-review" && verdicts.architect) {
+            writeReviewFile(
+              options.cwd,
+              slug,
+              "review-architect.md",
+              verdicts.architect,
+            );
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          if (options.role === "pm-review" && verdicts.pm) {
+            writeReviewFile(options.cwd, slug, "review-pm.md", verdicts.pm);
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          return baseProvider.invoke(options);
+        },
+      };
+    }
+
+    it("is unsuccessful when every slice passed but an unfavorable PM verdict kept the draft PR closed", async () => {
+      const slug = "exit-blocked-pm";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7401");
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "FIX-BEFORE-SHIP",
+        }),
+      });
+
+      // The slice itself passed and merged — the run is unsuccessful anyway.
+      expect(result.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("draft PR");
+      expect(result.failureReason).toContain("FIX-BEFORE-SHIP");
+    }, 60_000);
+
+    it("treats an unparseable guardian verdict the same way", async () => {
+      const slug = "exit-unparseable";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7402");
+
+      // The bare stub writes no review file at all, so both verdicts come
+      // back UNPARSEABLE — an absent judgment, not an unfavorable one.
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: baseProvider,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("UNPARSEABLE");
+    }, 60_000);
+
+    it("is unsuccessful when the pre-ship sanity gate failed, naming the failing step", async () => {
+      const slug = "exit-sanity-fail";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7403");
+
+      writeFileSync(
+        join(repo, "package.json"),
+        JSON.stringify(
+          {
+            name: "consumer-fixture",
+            private: true,
+            scripts: { typecheck: "node -e \"process.exit(1)\"" },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+      git(repo, ["add", "package.json"]);
+      git(repo, ["commit", "-m", "add failing typecheck"]);
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        // Favorable verdicts would open the PR — but the gate short-circuits
+        // the guardians, so the run is unsuccessful regardless.
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "SHIP",
+        }),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("pre-ship sanity gate");
+      expect(result.failureReason).toContain("typecheck");
+    }, 60_000);
+
+    it("stays successful when both guardian verdicts are favorable and the draft PR opened", async () => {
+      const slug = "exit-shipped";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7404");
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "ACCEPT-WITH-NOTES",
+        }),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.failureReason).toBeUndefined();
+    }, 60_000);
+
+    it("stays successful when --open-pr-on-override opened the draft PR, with the override note recorded", async () => {
+      const slug = "exit-override";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7405");
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        openPrOnOverride: true,
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "FIX-BEFORE-SHIP",
+        }),
+      });
+
+      // The override note is the operator's recorded acknowledgement, so a
+      // deliberate override is not reported as a failure.
+      expect(result.success).toBe(true);
+      expect(result.failureReason).toBeUndefined();
+      expect(result.summary).toContain(
+        "PR opened via --open-pr-on-override despite PM verdict FIX-BEFORE-SHIP",
+      );
+    }, 60_000);
+  });
 });
 
 describe("buildReviewScopeBlock", () => {
@@ -1923,6 +2103,45 @@ describe("buildPrCreationPlan", () => {
       expect(plan.overridden).toBe(false);
     },
   );
+
+  /**
+   * `open` is what makes `PipelineResult.success` honest (issue #43): a
+   * closed plan is a run with no shippable branch, and an overridden-open
+   * plan is the one deliberate exception that still exits 0.
+   */
+  it("closes the plan for every unfavorable or absent verdict pair without the override", () => {
+    const outcomes = [
+      "FIX-BEFORE-SHIP",
+      "NEVER_RAN",
+      "DIED_MID_RUN",
+      "UNPARSEABLE",
+    ] as const;
+    for (const architect of outcomes) {
+      for (const pm of [...outcomes, "SHIP", "ACCEPT-WITH-NOTES"] as const) {
+        const plan = buildPrCreationPlan({
+          ...base,
+          architect,
+          pm,
+          openPrOnOverride: false,
+        });
+        expect(plan.open, `${architect}/${pm}`).toBe(false);
+        expect(plan.overrideNote, `${architect}/${pm}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("the only open-with-override case carries the note that keeps the run successful", () => {
+    for (const architect of ["SHIP", "ACCEPT-WITH-NOTES"] as const) {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect,
+        pm: "FIX-BEFORE-SHIP",
+        openPrOnOverride: true,
+      });
+      expect(plan.open).toBe(true);
+      expect(plan.overrideNote).toBeDefined();
+    }
+  });
 });
 
 
@@ -2148,7 +2367,9 @@ describe("runPipeline per-slice state persistence", () => {
       provider: provider2,
     });
 
-    expect(result.success).toBe(true);
+    // Unsuccessful only because the stub's no-op guardian reviews leave
+    // no verdict to ship on (issue #43); both slices are PASS below.
+    expect(result.success).toBe(false);
     // The re-run skipped exactly the already-merged slice — zero agent
     // invocations for 7001 — and ran the crashed slice to completion.
     expect(records2.some((r) => r.ghIssue === "7001")).toBe(false);
@@ -2243,7 +2464,9 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
       provider: recordingProvider(baseProvider, seen),
     });
 
-    expect(result.success).toBe(true);
+    // The stub's no-op guardian reviews block shipping (issue #43); the
+    // slice ran to completion, which is what the ceilings below describe.
+    expect(result.success).toBe(false);
     // Slow roles: measured generator durations on a consuming project
     // ranged ~41–60+ min, so the 60 min provider default sat directly
     // on the real distribution. These two get double the budget.
@@ -2272,7 +2495,8 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
       maxAgentDurationMs: 5_400_000,
     });
 
-    expect(result.success).toBe(true);
+    // As above: the stub's no-op reviews block shipping (issue #43).
+    expect(result.success).toBe(false);
     // Every role that ran — slice roles and guardian reviews alike —
     // received the uniform override.
     expect(seen.size).toBeGreaterThanOrEqual(5);

@@ -533,11 +533,27 @@ export interface PipelineConfig {
 }
 
 export interface PipelineResult {
+  /**
+   * Whether the run produced a shippable branch. All slices passing is
+   * necessary but not sufficient: a failed **pre-ship sanity gate** or a
+   * guardian verdict that kept the draft PR closed makes a run
+   * unsuccessful, so wrapper scripts and CI can tell a shipped run from a
+   * blocked one. A draft PR opened via `--open-pr-on-override` is still a
+   * success — the override note records the operator's acknowledgement.
+   * See ADR 0015.
+   */
   success: boolean;
   /** Markdown summary written to `.afk/logs/<slug>/run-summary.md`. */
   summary: string;
   /** Grouped, scan-friendly summary for stdout. */
   consoleSummary: string;
+  /**
+   * One operator-facing sentence explaining an unsuccessful run whose
+   * per-slice outcomes do not show the cause — the CLI prints it instead
+   * of its generic failure line. Undefined on a successful run, and on a
+   * failure the slice summary already explains.
+   */
+  failureReason?: string;
 }
 
 /**
@@ -1555,6 +1571,14 @@ export async function runPipeline(
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;
   let draftPrNumber: number | null = null;
+  /**
+   * Why the run ended without a shippable branch, when the per-slice
+   * outcomes do not say. Set only by the post-merge phase: a failed
+   * pre-ship sanity gate, or guardian verdicts that kept the draft PR
+   * closed. Its presence makes the run unsuccessful even when every slice
+   * passed (issue #43). A `--open-pr-on-override` PR leaves it unset.
+   */
+  let shipBlocker: string | undefined;
 
   const emitHandoff = (runStatus: RunStatus): void => {
     if (!scope) return;
@@ -1994,6 +2018,7 @@ export async function runPipeline(
       }
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
+        shipBlocker = `pre-ship sanity gate failed (${sanity.failures.join(", ")}) — guardian reviews and PR creation were skipped`;
         logger.phase(
           `  ❌ Pre-ship sanity gate failed: ${sanity.failures.join(", ")}. Skipping guardian reviews and PR creation.`,
         );
@@ -2213,7 +2238,12 @@ export async function runPipeline(
           openPrOnOverride: config.openPrOnOverride === true,
           closesIssues: scope.selected.map((slice) => slice.ghIssue),
         });
-        if (prPlan.open) {
+        if (!prPlan.open) {
+          // No shippable branch: an unfavorable verdict, or an absent one
+          // (UNPARSEABLE / an exhausted infrastructure retry). Either way
+          // the operator has something to do, so the run is unsuccessful.
+          shipBlocker = `guardian verdicts kept the draft PR closed (architect: ${archResult.outcome}, PM: ${pmResult.outcome})`;
+        } else {
           if (prPlan.overridden) {
             logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
             logger.setPrOverrideNote(prPlan.overrideNote!);
@@ -2277,12 +2307,20 @@ export async function runPipeline(
 
     const summary = logger.writeSummary();
     const consoleSummary = logger.formatConsoleSummary();
-    const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
+    // Every slice passing is necessary but not sufficient: a ship blocker
+    // recorded by the post-merge phase means no draft PR opened, and the
+    // run must not exit 0 (issue #43).
+    const allSuccess = allPassed && shipBlocker === undefined;
     emitHandoff(
       signal?.aborted ? "ABORTED" : allSuccess ? "SUCCEEDED" : "FAILED",
     );
 
-    return { success: allSuccess, summary, consoleSummary };
+    return {
+      success: allSuccess,
+      summary,
+      consoleSummary,
+      failureReason: shipBlocker,
+    };
   } catch (err) {
     // Mark any slice still in flight as STUCK so the summary doesn't
     // misreport them as RUNNING/PENDING. Status keys we touch here

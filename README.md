@@ -226,6 +226,18 @@ Logs: `.afk/logs/<run-slug>/` (per-invocation stdout + `run-summary.md` with sta
 
 Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. This versioned JSON artifact records run status, selected slice outcomes, skipped slices and reasons, feature branch, final commit SHA, newly added migration paths, GitHub issues to close, and draft PR number/URL when available. The generated draft PR body includes `Closes #<issue>` for each selected slice.
 
+## Exit Status
+
+`afk`, `afk-claude`, and `afk-codex` all exit 0 only when the run
+produced a shippable branch — every selected slice merged **and** a draft
+PR opened. All slices passing is not enough: a failed pre-ship sanity
+gate, or a guardian verdict that is unfavorable or absent, exits non-zero
+with a one-line reason so wrapper scripts and CI notice. The one
+exception is `--open-pr-on-override`: when it opened the draft PR despite
+an unfavorable PM verdict, the run exits 0 and the override note is
+recorded in the PR body and `run-summary.md` (ADR 0015). There is no
+per-failure-class exit code; a second Ctrl-C still exits 130.
+
 ## Error Handling
 
 | Situation | What happens |
@@ -235,11 +247,11 @@ Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. Th
 | Merge conflict | Slice → CONFLICT, both branches preserved |
 | Agent idle timeout (10 min) | Agent killed, slice → STUCK — deferred while a spawned process (e.g. a long test suite) is still running (ADR 0021) |
 | Model temporarily unavailable | Invocation retried with exponential backoff for up to 15 min (`--transient-retry-window-ms`, ADR 0022) |
-| Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md |
-| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch |
+| Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md; run exits non-zero |
+| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch; run exits non-zero unless the PR was opened by override |
 | Guardian dies before producing output | Outcome → NEVER_RAN; infrastructure retry within the run (`--infrastructure-retries`); stderr surfaced in run-summary.md |
 | Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
-| Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes |
+| Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
 | HITL slice | Skipped entirely |
 | Ctrl-C | In-flight agents killed, remaining → CANCELLED |
 | Pipeline crash | Re-run to resume |
