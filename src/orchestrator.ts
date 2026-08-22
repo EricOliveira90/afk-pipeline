@@ -13,6 +13,14 @@ import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave, type WaveOutcome } from "./wave.js";
+import {
+  buildResumeHandoffNote,
+  buildStuckDiagnosisNote,
+  collectResumeFacts,
+  decideResume,
+  isForceRestarted,
+  isResumeStuckRequested,
+} from "./resume.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
@@ -27,6 +35,8 @@ import {
   saveReviewPhase,
   isSliceComplete,
   projectForPersistence,
+  getResumeAttempts,
+  recordRetryDecision,
   type PersistedReviewPhase,
 } from "./run-state.js";
 import { resolveRunScope, type ResolvedRunScope } from "./slice-scope.js";
@@ -536,6 +546,22 @@ export interface PipelineConfig {
   sharedPreview?: SharedPreviewConfig;
 
   /**
+   * Slices forced to restart from base regardless of resume
+   * eligibility (#37): slice numbers or GH issue ids from the
+   * operator's `--force-restart`. Unnamed slices are unaffected.
+   */
+  forceRestart?: string[];
+  /**
+   * Slices the operator grants one more implementation/QA attempt on
+   * their preserved STUCK tree instead of the default restart from base
+   * — the operator's `--resume-stuck` (#49). Values are slice numbers or
+   * GH issue ids. Unnamed slices are unaffected, so a stuck.md stays
+   * terminal by default. A slice named here and in `forceRestart`
+   * restarts: see `decideResume`.
+   */
+  resumeStuck?: string[];
+
+  /**
    * Cancellation signal. When fired (typically from SIGINT), in-flight
    * agent invocations are killed and remaining slices are marked
    * CANCELLED. See ADR 0003.
@@ -676,6 +702,44 @@ export interface SliceContext {
   sanityCommandsBlock: string;
   /** Handoffs from declared dependency slices only. */
   siblingHandoffsBlock: string;
+  /**
+   * Set by `runSliceNegotiate` when the slice resumed from its
+   * surviving branch tip instead of restarting from base (spec #33).
+   * Drives the round-1 generator prompt: a resumed generator gets a
+   * resume template (own commit log, verify-then-continue) instead of
+   * the normal one. Absent for fresh and restarted slices.
+   */
+  resume?: {
+    /**
+     * Which resume this is, selecting the round-1 generator template.
+     *
+     * - `killed` — the default path (#33): the previous invocation died
+     *   mid-run, so the tree was reset to its last commit and refreshed
+     *   from the feature branch before the generator was handed
+     *   `generator-resume`.
+     * - `stuck` — the operator opted in with `--resume-stuck` (#49): the
+     *   tree was left untouched, the stuck.md diagnosis survives, and
+     *   the generator is handed `generator-resume-stuck`. The two are
+     *   distinct templates because their situation sections state
+     *   opposite facts about the worktree.
+     */
+    mode: "killed" | "stuck";
+    /** Commits on the slice branch beyond the feature-branch base. */
+    commitsAhead: number;
+    /** `git log <base>..HEAD --stat` output for the resume prompt. */
+    commitLog: string;
+    /** Prior handoff.md block, or "" when stale/absent (#38). */
+    handoffNote: string;
+    /** `stuck` only — the preserved stuck.md diagnosis block (#49). */
+    stuckNote?: string;
+    /**
+     * `stuck` only — whether the feature branch was merged in. False
+     * when the refresh was declined to keep the preserved tree intact;
+     * the prompt then says the verification world is stale rather than
+     * claiming a merge that did not happen.
+     */
+    baseRefreshed?: boolean;
+  };
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0],
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -881,6 +945,189 @@ function preserveContractNegotiationFailure(
 }
 
 /**
+ * Create, resume, or deliberately recreate the slice worktree at
+ * negotiate time (spec #33, design note on #15).
+ *
+ * On retry of a failed slice the surviving git state decides:
+ * - **resume** — branch alive with commits beyond base in a registered
+ *   worktree: re-attach, discard uncommitted changes (hard reset +
+ *   clean, sparing the untracked slice artifacts so the locked
+ *   contract survives verbatim), refresh the base by merging the
+ *   current feature branch into the resumed branch (#35), and record
+ *   the resume on `ctx.resume` so Phase B hands the generator the
+ *   resume prompt. A refresh conflict falls back to restart — no agent
+ *   is asked to resolve a merge it has no context for.
+ * - **resume-stuck** — the operator named a STUCK slice in
+ *   `--resume-stuck` (#49) and its preserved branch, registered
+ *   worktree, and commits ahead of base all check out: re-attach and
+ *   grant one more implementation/QA attempt *without* resetting or
+ *   cleaning the tree and without deleting its stuck.md. The base
+ *   refresh is still attempted, but a conflict here does NOT fall back
+ *   to restart — the whole point of the opt-in is that this tree
+ *   survives, so the refresh is simply declined and the generator is
+ *   told its verification world is stale.
+ * - **restart** — branch or worktree missing, or nothing committed:
+ *   recreate from base deliberately. Today's accidental behavior
+ *   (branch creation no-ops for existing branches, silently
+ *   re-attaching to the old tip) must never restart implicitly.
+ * - **fresh** — no evidence of a prior attempt: the normal first-run
+ *   creation path, unchanged and unlogged.
+ *
+ * Every resume/restart decision is announced on console + run.log
+ * (`resuming from <n> commits` / `restarting from base (<reason>)`)
+ * so overnight runs are auditable.
+ *
+ * ADR 0010 holds throughout: a stale unregistered directory is never
+ * auto-deleted (`createWorktree` throws its descriptive error), and
+ * every path ends registered-and-asserted before agent dispatch.
+ */
+export function prepareSliceWorktree(ctx: SliceContext): void {
+  const { repoRoot } = ctx.config;
+  const provider = ctx.config.provider ?? kiroProvider;
+  const runSlug = pipelineRunSlug(ctx.config.prdSlug, provider);
+  const ghIssue = ctx.slice.ghIssue;
+  const priorAttempts = getResumeAttempts(
+    loadRunState(repoRoot, runSlug),
+    ghIssue,
+  );
+  const facts = collectResumeFacts(
+    repoRoot,
+    ctx.branch,
+    ctx.worktreeDir,
+    ctx.featBranch,
+    {
+      sliceDir: ctx.absSliceDir,
+      resumeAttempts: priorAttempts,
+      forceRestart: isForceRestarted(ctx.config.forceRestart, ctx.slice),
+      resumeStuck: isResumeStuckRequested(ctx.config.resumeStuck, ctx.slice),
+    },
+  );
+  const plan = decideResume(facts);
+
+  // Restart teardown + bookkeeping shared by the decision's restart
+  // path and the refresh-conflict fallback. The attempt counter resets:
+  // a fresh tree earns a fresh resume budget (#36).
+  const restartFromBase = (reason: string): void => {
+    ctx.logger.phase(`${ctx.tag}: restarting from base (${reason})`);
+    git.recreateWorktreeFromBase(
+      repoRoot,
+      ctx.branch,
+      ctx.worktreeDir,
+      ctx.featBranch,
+    );
+    recordRetryDecision(repoRoot, runSlug, ghIssue, {
+      attempts: 0,
+      lastDecision: `restarted from base (${reason})`,
+    });
+  };
+
+  if (plan.action === "resume") {
+    git.resetWorktreeToHead(ctx.worktreeDir, [ctx.relSpecsDir]);
+    // Capture the slice's OWN commit log and last-commit time before
+    // the refresh merge — afterwards the feature branch's commits (and
+    // the merge commit's fresh timestamp) would pollute both.
+    const commitLog = git.logCommitsWithStat(ctx.worktreeDir, ctx.featBranch);
+    const handoffNote = buildResumeHandoffNote(
+      join(ctx.absSliceDir, "handoff.md"),
+      git.lastCommitEpochSeconds(ctx.worktreeDir),
+    );
+    // Base refresh (#35): merge the current feature branch into the
+    // resumed branch, inside the worktree, so the generator verifies
+    // against the world it will eventually merge into.
+    const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
+    if (refresh.status === "conflict") {
+      restartFromBase("feature merge conflict");
+    } else {
+      ctx.resume = {
+        mode: "killed",
+        commitsAhead: plan.commitsAhead,
+        commitLog,
+        handoffNote,
+      };
+      recordRetryDecision(repoRoot, runSlug, ghIssue, {
+        attempts: priorAttempts + 1,
+        lastDecision: `resumed from ${plan.commitsAhead} commit(s)`,
+      });
+      ctx.logger.phase(
+        `${ctx.tag}: resuming from ${plan.commitsAhead} commit(s) on ${ctx.branch}`,
+      );
+    }
+  } else if (plan.action === "resume-stuck") {
+    // No resetWorktreeToHead here, deliberately: the operator opted in
+    // to keep this tree exactly as they inspected it, uncommitted edits
+    // included. The generator-resume-stuck prompt tells the generator to
+    // read `git status` first rather than assuming a clean tip.
+    const commitLog = git.logCommitsWithStat(ctx.worktreeDir, ctx.featBranch);
+    const handoffNote = buildResumeHandoffNote(
+      join(ctx.absSliceDir, "handoff.md"),
+      git.lastCommitEpochSeconds(ctx.worktreeDir),
+    );
+    const stuckNote = buildStuckDiagnosisNote(join(ctx.absSliceDir, "stuck.md"));
+    // Base refresh is best-effort here. `mergeBranchIntoWorktree` aborts
+    // on failure, leaving the branch tip and worktree byte-identical —
+    // so a conflict, or a dirty tree git refuses to merge over, costs
+    // only the refresh. Restarting from base instead (the #33 fallback)
+    // would destroy the preserved work this flag exists to protect.
+    const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
+    const baseRefreshed = refresh.status === "merged";
+    ctx.resume = {
+      mode: "stuck",
+      commitsAhead: plan.commitsAhead,
+      commitLog,
+      handoffNote,
+      stuckNote,
+      baseRefreshed,
+    };
+    recordRetryDecision(repoRoot, runSlug, ghIssue, {
+      attempts: priorAttempts + 1,
+      lastDecision:
+        `resumed STUCK tree from ${plan.commitsAhead} commit(s) via --resume-stuck` +
+        (baseRefreshed ? "" : " (base refresh declined to preserve the tree)"),
+    });
+    const message =
+      `resuming STUCK slice from ${plan.commitsAhead} commit(s) on ${ctx.branch} ` +
+      `(--resume-stuck: tree not reset, diagnosis preserved)` +
+      (baseRefreshed
+        ? ""
+        : `; base refresh declined — ${ctx.featBranch} did not merge cleanly, ` +
+          `verification world is stale`);
+    ctx.logger.phase(`${ctx.tag}: ${message}`, "error", {
+      type: "warn",
+      reason: "resume-stuck",
+      ghIssue,
+      message,
+    });
+  } else if (plan.action === "restart") {
+    if (existsSync(ctx.worktreeDir) && !facts.worktreeRegistered) {
+      // ADR 0010: never auto-delete a stale directory. createWorktree
+      // throws the descriptive stale-dir error for exactly this state,
+      // telling the operator to inspect and remove it manually.
+      git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+    }
+    // A registered worktree already sitting clean on the base tip needs
+    // no teardown — this is the lane-successor refresh arriving right
+    // after its own recreateWorktreeFromBase. Recreating again would be
+    // wasted work and a misleading "restarting" line in the run log.
+    // A genuine retry can also land here (death before the first
+    // commit, nothing dirty): its worktree is literally identical to a
+    // fresh one, and the retry itself is already announced by
+    // runPipeline's "Retrying #id (previous run: ...)" line.
+    const alreadyAtBase =
+      facts.worktreeRegistered &&
+      git.resolveCommit(repoRoot, ctx.branch) ===
+        git.resolveCommit(repoRoot, ctx.featBranch) &&
+      !git.hasUncommittedChanges(ctx.worktreeDir);
+    if (!alreadyAtBase) {
+      restartFromBase(plan.reason);
+    }
+  } else {
+    git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+  }
+
+  git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
+}
+
+/**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
  *
@@ -905,8 +1152,7 @@ export async function runSliceNegotiate(
   );
 
   try {
-    git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, featBranch);
-    git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
+    prepareSliceWorktree(ctx);
     mkdirSync(ctx.absSliceDir, { recursive: true });
 
     // --- Step 1: Explorer ---
@@ -1323,17 +1569,52 @@ export async function runSliceExecute(
       const genLog = logger.agentLog(slice.number, "generator", round);
       const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
       const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+      // A resumed slice's first generator round gets a resume prompt.
+      // Which one depends on how the slice died: `killed` gets the #33
+      // template (post-reset warning, feature-merged note,
+      // verify-then-continue); `stuck` gets the #49 template, whose
+      // situation section states the opposite facts — tree untouched,
+      // diagnosis preserved — plus the findings it must clear.
+      // Later rounds are ordinary QA-feedback retries and use the
+      // normal template.
+      const generatorPrompt =
+        round === 1 && ctx.resume?.mode === "stuck"
+          ? renderPrompt("generator-resume-stuck", {
+              SLICE_DIR: ctx.relSliceDir,
+              RELEVANT_FILES: ctx.relevantFilesBlock,
+              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+              TEST_COMMAND: ctx.testCommand,
+              COMMITS_AHEAD: ctx.resume.commitsAhead,
+              COMMIT_LOG: ctx.resume.commitLog,
+              BASE_REFRESH_NOTE: ctx.resume.baseRefreshed
+                ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
+                : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
+              STUCK_NOTE: ctx.resume.stuckNote ?? "",
+              HANDOFF_NOTE: ctx.resume.handoffNote,
+            })
+          : round === 1 && ctx.resume
+          ? renderPrompt("generator-resume", {
+              SLICE_DIR: ctx.relSliceDir,
+              RELEVANT_FILES: ctx.relevantFilesBlock,
+              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+              TEST_COMMAND: ctx.testCommand,
+              COMMITS_AHEAD: ctx.resume.commitsAhead,
+              COMMIT_LOG: ctx.resume.commitLog,
+              FEAT_BRANCH: featBranch,
+              HANDOFF_NOTE: ctx.resume.handoffNote,
+            })
+          : renderPrompt("generator", {
+              SLICE_DIR: ctx.relSliceDir,
+              RELEVANT_FILES: ctx.relevantFilesBlock,
+              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+              TEST_COMMAND: ctx.testCommand,
+              RETRY_NOTE: round > 1
+                ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
+                : "",
+            });
       await invoke({
         role: "generator",
-        prompt: renderPrompt("generator", {
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: ctx.relevantFilesBlock,
-          SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-          TEST_COMMAND: ctx.testCommand,
-          RETRY_NOTE: round > 1
-            ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
-            : "",
-        }),
+        prompt: generatorPrompt,
         cwd: ctx.worktreeDir,
         logStream: genLog,
         idleTimeoutMs: timeoutMs,

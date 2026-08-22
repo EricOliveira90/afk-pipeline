@@ -15,7 +15,6 @@ import {
 } from "./kill-tree.js";
 
 const DEFAULT_MODEL = "claude-opus-5";
-const EXPLORER_MODEL = "claude-sonnet-5";
 
 /** Tools whose calls we surface as stream events. Mirrors src/AgentProvider.ts. */
 const TOOL_ARG_FIELDS: Record<string, string> = {
@@ -142,8 +141,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
   } = options;
 
   const bare = options.bare === true;
-  const model =
-    options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
+  const model = options.model ?? DEFAULT_MODEL;
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {

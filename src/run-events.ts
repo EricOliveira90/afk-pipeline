@@ -81,8 +81,9 @@ export type RunEventPayload =
        * (ADR 0024), QA infrastructure retries that don't consume a
        * round, transient-outage backoff retries (ADR 0022), per-slice
        * prior-run state at run start (retry announcement), NOT-RUN
-       * dependency holds, and idle-kill deferrals from the busy probe
-       * (ADR 0021).
+       * dependency holds, idle-kill deferrals from the busy probe
+       * (ADR 0021), and operator-granted resumes of a STUCK slice's
+       * preserved tree (`--resume-stuck`, #49).
        */
       reason:
         | "lane-continuation"
@@ -90,7 +91,8 @@ export type RunEventPayload =
         | "backoff-retry"
         | "prior-run-state"
         | "not-run-hold"
-        | "idle-deferral";
+        | "idle-deferral"
+        | "resume-stuck";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;
