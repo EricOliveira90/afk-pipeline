@@ -138,6 +138,6 @@ deliberately.
 Cancellation keeps its own exit path: a second Ctrl-C still hard-exits
 before any of this is read, and a cancelled run's unstarted slices are
 already CANCELLED rather than PASS. The one window where cancellation
-could have looked successful — an abort landing after the last merge but
+could have looked successful — cancellation landing after the last merge but
 before the post-merge phase ran — is a ship blocker too, since nothing
 gated or reviewed the feature branch.

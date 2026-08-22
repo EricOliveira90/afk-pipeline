@@ -42,7 +42,7 @@ _Avoid_: "iteration", "run", "session"
 A pluggable adapter that knows how to invoke a specific agent system
 (Kiro, Claude Code, Codex) — builds the spawn command, parses streamed output,
 and contributes its `name` to branch namespacing. Injected into
-`runPipeline` so backends are swappable without orchestrator changes.
+`runPipeline` so agent providers are swappable without orchestrator changes.
 Stream parsing is opt-in per provider (see **stream event** + ADR 0004).
 _Avoid_: "backend", "invoker", "agent driver", "agent adapter"
 

@@ -83,10 +83,8 @@ export type RunEventPayload =
        * prior-run state at run start (retry announcement), a dependency
        * counted as satisfied from prior run state rather than from this
        * invocation (issue #41), NOT-RUN dependency holds, idle-kill
-       * deferrals from the busy probe (ADR 0021), operator-granted
-       * resumes of a STUCK slice's preserved tree (`--resume-stuck`,
-       * #49), and a locked contract sent back to the planner by the
-       * contract-lock gate (ADR 0028).
+       * deferrals from the busy probe (ADR 0021), and a locked contract
+       * sent back to the planner by the contract-lock gate (ADR 0028).
        */
       reason:
         | "lane-continuation"
@@ -96,7 +94,6 @@ export type RunEventPayload =
         | "dependency-from-prior-run"
         | "not-run-hold"
         | "idle-deferral"
-        | "resume-stuck"
         | "contract-lock-refused";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */

@@ -31,6 +31,7 @@ import { join } from "node:path";
 import type { RunEvent } from "./run-events.js";
 import { parseIssuesMd, buildDAG, type Slice } from "./issues-parser.js";
 import { loadRunState } from "./run-state.js";
+import { isSlicePhase, traitsFor } from "./slice-lifecycle.js";
 
 /** The fixed per-slice agent sequence (CONTEXT.md, "Relationships"). */
 export const AGENT_SEQUENCE = [
@@ -104,16 +105,6 @@ export interface FutureSection {
  * feature branch yet). The blocker annotation below says which of the two
  * it is, so "wait for the next run" doesn't read like "go fix something".
  */
-const TERMINAL_THIS_RUN_PHASES = new Set([
-  "STUCK",
-  "ESCALATE",
-  "ERROR",
-  "CONFLICT",
-  "MERGE-PENDING",
-  "CANCELLED",
-  "LANE-CANCELLED",
-]);
-
 /** Per-slice facts distilled from the event stream. */
 interface EventFacts {
   runSlug?: string;
@@ -273,7 +264,11 @@ export function buildFutureSection(input: {
   /** Phase that ended a slice's work this run, if any. */
   const terminalPhaseOf = (ghIssue: string): string | undefined => {
     const phase = facts.outcomePhase.get(ghIssue);
-    return phase !== undefined && TERMINAL_THIS_RUN_PHASES.has(phase)
+    return phase !== undefined &&
+      isSlicePhase(phase) &&
+      traitsFor(phase).terminalThisRun &&
+      phase !== "PASS" &&
+      phase !== "SKIPPED"
       ? phase
       : undefined;
   };

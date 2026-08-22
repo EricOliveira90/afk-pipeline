@@ -99,7 +99,7 @@ That leaves the gate slightly *stricter* than the merge-mutex check for a
 project with a configured pattern. Accepted: the gate is an early filter,
 being stricter than the authority costs a contract round at worst, and
 widening the merge-mutex check is a change to the last line of defence
-that this ticket deliberately leaves alone.
+that this change deliberately leaves alone.
 
 The normalisation the recognition rule applies cuts the other way in one
 corner: it lowercases, so `003_Users.sql` and `003_users.sql` read as the

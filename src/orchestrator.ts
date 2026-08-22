@@ -24,14 +24,6 @@ import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave, type WaveOutcome } from "./wave.js";
 import {
-  buildResumeHandoffNote,
-  buildStuckDiagnosisNote,
-  collectResumeFacts,
-  decideResume,
-  isForceRestarted,
-  isResumeStuckRequested,
-} from "./resume.js";
-import {
   lifecycle,
   type SliceIdentity,
   type SliceLifecycle,
@@ -49,15 +41,11 @@ import {
   saveReviewPhase,
   isSliceComplete,
   projectForPersistence,
-  getResumeAttempts,
-  recordRetryDecision,
   type PersistedReviewPhase,
   type RunState,
 } from "./run-state.js";
 import {
-  resolveOnlyFailedSelection,
   resolveRunScope,
-  type PersistedRunScope,
   type ResolvedRunScope,
 } from "./slice-scope.js";
 import {
@@ -513,15 +501,6 @@ export interface PipelineConfig {
   dryRun?: boolean;
   /** Slice numbers explicitly requested by the CLI, if any. */
   selectedSliceNumbers?: string[];
-  /**
-   * Re-run only the persisted run scope's non-PASS members. Sugar over
-   * `selectedSliceNumbers`: the selection is resolved from the run state
-   * at start-up and then travels the same subset-narrowing path, so the
-   * run is identical to naming those slice numbers by hand. Requires a
-   * persisted run scope, and cannot be combined with an explicit
-   * selection.
-   */
-  onlyFailed?: boolean;
   /** Contract negotiation cap before convergence may grant one extra round. */
   maxContractRounds?: number;
   /**
@@ -588,22 +567,6 @@ export interface PipelineConfig {
   openPrOnOverride?: boolean;
   /** Enables remote UAT after deterministic QA. */
   sharedPreview?: SharedPreviewConfig;
-
-  /**
-   * Slices forced to restart from base regardless of resume
-   * eligibility (#37): slice numbers or GH issue ids from the
-   * operator's `--force-restart`. Unnamed slices are unaffected.
-   */
-  forceRestart?: string[];
-  /**
-   * Slices the operator grants one more implementation/QA attempt on
-   * their preserved STUCK tree instead of the default restart from base
-   * — the operator's `--resume-stuck` (#49). Values are slice numbers or
-   * GH issue ids. Unnamed slices are unaffected, so a stuck.md stays
-   * terminal by default. A slice named here and in `forceRestart`
-   * restarts: see `decideResume`.
-   */
-  resumeStuck?: string[];
 
   /**
    * Cancellation signal. When fired (typically from SIGINT), in-flight
@@ -696,61 +659,6 @@ export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): strin
   return provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
 }
 
-/**
- * Turn `--only-failed` into the slice numbers an operator would have
- * typed after `--slices`. Shared by the provider CLIs (which need the
- * selection before the run, for the echoed header and the `--dry-run`
- * plan) and by {@link runPipeline}, so the announcement, the plan and
- * the run can never disagree about what "the failed slices" are.
- */
-export function resolveOnlyFailedNumbers(state: RunState): string[] {
-  if (!state.scope) {
-    throw new Error(
-      "--only-failed needs a persisted run scope; run the pipeline once before narrowing it to the failed slices",
-    );
-  }
-  return resolveOnlyFailedSelection(state.scope, (id) =>
-    isSliceComplete(state, id),
-  );
-}
-
-/** What a CLI needs to preview a `--only-failed` invocation. */
-export interface OnlyFailedNarrowing {
-  /** The derived selection, as `--slices` numbers. */
-  requestedSliceNumbers: string[];
-  /** The run's scope of record, so the preview can mark narrowed slices. */
-  persistedScope: PersistedRunScope;
-  /**
-   * Slices the run state already records complete. The pipeline counts
-   * these as satisfied dependencies even though this invocation does not
-   * select them, so a preview must seed its wave walk with them or it
-   * will claim a selected slice can never start.
-   */
-  priorCompleted: Set<string>;
-}
-
-/**
- * Read the run state for `prdSlug`/`provider` and derive everything a
- * provider CLI needs to echo and preview a `--only-failed` run. Throws
- * with an operator-facing message when there is no persisted scope.
- */
-export function narrowToFailedSlices(
-  repoRoot: string,
-  prdSlug: string,
-  provider: AgentProvider,
-): OnlyFailedNarrowing {
-  const state = loadRunState(repoRoot, pipelineRunSlug(prdSlug, provider));
-  const requestedSliceNumbers = resolveOnlyFailedNumbers(state);
-  const priorCompleted = new Set(
-    Object.keys(state.slices).filter((id) => isSliceComplete(state, id)),
-  );
-  return {
-    requestedSliceNumbers,
-    persistedScope: state.scope!,
-    priorCompleted,
-  };
-}
-
 export function sliceBranch(
   prdSlug: string,
   slice: Slice,
@@ -826,18 +734,6 @@ export function makeAsyncMutex() {
   };
 }
 
-/**
- * Per-slice closure passed between Phase A (negotiate) and Phase B
- * (execute). Holds the worktree paths, branch name, slice-scoped
- * `invoke` (auto-tags stats with the slice's ghIssue), and rendered
- * prompt fragments — everything either phase needs from `runPipeline`'s
- * scope.
- *
- * `makeSliceContext` is pure: it derives paths and rendering helpers
- * from `PipelineConfig` + the slice. Worktree creation and artifact-dir
- * mkdir happen inside `runSliceNegotiate` so the context can be reused
- * after `recreateWorktreeFromBase` (lane-successor refresh).
- */
 export interface SliceContext {
   config: PipelineConfig;
   slice: Slice;
@@ -850,62 +746,9 @@ export interface SliceContext {
   relSliceDir: string;
   relSpecsDir: string;
   tag: string;
-  /**
-   * Test command discovered from the consumer's `package.json` (e.g.
-   * `pnpm test:run` or `pnpm test`). Falls back to `pnpm test` when no
-   * test script is defined. Injected into generator + evaluator-qa
-   * prompts so they don't hardcode a runner-specific flag.
-   */
   testCommand: string;
-  /**
-   * Bullet list (newline-joined) of every `pnpm run <script>` the
-   * pre-ship sanity gate would run against the consumer project, in the
-   * gate's order. Injected into the evaluator-qa prompt so the QA pass
-   * exercises the same typecheck + lint + tests check the gate uses,
-   * preventing a slice from passing QA on code the post-merge gate
-   * would later reject. Empty string when no scripts are defined.
-   */
   sanityCommandsBlock: string;
-  /** Handoffs from declared dependency slices only. */
   siblingHandoffsBlock: string;
-  /**
-   * Set by `runSliceNegotiate` when the slice resumed from its
-   * surviving branch tip instead of restarting from base (spec #33).
-   * Drives the round-1 generator prompt: a resumed generator gets a
-   * resume template (own commit log, verify-then-continue) instead of
-   * the normal one. Absent for fresh and restarted slices.
-   */
-  resume?: {
-    /**
-     * Which resume this is, selecting the round-1 generator template.
-     *
-     * - `killed` — the default path (#33): the previous invocation died
-     *   mid-run, so the tree was reset to its last commit and refreshed
-     *   from the feature branch before the generator was handed
-     *   `generator-resume`.
-     * - `stuck` — the operator opted in with `--resume-stuck` (#49): the
-     *   tree was left untouched, the stuck.md diagnosis survives, and
-     *   the generator is handed `generator-resume-stuck`. The two are
-     *   distinct templates because their situation sections state
-     *   opposite facts about the worktree.
-     */
-    mode: "killed" | "stuck";
-    /** Commits on the slice branch beyond the feature-branch base. */
-    commitsAhead: number;
-    /** `git log <base>..HEAD --stat` output for the resume prompt. */
-    commitLog: string;
-    /** Prior handoff.md block, or "" when stale/absent (#38). */
-    handoffNote: string;
-    /** `stuck` only — the preserved stuck.md diagnosis block (#49). */
-    stuckNote?: string;
-    /**
-     * `stuck` only — whether the feature branch was merged in. False
-     * when the refresh was declined to keep the preserved tree intact;
-     * the prompt then says the verification world is stale rather than
-     * claiming a merge that did not happen.
-     */
-    baseRefreshed?: boolean;
-  };
   /**
    * Gate consulted the moment the contract reaches LOCKED, before
    * negotiation returns — the caller's chance to inspect the locked
@@ -1124,7 +967,7 @@ function preserveContractNegotiationFailure(
  * Which orchestrator-owned bound killed an agent invocation. See
  * ADR 0025 and CONTEXT.md "Agent failure cause".
  */
-export type AgentKillClass =
+type AgentKillClass =
   | "idle-timeout"
   | "wall-clock-ceiling"
   | "tool-call-cap"
@@ -1143,14 +986,14 @@ export type AgentKillClass =
  * The first three are *infrastructure* causes and are the only ones the
  * negotiate phase retries. See `isInfrastructureCause`.
  */
-export type NegotiateFailureKind =
+type NegotiateFailureKind =
   | "provider-exit"
   | "orchestrator-kill"
   | "transient-exhausted"
   | "verdict"
   | "internal-error";
 
-export interface NegotiateFailureCause {
+interface NegotiateFailureCause {
   kind: NegotiateFailureKind;
   /**
    * Operator-facing one-liner. The wave records it verbatim as the
@@ -1180,9 +1023,9 @@ export type NegotiateOutcome =
  * Whether a negotiate failure is worth retrying. A genuine verdict
  * never is — retrying it would just re-run agents against a contract
  * the evaluator already judged — and neither is a pipeline-internal
- * throw, whose blast radius this ticket deliberately leaves unchanged.
+ * throw, whose blast radius this change deliberately leaves unchanged.
  */
-export function isInfrastructureCause(cause: NegotiateFailureCause): boolean {
+function isInfrastructureCause(cause: NegotiateFailureCause): boolean {
   return (
     cause.kind === "provider-exit" ||
     cause.kind === "orchestrator-kill" ||
@@ -1222,7 +1065,7 @@ const OUTPUT_TAIL_CHARS = 240;
  * single-line retry announcement built from it. Best-effort: an
  * unreadable log yields no tail rather than masking the real failure.
  */
-export function readInvocationOutputTail(
+function readInvocationOutputTail(
   logPath: string | undefined,
 ): string | undefined {
   if (!logPath || !existsSync(logPath)) return undefined;
@@ -1264,7 +1107,7 @@ function agentLogPath(log: WriteStream): string | undefined {
  * duplicate module instances); kills and exits fall back to the
  * provider's message, which is the only place either fact is recorded.
  */
-export function classifyNegotiateFailure(args: {
+function classifyNegotiateFailure(args: {
   role: string;
   error: unknown;
   outputTail?: string;
@@ -1316,7 +1159,7 @@ export function classifyNegotiateFailure(args: {
 /**
  * A negotiate failure the evaluator decided, not one that killed it.
  * Labelled as a verdict so "the agent decided this is broken" never
- * reads like "the backend hung up".
+ * reads like "the agent provider hung up".
  */
 function negotiateVerdictCause(args: {
   outcome: "ESCALATE" | "STUCK";
@@ -1365,207 +1208,35 @@ function negotiateFailureCauseOf(
 }
 
 /**
- * Create, resume, or deliberately recreate the slice worktree at
- * negotiate time (spec #33, design note on #15).
- *
- * On retry of a failed slice the surviving git state decides:
- * - **resume** — branch alive with commits beyond base in a registered
- *   worktree: re-attach, discard uncommitted changes (hard reset +
- *   clean, sparing the untracked slice artifacts so the locked
- *   contract survives verbatim), refresh the base by merging the
- *   current feature branch into the resumed branch (#35), and record
- *   the resume on `ctx.resume` so Phase B hands the generator the
- *   resume prompt. A refresh conflict falls back to restart — no agent
- *   is asked to resolve a merge it has no context for.
- * - **resume-stuck** — the operator named a STUCK slice in
- *   `--resume-stuck` (#49) and its preserved branch, registered
- *   worktree, and commits ahead of base all check out: re-attach and
- *   grant one more implementation/QA attempt *without* resetting or
- *   cleaning the tree and without deleting its stuck.md. The base
- *   refresh is still attempted, but a conflict here does NOT fall back
- *   to restart — the whole point of the opt-in is that this tree
- *   survives, so the refresh is simply declined and the generator is
- *   told its verification world is stale.
- * - **restart** — branch or worktree missing, or nothing committed:
- *   recreate from base deliberately. Today's accidental behavior
- *   (branch creation no-ops for existing branches, silently
- *   re-attaching to the old tip) must never restart implicitly.
- * - **fresh** — no evidence of a prior attempt: the normal first-run
- *   creation path, unchanged and unlogged.
- *
- * Every resume/restart decision is announced on console + run.log
- * (`resuming from <n> commits` / `restarting from base (<reason>)`)
- * so overnight runs are auditable.
- *
- * ADR 0010 holds throughout: a stale unregistered directory is never
- * auto-deleted (`createWorktree` throws its descriptive error), and
- * every path ends registered-and-asserted before agent dispatch.
+ * Create the slice worktree and enforce its registration before dispatch.
  */
 export function prepareSliceWorktree(ctx: SliceContext): void {
-  const { repoRoot } = ctx.config;
-  const provider = ctx.config.provider ?? kiroProvider;
-  const runSlug = pipelineRunSlug(ctx.config.prdSlug, provider);
-  const ghIssue = ctx.slice.ghIssue;
-  const priorAttempts = getResumeAttempts(
-    loadRunState(repoRoot, runSlug),
-    ghIssue,
-  );
-  const facts = collectResumeFacts(
-    repoRoot,
+  git.createWorktree(
+    ctx.config.repoRoot,
     ctx.branch,
     ctx.worktreeDir,
     ctx.featBranch,
-    {
-      sliceDir: ctx.absSliceDir,
-      resumeAttempts: priorAttempts,
-      forceRestart: isForceRestarted(ctx.config.forceRestart, ctx.slice),
-      resumeStuck: isResumeStuckRequested(ctx.config.resumeStuck, ctx.slice),
-    },
   );
-  const plan = decideResume(facts);
-
-  // Restart teardown + bookkeeping shared by the decision's restart
-  // path and the refresh-conflict fallback. The attempt counter resets:
-  // a fresh tree earns a fresh resume budget (#36).
-  const restartFromBase = (reason: string): void => {
-    ctx.logger.phase(`${ctx.tag}: restarting from base (${reason})`);
-    git.recreateWorktreeFromBase(
-      repoRoot,
-      ctx.branch,
-      ctx.worktreeDir,
-      ctx.featBranch,
-    );
-    recordRetryDecision(repoRoot, runSlug, ghIssue, {
-      attempts: 0,
-      lastDecision: `restarted from base (${reason})`,
-    });
-  };
-
-  if (plan.action === "resume") {
-    git.resetWorktreeToHead(ctx.worktreeDir, [ctx.relSpecsDir]);
-    // Capture the slice's OWN commit log and last-commit time before
-    // the refresh merge — afterwards the feature branch's commits (and
-    // the merge commit's fresh timestamp) would pollute both.
-    const commitLog = git.logCommitsWithStat(ctx.worktreeDir, ctx.featBranch);
-    const handoffNote = buildResumeHandoffNote(
-      join(ctx.absSliceDir, "handoff.md"),
-      git.lastCommitEpochSeconds(ctx.worktreeDir),
-    );
-    // Base refresh (#35): merge the current feature branch into the
-    // resumed branch, inside the worktree, so the generator verifies
-    // against the world it will eventually merge into.
-    const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
-    if (refresh.status === "conflict") {
-      restartFromBase("feature merge conflict");
-    } else {
-      ctx.resume = {
-        mode: "killed",
-        commitsAhead: plan.commitsAhead,
-        commitLog,
-        handoffNote,
-      };
-      recordRetryDecision(repoRoot, runSlug, ghIssue, {
-        attempts: priorAttempts + 1,
-        lastDecision: `resumed from ${plan.commitsAhead} commit(s)`,
-      });
-      ctx.logger.phase(
-        `${ctx.tag}: resuming from ${plan.commitsAhead} commit(s) on ${ctx.branch}`,
-      );
-    }
-  } else if (plan.action === "resume-stuck") {
-    // No resetWorktreeToHead here, deliberately: the operator opted in
-    // to keep this tree exactly as they inspected it, uncommitted edits
-    // included. The generator-resume-stuck prompt tells the generator to
-    // read `git status` first rather than assuming a clean tip.
-    const commitLog = git.logCommitsWithStat(ctx.worktreeDir, ctx.featBranch);
-    const handoffNote = buildResumeHandoffNote(
-      join(ctx.absSliceDir, "handoff.md"),
-      git.lastCommitEpochSeconds(ctx.worktreeDir),
-    );
-    const stuckNote = buildStuckDiagnosisNote(join(ctx.absSliceDir, "stuck.md"));
-    // Base refresh is best-effort here. `mergeBranchIntoWorktree` aborts
-    // on failure, leaving the branch tip and worktree byte-identical —
-    // so a conflict, or a dirty tree git refuses to merge over, costs
-    // only the refresh. Restarting from base instead (the #33 fallback)
-    // would destroy the preserved work this flag exists to protect.
-    const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
-    const baseRefreshed = refresh.status === "merged";
-    ctx.resume = {
-      mode: "stuck",
-      commitsAhead: plan.commitsAhead,
-      commitLog,
-      handoffNote,
-      stuckNote,
-      baseRefreshed,
-    };
-    recordRetryDecision(repoRoot, runSlug, ghIssue, {
-      attempts: priorAttempts + 1,
-      lastDecision:
-        `resumed STUCK tree from ${plan.commitsAhead} commit(s) via --resume-stuck` +
-        (baseRefreshed ? "" : " (base refresh declined to preserve the tree)"),
-    });
-    const message =
-      `resuming STUCK slice from ${plan.commitsAhead} commit(s) on ${ctx.branch} ` +
-      `(--resume-stuck: tree not reset, diagnosis preserved)` +
-      (baseRefreshed
-        ? ""
-        : `; base refresh declined — ${ctx.featBranch} did not merge cleanly, ` +
-          `verification world is stale`);
-    ctx.logger.phase(`${ctx.tag}: ${message}`, "error", {
-      type: "warn",
-      reason: "resume-stuck",
-      ghIssue,
-      message,
-    });
-  } else if (plan.action === "restart") {
-    if (existsSync(ctx.worktreeDir) && !facts.worktreeRegistered) {
-      // ADR 0010: never auto-delete a stale directory. createWorktree
-      // throws the descriptive stale-dir error for exactly this state,
-      // telling the operator to inspect and remove it manually.
-      git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
-    }
-    // A registered worktree already sitting clean on the base tip needs
-    // no teardown — this is the lane-successor refresh arriving right
-    // after its own recreateWorktreeFromBase. Recreating again would be
-    // wasted work and a misleading "restarting" line in the run log.
-    // A genuine retry can also land here (death before the first
-    // commit, nothing dirty): its worktree is literally identical to a
-    // fresh one, and the retry itself is already announced by
-    // runPipeline's "Retrying #id (previous run: ...)" line.
-    const alreadyAtBase =
-      facts.worktreeRegistered &&
-      git.resolveCommit(repoRoot, ctx.branch) ===
-        git.resolveCommit(repoRoot, ctx.featBranch) &&
-      !git.hasUncommittedChanges(ctx.worktreeDir);
-    if (!alreadyAtBase) {
-      restartFromBase(plan.reason);
-    }
-  } else {
-    git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
-  }
-
-  git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
+  git.assertWorktreeRegistered(
+    ctx.config.repoRoot,
+    ctx.branch,
+    ctx.worktreeDir,
+  );
 }
-
 /**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
  *
- * Infrastructure deaths are retried here under `--infrastructure-retries`
- * (the same bound the QA and guardian-review stages use): one dead
- * contract evaluator no longer ends a wave. Only infrastructure causes
- * retry — a genuine ESCALATE or STUCK verdict is terminal on the first
- * occurrence. A retry re-enters the phase, which reuses `context.md`
- * and any drafted `contract.md` already on disk and restarts the round
- * counter, so it neither re-runs the explorer nor consumes a contract
- * round.
+ * Infrastructure deaths are retried at the failed invocation under
+ * `--infrastructure-retries`. The prompt and round stay unchanged, and
+ * successful explorer/planner work is not repeated.
  *
  * Outcome semantics:
  * - `LOCKED` — contract is ready for Phase B.
  * - `ESCALATE` — contract negotiation gave up after max rounds.
  * - `STUCK` — negotiation finished without LOCKED status.
  * - `ERROR` — a dead invocation or a pipeline-internal throw.
- * - `CANCELLED` — external abort.
+ * - `CANCELLED` — external cancellation.
  *
  * Every non-LOCKED, non-CANCELLED outcome carries a
  * `NegotiateFailureCause` naming what ended it. See ADR 0025.
@@ -1583,31 +1254,12 @@ export async function runSliceNegotiate(
     throw new Error("infrastructureRetries must be a non-negative integer");
   }
 
-  for (let attempt = 1; ; attempt++) {
-    // Worktree resume/restart is a per-phase-entry decision. Infrastructure
-    // retries stay in the same prepared tree so they reuse explorer output
-    // and do not turn a dead evaluator into a fresh pipeline attempt.
-    const outcome = await negotiateAttempt(ctx, attempt === 1);
-    if (outcome.phase === "LOCKED" || outcome.phase === "CANCELLED") {
-      return outcome;
-    }
-    if (!isInfrastructureCause(outcome.cause)) return outcome;
-    if (attempt > infrastructureRetries) return outcome;
-    const message =
-      `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
-      outcome.cause.summary;
-    logger.phase(`${ctx.tag}: ${message}`, "error", {
-      type: "warn",
-      reason: "infrastructure-retry",
-      ghIssue: slice.ghIssue,
-      message,
-    });
-  }
+  return negotiateAttempt(ctx, infrastructureRetries);
 }
 
 async function negotiateAttempt(
   ctx: SliceContext,
-  prepareWorktree: boolean,
+  infrastructureRetries: number,
 ): Promise<NegotiateOutcome> {
   const { config, slice, logger, featBranch, relevantFilesBlock, invoke } = ctx;
   const { repoRoot, prdDir, signal } = config;
@@ -1619,21 +1271,37 @@ async function negotiateAttempt(
    */
   const invokeAgent = async (
     opts: Omit<Parameters<SliceContext["invoke"]>[0], "logStream">,
-    logStream: WriteStream,
+    createLogStream: () => WriteStream,
+    beforeAttempt?: () => void,
   ): Promise<void> => {
-    try {
-      await invoke({ ...opts, logStream }).finally(() =>
-        closeAgentLog(logStream),
-      );
-    } catch (err) {
-      if (isCancelled(err, signal)) throw err;
-      throw new NegotiateInvocationError(
-        classifyNegotiateFailure({
+    for (let attempt = 1; ; attempt++) {
+      beforeAttempt?.();
+      const logStream = createLogStream();
+      try {
+        await invoke({ ...opts, logStream }).finally(() =>
+          closeAgentLog(logStream),
+        );
+        return;
+      } catch (err) {
+        if (isCancelled(err, signal)) throw err;
+        const cause = classifyNegotiateFailure({
           role: opts.role,
           error: err,
           outputTail: readInvocationOutputTail(agentLogPath(logStream)),
-        }),
-      );
+        });
+        if (!isInfrastructureCause(cause) || attempt > infrastructureRetries) {
+          throw new NegotiateInvocationError(cause);
+        }
+        const message =
+          `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
+          cause.summary;
+        logger.phase(`${ctx.tag}: ${message}`, "error", {
+          type: "warn",
+          reason: "infrastructure-retry",
+          ghIssue: slice.ghIssue,
+          message,
+        });
+      }
     }
   };
 
@@ -1646,10 +1314,8 @@ async function negotiateAttempt(
   );
 
   try {
-    if (prepareWorktree) {
-      prepareSliceWorktree(ctx);
-      mkdirSync(ctx.absSliceDir, { recursive: true });
-    }
+    prepareSliceWorktree(ctx);
+    mkdirSync(ctx.absSliceDir, { recursive: true });
 
     // --- Step 1: Explorer ---
     const localSliceContent = readSliceFile(prdDir, slice.number);
@@ -1664,7 +1330,6 @@ async function negotiateAttempt(
         sliceNumber: slice.number,
         agent: "explorer",
       });
-      const logStream = logger.agentLog(slice.number, "explorer");
       await invokeAgent(
         {
           role: "explorer",
@@ -1678,7 +1343,7 @@ async function negotiateAttempt(
           cwd: ctx.worktreeDir,
           maxDurationMs: config.maxAgentDurationMs,
         },
-        logStream,
+        () => logger.agentLog(slice.number, "explorer"),
       );
       logger.event({
         type: "phase-ended",
@@ -1796,7 +1461,6 @@ async function negotiateAttempt(
             round,
           },
         );
-        const plannerLog = logger.agentLog(slice.number, "planner", round);
         await invokeAgent(
           {
             role: "planner",
@@ -1812,7 +1476,7 @@ async function negotiateAttempt(
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
-          plannerLog,
+          () => logger.agentLog(slice.number, "planner", round),
         );
         logger.event({
           type: "phase-ended",
@@ -1833,11 +1497,7 @@ async function negotiateAttempt(
             round,
           },
         );
-        const evalLog = logger.agentLog(
-          slice.number,
-          "evaluator-contract",
-          round,
-        );
+        const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         await invokeAgent(
           {
             role: "evaluator-contract",
@@ -1854,10 +1514,10 @@ async function negotiateAttempt(
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
-          evalLog,
+          () => logger.agentLog(slice.number, "evaluator-contract", round),
+          () => rmSync(feedbackPath, { force: true }),
         );
 
-        const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
         const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
         // An UNKNOWN verdict means the evaluator exited without writing
@@ -2165,50 +1825,18 @@ export async function runSliceExecute(
       );
       const genLog = logger.agentLog(slice.number, "generator", round);
       const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
-      const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-      // A resumed slice's first generator round gets a resume prompt.
-      // Which one depends on how the slice died: `killed` gets the #33
-      // template (post-reset warning, feature-merged note,
-      // verify-then-continue); `stuck` gets the #49 template, whose
-      // situation section states the opposite facts — tree untouched,
-      // diagnosis preserved — plus the findings it must clear.
-      // Later rounds are ordinary QA-feedback retries and use the
-      // normal template.
-      const generatorPrompt =
-        round === 1 && ctx.resume?.mode === "stuck"
-          ? renderPrompt("generator-resume-stuck", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              COMMITS_AHEAD: ctx.resume.commitsAhead,
-              COMMIT_LOG: ctx.resume.commitLog,
-              BASE_REFRESH_NOTE: ctx.resume.baseRefreshed
-                ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
-                : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
-              STUCK_NOTE: ctx.resume.stuckNote ?? "",
-              HANDOFF_NOTE: ctx.resume.handoffNote,
-            })
-          : round === 1 && ctx.resume
-          ? renderPrompt("generator-resume", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              COMMITS_AHEAD: ctx.resume.commitsAhead,
-              COMMIT_LOG: ctx.resume.commitLog,
-              FEAT_BRANCH: featBranch,
-              HANDOFF_NOTE: ctx.resume.handoffNote,
-            })
-          : renderPrompt("generator", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              RETRY_NOTE: round > 1
-                ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
-                : "",
-            });
+      const heartbeatMs =
+        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+      const generatorPrompt = renderPrompt("generator", {
+        SLICE_DIR: ctx.relSliceDir,
+        RELEVANT_FILES: ctx.relevantFilesBlock,
+        SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+        TEST_COMMAND: ctx.testCommand,
+        RETRY_NOTE:
+          round > 1
+            ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
+            : "",
+      });
       await invoke({
         role: "generator",
         prompt: generatorPrompt,
@@ -2489,33 +2117,16 @@ export async function runPipeline(
 
   try {
   const runState = loadRunState(repoRoot, loggerSlug);
-  // `--only-failed` is resolved here, against the run state, and then
-  // handed to `resolveRunScope` as an ordinary requested selection — so
-  // it takes exactly the same subset-narrowing path as naming the slice
-  // numbers by hand.
-  let requestedSliceNumbers = config.selectedSliceNumbers;
-  if (config.onlyFailed) {
-    if (config.selectedSliceNumbers) {
-      throw new Error(
-        "--only-failed cannot be combined with --slices; it derives the selection from the persisted run scope",
-      );
-    }
-    requestedSliceNumbers = resolveOnlyFailedNumbers(runState);
-    logger.phase(
-      requestedSliceNumbers.length > 0
-        ? `[afk] --only-failed: re-running the non-PASS members of the run scope [${requestedSliceNumbers.join(", ")}]`
-        : "[afk] --only-failed: every member of the run scope is recorded PASS — nothing to re-run",
-    );
-  }
   scope = resolveRunScope(
     [...manifestDag.slices.values()],
-    requestedSliceNumbers,
+    config.selectedSliceNumbers,
     runState.scope,
   );
   runState.scope = scope.persisted;
   runState.featureBranch = featBranch;
   saveRunState(repoRoot, runState);
   const dag = buildDAG(scope.selected);
+  const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
 
   // Detect the repo's default branch (main / master / etc.) once so
   // every base reference below — feat-branch init, review-worktree
@@ -2831,9 +2442,10 @@ export async function runPipeline(
   // The collision re-check happens inside the merge mutex against the
   // current feature-branch tip, exactly as the original attempt did: this
   // recovery is no less safe than the merge it is repeating.
-  for (const [id, slice] of dag.slices) {
+  for (const slice of scope.members) {
+    const id = slice.ghIssue;
     // Ctrl-C during recovery stops it where it stands; the wave loop's
-    // abort sweep marks whatever is left (ADR 0003).
+    // cancellation sweep marks whatever is left (ADR 0003).
     if (signal?.aborted) break;
     const prior = runState.slices[id];
     if (prior?.phase !== "MERGE-PENDING") continue;
@@ -2850,9 +2462,13 @@ export async function runPipeline(
       !git.branchExists(repoRoot, branch) ||
       !git.hasCommitsAhead(repoRoot, branch, featBranch)
     ) {
+      const selected = selectedIssues.has(id);
       logger.phase(
         `  #${id} ${slice.title}: MERGE-PENDING, but ${branch} is missing or has no ` +
-          `commits ahead of ${featBranch} — nothing to recover; dispatching normally`,
+          `commits ahead of ${featBranch} — nothing to recover; ` +
+          (selected
+            ? "dispatching normally"
+            : "slice is outside this invocation's dispatch set"),
         "log",
         {
           type: "warn",
@@ -2861,7 +2477,10 @@ export async function runPipeline(
           previousPhase: "MERGE-PENDING",
           message:
             `#${id} ${slice.title}: recoverable merge claim is false ` +
-            `(${branch} missing or empty) — dispatching normally`,
+            `(${branch} missing or empty) — ` +
+            (selected
+              ? "dispatching normally"
+              : "not selected for agent dispatch"),
         },
       );
       continue;

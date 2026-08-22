@@ -3,6 +3,7 @@ import {
   ALL_PHASES,
   bucketFor,
   lifecycle,
+  traitsFor,
   statusIconFor,
   summaryStatusLabel,
   type SliceIdentity,
@@ -90,6 +91,19 @@ describe("statusIconFor", () => {
     for (const p of ALL_PHASES) {
       expect(statusIconFor(p).length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("phase traits", () => {
+  it("defines every phase and keeps MERGE-PENDING recoverable and preserved", () => {
+    expect(ALL_PHASES.every((phase) => traitsFor(phase) !== undefined)).toBe(true);
+    expect(traitsFor("MERGE-PENDING")).toMatchObject({
+      bucket: "deferred",
+      persisted: true,
+      terminalThisRun: true,
+      branchDisposition: "preserved",
+      summaryLabel: "MERGE-PENDING",
+    });
   });
 });
 

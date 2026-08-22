@@ -73,7 +73,7 @@ doesn't already explain itself".
 **Cancellation is excluded.** A run aborted before its first wave has
 `dispatched` empty, but Ctrl-C already has its own exit path (ADR 0003)
 and an operator who cancelled does not need to be told nothing ran. The
-check is gated on `!signal?.aborted` so the abort path keeps reporting
+check is gated on `!signal?.aborted` so the cancellation path keeps reporting
 `ABORTED`, not a spurious no-op diagnosis.
 
 ## Exit codes are unchanged

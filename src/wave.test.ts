@@ -22,7 +22,7 @@ import type {
   InvokeOptions,
   InvokeResult,
 } from "./agent-provider.js";
-import { TransientProviderError } from "./agent-provider.js";
+import { CancelledError, TransientProviderError } from "./agent-provider.js";
 import { readRunEvents, type RunEvent } from "./run-events.js";
 import type { PipelineConfig } from "./orchestrator.js";
 
@@ -936,10 +936,13 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(retry!.message).toContain("negotiate infrastructure retry 1/2");
     expect(retry!.message).toContain("idle timeout");
 
-    // The retry reused the explorer's context.md instead of re-running
-    // it, and did not consume a contract round — the planner's only
-    // round on either attempt is round 1.
+    // The retry repeats only the failed evaluator invocation with the
+    // same round. Explorer context and the planner's contract survive.
     expect(setup.records.filter((r) => r === "explorer:1401")).toHaveLength(1);
+    expect(setup.records.filter((r) => r === "planner:1401")).toHaveLength(1);
+    expect(
+      setup.records.filter((r) => r === "evaluator-contract:1401"),
+    ).toHaveLength(2);
     const plannerRounds = (events?.events ?? [])
       .filter(
         (e: RunEvent) =>
@@ -948,8 +951,72 @@ describe("runWave negotiate failure causes (issue #40)", () => {
           e.ghIssue === "1401",
       )
       .map((e) => (e as Extract<RunEvent, { type: "phase-started" }>).round);
-    expect(plannerRounds).toEqual([1, 1]);
+    expect(plannerRounds).toEqual([1]);
   }, 60_000);
+
+  it.each(["explorer", "planner"] as const)(
+    "retries only the failed %s invocation with the same prompt",
+    async (role) => {
+      const setup = oneSlice(`neg-retry-${role}`, role === "explorer" ? "1451" : "1452", {
+        deaths: [{ role, kind: "exit", exitCode: 9, times: 1 }],
+      });
+      setup.config.infrastructureRetries = 1;
+      const prompts: string[] = [];
+      const inner = setup.config.provider!;
+      setup.config.provider = {
+        name: inner.name,
+        invoke(options) {
+          if (options.role === role) prompts.push(options.prompt);
+          return inner.invoke(options);
+        },
+      };
+
+      const id = role === "explorer" ? "1451" : "1452";
+      const outcomes = await dispatch(setup, [id]);
+
+      expect(outcomes.get(id)?.phase).toBe("PASS");
+      expect(setup.records.filter((record) => record === `${role}:${id}`)).toHaveLength(2);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toBe(prompts[0]);
+      expect(
+        setup.records.filter((record) => record === `explorer:${id}`),
+      ).toHaveLength(role === "explorer" ? 2 : 1);
+      expect(
+        setup.records.filter((record) => record === `planner:${id}`),
+      ).toHaveLength(role === "planner" ? 2 : 1);
+      expect(
+        setup.records.filter((record) => record === `evaluator-contract:${id}`),
+      ).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it("does not retry cancellation or consume the infrastructure budget", async () => {
+    const setup = oneSlice("neg-cancel", "1491");
+    const controller = new AbortController();
+    setup.config.signal = controller.signal;
+    setup.config.infrastructureRetries = 2;
+    const inner = setup.config.provider!;
+    setup.config.provider = {
+      name: inner.name,
+      async invoke(options) {
+        if (options.role === "planner") {
+          controller.abort();
+          throw new CancelledError();
+        }
+        return inner.invoke(options);
+      },
+    };
+
+    const outcomes = await dispatch(setup, ["1491"]);
+
+    expect(outcomes.get("1491")?.phase).toBe("CANCELLED");
+    expect(setup.records.filter((record) => record === "planner:1491")).toEqual([]);
+    const retries = (readRunEvents(setup.logger.runDir)?.events ?? []).filter(
+      (event) => event.type === "warn" && event.reason === "infrastructure-retry",
+    );
+    expect(retries).toEqual([]);
+  }, 30_000);
 
   it("never retries a genuine verdict — it is terminal on the first occurrence", async () => {
     const setup = oneSlice("neg-verdict-terminal", "1501", {

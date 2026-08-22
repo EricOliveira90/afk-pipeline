@@ -4,8 +4,8 @@ import type { AgentProvider } from "./agent-provider.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import { pipelineRunSlug, sliceBranchPrefix } from "./orchestrator.js";
-import { loadRunState, type PersistedPhase } from "./run-state.js";
-import { bucketFor } from "./slice-lifecycle.js";
+import { loadRunState } from "./run-state.js";
+import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
 
 /**
  * `afk clean-failed` — one command for the manual, Windows-hostile
@@ -39,15 +39,6 @@ import { bucketFor } from "./slice-lifecycle.js";
  * junction hazard from the babysit-afk notes.
  */
 
-const FAILURE_PHASES: ReadonlySet<PersistedPhase> = new Set([
-  "STUCK",
-  "ESCALATE",
-  "ERROR",
-  "CONFLICT",
-  "CANCELLED",
-  "LANE-CANCELLED",
-] as PersistedPhase[]);
-
 /**
  * Phases whose worktree is disposable but whose branch is not. Read off
  * the lifecycle's own bucketing rather than a second list here, so a new
@@ -56,8 +47,13 @@ const FAILURE_PHASES: ReadonlySet<PersistedPhase> = new Set([
  * branch is reported as deliberately preserved rather than assessed for
  * deletion.
  */
-const isDeferred = (phase: PersistedPhase): boolean =>
-  bucketFor(phase) === "deferred";
+const isCleanupTarget = (phase: SlicePhase): boolean => {
+  const bucket = traitsFor(phase).bucket;
+  return bucket === "failed" || bucket === "cancelled" || bucket === "deferred";
+};
+
+const mustPreserveBranch = (phase: SlicePhase): boolean =>
+  traitsFor(phase).bucket === "deferred";
 
 export interface CleanFailedOptions {
   repoRoot: string;
@@ -150,7 +146,7 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
   // phases whose worktree is debris but whose branch is not. ---
   const handledDirs = new Set<string>();
   for (const [ghIssue, slice] of Object.entries(state.slices)) {
-    if (!FAILURE_PHASES.has(slice.phase) && !isDeferred(slice.phase)) continue;
+    if (!isCleanupTarget(slice.phase)) continue;
     log(`Slice #${ghIssue} (${slice.phase}):`);
 
     // Worktree: the registered location wins when git knows one for the
@@ -184,7 +180,7 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
     // Branch: delete only when nothing would be lost.
     const branch = slice.branch;
     if (!branch || !git.branchExists(repoRoot, branch)) continue;
-    if (isDeferred(slice.phase)) {
+    if (mustPreserveBranch(slice.phase)) {
       // Never a deletion candidate, whatever the commit comparison says:
       // the next run's merge-only recovery merges this exact branch.
       report.keptBranches.push({

@@ -5,7 +5,6 @@ import { parseIssuesMd, buildDAG } from "./issues-parser.js";
 import {
   formatRunFailure,
   runPipeline,
-  narrowToFailedSlices,
   PipelineError,
   type MigrationValidation,
 } from "./orchestrator.js";
@@ -14,10 +13,7 @@ import {
   parseMaxContractRounds,
   parseSliceSelection,
 } from "./cli-options.js";
-import {
-  resolveRunScope,
-  type PersistedRunScope,
-} from "./slice-scope.js";
+import { resolveCliRunScope } from "./cli-run-scope.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runCleanFailedCli } from "./clean-failed.js";
@@ -31,7 +27,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-claude clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-claude clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -121,45 +117,41 @@ async function main() {
     .replace(/\\/g, "/");
   const issuesPath = join(prdDir, "issues.md");
 
+  const slices = parseIssuesMd(issuesPath);
+  const dag = buildDAG(slices);
+  let runScope;
+  try {
+    runScope = resolveCliRunScope({
+      repoRoot,
+      prdSlug,
+      provider: claudeProvider,
+      slices,
+      selectedSliceNumbers,
+      onlyFailed,
+    });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(2);
+  }
+  const requestedSliceNumbers = runScope.requestedSliceNumbers;
+  const previewScope = runScope.scope;
+  const priorCompleted = runScope.priorCompleted;
+
   console.log(`AFK Pipeline (Claude Code backend)`);
   console.log(`  PRD: ${prdSlug}`);
   console.log(`  PRD dir: ${prdDir}`);
   console.log(`  Repo: ${repoRoot}`);
   console.log(`  Dry run: ${dryRun}`);
   console.log(`  Max contract rounds: ${maxContractRounds}`);
-  // `--only-failed` is resolved here as well as inside the pipeline, from
-  // the same run state through the same helper, so the header line and
-  // the --dry-run plan name exactly the slices the run will dispatch.
-  let requestedSliceNumbers = selectedSliceNumbers;
-  let previewPersistedScope: PersistedRunScope | undefined;
-  let priorCompleted = new Set<string>();
-  if (onlyFailed) {
-    try {
-      const narrowing = narrowToFailedSlices(repoRoot, prdSlug, claudeProvider);
-      requestedSliceNumbers = narrowing.requestedSliceNumbers;
-      previewPersistedScope = narrowing.persistedScope;
-      priorCompleted = narrowing.priorCompleted;
-    } catch (err) {
-      console.error(`Error: ${(err as Error).message}`);
-      process.exit(2);
-    }
-  }
   console.log(
     `  Requested slices: ${
       onlyFailed
         ? `--only-failed → ${requestedSliceNumbers?.length ? requestedSliceNumbers.join(", ") : "none (every scope member is recorded PASS)"}`
-        : (selectedSliceNumbers?.join(", ") ?? "all AFK")
+        : (previewScope.selected.map((slice) => slice.number).join(", ") || "none")
     }`,
   );
   console.log();
 
-  const slices = parseIssuesMd(issuesPath);
-  const dag = buildDAG(slices);
-  const previewScope = resolveRunScope(
-    slices,
-    requestedSliceNumbers,
-    previewPersistedScope,
-  );
   const previewDag = buildDAG(previewScope.selected);
 
   const afkCount = [...dag.slices.values()].filter(
@@ -238,8 +230,7 @@ async function main() {
       dag,
       dryRun,
       maxContractRounds,
-      selectedSliceNumbers,
-      onlyFailed,
+      selectedSliceNumbers: requestedSliceNumbers,
       provider: claudeProvider,
       migrationValidation,
       signal: controller.signal,

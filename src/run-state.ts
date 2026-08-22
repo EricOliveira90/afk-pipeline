@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import {
   ALL_PHASES,
+  traitsFor,
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
@@ -11,7 +12,7 @@ import type { PersistedRunScope } from "./slice-scope.js";
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
 
 const PERSISTED_PHASES = new Set<string>(
-  ALL_PHASES.filter((p) => p !== "RUNNING" && p !== "PENDING"),
+  ALL_PHASES.filter((phase) => traitsFor(phase).persisted),
 );
 
 export interface PersistedSliceState {
@@ -39,23 +40,6 @@ export interface RunState {
   slices: Record<string, PersistedSliceState>;
   /** Cached post-merge review-phase results for cheap re-entry (ADR 0015). */
   reviewPhase?: PersistedReviewPhase;
-  /**
-   * Per-slice resume-attempt counters + last retry decision (spec #33 /
-   * #36). Kept beside `slices` rather than inside `PersistedSliceState`
-   * because a slice that died mid-generator may have NO slice record at
-   * all (RUNNING is never persisted, ADR 0018) yet still needs its
-   * resume counted on the next retry. Absent entries read as zero, so
-   * state files that predate the field stay loadable unchanged.
-   */
-  resume?: Record<string, SliceResumeState>;
-}
-
-/** Resume bookkeeping for one slice — see `RunState.resume`. */
-export interface SliceResumeState {
-  /** Resumes so far on the current tree. Reset to 0 on restart-from-base. */
-  attempts: number;
-  /** Human-readable last retry decision, for post-run audits. */
-  lastDecision?: string;
 }
 
 /**
@@ -115,29 +99,6 @@ export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | unde
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-/**
- * Validate a loaded `resume` map, dropping malformed entries instead of
- * throwing — bad bookkeeping must degrade to "zero attempts", never
- * block resumption.
- */
-export function sanitizeResumeMap(
-  value: unknown,
-): Record<string, SliceResumeState> | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const out: Record<string, SliceResumeState> = {};
-  for (const [id, entry] of Object.entries(value as Record<string, unknown>)) {
-    const e = (entry ?? {}) as { attempts?: unknown; lastDecision?: unknown };
-    if (typeof e.attempts !== "number" || !Number.isSafeInteger(e.attempts) || e.attempts < 0) {
-      continue;
-    }
-    out[id] = {
-      attempts: e.attempts,
-      ...(typeof e.lastDecision === "string" ? { lastDecision: e.lastDecision } : {}),
-    };
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
 }
@@ -165,7 +126,6 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     scope?: PersistedRunScope;
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
-    resume?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -176,7 +136,6 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices[id] = validateV1Slice(id, val);
     }
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
-    const resume = sanitizeResumeMap(r.resume);
     return {
       version: 1,
       prdSlug,
@@ -184,7 +143,6 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ...(r.scope !== undefined ? { scope: r.scope } : {}),
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
-      ...(resume !== undefined ? { resume } : {}),
     };
   }
 
@@ -356,28 +314,4 @@ export function markSliceComplete(
 export function isSliceComplete(state: RunState, ghIssue: string): boolean {
   const s = state.slices[ghIssue];
   return s?.phase === "PASS" && s.mergedToFeature === true;
-}
-
-/** Resume attempts recorded for a slice; absent reads as zero (#36). */
-export function getResumeAttempts(state: RunState, ghIssue: string): number {
-  return state.resume?.[ghIssue]?.attempts ?? 0;
-}
-
-/**
- * Atomically record a slice's retry decision (resume-attempt count +
- * human-readable decision). Same read-modify-write pattern as
- * `saveSliceState` so parallel per-slice outcome writes are never
- * clobbered — and vice versa.
- */
-export function recordRetryDecision(
-  repoRoot: string,
-  prdSlug: string,
-  ghIssue: string,
-  decision: SliceResumeState,
-) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  current.resume = { ...current.resume, [ghIssue]: decision };
-  writeFileSync(p, JSON.stringify(current, null, 2));
 }

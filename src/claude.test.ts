@@ -103,7 +103,7 @@ describe("invoke spawn args", () => {
     expect(args).not.toContain("--bare");
   });
 
-  it("uses Opus for every pipeline role", async () => {
+  it("uses Sonnet for explorer and Opus for other roles", async () => {
     const explorerProc = makeFakeProc();
     const plannerProc = makeFakeProc();
     spawnMock
@@ -129,7 +129,7 @@ describe("invoke spawn args", () => {
     const explorerArgs = spawnMock.mock.calls[0]![1] as string[];
     const plannerArgs = spawnMock.mock.calls[1]![1] as string[];
     expect(explorerArgs[explorerArgs.indexOf("--model") + 1]).toBe(
-      "claude-opus-5",
+      "claude-sonnet-5",
     );
     expect(plannerArgs[plannerArgs.indexOf("--model") + 1]).toBe(
       "claude-opus-5",

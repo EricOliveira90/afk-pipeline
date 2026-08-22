@@ -20,6 +20,7 @@ import {
   lifecycle,
   statusIconFor,
   summaryStatusLabel,
+  traitsFor,
   type SliceIdentity,
   type SliceLifecycle,
   type SliceProgress,
@@ -630,23 +631,14 @@ function roundsCellFor(s: SliceLifecycle): string {
 }
 
 function branchInfoFor(s: SliceLifecycle): string {
-  switch (s.phase) {
-    case "PASS":
+  switch (traitsFor(s.phase).branchDisposition) {
+    case "merged":
       return "merged";
-    case "STUCK":
-    case "CONFLICT":
-    case "MERGE-PENDING":
+    case "preserved":
       return "preserved";
-    case "SKIPPED":
+    case "none":
       return "—";
-    case "PENDING":
-    case "RUNNING":
-    case "ESCALATE":
-    case "ERROR":
-    case "CANCELLED":
-    case "LANE-CANCELLED":
+    case "branch":
       return s.branch;
-    default:
-      return assertNever(s);
   }
 }

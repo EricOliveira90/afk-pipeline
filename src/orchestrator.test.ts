@@ -2079,7 +2079,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       const { repo, prdDir, specsDir, slices, baseProvider } =
         makePassingSliceSetup(slug, "7406");
 
-      // Abort as soon as the slice's QA lands: the merge completes, so
+      // Cancel as soon as the slice's QA lands: the merge completes, so
       // every slice is PASS, but the sanity gate and guardians never run.
       const controller = new AbortController();
       const provider: AgentProvider = {
@@ -2206,9 +2206,11 @@ describe("buildReviewScopeBlock", () => {
   });
 
   it("lists selected slices and skipped slices with their reasons", () => {
+    const selected = slice("01", "1", "Do the thing", "AFK");
     const block = buildReviewScopeBlock({
       persisted: { mode: "explicit", slices: [{ number: "01", ghIssue: "1" }] },
-      selected: [slice("01", "1", "Do the thing", "AFK")],
+      members: [selected],
+      selected: [selected],
       skipped: [
         { slice: slice("02", "2", "Human ceremony", "HITL"), reason: "hitl" },
         { slice: slice("03", "3", "Deferred work", "AFK"), reason: "not-selected" },
@@ -2222,6 +2224,8 @@ describe("buildReviewScopeBlock", () => {
   });
 
   it("tells the reviewer the invocation was narrowed and which members it left out", () => {
+    const passed = slice("01", "1", "Passed earlier", "AFK");
+    const selected = slice("02", "2", "Re-run of the failed slice", "AFK");
     const block = buildReviewScopeBlock({
       persisted: {
         mode: "all-afk",
@@ -2230,9 +2234,10 @@ describe("buildReviewScopeBlock", () => {
           { number: "02", ghIssue: "2" },
         ],
       },
-      selected: [slice("02", "2", "Re-run of the failed slice", "AFK")],
+      members: [passed, selected],
+      selected: [selected],
       skipped: [
-        { slice: slice("01", "1", "Passed earlier", "AFK"), reason: "narrowed" },
+        { slice: passed, reason: "narrowed" },
       ],
     });
     expect(block).toContain("- 02 (#2) Re-run of the failed slice");
@@ -2243,9 +2248,11 @@ describe("buildReviewScopeBlock", () => {
   });
 
   it("notes when nothing was skipped", () => {
+    const selected = slice("01", "1", "Everything", "AFK");
     const block = buildReviewScopeBlock({
       persisted: { mode: "all-afk", slices: [{ number: "01", ghIssue: "1" }] },
-      selected: [slice("01", "1", "Everything", "AFK")],
+      members: [selected],
+      selected: [selected],
       skipped: [],
     });
     expect(block).toContain("No manifest slices were skipped");
@@ -3419,7 +3426,7 @@ describe("narrowed re-run of the failed slices (#41)", () => {
   /** Re-run the same PRD with a narrowing config, and observe the result. */
   async function narrowRerun(
     env: FailedRun,
-    narrowing: { selectedSliceNumbers?: string[]; onlyFailed?: boolean },
+    narrowing: { selectedSliceNumbers?: string[] },
   ) {
     const records: InvocationRecord[] = [];
     const result = await runPipeline({
@@ -3531,46 +3538,12 @@ describe("narrowed re-run of the failed slices (#41)", () => {
     ).rejects.toThrow(/do not match the persisted run scope/);
   }, 120_000);
 
-  it("--only-failed produces the same run as naming the failed slice numbers", async () => {
-    const byHand = await narrowRerun(
-      await runUntilDependentFails("narrow-by-hand"),
-      { selectedSliceNumbers: ["02"] },
-    );
-    const byFlag = await narrowRerun(
-      await runUntilDependentFails("narrow-only-failed"),
-      { onlyFailed: true },
-    );
-
-    expect(byFlag.dispatched).toEqual(byHand.dispatched);
-    expect(byFlag.success).toEqual(byHand.success);
-    expect(byFlag.scope).toEqual(byHand.scope);
-    expect(byFlag.phases).toEqual(byHand.phases);
-    expect(byFlag.selectedSlices).toEqual(byHand.selectedSlices);
-    expect(byFlag.skippedSlices).toEqual(byHand.skippedSlices);
-  }, 240_000);
-
-  it("ignores run-state entries for slices no longer in issues.md", async () => {
-    const env = await runUntilDependentFails("narrow-stale-state");
-    const state = JSON.parse(readFileSync(env.statePath, "utf-8"));
-    state.slices["4199"] = {
-      phase: "PASS",
-      branch: "afk-stub/removed-slice",
-      mergedToFeature: true,
-    };
-    writeFileSync(env.statePath, JSON.stringify(state, null, 2));
-
-    const observed = await narrowRerun(env, { onlyFailed: true });
-
-    expect(observed.dispatched).toEqual(["4102"]);
-    // Slice work passed; the stub guardian verdicts still block shipping.
-    expect(observed.success).toBe(false);
-  }, 120_000);
 });
 
 /**
  * Merge-only recovery for MERGE-PENDING slices (ADR 0029). Driven through
- * the two-run `runPipeline` shape the resume tests already use — run,
- * mutate state, run again — because that is exactly what recovery is: a
+ * a two-run `runPipeline` shape — run, mutate state, run again — because
+ * that is exactly what recovery is: a
  * later invocation acting on what an earlier one persisted.
  *
  * Run 1 always ends the same way: a migration whose numeric prefix is
@@ -3640,6 +3613,103 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
       .at(-1)!;
     return readFileSync(join(parent, latest, "run.log"), "utf-8");
   }
+
+  async function createDeferredRun(slug: string) {
+    const repo = makeRepo();
+    seedMigrationOnMain(repo, "042_users.sql");
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices = slicesWithDependent();
+    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: [],
+      }),
+    });
+    expect(stateOf(repo, slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
+    return { repo, slug, slices, config, featBranch: `feat-stub/${slug}` };
+  }
+
+  it("recovers an excluded member before dispatching the narrowed dependent", async () => {
+    const env = await createDeferredRun("merge-pending-narrow-recover");
+    git(env.repo, ["checkout", env.featBranch]);
+    git(env.repo, [
+      "mv",
+      "supabase/migrations/042_users.sql",
+      "supabase/migrations/041_users.sql",
+    ]);
+    git(env.repo, ["commit", "-m", "free migration prefix 042"]);
+    git(env.repo, ["checkout", "main"]);
+
+    const records: InvocationRecord[] = [];
+    await runPipeline({
+      ...env.config,
+      dag: buildDAG(env.slices),
+      selectedSliceNumbers: ["02"],
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices: env.slices,
+        records,
+      }),
+    });
+
+    expect(stateOf(env.repo, env.slug)[BLOCKED]!.phase).toBe("PASS");
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(records.some((record) => record.ghIssue === DEPENDENT)).toBe(true);
+  }, 180_000);
+
+  it("rechecks an excluded member whose collision persists without dispatching it", async () => {
+    const env = await createDeferredRun("merge-pending-narrow-sticky");
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      ...env.config,
+      dag: buildDAG(env.slices),
+      selectedSliceNumbers: ["02"],
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices: env.slices,
+        records,
+      }),
+    });
+
+    expect(stateOf(env.repo, env.slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(records.some((record) => record.ghIssue === DEPENDENT)).toBe(false);
+  }, 180_000);
+
+  it("checks an excluded member with a missing branch but does not dispatch it", async () => {
+    const env = await createDeferredRun("merge-pending-narrow-missing");
+    const branch = stateOf(env.repo, env.slug)[BLOCKED]!.branch!;
+    const worktree = join(
+      env.repo,
+      ".afk",
+      "worktrees",
+      `afk-stub-${env.slug}-s01`,
+    );
+    git(env.repo, ["worktree", "remove", worktree, "--force"]);
+    git(env.repo, ["branch", "-D", branch]);
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      ...env.config,
+      dag: buildDAG(env.slices),
+      selectedSliceNumbers: ["02"],
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices: env.slices,
+        records,
+      }),
+    });
+
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(latestRunLog(env.repo, env.slug)).toContain(
+      "slice is outside this invocation's dispatch set",
+    );
+  }, 180_000);
 
   it("merges the deferred slice on the next run with no agent, unblocking its dependent", async () => {
     const repo = makeRepo();

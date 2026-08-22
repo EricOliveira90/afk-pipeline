@@ -31,6 +31,8 @@ export interface SkippedSlice {
 
 export interface ResolvedRunScope {
   persisted: PersistedRunScope;
+  /** Extant members of the scope of record, before invocation narrowing. */
+  members: Slice[];
   selected: Slice[];
   skipped: SkippedSlice[];
 }
@@ -106,11 +108,10 @@ function restorePersisted(
       throw new Error("Run state contains an invalid scoped slice");
     }
     const slice = byNumber.get(canonicalNumber(saved.number));
-    if (!slice || slice.ghIssue !== saved.ghIssue) {
-      throw new Error(
-        `Persisted scope slice ${saved.number} (#${saved.ghIssue}) no longer matches issues.md`,
-      );
-    }
+    // A scope identity removed from issues.md is historical state, not
+    // executable work. Keep it in the persisted scope of record but do
+    // not let it wedge this invocation or re-enter through --only-failed.
+    if (!slice || slice.ghIssue !== saved.ghIssue) continue;
     if (slice.type !== "AFK") {
       throw new Error(
         `Persisted scope slice ${slice.number} is now declared ${slice.type}; refusing to run it`,
@@ -128,10 +129,10 @@ function restorePersisted(
  * selection an operator would type by hand.
  */
 export function resolveOnlyFailedSelection(
-  persisted: PersistedRunScope,
+  members: readonly Slice[],
   isComplete: (ghIssue: string) => boolean,
 ): string[] {
-  return persisted.slices
+  return members
     .filter((slice) => !isComplete(slice.ghIssue))
     .map((slice) => slice.number);
 }
@@ -156,12 +157,14 @@ export function resolveRunScope(
   const requestedSlices =
     requested === undefined ? undefined : resolveRequested(slices, requested);
 
+  let members: Slice[];
   let selected: Slice[];
   const scopeOfRecord = new Set<string>();
   let resolved: PersistedRunScope;
   if (persisted) {
-    selected = restorePersisted(slices, persisted);
-    for (const slice of selected) scopeOfRecord.add(slice.ghIssue);
+    members = restorePersisted(slices, persisted);
+    selected = members;
+    for (const slice of members) scopeOfRecord.add(slice.ghIssue);
     if (requestedSlices) {
       const outside = requestedSlices.filter(
         (slice) => !scopeOfRecord.has(slice.ghIssue),
@@ -184,6 +187,7 @@ export function resolveRunScope(
   } else {
     selected =
       requestedSlices ?? slices.filter((slice) => slice.type === "AFK");
+    members = selected;
     resolved = {
       mode: requested === undefined ? "all-afk" : "explicit",
       slices: selected.map(({ number, ghIssue }) => ({ number, ghIssue })),
@@ -203,5 +207,5 @@ export function resolveRunScope(
             : "not-selected",
     })) satisfies SkippedSlice[];
 
-  return { persisted: resolved, selected, skipped };
+  return { persisted: resolved, members, selected, skipped };
 }

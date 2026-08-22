@@ -88,6 +88,7 @@ describe("resolveRunScope", () => {
 
     const narrowed = resolveRunScope(SLICES, ["02"], first.persisted);
 
+    expect(narrowed.members.map((slice) => slice.number)).toEqual(["01", "02"]);
     expect(narrowed.selected.map((slice) => slice.number)).toEqual(["02"]);
     // The persisted scope of record is untouched by the narrowing, so a
     // later full re-run still knows the original selection.
@@ -96,6 +97,36 @@ describe("resolveRunScope", () => {
       { slice: { number: "01" }, reason: "narrowed" },
       { slice: { number: "03" }, reason: "hitl" },
     ]);
+  });
+
+  it("ignores persisted members removed from issues.md without rewriting the scope of record", () => {
+    const first = resolveRunScope(SLICES, undefined);
+    const currentManifest = SLICES.filter((slice) => slice.number !== "01");
+
+    const retry = resolveRunScope(currentManifest, undefined, first.persisted);
+
+    expect(retry.persisted).toEqual(first.persisted);
+    expect(retry.members.map((slice) => slice.number)).toEqual(["02"]);
+    expect(retry.selected.map((slice) => slice.number)).toEqual(["02"]);
+  });
+
+  it("still rejects newly added work after a persisted member was removed", () => {
+    const first = resolveRunScope(SLICES, ["01", "02"]);
+    const currentManifest = [
+      SLICES[1]!,
+      {
+        number: "04",
+        ghIssue: "104",
+        title: "New AFK work",
+        type: "AFK" as const,
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+
+    expect(() =>
+      resolveRunScope(currentManifest, ["02", "04"], first.persisted),
+    ).toThrow(/do not match the persisted run scope/);
   });
 
   it("rejects a selection that adds work outside the persisted scope", () => {
@@ -130,27 +161,33 @@ describe("resolveOnlyFailedSelection", () => {
   };
 
   it("selects the persisted-scope members that are not recorded complete", () => {
-    expect(resolveOnlyFailedSelection(persisted, (id) => id === "101")).toEqual([
+    expect(resolveOnlyFailedSelection(SLICES.slice(0, 2), (id) => id === "101")).toEqual([
       "02",
     ]);
   });
 
   it("selects every member when none is recorded complete", () => {
-    expect(resolveOnlyFailedSelection(persisted, () => false)).toEqual([
+    expect(resolveOnlyFailedSelection(SLICES.slice(0, 2), () => false)).toEqual([
       "01",
       "02",
     ]);
   });
 
   it("selects nothing when every member is recorded complete", () => {
-    expect(resolveOnlyFailedSelection(persisted, () => true)).toEqual([]);
+    expect(resolveOnlyFailedSelection(SLICES.slice(0, 2), () => true)).toEqual([]);
   });
 
   it("feeds resolveRunScope a subset the persisted scope accepts", () => {
-    const failed = resolveOnlyFailedSelection(persisted, (id) => id === "101");
+    const failed = resolveOnlyFailedSelection(SLICES.slice(0, 2), (id) => id === "101");
 
     const scope = resolveRunScope(SLICES, failed, persisted);
 
     expect(scope.selected.map((slice) => slice.ghIssue)).toEqual(["102"]);
+  });
+
+  it("does not select persisted identities that are absent from issues.md", () => {
+    const extant = [SLICES[1]!];
+
+    expect(resolveOnlyFailedSelection(extant, () => false)).toEqual(["02"]);
   });
 });
