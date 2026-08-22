@@ -24,6 +24,10 @@ import {
   renderPresentSection,
   type PresentSection,
 } from "./status-present.js";
+import {
+  buildPipelineSection,
+  type PipelineSection,
+} from "./status-pipeline.js";
 
 /** The model the renderer consumes; `--json` emits it verbatim. */
 export interface StatusModel {
@@ -34,6 +38,8 @@ export interface StatusModel {
   present: PresentSection;
   /** What comes next and what unblocks what (spec #30). */
   future: FutureSection;
+  /** Wave/lane/round projection consumed by the web dashboard. */
+  pipeline: PipelineSection;
 }
 
 export interface StatusResult {
@@ -76,18 +82,32 @@ export function buildStatusModel(
       message: `No events.jsonl in ${runDir} — this run predates events.jsonl.`,
     };
   }
+  const now = new Date();
+  const present = buildPresentSection({
+    runDir,
+    events: parsed.events,
+    now,
+  });
+  const future = buildFutureSection({
+    repoRoot,
+    runDir,
+    events: parsed.events,
+  });
   return {
     ok: true,
     model: {
       schemaVersion: parsed.version,
       runDir,
       events: parsed.events,
-      present: buildPresentSection({
-        runDir,
+      present,
+      future,
+      pipeline: buildPipelineSection({
+        repoRoot,
         events: parsed.events,
-        now: new Date(),
+        present,
+        future,
+        now,
       }),
-      future: buildFutureSection({ repoRoot, runDir, events: parsed.events }),
     },
   };
 }

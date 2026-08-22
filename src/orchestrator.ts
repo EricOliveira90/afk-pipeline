@@ -1510,7 +1510,14 @@ export async function runPipeline(
   logger.phase(
     `[afk] Pipeline run started (${provider.name}) — logs: ${logger.runDir}`,
     "error",
-    { type: "run-started", provider: provider.name, runSlug: loggerSlug },
+    {
+      type: "run-started",
+      provider: provider.name,
+      runSlug: loggerSlug,
+      contractRoundLimit:
+        config.maxContractRounds ?? DEFAULT_MAX_CONTRACT_ROUNDS,
+      implementationRoundLimit: MAX_GENERATOR_ROUNDS,
+    },
   );
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     withTransientRetry(
@@ -1861,6 +1868,7 @@ export async function runPipeline(
         failed.add(id);
       }
     }
+    logger.event({ type: "wave-completed", wave: waveNumber });
 
     // If cancelled, mark anything not yet completed/failed as CANCELLED
     // and exit the wave loop. Worktrees are preserved on disk so a
@@ -1984,14 +1992,29 @@ export async function runPipeline(
       const cachedSanity = runState.reviewPhase?.sanity;
       let sanity: { ok: boolean; failures: string[] };
       if (treeShaBefore && cachedSanity?.treeSha === treeShaBefore) {
+        logger.event({
+          type: "run-phase-started",
+          phase: "sanity",
+          cached: true,
+        });
         sanity = { ok: true, failures: [] };
         logger.phase(
           `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
           "log",
         );
       } else {
+        logger.event({ type: "run-phase-started", phase: "sanity" });
         sanity = runPreShipSanity(reviewDir);
       }
+      logger.event({
+        type: "run-phase-ended",
+        phase: "sanity",
+        cached:
+          treeShaBefore && cachedSanity?.treeSha === treeShaBefore
+            ? true
+            : undefined,
+        verdict: sanity.ok ? "PASS" : "FAIL",
+      });
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
         logger.phase(
@@ -2039,6 +2062,11 @@ export async function runPipeline(
                 });
           let lastFailure: ReviewRunResult = { outcome: "NEVER_RAN" };
           for (let attempt = 1; attempt <= reviewRetries + 1; attempt++) {
+            logger.event({
+              type: "run-phase-started",
+              phase: role,
+              attempt,
+            });
             const log = logger.agentLog(
               "all",
               role,
@@ -2077,6 +2105,12 @@ export async function runPipeline(
               const message =
                 error instanceof Error ? error.message : String(error);
               lastFailure = { outcome: failureClass, detail: message };
+              logger.event({
+                type: "run-phase-ended",
+                phase: role,
+                attempt,
+                verdict: failureClass,
+              });
               if (attempt <= reviewRetries) {
                 logger.phase(
                   `  ⚠️  ${label} review ${failureClass}: ${message}. Infrastructure retry ${attempt}/${reviewRetries}.`,
@@ -2098,6 +2132,12 @@ export async function runPipeline(
                 "warn",
               );
             }
+            logger.event({
+              type: "run-phase-ended",
+              phase: role,
+              attempt,
+              verdict,
+            });
             return { outcome: verdict };
           }
           return lastFailure;
@@ -2122,6 +2162,23 @@ export async function runPipeline(
           "architect",
         );
         const cachedPm = reuseCachedReview(runState.reviewPhase?.pm, "PM");
+        for (const [phase, cached] of [
+          ["architect-review", cachedArch],
+          ["pm-review", cachedPm],
+        ] as const) {
+          if (!cached) continue;
+          logger.event({
+            type: "run-phase-started",
+            phase,
+            cached: true,
+          });
+          logger.event({
+            type: "run-phase-ended",
+            phase,
+            cached: true,
+            verdict: cached.outcome,
+          });
+        }
 
         let archResult: ReviewRunResult;
         let pmResult: ReviewRunResult;
@@ -2213,6 +2270,7 @@ export async function runPipeline(
           openPrOnOverride: config.openPrOnOverride === true,
           closesIssues: scope.selected.map((slice) => slice.ghIssue),
         });
+        logger.event({ type: "run-phase-started", phase: "draft-pr" });
         if (prPlan.open) {
           if (prPlan.overridden) {
             logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
@@ -2267,6 +2325,15 @@ export async function runPipeline(
             }
           }
         }
+        logger.event({
+          type: "run-phase-ended",
+          phase: "draft-pr",
+          verdict: prPlan.open
+            ? draftPrUrl
+              ? "READY"
+              : "FAILED"
+            : "SKIPPED",
+        });
       }
     } finally {
       if (cleanupReviewDir) {
@@ -2278,9 +2345,13 @@ export async function runPipeline(
     const summary = logger.writeSummary();
     const consoleSummary = logger.formatConsoleSummary();
     const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
-    emitHandoff(
-      signal?.aborted ? "ABORTED" : allSuccess ? "SUCCEEDED" : "FAILED",
-    );
+    const runOutcome = signal?.aborted
+      ? "ABORTED"
+      : allSuccess
+        ? "SUCCEEDED"
+        : "FAILED";
+    logger.event({ type: "run-ended", outcome: runOutcome });
+    emitHandoff(runOutcome);
 
     return { success: allSuccess, summary, consoleSummary };
   } catch (err) {
@@ -2316,6 +2387,10 @@ export async function runPipeline(
     } catch {
       // Best effort on an already-failing path.
     }
+    logger.event({
+      type: "run-ended",
+      outcome: signal?.aborted ? "ABORTED" : "FAILED",
+    });
     const partial: PipelineResult = {
       success: false,
       summary,

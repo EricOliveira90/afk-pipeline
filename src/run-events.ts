@@ -24,8 +24,16 @@ export const EVENTS_SCHEMA_VERSION = 1;
  */
 export type RunEventPayload =
   | { type: "header"; version: typeof EVENTS_SCHEMA_VERSION }
-  | { type: "run-started"; provider: string; runSlug: string }
+  | {
+      type: "run-started";
+      provider: string;
+      runSlug: string;
+      /** Configured convergence limits; absent in historical streams. */
+      contractRoundLimit?: number;
+      implementationRoundLimit?: number;
+    }
   | { type: "wave-dispatched"; wave: number; slices: string[] }
+  | { type: "wave-completed"; wave: number }
   | {
       type: "lanes-partitioned";
       wave: number;
@@ -64,6 +72,20 @@ export type RunEventPayload =
        */
       verdict?: string;
     }
+  | {
+      type: "run-phase-started";
+      phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+      attempt?: number;
+      cached?: boolean;
+    }
+  | {
+      type: "run-phase-ended";
+      phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+      attempt?: number;
+      cached?: boolean;
+      verdict: string;
+    }
+  | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
   | {
       type: "warn";

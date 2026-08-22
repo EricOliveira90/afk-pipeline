@@ -17,6 +17,7 @@ import { runCleanFailedCli } from "./clean-failed.js";
 import { resolveRunScope } from "./slice-scope.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runStatus } from "./status.js";
+import { runStatusWeb } from "./status-web.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -26,7 +27,8 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]
+       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -39,6 +41,19 @@ async function main() {
   //
   // `status` is the one-shot, read-only run view (spec #26).
   if (args[0] === "status") {
+    if (args.includes("--web")) {
+      try {
+        const handle = await runStatusWeb(args.slice(1), resolve("."));
+        console.log(`AFK status dashboard: ${handle.url}\nRun: ${handle.runDir}`);
+        process.once("SIGINT", () => {
+          void handle.close().finally(() => process.exit(0));
+        });
+        return;
+      } catch (error) {
+        console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(2);
+      }
+    }
     const { output, exitCode } = runStatus(args.slice(1), resolve("."));
     // Error output goes to stderr so it's distinguishable from the
     // rendered view (and from --json documents) in shell pipelines.
