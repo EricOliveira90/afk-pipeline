@@ -36,6 +36,14 @@ export type RunEventPayload =
        * file lists.
        */
       lanes: string[][];
+      /**
+       * Slices unioned into one lane by a shared *resource* rather than
+       * a shared path (ADR 0027), keyed by resource — today only
+       * `migrations`. Present only when at least two slices in the wave
+       * contend for the same resource; a lone declarer is contending
+       * with nobody.
+       */
+      sharedResources?: Record<string, string[]>;
       serial?: boolean;
     }
   | {
