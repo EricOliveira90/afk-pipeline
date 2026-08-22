@@ -3,6 +3,7 @@ import type { Slice } from "./issues-parser.js";
 import {
   DEFAULT_MIGRATION_PATH_PATTERN,
   laneResourceGroups,
+  migrationPathsIn,
   partitionLanes,
 } from "./lanes.js";
 
@@ -302,5 +303,57 @@ describe("laneResourceGroups", () => {
       true,
     );
     expect(DEFAULT_MIGRATION_PATH_PATTERN.test("db/seed.sql")).toBe(false);
+  });
+});
+
+/**
+ * The recognition rule itself, shared by lane grouping and by the
+ * contract-lock prefix gate (ADR 0026). The gate needs the migration
+ * paths, not just "does this slice declare one", and it must agree with
+ * the partitioner about what counts — one rule, two callers.
+ */
+describe("migrationPathsIn", () => {
+  it("keeps only the recognised migration paths", () => {
+    expect(
+      migrationPathsIn([
+        "supabase/migrations/003_users.sql",
+        "src/db.ts",
+        "docs/schema.md",
+      ]),
+    ).toEqual(["supabase/migrations/003_users.sql"]);
+  });
+
+  it("normalises separators, leading ./ and case", () => {
+    expect(
+      migrationPathsIn([".\\DB\\Migrations\\004_Orders.SQL"]),
+    ).toEqual(["db/migrations/004_orders.sql"]);
+  });
+
+  it("returns an empty list when nothing is a migration", () => {
+    expect(migrationPathsIn(["src/a.ts"])).toEqual([]);
+    expect(migrationPathsIn([])).toEqual([]);
+  });
+
+  it("honours a configured pattern in place of the default", () => {
+    const options = {
+      migrationPathPattern: /(^|\/)changesets\/.*\.xml$/,
+    };
+    expect(
+      migrationPathsIn(
+        ["db/changesets/001_one.xml", "supabase/migrations/002_two.sql"],
+        options,
+      ),
+    ).toEqual(["db/changesets/001_one.xml"]);
+  });
+
+  it("matches every path, not every other one, given a stateful pattern", () => {
+    // A `g` pattern advances lastIndex across `test` calls, so a naive
+    // implementation would drop alternate matches.
+    expect(
+      migrationPathsIn(
+        ["migrations/a.sql", "migrations/b.sql", "migrations/c.sql"],
+        { migrationPathPattern: /(^|\/)migrations\/.*\.sql$/g },
+      ),
+    ).toHaveLength(3);
   });
 });

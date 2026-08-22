@@ -82,8 +82,9 @@ export type RunEventPayload =
        * round, transient-outage backoff retries (ADR 0022), per-slice
        * prior-run state at run start (retry announcement), NOT-RUN
        * dependency holds, idle-kill deferrals from the busy probe
-       * (ADR 0021), and operator-granted resumes of a STUCK slice's
-       * preserved tree (`--resume-stuck`, #49).
+       * (ADR 0021), operator-granted resumes of a STUCK slice's
+       * preserved tree (`--resume-stuck`, #49), and a locked contract
+       * sent back to the planner by the contract-lock gate (ADR 0026).
        */
       reason:
         | "lane-continuation"
@@ -92,7 +93,8 @@ export type RunEventPayload =
         | "prior-run-state"
         | "not-run-hold"
         | "idle-deferral"
-        | "resume-stuck";
+        | "resume-stuck"
+        | "contract-lock-refused";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

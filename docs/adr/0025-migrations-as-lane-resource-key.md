@@ -94,8 +94,9 @@ alternative in every direction:
   contract-lock** — a sibling gate is unnecessary once migration-bearing
   slices share a lane, because the successor re-negotiates after its
   predecessor merges and sees the real tip. The contract-lock check
-  against the *feature branch* remains worthwhile in its own right and
-  is tracked separately.
+  against the *feature branch* remains worthwhile in its own right, and
+  now exists — see ADR 0026, which is scoped to the feature-branch tip
+  alone for exactly this reason.
 - **Automatic renumbering of a colliding migration** — rewriting a
   filename and its references is a semantic change to someone's schema
   history, and a strictly larger change than not colliding.

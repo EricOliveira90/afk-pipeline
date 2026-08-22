@@ -1019,3 +1019,378 @@ describe("runWave onOutcome", () => {
     expect(outcomes.get("121")?.phase).toBe("PASS");
   }, 30_000);
 });
+
+/**
+ * The contract-lock migration prefix gate (ADR 0026).
+ *
+ * The contract names its migration file at lock time. When that
+ * filename's prefix already exists on the feature branch under another
+ * name, the merge mutex refuses the merge — in the PRD 076 session, four
+ * hours and seven commits later. The wave inspects each contract the
+ * moment it locks and sends a colliding one straight back to the
+ * planner, which costs one contract round and no generation at all.
+ */
+describe("runWave — contract-lock migration prefix gate", () => {
+  function readEvents(runDir: string): Array<Record<string, unknown>> {
+    const raw = readFileSync(join(runDir, "events.jsonl"), "utf-8");
+    return raw
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  /**
+   * Commit a migration onto the feature branch, without disturbing HEAD.
+   * Only the migration is staged — `add -A` here would sweep the run's
+   * untracked `.afk/logs` and `.kiro/specs` onto the branch, and
+   * checking HEAD back out would then delete them mid-run.
+   */
+  function addMigrationToFeatBranch(
+    repo: string,
+    featBranch: string,
+    relPath: string,
+  ) {
+    const head = git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(repo, ["checkout", featBranch]);
+    const abs = join(repo, relPath);
+    mkdirSync(join(abs, ".."), { recursive: true });
+    writeFileSync(abs, "-- existing\n", "utf-8");
+    git(repo, ["add", "--", relPath]);
+    git(repo, ["commit", "-m", `add ${relPath}`]);
+    git(repo, ["checkout", head]);
+  }
+
+  /**
+   * Provider whose planner declares — and whose generator writes — a
+   * migration path chosen per planner round, so a test can make the
+   * planner obey the gate's objection or ignore it.
+   */
+  function buildPlannerProvider(opts: {
+    slices: Slice[];
+    /** Migration path this slice's planner declares on the given round. */
+    pathForRound: (ghIssue: string, round: number) => string;
+    /** Overrides what the generator writes; defaults to the declared path. */
+    generatorPath?: (ghIssue: string) => string;
+    /** Every planner prompt, in invocation order. */
+    plannerPrompts?: string[];
+  }): AgentProvider {
+    const { slices, pathForRound, generatorPath, plannerPrompts } = opts;
+    const plannerRounds = new Map<string, number>();
+    const declaredNow = new Map<string, string>();
+
+    return {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const { role, cwd, prompt } = options;
+        const slice = sliceFromCwd(cwd, slices);
+        const ghIssue = slice?.ghIssue ?? "";
+        const dir = slice ? findSliceArtifactDir(cwd, slice.number) : null;
+        await new Promise((r) => setTimeout(r, 5));
+
+        if (role === "explorer" && dir) {
+          writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+        } else if (role === "planner" && dir) {
+          const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
+          plannerRounds.set(ghIssue, round);
+          plannerPrompts?.push(prompt);
+          const path = pathForRound(ghIssue, round);
+          declaredNow.set(ghIssue, path);
+          writeFileSync(
+            join(dir, "contract.md"),
+            `# Slice Contract\n\n**Status:** NEGOTIATING\n\n## Files expected to change\n- ${path}\n`,
+            "utf-8",
+          );
+        } else if (role === "evaluator-contract" && dir) {
+          // Always ACCEPT. The evaluator has no idea what is on the
+          // feature branch, which is exactly why the gate has to exist.
+          const round = plannerRounds.get(ghIssue) ?? 1;
+          writeFileSync(
+            join(dir, `feedback-r${round}.md`),
+            `## Evaluator feedback — round ${round}\n\n**Verdict:** ACCEPT\n\nGAPS: 0\nRE_RAISED_GAPS: 0\n`,
+            "utf-8",
+          );
+        } else if (role === "generator" && dir) {
+          const path =
+            generatorPath?.(ghIssue) ?? declaredNow.get(ghIssue) ?? "src/x.txt";
+          const abs = join(cwd, path);
+          mkdirSync(join(abs, ".."), { recursive: true });
+          writeFileSync(abs, `-- ${ghIssue}\n`, "utf-8");
+        } else if (role === "evaluator-qa" && dir) {
+          writeFileSync(
+            join(dir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n",
+            "utf-8",
+          );
+        }
+
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+  }
+
+  it("sends a colliding contract back to the planner with the free prefix, then passes", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2001", title: "Adds a migration", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-collision",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    // The feature branch already owns prefix 003 under another name.
+    addMigrationToFeatBranch(
+      repo,
+      featBranch,
+      "supabase/migrations/003_users.sql",
+    );
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      // Round 1 collides on 003; the planner then obeys the objection.
+      pathForRound: (_id, round) =>
+        round === 1
+          ? "supabase/migrations/003_orders.sql"
+          : "supabase/migrations/004_orders.sql",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2001"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    // The renumbered slice merged normally: one contract round bought
+    // the correction and no generation was wasted.
+    expect(outcomes.get("2001")?.phase).toBe("PASS");
+
+    // The gate refused round 1, so the planner ran again.
+    expect(plannerPrompts).toHaveLength(2);
+    // The second prompt named the colliding prefix and the next free
+    // one — a mechanical correction rather than a puzzle.
+    expect(plannerPrompts[1]).toContain("003");
+    expect(plannerPrompts[1]).toContain("004");
+    expect(plannerPrompts[1]).toMatch(/REJECTED by the/i);
+
+    // Observable in the event stream, under one warn reason.
+    const refusals = readEvents(logger.runDir).filter(
+      (e) => e.type === "warn" && e.reason === "contract-lock-refused",
+    );
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]!.ghIssue).toBe("2001");
+    expect(String(refusals[0]!.message)).toContain("004");
+
+    // The renumbered migration is what landed on the feature branch.
+    git(repo, ["checkout", featBranch]);
+    expect(
+      existsSync(join(repo, "supabase", "migrations", "004_orders.sql")),
+    ).toBe(true);
+    expect(
+      existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
+    ).toBe(false);
+  }, 60_000);
+
+  it("does not flag a contract re-touching a migration it already owns", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2011", title: "Edits its own migration", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-same-file",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    const owned = "supabase/migrations/003_users.sql";
+    addMigrationToFeatBranch(repo, featBranch, owned);
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      // Same prefix and same filename: the slice is editing the
+      // migration already there, which collides with nothing.
+      pathForRound: () => owned,
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2011"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("2011")?.phase).toBe("PASS");
+    // One planner round: the gate never fired.
+    expect(plannerPrompts).toHaveLength(1);
+    expect(
+      readEvents(logger.runDir).filter(
+        (e) => e.type === "warn" && e.reason === "contract-lock-refused",
+      ),
+    ).toEqual([]);
+  }, 60_000);
+
+  it("leaves a slice declaring no migration files alone", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2021", title: "No migrations", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-no-migrations",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    // A migration exists on the tip; this slice just does not declare one.
+    addMigrationToFeatBranch(
+      repo,
+      featBranch,
+      "supabase/migrations/003_users.sql",
+    );
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      pathForRound: () => "src/app.ts",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2021"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("2021")?.phase).toBe("PASS");
+    expect(plannerPrompts).toHaveLength(1);
+  }, 60_000);
+
+  it("escalates when the contract rounds run out on an unresolved collision", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2031", title: "Will not renumber", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-escalate",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    addMigrationToFeatBranch(
+      repo,
+      featBranch,
+      "supabase/migrations/003_users.sql",
+    );
+    config.maxContractRounds = 2;
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      // The planner never takes the correction.
+      pathForRound: () => "supabase/migrations/003_orders.sql",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2031"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    // Escalation through the ordinary unresolvable-contract path, not a
+    // new outcome: a gate refusal spends rounds like any other revision,
+    // and earns no cap extension for a correction it declined twice.
+    expect(outcomes.get("2031")?.phase).toBe("ESCALATE");
+    expect(plannerPrompts).toHaveLength(2);
+    // Nothing was generated: the slice never reached Phase B.
+    expect(
+      existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
+    ).toBe(false);
+
+    // The escalated slice says why. Without the objection in stuck.md the
+    // operator sees a contract that the evaluator ACCEPTed twice and no
+    // trace of what refused it.
+    const stuck = readFileSync(
+      join(repo, ".afk", "artifacts", "wave-gate-escalate-stub", "slice-01", "stuck.md"),
+      "utf-8",
+    );
+    expect(stuck).toContain("contract-lock gate");
+    expect(stuck).toContain("003");
+    expect(stuck).toContain("004");
+  }, 60_000);
+
+  it("still refuses at the merge mutex when the generator collides but the contract did not", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2041", title: "Generator went off-contract", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-merge-authority",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    addMigrationToFeatBranch(
+      repo,
+      featBranch,
+      "supabase/migrations/003_users.sql",
+    );
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      // The contract is clean, so the contract-lock gate has nothing to say.
+      pathForRound: () => "supabase/migrations/004_orders.sql",
+      // The generator writes a colliding file anyway. Only a check
+      // atomic with the merge can catch that, which is why the
+      // merge-mutex check stays exactly where it is.
+      generatorPath: () => "supabase/migrations/003_orders.sql",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2041"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(plannerPrompts).toHaveLength(1);
+    const outcome = outcomes.get("2041");
+    expect(outcome?.phase).toBe("CONFLICT");
+    if (outcome?.phase === "CONFLICT") {
+      expect(outcome.error).toMatch(/Migration prefix collision: 003/);
+    }
+  }, 60_000);
+});

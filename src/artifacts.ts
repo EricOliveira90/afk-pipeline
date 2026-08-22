@@ -426,26 +426,60 @@ export function hasPassingQA(sliceDir: string): boolean {
  * evaluator returns `ACCEPT`. Agents do not edit Status. See ADR 0008.
  */
 export function lockContract(contractPath: string): void {
+  writeContractStatus(contractPath, "LOCKED");
+}
+
+/**
+ * Write `**Status:** NEGOTIATING` into `contract.md` — the counterpart
+ * to {@link lockContract}, for the one case where the orchestrator locks
+ * a contract and then takes the lock back: a gate outside the
+ * negotiation loop refuses the locked contract and sends it to the
+ * planner for another round (ADR 0026).
+ *
+ * The file must not keep claiming `LOCKED` while it is being revised.
+ * The generator enforces its own Status invariant ("if Status is not
+ * LOCKED, stop"), so a stale LOCKED is exactly the disk-versus-
+ * orchestrator divergence ADR 0008 exists to prevent — and it would let
+ * a contract the pipeline already rejected reach generation.
+ */
+export function reopenContract(contractPath: string): void {
+  writeContractStatus(contractPath, "NEGOTIATING");
+}
+
+/**
+ * Set the contract's Status line. Replaces the first matching
+ * `**Status:**` line in document order — including one nested in a
+ * fenced code block, though contracts in production format have exactly
+ * one Status line at the top. Inserts a Status line after the H1
+ * heading if none is present.
+ *
+ * Owned by the orchestrator; agents do not edit Status. See ADR 0008.
+ */
+function writeContractStatus(
+  contractPath: string,
+  status: "LOCKED" | "NEGOTIATING",
+): void {
   const content = existsSync(contractPath)
     ? readFileSync(contractPath, "utf-8")
     : "";
 
   const statusRe = /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/im;
+  const line = `**Status:** ${status}`;
   let next: string;
 
   if (statusRe.test(content)) {
-    next = content.replace(statusRe, "**Status:** LOCKED");
+    next = content.replace(statusRe, line);
   } else if (content.length > 0) {
     // Insert after the first H1, or prepend if no H1.
     const h1 = content.match(/^#\s+.+$/m);
     if (h1 && h1.index !== undefined) {
       const at = h1.index + h1[0].length;
-      next = content.slice(0, at) + "\n\n**Status:** LOCKED" + content.slice(at);
+      next = content.slice(0, at) + `\n\n${line}` + content.slice(at);
     } else {
-      next = "**Status:** LOCKED\n\n" + content;
+      next = `${line}\n\n` + content;
     }
   } else {
-    next = "**Status:** LOCKED\n";
+    next = `${line}\n`;
   }
 
   writeFileSync(contractPath, next, "utf-8");

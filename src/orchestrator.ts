@@ -740,6 +740,24 @@ export interface SliceContext {
      */
     baseRefreshed?: boolean;
   };
+  /**
+   * Gate consulted the moment the contract reaches LOCKED, before
+   * negotiation returns — the caller's chance to inspect the locked
+   * contract and refuse it. Returning a string rejects the lock: the
+   * contract is reopened and the planner gets another round with that
+   * string as its objection. Returning `null` (or omitting the gate)
+   * accepts the lock.
+   *
+   * A refusal costs one contract round and nothing more, which is the
+   * whole point: it is the cheapest place to catch a contract that names
+   * something the pipeline will refuse later. Exhausting the rounds on
+   * an objection the planner cannot resolve escalates through the same
+   * path any other unresolvable contract does.
+   *
+   * `runWave` supplies the migration-prefix gate (ADR 0026); other
+   * callers leave it unset and negotiate exactly as before.
+   */
+  onContractLocked?: (contractPath: string) => string | null;
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0],
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -1205,8 +1223,83 @@ export async function runSliceNegotiate(
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
     const capDecisions: string[] = [];
 
+    /**
+     * Objection raised by `ctx.onContractLocked` and not yet handed to a
+     * planner round. Non-null means the last contract to reach LOCKED was
+     * refused after the evaluator had accepted it.
+     */
+    let gateObjection: string | null = null;
+
+    /**
+     * Consult the contract-lock gate on a contract that just reached
+     * LOCKED. `true` means the gate refused it: the contract is back to
+     * NEGOTIATING on disk and `gateObjection` holds the feedback the next
+     * planner round must address.
+     */
+    const lockRefusedByGate = (round: number): boolean => {
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection === null) return false;
+      gateObjection = objection;
+      artifacts.reopenContract(contractPath);
+      contractStatus = "NEGOTIATING";
+      capDecisions.push(
+        `The contract-lock gate refused the contract locked at round ${round}: ${objection}`,
+      );
+      logger.phase(
+        `${ctx.tag}: contract lock refused before generation — ${objection}`,
+        "error",
+        {
+          type: "warn",
+          reason: "contract-lock-refused",
+          ghIssue: slice.ghIssue,
+          message: objection,
+        },
+      );
+      return true;
+    };
+
+    /**
+     * The planner's REVISION_NOTE for `round`. A pending gate objection
+     * takes the lead: it is a concrete, mechanical correction, and the
+     * evaluator feedback it supersedes said ACCEPT.
+     */
+    const revisionNote = (round: number, objection: string | null): string => {
+      const priorFeedback =
+        round > 1
+          ? `${ctx.relSliceDir}/feedback-r${round - 1}.md`
+          : null;
+      if (objection === null) {
+        return priorFeedback
+          ? `Revise based only on evaluator feedback in ${priorFeedback}.`
+          : "";
+      }
+      return (
+        `The previous contract was accepted by the evaluator and then REJECTED by the ` +
+        `pipeline, before any code was generated:\n\n${objection}\n\n` +
+        `Resolve exactly that in this revision.` +
+        (priorFeedback
+          ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
+          : "")
+      );
+    };
+
+    // A contract left LOCKED on disk by an earlier run has never been
+    // past the gate against *this* run's feature-branch tip. Consult it
+    // before skipping negotiation altogether; a refusal reopens the
+    // contract and the round loop below runs normally.
+    if (contractStatus === "LOCKED") {
+      lockRefusedByGate(0);
+    }
+
     if (contractStatus !== "LOCKED") {
       for (let round = 1; round <= allowedContractRounds; round++) {
+        // Consume any pending gate objection: it belongs to this round's
+        // planner prompt only. Leaving it set would re-deliver it after a
+        // later ordinary REVISE, and would make the round-cap branch
+        // below misattribute that REVISE to the gate.
+        const pendingObjection = gateObjection;
+        gateObjection = null;
+
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
           "error",
@@ -1228,10 +1321,7 @@ export async function runSliceNegotiate(
             ROUND: round,
             RELEVANT_FILES: relevantFilesBlock,
             SLICE_BODY: sliceBodyNote,
-            REVISION_NOTE:
-              round > 1
-                ? `Revise based only on evaluator feedback in ${ctx.relSliceDir}/feedback-r${round - 1}.md.`
-                : "",
+            REVISION_NOTE: revisionNote(round, pendingObjection),
           }),
           cwd: ctx.worktreeDir,
           logStream: plannerLog,
@@ -1306,10 +1396,12 @@ export async function runSliceNegotiate(
         if (verdict === "ACCEPT") {
           artifacts.lockContract(contractPath);
           contractStatus = "LOCKED";
-          break;
+        } else {
+          contractStatus = artifacts.readContractStatus(contractPath);
         }
-        contractStatus = artifacts.readContractStatus(contractPath);
-        if (contractStatus === "LOCKED") break;
+        // A refused lock falls through to the round-spending logic
+        // below: the gate costs exactly what an evaluator REVISE costs.
+        if (contractStatus === "LOCKED" && !lockRefusedByGate(round)) break;
 
         if (verdict === "ESCALATE") {
           capDecisions.push(
@@ -1317,8 +1409,18 @@ export async function runSliceNegotiate(
           );
           logger.phase(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
         } else if (round === allowedContractRounds) {
-          const assessment =
-            verdict === "REVISE"
+          // A gate refusal earns no extension. The extension exists for
+          // a planner making measurable progress on evaluator gaps; a
+          // gate objection is a concrete mechanical correction the
+          // planner already had every round to make, so failing it is
+          // the escalation the operator should see.
+          const assessment = gateObjection
+            ? {
+                grant: false as const,
+                reason:
+                  "the contract-lock gate refused the final round's contract",
+              }
+            : verdict === "REVISE"
               ? assessContractExtension({
                   previousGapCount: previousMetrics?.gapCount ?? null,
                   currentGapCount: metrics.gapCount,

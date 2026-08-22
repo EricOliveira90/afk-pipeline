@@ -72,6 +72,29 @@ function matcherFor(pattern: RegExp): RegExp {
 }
 
 /**
+ * The subset of `files` the configured pattern recognises as database
+ * migrations, normalised (forward slashes, no leading `./`, lowercased).
+ *
+ * One definition of "this is a migration path" for both consumers: lane
+ * grouping only needs to know whether a slice declares any (see
+ * {@link laneResourceGroups}), while the contract-lock prefix gate needs
+ * the paths themselves so it can compare their numeric prefixes against
+ * the feature-branch tip (ADR 0026). A second recognition rule would be
+ * free to drift from this one.
+ */
+export function migrationPathsIn(
+  files: readonly string[],
+  options?: LaneResourceOptions,
+): string[] {
+  const pattern = matcherFor(
+    options?.migrationPathPattern ?? DEFAULT_MIGRATION_PATH_PATTERN,
+  );
+  return files
+    .map((raw) => normalisePath(raw))
+    .filter((key) => key !== "" && pattern.test(key));
+}
+
+/**
  * Ascending slice-number order. `parseInt` with base 10 lets "10"
  * follow "09" correctly (string compare wouldn't).
  */
@@ -101,17 +124,10 @@ export function laneResourceGroups(
   slices: Slice[],
   options?: LaneResourceOptions,
 ): Map<string, string[]> {
-  const pattern = matcherFor(
-    options?.migrationPathPattern ?? DEFAULT_MIGRATION_PATH_PATTERN,
-  );
   const groups = new Map<string, string[]>();
   for (const slice of [...slices].sort(bySliceNumber)) {
     if (slice.files === undefined) continue;
-    const declaresMigration = slice.files.some((raw) => {
-      const key = normalisePath(raw);
-      return key !== "" && pattern.test(key);
-    });
-    if (!declaresMigration) continue;
+    if (migrationPathsIn(slice.files, options).length === 0) continue;
     const members = groups.get(MIGRATION_RESOURCE_KEY);
     if (members) members.push(slice.ghIssue);
     else groups.set(MIGRATION_RESOURCE_KEY, [slice.ghIssue]);
