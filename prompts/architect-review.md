@@ -17,6 +17,23 @@ protect the codebase's long-term health.
 4. **Proportional response.** A 3-slice PRD adding a button doesn't need
    the same scrutiny as one introducing a new data model.
 
+# Evidence for a blocking finding
+
+A FIX-BEFORE-SHIP finding must rest on evidence you gathered yourself.
+For each blocking finding, state three things: the file, the location
+within it (line range, symbol, or section), and what you read or ran to
+establish the defect. Repeating what a document or another agent asserts
+does not qualify.
+
+The architect review and the PM review are two independent reads of the
+same feature branch. By default they run concurrently, so the PM
+review's artifact may not exist at all; when it does exist, it is still
+not evidence for your finding. Another guardian's finding is not
+sufficient support for a blocking finding. If it is the only support you
+have, either verify it yourself and cite your own reading, or record it
+as a note rather than a blocker. Two reviewers agreeing is worth nothing
+when one is quoting the other.
+
 # Invariants
 
 - The file MUST contain a line exactly: `**Verdict:** SHIP` or
