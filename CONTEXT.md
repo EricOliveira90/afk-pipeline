@@ -212,6 +212,31 @@ so husky never runs during the pipeline. Steps not defined in
 guardians and the PR; the run-summary records the failing step names.
 _Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
 
+**Agent failure cause**:
+What ended an agent-driven phase short of success, classified at the
+point of failure into one of five kinds: `provider-exit` (the **agent
+provider** hung up with a non-zero exit code), `orchestrator-kill` (we
+killed it — carries the **kill class**), `transient-exhausted` (the
+ADR 0022 retry window closed on an unresolved outage), `verdict` (nothing
+died; the agent decided), or `internal-error` (the pipeline itself
+threw). The first three are *infrastructure causes* and are the only ones
+retried under `--infrastructure-retries`. The cause's one-line summary
+becomes the slice outcome's reason, so it reaches **run state**, the next
+run's retry announcement, `events.jsonl`, and `afk status` unchanged.
+Currently classified for the negotiate phase. See ADR 0025.
+_Avoid_: "error message" (the cause is structured, and the summary is
+derived from it), "failure class" (that term belongs to the evaluator's
+`INFRASTRUCTURE` / `IMPLEMENTATION` QA-report field)
+
+**Kill class**:
+Which orchestrator-owned bound killed an **agent invocation**:
+`idle-timeout` (the **idle timeout**), `wall-clock-ceiling` (the
+**wall-clock ceiling**), `tool-call-cap`, or `unspecified` when the
+provider recorded no reason. A component of an **agent failure cause**;
+recovered from the provider's rejection message, which is the only place
+it is recorded.
+_Avoid_: "kill reason", "termination cause"
+
 **Cancellation**:
 External termination via `AbortSignal` (typically SIGINT / Ctrl-C).
 In-flight agent invocations are killed immediately, unstarted slices are

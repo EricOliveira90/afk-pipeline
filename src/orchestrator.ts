@@ -1,12 +1,22 @@
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, rmSync, type WriteStream } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+  type WriteStream,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import { finished } from "node:stream/promises";
 import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import type { AgentProvider } from "./agent-provider.js";
-import { CancelledError } from "./agent-provider.js";
+import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
@@ -870,20 +880,332 @@ function preserveContractNegotiationFailure(
 }
 
 /**
+ * Which orchestrator-owned bound killed an agent invocation. See
+ * ADR 0025 and CONTEXT.md "Agent failure cause".
+ */
+export type AgentKillClass =
+  | "idle-timeout"
+  | "wall-clock-ceiling"
+  | "tool-call-cap"
+  | "unspecified";
+
+/**
+ * What ended a negotiate phase short of LOCKED.
+ *
+ * - `provider-exit` — the agent provider hung up with a non-zero exit.
+ * - `orchestrator-kill` — the orchestrator killed the invocation itself.
+ * - `transient-exhausted` — the transient-provider retry window closed
+ *   without the outage clearing (ADR 0022).
+ * - `verdict` — nothing died; the evaluator wrote a real verdict.
+ * - `internal-error` — the pipeline itself threw (git, filesystem).
+ *
+ * The first three are *infrastructure* causes and are the only ones the
+ * negotiate phase retries. See `isInfrastructureCause`.
+ */
+export type NegotiateFailureKind =
+  | "provider-exit"
+  | "orchestrator-kill"
+  | "transient-exhausted"
+  | "verdict"
+  | "internal-error";
+
+export interface NegotiateFailureCause {
+  kind: NegotiateFailureKind;
+  /**
+   * Operator-facing one-liner. The wave records it verbatim as the
+   * slice outcome's reason, replacing the fixed "Negotiation returned
+   * ERROR" text, so it reaches the run state, the next run's retry
+   * announcement, the event stream, and `afk status` unchanged.
+   */
+  summary: string;
+  /** Agent role whose invocation died. Absent for `verdict`. */
+  role?: string;
+  /** `provider-exit` only — the agent provider's exit code. */
+  exitCode?: number;
+  /** `orchestrator-kill` only — which bound tripped. */
+  killClass?: AgentKillClass;
+  /** `verdict` only — what the evaluator actually wrote. */
+  verdict?: artifacts.EvaluatorVerdict;
+  /** Tail of the dead invocation's output. Absent for `verdict`. */
+  outputTail?: string;
+}
+
+export type NegotiateOutcome =
+  | { phase: "LOCKED" }
+  | { phase: "CANCELLED" }
+  | { phase: "STUCK" | "ESCALATE" | "ERROR"; cause: NegotiateFailureCause };
+
+/**
+ * Whether a negotiate failure is worth retrying. A genuine verdict
+ * never is — retrying it would just re-run agents against a contract
+ * the evaluator already judged — and neither is a pipeline-internal
+ * throw, whose blast radius this ticket deliberately leaves unchanged.
+ */
+export function isInfrastructureCause(cause: NegotiateFailureCause): boolean {
+  return (
+    cause.kind === "provider-exit" ||
+    cause.kind === "orchestrator-kill" ||
+    cause.kind === "transient-exhausted"
+  );
+}
+
+/**
+ * Kill-class signatures, matched against the provider's rejection
+ * message. Every provider builds these strings from the same shapes
+ * (`claude.ts`/`kiro.ts` use an em dash, `codex.ts` a hyphen), so the
+ * patterns stay dash-agnostic — the same approach `classifyReviewFailure`
+ * already takes for guardian reviews.
+ */
+const KILL_SIGNATURES: ReadonlyArray<readonly [RegExp, AgentKillClass]> = [
+  [/exceeded \d+ tool calls/i, "tool-call-cap"],
+  [/wall-clock ceiling/i, "wall-clock-ceiling"],
+  [/idle for .*killed/i, "idle-timeout"],
+  [/was killed/i, "unspecified"],
+];
+
+const KILL_CLASS_LABEL: Record<AgentKillClass, string> = {
+  "idle-timeout": "idle timeout",
+  "wall-clock-ceiling": "wall-clock ceiling",
+  "tool-call-cap": "tool-call cap",
+  unspecified: "kill class not recorded",
+};
+
+/** Bytes of agent log read to build an output tail. */
+const OUTPUT_TAIL_BYTES = 8_192;
+/** Characters of collapsed output kept in the failure reason. */
+const OUTPUT_TAIL_CHARS = 240;
+
+/**
+ * Last few lines of a dead invocation's agent log, collapsed onto one
+ * line so the tail can ride inside a run-state `error` string and the
+ * single-line retry announcement built from it. Best-effort: an
+ * unreadable log yields no tail rather than masking the real failure.
+ */
+export function readInvocationOutputTail(
+  logPath: string | undefined,
+): string | undefined {
+  if (!logPath || !existsSync(logPath)) return undefined;
+  let text: string;
+  try {
+    const { size } = statSync(logPath);
+    if (size === 0) return undefined;
+    const length = Math.min(size, OUTPUT_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(logPath, "r");
+    try {
+      readSync(fd, buffer, 0, length, size - length);
+    } finally {
+      closeSync(fd);
+    }
+    text = buffer.toString("utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return undefined;
+  const tail = lines.slice(-3).join(" / ");
+  return tail.length > OUTPUT_TAIL_CHARS
+    ? `…${tail.slice(-OUTPUT_TAIL_CHARS)}`
+    : tail;
+}
+
+/** `WriteStream.path` narrowed to the string form agent logs always use. */
+function agentLogPath(log: WriteStream): string | undefined {
+  return typeof log.path === "string" ? log.path : undefined;
+}
+
+/**
+ * Classify a rejected negotiate-phase invocation. Transient errors are
+ * recognised structurally (by `Error.name`, so classification survives
+ * duplicate module instances); kills and exits fall back to the
+ * provider's message, which is the only place either fact is recorded.
+ */
+export function classifyNegotiateFailure(args: {
+  role: string;
+  error: unknown;
+  outputTail?: string;
+}): NegotiateFailureCause {
+  const { role, error, outputTail } = args;
+  const message = error instanceof Error ? error.message : String(error);
+  const tail = outputTail ? ` [last output: ${outputTail}]` : "";
+  const base = { role, ...(outputTail ? { outputTail } : {}) };
+
+  if (isTransientProviderError(error)) {
+    return {
+      ...base,
+      kind: "transient-exhausted",
+      summary:
+        `negotiate: ${role} exhausted its transient-provider retry window — ` +
+        `${message}${tail}`,
+    };
+  }
+  for (const [pattern, killClass] of KILL_SIGNATURES) {
+    if (pattern.test(message)) {
+      return {
+        ...base,
+        kind: "orchestrator-kill",
+        killClass,
+        summary:
+          `negotiate: the orchestrator killed ${role} ` +
+          `(${KILL_CLASS_LABEL[killClass]}) — ${message}${tail}`,
+      };
+    }
+  }
+  const exit = /exited with code (\d+)/i.exec(message);
+  if (exit) {
+    return {
+      ...base,
+      kind: "provider-exit",
+      exitCode: Number(exit[1]),
+      summary:
+        `negotiate: the agent provider hung up on ${role} — ` +
+        `exit code ${exit[1]} — ${message}${tail}`,
+    };
+  }
+  return {
+    ...base,
+    kind: "internal-error",
+    summary: `negotiate: ${role} failed — ${message}${tail}`,
+  };
+}
+
+/**
+ * A negotiate failure the evaluator decided, not one that killed it.
+ * Labelled as a verdict so "the agent decided this is broken" never
+ * reads like "the backend hung up".
+ */
+function negotiateVerdictCause(args: {
+  outcome: "ESCALATE" | "STUCK";
+  verdict: artifacts.EvaluatorVerdict;
+  round: number;
+}): NegotiateFailureCause {
+  const { outcome, verdict, round } = args;
+  return {
+    kind: "verdict",
+    verdict,
+    summary:
+      outcome === "ESCALATE"
+        ? `negotiate: contract negotiation escalated after ${round} round(s) — ` +
+          `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
+        : `negotiate: contract not locked after negotiation — last evaluator ` +
+          `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+/** A throw from the pipeline itself, with no dead invocation behind it. */
+function internalNegotiateCause(error: unknown): NegotiateFailureCause {
+  const message = error instanceof Error ? error.message : String(error);
+  return { kind: "internal-error", summary: `negotiate: ${message}` };
+}
+
+/**
+ * Carries a classified cause out of a failed invocation to
+ * `negotiateAttempt`'s catch, so a dead agent is never confused with a
+ * git or filesystem throw from the surrounding code.
+ */
+class NegotiateInvocationError extends Error {
+  readonly failureCause: NegotiateFailureCause;
+  constructor(failureCause: NegotiateFailureCause) {
+    super(failureCause.summary);
+    this.name = "NegotiateInvocationError";
+    this.failureCause = failureCause;
+  }
+}
+
+function negotiateFailureCauseOf(
+  error: unknown,
+): NegotiateFailureCause | undefined {
+  return error instanceof Error && error.name === "NegotiateInvocationError"
+    ? (error as NegotiateInvocationError).failureCause
+    : undefined;
+}
+
+/**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
+ *
+ * Infrastructure deaths are retried here under `--infrastructure-retries`
+ * (the same bound the QA and guardian-review stages use): one dead
+ * contract evaluator no longer ends a wave. Only infrastructure causes
+ * retry — a genuine ESCALATE or STUCK verdict is terminal on the first
+ * occurrence. A retry re-enters the phase, which reuses `context.md`
+ * and any drafted `contract.md` already on disk and restarts the round
+ * counter, so it neither re-runs the explorer nor consumes a contract
+ * round.
  *
  * Outcome semantics:
  * - `LOCKED` — contract is ready for Phase B.
  * - `ESCALATE` — contract negotiation gave up after max rounds.
  * - `STUCK` — negotiation finished without LOCKED status.
- * - `ERROR` / `CANCELLED` — exception or external abort.
+ * - `ERROR` — a dead invocation or a pipeline-internal throw.
+ * - `CANCELLED` — external abort.
+ *
+ * Every non-LOCKED, non-CANCELLED outcome carries a
+ * `NegotiateFailureCause` naming what ended it. See ADR 0025.
  */
 export async function runSliceNegotiate(
   ctx: SliceContext,
-): Promise<"LOCKED" | "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED"> {
+): Promise<NegotiateOutcome> {
+  const { config, slice, logger } = ctx;
+  const infrastructureRetries =
+    config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
+  if (
+    !Number.isSafeInteger(infrastructureRetries) ||
+    infrastructureRetries < 0
+  ) {
+    throw new Error("infrastructureRetries must be a non-negative integer");
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    const outcome = await negotiateAttempt(ctx);
+    if (outcome.phase === "LOCKED" || outcome.phase === "CANCELLED") {
+      return outcome;
+    }
+    if (!isInfrastructureCause(outcome.cause)) return outcome;
+    if (attempt > infrastructureRetries) return outcome;
+    const message =
+      `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
+      outcome.cause.summary;
+    logger.phase(`${ctx.tag}: ${message}`, "error", {
+      type: "warn",
+      reason: "infrastructure-retry",
+      ghIssue: slice.ghIssue,
+      message,
+    });
+  }
+}
+
+async function negotiateAttempt(ctx: SliceContext): Promise<NegotiateOutcome> {
   const { config, slice, logger, featBranch, relevantFilesBlock, invoke } = ctx;
   const { repoRoot, prdDir, signal } = config;
+
+  /**
+   * Run one negotiate invocation, closing its log before classifying a
+   * failure — `closeAgentLog` awaits the stream's flush, so the output
+   * tail read afterwards is complete.
+   */
+  const invokeAgent = async (
+    opts: Omit<Parameters<SliceContext["invoke"]>[0], "logStream">,
+    logStream: WriteStream,
+  ): Promise<void> => {
+    try {
+      await invoke({ ...opts, logStream }).finally(() =>
+        closeAgentLog(logStream),
+      );
+    } catch (err) {
+      if (isCancelled(err, signal)) throw err;
+      throw new NegotiateInvocationError(
+        classifyNegotiateFailure({
+          role: opts.role,
+          error: err,
+          outputTail: readInvocationOutputTail(agentLogPath(logStream)),
+        }),
+      );
+    }
+  };
 
   logger.transitionTo(
     slice.ghIssue,
@@ -912,19 +1234,21 @@ export async function runSliceNegotiate(
         agent: "explorer",
       });
       const logStream = logger.agentLog(slice.number, "explorer");
-      await invoke({
-        role: "explorer",
-        prompt: renderPrompt("explorer", {
-          GH_ISSUE: slice.ghIssue,
-          TITLE: slice.title,
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: relevantFilesBlock,
-          SLICE_BODY: sliceBodyNote,
-        }),
-        cwd: ctx.worktreeDir,
+      await invokeAgent(
+        {
+          role: "explorer",
+          prompt: renderPrompt("explorer", {
+            GH_ISSUE: slice.ghIssue,
+            TITLE: slice.title,
+            SLICE_DIR: ctx.relSliceDir,
+            RELEVANT_FILES: relevantFilesBlock,
+            SLICE_BODY: sliceBodyNote,
+          }),
+          cwd: ctx.worktreeDir,
+          maxDurationMs: config.maxAgentDurationMs,
+        },
         logStream,
-        maxDurationMs: config.maxAgentDurationMs,
-      }).finally(() => closeAgentLog(logStream));
+      );
       logger.event({
         type: "phase-ended",
         ghIssue: slice.ghIssue,
@@ -962,24 +1286,26 @@ export async function runSliceNegotiate(
           },
         );
         const plannerLog = logger.agentLog(slice.number, "planner", round);
-        await invoke({
-          role: "planner",
-          prompt: renderPrompt("planner", {
-            GH_ISSUE: slice.ghIssue,
-            SPECS_DIR: ctx.relSpecsDir,
-            SLICE_DIR: ctx.relSliceDir,
-            ROUND: round,
-            RELEVANT_FILES: relevantFilesBlock,
-            SLICE_BODY: sliceBodyNote,
-            REVISION_NOTE:
-              round > 1
-                ? `Revise based only on evaluator feedback in ${ctx.relSliceDir}/feedback-r${round - 1}.md.`
-                : "",
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: plannerLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(plannerLog));
+        await invokeAgent(
+          {
+            role: "planner",
+            prompt: renderPrompt("planner", {
+              GH_ISSUE: slice.ghIssue,
+              SPECS_DIR: ctx.relSpecsDir,
+              SLICE_DIR: ctx.relSliceDir,
+              ROUND: round,
+              RELEVANT_FILES: relevantFilesBlock,
+              SLICE_BODY: sliceBodyNote,
+              REVISION_NOTE:
+                round > 1
+                  ? `Revise based only on evaluator feedback in ${ctx.relSliceDir}/feedback-r${round - 1}.md.`
+                  : "",
+            }),
+            cwd: ctx.worktreeDir,
+            maxDurationMs: config.maxAgentDurationMs,
+          },
+          plannerLog,
+        );
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
@@ -1004,22 +1330,24 @@ export async function runSliceNegotiate(
           "evaluator-contract",
           round,
         );
-        await invoke({
-          role: "evaluator-contract",
-          prompt: renderPrompt("evaluator-contract", {
-            SPECS_DIR: ctx.relSpecsDir,
-            SLICE_DIR: ctx.relSliceDir,
-            ROUND: round,
-            RELEVANT_FILES: relevantFilesBlock,
-            PREVIOUS_FEEDBACK_NOTE:
-              round > 1
-                ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
-                : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: evalLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(evalLog));
+        await invokeAgent(
+          {
+            role: "evaluator-contract",
+            prompt: renderPrompt("evaluator-contract", {
+              SPECS_DIR: ctx.relSpecsDir,
+              SLICE_DIR: ctx.relSliceDir,
+              ROUND: round,
+              RELEVANT_FILES: relevantFilesBlock,
+              PREVIOUS_FEEDBACK_NOTE:
+                round > 1
+                  ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
+                  : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
+            }),
+            cwd: ctx.worktreeDir,
+            maxDurationMs: config.maxAgentDurationMs,
+          },
+          evalLog,
+        );
 
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
@@ -1103,11 +1431,13 @@ export async function runSliceNegotiate(
           capDecisions.join(" "),
         );
         logger.bumpEvalRound(slice.ghIssue, round);
-        logger.markEscalated(
-          slice.ghIssue,
-          `Contract negotiation escalated after ${round} round(s)`,
-        );
-        return "ESCALATE";
+        const cause = negotiateVerdictCause({
+          outcome: "ESCALATE",
+          verdict,
+          round,
+        });
+        logger.markEscalated(slice.ghIssue, cause.summary);
+        return { phase: "ESCALATE", cause };
       }
     }
 
@@ -1123,27 +1453,30 @@ export async function runSliceNegotiate(
           ? capDecisions.join(" ")
           : "The configured round cap was not reached.",
       );
-      logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
+      const cause = negotiateVerdictCause({
+        outcome: "STUCK",
+        verdict: lastVerdict,
+        round: lastRound,
+      });
+      logger.markStuck(slice.ghIssue, cause.summary);
       // Previously this path was silent — a slice could end negotiation
       // still NEGOTIATING with no visible trace, indistinguishable from
       // one awaiting a lane-successor refresh. See ADR 0017.
       logger.phase(
         `${ctx.tag}: STUCK — contract not locked after negotiation (last verdict: ${lastVerdict}, round ${lastRound})`,
       );
-      return "STUCK";
+      return { phase: "STUCK", cause };
     }
     logger.phase(`${ctx.tag}: contract LOCKED`);
-    return "LOCKED";
+    return { phase: "LOCKED" };
   } catch (err) {
     if (isCancelled(err, signal)) {
       logger.markCancelled(slice.ghIssue, "Cancelled by user");
-      return "CANCELLED";
+      return { phase: "CANCELLED" };
     }
-    logger.markError(
-      slice.ghIssue,
-      err instanceof Error ? err.message : String(err),
-    );
-    return "ERROR";
+    const cause = negotiateFailureCauseOf(err) ?? internalNegotiateCause(err);
+    logger.markError(slice.ghIssue, cause.summary);
+    return { phase: "ERROR", cause };
   }
 }
 
@@ -1486,7 +1819,7 @@ async function runSlice(
     testCommand,
   );
   const negotiate = await runSliceNegotiate(ctx);
-  if (negotiate !== "LOCKED") return negotiate;
+  if (negotiate.phase !== "LOCKED") return negotiate.phase;
   return runSliceExecute(ctx);
 }
 

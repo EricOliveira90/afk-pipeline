@@ -1176,7 +1176,7 @@ describe("round-scoped contract feedback", () => {
       "pnpm test",
     );
 
-    await expect(runSliceNegotiate(ctx)).resolves.toBe("LOCKED");
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(plannerRounds).toBe(2);
     expect(evaluatorRounds).toBe(2);
@@ -1259,7 +1259,7 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await expect(runSliceNegotiate(ctx)).resolves.toBe("LOCKED");
+      expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(plannerRounds).toBe(3);
       expect(evaluatorRounds).toBe(3);
@@ -1323,7 +1323,13 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await expect(runSliceNegotiate(ctx)).resolves.toBe("ESCALATE");
+      // The ESCALATE carries a verdict-class cause, not an
+      // infrastructure one — so it is terminal, not retried (ADR 0025).
+      const negotiate = await runSliceNegotiate(ctx);
+      expect(negotiate.phase).toBe("ESCALATE");
+      expect(
+        negotiate.phase === "ESCALATE" ? negotiate.cause.kind : undefined,
+      ).toBe("verdict");
       await new Promise((resolve) => setTimeout(resolve, 50));
       const stuckPath = join(ctx.absSliceDir, "stuck.md");
       expect(existsSync(stuckPath)).toBe(true);
@@ -2748,6 +2754,94 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
     // And the retry actually ran to completion.
     expect(runLog).toContain("Slice #9401 (Retried): PASS");
   }, 60_000);
+
+  /**
+   * Issue #40: the cause a negotiate failure was classified with has to
+   * survive the whole way out — into the run state, and back out of it
+   * into the next run's retry announcement. Before this, a dead contract
+   * evaluator persisted the fixed text "Negotiation returned ERROR", so
+   * the next run announced a retry that explained nothing.
+   *
+   * Two real pipeline runs against one repo: the first kills the contract
+   * evaluator, the second is healthy.
+   */
+  it("persists a negotiate failure cause and quotes it in the next run's retry announcement", async () => {
+    const repo = makeRepo();
+    const slug = "negotiate-cause";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "9501",
+        title: "Negotiator",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "9501",
+        {
+          files: ["src/neg.txt"],
+          qaPasses: true,
+          outputFile: "src/neg.txt",
+          outputContent: "neg",
+        },
+      ],
+    ]);
+    const healthy = buildStubProvider({ fixtures, slices, records: [] });
+    const doomed: AgentProvider = {
+      name: healthy.name,
+      async invoke(options) {
+        if (options.role === "evaluator-contract") {
+          options.logStream?.write("evaluator-contract: reading contract.md\n");
+          throw new Error("Agent evaluator-contract exited with code 1");
+        }
+        return healthy.invoke(options);
+      },
+    };
+
+    const first = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: doomed,
+      infrastructureRetries: 0,
+    });
+    expect(first.success).toBe(false);
+
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.slices["9501"].phase).toBe("ERROR");
+    const persisted: string = state.slices["9501"].error;
+    expect(persisted).toContain("exit code 1");
+    expect(persisted).toContain("evaluator-contract");
+    expect(persisted).toContain("last output:");
+    expect(persisted).not.toContain("Negotiation returned ERROR");
+    // The reason has to stay one line: the retry announcement below
+    // embeds it, and run.log is line-oriented.
+    expect(persisted).not.toContain("\n");
+
+    const second = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: healthy,
+    });
+    expect(second.success).toBe(true);
+
+    // Second run's run.log — runLogOf reads the newest run directory.
+    const runLog = runLogOf(repo, slug);
+    expect(runLog).toContain(
+      `Retrying #9501 Negotiator (previous run: ERROR — ${persisted})`,
+    );
+  }, 120_000);
 
   it("emits an explicit NOT-RUN line naming the unresolved blocker for held-back slices", async () => {
     const repo = makeRepo();
