@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
 import {
   runPipeline,
+  narrowToFailedSlices,
   PipelineError,
   type MigrationValidation,
 } from "./orchestrator.js";
@@ -12,7 +13,10 @@ import {
   parseMaxContractRounds,
   parseSliceSelection,
 } from "./cli-options.js";
-import { resolveRunScope } from "./slice-scope.js";
+import {
+  resolveRunScope,
+  type PersistedRunScope,
+} from "./slice-scope.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runCleanFailedCli } from "./clean-failed.js";
@@ -26,7 +30,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-claude clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk-claude --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-claude clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -50,6 +54,7 @@ async function main() {
   let dryRun = false;
   let migrationValidation: MigrationValidation | undefined;
   let selectedSliceNumbers: string[] | undefined;
+  let onlyFailed = false;
   let maxContractRounds = DEFAULT_MAX_CONTRACT_ROUNDS;
 
   for (let i = 0; i < args.length; i++) {
@@ -57,6 +62,8 @@ async function main() {
       prdDirArg = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
+    } else if (args[i] === "--only-failed") {
+      onlyFailed = true;
     } else if (args[i] === "--slices") {
       try {
         selectedSliceNumbers = parseSliceSelection(args[++i]);
@@ -86,6 +93,12 @@ async function main() {
   }
 
   if (!prdDirArg) usage();
+  if (onlyFailed && selectedSliceNumbers) {
+    console.error(
+      "Error: --only-failed cannot be combined with --slices; it derives the selection from the persisted run scope",
+    );
+    process.exit(2);
+  }
 
   const prdDir = resolve(prdDirArg);
   const repoRoot = resolve(".");
@@ -113,14 +126,39 @@ async function main() {
   console.log(`  Repo: ${repoRoot}`);
   console.log(`  Dry run: ${dryRun}`);
   console.log(`  Max contract rounds: ${maxContractRounds}`);
+  // `--only-failed` is resolved here as well as inside the pipeline, from
+  // the same run state through the same helper, so the header line and
+  // the --dry-run plan name exactly the slices the run will dispatch.
+  let requestedSliceNumbers = selectedSliceNumbers;
+  let previewPersistedScope: PersistedRunScope | undefined;
+  let priorCompleted = new Set<string>();
+  if (onlyFailed) {
+    try {
+      const narrowing = narrowToFailedSlices(repoRoot, prdSlug, claudeProvider);
+      requestedSliceNumbers = narrowing.requestedSliceNumbers;
+      previewPersistedScope = narrowing.persistedScope;
+      priorCompleted = narrowing.priorCompleted;
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(2);
+    }
+  }
   console.log(
-    `  Requested slices: ${selectedSliceNumbers?.join(", ") ?? "all AFK"}`,
+    `  Requested slices: ${
+      onlyFailed
+        ? `--only-failed → ${requestedSliceNumbers?.length ? requestedSliceNumbers.join(", ") : "none (every scope member is recorded PASS)"}`
+        : (selectedSliceNumbers?.join(", ") ?? "all AFK")
+    }`,
   );
   console.log();
 
   const slices = parseIssuesMd(issuesPath);
   const dag = buildDAG(slices);
-  const previewScope = resolveRunScope(slices, selectedSliceNumbers);
+  const previewScope = resolveRunScope(
+    slices,
+    requestedSliceNumbers,
+    previewPersistedScope,
+  );
   const previewDag = buildDAG(previewScope.selected);
 
   const afkCount = [...dag.slices.values()].filter(
@@ -147,7 +185,9 @@ async function main() {
   if (dryRun) {
     console.log("Dry run — showing execution plan only.\n");
 
-    const completed = new Set<string>();
+    // Seeded with the run state's completed slices: the pipeline counts
+    // those as satisfied dependencies, so the plan must too.
+    const completed = new Set<string>(priorCompleted);
     let wave = 1;
     while (true) {
       const ready = previewDag.ready(completed);
@@ -198,6 +238,7 @@ async function main() {
       dryRun,
       maxContractRounds,
       selectedSliceNumbers,
+      onlyFailed,
       provider: claudeProvider,
       migrationValidation,
       signal: controller.signal,

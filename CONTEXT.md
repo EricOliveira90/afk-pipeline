@@ -70,6 +70,27 @@ lose the record of already-merged work. A persisted PASS
 ADR 0018.
 _Avoid_: "state cache", "checkpoint" (it is authoritative, not a cache)
 
+**Scope of record**:
+The set of slices a run owns, fixed on its first invocation (all AFK
+slices, or whatever `--slices` named) and persisted in the **run state**.
+Later invocations may not add to it — that is how a changed `issues.md`
+or a mistyped command is kept from silently growing the run. It is not
+rewritten by a **narrowed invocation**.
+_Avoid_: "selection" (that is per-invocation), "run scope" when the
+per-invocation set is meant
+
+**Narrowed invocation**:
+An invocation that runs a strict subset of the **scope of record** —
+`--slices` naming some of its members, or `--only-failed` deriving the
+non-PASS ones from the **run state**. The excluded members are reported
+skipped for the reason `narrowed` (distinct from `not-selected`, which
+means never in the scope at all), the reviewer is told to judge only the
+subset, and dependencies are satisfied from persisted PASS records
+rather than from this invocation's waves. A later full re-run picks the
+narrowed-out slices back up with no flag. See issue #41.
+_Avoid_: "partial run", "resume" (resumption skips completed work
+automatically; narrowing is an explicit operator choice)
+
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
 process produces no stdout (default: every 60s). Distinct from the

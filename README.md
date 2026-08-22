@@ -45,6 +45,9 @@ npx afk-codex --prd-dir .kiro/specs/contacts-crud
 
 # Run only slices 01-04 (all must be declared AFK)
 npx afk-codex --prd-dir .kiro/specs/contacts-crud --slices 01,02,03,04
+
+# Re-run just the slices the last run did not land
+npx afk-codex --prd-dir .kiro/specs/contacts-crud --only-failed
 ```
 
 Ctrl-C cancels cleanly: in-flight agents are killed, remaining slices are marked CANCELLED, worktrees are preserved. A second Ctrl-C hard-exits.
@@ -67,6 +70,7 @@ The pipeline reads a markdown file with a dependency table:
 - **Type `HITL`** — skipped; reserved for slices that need a human.
 - **Blocked by** — `—` for none, or comma-separated issue numbers for DAG dependencies.
 - `--slices` selects manifest slice numbers, not GitHub issue numbers. Selecting a `HITL` slice is rejected; there is no force override.
+- `--only-failed` derives that selection from the run state instead: every member of the persisted scope not recorded as a merged PASS. It needs a previous run to have persisted a scope, and cannot be combined with `--slices`.
 
 ## How It Works
 
@@ -200,7 +204,9 @@ Convenience scripts for your `package.json`:
 
 State persists in `.afk/state/<run-slug>.json`, where the run slug includes the provider for non-Kiro backends. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and stuck slices retry from their artifact state.
 
-A retry with no `--slices` argument reuses the persisted scope. Supplying a different selection is rejected so a changed manifest or command cannot silently expand the run. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
+A retry with no `--slices` argument reuses the persisted scope. A selection that *adds* work outside it is rejected, so a changed manifest or command cannot silently expand the run; a selection that is a strict *subset* of it is allowed and runs narrowed — the persisted scope is left untouched as the run's scope of record, the left-out members are reported as skipped for the reason `narrowed`, and the post-merge reviewer is told to judge only the slices this invocation ran. `--only-failed` is sugar for the common narrowing: it reads the run state and selects the scope members that are not recorded as merged PASS.
+
+A narrowed invocation still honours the DAG. Dependencies are satisfied from the run state as well as from this invocation's waves, so re-running one failed slice whose prerequisite already merged dispatches it instead of holding it back forever; the run log says which dependency was counted from prior state. Run-state entries for slices no longer declared in `issues.md` are ignored rather than fatal, and still satisfy dependents that name them. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
 
 The state file also caches the post-merge review phase (ADR 0015): a passing pre-ship sanity gate is keyed by the reviewed tree's SHA, and favorable guardian verdicts by the reviewed HEAD. Re-entering a finished run re-executes only what actually changed — typically just the review that previously failed or blocked.
 

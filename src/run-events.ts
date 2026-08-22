@@ -72,15 +72,17 @@ export type RunEventPayload =
        * already logs: lane continuation after a member failure
        * (ADR 0024), QA infrastructure retries that don't consume a
        * round, transient-outage backoff retries (ADR 0022), per-slice
-       * prior-run state at run start (retry announcement), NOT-RUN
-       * dependency holds, and idle-kill deferrals from the busy probe
-       * (ADR 0021).
+       * prior-run state at run start (retry announcement), a dependency
+       * counted as satisfied from prior run state rather than from this
+       * invocation (issue #41), NOT-RUN dependency holds, and idle-kill
+       * deferrals from the busy probe (ADR 0021).
        */
       reason:
         | "lane-continuation"
         | "infrastructure-retry"
         | "backoff-retry"
         | "prior-run-state"
+        | "dependency-from-prior-run"
         | "not-run-hold"
         | "idle-deferral";
       ghIssue?: string;
