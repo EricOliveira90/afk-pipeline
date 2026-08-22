@@ -573,18 +573,39 @@ export interface PipelineConfig {
 }
 
 export interface PipelineResult {
+  /**
+   * Whether the run produced a shippable branch. All slices passing is
+   * necessary but not sufficient: a failed **pre-ship sanity gate** or a
+   * guardian verdict that kept the draft PR closed makes a run
+   * unsuccessful, so wrapper scripts and CI can tell a shipped run from a
+   * blocked one. A draft PR opened via `--open-pr-on-override` is still a
+   * success — the override note records the operator's acknowledgement.
+   * See ADR 0015.
+   */
   success: boolean;
   /** Markdown summary written to `.afk/logs/<slug>/run-summary.md`. */
   summary: string;
   /** Grouped, scan-friendly summary for stdout. */
   consoleSummary: string;
   /**
-   * Why the run was unsuccessful, when the reason isn't already legible
-   * from the per-slice summary — today, a run that dispatched nothing.
-   * Set only when `success` is false; the CLI prints it in place of the
-   * generic failure line before its existing non-zero exit (issue #42).
+   * One operator-facing sentence explaining an unsuccessful run whose
+   * per-slice outcomes do not show the cause — the CLI prints it instead
+   * of its generic failure line. Undefined on a successful run, and on a
+   * failure the slice summary already explains.
    */
   failureReason?: string;
+}
+
+/**
+ * The line every entrypoint prints for an unsuccessful run. Lives here,
+ * next to the result it reads, so `afk`, `afk-claude`, and `afk-codex`
+ * cannot drift apart: the exit contract is the same for all three, and
+ * ADR 0015 keeps it free of per-binary logic.
+ */
+export function formatRunFailure(result: PipelineResult): string {
+  return result.failureReason
+    ? `Pipeline did not ship: ${result.failureReason}`
+    : "Pipeline completed with failures. Check logs and stuck.md files.";
 }
 
 /**
@@ -1980,6 +2001,14 @@ export async function runPipeline(
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;
   let draftPrNumber: number | null = null;
+  /**
+   * Why the run ended without a shippable branch, when the per-slice
+   * outcomes do not say. Set only by the post-merge phase: a failed
+   * pre-ship sanity gate, or guardian verdicts that kept the draft PR
+   * closed. Its presence makes the run unsuccessful even when every slice
+   * passed (issue #43). A `--open-pr-on-override` PR leaves it unset.
+   */
+  let shipBlocker: string | undefined;
 
   const emitHandoff = (runStatus: RunStatus): void => {
     if (!scope) return;
@@ -2429,7 +2458,20 @@ export async function runPipeline(
   const afkSlices = [...dag.slices.values()].filter((s) => s.type === "AFK");
   const allPassed = afkSlices.every((s) => completed.has(s.ghIssue));
 
-  if (allPassed && afkSlices.length > 0 && !signal?.aborted) {
+  /** Every slice merged, so the branch is ready for the ship gates. */
+  const readyForShipGates = allPassed && afkSlices.length > 0;
+
+  if (readyForShipGates && signal?.aborted) {
+    // Cancelled in the window between the last merge and the post-merge
+    // phase: every slice passed, but nothing gated or reviewed the feature
+    // branch and no PR opened, so the run did not ship (issue #43). The
+    // cancellation exit path itself is untouched — a second Ctrl-C still
+    // hard-exits 130 before this is ever read.
+    shipBlocker =
+      "cancelled before the pre-ship sanity gate and guardian reviews ran";
+  }
+
+  if (readyForShipGates && !signal?.aborted) {
     // Reviews need a worktree on the feature branch. Prefer an existing
     // checkout (commonly the main repo) — `git worktree add` refuses to
     // check out the same branch twice. Fall back to a scratch worktree
@@ -2486,8 +2528,10 @@ export async function runPipeline(
       }
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
+        const failedSteps = sanity.failures.join(", ");
+        shipBlocker = `pre-ship sanity gate failed (${failedSteps}) — guardian reviews and PR creation were skipped`;
         logger.phase(
-          `  ❌ Pre-ship sanity gate failed: ${sanity.failures.join(", ")}. Skipping guardian reviews and PR creation.`,
+          `  ❌ Pre-ship sanity gate failed: ${failedSteps}. Skipping guardian reviews and PR creation.`,
         );
       } else {
         logger.phase("  ✅ Pre-ship sanity gate passed.", "log");
@@ -2705,7 +2749,12 @@ export async function runPipeline(
           openPrOnOverride: config.openPrOnOverride === true,
           closesIssues: scope.selected.map((slice) => slice.ghIssue),
         });
-        if (prPlan.open) {
+        if (!prPlan.open) {
+          // No shippable branch: an unfavorable verdict, or an absent one
+          // (UNPARSEABLE / an exhausted infrastructure retry). Either way
+          // the operator has something to do, so the run is unsuccessful.
+          shipBlocker = `guardian verdicts kept the draft PR closed (architect: ${archResult.outcome}, PM: ${pmResult.outcome})`;
+        } else {
           if (prPlan.overridden) {
             logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
             logger.setPrOverrideNote(prPlan.overrideNote!);
@@ -2773,7 +2822,7 @@ export async function runPipeline(
     // reads exactly like a finished run (issue #42). Cancellation is
     // excluded: Ctrl-C keeps its own exit path, and a run cancelled
     // before its first wave is not a silent no-op.
-    let failureReason: string | undefined;
+    let zeroDispatchReason: string | undefined;
     if (
       !signal?.aborted &&
       dispatched.size === 0 &&
@@ -2782,26 +2831,31 @@ export async function runPipeline(
       const holds = notRunHolds.map(
         ({ id, title, hold }) => `  #${id} ${title} — ${hold}`,
       );
-      failureReason = [
+      zeroDispatchReason = [
         "Pipeline dispatched no slices and skipped none as already complete — nothing ran.",
         ...(holds.length > 0
           ? [...holds, "Fix the blocker(s) and re-run."]
           : ["No slice in the run scope was eligible to run."]),
       ].join("\n");
-      logger.phase(`[afk] ${failureReason}`, "error");
+      logger.phase(`[afk] ${zeroDispatchReason}`, "error");
     }
 
     const summary = logger.writeSummary();
     const consoleSummary = logger.formatConsoleSummary();
-    const allSuccess =
-      failureReason === undefined &&
-      afkSlices.every((s) => completed.has(s.ghIssue));
-
+    // Every slice passing is necessary but not sufficient: a ship blocker
+    // or a zero-dispatch reason means the run must not exit 0.
+    const failureReason = zeroDispatchReason ?? shipBlocker;
+    const allSuccess = allPassed && failureReason === undefined;
     emitHandoff(
       signal?.aborted ? "ABORTED" : allSuccess ? "SUCCEEDED" : "FAILED",
     );
 
-    return { success: allSuccess, summary, consoleSummary, failureReason };
+    return {
+      success: allSuccess,
+      summary,
+      consoleSummary,
+      failureReason,
+    };
   } catch (err) {
     // Mark any slice still in flight as STUCK so the summary doesn't
     // misreport them as RUNNING/PENDING. Status keys we touch here

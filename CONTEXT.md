@@ -230,7 +230,8 @@ reviews and PR creation. Same guard a human's pre-push hook would
 apply — necessary because every AFK commit uses `git commit --no-verify`,
 so husky never runs during the pipeline. Steps not defined in
 `package.json` are skipped, not failed. Failure short-circuits the
-guardians and the PR; the run-summary records the failing step names.
+guardians and the PR; the run-summary records the failing step names,
+and the run is a **blocked ship**.
 _Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
 
 **Agent failure cause**:
@@ -258,6 +259,21 @@ recovered from the provider's rejection message, which is the only place
 it is recorded.
 _Avoid_: "kill reason", "termination cause"
 
+**Blocked ship**:
+A run whose slices all passed and merged but which never cleared the gate
+to a draft PR — a failed **pre-ship sanity gate**, a guardian verdict that
+was unfavorable or absent (`UNPARSEABLE` / an exhausted infrastructure
+retry), or a **cancellation** that landed before those gates ran.
+Reported as an unsuccessful `PipelineResult` with a
+`failureReason`, so `afk`, `afk-claude`, and `afk-codex` all exit
+non-zero. A draft PR opened by `--open-pr-on-override` is not a blocked
+ship: the recorded override note is the operator's acknowledgement, and
+the run stays successful. Distinct from **escalation** (a single slice's
+agent gave up) and **cancellation** (user-initiated). See ADR 0015.
+_Avoid_: "failed run" (slices can all pass), "not ready" (that is the
+run-summary's rendering, not the outcome), "exit code 2" (there is no
+per-class exit taxonomy)
+
 **Cancellation**:
 External termination via `AbortSignal` (typically SIGINT / Ctrl-C).
 In-flight agent invocations are killed immediately, unstarted slices are
@@ -276,8 +292,9 @@ _Avoid_: "abort" (overloads with `git merge --abort`), "interrupted"
 - After max rounds, the pipeline triggers **escalation** (stuck.md)
 - On PASS, the slice branch merges into the **feature branch**
 - After all slices merge, the **pre-ship sanity gate** runs (typecheck + lint + tests) on the **feature branch**
-- If the **pre-ship sanity gate** fails, **architect reviewer** / **PM reviewer** / PR creation are skipped
+- If the **pre-ship sanity gate** fails, **architect reviewer** / **PM reviewer** / PR creation are skipped, and the run is a **blocked ship**
 - Otherwise, **architect reviewer** and **PM reviewer** run against the **feature branch**
+- A **blocked ship** exits non-zero even when every **slice** passed
 - HITL slices are skipped entirely by the pipeline
 - Parallel slices merge in completion order; merge conflicts trigger **escalation**
 - The pipeline is resumable: slices with existing `qa-report.md` PASS are skipped

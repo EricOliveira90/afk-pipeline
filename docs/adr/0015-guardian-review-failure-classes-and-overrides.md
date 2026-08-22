@@ -107,3 +107,37 @@ resumption.
   an unchanged tree and a favorable review for an unchanged HEAD.
 - The three-round implementation cap and all ADR 0014 QA behavior are
   unchanged.
+
+## Amendment (2026-08-22) — the ship gate drives the exit signal
+
+`PipelineResult.success` was computed purely from slice outcomes, so
+all-slices-PASS plus a `FIX-BEFORE-SHIP` PM verdict exited 0 and a
+wrapper script could not tell a shipped run from a blocked one.
+
+The draft-PR decision described above is now the second half of the exit
+signal: a run whose slices all passed but which opened no draft PR — a
+failed pre-ship sanity gate, or a verdict that was unfavorable or absent
+(`UNPARSEABLE`, or an infrastructure class whose retries were exhausted)
+— is unsuccessful, and `PipelineResult.failureReason` carries the
+one-sentence explanation the CLI prints. All three entrypoints keep
+mapping an unsuccessful result to their existing failure exit; there is
+no per-class exit taxonomy and no per-binary exit logic.
+
+The gate is the decision to open the draft PR, not the `git push` /
+`gh pr create` calls that follow it. Those stay best-effort — a missing
+remote or an unauthenticated `gh` is an operator environment problem, not
+a verdict — so they do not move the exit signal.
+
+The one exception is the override this ADR already defines. When
+`--open-pr-on-override` cleared the gate despite an unfavorable PM
+verdict, the run stays successful: the override note recorded in the PR
+body and the run summary is the operator's acknowledgement, so reporting
+it as a failure would contradict a decision the operator made
+deliberately.
+
+Cancellation keeps its own exit path: a second Ctrl-C still hard-exits
+before any of this is read, and a cancelled run's unstarted slices are
+already CANCELLED rather than PASS. The one window where cancellation
+could have looked successful — an abort landing after the last merge but
+before the post-merge phase ran — is a ship blocker too, since nothing
+gated or reviewed the feature branch.

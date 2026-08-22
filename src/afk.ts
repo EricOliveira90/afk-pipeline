@@ -3,6 +3,7 @@ import { resolve, basename, join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
 import {
+  formatRunFailure,
   runPipeline,
   narrowToFailedSlices,
   PipelineError,
@@ -279,14 +280,7 @@ async function main() {
   console.log("\n" + result.consoleSummary);
 
   if (!result.success) {
-    // A run that dispatched nothing reports why, naming each unrun slice
-    // and its blockers, instead of the generic per-slice failure line
-    // (issue #42). Either way the exit code is unchanged.
-    console.error(
-      "\n" +
-        (result.failureReason ??
-          "Pipeline completed with failures. Check logs and stuck.md files."),
-    );
+    console.error("\n" + formatRunFailure(result));
     process.exit(1);
   }
 
