@@ -15,6 +15,7 @@ import {
   isFavorableReviewOutcome,
   isReviewInfrastructureFailure,
   lockContract,
+  reopenContract,
   readContractFiles,
   readContractStatus,
   preserveNegotiationFailure,
@@ -443,6 +444,51 @@ describe("lockContract", () => {
     withContractFile(`# Slice Contract\n\n## Scope lock\nFoo.\n`, (p) => {
       lockContract(p);
       expect(readContractStatus(p)).toBe("LOCKED");
+    });
+  });
+});
+
+/**
+ * Taking a lock back (ADR 0028). When the contract-lock gate refuses a
+ * contract the orchestrator has already locked, the file must stop
+ * claiming LOCKED — the generator's own invariant reads that field, so a
+ * stale LOCKED would let a contract the pipeline rejected reach
+ * generation.
+ */
+describe("reopenContract", () => {
+  it("flips **Status:** LOCKED back to NEGOTIATING in place", () => {
+    withContractFile(
+      `# Slice\n\n**Status:** LOCKED\n\n## Files expected to change\n- supabase/migrations/003_a.sql\n`,
+      (p) => {
+        reopenContract(p);
+        expect(readContractStatus(p)).toBe("NEGOTIATING");
+        const content = readFileSync(p, "utf-8");
+        expect(content).not.toContain("**Status:** LOCKED");
+        // The rest of the contract survives for the planner to revise.
+        expect(content).toContain("supabase/migrations/003_a.sql");
+      },
+    );
+  });
+
+  it("round-trips with lockContract", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n`, (p) => {
+      lockContract(p);
+      reopenContract(p);
+      lockContract(p);
+      expect(readContractStatus(p)).toBe("LOCKED");
+      expect(
+        readFileSync(p, "utf-8").match(/\*\*Status:\*\*/g)?.length,
+      ).toBe(1);
+    });
+  });
+
+  it("is idempotent when Status is already NEGOTIATING", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n`, (p) => {
+      reopenContract(p);
+      expect(readContractStatus(p)).toBe("NEGOTIATING");
+      expect(
+        readFileSync(p, "utf-8").match(/\*\*Status:\*\*/g)?.length,
+      ).toBe(1);
     });
   });
 });

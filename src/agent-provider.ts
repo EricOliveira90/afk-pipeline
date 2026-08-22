@@ -56,7 +56,7 @@ export interface InvokeOptions {
    * Model alias or full ID to invoke this agent with. Provider-specific:
    * the `claude` and `kiro` providers read this (passed through as
    * `--model`). Codex silently ignores it. Defaults to the provider's
-   * own role-based policy when omitted.
+   * own model policy when omitted.
    */
   model?: string;
   /**

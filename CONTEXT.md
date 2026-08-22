@@ -219,6 +219,20 @@ _Avoid_: "shared file" (the point is that no path is shared), "lock"
 (nothing is held; the slices are serialised), "migration conflict"
 (the grouping exists so that no conflict occurs)
 
+**Contract-lock gate**:
+A check the wave runs on a slice contract the moment it locks, with the
+power to refuse the lock and send the contract back to the planner for
+another **round**. Today the only one is the migration prefix gate: a
+declared migration whose numeric prefix already exists on the **feature
+branch** under a different filename is refused with the colliding prefix
+and the next free one, seconds after the planner named the file rather
+than hours later at the merge. A refusal costs one contract round and no
+generation; exhausting the rounds triggers ordinary **escalation**. See
+ADR 0028.
+_Avoid_: "pre-flight check" (it is not before the pipeline, it is inside
+negotiation), "validation" (too generic), "merge check" (the merge-mutex
+collision check is a different, and still authoritative, thing)
+
 **Lane leader**:
 The first slice in a lane (by ascending slice number). Negotiates its
 contract during the wave's parallel Phase A like any other slice;
@@ -303,6 +317,7 @@ _Avoid_: "abort" (overloads with `git merge --abort`), "interrupted"
 - Each **slice** gets its own **worktree** on a dedicated branch
 - The per-slice pipeline runs: **explorer** → **planner** → **evaluator** (contract) → **generator** → **evaluator** (QA)
 - **Evaluator** contract review may trigger planner revision (max 2 **rounds**)
+- A **contract-lock gate** may also refuse a locked contract, spending a **round**
 - **Evaluator** QA may trigger generator retry (max 3 **rounds**)
 - After max rounds, the pipeline triggers **escalation** (stuck.md)
 - On PASS, the slice branch merges into the **feature branch**

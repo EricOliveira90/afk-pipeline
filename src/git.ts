@@ -254,10 +254,64 @@ export function listMigrationFiles(repoRoot: string, ref: string): string[] {
   }
 }
 
+/**
+ * Every repo-relative file path on `ref` (committed tree only, no
+ * working-tree state). Empty array when the ref or repo is missing —
+ * the same tolerant contract as {@link listMigrationFiles}.
+ *
+ * Listing the whole tree rather than one directory is deliberate:
+ * deciding whether a path is a migration belongs to the configured
+ * recognition rule (`migrationPathsIn` in `src/lanes.ts`), and scoping
+ * the git call to a hardcoded directory is exactly what leaves
+ * {@link listMigrationFiles} blind to any layout but Supabase's.
+ */
+export function listFilesOnRef(repoRoot: string, ref: string): string[] {
+  try {
+    const output = git(["ls-tree", "-r", "--name-only", ref], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return output
+      .split(/\r?\n/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 /** Extract the leading numeric prefix of a migration filename, or null. */
 function migrationPrefix(filename: string): string | null {
   const m = /^(\d+)/.exec(filename);
   return m ? m[1]! : null;
+}
+
+/**
+ * Pure: the lowest prefix above every numeric prefix `featFiles` already
+ * uses, rendered at the width of the widest one so a zero-padded scheme
+ * stays padded (`003` → `004`) and a timestamp scheme stays a timestamp
+ * (`20240101000000` → `20240101000001`).
+ *
+ * "Above every used prefix" rather than "the first unused gap": a
+ * migration runner applies files in prefix order, so a new migration
+ * belongs at the end of the sequence. Filling a gap would insert a
+ * schema change *before* changes already applied downstream.
+ *
+ * `BigInt` because a 14-digit timestamp prefix fits a `number` but a
+ * longer one silently would not. Returns `"1"` when no file carries a
+ * numeric prefix.
+ */
+export function nextFreeMigrationPrefix(featFiles: string[]): string {
+  let highest = 0n;
+  let width = 1;
+  for (const f of featFiles) {
+    const p = migrationPrefix(f);
+    if (!p) continue;
+    const value = BigInt(p);
+    if (value > highest) highest = value;
+    if (p.length > width) width = p.length;
+  }
+  return (highest + 1n).toString().padStart(width, "0");
 }
 
 /**
@@ -305,6 +359,100 @@ export function migrationPrefixCollisions(
 }
 
 /**
+ * Number of commits `source` has that `target` doesn't. Returns 0 (not
+ * throws) when either ref is missing, mirroring `hasCommitsAhead`: a
+ * missing ref contributes no commits, and the resume decision treats
+ * "0 commits beyond base" as a deliberate restart, not an error.
+ */
+export function countCommitsAhead(
+  repoRoot: string,
+  source: string,
+  target: string,
+): number {
+  try {
+    const count = git(["rev-list", "--count", `${target}..${source}`], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const parsed = parseInt(count, 10);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Non-throwing sibling of `assertWorktreeRegistered`: true iff
+ * `worktreeDir` is the git-registered worktree for `branch`. Used by
+ * the resume-eligibility inspection, which needs a fact, not an
+ * invariant failure — an unregistered worktree is a valid restart
+ * reason there (ADR 0010 still forbids dispatching into it).
+ */
+export function isWorktreeRegistered(
+  repoRoot: string,
+  branch: string,
+  worktreeDir: string,
+): boolean {
+  const registered = findWorktreeForBranch(repoRoot, branch);
+  return registered !== null && pathEquals(registered, worktreeDir);
+}
+
+/**
+ * Discard everything after the last commit in `worktreeDir`:
+ * `git reset --hard` for tracked modifications, `git clean -fd` for
+ * untracked files and directories. Run before a resumed generator
+ * starts so half-applied edits from the moment of death never poison
+ * the resumed run — the resume prompt tells the generator exactly what
+ * was lost. See the design note on issue #15.
+ *
+ * `excludePaths` (gitignore-style patterns, repo-relative) survive the
+ * clean. The caller passes the specs dir so *untracked* slice
+ * artifacts (context.md, contract.md, feedback) outlive the clean —
+ * the contract is reused verbatim on resume and explorer/planner stay
+ * skipped, which is only possible if their artifacts survive. Tracked
+ * modifications are still reverted by the reset regardless of
+ * excludes; slice artifacts are untracked until a slice passes QA.
+ */
+export function resetWorktreeToHead(
+  worktreeDir: string,
+  excludePaths: string[] = [],
+): void {
+  git(["reset", "--hard"], { cwd: worktreeDir });
+  const excludes = excludePaths.flatMap((p) => ["-e", p]);
+  git(["clean", "-fd", ...excludes], { cwd: worktreeDir });
+}
+
+/**
+ * The slice branch's own commit log beyond `base`, with per-file stats
+ * (`git log <base>..HEAD --stat`). Injected into the resume prompt so
+ * the generator can verify where its predecessor stopped instead of
+ * redoing finished work. Empty string when there are no commits.
+ */
+export function logCommitsWithStat(worktreeDir: string, base: string): string {
+  return git(["log", `${base}..HEAD`, "--stat", "--no-color"], {
+    cwd: worktreeDir,
+  });
+}
+
+/**
+ * Committer timestamp of the HEAD commit in `worktreeDir`, in epoch
+ * seconds — the reference point for the handoff-freshness check (#38).
+ * Null when there is no commit to read (not a repo, unborn branch).
+ */
+export function lastCommitEpochSeconds(worktreeDir: string): number | null {
+  try {
+    const out = git(["log", "-1", "--format=%ct"], {
+      cwd: worktreeDir,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const parsed = parseInt(out, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Merge a source branch into a target branch.
  * Returns true on success, false on conflict.
  */
@@ -326,6 +474,36 @@ export function mergeBranch(
       // Already clean
     }
     return false;
+  }
+}
+
+/**
+ * Merge `sourceBranch` into the branch checked out at `worktreeDir`,
+ * running entirely inside that worktree. Used by the resume path to
+ * refresh a resumed slice branch with the current feature branch before
+ * the generator starts (#35) — the generator must verify against the
+ * world it will eventually merge into, not the stale fork base.
+ *
+ * The generic `mergeBranch` helper is unsafe here: it checks out the
+ * target in the repo root, stomping whatever the operator has checked
+ * out. This mirrors `mergeSliceBranch`'s conflict handling instead —
+ * on conflict the merge is aborted, leaving the branch tip and worktree
+ * exactly as they were; the caller falls back to restart-from-base.
+ */
+export function mergeBranchIntoWorktree(
+  worktreeDir: string,
+  sourceBranch: string,
+): MergeResult {
+  try {
+    git(["merge", sourceBranch, "--no-edit"], { cwd: worktreeDir });
+    return { status: "merged" };
+  } catch (err: unknown) {
+    try {
+      git(["merge", "--abort"], { cwd: worktreeDir });
+    } catch {
+      // Already clean
+    }
+    return { status: "conflict", details: execErrorDetails(err) };
   }
 }
 
