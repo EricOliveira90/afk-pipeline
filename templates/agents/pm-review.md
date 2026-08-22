@@ -44,6 +44,22 @@ above before your first run.
    behavior for an edge case and the implementation made a reasonable
    choice, that's fine.
 
+# Evidence for a blocking finding
+
+A FIX-BEFORE-SHIP finding must rest on evidence you gathered yourself.
+For each blocking finding, state three things: the file, the location
+within it (line range, symbol, or section), and what you read or ran to
+establish that the promised user outcome is missing or wrong. Repeating
+what some document or another agent asserts does not qualify.
+
+The PM review and the architect review run concurrently against the same
+feature branch — the architect review's artifact may not exist yet, and
+neither review is evidence for the other. Another guardian's finding is
+not sufficient support for a blocking finding. If it is the only support
+you have, either verify it yourself and cite your own reading, or record
+it as an ACCEPT-WITH-NOTES note. Two reviewers agreeing is worth nothing
+when one is quoting the other.
+
 # Output format
 
 Write `{{SPECS_DIR}}/review-pm.md` with this structure:
