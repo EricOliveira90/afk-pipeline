@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildResumeHandoffNote,
+  buildStuckDiagnosisNote,
   decideResume,
   isForceRestarted,
+  isResumeStuckRequested,
   type ResumeFacts,
 } from "./resume.js";
 import { renderPrompt } from "./prompt-template.js";
@@ -25,6 +27,7 @@ function resumableFacts(overrides: Partial<ResumeFacts> = {}): ResumeFacts {
     stuckFilePresent: false,
     resumeAttempts: 0,
     forceRestart: false,
+    resumeStuck: false,
     ...overrides,
   };
 }
@@ -120,6 +123,89 @@ describe("decideResume", () => {
   });
 });
 
+/**
+ * Opt-in resume of a STUCK slice's preserved tree (#49). The default in
+ * every case below is the unchanged `restart` decision above — these
+ * tests only describe what the operator's explicit `--resume-stuck`
+ * buys, and where it deliberately buys nothing.
+ */
+describe("decideResume with --resume-stuck (#49)", () => {
+  const stuck = (overrides: Partial<ResumeFacts> = {}): ResumeFacts =>
+    resumableFacts({ stuckFilePresent: true, resumeStuck: true, ...overrides });
+
+  it("resumes a STUCK slice's preserved tree when the operator opted in", () => {
+    expect(decideResume(stuck())).toEqual({
+      action: "resume-stuck",
+      commitsAhead: 3,
+    });
+  });
+
+  it("still restarts a STUCK slice the operator did NOT name", () => {
+    // The default must be byte-identical to pre-#49 behavior, reason included.
+    expect(decideResume(stuck({ resumeStuck: false }))).toEqual({
+      action: "restart",
+      reason: "stuck.md present (terminal diagnosis)",
+    });
+  });
+
+  it("requires a preserved branch", () => {
+    expect(
+      decideResume(stuck({ branchExists: false, commitsAheadOfBase: 0 })),
+    ).toEqual({ action: "restart", reason: "slice branch missing" });
+  });
+
+  it("requires a registered worktree (ADR 0010)", () => {
+    expect(decideResume(stuck({ worktreeRegistered: false }))).toEqual({
+      action: "restart",
+      reason: "worktree missing or unregistered",
+    });
+  });
+
+  it("requires commits ahead of base, and says the opt-in did not apply", () => {
+    // Restarting silently here would look like the flag was ignored.
+    expect(decideResume(stuck({ commitsAheadOfBase: 0 }))).toEqual({
+      action: "restart",
+      reason: "--resume-stuck named this slice but it has no commits beyond base",
+    });
+  });
+
+  it("is not capped by MAX_RESUME_ATTEMPTS — the operator is the cap", () => {
+    // Honouring the cap here would restart from base and destroy the
+    // very commits and diagnosis the operator asked to keep.
+    expect(decideResume(stuck({ resumeAttempts: 5 }))).toEqual({
+      action: "resume-stuck",
+      commitsAhead: 3,
+    });
+  });
+
+  it("yields to --force-restart on the same slice", () => {
+    expect(decideResume(stuck({ forceRestart: true }))).toEqual({
+      action: "restart",
+      reason: "--force-restart",
+    });
+  });
+
+  it("is a no-op on a slice with no stuck.md — the ordinary resume still applies", () => {
+    expect(decideResume(resumableFacts({ resumeStuck: true }))).toEqual({
+      action: "resume",
+      commitsAhead: 3,
+    });
+  });
+
+  it("is a no-op on a slice with no prior attempt at all", () => {
+    expect(
+      decideResume(
+        resumableFacts({
+          branchExists: false,
+          worktreeRegistered: false,
+          commitsAheadOfBase: 0,
+          resumeStuck: true,
+        }),
+      ),
+    ).toEqual({ action: "fresh" });
+  });
+});
+
 
 describe("isForceRestarted", () => {
   const slice = { number: "05", ghIssue: "4001" };
@@ -139,6 +225,28 @@ describe("isForceRestarted", () => {
 
   it("leaves unnamed slices unaffected", () => {
     expect(isForceRestarted(["07", "4002"], slice)).toBe(false);
+  });
+});
+
+
+describe("isResumeStuckRequested", () => {
+  const slice = { number: "20", ghIssue: "49" };
+
+  it("is false when no flag was given", () => {
+    expect(isResumeStuckRequested(undefined, slice)).toBe(false);
+  });
+
+  it("matches by GH issue id", () => {
+    expect(isResumeStuckRequested(["49"], slice)).toBe(true);
+  });
+
+  it("matches by slice number, zero padding optional", () => {
+    expect(isResumeStuckRequested(["20"], slice)).toBe(true);
+    expect(isResumeStuckRequested(["020"], slice)).toBe(true);
+  });
+
+  it("leaves unnamed slices unaffected", () => {
+    expect(isResumeStuckRequested(["21", "50"], slice)).toBe(false);
   });
 });
 
@@ -232,5 +340,104 @@ describe("generator-resume prompt rendering", () => {
   it("splices the handoff note through, or renders cleanly without one", () => {
     expect(render("## Prior handoff\nFresh notes.")).toContain("Fresh notes.");
     expect(render("")).not.toContain("undefined");
+  });
+});
+
+/**
+ * The preserved STUCK diagnosis (#49) rides into the prompt verbatim and
+ * unconditionally — no staleness check. A stuck.md is written after the
+ * slice's last commit, and it is the reason the operator opted in.
+ */
+describe("buildStuckDiagnosisNote", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "afk-stuck-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("includes the diagnosis verbatim, however old the file is", () => {
+    const stuckPath = join(dir, "stuck.md");
+    writeFileSync(
+      stuckPath,
+      "# Stuck Handoff\n\n## What the evaluator wants\nFinding 1 — precedence is wrong.\n",
+      "utf-8",
+    );
+    const ancient = new Date("2020-01-01T00:00:00Z");
+    utimesSync(stuckPath, ancient, ancient);
+
+    const note = buildStuckDiagnosisNote(stuckPath);
+
+    expect(note).toContain("Finding 1 — precedence is wrong.");
+    expect(note).toMatch(/declared STUCK/i);
+  });
+
+  it("omits a missing stuck.md", () => {
+    expect(buildStuckDiagnosisNote(join(dir, "stuck.md"))).toBe("");
+  });
+
+  it("omits an empty stuck.md rather than emitting an empty block", () => {
+    const stuckPath = join(dir, "stuck.md");
+    writeFileSync(stuckPath, "   \n\n", "utf-8");
+    expect(buildStuckDiagnosisNote(stuckPath)).toBe("");
+  });
+});
+
+/**
+ * The stuck-resume prompt (#49) must state the OPPOSITE worktree facts
+ * from `generator-resume`: nothing reset, nothing cleaned, diagnosis
+ * kept. renderPrompt throws on missing AND unused args, so a clean
+ * render with exactly this arg set locks full placeholder coverage.
+ */
+describe("generator-resume-stuck prompt rendering", () => {
+  function render(
+    overrides: { stuckNote?: string; handoffNote?: string; baseNote?: string } = {},
+  ): string {
+    return renderPrompt("generator-resume-stuck", {
+      SLICE_DIR: ".kiro/specs/demo/slices/20-x",
+      RELEVANT_FILES: "- README.md",
+      SIBLING_HANDOFFS: "(none)",
+      TEST_COMMAND: "pnpm test:run",
+      COMMITS_AHEAD: 14,
+      COMMIT_LOG: "71066cc feat: round 3",
+      BASE_REFRESH_NOTE: overrides.baseNote ?? "The feature branch was merged in.",
+      STUCK_NOTE: overrides.stuckNote ?? "",
+      HANDOFF_NOTE: overrides.handoffNote ?? "",
+    });
+  }
+
+  it("tells the generator its worktree was NOT reset or cleaned", () => {
+    const prompt = render();
+    expect(prompt).toContain("Your worktree was not touched.");
+    // The #33 template's post-reset warning must NOT leak in here.
+    expect(prompt).not.toMatch(/anything after your last commit is gone/i);
+  });
+
+  it("forbids deleting the preserved diagnosis", () => {
+    expect(render()).toMatch(/Never delete `.*stuck\.md`/);
+  });
+
+  it("carries the tree-wins and migration-prefix rules verbatim", () => {
+    const prompt = render();
+    expect(prompt).toContain("the contract predates merges from other slices");
+    expect(prompt).toContain("the current tree wins over the contract");
+    expect(prompt).toContain("renumber yours to the next free prefix");
+  });
+
+  it("splices the diagnosis and handoff notes through, or renders cleanly without them", () => {
+    expect(render({ stuckNote: "Finding 1 — precedence." })).toContain(
+      "Finding 1 — precedence.",
+    );
+    expect(render({ handoffNote: "## Prior handoff\nNotes." })).toContain("Notes.");
+    expect(render()).not.toContain("undefined");
+  });
+
+  it("carries whichever base-refresh fact actually happened", () => {
+    expect(render({ baseNote: "could **not** be merged" })).toContain(
+      "could **not** be merged",
+    );
   });
 });

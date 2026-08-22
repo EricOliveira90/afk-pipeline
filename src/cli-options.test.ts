@@ -168,3 +168,75 @@ describe("parsePipelineRuntimeOptions --force-restart", () => {
     );
   });
 });
+
+/**
+ * --resume-stuck (#49): operator opt-in that grants named STUCK slices
+ * one more implementation/QA attempt on their preserved tree instead of
+ * the default restart from base. Same selector vocabulary as
+ * --force-restart, and mutually exclusive with it per slice.
+ */
+describe("parsePipelineRuntimeOptions --resume-stuck", () => {
+  it("is undefined when the flag is absent", () => {
+    expect(parsePipelineRuntimeOptions([]).resumeStuck).toBeUndefined();
+  });
+
+  it("parses a single slice", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--resume-stuck", "20"]).resumeStuck,
+    ).toEqual(["20"]);
+  });
+
+  it("parses a comma-separated list, trimming whitespace", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--resume-stuck", "20, 49"]).resumeStuck,
+    ).toEqual(["20", "49"]);
+  });
+
+  it("is repeatable — occurrences accumulate", () => {
+    expect(
+      parsePipelineRuntimeOptions([
+        "--resume-stuck", "20",
+        "--resume-stuck", "49",
+      ]).resumeStuck,
+    ).toEqual(["20", "49"]);
+  });
+
+  it.each(["", "20,", "abc", "20 49"])("rejects invalid value %j", (value) => {
+    expect(() => parsePipelineRuntimeOptions(["--resume-stuck", value])).toThrow(
+      /--resume-stuck/,
+    );
+  });
+
+  it("rejects a missing value", () => {
+    expect(() => parsePipelineRuntimeOptions(["--resume-stuck"])).toThrow(
+      /--resume-stuck/,
+    );
+  });
+
+  it("coexists with --force-restart on DIFFERENT slices", () => {
+    const opts = parsePipelineRuntimeOptions([
+      "--force-restart", "07",
+      "--resume-stuck", "20",
+    ]);
+    expect(opts.forceRestart).toEqual(["07"]);
+    expect(opts.resumeStuck).toEqual(["20"]);
+  });
+
+  it("rejects the same slice named in both flags — contradictory instructions", () => {
+    expect(() =>
+      parsePipelineRuntimeOptions([
+        "--force-restart", "20",
+        "--resume-stuck", "20",
+      ]),
+    ).toThrow(/both name 20/);
+  });
+
+  it("catches the contradiction across zero padding too", () => {
+    expect(() =>
+      parsePipelineRuntimeOptions([
+        "--force-restart", "05",
+        "--resume-stuck", "5",
+      ]),
+    ).toThrow(/both name 05/);
+  });
+});

@@ -100,6 +100,10 @@ interface PromptRecord {
   featureFilePresent: boolean;
   /** Whether BOTH colliding migration files (slice's + feature's) were visible. */
   migrationCollisionPresent: boolean;
+  /** Whether the previous run's UNCOMMITTED in-flight edit survived (#49). */
+  inFlightPresent: boolean;
+  /** Whether the preserved stuck.md diagnosis survived into this run (#49). */
+  stuckFilePresent: boolean;
 }
 
 /**
@@ -124,6 +128,11 @@ function buildProvider(opts: {
         migrationCollisionPresent:
           existsSync(join(cwd, "supabase", "migrations", "125_slice_work.sql")) &&
           existsSync(join(cwd, "supabase", "migrations", "125_sibling.sql")),
+        inFlightPresent: existsSync(join(cwd, "src", "in-flight.ts")),
+        stuckFilePresent: (() => {
+          const dir = findSliceArtifactDir(cwd, "01");
+          return dir !== null && existsSync(join(dir, "stuck.md"));
+        })(),
       });
       const artifactDir = findSliceArtifactDir(cwd, "01");
       if (role === "explorer" && artifactDir) {
@@ -434,6 +443,159 @@ describe("retried slice resume (spec #33)", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).slices["4001"].phase).toBe("PASS");
   }, 180_000);
 
+  it("resumes a STUCK slice's preserved tree when the operator opts in with --resume-stuck (#49)", async () => {
+    const repo = makeRepo();
+    const slug = "resume-stuck-optin";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice = makeSlice();
+
+    // --- Run 1: the generator commits work every round but QA always
+    // fails — the slice ends STUCK and generator-stuck writes stuck.md.
+    // On the LAST round it also leaves an uncommitted in-flight edit
+    // that nothing afterwards commits: run 2 must still see it, which is
+    // what "the preserved worktree is not reset or cleaned" means.
+    let round = 0;
+    const stuckProvider = buildProvider({
+      qaVerdict: "FAIL",
+      generator: (cwd) => {
+        round++;
+        mkdirSync(join(cwd, "src"), { recursive: true });
+        writeFileSync(join(cwd, "src", `round-${round}.ts`), `export const r = ${round};\n`, "utf-8");
+        git(cwd, ["add", "-A"]);
+        git(cwd, ["commit", "-m", `feat(#4001): round ${round}`]);
+        if (round === 3) {
+          writeFileSync(join(cwd, "src", "in-flight.ts"), "export const inFlight =", "utf-8");
+        }
+      },
+    });
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: stuckProvider,
+    });
+
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).slices["4001"].phase).toBe("STUCK");
+    const branch = `afk-stub/${slug}-slice-01-resumable`;
+    const stuckTip = git(repo, ["rev-parse", branch]);
+
+    // --- Run 2: the operator read the diagnosis and granted one more
+    // attempt on the same tree. QA now passes.
+    const records: PromptRecord[] = [];
+    const resumingProvider = buildProvider({
+      records,
+      generator: (cwd) => {
+        writeFileSync(join(cwd, "src", "in-flight.ts"), "export const inFlight = 1;\n", "utf-8");
+        writeFileSync(join(cwd, "src", "cleared.ts"), "export const cleared = 1;\n", "utf-8");
+        git(cwd, ["add", "-A"]);
+        git(cwd, ["commit", "-m", "feat(#4001): cleared the stuck findings"]);
+      },
+    });
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: resumingProvider,
+      resumeStuck: ["01"],
+    });
+
+    // The locked contract survived: no renegotiation.
+    const roles = records.map((r) => r.role);
+    expect(roles).not.toContain("explorer");
+    expect(roles).not.toContain("planner");
+
+    const generatorRecord = records.find((r) => r.role === "generator");
+    expect(generatorRecord).toBeDefined();
+    const prompt = generatorRecord!.prompt;
+
+    // Prompt-assembly seam: the STUCK-resume template, not the #33 one.
+    expect(prompt).toContain("Your worktree was not touched.");
+    expect(prompt).not.toMatch(/anything after your last commit is gone/i);
+    // Its own commit log across all three dead rounds.
+    expect(prompt).toContain("feat(#4001): round 1");
+    expect(prompt).toContain("feat(#4001): round 3");
+    // The preserved diagnosis rode into the prompt.
+    expect(prompt).toMatch(/declared STUCK/i);
+
+    // The tree really was preserved: the uncommitted in-flight edit and
+    // the stuck.md diagnosis were both still there when the generator ran.
+    expect(generatorRecord!.inFlightPresent).toBe(true);
+    expect(generatorRecord!.stuckFilePresent).toBe(true);
+
+    // Every commit from the STUCK life is still an ancestor — nothing
+    // was reset away, and the branch was never recreated from base.
+    expect(git(repo, ["merge-base", "--is-ancestor", stuckTip, branch])).toBe("");
+
+    // Retry state records the decision distinctly from an ordinary resume.
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.slices["4001"].phase).toBe("PASS");
+    expect(state.resume["4001"].attempts).toBe(1);
+    expect(state.resume["4001"].lastDecision).toMatch(/--resume-stuck/);
+
+    // Auditable in the run log — and no restart line for this slice.
+    const logs = allRunLogs(repo, `${slug}-stub`);
+    expect(logs).toMatch(/resuming STUCK slice from 3 commit\(s\)/);
+    expect(logs).toMatch(/tree not reset, diagnosis preserved/);
+    expect(logs).not.toMatch(/restarting from base \(stuck\.md present/);
+
+    // The work from both lives reached the feature branch.
+    git(repo, ["checkout", `feat-stub/${slug}`]);
+    for (const file of ["round-1.ts", "round-3.ts", "cleared.ts"]) {
+      expect(existsSync(join(repo, "src", file))).toBe(true);
+    }
+  }, 240_000);
+
+  it("leaves a STUCK slice the operator did NOT name restarting from base (#49)", async () => {
+    const repo = makeRepo();
+    const slug = "resume-stuck-unnamed";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice = makeSlice();
+
+    let round = 0;
+    const stuckProvider = buildProvider({
+      qaVerdict: "FAIL",
+      generator: (cwd) => {
+        round++;
+        mkdirSync(join(cwd, "src"), { recursive: true });
+        writeFileSync(join(cwd, "src", `round-${round}.ts`), `export const r = ${round};\n`, "utf-8");
+        git(cwd, ["add", "-A"]);
+        git(cwd, ["commit", "-m", `feat(#4001): round ${round}`]);
+      },
+    });
+    await runPipeline({
+      repoRoot: repo, prdSlug: slug, prdDir, specsDir,
+      dag: buildDAG([slice]), provider: stuckProvider,
+    });
+
+    // --- Run 2: --resume-stuck names a DIFFERENT slice. The stuck
+    // slice's default terminal behavior must be untouched.
+    const records: PromptRecord[] = [];
+    const retryProvider = buildProvider({
+      records,
+      generator: (cwd) => {
+        mkdirSync(join(cwd, "src"), { recursive: true });
+        writeFileSync(join(cwd, "src", "fresh.ts"), "export const fresh = 1;\n", "utf-8");
+        git(cwd, ["add", "-A"]);
+        git(cwd, ["commit", "-m", "feat(#4001): fresh after stuck"]);
+      },
+    });
+    await runPipeline({
+      repoRoot: repo, prdSlug: slug, prdDir, specsDir,
+      dag: buildDAG([slice]), provider: retryProvider,
+      resumeStuck: ["02", "9999"],
+    });
+
+    expect(records.map((r) => r.role)).toContain("explorer");
+    expect(allRunLogs(repo, `${slug}-stub`)).toMatch(
+      /restarting from base \(stuck\.md present \(terminal diagnosis\)\)/,
+    );
+  }, 240_000);
+
   it("caps resumes at 2: die-resume-die-resume-die-restart (#36)", async () => {
     const repo = makeRepo();
     const slug = "resume-cap";
@@ -621,7 +783,7 @@ describe("prepareSliceWorktree", () => {
     repo: string,
     slug: string,
     slice: Slice,
-    forceRestart?: string[],
+    flags: { forceRestart?: string[]; resumeStuck?: string[] } = {},
   ) {
     return makeSliceContext(
       {
@@ -631,7 +793,8 @@ describe("prepareSliceWorktree", () => {
         specsDir: join(".kiro", "specs", slug),
         dag: buildDAG([slice]),
         provider: stubProvider,
-        ...(forceRestart ? { forceRestart } : {}),
+        ...(flags.forceRestart ? { forceRestart: flags.forceRestart } : {}),
+        ...(flags.resumeStuck ? { resumeStuck: flags.resumeStuck } : {}),
       },
       slice,
       new Logger(repo, `${slug}-stub`),
@@ -669,16 +832,16 @@ describe("prepareSliceWorktree", () => {
     expect(ctx.resume).toBeDefined();
     expect(ctx.resume!.commitsAhead).toBe(1);
     expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
-  });
+  }, 60_000);
 
   it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", () => {
     const repo = makeRepo();
     const slug = "multi-force";
     const forced = ["01", "4003"]; // slice 01 by number, slice 03 by GH issue
     const contexts = [
-      makeCtx(repo, slug, sliceAt("01", "4001"), forced),
-      makeCtx(repo, slug, sliceAt("02", "4002"), forced),
-      makeCtx(repo, slug, sliceAt("03", "4003"), forced),
+      makeCtx(repo, slug, sliceAt("01", "4001"), { forceRestart: forced }),
+      makeCtx(repo, slug, sliceAt("02", "4002"), { forceRestart: forced }),
+      makeCtx(repo, slug, sliceAt("03", "4003"), { forceRestart: forced }),
     ];
     git(repo, ["branch", contexts[0]!.featBranch]);
     for (const ctx of contexts) {
@@ -700,5 +863,69 @@ describe("prepareSliceWorktree", () => {
     expect(git(repo, ["rev-parse", contexts[0]!.branch])).toBe(
       git(repo, ["rev-parse", contexts[0]!.featBranch]),
     );
-  });
+  }, 60_000);
+
+  /**
+   * Mark a seeded slice STUCK the way the pipeline does — a stuck.md in
+   * the slice artifact dir — and leave an uncommitted edit behind.
+   */
+  function markStuckWithDirtyTree(ctx: ReturnType<typeof makeCtx>) {
+    mkdirSync(ctx.absSliceDir, { recursive: true });
+    writeFileSync(join(ctx.absSliceDir, "stuck.md"), "# Stuck Handoff\nFinding 1.\n", "utf-8");
+    writeFileSync(join(ctx.worktreeDir, "src", "in-flight.ts"), "export const x =", "utf-8");
+  }
+
+  it("--resume-stuck keeps the preserved tip, the dirty tree, and stuck.md (#49)", () => {
+    const repo = makeRepo();
+    const ctx = makeCtx(repo, "stuck-optin", sliceAt("20", "49"), { resumeStuck: ["49"] });
+    seedResumableSlice(repo, ctx);
+    markStuckWithDirtyTree(ctx);
+    const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
+
+    prepareSliceWorktree(ctx);
+
+    expect(ctx.resume).toEqual({
+      mode: "stuck",
+      commitsAhead: 1,
+      commitLog: expect.stringContaining("work"),
+      handoffNote: "",
+      stuckNote: expect.stringContaining("Finding 1."),
+      baseRefreshed: true,
+    });
+    // Nothing was reset, cleaned, or recreated.
+    expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
+    expect(existsSync(join(ctx.worktreeDir, "src", "in-flight.ts"))).toBe(true);
+    expect(existsSync(join(ctx.absSliceDir, "stuck.md"))).toBe(true);
+  }, 60_000);
+
+  it("--resume-stuck on an unnamed slice leaves the terminal restart alone (#49)", () => {
+    const repo = makeRepo();
+    const ctx = makeCtx(repo, "stuck-unnamed", sliceAt("20", "49"), { resumeStuck: ["21"] });
+    seedResumableSlice(repo, ctx);
+    markStuckWithDirtyTree(ctx);
+
+    prepareSliceWorktree(ctx);
+
+    expect(ctx.resume).toBeUndefined();
+    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
+      git(repo, ["rev-parse", ctx.featBranch]),
+    );
+  }, 60_000);
+
+  it("--force-restart beats --resume-stuck on the same slice (#49)", () => {
+    const repo = makeRepo();
+    const ctx = makeCtx(repo, "stuck-contested", sliceAt("20", "49"), {
+      forceRestart: ["20"],
+      resumeStuck: ["49"],
+    });
+    seedResumableSlice(repo, ctx);
+    markStuckWithDirtyTree(ctx);
+
+    prepareSliceWorktree(ctx);
+
+    expect(ctx.resume).toBeUndefined();
+    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
+      git(repo, ["rev-parse", ctx.featBranch]),
+    );
+  }, 60_000);
 });

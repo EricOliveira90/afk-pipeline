@@ -198,9 +198,48 @@ Convenience scripts for your `package.json`:
 
 ## Resumability
 
-State persists in `.afk/state/<run-slug>.json`, where the run slug includes the provider for non-Kiro backends. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and stuck slices retry from their artifact state.
+State persists in `.afk/state/<run-slug>.json`, where the run slug includes the provider for non-Kiro backends. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and failed slices retry from their surviving artifact and git state. A slice whose generator died mid-run resumes from its branch tip; a slice that went STUCK restarts from base unless you opt in with `--resume-stuck` (below).
 
 A retry with no `--slices` argument reuses the persisted scope. Supplying a different selection is rejected so a changed manifest or command cannot silently expand the run. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
+
+### Resuming a STUCK slice
+
+A slice that exhausts its implementation rounds is declared STUCK, and
+the pipeline writes a `stuck.md` diagnosis into the slice's artifact
+directory. By default that diagnosis is **terminal**: the next run
+restarts the slice from base, discarding its branch and worktree. That is
+the right default — a slice that failed QA three times usually needs a
+renegotiated contract, not another pass at the same code.
+
+When you have read the diagnosis and judged the work worth finishing,
+`--resume-stuck` grants exactly one more implementation/QA attempt on the
+preserved tree:
+
+```bash
+npx afk-codex --prd-dir .kiro/specs/<prd-slug> --resume-stuck 49
+```
+
+Values are slice numbers or GH issue ids (repeatable and
+comma-separated), matching `--force-restart`. What the flag does:
+
+- **Requires** a preserved slice branch, a git-registered worktree, and
+  commits ahead of the feature branch. If any is missing the slice
+  restarts from base as usual, and the run log says why.
+- **Does not reset or clean** the worktree — uncommitted work-in-progress
+  survives, and the generator is told to read `git status` first.
+- **Keeps** `stuck.md`, the locked `contract.md`, and every QA report. No
+  renegotiation happens; the diagnosis is spliced into the generator's
+  prompt as the specification for this attempt.
+- **Records** the decision in `.afk/state/<run-slug>.json` under
+  `resume`, in `run.log`, and as a `resume-stuck` warn event in
+  `events.jsonl`.
+- Attempts the base refresh, but **declines rather than restarts** if the
+  feature branch will not merge cleanly — preserving the tree outranks
+  refreshing it. The generator is told its verification world is stale.
+
+It is opt-in per run: nothing is remembered, so omitting the flag next
+time restores the terminal default. `--force-restart` wins if both name
+the same slice, and naming a slice in both is rejected.
 
 The state file also caches the post-merge review phase (ADR 0015): a passing pre-ship sanity gate is keyed by the reviewed tree's SHA, and favorable guardian verdicts by the reviewed HEAD. Re-entering a finished run re-executes only what actually changed — typically just the review that previously failed or blocked.
 
