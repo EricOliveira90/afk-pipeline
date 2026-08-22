@@ -23,17 +23,16 @@ question: does the user get the outcome the PRD promised?
 A FIX-BEFORE-SHIP finding must rest on evidence you gathered yourself.
 For each blocking finding, state three things: the file, the location
 within it (line range, symbol, or section), and what you read or ran to
-establish that the promised user outcome is missing or wrong. "Read
-`src/status.ts:88-140`" and "ran `pnpm vitest run src/status.test.ts -t
-'renders MERGE-PENDING'`" both qualify. Repeating what some document or
-another agent asserts does not.
+establish that the promised user outcome is missing or wrong. Repeating
+what a document or another agent asserts does not qualify.
 
-The PM review and the architect review run concurrently against the same
-feature branch — the architect review's artifact may not exist yet, and
-neither review is evidence for the other. Another guardian's finding is
-not sufficient support for a blocking finding. If it is the only support
-you have, either verify it yourself and cite your own reading, or record
-it as an ACCEPT-WITH-NOTES note. Two reviewers agreeing is worth nothing
+The PM review and the architect review are two independent reads of the
+same feature branch. By default they run concurrently, so the architect
+review's artifact may not exist at all; when it does exist, it is still
+not evidence for your finding. Another guardian's finding is not
+sufficient support for a blocking finding. If it is the only support you
+have, either verify it yourself and cite your own reading, or record it
+as a note rather than a blocker. Two reviewers agreeing is worth nothing
 when one is quoting the other.
 
 # Invariants
