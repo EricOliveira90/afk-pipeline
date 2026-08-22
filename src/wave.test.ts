@@ -12,7 +12,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executionLanes, runWave } from "./wave.js";
+import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
 import { makeAsyncMutex } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { Logger } from "./logger.js";
@@ -22,6 +22,8 @@ import type {
   InvokeOptions,
   InvokeResult,
 } from "./agent-provider.js";
+import { TransientProviderError } from "./agent-provider.js";
+import { readRunEvents, type RunEvent } from "./run-events.js";
 import type { PipelineConfig } from "./orchestrator.js";
 
 const tempDirs: string[] = [];
@@ -58,6 +60,54 @@ interface SliceFixture {
   qaPasses: boolean;
   outputFile: string;
   outputContent: string;
+  /**
+   * Verdict the contract evaluator writes. Defaults to ACCEPT; ESCALATE
+   * drives the "genuine verdict" negotiate failure — the evaluator lived
+   * and decided, so nothing about it is an infrastructure death.
+   */
+  contractVerdict?: "ACCEPT" | "ESCALATE";
+}
+
+/**
+ * How the fake provider should die on a role's invocation, so the wave
+ * tests can drive each agent-failure cause (ADR 0025) at the same seam
+ * a real provider produces it: a rejected `invoke` whose message is the
+ * only record of the exit code or the kill class.
+ *
+ * `times` bounds how many consecutive invocations of that role die;
+ * later ones behave normally, which is how an infrastructure retry is
+ * observed to recover. Omit it to die every time.
+ */
+interface ProviderDeath {
+  role: string;
+  kind: "exit" | "idle-kill" | "ceiling-kill" | "tool-cap-kill" | "transient";
+  /** `kind: "exit"` only. */
+  exitCode?: number;
+  times?: number;
+}
+
+/**
+ * Build the rejection a real provider would produce. The message shapes
+ * are copied from `claude.ts` / `kiro.ts` verbatim — they are the wire
+ * format the classifier reads.
+ */
+function deathError(death: ProviderDeath, role: string): Error {
+  switch (death.kind) {
+    case "exit":
+      return new Error(`Agent ${role} exited with code ${death.exitCode ?? 1}`);
+    case "idle-kill":
+      return new Error(`Agent ${role} idle for 600s — killed`);
+    case "ceiling-kill":
+      return new Error(
+        `Agent ${role} exceeded 7200s wall-clock ceiling — killed`,
+      );
+    case "tool-cap-kill":
+      return new Error(`Agent ${role} exceeded 100 tool calls — killed`);
+    case "transient":
+      return new TransientProviderError(
+        `Agent ${role} exited with code 1 — model temporarily unavailable`,
+      );
+  }
 }
 
 function findSliceArtifactDir(cwd: string, sliceNumber: string): string | null {
@@ -88,9 +138,13 @@ function sliceFromCwd(cwd: string, slices: Slice[]): Slice | null {
 function buildStubProvider(opts: {
   fixtures: Map<string, SliceFixture>;
   slices: Slice[];
+  deaths?: ProviderDeath[];
+  /** `role:ghIssue` per invocation, in call order. */
+  records?: string[];
 }): AgentProvider {
-  const { fixtures, slices } = opts;
+  const { fixtures, slices, deaths = [], records } = opts;
   const generatorRounds = new Map<string, number>();
+  const roleAttempts = new Map<string, number>();
 
   return {
     name: "stub",
@@ -99,7 +153,22 @@ function buildStubProvider(opts: {
       const slice = sliceFromCwd(cwd, slices);
       const ghIssue = slice?.ghIssue ?? "";
       const fixture = fixtures.get(ghIssue);
+      records?.push(`${role}:${ghIssue}`);
       await new Promise((r) => setTimeout(r, 5));
+
+      const attempts = (roleAttempts.get(`${role}:${ghIssue}`) ?? 0) + 1;
+      roleAttempts.set(`${role}:${ghIssue}`, attempts);
+      const death = deaths.find(
+        (d) => d.role === role && attempts <= (d.times ?? Infinity),
+      );
+      if (death) {
+        // Real providers tee stdout into the agent log before dying, and
+        // that tail is what the failure reason must carry.
+        options.logStream?.write(
+          `stub ${role} output line\nabout to die: ${death.kind}\n`,
+        );
+        throw deathError(death, role);
+      }
 
       const sliceArtifactDir = slice
         ? findSliceArtifactDir(cwd, slice.number)
@@ -113,15 +182,20 @@ function buildStubProvider(opts: {
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {
         const filesBlock = fixture.files.map((f) => `- ${f}`).join("\n");
+        // The planner leaves the contract in DRAFT: the orchestrator owns
+        // the LOCKED transition (ADR 0008), and a planner that pre-locked
+        // it would hide the round loop from any test that re-enters
+        // negotiation on a contract already on disk.
         writeFileSync(
           join(sliceArtifactDir, "contract.md"),
-          `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n${filesBlock}\n`,
+          `# Slice Contract\n\n**Status:** DRAFT\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
+        const verdict = fixture?.contractVerdict ?? "ACCEPT";
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+          `## Evaluator feedback — round 1\n\n**Verdict:** ${verdict}\n`,
           "utf-8",
         );
       } else if (role === "generator" && sliceArtifactDir && fixture) {
@@ -159,7 +233,7 @@ function setupWave(
   slug: string,
   slices: Slice[],
   fixtures: Map<string, SliceFixture>,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; deaths?: ProviderDeath[] },
 ) {
   const specsDir = join(".kiro", "specs", slug);
   const prdDir = join(repo, specsDir);
@@ -170,7 +244,13 @@ function setupWave(
     "utf-8",
   );
 
-  const provider = buildStubProvider({ fixtures, slices });
+  const records: string[] = [];
+  const provider = buildStubProvider({
+    fixtures,
+    slices,
+    deaths: opts?.deaths,
+    records,
+  });
   const dag = buildDAG(slices);
   const featBranch = `feat-stub/${slug}`;
 
@@ -190,7 +270,7 @@ function setupWave(
     signal: opts?.signal,
   };
 
-  return { config, dag, logger, featBranch, provider };
+  return { config, dag, logger, featBranch, provider, records };
 }
 
 describe("runWave", () => {
@@ -679,6 +759,295 @@ describe("runWave", () => {
 });
 
 
+
+/**
+ * Agent failure causes for the negotiate phase (issue #40, ADR 0025).
+ *
+ * The defect: a contract evaluator that died mid-tool-call failed its
+ * slice with the fixed text "Negotiation returned ERROR" — no exit code,
+ * no output, no way to tell "the agent provider hung up" from "the
+ * evaluator returned a real verdict" — and got no retry, because
+ * `--infrastructure-retries` covered only QA and the guardian reviews.
+ * One such death ended a whole wave.
+ *
+ * Asserted through `runWave` outcomes and the typed event stream, never
+ * through console prose.
+ */
+describe("runWave negotiate failure causes (issue #40)", () => {
+  /** One independent slice whose contract evaluator is the thing that dies. */
+  function oneSlice(
+    slug: string,
+    ghIssue: string,
+    opts?: { deaths?: ProviderDeath[]; contractVerdict?: "ACCEPT" | "ESCALATE" },
+  ) {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue,
+        title: "Negotiator",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        ghIssue,
+        {
+          files: ["src/n.txt"],
+          qaPasses: true,
+          outputFile: "src/n.txt",
+          outputContent: "n",
+          ...(opts?.contractVerdict
+            ? { contractVerdict: opts.contractVerdict }
+            : {}),
+        },
+      ],
+    ]);
+    const setup = setupWave(repo, slug, slices, fixtures, {
+      ...(opts?.deaths ? { deaths: opts.deaths } : {}),
+    });
+    return { repo, slices, ...setup };
+  }
+
+  function dispatch(
+    setup: ReturnType<typeof oneSlice>,
+    readyIds: string[],
+  ): Promise<Map<string, WaveOutcome>> {
+    return runWave({
+      waveNumber: 1,
+      readyIds,
+      config: setup.config,
+      dag: setup.dag,
+      logger: setup.logger,
+      featBranch: setup.featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    }).then((r) => r.outcomes);
+  }
+
+  function reasonOf(outcome: WaveOutcome | undefined): string {
+    return outcome && outcome.phase !== "PASS" ? outcome.error : "";
+  }
+
+  it("names the agent provider's exit code when a negotiate invocation exits non-zero", async () => {
+    const setup = oneSlice("neg-exit", "1001", {
+      deaths: [{ role: "evaluator-contract", kind: "exit", exitCode: 137 }],
+    });
+    setup.config.infrastructureRetries = 0;
+
+    const outcomes = await dispatch(setup, ["1001"]);
+
+    expect(outcomes.get("1001")?.phase).toBe("ERROR");
+    const reason = reasonOf(outcomes.get("1001"));
+    expect(reason).toContain("exit code 137");
+    expect(reason).toContain("evaluator-contract");
+    // The tail of the dead invocation's output rides along, so an
+    // operator has a starting point without opening the agent log.
+    expect(reason).toContain("last output:");
+    expect(reason).toContain("about to die");
+    // The retired fixed string must be gone.
+    expect(reason).not.toContain("Negotiation returned ERROR");
+  }, 30_000);
+
+  it("names the kill class when the orchestrator killed the negotiate invocation", async () => {
+    const cases: Array<[ProviderDeath["kind"], string, string]> = [
+      ["idle-kill", "neg-idle", "idle timeout"],
+      ["ceiling-kill", "neg-ceiling", "wall-clock ceiling"],
+      ["tool-cap-kill", "neg-toolcap", "tool-call cap"],
+    ];
+    let ghIssue = 1100;
+    for (const [kind, slug, label] of cases) {
+      const id = String(ghIssue++);
+      const setup = oneSlice(slug, id, {
+        deaths: [{ role: "evaluator-contract", kind }],
+      });
+      setup.config.infrastructureRetries = 0;
+
+      const outcomes = await dispatch(setup, [id]);
+
+      expect(outcomes.get(id)?.phase, label).toBe("ERROR");
+      const reason = reasonOf(outcomes.get(id));
+      expect(reason, label).toContain(label);
+      expect(reason, label).toContain("the orchestrator killed");
+      // A kill is not an exit: the two causes must stay distinguishable.
+      expect(reason, label).not.toContain("exit code");
+    }
+  }, 90_000);
+
+  it("distinguishes an exhausted transient-provider retry from an exit and from a kill", async () => {
+    const setup = oneSlice("neg-transient", "1201", {
+      deaths: [{ role: "evaluator-contract", kind: "transient" }],
+    });
+    setup.config.infrastructureRetries = 0;
+    // Window closed: the transient retry (ADR 0022) is already exhausted
+    // by the time the negotiate phase sees the failure.
+    setup.config.transientRetryWindowMs = 0;
+
+    const outcomes = await dispatch(setup, ["1201"]);
+
+    expect(outcomes.get("1201")?.phase).toBe("ERROR");
+    const reason = reasonOf(outcomes.get("1201"));
+    expect(reason).toContain("exhausted its transient-provider retry window");
+    expect(reason).not.toContain("the orchestrator killed");
+    expect(reason).not.toContain("hung up");
+  }, 30_000);
+
+  it("labels a genuine evaluator verdict as a verdict, never as an infrastructure death", async () => {
+    const setup = oneSlice("neg-verdict", "1301", {
+      contractVerdict: "ESCALATE",
+    });
+
+    const outcomes = await dispatch(setup, ["1301"]);
+
+    expect(outcomes.get("1301")?.phase).toBe("ESCALATE");
+    const reason = reasonOf(outcomes.get("1301"));
+    expect(reason).toContain("evaluator verdict ESCALATE");
+    expect(reason).toContain("not an infrastructure death");
+    expect(reason).not.toContain("exit code");
+    expect(reason).not.toContain("killed");
+    expect(reason).not.toContain("transient");
+  }, 30_000);
+
+  it("retries an infrastructure death under --infrastructure-retries and the slice still passes", async () => {
+    const setup = oneSlice("neg-retry", "1401", {
+      // Dies on the first evaluator-contract invocation only.
+      deaths: [{ role: "evaluator-contract", kind: "idle-kill", times: 1 }],
+    });
+    // Default is 2; state it so the test documents the bound it relies on.
+    setup.config.infrastructureRetries = 2;
+
+    const outcomes = await dispatch(setup, ["1401"]);
+
+    // One dead evaluator no longer ends the slice — or the wave.
+    expect(outcomes.get("1401")?.phase).toBe("PASS");
+
+    // The retry is announced through the existing warn reason, naming
+    // the negotiate stage — one reason code across all stages.
+    const events = readRunEvents(setup.logger.runDir);
+    const retries = (events?.events ?? []).filter(
+      (e: RunEvent) => e.type === "warn" && e.reason === "infrastructure-retry",
+    );
+    expect(retries).toHaveLength(1);
+    const [retry] = retries as Array<Extract<RunEvent, { type: "warn" }>>;
+    expect(retry!.ghIssue).toBe("1401");
+    expect(retry!.message).toContain("negotiate infrastructure retry 1/2");
+    expect(retry!.message).toContain("idle timeout");
+
+    // The retry reused the explorer's context.md instead of re-running
+    // it, and did not consume a contract round — the planner's only
+    // round on either attempt is round 1.
+    expect(setup.records.filter((r) => r === "explorer:1401")).toHaveLength(1);
+    const plannerRounds = (events?.events ?? [])
+      .filter(
+        (e: RunEvent) =>
+          e.type === "phase-started" &&
+          e.agent === "planner" &&
+          e.ghIssue === "1401",
+      )
+      .map((e) => (e as Extract<RunEvent, { type: "phase-started" }>).round);
+    expect(plannerRounds).toEqual([1, 1]);
+  }, 60_000);
+
+  it("never retries a genuine verdict — it is terminal on the first occurrence", async () => {
+    const setup = oneSlice("neg-verdict-terminal", "1501", {
+      contractVerdict: "ESCALATE",
+    });
+    setup.config.infrastructureRetries = 2;
+
+    const outcomes = await dispatch(setup, ["1501"]);
+
+    expect(outcomes.get("1501")?.phase).toBe("ESCALATE");
+    // One negotiate attempt only: a real escalation must not burn the
+    // infrastructure-retries budget.
+    expect(setup.records.filter((r) => r === "explorer:1501")).toHaveLength(1);
+    expect(setup.records.filter((r) => r === "planner:1501")).toHaveLength(1);
+    const events = readRunEvents(setup.logger.runDir);
+    expect(
+      (events?.events ?? []).filter(
+        (e: RunEvent) => e.type === "warn" && e.reason === "infrastructure-retry",
+      ),
+    ).toHaveLength(0);
+  }, 30_000);
+
+  it("gives up with the cause named once the retry budget is spent", async () => {
+    const setup = oneSlice("neg-retry-spent", "1601", {
+      deaths: [{ role: "evaluator-contract", kind: "exit", exitCode: 2 }],
+    });
+    setup.config.infrastructureRetries = 1;
+
+    const outcomes = await dispatch(setup, ["1601"]);
+
+    expect(outcomes.get("1601")?.phase).toBe("ERROR");
+    expect(reasonOf(outcomes.get("1601"))).toContain("exit code 2");
+    // 1 initial attempt + 1 retry, then terminal.
+    expect(
+      setup.records.filter((r) => r === "evaluator-contract:1601"),
+    ).toHaveLength(2);
+  }, 60_000);
+
+  it("keeps a dead negotiate invocation from ending the wave — the sibling slice still passes", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "1701",
+        title: "Doomed negotiator",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "1702",
+        title: "Healthy sibling",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["1701", { files: ["src/p.txt"], qaPasses: true, outputFile: "src/p.txt", outputContent: "p" }],
+      ["1702", { files: ["src/q.txt"], qaPasses: true, outputFile: "src/q.txt", outputContent: "q" }],
+    ]);
+    const setup = setupWave(repo, "neg-wave-survives", slices, fixtures);
+    // `deaths` is keyed by role, so wrap the stub to kill only 1701's
+    // evaluator and leave the sibling negotiating normally.
+    const inner = setup.config.provider!;
+    setup.config.provider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (
+          options.role === "evaluator-contract" &&
+          options.cwd.includes("-s01")
+        ) {
+          options.logStream?.write("stub evaluator-contract output\n");
+          throw new Error("Agent evaluator-contract exited with code 1");
+        }
+        return inner.invoke(options);
+      },
+    };
+    setup.config.infrastructureRetries = 0;
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["1701", "1702"],
+      config: setup.config,
+      dag: setup.dag,
+      logger: setup.logger,
+      featBranch: setup.featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("1701")?.phase).toBe("ERROR");
+    expect(reasonOf(outcomes.get("1701"))).toContain("exit code 1");
+    expect(outcomes.get("1702")?.phase).toBe("PASS");
+  }, 60_000);
+});
 
 /**
  * Per-slice outcome hook (ADR 0018): runWave must report each slice's

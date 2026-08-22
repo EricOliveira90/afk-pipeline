@@ -6,7 +6,7 @@ import type { AgentProvider } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { partitionLanes } from "./lanes.js";
-import type { PipelineConfig } from "./orchestrator.js";
+import type { NegotiateOutcome, PipelineConfig } from "./orchestrator.js";
 import {
   makeSliceContext,
   runSliceNegotiate,
@@ -160,30 +160,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     }
 
     const { result } = r.value;
-    if (result === "LOCKED") {
+    if (result.phase === "LOCKED") {
       lockedIds.push(id);
       continue;
     }
-
-    // Phase A returns ESCALATE / STUCK / ERROR / CANCELLED on non-LOCKED.
-    if (result === "CANCELLED") {
-      record(id, { phase: "CANCELLED", error: "Cancelled by user" });
-    } else if (result === "ESCALATE") {
-      record(id, {
-        phase: "ESCALATE",
-        error: "Contract negotiation escalated after max rounds",
-      });
-    } else if (result === "STUCK") {
-      record(id, {
-        phase: "STUCK",
-        error: "Contract not locked after negotiation",
-      });
-    } else {
-      record(id, {
-        phase: "ERROR",
-        error: "Negotiation returned ERROR",
-      });
-    }
+    record(id, negotiateOutcome(result));
   }
 
   // Cancellation short-circuit between phases.
@@ -304,8 +285,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               }
             }
             const negotiate = await runSliceNegotiate(ctx);
-            if (negotiate !== "LOCKED") {
-              const outcome = negotiateRefreshOutcome(negotiate);
+            if (negotiate.phase !== "LOCKED") {
+              const outcome = negotiateOutcome(negotiate);
               record(id, outcome);
               if (outcome.phase === "CANCELLED") return;
               continueLane(i, outcome.phase);
@@ -463,25 +444,21 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   return { outcomes };
 }
 
-function negotiateRefreshOutcome(
-  result: "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED",
+/**
+ * Turn a non-LOCKED negotiate result into the slice's outcome, keeping
+ * the classified cause as the outcome's reason. That reason is what the
+ * run state persists, what the next run's retry announcement quotes,
+ * and what `afk status` renders — so an operator can tell "the agent
+ * provider hung up with exit code 1" from "the evaluator wrote
+ * ESCALATE" without opening an agent log. It replaces the fixed
+ * "Negotiation returned ERROR" text. See ADR 0025.
+ */
+function negotiateOutcome(
+  result: Exclude<NegotiateOutcome, { phase: "LOCKED" }>,
 ): WaveOutcome {
-  switch (result) {
-    case "CANCELLED":
-      return { phase: "CANCELLED", error: "Cancelled by user" };
-    case "ESCALATE":
-      return {
-        phase: "ESCALATE",
-        error: "Contract negotiation escalated after max rounds",
-      };
-    case "STUCK":
-      return {
-        phase: "STUCK",
-        error: "Contract not locked after negotiation",
-      };
-    case "ERROR":
-      return { phase: "ERROR", error: "Negotiation refresh returned ERROR" };
-  }
+  return result.phase === "CANCELLED"
+    ? { phase: "CANCELLED", error: "Cancelled by user" }
+    : { phase: result.phase, error: result.cause.summary };
 }
 
 /**

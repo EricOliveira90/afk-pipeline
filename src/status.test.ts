@@ -212,6 +212,77 @@ describe("afk status (filesystem contract)", () => {
 });
 
 
+/**
+ * Issue #40: a negotiate failure cause reaches `afk status` for free —
+ * it rides in the `slice-outcome` event's existing `error` field rather
+ * than a parallel channel. These lock that in for both output forms, so
+ * a future cause-vocabulary change can't quietly stop surfacing here.
+ */
+describe("afk status renders negotiate failure causes (#40)", () => {
+  const CAUSE =
+    "negotiate: the agent provider hung up on evaluator-contract — " +
+    "exit code 1 — Agent evaluator-contract exited with code 1 " +
+    "[last output: codex-wrapper: error: failed to persist AWS config file]";
+
+  function causeEvents(): Array<Record<string, unknown>> {
+    return [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      {
+        type: "run-started",
+        provider: "stub",
+        runSlug: "demo-stub",
+        ts: "2026-08-18T10:00:00.100Z",
+      },
+      {
+        type: "warn",
+        reason: "infrastructure-retry",
+        ghIssue: "9501",
+        message: `negotiate infrastructure retry 1/2 — ${CAUSE}`,
+        ts: "2026-08-18T10:02:00.000Z",
+      },
+      {
+        type: "slice-outcome",
+        slice: lifecycle.error(
+          { ghIssue: "9501", title: "Negotiator", branch: "afk/9501" },
+          PROGRESS,
+          CAUSE,
+        ),
+        ts: "2026-08-18T10:05:00.000Z",
+      },
+    ];
+  }
+
+  it("renders the cause — exit code and output tail — in the human form", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", causeEvents());
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    expect(output).toContain("exit code 1");
+    expect(output).toContain("evaluator-contract");
+    expect(output).toContain("last output:");
+    // The retry that preceded it is legible too, so an operator can see
+    // the death was retried before it became terminal.
+    expect(output).toContain("negotiate infrastructure retry 1/2");
+  });
+
+  it("carries the cause verbatim in --json", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", causeEvents());
+
+    const { output, exitCode } = runStatus(["--json"], root);
+
+    expect(exitCode).toBe(0);
+    const model = JSON.parse(output);
+    const outcome = model.events.find(
+      (e: { type: string }) => e.type === "slice-outcome",
+    );
+    expect(outcome.slice.phase).toBe("ERROR");
+    expect(outcome.slice.error).toBe(CAUSE);
+  });
+});
+
 describe("afk status warn events inline (#29)", () => {
   it("renders warn events inline at their chronological position, visually distinct", () => {
     const root = makeRoot();
