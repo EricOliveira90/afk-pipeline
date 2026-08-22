@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
@@ -13,6 +13,7 @@ import {
 import type { PipelineConfig } from "./orchestrator.js";
 import {
   makeSliceContext,
+  type SliceContext,
   runSliceNegotiate,
   runSliceExecute,
   sliceBranch,
@@ -107,7 +108,11 @@ function migrationPrefixGate(
   featBranch: string,
 ): (contractPath: string) => string | null {
   const laneOptions = { migrationPathPattern: config.migrationPathPattern };
-  const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+  // `migrationPathsIn` normalises to forward slashes, so the POSIX
+  // flavour is the exact one on every platform. Wrapped rather than
+  // passed to `map` directly: `basename` takes an optional second
+  // argument, which `map` would fill with the array index.
+  const basename = (p: string) => posix.basename(p);
 
   return (contractPath) => {
     const declared = artifacts.readContractFiles(contractPath);
@@ -189,7 +194,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   // declared file list is what the wave does next anyway, and the gate
   // is that read moved to the moment the contract locks.
   const contractGate = migrationPrefixGate(config, featBranch);
-  const ctxById = new Map<string, ReturnType<typeof makeSliceContext>>();
+  const ctxById = new Map<string, SliceContext>();
   for (const id of readyIds) {
     const slice = dag.slices.get(id)!;
     ctxById.set(id, {

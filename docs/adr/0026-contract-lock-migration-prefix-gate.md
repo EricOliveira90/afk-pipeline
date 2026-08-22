@@ -101,6 +101,15 @@ being stricter than the authority costs a contract round at worst, and
 widening the merge-mutex check is a change to the last line of defence
 that this ticket deliberately leaves alone.
 
+The normalisation the recognition rule applies cuts the other way in one
+corner: it lowercases, so `003_Users.sql` and `003_users.sql` read as the
+same filename to the gate — not a collision — while the merge-mutex check
+compares raw basenames and would flag them. Also accepted, and in the
+safe direction: the gate misses, the authority catches. Diverging from the
+partitioner's normalisation to fix it would buy a case-sensitive-
+filesystem edge case at the price of two rules for what a migration path
+is, which is the thing `migrationPathsIn` exists to prevent.
+
 `nextFreeMigrationPrefix` computes the prefix the objection offers: one
 past the highest prefix in use, rendered at the widest existing width so a
 padded scheme stays padded and a timestamp scheme stays a timestamp. Past

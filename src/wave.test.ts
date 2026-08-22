@@ -1040,24 +1040,34 @@ describe("runWave — contract-lock migration prefix gate", () => {
   }
 
   /**
-   * Commit a migration onto the feature branch, without disturbing HEAD.
-   * Only the migration is staged — `add -A` here would sweep the run's
-   * untracked `.afk/logs` and `.kiro/specs` onto the branch, and
-   * checking HEAD back out would then delete them mid-run.
+   * Commit the given repo-relative files onto the feature branch, without
+   * disturbing HEAD. Each path is staged by name — `add -A` here would
+   * sweep the run's untracked `.afk/logs` and `.kiro/specs` onto the
+   * branch, and checking HEAD back out would then delete them mid-run.
    */
+  function commitToFeatBranch(
+    repo: string,
+    featBranch: string,
+    files: Record<string, string>,
+  ) {
+    const head = git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(repo, ["checkout", featBranch]);
+    for (const [relPath, content] of Object.entries(files)) {
+      const abs = join(repo, relPath);
+      mkdirSync(join(abs, ".."), { recursive: true });
+      writeFileSync(abs, content, "utf-8");
+      git(repo, ["add", "--", relPath]);
+    }
+    git(repo, ["commit", "-m", `add ${Object.keys(files).join(", ")}`]);
+    git(repo, ["checkout", head]);
+  }
+
   function addMigrationToFeatBranch(
     repo: string,
     featBranch: string,
     relPath: string,
   ) {
-    const head = git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    git(repo, ["checkout", featBranch]);
-    const abs = join(repo, relPath);
-    mkdirSync(join(abs, ".."), { recursive: true });
-    writeFileSync(abs, "-- existing\n", "utf-8");
-    git(repo, ["add", "--", relPath]);
-    git(repo, ["commit", "-m", `add ${relPath}`]);
-    git(repo, ["checkout", head]);
+    commitToFeatBranch(repo, featBranch, { [relPath]: "-- existing\n" });
   }
 
   /**
@@ -1392,5 +1402,74 @@ describe("runWave — contract-lock migration prefix gate", () => {
     if (outcome?.phase === "CONFLICT") {
       expect(outcome.error).toMatch(/Migration prefix collision: 003/);
     }
+  }, 60_000);
+
+  it("gates a contract left LOCKED on disk by an earlier run", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2051", title: "Preseeded contract", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const slug = "wave-gate-prior-lock";
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      slug,
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+
+    // A LOCKED contract naming prefix 003, plus the 003 the feature
+    // branch already owns. Committing the contract onto the feature
+    // branch is how it reaches the slice worktree: the worktree is cut
+    // from that branch, so negotiation starts with the contract already
+    // on disk — exactly the state an interrupted earlier run leaves.
+    const sliceDir = `.kiro/specs/${slug}/slices/01-preseeded-contract`;
+    commitToFeatBranch(repo, featBranch, {
+      "supabase/migrations/003_users.sql": "-- existing\n",
+      [`${sliceDir}/contract.md`]:
+        "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- supabase/migrations/003_orders.sql\n",
+    });
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      pathForRound: () => "supabase/migrations/004_orders.sql",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2051"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("2051")?.phase).toBe("PASS");
+
+    // The whole point: negotiation would otherwise have skipped the
+    // planner entirely and carried the stale colliding contract into
+    // generation. The gate reopened it, so the planner ran once.
+    expect(plannerPrompts).toHaveLength(1);
+    expect(plannerPrompts[0]).toMatch(/REJECTED by the/i);
+
+    // Announced as a refusal by a previous run's lock, not by a round
+    // this run never ran.
+    const refusals = readEvents(logger.runDir).filter(
+      (e) => e.type === "warn" && e.reason === "contract-lock-refused",
+    );
+    expect(refusals).toHaveLength(1);
+
+    // The renumbered migration is what landed; the stale one never existed.
+    git(repo, ["checkout", featBranch]);
+    expect(
+      existsSync(join(repo, "supabase", "migrations", "004_orders.sql")),
+    ).toBe(true);
+    expect(
+      existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
+    ).toBe(false);
   }, 60_000);
 });

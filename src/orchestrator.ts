@@ -1235,15 +1235,20 @@ export async function runSliceNegotiate(
      * LOCKED. `true` means the gate refused it: the contract is back to
      * NEGOTIATING on disk and `gateObjection` holds the feedback the next
      * planner round must address.
+     *
+     * `lockedAt` describes where the refused lock came from, and reaches
+     * the operator through `stuck.md` — so it says "a previous run" for a
+     * contract found already locked on disk rather than inventing a
+     * round number for a round this run never ran.
      */
-    const lockRefusedByGate = (round: number): boolean => {
+    const lockRefusedByGate = (lockedAt: string): boolean => {
       const objection = ctx.onContractLocked?.(contractPath) ?? null;
       if (objection === null) return false;
       gateObjection = objection;
       artifacts.reopenContract(contractPath);
       contractStatus = "NEGOTIATING";
       capDecisions.push(
-        `The contract-lock gate refused the contract locked at round ${round}: ${objection}`,
+        `The contract-lock gate refused the contract locked at ${lockedAt}: ${objection}`,
       );
       logger.phase(
         `${ctx.tag}: contract lock refused before generation — ${objection}`,
@@ -1288,7 +1293,7 @@ export async function runSliceNegotiate(
     // before skipping negotiation altogether; a refusal reopens the
     // contract and the round loop below runs normally.
     if (contractStatus === "LOCKED") {
-      lockRefusedByGate(0);
+      lockRefusedByGate("a previous run");
     }
 
     if (contractStatus !== "LOCKED") {
@@ -1401,7 +1406,8 @@ export async function runSliceNegotiate(
         }
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.
-        if (contractStatus === "LOCKED" && !lockRefusedByGate(round)) break;
+        if (contractStatus === "LOCKED" && !lockRefusedByGate(`round ${round}`))
+          break;
 
         if (verdict === "ESCALATE") {
           capDecisions.push(
