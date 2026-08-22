@@ -21,8 +21,8 @@ import { createProgressFilter } from "./liveness.js";
 const DEFAULT_MAX_DURATION_MS = 3_600_000;
 
 /**
- * Role-based model policy, mirroring claude.ts: the read-only explorer
- * runs on the cheaper Sonnet; every other role gets the stronger model.
+ * Role-based model policy: the read-only explorer runs on the cheaper
+ * Sonnet; every other role gets the stronger model.
  * Model IDs match `kiro-cli chat --list-models`.
  */
 const DEFAULT_MODEL = "claude-fable-5";

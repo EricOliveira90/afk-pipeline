@@ -1,19 +1,33 @@
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, rmSync, type WriteStream } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+  type WriteStream,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import { finished } from "node:stream/promises";
 import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import type { AgentProvider } from "./agent-provider.js";
-import { CancelledError } from "./agent-provider.js";
+import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave, type WaveOutcome } from "./wave.js";
-import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
+import {
+  lifecycle,
+  type SliceIdentity,
+  type SliceLifecycle,
+} from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
@@ -28,8 +42,12 @@ import {
   isSliceComplete,
   projectForPersistence,
   type PersistedReviewPhase,
+  type RunState,
 } from "./run-state.js";
-import { resolveRunScope, type ResolvedRunScope } from "./slice-scope.js";
+import {
+  resolveRunScope,
+  type ResolvedRunScope,
+} from "./slice-scope.js";
 import {
   parseDraftPrNumber,
   writeTerminalHandoff,
@@ -198,6 +216,19 @@ export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
   for (const slice of scope.selected) {
     lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title}`);
   }
+  // A narrowed invocation (a subset of the persisted scope, e.g.
+  // `--only-failed`) must say so: the branch may already carry work from
+  // earlier invocations, and the reviewer must not grade this invocation
+  // against slices it never touched.
+  if (scope.skipped.some(({ reason }) => reason === "narrowed")) {
+    lines.push("");
+    lines.push(
+      "This invocation was narrowed to a subset of the run's scope of record. " +
+        "Judge only the slices listed above: the narrowed-out slices below may " +
+        "have been implemented by an earlier invocation on this branch, or not " +
+        "at all — either way they are not this invocation's work.",
+    );
+  }
   if (scope.skipped.length > 0) {
     lines.push("");
     lines.push(
@@ -208,7 +239,9 @@ export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
       const label =
         reason === "hitl"
           ? "HITL — reserved for a human; AFK never runs it"
-          : "not selected for this run";
+          : reason === "narrowed"
+            ? "in this run's scope of record but not run by this invocation"
+            : "not selected for this run";
       lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title} (${label})`);
     }
   } else {
@@ -515,6 +548,17 @@ export interface PipelineConfig {
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
+   * Recognises a contract's declared path as a migration when
+   * partitioning a wave into lanes, so every migration-bearing slice in
+   * the wave serialises into one lane instead of racing on the next
+   * free numeric prefix. Replaces (does not extend)
+   * `DEFAULT_MIGRATION_PATH_PATTERN` in `src/lanes.ts`, which matches a
+   * `migrations` path segment with a `.sql` extension. Matched against
+   * normalised paths — forward slashes, no leading `./`, lowercased.
+   * See ADR 0027.
+   */
+  migrationPathPattern?: RegExp;
+  /**
    * Open the draft PR despite an unfavorable PM verdict, recording the
    * override and both guardian verdicts in the PR body. Only a real
    * FIX-BEFORE-SHIP PM verdict can be overridden, and only when the
@@ -533,11 +577,39 @@ export interface PipelineConfig {
 }
 
 export interface PipelineResult {
+  /**
+   * Whether the run produced a shippable branch. All slices passing is
+   * necessary but not sufficient: a failed **pre-ship sanity gate** or a
+   * guardian verdict that kept the draft PR closed makes a run
+   * unsuccessful, so wrapper scripts and CI can tell a shipped run from a
+   * blocked one. A draft PR opened via `--open-pr-on-override` is still a
+   * success — the override note records the operator's acknowledgement.
+   * See ADR 0015.
+   */
   success: boolean;
   /** Markdown summary written to `.afk/logs/<slug>/run-summary.md`. */
   summary: string;
   /** Grouped, scan-friendly summary for stdout. */
   consoleSummary: string;
+  /**
+   * One operator-facing sentence explaining an unsuccessful run whose
+   * per-slice outcomes do not show the cause — the CLI prints it instead
+   * of its generic failure line. Undefined on a successful run, and on a
+   * failure the slice summary already explains.
+   */
+  failureReason?: string;
+}
+
+/**
+ * The line every entrypoint prints for an unsuccessful run. Lives here,
+ * next to the result it reads, so `afk`, `afk-claude`, and `afk-codex`
+ * cannot drift apart: the exit contract is the same for all three, and
+ * ADR 0015 keeps it free of per-binary logic.
+ */
+export function formatRunFailure(result: PipelineResult): string {
+  return result.failureReason
+    ? `Pipeline did not ship: ${result.failureReason}`
+    : "Pipeline completed with failures. Check logs and stuck.md files.";
 }
 
 /**
@@ -595,6 +667,45 @@ export function sliceBranch(
   return `${sliceBranchPrefix(provider)}/${prdSlug}-slice-${slice.number}-${slugify(slice.title)}`;
 }
 
+/**
+ * Where a slice's worktree lives. Short dir name to stay under Windows'
+ * 260-char MAX_PATH — the full title remains in the branch name (visible
+ * in PRs and git log); the dir just needs to be unique per slice within
+ * the run.
+ */
+export function sliceWorktreeDir(
+  repoRoot: string,
+  prdSlug: string,
+  slice: Slice,
+  provider: AgentProvider,
+): string {
+  return join(
+    repoRoot,
+    ".afk",
+    "worktrees",
+    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+  );
+}
+
+/**
+ * Throwaway checkout the merge of a slice branch happens in when the
+ * feature branch has no worktree of its own. Shared by the wave's first
+ * merge attempt and the next run's merge-only recovery (ADR 0029), which
+ * must target the same directory.
+ */
+export function sliceScratchMergeDir(
+  repoRoot: string,
+  prdSlug: string,
+  slice: Slice,
+  provider: AgentProvider,
+): string {
+  return join(
+    repoRoot,
+    ".afk",
+    `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+  );
+}
+
 function featureBranch(prdSlug: string, provider: AgentProvider): string {
   return `${featureBranchPrefix(provider)}/${prdSlug}`;
 }
@@ -623,18 +734,6 @@ export function makeAsyncMutex() {
   };
 }
 
-/**
- * Per-slice closure passed between Phase A (negotiate) and Phase B
- * (execute). Holds the worktree paths, branch name, slice-scoped
- * `invoke` (auto-tags stats with the slice's ghIssue), and rendered
- * prompt fragments — everything either phase needs from `runPipeline`'s
- * scope.
- *
- * `makeSliceContext` is pure: it derives paths and rendering helpers
- * from `PipelineConfig` + the slice. Worktree creation and artifact-dir
- * mkdir happen inside `runSliceNegotiate` so the context can be reused
- * after `recreateWorktreeFromBase` (lane-successor refresh).
- */
 export interface SliceContext {
   config: PipelineConfig;
   slice: Slice;
@@ -647,24 +746,27 @@ export interface SliceContext {
   relSliceDir: string;
   relSpecsDir: string;
   tag: string;
-  /**
-   * Test command discovered from the consumer's `package.json` (e.g.
-   * `pnpm test:run` or `pnpm test`). Falls back to `pnpm test` when no
-   * test script is defined. Injected into generator + evaluator-qa
-   * prompts so they don't hardcode a runner-specific flag.
-   */
   testCommand: string;
-  /**
-   * Bullet list (newline-joined) of every `pnpm run <script>` the
-   * pre-ship sanity gate would run against the consumer project, in the
-   * gate's order. Injected into the evaluator-qa prompt so the QA pass
-   * exercises the same typecheck + lint + tests check the gate uses,
-   * preventing a slice from passing QA on code the post-merge gate
-   * would later reject. Empty string when no scripts are defined.
-   */
   sanityCommandsBlock: string;
-  /** Handoffs from declared dependency slices only. */
   siblingHandoffsBlock: string;
+  /**
+   * Gate consulted the moment the contract reaches LOCKED, before
+   * negotiation returns — the caller's chance to inspect the locked
+   * contract and refuse it. Returning a string rejects the lock: the
+   * contract is reopened and the planner gets another round with that
+   * string as its objection. Returning `null` (or omitting the gate)
+   * accepts the lock.
+   *
+   * A refusal costs one contract round and nothing more, which is the
+   * whole point: it is the cheapest place to catch a contract that names
+   * something the pipeline will refuse later. Exhausting the rounds on
+   * an objection the planner cannot resolve escalates through the same
+   * path any other unresolvable contract does.
+   *
+   * `runWave` supplies the migration-prefix gate (ADR 0028); other
+   * callers leave it unset and negotiate exactly as before.
+   */
+  onContractLocked?: (contractPath: string) => string | null;
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0],
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -681,15 +783,7 @@ export function makeSliceContext(
   const { repoRoot, prdSlug, specsDir, signal } = config;
   const provider = config.provider ?? kiroProvider;
   const branch = sliceBranch(prdSlug, slice, provider);
-  // Short worktree dir name to stay under Windows' 260-char MAX_PATH.
-  // The full title remains in the branch name (visible in PRs and git
-  // log) — the dir just needs to be unique per slice within the run.
-  const worktreeDir = join(
-    repoRoot,
-    ".afk",
-    "worktrees",
-    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
-  );
+  const worktreeDir = sliceWorktreeDir(repoRoot, prdSlug, slice, provider);
   const relSliceDir = join(
     specsDir,
     "slices",
@@ -870,20 +964,346 @@ function preserveContractNegotiationFailure(
 }
 
 /**
+ * Which orchestrator-owned bound killed an agent invocation. See
+ * ADR 0025 and CONTEXT.md "Agent failure cause".
+ */
+type AgentKillClass =
+  | "idle-timeout"
+  | "wall-clock-ceiling"
+  | "tool-call-cap"
+  | "unspecified";
+
+/**
+ * What ended a negotiate phase short of LOCKED.
+ *
+ * - `provider-exit` — the agent provider hung up with a non-zero exit.
+ * - `orchestrator-kill` — the orchestrator killed the invocation itself.
+ * - `transient-exhausted` — the transient-provider retry window closed
+ *   without the outage clearing (ADR 0022).
+ * - `verdict` — nothing died; the evaluator wrote a real verdict.
+ * - `internal-error` — the pipeline itself threw (git, filesystem).
+ *
+ * The first three are *infrastructure* causes and are the only ones the
+ * negotiate phase retries. See `isInfrastructureCause`.
+ */
+type NegotiateFailureKind =
+  | "provider-exit"
+  | "orchestrator-kill"
+  | "transient-exhausted"
+  | "verdict"
+  | "internal-error";
+
+interface NegotiateFailureCause {
+  kind: NegotiateFailureKind;
+  /**
+   * Operator-facing one-liner. The wave records it verbatim as the
+   * slice outcome's reason, replacing the fixed "Negotiation returned
+   * ERROR" text, so it reaches the run state, the next run's retry
+   * announcement, the event stream, and `afk status` unchanged.
+   */
+  summary: string;
+  /** Agent role whose invocation died. Absent for `verdict`. */
+  role?: string;
+  /** `provider-exit` only — the agent provider's exit code. */
+  exitCode?: number;
+  /** `orchestrator-kill` only — which bound tripped. */
+  killClass?: AgentKillClass;
+  /** `verdict` only — what the evaluator actually wrote. */
+  verdict?: artifacts.EvaluatorVerdict;
+  /** Tail of the dead invocation's output. Absent for `verdict`. */
+  outputTail?: string;
+}
+
+export type NegotiateOutcome =
+  | { phase: "LOCKED" }
+  | { phase: "CANCELLED" }
+  | { phase: "STUCK" | "ESCALATE" | "ERROR"; cause: NegotiateFailureCause };
+
+/**
+ * Whether a negotiate failure is worth retrying. A genuine verdict
+ * never is — retrying it would just re-run agents against a contract
+ * the evaluator already judged — and neither is a pipeline-internal
+ * throw, whose blast radius this change deliberately leaves unchanged.
+ */
+function isInfrastructureCause(cause: NegotiateFailureCause): boolean {
+  return (
+    cause.kind === "provider-exit" ||
+    cause.kind === "orchestrator-kill" ||
+    cause.kind === "transient-exhausted"
+  );
+}
+
+/**
+ * Kill-class signatures, matched against the provider's rejection
+ * message. Every provider builds these strings from the same shapes
+ * (`claude.ts`/`kiro.ts` use an em dash, `codex.ts` a hyphen), so the
+ * patterns stay dash-agnostic — the same approach `classifyReviewFailure`
+ * already takes for guardian reviews.
+ */
+const KILL_SIGNATURES: ReadonlyArray<readonly [RegExp, AgentKillClass]> = [
+  [/exceeded \d+ tool calls/i, "tool-call-cap"],
+  [/wall-clock ceiling/i, "wall-clock-ceiling"],
+  [/idle for .*killed/i, "idle-timeout"],
+  [/was killed/i, "unspecified"],
+];
+
+const KILL_CLASS_LABEL: Record<AgentKillClass, string> = {
+  "idle-timeout": "idle timeout",
+  "wall-clock-ceiling": "wall-clock ceiling",
+  "tool-call-cap": "tool-call cap",
+  unspecified: "kill class not recorded",
+};
+
+/** Bytes of agent log read to build an output tail. */
+const OUTPUT_TAIL_BYTES = 8_192;
+/** Characters of collapsed output kept in the failure reason. */
+const OUTPUT_TAIL_CHARS = 240;
+
+/**
+ * Last few lines of a dead invocation's agent log, collapsed onto one
+ * line so the tail can ride inside a run-state `error` string and the
+ * single-line retry announcement built from it. Best-effort: an
+ * unreadable log yields no tail rather than masking the real failure.
+ */
+function readInvocationOutputTail(
+  logPath: string | undefined,
+): string | undefined {
+  if (!logPath || !existsSync(logPath)) return undefined;
+  let text: string;
+  try {
+    const { size } = statSync(logPath);
+    if (size === 0) return undefined;
+    const length = Math.min(size, OUTPUT_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(logPath, "r");
+    try {
+      readSync(fd, buffer, 0, length, size - length);
+    } finally {
+      closeSync(fd);
+    }
+    text = buffer.toString("utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return undefined;
+  const tail = lines.slice(-3).join(" / ");
+  return tail.length > OUTPUT_TAIL_CHARS
+    ? `…${tail.slice(-OUTPUT_TAIL_CHARS)}`
+    : tail;
+}
+
+/** `WriteStream.path` narrowed to the string form agent logs always use. */
+function agentLogPath(log: WriteStream): string | undefined {
+  return typeof log.path === "string" ? log.path : undefined;
+}
+
+/**
+ * Classify a rejected negotiate-phase invocation. Transient errors are
+ * recognised structurally (by `Error.name`, so classification survives
+ * duplicate module instances); kills and exits fall back to the
+ * provider's message, which is the only place either fact is recorded.
+ */
+function classifyNegotiateFailure(args: {
+  role: string;
+  error: unknown;
+  outputTail?: string;
+}): NegotiateFailureCause {
+  const { role, error, outputTail } = args;
+  const message = error instanceof Error ? error.message : String(error);
+  const tail = outputTail ? ` [last output: ${outputTail}]` : "";
+  const base = { role, ...(outputTail ? { outputTail } : {}) };
+
+  if (isTransientProviderError(error)) {
+    return {
+      ...base,
+      kind: "transient-exhausted",
+      summary:
+        `negotiate: ${role} exhausted its transient-provider retry window — ` +
+        `${message}${tail}`,
+    };
+  }
+  for (const [pattern, killClass] of KILL_SIGNATURES) {
+    if (pattern.test(message)) {
+      return {
+        ...base,
+        kind: "orchestrator-kill",
+        killClass,
+        summary:
+          `negotiate: the orchestrator killed ${role} ` +
+          `(${KILL_CLASS_LABEL[killClass]}) — ${message}${tail}`,
+      };
+    }
+  }
+  const exit = /exited with code (\d+)/i.exec(message);
+  if (exit) {
+    return {
+      ...base,
+      kind: "provider-exit",
+      exitCode: Number(exit[1]),
+      summary:
+        `negotiate: the agent provider hung up on ${role} — ` +
+        `exit code ${exit[1]} — ${message}${tail}`,
+    };
+  }
+  return {
+    ...base,
+    kind: "internal-error",
+    summary: `negotiate: ${role} failed — ${message}${tail}`,
+  };
+}
+
+/**
+ * A negotiate failure the evaluator decided, not one that killed it.
+ * Labelled as a verdict so "the agent decided this is broken" never
+ * reads like "the agent provider hung up".
+ */
+function negotiateVerdictCause(args: {
+  outcome: "ESCALATE" | "STUCK";
+  verdict: artifacts.EvaluatorVerdict;
+  round: number;
+}): NegotiateFailureCause {
+  const { outcome, verdict, round } = args;
+  return {
+    kind: "verdict",
+    verdict,
+    summary:
+      outcome === "ESCALATE"
+        ? `negotiate: contract negotiation escalated after ${round} round(s) — ` +
+          `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
+        : `negotiate: contract not locked after negotiation — last evaluator ` +
+          `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+/** A throw from the pipeline itself, with no dead invocation behind it. */
+function internalNegotiateCause(error: unknown): NegotiateFailureCause {
+  const message = error instanceof Error ? error.message : String(error);
+  return { kind: "internal-error", summary: `negotiate: ${message}` };
+}
+
+/**
+ * Carries a classified cause out of a failed invocation to
+ * `negotiateAttempt`'s catch, so a dead agent is never confused with a
+ * git or filesystem throw from the surrounding code.
+ */
+class NegotiateInvocationError extends Error {
+  readonly failureCause: NegotiateFailureCause;
+  constructor(failureCause: NegotiateFailureCause) {
+    super(failureCause.summary);
+    this.name = "NegotiateInvocationError";
+    this.failureCause = failureCause;
+  }
+}
+
+function negotiateFailureCauseOf(
+  error: unknown,
+): NegotiateFailureCause | undefined {
+  return error instanceof Error && error.name === "NegotiateInvocationError"
+    ? (error as NegotiateInvocationError).failureCause
+    : undefined;
+}
+
+/**
+ * Create the slice worktree and enforce its registration before dispatch.
+ */
+export function prepareSliceWorktree(ctx: SliceContext): void {
+  git.createWorktree(
+    ctx.config.repoRoot,
+    ctx.branch,
+    ctx.worktreeDir,
+    ctx.featBranch,
+  );
+  git.assertWorktreeRegistered(
+    ctx.config.repoRoot,
+    ctx.branch,
+    ctx.worktreeDir,
+  );
+}
+/**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
+ *
+ * Infrastructure deaths are retried at the failed invocation under
+ * `--infrastructure-retries`. The prompt and round stay unchanged, and
+ * successful explorer/planner work is not repeated.
  *
  * Outcome semantics:
  * - `LOCKED` — contract is ready for Phase B.
  * - `ESCALATE` — contract negotiation gave up after max rounds.
  * - `STUCK` — negotiation finished without LOCKED status.
- * - `ERROR` / `CANCELLED` — exception or external abort.
+ * - `ERROR` — a dead invocation or a pipeline-internal throw.
+ * - `CANCELLED` — external cancellation.
+ *
+ * Every non-LOCKED, non-CANCELLED outcome carries a
+ * `NegotiateFailureCause` naming what ended it. See ADR 0025.
  */
 export async function runSliceNegotiate(
   ctx: SliceContext,
-): Promise<"LOCKED" | "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED"> {
+): Promise<NegotiateOutcome> {
+  const { config, slice, logger } = ctx;
+  const infrastructureRetries =
+    config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
+  if (
+    !Number.isSafeInteger(infrastructureRetries) ||
+    infrastructureRetries < 0
+  ) {
+    throw new Error("infrastructureRetries must be a non-negative integer");
+  }
+
+  return negotiateAttempt(ctx, infrastructureRetries);
+}
+
+async function negotiateAttempt(
+  ctx: SliceContext,
+  infrastructureRetries: number,
+): Promise<NegotiateOutcome> {
   const { config, slice, logger, featBranch, relevantFilesBlock, invoke } = ctx;
   const { repoRoot, prdDir, signal } = config;
+
+  /**
+   * Run one negotiate invocation, closing its log before classifying a
+   * failure — `closeAgentLog` awaits the stream's flush, so the output
+   * tail read afterwards is complete.
+   */
+  const invokeAgent = async (
+    opts: Omit<Parameters<SliceContext["invoke"]>[0], "logStream">,
+    createLogStream: () => WriteStream,
+    beforeAttempt?: () => void,
+  ): Promise<void> => {
+    for (let attempt = 1; ; attempt++) {
+      beforeAttempt?.();
+      const logStream = createLogStream();
+      try {
+        await invoke({ ...opts, logStream }).finally(() =>
+          closeAgentLog(logStream),
+        );
+        return;
+      } catch (err) {
+        if (isCancelled(err, signal)) throw err;
+        const cause = classifyNegotiateFailure({
+          role: opts.role,
+          error: err,
+          outputTail: readInvocationOutputTail(agentLogPath(logStream)),
+        });
+        if (!isInfrastructureCause(cause) || attempt > infrastructureRetries) {
+          throw new NegotiateInvocationError(cause);
+        }
+        const message =
+          `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
+          cause.summary;
+        logger.phase(`${ctx.tag}: ${message}`, "error", {
+          type: "warn",
+          reason: "infrastructure-retry",
+          ghIssue: slice.ghIssue,
+          message,
+        });
+      }
+    }
+  };
 
   logger.transitionTo(
     slice.ghIssue,
@@ -894,8 +1314,7 @@ export async function runSliceNegotiate(
   );
 
   try {
-    git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, featBranch);
-    git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
+    prepareSliceWorktree(ctx);
     mkdirSync(ctx.absSliceDir, { recursive: true });
 
     // --- Step 1: Explorer ---
@@ -911,20 +1330,21 @@ export async function runSliceNegotiate(
         sliceNumber: slice.number,
         agent: "explorer",
       });
-      const logStream = logger.agentLog(slice.number, "explorer");
-      await invoke({
-        role: "explorer",
-        prompt: renderPrompt("explorer", {
-          GH_ISSUE: slice.ghIssue,
-          TITLE: slice.title,
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: relevantFilesBlock,
-          SLICE_BODY: sliceBodyNote,
-        }),
-        cwd: ctx.worktreeDir,
-        logStream,
-        maxDurationMs: config.maxAgentDurationMs,
-      }).finally(() => closeAgentLog(logStream));
+      await invokeAgent(
+        {
+          role: "explorer",
+          prompt: renderPrompt("explorer", {
+            GH_ISSUE: slice.ghIssue,
+            TITLE: slice.title,
+            SLICE_DIR: ctx.relSliceDir,
+            RELEVANT_FILES: relevantFilesBlock,
+            SLICE_BODY: sliceBodyNote,
+          }),
+          cwd: ctx.worktreeDir,
+          maxDurationMs: config.maxAgentDurationMs,
+        },
+        () => logger.agentLog(slice.number, "explorer"),
+      );
       logger.event({
         type: "phase-ended",
         ghIssue: slice.ghIssue,
@@ -948,8 +1368,88 @@ export async function runSliceNegotiate(
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
     const capDecisions: string[] = [];
 
+    /**
+     * Objection raised by `ctx.onContractLocked` and not yet handed to a
+     * planner round. Non-null means the last contract to reach LOCKED was
+     * refused after the evaluator had accepted it.
+     */
+    let gateObjection: string | null = null;
+
+    /**
+     * Consult the contract-lock gate on a contract that just reached
+     * LOCKED. `true` means the gate refused it: the contract is back to
+     * NEGOTIATING on disk and `gateObjection` holds the feedback the next
+     * planner round must address.
+     *
+     * `lockedAt` describes where the refused lock came from, and reaches
+     * the operator through `stuck.md` — so it says "a previous run" for a
+     * contract found already locked on disk rather than inventing a
+     * round number for a round this run never ran.
+     */
+    const lockRefusedByGate = (lockedAt: string): boolean => {
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection === null) return false;
+      gateObjection = objection;
+      artifacts.reopenContract(contractPath);
+      contractStatus = "NEGOTIATING";
+      capDecisions.push(
+        `The contract-lock gate refused the contract locked at ${lockedAt}: ${objection}`,
+      );
+      logger.phase(
+        `${ctx.tag}: contract lock refused before generation — ${objection}`,
+        "error",
+        {
+          type: "warn",
+          reason: "contract-lock-refused",
+          ghIssue: slice.ghIssue,
+          message: objection,
+        },
+      );
+      return true;
+    };
+
+    /**
+     * The planner's REVISION_NOTE for `round`. A pending gate objection
+     * takes the lead: it is a concrete, mechanical correction, and the
+     * evaluator feedback it supersedes said ACCEPT.
+     */
+    const revisionNote = (round: number, objection: string | null): string => {
+      const priorFeedback =
+        round > 1
+          ? `${ctx.relSliceDir}/feedback-r${round - 1}.md`
+          : null;
+      if (objection === null) {
+        return priorFeedback
+          ? `Revise based only on evaluator feedback in ${priorFeedback}.`
+          : "";
+      }
+      return (
+        `The previous contract was accepted by the evaluator and then REJECTED by the ` +
+        `pipeline, before any code was generated:\n\n${objection}\n\n` +
+        `Resolve exactly that in this revision.` +
+        (priorFeedback
+          ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
+          : "")
+      );
+    };
+
+    // A contract left LOCKED on disk by an earlier run has never been
+    // past the gate against *this* run's feature-branch tip. Consult it
+    // before skipping negotiation altogether; a refusal reopens the
+    // contract and the round loop below runs normally.
+    if (contractStatus === "LOCKED") {
+      lockRefusedByGate("a previous run");
+    }
+
     if (contractStatus !== "LOCKED") {
       for (let round = 1; round <= allowedContractRounds; round++) {
+        // Consume any pending gate objection: it belongs to this round's
+        // planner prompt only. Leaving it set would re-deliver it after a
+        // later ordinary REVISE, and would make the round-cap branch
+        // below misattribute that REVISE to the gate.
+        const pendingObjection = gateObjection;
+        gateObjection = null;
+
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
           "error",
@@ -961,25 +1461,23 @@ export async function runSliceNegotiate(
             round,
           },
         );
-        const plannerLog = logger.agentLog(slice.number, "planner", round);
-        await invoke({
-          role: "planner",
-          prompt: renderPrompt("planner", {
-            GH_ISSUE: slice.ghIssue,
-            SPECS_DIR: ctx.relSpecsDir,
-            SLICE_DIR: ctx.relSliceDir,
-            ROUND: round,
-            RELEVANT_FILES: relevantFilesBlock,
-            SLICE_BODY: sliceBodyNote,
-            REVISION_NOTE:
-              round > 1
-                ? `Revise based only on evaluator feedback in ${ctx.relSliceDir}/feedback-r${round - 1}.md.`
-                : "",
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: plannerLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(plannerLog));
+        await invokeAgent(
+          {
+            role: "planner",
+            prompt: renderPrompt("planner", {
+              GH_ISSUE: slice.ghIssue,
+              SPECS_DIR: ctx.relSpecsDir,
+              SLICE_DIR: ctx.relSliceDir,
+              ROUND: round,
+              RELEVANT_FILES: relevantFilesBlock,
+              SLICE_BODY: sliceBodyNote,
+              REVISION_NOTE: revisionNote(round, pendingObjection),
+            }),
+            cwd: ctx.worktreeDir,
+            maxDurationMs: config.maxAgentDurationMs,
+          },
+          () => logger.agentLog(slice.number, "planner", round),
+        );
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
@@ -999,29 +1497,27 @@ export async function runSliceNegotiate(
             round,
           },
         );
-        const evalLog = logger.agentLog(
-          slice.number,
-          "evaluator-contract",
-          round,
-        );
-        await invoke({
-          role: "evaluator-contract",
-          prompt: renderPrompt("evaluator-contract", {
-            SPECS_DIR: ctx.relSpecsDir,
-            SLICE_DIR: ctx.relSliceDir,
-            ROUND: round,
-            RELEVANT_FILES: relevantFilesBlock,
-            PREVIOUS_FEEDBACK_NOTE:
-              round > 1
-                ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
-                : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: evalLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(evalLog));
-
         const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
+        await invokeAgent(
+          {
+            role: "evaluator-contract",
+            prompt: renderPrompt("evaluator-contract", {
+              SPECS_DIR: ctx.relSpecsDir,
+              SLICE_DIR: ctx.relSliceDir,
+              ROUND: round,
+              RELEVANT_FILES: relevantFilesBlock,
+              PREVIOUS_FEEDBACK_NOTE:
+                round > 1
+                  ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
+                  : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
+            }),
+            cwd: ctx.worktreeDir,
+            maxDurationMs: config.maxAgentDurationMs,
+          },
+          () => logger.agentLog(slice.number, "evaluator-contract", round),
+          () => rmSync(feedbackPath, { force: true }),
+        );
+
         const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
         const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
         // An UNKNOWN verdict means the evaluator exited without writing
@@ -1049,10 +1545,13 @@ export async function runSliceNegotiate(
         if (verdict === "ACCEPT") {
           artifacts.lockContract(contractPath);
           contractStatus = "LOCKED";
-          break;
+        } else {
+          contractStatus = artifacts.readContractStatus(contractPath);
         }
-        contractStatus = artifacts.readContractStatus(contractPath);
-        if (contractStatus === "LOCKED") break;
+        // A refused lock falls through to the round-spending logic
+        // below: the gate costs exactly what an evaluator REVISE costs.
+        if (contractStatus === "LOCKED" && !lockRefusedByGate(`round ${round}`))
+          break;
 
         if (verdict === "ESCALATE") {
           capDecisions.push(
@@ -1060,8 +1559,18 @@ export async function runSliceNegotiate(
           );
           logger.phase(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
         } else if (round === allowedContractRounds) {
-          const assessment =
-            verdict === "REVISE"
+          // A gate refusal earns no extension. The extension exists for
+          // a planner making measurable progress on evaluator gaps; a
+          // gate objection is a concrete mechanical correction the
+          // planner already had every round to make, so failing it is
+          // the escalation the operator should see.
+          const assessment = gateObjection
+            ? {
+                grant: false as const,
+                reason:
+                  "the contract-lock gate refused the final round's contract",
+              }
+            : verdict === "REVISE"
               ? assessContractExtension({
                   previousGapCount: previousMetrics?.gapCount ?? null,
                   currentGapCount: metrics.gapCount,
@@ -1103,11 +1612,13 @@ export async function runSliceNegotiate(
           capDecisions.join(" "),
         );
         logger.bumpEvalRound(slice.ghIssue, round);
-        logger.markEscalated(
-          slice.ghIssue,
-          `Contract negotiation escalated after ${round} round(s)`,
-        );
-        return "ESCALATE";
+        const cause = negotiateVerdictCause({
+          outcome: "ESCALATE",
+          verdict,
+          round,
+        });
+        logger.markEscalated(slice.ghIssue, cause.summary);
+        return { phase: "ESCALATE", cause };
       }
     }
 
@@ -1123,27 +1634,30 @@ export async function runSliceNegotiate(
           ? capDecisions.join(" ")
           : "The configured round cap was not reached.",
       );
-      logger.markStuck(slice.ghIssue, "Contract not locked after negotiation");
+      const cause = negotiateVerdictCause({
+        outcome: "STUCK",
+        verdict: lastVerdict,
+        round: lastRound,
+      });
+      logger.markStuck(slice.ghIssue, cause.summary);
       // Previously this path was silent — a slice could end negotiation
       // still NEGOTIATING with no visible trace, indistinguishable from
       // one awaiting a lane-successor refresh. See ADR 0017.
       logger.phase(
         `${ctx.tag}: STUCK — contract not locked after negotiation (last verdict: ${lastVerdict}, round ${lastRound})`,
       );
-      return "STUCK";
+      return { phase: "STUCK", cause };
     }
     logger.phase(`${ctx.tag}: contract LOCKED`);
-    return "LOCKED";
+    return { phase: "LOCKED" };
   } catch (err) {
     if (isCancelled(err, signal)) {
       logger.markCancelled(slice.ghIssue, "Cancelled by user");
-      return "CANCELLED";
+      return { phase: "CANCELLED" };
     }
-    logger.markError(
-      slice.ghIssue,
-      err instanceof Error ? err.message : String(err),
-    );
-    return "ERROR";
+    const cause = negotiateFailureCauseOf(err) ?? internalNegotiateCause(err);
+    logger.markError(slice.ghIssue, cause.summary);
+    return { phase: "ERROR", cause };
   }
 }
 
@@ -1311,18 +1825,21 @@ export async function runSliceExecute(
       );
       const genLog = logger.agentLog(slice.number, "generator", round);
       const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
-      const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-      await invoke({
-        role: "generator",
-        prompt: renderPrompt("generator", {
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: ctx.relevantFilesBlock,
-          SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-          TEST_COMMAND: ctx.testCommand,
-          RETRY_NOTE: round > 1
+      const heartbeatMs =
+        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+      const generatorPrompt = renderPrompt("generator", {
+        SLICE_DIR: ctx.relSliceDir,
+        RELEVANT_FILES: ctx.relevantFilesBlock,
+        SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+        TEST_COMMAND: ctx.testCommand,
+        RETRY_NOTE:
+          round > 1
             ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
             : "",
-        }),
+      });
+      await invoke({
+        role: "generator",
+        prompt: generatorPrompt,
         cwd: ctx.worktreeDir,
         logStream: genLog,
         idleTimeoutMs: timeoutMs,
@@ -1486,7 +2003,7 @@ async function runSlice(
     testCommand,
   );
   const negotiate = await runSliceNegotiate(ctx);
-  if (negotiate !== "LOCKED") return negotiate;
+  if (negotiate.phase !== "LOCKED") return negotiate.phase;
   return runSliceExecute(ctx);
 }
 
@@ -1562,6 +2079,14 @@ export async function runPipeline(
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;
   let draftPrNumber: number | null = null;
+  /**
+   * Why the run ended without a shippable branch, when the per-slice
+   * outcomes do not say. Set only by the post-merge phase: a failed
+   * pre-ship sanity gate, or guardian verdicts that kept the draft PR
+   * closed. Its presence makes the run unsuccessful even when every slice
+   * passed (issue #43). A `--open-pr-on-override` PR leaves it unset.
+   */
+  let shipBlocker: string | undefined;
 
   const emitHandoff = (runStatus: RunStatus): void => {
     if (!scope) return;
@@ -1608,6 +2133,7 @@ export async function runPipeline(
   runState.featureBranch = featBranch;
   saveRunState(repoRoot, runState);
   const dag = buildDAG(scope.selected);
+  const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
 
   // Detect the repo's default branch (main / master / etc.) once so
   // every base reference below — feat-branch init, review-worktree
@@ -1645,6 +2171,28 @@ export async function runPipeline(
   // them in the current run — that's the whole point of the status:
   // human resolution of the predecessor first.
   const laneCancelled = new Set<string>();
+  // Slices this invocation handed to a wave, skipped as already merged,
+  // or merged during recovery. None is derivable from `completed`
+  // afterwards because that set mixes all three; together they decide
+  // whether the run did anything at all (issue #42).
+  const dispatched = new Set<string>();
+  const alreadyComplete = new Set<string>();
+  const recoveredMerges = new Set<string>();
+  // Slices whose merge is deferred (ADR 0029). Like `laneCancelled` they
+  // are held out of readiness for the rest of this run — a slice that
+  // just refused its merge must not be regenerated — and they never
+  // unblock DAG dependents, because nothing of theirs is on the feature
+  // branch. They are naturally re-eligible on the next run, where the
+  // merge-only recovery pass tries the merge again before any agent runs.
+  const mergePending = new Set<string>();
+
+  /**
+   * A slice this run will not dispatch again, for any reason short of
+   * success. One predicate so a new hold-back reason is one edit, not
+   * three filter sites plus a sweep condition.
+   */
+  const heldBack = (id: string): boolean =>
+    failed.has(id) || laneCancelled.has(id) || mergePending.has(id);
 
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
@@ -1653,6 +2201,7 @@ export async function runPipeline(
   for (const [id, slice] of dag.slices) {
     if (isSliceComplete(runState, id)) {
       completed.add(id);
+      alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
       logger.transitionTo(
@@ -1684,13 +2233,21 @@ export async function runPipeline(
     // failure reason without opening .afk/state/<slug>.json by hand.
     // There is deliberately NO retry cap: failed slices are always
     // eligible again on the next run. See issue #17.
+    //
+    // A MERGE-PENDING slice is not being retried in that sense: its work
+    // is intact and only its merge is outstanding, so it is announced as
+    // a recovery. The merge-only pass below acts on it.
     const prior = runState.slices[id];
     if (prior) {
       const reason = prior.error ? ` — ${prior.error}` : "";
       const label =
         prior.phase === "PASS" ? "PASS (merge did not complete)" : prior.phase;
+      const verb =
+        prior.phase === "MERGE-PENDING"
+          ? "Recovering the merge for"
+          : "Retrying";
       logger.phase(
-        `  Retrying #${id} ${slice.title} (previous run: ${label}${reason})`,
+        `  ${verb} #${id} ${slice.title} (previous run: ${label}${reason})`,
         "log",
         {
           type: "warn",
@@ -1702,6 +2259,41 @@ export async function runPipeline(
         },
       );
     }
+  }
+
+  // Dependency satisfaction reads the run state, not only this
+  // invocation's DAG. A slice recorded PASS with `mergedToFeature` is a
+  // fact about the feature branch, so it unblocks its dependents whether
+  // or not this invocation selected it — without this, narrowing the
+  // selection to one failed slice dispatches nothing at all, because the
+  // prerequisite is not a member of the current DAG and never counts as
+  // satisfied (issue #41).
+  //
+  // Entries for slices no longer declared in `issues.md` are ignored
+  // rather than fatal: a manifest edit must not wedge a re-run. They
+  // still satisfy dependents that name them, and say so in the line.
+  for (const id of Object.keys(runState.slices)) {
+    if (dag.slices.has(id)) continue;
+    if (!isSliceComplete(runState, id)) continue;
+    completed.add(id);
+    const manifestSlice = manifestDag.slices.get(id);
+    const label = manifestSlice
+      ? manifestSlice.title
+      : "(no longer declared in issues.md)";
+    logger.phase(
+      `  Dependency #${id} ${label} satisfied from prior run state ` +
+        `(PASS, merged into ${featBranch}) — not part of this invocation`,
+      "log",
+      {
+        type: "warn",
+        reason: "dependency-from-prior-run",
+        ghIssue: id,
+        previousPhase: "PASS",
+        message:
+          `#${id} ${label}: dependency satisfied from prior run state ` +
+          `(PASS, merged into ${featBranch}) — outside this invocation's selection`,
+      },
+    );
   }
 
   // Process DAG level by level.
@@ -1769,20 +2361,38 @@ export async function runPipeline(
     // PASS is only ever reported by runWave after the merge into the
     // feature branch succeeded, so `mergedToFeature: true` is safe here
     // and `isSliceComplete` will treat the slice as resumable-complete.
-    const next =
-      outcome.phase === "PASS"
-        ? lifecycle.pass(sliceId, progress, true)
-        : outcome.phase === "LANE-CANCELLED"
-          ? lifecycle.laneCancelled(sliceId, progress, detailOf(outcome.error))
-          : outcome.phase === "CANCELLED"
-            ? lifecycle.cancelled(sliceId, progress, detailOf(outcome.error))
-            : outcome.phase === "CONFLICT"
-              ? lifecycle.conflict(sliceId, progress, detailOf(outcome.error))
-              : outcome.phase === "ESCALATE"
-                ? lifecycle.escalate(sliceId, progress, detailOf(outcome.error))
-                : outcome.phase === "ERROR"
-                  ? lifecycle.error(sliceId, progress, detailOf(outcome.error))
-                  : lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
+    const next = ((): SliceLifecycle => {
+      switch (outcome.phase) {
+        case "PASS":
+          return lifecycle.pass(sliceId, progress, true);
+        case "LANE-CANCELLED":
+          return lifecycle.laneCancelled(
+            sliceId,
+            progress,
+            detailOf(outcome.error),
+          );
+        case "CANCELLED":
+          return lifecycle.cancelled(sliceId, progress, detailOf(outcome.error));
+        case "CONFLICT":
+          return lifecycle.conflict(sliceId, progress, detailOf(outcome.error));
+        case "MERGE-PENDING":
+          // Not `detailOf`: the wave's reason names the colliding
+          // prefixes, which no earlier failure site could have recorded
+          // on the logger.
+          return lifecycle.mergePending(
+            sliceId,
+            progress,
+            outcome.error,
+            outcome.collidingPrefixes,
+          );
+        case "ESCALATE":
+          return lifecycle.escalate(sliceId, progress, detailOf(outcome.error));
+        case "ERROR":
+          return lifecycle.error(sliceId, progress, detailOf(outcome.error));
+        case "STUCK":
+          return lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
+      }
+    })();
 
     logger.transitionTo(id, next);
     saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
@@ -1798,13 +2408,146 @@ export async function runPipeline(
         { type: "slice-outcome", slice: next },
       );
     } else {
+      // Read the reason off `next` so the run.log line and the persisted
+      // record can never disagree about why the slice stopped.
+      const reason = "error" in next ? next.error : outcome.error;
       logger.phase(
-        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${detailOf(outcome.error)}`,
+        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${reason}`,
         "error",
         { type: "slice-outcome", slice: next },
       );
     }
   };
+
+  // Record an outcome the merge-only recovery pass decided. Same three
+  // steps `persistOutcome` takes for a wave outcome — transition, persist,
+  // emit the slice-outcome event — but the recovery pass owns the
+  // lifecycle value itself, because it has facts (the refreshed colliding
+  // prefixes) no wave produced.
+  const recordRecovery = (id: string, next: SliceLifecycle) => {
+    logger.transitionTo(id, next);
+    saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
+    persistedOutcomes.add(id);
+    const suffix =
+      next.phase === "PASS"
+        ? `PASS — merged into ${featBranch} by merge-only recovery (no agent invoked)`
+        : `${next.phase} — ${"error" in next ? next.error : ""}`;
+    logger.phase(`[afk] Slice #${id} (${next.title}): ${suffix}`, "error", {
+      type: "slice-outcome",
+      slice: next,
+    });
+  };
+
+  // --- Merge-only recovery, before the first wave dispatches (ADR 0029).
+  //
+  // A slice recorded MERGE-PENDING lost nothing but its merge: the work
+  // is committed on its slice branch and QA passed. Retrying it costs one
+  // git merge and zero tokens, so it runs ahead of any agent — and it
+  // must, because a recovered slice may unblock DAG dependents that would
+  // otherwise be held back for the whole run.
+  //
+  // The collision re-check happens inside the merge mutex against the
+  // current feature-branch tip, exactly as the original attempt did: this
+  // recovery is no less safe than the merge it is repeating.
+  for (const slice of scope.members) {
+    const id = slice.ghIssue;
+    // Ctrl-C during recovery stops it where it stands; the wave loop's
+    // cancellation sweep marks whatever is left (ADR 0003).
+    if (signal?.aborted) break;
+    const prior = runState.slices[id];
+    if (prior?.phase !== "MERGE-PENDING") continue;
+
+    const branch = prior.branch ?? sliceBranch(prdSlug, slice, provider);
+    const sliceId: SliceIdentity = { ghIssue: id, title: slice.title, branch };
+    const progress = logger.getSliceProgress(id);
+
+    // The recoverable claim is "the work is committed on this branch". If
+    // the branch is gone or carries nothing, the claim is false and there
+    // is nothing to merge — fall through to ordinary dispatch rather than
+    // inventing an outcome.
+    if (
+      !git.branchExists(repoRoot, branch) ||
+      !git.hasCommitsAhead(repoRoot, branch, featBranch)
+    ) {
+      const selected = selectedIssues.has(id);
+      logger.phase(
+        `  #${id} ${slice.title}: MERGE-PENDING, but ${branch} is missing or has no ` +
+          `commits ahead of ${featBranch} — nothing to recover; ` +
+          (selected
+            ? "dispatching normally"
+            : "slice is outside this invocation's dispatch set"),
+        "log",
+        {
+          type: "warn",
+          reason: "prior-run-state",
+          ghIssue: id,
+          previousPhase: "MERGE-PENDING",
+          message:
+            `#${id} ${slice.title}: recoverable merge claim is false ` +
+            `(${branch} missing or empty) — ` +
+            (selected
+              ? "dispatching normally"
+              : "not selected for agent dispatch"),
+        },
+      );
+      continue;
+    }
+
+    const scratchMergeDir = sliceScratchMergeDir(
+      repoRoot,
+      prdSlug,
+      slice,
+      provider,
+    );
+    const attempt = await mergeMutex(() =>
+      Promise.resolve(
+        git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
+      ),
+    );
+
+    // Still colliding: stay MERGE-PENDING with a reason refreshed against
+    // the current tip. Deliberately NOT escalated to a regeneration — a
+    // repeated retry must never spend tokens the operator didn't ask for.
+    if (attempt.kind === "collision") {
+      recordRecovery(
+        id,
+        lifecycle.mergePending(
+          sliceId,
+          progress,
+          git.mergePendingReason(attempt.prefixes, featBranch),
+          attempt.prefixes,
+        ),
+      );
+      mergePending.add(id);
+      continue;
+    }
+
+    // A real merge conflict is a different animal: it needs a human, and
+    // CONFLICT keeps meaning exactly that.
+    if (attempt.result.status === "conflict") {
+      recordRecovery(
+        id,
+        lifecycle.conflict(sliceId, progress, attempt.result.details),
+      );
+      failed.add(id);
+      continue;
+    }
+
+    if (attempt.result.cleanupWarning) {
+      logger.phase(`[afk] Warning: ${attempt.result.cleanupWarning}`);
+    }
+    await mergeMutex(() =>
+      Promise.resolve(
+        git.removeWorktree(
+          repoRoot,
+          sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
+        ),
+      ),
+    );
+    recordRecovery(id, lifecycle.pass(sliceId, progress, true));
+    completed.add(id);
+    recoveredMerges.add(id);
+  }
 
   let waveNumber = 0;
   while (true) {
@@ -1817,9 +2560,7 @@ export async function runPipeline(
     const readyResult = await Promise.race([
       Promise.resolve().then(() => {
         const ready = dag.ready(completed);
-        return ready.filter(
-          (id) => !failed.has(id) && !laneCancelled.has(id),
-        );
+        return ready.filter((id) => !heldBack(id));
       }),
       new Promise<never>((_, reject) => {
         const timer = setTimeout(() => {
@@ -1860,10 +2601,13 @@ export async function runPipeline(
     // which only matter between waves.
     for (const [id, outcome] of outcomes) {
       persistOutcome(id, outcome);
+      dispatched.add(id);
       if (outcome.phase === "PASS") {
         completed.add(id);
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
+      } else if (outcome.phase === "MERGE-PENDING") {
+        mergePending.add(id);
       } else {
         failed.add(id);
       }
@@ -1897,9 +2641,7 @@ export async function runPipeline(
 
     // If no progress was made this round, we're stuck.
     const newReady = dag.ready(completed);
-    const newToRun = newReady.filter(
-      (id) => !failed.has(id) && !laneCancelled.has(id),
-    );
+    const newToRun = newReady.filter((id) => !heldBack(id));
     if (newToRun.length === 0) break;
   }
 
@@ -1910,11 +2652,14 @@ export async function runPipeline(
   // operator doesn't have to reverse-engineer the omission from the
   // wave composition (issue #17) — and tee the same hold as a typed
   // warn event for `afk status` (spec #26).
+  //
+  // The same per-slice hold is the diagnostic a zero-dispatch failure
+  // has to report (issue #42), so it is computed once here and reused
+  // below rather than re-derived from the log lines.
+  const notRunHolds: Array<{ id: string; title: string; hold: string }> = [];
   for (const [id, slice] of dag.slices) {
     if (slice.type === "HITL") continue;
-    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) {
-      continue;
-    }
+    if (completed.has(id) || heldBack(id)) continue;
     const unresolved = slice.blockedBy.filter((dep) => !completed.has(dep));
     const blockerText =
       unresolved.length > 0
@@ -1924,9 +2669,12 @@ export async function runPipeline(
             )
             .join(", ")
         : "(unknown)";
+    const hold =
+      `held back by unresolved ` +
+      `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`;
+    notRunHolds.push({ id, title: slice.title, hold });
     logger.phase(
-      `[afk] Slice #${id} (${slice.title}): NOT-RUN — held back by unresolved ` +
-        `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]; ` +
+      `[afk] Slice #${id} (${slice.title}): NOT-RUN — ${hold}; ` +
         `fix the blocker(s) and re-run`,
       "error",
       {
@@ -1934,9 +2682,7 @@ export async function runPipeline(
         reason: "not-run-hold",
         ghIssue: id,
         blockedBy: unresolved,
-        message:
-          `#${id} ${slice.title}: NOT-RUN — held back by unresolved ` +
-          `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`,
+        message: `#${id} ${slice.title}: NOT-RUN — ${hold}`,
       },
     );
   }
@@ -1945,7 +2691,20 @@ export async function runPipeline(
   const afkSlices = [...dag.slices.values()].filter((s) => s.type === "AFK");
   const allPassed = afkSlices.every((s) => completed.has(s.ghIssue));
 
-  if (allPassed && afkSlices.length > 0 && !signal?.aborted) {
+  /** Every slice merged, so the branch is ready for the ship gates. */
+  const readyForShipGates = allPassed && afkSlices.length > 0;
+
+  if (readyForShipGates && signal?.aborted) {
+    // Cancelled in the window between the last merge and the post-merge
+    // phase: every slice passed, but nothing gated or reviewed the feature
+    // branch and no PR opened, so the run did not ship (issue #43). The
+    // cancellation exit path itself is untouched — a second Ctrl-C still
+    // hard-exits 130 before this is ever read.
+    shipBlocker =
+      "cancelled before the pre-ship sanity gate and guardian reviews ran";
+  }
+
+  if (readyForShipGates && !signal?.aborted) {
     // Reviews need a worktree on the feature branch. Prefer an existing
     // checkout (commonly the main repo) — `git worktree add` refuses to
     // check out the same branch twice. Fall back to a scratch worktree
@@ -2017,8 +2776,10 @@ export async function runPipeline(
       });
       logger.setSanityGate(sanity);
       if (!sanity.ok) {
+        const failedSteps = sanity.failures.join(", ");
+        shipBlocker = `pre-ship sanity gate failed (${failedSteps}) — guardian reviews and PR creation were skipped`;
         logger.phase(
-          `  ❌ Pre-ship sanity gate failed: ${sanity.failures.join(", ")}. Skipping guardian reviews and PR creation.`,
+          `  ❌ Pre-ship sanity gate failed: ${failedSteps}. Skipping guardian reviews and PR creation.`,
         );
       } else {
         logger.phase("  ✅ Pre-ship sanity gate passed.", "log");
@@ -2271,7 +3032,12 @@ export async function runPipeline(
           closesIssues: scope.selected.map((slice) => slice.ghIssue),
         });
         logger.event({ type: "run-phase-started", phase: "draft-pr" });
-        if (prPlan.open) {
+        if (!prPlan.open) {
+          // No shippable branch: an unfavorable verdict, or an absent one
+          // (UNPARSEABLE / an exhausted infrastructure retry). Either way
+          // the operator has something to do, so the run is unsuccessful.
+          shipBlocker = `guardian verdicts kept the draft PR closed (architect: ${archResult.outcome}, PM: ${pmResult.outcome})`;
+        } else {
           if (prPlan.overridden) {
             logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
             logger.setPrOverrideNote(prPlan.overrideNote!);
@@ -2342,9 +3108,37 @@ export async function runPipeline(
     }
   }
 
+    // A run that handed no slice to a wave, skipped none as already
+    // complete, and recovered no deferred merge did nothing at all. Without this it can report success —
+    // an empty selection satisfies `every` vacuously — and a 0m00s no-op
+    // reads exactly like a finished run (issue #42). Cancellation is
+    // excluded: Ctrl-C keeps its own exit path, and a run cancelled
+    // before its first wave is not a silent no-op.
+    let zeroDispatchReason: string | undefined;
+    if (
+      !signal?.aborted &&
+      dispatched.size === 0 &&
+      alreadyComplete.size === 0 &&
+      recoveredMerges.size === 0
+    ) {
+      const holds = notRunHolds.map(
+        ({ id, title, hold }) => `  #${id} ${title} — ${hold}`,
+      );
+      zeroDispatchReason = [
+        "Pipeline dispatched no slices and skipped none as already complete — nothing ran.",
+        ...(holds.length > 0
+          ? [...holds, "Fix the blocker(s) and re-run."]
+          : ["No slice in the run scope was eligible to run."]),
+      ].join("\n");
+      logger.phase(`[afk] ${zeroDispatchReason}`, "error");
+    }
+
     const summary = logger.writeSummary();
     const consoleSummary = logger.formatConsoleSummary();
-    const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
+    // Every slice passing is necessary but not sufficient: a ship blocker
+    // or a zero-dispatch reason means the run must not exit 0.
+    const failureReason = zeroDispatchReason ?? shipBlocker;
+    const allSuccess = allPassed && failureReason === undefined;
     const runOutcome = signal?.aborted
       ? "ABORTED"
       : allSuccess
@@ -2353,7 +3147,12 @@ export async function runPipeline(
     logger.event({ type: "run-ended", outcome: runOutcome });
     emitHandoff(runOutcome);
 
-    return { success: allSuccess, summary, consoleSummary };
+    return {
+      success: allSuccess,
+      summary,
+      consoleSummary,
+      failureReason,
+    };
   } catch (err) {
     // Mark any slice still in flight as STUCK so the summary doesn't
     // misreport them as RUNNING/PENDING. Status keys we touch here

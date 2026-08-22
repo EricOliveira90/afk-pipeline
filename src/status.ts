@@ -186,8 +186,15 @@ export function renderStatus(model: StatusModel): string {
         const s = event.slice;
         const reason =
           "error" in s && s.error ? ` — ${s.error}` : "";
+        // A deferred merge names its colliding prefixes explicitly: they
+        // are the fact the operator acts on (or decides not to), and they
+        // shouldn't have to be read out of the reason prose.
+        const prefixes =
+          s.phase === "MERGE-PENDING" && s.collidingPrefixes.length > 0
+            ? ` (colliding prefixes: ${s.collidingPrefixes.join(", ")})`
+            : "";
         lines.push(
-          `  ${clock(event.ts)}  #${s.ghIssue} ${s.title}: ${s.phase}${reason}`,
+          `  ${clock(event.ts)}  #${s.ghIssue} ${s.title}: ${s.phase}${prefixes}${reason}`,
         );
         break;
       }

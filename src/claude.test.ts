@@ -159,6 +159,7 @@ describe("invoke spawn args", () => {
     // explicitly.
     expect(args).toContain("--add-dir");
     expect(args[args.indexOf("--add-dir") + 1]).toBe("/tmp/x");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-opus-5");
     // --bare strips plugin-loaded agents, so passing --agent would
     // resolve to the default agent and waste a CLI flag.
     expect(args).not.toContain("--agent");

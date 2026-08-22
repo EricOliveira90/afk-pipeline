@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -17,9 +18,11 @@ import {
   findWorktreeForBranch,
   getDefaultBranch,
   hasCommitsAhead,
+  listFilesOnRef,
   listMigrationFiles,
   mergeSliceBranch,
   migrationPrefixCollisions,
+  nextFreeMigrationPrefix,
   removeWorktree,
 } from "./git.js";
 
@@ -73,7 +76,6 @@ describe("git.branchExists", () => {
     expect(branchExists(repoDir, "origin/main")).toBe(false);
   });
 });
-
 describe("git.getDefaultBranch", () => {
   let repoDir: string;
   let originDir: string;
@@ -535,6 +537,86 @@ describe("findMigrationPrefixCollisions (pure)", () => {
         ["044_d.sql", "043_b.sql", "043_e.sql"],
       ),
     ).toEqual(["043", "044"]);
+  });
+});
+
+/**
+ * The prefix the contract-lock gate tells a colliding planner to move
+ * to (ADR 0028). "Next free" means past the end of the sequence, not
+ * the first gap: a migration runner applies files in prefix order, so
+ * filling a gap would insert a schema change before ones already
+ * applied downstream.
+ */
+describe("nextFreeMigrationPrefix (pure)", () => {
+  it("returns one past the highest used prefix", () => {
+    expect(nextFreeMigrationPrefix(["042_a.sql", "043_b.sql"])).toBe("044");
+  });
+
+  it("keeps the zero padding of the widest prefix", () => {
+    expect(nextFreeMigrationPrefix(["009_a.sql"])).toBe("010");
+  });
+
+  it("stays a timestamp for a timestamp scheme", () => {
+    expect(
+      nextFreeMigrationPrefix(["20240101000000_a.sql"]),
+    ).toBe("20240101000001");
+  });
+
+  it("skips past a gap rather than filling it", () => {
+    expect(nextFreeMigrationPrefix(["001_a.sql", "005_b.sql"])).toBe("006");
+  });
+
+  it("ignores files carrying no numeric prefix", () => {
+    expect(nextFreeMigrationPrefix(["README.md", "007_a.sql"])).toBe("008");
+  });
+
+  it("starts at 1 when nothing is numbered", () => {
+    expect(nextFreeMigrationPrefix(["seed.sql"])).toBe("1");
+    expect(nextFreeMigrationPrefix([])).toBe("1");
+  });
+
+  it("does not lose precision on a prefix too long for a number", () => {
+    // 20 digits — beyond Number.MAX_SAFE_INTEGER, where a `number`
+    // implementation would round and return a prefix that is not free.
+    expect(nextFreeMigrationPrefix(["20240101000000000001_a.sql"])).toBe(
+      "20240101000000000002",
+    );
+  });
+});
+
+describe("git.listFilesOnRef", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("lists repo-relative paths from anywhere in the tree", () => {
+    mkdirSync(join(repoDir, "db", "migrations"), { recursive: true });
+    writeFileSync(join(repoDir, "db", "migrations", "003_x.sql"), "select 1;");
+    writeFileSync(join(repoDir, "app.ts"), "export {};");
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "add files"]);
+
+    // Unlike listMigrationFiles this is not scoped to one directory, so
+    // a non-Supabase migration layout is visible to the caller's own
+    // recognition rule.
+    expect(listFilesOnRef(repoDir, "main").sort()).toEqual([
+      "app.ts",
+      "db/migrations/003_x.sql",
+    ]);
+  });
+
+  it("returns empty for a ref that does not exist", () => {
+    expect(listFilesOnRef(repoDir, "no/such/ref")).toEqual([]);
   });
 });
 

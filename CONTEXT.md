@@ -42,7 +42,7 @@ _Avoid_: "iteration", "run", "session"
 A pluggable adapter that knows how to invoke a specific agent system
 (Kiro, Claude Code, Codex) — builds the spawn command, parses streamed output,
 and contributes its `name` to branch namespacing. Injected into
-`runPipeline` so backends are swappable without orchestrator changes.
+`runPipeline` so agent providers are swappable without orchestrator changes.
 Stream parsing is opt-in per provider (see **stream event** + ADR 0004).
 _Avoid_: "backend", "invoker", "agent driver", "agent adapter"
 
@@ -69,6 +69,27 @@ lose the record of already-merged work. A persisted PASS
 (`mergedToFeature: true`) is always safe to skip on re-run. See
 ADR 0018.
 _Avoid_: "state cache", "checkpoint" (it is authoritative, not a cache)
+
+**Scope of record**:
+The set of slices a run owns, fixed on its first invocation (all AFK
+slices, or whatever `--slices` named) and persisted in the **run state**.
+Later invocations may not add to it — that is how a changed `issues.md`
+or a mistyped command is kept from silently growing the run. It is not
+rewritten by a **narrowed invocation**.
+_Avoid_: "selection" (that is per-invocation), "run scope" when the
+per-invocation set is meant
+
+**Narrowed invocation**:
+An invocation that runs a strict subset of the **scope of record** —
+`--slices` naming some of its members, or `--only-failed` deriving the
+non-PASS ones from the **run state**. The excluded members are reported
+skipped for the reason `narrowed` (distinct from `not-selected`, which
+means never in the scope at all), the reviewer is told to judge only the
+subset, and dependencies are satisfied from persisted PASS records
+rather than from this invocation's waves. A later full re-run picks the
+narrowed-out slices back up with no flag. See issue #41.
+_Avoid_: "partial run", "resume" (resumption skips completed work
+automatically; narrowing is an explicit operator choice)
 
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
@@ -175,13 +196,42 @@ When max rounds are exhausted, the pipeline stops the slice, writes
 
 **Lane**:
 A serial chain of slices in a single wave whose declared file lists
-overlap (transitive closure on shared files). Lanes run in parallel;
-within a lane, each slice runs to completion and merges into the
-**feature branch** before the next lane-mate starts. Computed by
-`partitionLanes` from each slice's `contract.md` "Files expected to
-change". See ADR 0005.
+overlap, or which declare the same **lane-shared resource** (transitive
+closure over both). Lanes run in parallel; within a lane, each slice
+runs to completion and merges into the **feature branch** before the
+next lane-mate starts. Computed by `partitionLanes` from each slice's
+`contract.md` "Files expected to change". See ADR 0005 and ADR 0027.
 _Avoid_: "batch", "group" (too generic), "wave" (a wave contains lanes,
 not the other way around)
+
+**Lane-shared resource**:
+Something two slices contend for as a whole rather than file by file,
+identified by a _resource key_ that any declared path can map to.
+Today the only one is `migrations`: two slices each adding their own
+migration file share no path, yet both compute the same "next free
+numeric prefix" from the same base. Every slice declaring a recognised
+migration path unions into one lane, so the successor re-negotiates
+against a base that already contains its predecessor's merged
+migration. Recognition is `PipelineConfig.migrationPathPattern`,
+defaulting to a `migrations` path segment with a `.sql` extension.
+See ADR 0027.
+_Avoid_: "shared file" (the point is that no path is shared), "lock"
+(nothing is held; the slices are serialised), "migration conflict"
+(the grouping exists so that no conflict occurs)
+
+**Contract-lock gate**:
+A check the wave runs on a slice contract the moment it locks, with the
+power to refuse the lock and send the contract back to the planner for
+another **round**. Today the only one is the migration prefix gate: a
+declared migration whose numeric prefix already exists on the **feature
+branch** under a different filename is refused with the colliding prefix
+and the next free one, seconds after the planner named the file rather
+than hours later at the merge. A refusal costs one contract round and no
+generation; exhausting the rounds triggers ordinary **escalation**. See
+ADR 0028.
+_Avoid_: "pre-flight check" (it is not before the pipeline, it is inside
+negotiation), "validation" (too generic), "merge check" (the merge-mutex
+collision check is a different, and still authoritative, thing)
 
 **Lane leader**:
 The first slice in a lane (by ascending slice number). Negotiates its
@@ -202,6 +252,23 @@ re-eligible on the next pipeline run once the repository is verified.
 _Avoid_: "skipped" (HITL slices are skipped; lane-cancelled is
 deferral, not skip), "blocked" (DAG-blocked is a separate concept)
 
+**MERGE-PENDING**:
+A *deferred merge*. The slice's work is complete and committed on its
+slice branch, QA passed, and the merge was refused for a reason no human
+needs to adjudicate — today, only a migration prefix collision detected
+inside the merge mutex (ADR 0029). Recorded as the `MERGE-PENDING`
+status, carrying the slice branch and the colliding numeric prefixes.
+The branch is preserved and the next run retries the merge mechanically,
+before any agent is dispatched: no regeneration, no tokens. It does not
+unblock DAG dependents (nothing of its work is on the feature branch
+yet), and by the existing lane rule its lane continues past it
+(ADR 0024). Distinct from **escalation** (the agent gave up), from
+**cancellation** (user-initiated), from **lane-cancelled** (repository
+integrity), and from `CONFLICT` — which keeps meaning a real git merge
+conflict a human must resolve.
+_Avoid_: "retryable conflict", "soft conflict" (it is not a conflict at
+all — nothing needs resolving, only re-attempting)
+
 **Pre-ship sanity gate**:
 The post-merge check that runs the project's `typecheck`, `lint`, and
 test scripts against the merged feature branch before the guardian
@@ -209,8 +276,49 @@ reviews and PR creation. Same guard a human's pre-push hook would
 apply — necessary because every AFK commit uses `git commit --no-verify`,
 so husky never runs during the pipeline. Steps not defined in
 `package.json` are skipped, not failed. Failure short-circuits the
-guardians and the PR; the run-summary records the failing step names.
+guardians and the PR; the run-summary records the failing step names,
+and the run is a **blocked ship**.
 _Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
+
+**Agent failure cause**:
+What ended an agent-driven phase short of success, classified at the
+point of failure into one of five kinds: `provider-exit` (the **agent
+provider** hung up with a non-zero exit code), `orchestrator-kill` (we
+killed it — carries the **kill class**), `transient-exhausted` (the
+ADR 0022 retry window closed on an unresolved outage), `verdict` (nothing
+died; the agent decided), or `internal-error` (the pipeline itself
+threw). The first three are *infrastructure causes* and are the only ones
+retried under `--infrastructure-retries`. The cause's one-line summary
+becomes the slice outcome's reason, so it reaches **run state**, the next
+run's retry announcement, `events.jsonl`, and `afk status` unchanged.
+Currently classified for the negotiate phase. See ADR 0025.
+_Avoid_: "error message" (the cause is structured, and the summary is
+derived from it), "failure class" (that term belongs to the evaluator's
+`INFRASTRUCTURE` / `IMPLEMENTATION` QA-report field)
+
+**Kill class**:
+Which orchestrator-owned bound killed an **agent invocation**:
+`idle-timeout` (the **idle timeout**), `wall-clock-ceiling` (the
+**wall-clock ceiling**), `tool-call-cap`, or `unspecified` when the
+provider recorded no reason. A component of an **agent failure cause**;
+recovered from the provider's rejection message, which is the only place
+it is recorded.
+_Avoid_: "kill reason", "termination cause"
+
+**Blocked ship**:
+A run whose slices all passed and merged but which never cleared the gate
+to a draft PR — a failed **pre-ship sanity gate**, a guardian verdict that
+was unfavorable or absent (`UNPARSEABLE` / an exhausted infrastructure
+retry), or a **cancellation** that landed before those gates ran.
+Reported as an unsuccessful `PipelineResult` with a
+`failureReason`, so `afk`, `afk-claude`, and `afk-codex` all exit
+non-zero. A draft PR opened by `--open-pr-on-override` is not a blocked
+ship: the recorded override note is the operator's acknowledgement, and
+the run stays successful. Distinct from **escalation** (a single slice's
+agent gave up) and **cancellation** (user-initiated). See ADR 0015.
+_Avoid_: "failed run" (slices can all pass), "not ready" (that is the
+run-summary's rendering, not the outcome), "exit code 2" (there is no
+per-class exit taxonomy)
 
 **Cancellation**:
 External termination via `AbortSignal` (typically SIGINT / Ctrl-C).
@@ -226,14 +334,17 @@ _Avoid_: "abort" (overloads with `git merge --abort`), "interrupted"
 - Each **slice** gets its own **worktree** on a dedicated branch
 - The per-slice pipeline runs: **explorer** → **planner** → **evaluator** (contract) → **generator** → **evaluator** (QA)
 - **Evaluator** contract review may trigger planner revision (max 2 **rounds**)
+- A **contract-lock gate** may also refuse a locked contract, spending a **round**
 - **Evaluator** QA may trigger generator retry (max 3 **rounds**)
 - After max rounds, the pipeline triggers **escalation** (stuck.md)
 - On PASS, the slice branch merges into the **feature branch**
 - After all slices merge, the **pre-ship sanity gate** runs (typecheck + lint + tests) on the **feature branch**
-- If the **pre-ship sanity gate** fails, **architect reviewer** / **PM reviewer** / PR creation are skipped
+- If the **pre-ship sanity gate** fails, **architect reviewer** / **PM reviewer** / PR creation are skipped, and the run is a **blocked ship**
 - Otherwise, **architect reviewer** and **PM reviewer** run against the **feature branch**
+- A **blocked ship** exits non-zero even when every **slice** passed
 - HITL slices are skipped entirely by the pipeline
 - Parallel slices merge in completion order; merge conflicts trigger **escalation**
+- A merge refused only by a migration prefix collision is **MERGE-PENDING**; the next run retries that merge before dispatching any agent
 - The pipeline is resumable: slices with existing `qa-report.md` PASS are skipped
 
 ## Example dialogue

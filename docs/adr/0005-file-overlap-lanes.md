@@ -19,6 +19,12 @@ behaviour level — and `issues.md` doesn't carry file metadata.
 
 ## Construct: lane
 
+> **Extended by ADR 0027:** lanes union on **resource keys** as well as
+> shared files. A declared path recognised as a migration unions every
+> migration-bearing slice in the wave into one lane, even when those
+> slices share no path. Everything below still holds — resource keys are
+> an additional union step in the same union-find, not a replacement.
+
 A **lane** is a serial chain of slices whose declared file lists
 overlap (transitive closure on shared files). One wave → one or more
 lanes; lanes run in parallel; **within** a lane, each slice runs to
@@ -32,10 +38,12 @@ The lane partitioner is a pure function in `src/lanes.ts`:
 2. For every declared path, the *first* slice that mentions it
    becomes the path's anchor; later slices declaring the same path
    union with the anchor.
-3. Slices whose `files === undefined` (planner produced no usable
+3. For every resource key, all slices declaring that resource union
+   together even when they share no path (ADR 0027).
+4. Slices whose `files === undefined` (planner produced no usable
    list) union with **every** other slice in the wave —
    conservative fallback, see "Limitations" below.
-4. Group by component root, sort each lane by ascending slice number,
+5. Group by component root, sort each lane by ascending slice number,
    sort lanes by their lowest slice number. Determinism is observable.
 
 ## Two-phase `runSlice`

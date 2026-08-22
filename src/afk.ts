@@ -3,10 +3,12 @@ import { resolve, basename, join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseIssuesMd, buildDAG } from "./issues-parser.js";
 import {
+  formatRunFailure,
   runPipeline,
   PipelineError,
   type MigrationValidation,
 } from "./orchestrator.js";
+import { kiroProvider } from "./kiro.js";
 import {
   DEFAULT_MAX_CONTRACT_ROUNDS,
   parseMaxContractRounds,
@@ -14,7 +16,7 @@ import {
 } from "./cli-options.js";
 import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { runCleanFailedCli } from "./clean-failed.js";
-import { resolveRunScope } from "./slice-scope.js";
+import { resolveCliRunScope } from "./cli-run-scope.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runStatus } from "./status.js";
 import { runStatusWeb } from "./status-web.js";
@@ -27,8 +29,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]
-       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -77,6 +78,7 @@ async function main() {
   let dryRun = false;
   let migrationValidation: MigrationValidation | undefined;
   let selectedSliceNumbers: string[] | undefined;
+  let onlyFailed = false;
   let maxContractRounds = DEFAULT_MAX_CONTRACT_ROUNDS;
 
   for (let i = 0; i < args.length; i++) {
@@ -84,6 +86,8 @@ async function main() {
       prdDirArg = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
+    } else if (args[i] === "--only-failed") {
+      onlyFailed = true;
     } else if (args[i] === "--slices") {
       try {
         selectedSliceNumbers = parseSliceSelection(args[++i]);
@@ -113,6 +117,12 @@ async function main() {
   }
 
   if (!prdDirArg) usage();
+  if (onlyFailed && selectedSliceNumbers) {
+    console.error(
+      "Error: --only-failed cannot be combined with --slices; it derives the selection from the persisted run scope",
+    );
+    process.exit(2);
+  }
 
   const prdDir = resolve(prdDirArg);
   const repoRoot = resolve(".");
@@ -134,21 +144,42 @@ async function main() {
     .replace(/\\/g, "/");
   const issuesPath = join(prdDir, "issues.md");
 
+  const slices = parseIssuesMd(issuesPath);
+  const dag = buildDAG(slices);
+  let runScope;
+  try {
+    runScope = resolveCliRunScope({
+      repoRoot,
+      prdSlug,
+      provider: kiroProvider,
+      slices,
+      selectedSliceNumbers,
+      onlyFailed,
+    });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(2);
+  }
+  const requestedSliceNumbers = runScope.requestedSliceNumbers;
+  const previewScope = runScope.scope;
+  const priorCompleted = runScope.priorCompleted;
+
   console.log(`AFK Pipeline`);
   console.log(`  PRD: ${prdSlug}`);
   console.log(`  PRD dir: ${prdDir}`);
   console.log(`  Repo: ${repoRoot}`);
   console.log(`  Dry run: ${dryRun}`);
   console.log(`  Max contract rounds: ${maxContractRounds}`);
+
   console.log(
-    `  Requested slices: ${selectedSliceNumbers?.join(", ") ?? "all AFK"}`,
+    `  Requested slices: ${
+      onlyFailed
+        ? `--only-failed → ${requestedSliceNumbers?.length ? requestedSliceNumbers.join(", ") : "none (every scope member is recorded PASS)"}`
+        : (previewScope.selected.map((slice) => slice.number).join(", ") || "none")
+    }`,
   );
   console.log();
 
-  // Parse issues and build DAG
-  const slices = parseIssuesMd(issuesPath);
-  const dag = buildDAG(slices);
-  const previewScope = resolveRunScope(slices, selectedSliceNumbers);
   const previewDag = buildDAG(previewScope.selected);
 
   const afkCount = [...dag.slices.values()].filter(
@@ -176,7 +207,9 @@ async function main() {
   if (dryRun) {
     console.log("Dry run — showing execution plan only.\n");
 
-    const completed = new Set<string>();
+    // Seeded with the run state's completed slices: the pipeline counts
+    // those as satisfied dependencies, so the plan must too.
+    const completed = new Set<string>(priorCompleted);
     let wave = 1;
     while (true) {
       const ready = previewDag.ready(completed);
@@ -230,7 +263,7 @@ async function main() {
       dag,
       dryRun,
       maxContractRounds,
-      selectedSliceNumbers,
+      selectedSliceNumbers: requestedSliceNumbers,
       migrationValidation,
       signal: controller.signal,
       ...runtimeOptions,
@@ -251,9 +284,7 @@ async function main() {
   console.log("\n" + result.consoleSummary);
 
   if (!result.success) {
-    console.error(
-      "\nPipeline completed with failures. Check logs and stuck.md files.",
-    );
+    console.error("\n" + formatRunFailure(result));
     process.exit(1);
   }
 

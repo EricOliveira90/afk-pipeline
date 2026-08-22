@@ -40,6 +40,18 @@ export type SliceLifecycle =
       progress: SliceProgress;
       error: string;
     })
+  /**
+   * Deferred merge (ADR 0029): the work is complete and committed on the
+   * slice branch, QA passed, and only the migration prefix collision
+   * detected inside the merge mutex refused the merge. Carries the
+   * colliding prefixes so the next run can retry the merge without
+   * re-deriving them. Not a `FailurePhase` — nothing here needs a human.
+   */
+  | ({ phase: "MERGE-PENDING" } & SliceIdentity & {
+      progress: SliceProgress;
+      error: string;
+      collidingPrefixes: string[];
+    })
   | ({ phase: "SKIPPED" } & SliceIdentity);
 
 export type SlicePhase = SliceLifecycle["phase"];
@@ -52,6 +64,7 @@ export const ALL_PHASES = [
   "ESCALATE",
   "ERROR",
   "CONFLICT",
+  "MERGE-PENDING",
   "CANCELLED",
   "LANE-CANCELLED",
   "SKIPPED",
@@ -105,6 +118,18 @@ export const lifecycle = {
     progress,
     error,
   }),
+  mergePending: (
+    id: SliceIdentity,
+    progress: SliceProgress,
+    error: string,
+    collidingPrefixes: string[],
+  ): SliceLifecycle => ({
+    phase: "MERGE-PENDING",
+    ...id,
+    progress,
+    error,
+    collidingPrefixes,
+  }),
   cancelled: (id: SliceIdentity, progress: SliceProgress, error: string): SliceLifecycle => ({
     phase: "CANCELLED",
     ...id,
@@ -132,28 +157,124 @@ export function assertNever(x: never): never {
 export type SliceBucket =
   | "succeeded"
   | "failed"
+  /** Merge deferred, recoverable without an agent on the next run. */
+  | "deferred"
   | "cancelled"
   | "skipped"
   | "inFlight";
 
+export type BranchDisposition = "branch" | "merged" | "preserved" | "none";
+
+export interface SlicePhaseTraits {
+  bucket: SliceBucket;
+  icon: string;
+  summaryLabel: string;
+  persisted: boolean;
+  terminalThisRun: boolean;
+  branchDisposition: BranchDisposition;
+}
+
+export const PHASE_TRAITS = {
+  PENDING: {
+    bucket: "inFlight",
+    icon: "⏳",
+    summaryLabel: "PENDING",
+    persisted: false,
+    terminalThisRun: false,
+    branchDisposition: "branch",
+  },
+  RUNNING: {
+    bucket: "inFlight",
+    icon: "🔄",
+    summaryLabel: "RUNNING",
+    persisted: false,
+    terminalThisRun: false,
+    branchDisposition: "branch",
+  },
+  PASS: {
+    bucket: "succeeded",
+    icon: "✅",
+    summaryLabel: "PASS",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "merged",
+  },
+  STUCK: {
+    bucket: "failed",
+    icon: "🔴",
+    summaryLabel: "STUCK",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "preserved",
+  },
+  ESCALATE: {
+    bucket: "failed",
+    icon: "🔴",
+    summaryLabel: "STUCK",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "branch",
+  },
+  ERROR: {
+    bucket: "failed",
+    icon: "🔴",
+    summaryLabel: "STUCK",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "branch",
+  },
+  CONFLICT: {
+    bucket: "failed",
+    icon: "⚠️",
+    summaryLabel: "CONFLICT",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "preserved",
+  },
+  "MERGE-PENDING": {
+    bucket: "deferred",
+    icon: "⏸️",
+    summaryLabel: "MERGE-PENDING",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "preserved",
+  },
+  CANCELLED: {
+    bucket: "cancelled",
+    icon: "🚫",
+    summaryLabel: "CANCELLED",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "branch",
+  },
+  "LANE-CANCELLED": {
+    bucket: "cancelled",
+    icon: "⛔",
+    summaryLabel: "LANE-CANCELLED",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "branch",
+  },
+  SKIPPED: {
+    bucket: "skipped",
+    icon: "⏭️",
+    summaryLabel: "SKIPPED",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "none",
+  },
+} as const satisfies Record<SlicePhase, SlicePhaseTraits>;
+
+export function traitsFor(phase: SlicePhase): SlicePhaseTraits {
+  return PHASE_TRAITS[phase];
+}
+
+export function isSlicePhase(value: string): value is SlicePhase {
+  return Object.prototype.hasOwnProperty.call(PHASE_TRAITS, value);
+}
+
 export function bucketFor(phase: SlicePhase): SliceBucket {
-  switch (phase) {
-    case "PASS":
-      return "succeeded";
-    case "STUCK":
-    case "ESCALATE":
-    case "ERROR":
-    case "CONFLICT":
-      return "failed";
-    case "CANCELLED":
-    case "LANE-CANCELLED":
-      return "cancelled";
-    case "SKIPPED":
-      return "skipped";
-    case "RUNNING":
-    case "PENDING":
-      return "inFlight";
-  }
+  return traitsFor(phase).bucket;
 }
 
 /**
@@ -162,29 +283,9 @@ export function bucketFor(phase: SlicePhase): SliceBucket {
  * Persisted JSON keeps the distinction.
  */
 export function summaryStatusLabel(phase: SlicePhase): string {
-  if (phase === "ESCALATE" || phase === "ERROR") return "STUCK";
-  return phase;
+  return traitsFor(phase).summaryLabel;
 }
 
 export function statusIconFor(phase: SlicePhase): string {
-  switch (phase) {
-    case "PASS":
-      return "✅";
-    case "STUCK":
-    case "ESCALATE":
-    case "ERROR":
-      return "🔴";
-    case "CONFLICT":
-      return "⚠️";
-    case "RUNNING":
-      return "🔄";
-    case "PENDING":
-      return "⏳";
-    case "CANCELLED":
-      return "🚫";
-    case "LANE-CANCELLED":
-      return "⛔";
-    case "SKIPPED":
-      return "⏭️";
-  }
+  return traitsFor(phase).icon;
 }

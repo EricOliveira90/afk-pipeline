@@ -45,6 +45,9 @@ npx afk-codex --prd-dir .kiro/specs/contacts-crud
 
 # Run only slices 01-04 (all must be declared AFK)
 npx afk-codex --prd-dir .kiro/specs/contacts-crud --slices 01,02,03,04
+
+# Re-run just the slices the last run did not land
+npx afk-codex --prd-dir .kiro/specs/contacts-crud --only-failed
 ```
 
 Ctrl-C cancels cleanly: in-flight agents are killed, remaining slices are marked CANCELLED, worktrees are preserved. A second Ctrl-C hard-exits.
@@ -67,6 +70,7 @@ The pipeline reads a markdown file with a dependency table:
 - **Type `HITL`** — skipped; reserved for slices that need a human.
 - **Blocked by** — `—` for none, or comma-separated issue numbers for DAG dependencies.
 - `--slices` selects manifest slice numbers, not GitHub issue numbers. Selecting a `HITL` slice is rejected; there is no force override.
+- `--only-failed` derives that selection from the run state instead: every member of the persisted scope not recorded as a merged PASS. It needs a previous run to have persisted a scope, and cannot be combined with `--slices`.
 
 ## How It Works
 
@@ -136,6 +140,8 @@ Skipped: #45 LGPD delete flow    ← HITL
 
 Slices that declare overlapping files are grouped into **lanes** and run serially within their lane. Merges into the feature branch are serialised via an async mutex.
 
+Lanes also union on **shared resources**, not just shared paths: every slice in a wave whose contract declares a migration file lands in one lane, so no two of them compute the same "next free prefix" from the same base (ADR 0027). Recognition defaults to a `migrations` path segment with a `.sql` extension and is configurable via `PipelineConfig.migrationPathPattern`; slices declaring no migration paths keep their parallelism, and `--serial-lanes` remains the blunt override that collapses the whole wave.
+
 ### Branch Strategy
 
 ```
@@ -198,9 +204,11 @@ Convenience scripts for your `package.json`:
 
 ## Resumability
 
-State persists in `.afk/state/<run-slug>.json`, where the run slug includes the provider for non-Kiro backends. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and stuck slices retry from their artifact state.
+State persists in `.afk/state/<run-slug>.json`, where the run slug includes the agent provider for non-Kiro runs. The first non-dry run stores the resolved slice identities. Re-run the same command to continue: completed slices are skipped and failed slices retry from their artifact state.
 
-A retry with no `--slices` argument reuses the persisted scope. Supplying a different selection is rejected so a changed manifest or command cannot silently expand the run. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
+A retry with no `--slices` argument reuses the persisted scope. A selection that *adds* work outside it is rejected, so a changed manifest or command cannot silently expand the run; a selection that is a strict *subset* of it is allowed and runs narrowed — the persisted scope is left untouched as the run's scope of record, the left-out members are reported as skipped for the reason `narrowed`, and the post-merge reviewer is told to judge only the slices this invocation ran. `--only-failed` is sugar for the common narrowing: it reads the run state and selects the scope members that are not recorded as merged PASS.
+
+A narrowed invocation still honours the DAG. Dependencies are satisfied from the run state as well as from this invocation's waves, so re-running one failed slice whose prerequisite already merged dispatches it instead of holding it back forever; the run log says which dependency was counted from prior state. Run-state entries for slices no longer declared in `issues.md` are ignored rather than fatal, and still satisfy dependents that name them. To intentionally start a different scope, use a fresh PRD/run slug or remove the old state file after confirming no in-progress work depends on it. State files created by older package versions have no scope; their first run after upgrade adopts the then-current set of all AFK slices.
 
 The state file also caches the post-merge review phase (ADR 0015): a passing pre-ship sanity gate is keyed by the reviewed tree's SHA, and favorable guardian verdicts by the reviewed HEAD. Re-entering a finished run re-executes only what actually changed — typically just the review that previously failed or blocked.
 
@@ -226,6 +234,22 @@ Logs: `.afk/logs/<run-slug>/` (per-invocation stdout + `run-summary.md` with sta
 
 Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. This versioned JSON artifact records run status, selected slice outcomes, skipped slices and reasons, feature branch, final commit SHA, newly added migration paths, GitHub issues to close, and draft PR number/URL when available. The generated draft PR body includes `Closes #<issue>` for each selected slice.
 
+## Exit Status
+
+`afk`, `afk-claude`, and `afk-codex` all exit 0 only when the run cleared
+every gate to shipping. All slices passing is not enough: a failed
+pre-ship sanity gate, or a guardian verdict that is unfavorable or absent
+(`UNPARSEABLE`, or an infrastructure class whose retries were exhausted),
+exits non-zero with a one-line reason so wrapper scripts and CI notice.
+`--open-pr-on-override` is the exception: when it cleared the gate despite
+an unfavorable PM verdict, the run exits 0 and the override note is
+recorded in the PR body and `run-summary.md` (ADR 0015).
+
+The gate is the decision to open the draft PR, not the `git push` /
+`gh pr create` calls that follow it — those stay best-effort, so a run
+with no `origin` or no `gh` auth still exits 0. There is no
+per-failure-class exit code; a second Ctrl-C still exits 130.
+
 ## Error Handling
 
 | Situation | What happens |
@@ -235,11 +259,11 @@ Every terminal pipeline exit also writes `.afk/logs/<run-slug>/handoff.json`. Th
 | Merge conflict | Slice → CONFLICT, both branches preserved |
 | Agent idle timeout (10 min) | Agent killed, slice → STUCK — deferred while a spawned process (e.g. a long test suite) is still running (ADR 0021) |
 | Model temporarily unavailable | Invocation retried with exponential backoff for up to 15 min (`--transient-retry-window-ms`, ADR 0022) |
-| Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md |
-| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch |
+| Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md; run exits non-zero |
+| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch; run exits non-zero unless the PR was opened by override |
 | Guardian dies before producing output | Outcome → NEVER_RAN; infrastructure retry within the run (`--infrastructure-retries`); stderr surfaced in run-summary.md |
 | Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
-| Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes |
+| Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
 | HITL slice | Skipped entirely |
 | Ctrl-C | In-flight agents killed, remaining → CANCELLED |
 | Pipeline crash | Re-run to resume |
@@ -350,12 +374,12 @@ Before your first run with reviews enabled:
       `**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP`.
 - [ ] Your `prd.md` has a `## Relevant Files` section.
 
-## Choosing a Backend
+## Choosing an Agent Provider
 
-| Backend | Strengths | Trade-offs |
+| Agent provider | Strengths | Trade-offs |
 |---------|-----------|------------|
 | Kiro | Default; persona-rich agent configs; Fable for most roles and Sonnet for explorer | Opaque stream — no cost/tool-call stats |
-| Claude Code | Streamed JSON; Opus for most roles and Sonnet for explorer; cost + tool calls in run-summary.md | Requires `claude` CLI auth |
+| Claude Code | Streamed JSON; Sonnet 5 for explorer and Opus 5 for other roles; cost + tool calls in run-summary.md | Requires `claude` CLI auth |
 | Codex | Ephemeral JSONL sessions; tool-call stats; prompt-only guardians | Requires managed CLI auth; fixed `openai.gpt-5.6-sol` model |
 
 All providers share the orchestrator, prompts, artifact format, and DAG semantics. Codex runs `explorer` at medium reasoning effort and every other role at high effort. Provider failures are explicit and never fall back to another provider.
@@ -382,6 +406,8 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0022** — Transient model unavailability retried with backoff at the orchestrator
 - **ADR 0023** — `clean-failed` subcommand for dead-slice worktree/branch debris
 - **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
+- **ADR 0027** — Migrations are a lane-shared resource: migration-bearing slices serialise into one lane
+- **ADR 0029** — Recoverable merge deferral: `MERGE-PENDING` keeps the slice branch and the next run retries the merge
 
 ## QA Rounds and Shared Preview
 

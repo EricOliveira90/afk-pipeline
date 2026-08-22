@@ -1,18 +1,23 @@
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
-import { partitionLanes } from "./lanes.js";
-import type { PipelineConfig } from "./orchestrator.js";
+import {
+  laneResourceGroups,
+  migrationPathsIn,
+  partitionLanes,
+} from "./lanes.js";
+import type { NegotiateOutcome, PipelineConfig } from "./orchestrator.js";
 import {
   makeSliceContext,
+  type SliceContext,
   runSliceNegotiate,
   runSliceExecute,
   sliceBranch,
-  sliceBranchPrefix,
+  sliceScratchMergeDir,
   isCancelled,
 } from "./orchestrator.js";
 import { kiroProvider } from "./kiro.js";
@@ -24,12 +29,24 @@ export type WaveOutcomePhase =
   | "ERROR"
   | "CANCELLED"
   | "CONFLICT"
+  | "MERGE-PENDING"
   | "LANE-CANCELLED";
 
 export type WaveOutcome =
   | { phase: "PASS" }
+  /**
+   * Deferred merge (ADR 0029). The slice branch is intact and QA passed;
+   * only the migration prefix collision refused the merge. The prefixes
+   * ride along so the orchestrator can persist them for the next run's
+   * merge-only recovery.
+   */
   | {
-      phase: Exclude<WaveOutcomePhase, "PASS">;
+      phase: "MERGE-PENDING";
+      error: string;
+      collidingPrefixes: string[];
+    }
+  | {
+      phase: Exclude<WaveOutcomePhase, "PASS" | "MERGE-PENDING">;
       error: string;
     };
 
@@ -71,6 +88,74 @@ export function executionLanes(
   serialLanes: boolean | undefined,
 ): Slice[][] {
   return serialLanes ? [lanes.flat()] : lanes;
+}
+
+/**
+ * The wave's contract-lock migration gate (ADR 0028).
+ *
+ * A contract names its migration file at lock time, seconds after the
+ * planner drafts it. If that filename's numeric prefix already exists on
+ * the feature branch under a different name, the merge mutex will refuse
+ * the merge — but not until the slice has explored, planned, generated,
+ * and passed QA. In the PRD 076 session that was four hours and seven
+ * commits, thrown away over a filename.
+ *
+ * So the wave inspects the locked contract's "Files expected to change"
+ * list the moment it locks, and refuses a lock that collides. The
+ * objection names the colliding prefix and the next free one, so the
+ * planner has a mechanical correction to make rather than a puzzle.
+ *
+ * This does not replace the merge-mutex check, which is unchanged and
+ * remains the authority: only a check atomic with the merge itself can
+ * rule out a sibling lane merging a colliding prefix in between (see
+ * `git.migrationPrefixCollisions`). This is a cheap early filter running
+ * against the tip as it stands, and it is deliberately the *only*
+ * feature-branch gate — sibling collisions within a wave need none,
+ * because migration-bearing slices now share a lane (ADR 0027) and the
+ * successor re-negotiates against a tip that already holds its
+ * predecessor's migration.
+ */
+function migrationPrefixGate(
+  config: PipelineConfig,
+  featBranch: string,
+): (contractPath: string) => string | null {
+  const laneOptions = { migrationPathPattern: config.migrationPathPattern };
+  // `migrationPathsIn` normalises to forward slashes, so the POSIX
+  // flavour is the exact one on every platform. Wrapped rather than
+  // passed to `map` directly: `basename` takes an optional second
+  // argument, which `map` would fill with the array index.
+  const basename = (p: string) => posix.basename(p);
+
+  return (contractPath) => {
+    const declared = artifacts.readContractFiles(contractPath);
+    // `undefined` (no such section) and `[]` (nothing usable declared)
+    // both mean the contract names no migration to check.
+    if (declared === undefined || declared.length === 0) return null;
+    const declaredMigrations = migrationPathsIn(declared, laneOptions);
+    if (declaredMigrations.length === 0) return null;
+
+    const featMigrations = migrationPathsIn(
+      git.listFilesOnRef(config.repoRoot, featBranch),
+      laneOptions,
+    ).map(basename);
+    const collisions = git.findMigrationPrefixCollisions(
+      featMigrations,
+      declaredMigrations.map(basename),
+    );
+    if (collisions.length === 0) return null;
+
+    const free = git.nextFreeMigrationPrefix(featMigrations);
+    const subject =
+      collisions.length === 1
+        ? `Migration prefix ${collisions[0]} already exists`
+        : `Migration prefixes ${collisions.join(", ")} already exist`;
+    return (
+      `${subject} on ${featBranch} under a different filename, so this slice's ` +
+      `migration(s) cannot be merged. The next free prefix on ${featBranch} is ${free}. ` +
+      `Renumber this slice's colliding migration file(s) from ${free} upwards, keeping the ` +
+      `rest of each filename, and list the corrected path(s) under "Files expected to change".`
+    );
+  };
 }
 
 export async function runWave(input: WaveInput): Promise<WaveResult> {
@@ -115,13 +200,17 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     { type: "wave-dispatched", wave: waveNumber, slices: [...readyIds] },
   );
 
-  // Build a SliceContext per slice.
-  const ctxById = new Map<string, ReturnType<typeof makeSliceContext>>();
+  // Build a SliceContext per slice, each carrying the contract-lock
+  // migration gate. Attached here rather than inside `makeSliceContext`
+  // because the gate is the wave's business: reading a locked contract's
+  // declared file list is what the wave does next anyway, and the gate
+  // is that read moved to the moment the contract locks.
+  const contractGate = migrationPrefixGate(config, featBranch);
+  const ctxById = new Map<string, SliceContext>();
   for (const id of readyIds) {
     const slice = dag.slices.get(id)!;
-    ctxById.set(
-      id,
-      makeSliceContext(
+    ctxById.set(id, {
+      ...makeSliceContext(
         config,
         slice,
         logger,
@@ -129,7 +218,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         relevantFilesBlock,
         testCommand,
       ),
-    );
+      onContractLocked: contractGate,
+    });
   }
 
   // --- Phase A: negotiate in parallel. ---
@@ -160,30 +250,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     }
 
     const { result } = r.value;
-    if (result === "LOCKED") {
+    if (result.phase === "LOCKED") {
       lockedIds.push(id);
       continue;
     }
-
-    // Phase A returns ESCALATE / STUCK / ERROR / CANCELLED on non-LOCKED.
-    if (result === "CANCELLED") {
-      record(id, { phase: "CANCELLED", error: "Cancelled by user" });
-    } else if (result === "ESCALATE") {
-      record(id, {
-        phase: "ESCALATE",
-        error: "Contract negotiation escalated after max rounds",
-      });
-    } else if (result === "STUCK") {
-      record(id, {
-        phase: "STUCK",
-        error: "Contract not locked after negotiation",
-      });
-    } else {
-      record(id, {
-        phase: "ERROR",
-        error: "Negotiation returned ERROR",
-      });
-    }
+    record(id, negotiateOutcome(result));
   }
 
   // Cancellation short-circuit between phases.
@@ -207,18 +278,36 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   }
 
   // --- Partition into lanes. ---
-  const lanes = partitionLanes(readyForLanes);
+  const laneOptions = { migrationPathPattern: config.migrationPathPattern };
+  const lanes = partitionLanes(readyForLanes, laneOptions);
   const lanesToRun = executionLanes(lanes, config.serialLanes);
+
+  // Which slices were serialised because they contend for a shared
+  // resource rather than a shared file (ADR 0027) — reported so the
+  // grouping is legible in the log and in the event stream.
+  const sharedResourceEntries = [
+    ...laneResourceGroups(readyForLanes, laneOptions),
+  ];
+  const sharedResources = Object.fromEntries(sharedResourceEntries);
+
   if (lanes.length > 0) {
     logger.phase(
       `[afk] Wave ${waveNumber}: ${lanesToRun.length} lane(s)${config.serialLanes ? " (serial)" : ""} — ${lanesToRun
         .map((l) => `[${l.map((s) => `#${s.ghIssue}`).join(", ")}]`)
-        .join(" ")}`,
+        .join(" ")}` +
+        sharedResourceEntries
+          .map(
+            ([key, members]) =>
+              ` — shared ${key}: ${members.map((id) => `#${id}`).join(", ")} (serialised into one lane)`,
+          )
+          .join(""),
       "error",
       {
         type: "lanes-partitioned",
         wave: waveNumber,
         lanes: lanesToRun.map((l) => l.map((s) => s.ghIssue)),
+        sharedResources:
+          sharedResourceEntries.length > 0 ? sharedResources : undefined,
         serial: config.serialLanes ? true : undefined,
       },
     );
@@ -255,11 +344,18 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     lanesToRun.map(async (lane) => {
       // Announce that the lane survives a member's failure — the exact
       // collateral-cancel spot pre-ADR 0024.
-      const continueLane = (failedIndex: number, phase: string) => {
+      const continueLane = (
+        failedIndex: number,
+        phase: Exclude<WaveOutcomePhase, "PASS">,
+      ) => {
         const rest = lane.slice(failedIndex + 1).map((s) => `#${s.ghIssue}`);
         if (rest.length === 0) return;
+        // A deferred merge is not a failure — say so, or the operator
+        // reads "failed (MERGE-PENDING)" and goes looking for a break.
+        const verb =
+          phase === "MERGE-PENDING" ? "deferred its merge" : "failed";
         logger.phase(
-          `[afk] Slice #${lane[failedIndex]!.ghIssue} failed (${phase}) — ` +
+          `[afk] Slice #${lane[failedIndex]!.ghIssue} ${verb} (${phase}) — ` +
             `its lane continues with ${rest.join(", ")} on the current ` +
             `${featBranch} tip (DAG-independent; see ADR 0024)`,
           "error",
@@ -267,7 +363,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             type: "warn",
             reason: "lane-continuation",
             ghIssue: lane[failedIndex]!.ghIssue,
-            message: `failed (${phase}) — its lane continues with ${rest.join(", ")}`,
+            message: `${verb} (${phase}) — its lane continues with ${rest.join(", ")}`,
           },
         );
       };
@@ -304,8 +400,8 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               }
             }
             const negotiate = await runSliceNegotiate(ctx);
-            if (negotiate !== "LOCKED") {
-              const outcome = negotiateRefreshOutcome(negotiate);
+            if (negotiate.phase !== "LOCKED") {
+              const outcome = negotiateOutcome(negotiate);
               record(id, outcome);
               if (outcome.phase === "CANCELLED") return;
               continueLane(i, outcome.phase);
@@ -399,32 +495,34 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             continue;
           }
 
-          const scratchMergeDir = join(
+          const scratchMergeDir = sliceScratchMergeDir(
             repoRoot,
-            ".afk",
-            `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+            prdSlug,
+            slice,
+            provider,
           );
           // Collision check + merge share one critical section: checking
           // against the feature-branch tip and then merging must be atomic,
           // or a sibling lane could merge a colliding prefix in between.
-          const mergeResult = await mergeMutex(() => {
-            const collisions = git.migrationPrefixCollisions(
-              repoRoot,
-              branch,
-              featBranch,
-            );
-            if (collisions.length > 0) {
-              return Promise.resolve<git.MergeResult>({
-                status: "conflict",
-                details:
-                  `Migration prefix collision: ${collisions.join(", ")} already exists on ${featBranch} ` +
-                  `under a different filename. Renumber this slice's migration(s) to the next free prefix and re-run.`,
-              });
-            }
-            return Promise.resolve(
-              git.mergeSliceBranch(repoRoot, branch, featBranch, scratchMergeDir),
-            );
-          });
+          // See ADR 0029 — the check stays here; only the refusal changed
+          // from terminal to deferred.
+          const attempt = await mergeMutex(() =>
+            Promise.resolve(
+              git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
+            ),
+          );
+          if (attempt.kind === "collision") {
+            // Deferred merge, not a conflict: the work is committed on the
+            // slice branch and QA passed. The next run retries the merge.
+            record(id, {
+              phase: "MERGE-PENDING",
+              error: git.mergePendingReason(attempt.prefixes, featBranch),
+              collidingPrefixes: attempt.prefixes,
+            });
+            continueLane(i, "MERGE-PENDING");
+            continue;
+          }
+          const mergeResult = attempt.result;
           if (mergeResult.status === "conflict") {
             record(id, {
               phase: "CONFLICT",
@@ -463,25 +561,21 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   return { outcomes };
 }
 
-function negotiateRefreshOutcome(
-  result: "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED",
-): WaveOutcome {
-  switch (result) {
-    case "CANCELLED":
-      return { phase: "CANCELLED", error: "Cancelled by user" };
-    case "ESCALATE":
-      return {
-        phase: "ESCALATE",
-        error: "Contract negotiation escalated after max rounds",
-      };
-    case "STUCK":
-      return {
-        phase: "STUCK",
-        error: "Contract not locked after negotiation",
-      };
-    case "ERROR":
-      return { phase: "ERROR", error: "Negotiation refresh returned ERROR" };
-  }
+/**
+ * Turn a non-LOCKED negotiate result into the slice's outcome, keeping
+ * the classified cause as the outcome's reason. That reason is what the
+ * run state persists, what the next run's retry announcement quotes,
+ * and what `afk status` renders — so an operator can tell "the agent
+ * provider hung up with exit code 1" from "the evaluator wrote
+ * ESCALATE" without opening an agent log. It replaces the fixed
+ * "Negotiation returned ERROR" text. See ADR 0025.
+ */
+function negotiateOutcome(
+  result: Exclude<NegotiateOutcome, { phase: "LOCKED" }>,
+): Exclude<WaveOutcome, { phase: "PASS" }> {
+  return result.phase === "CANCELLED"
+    ? { phase: "CANCELLED", error: "Cancelled by user" }
+    : { phase: result.phase, error: result.cause.summary };
 }
 
 /**

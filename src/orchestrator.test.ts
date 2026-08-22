@@ -804,7 +804,10 @@ describe("runPipeline lane scheduling", () => {
       provider: buildStubProvider({ fixtures, slices, records }),
     });
 
-    expect(result.success).toBe(true);
+    // The selected slice passed and merged; the run itself is unsuccessful
+    // because the stub's no-op reviews leave no verdict to ship on
+    // (issue #43) — which is why the handoff below records FAILED.
+    expect(result.success).toBe(false);
     expect(records.some((record) => record.ghIssue === "4001")).toBe(true);
     expect(records.some((record) => record.ghIssue === "4002")).toBe(false);
 
@@ -819,7 +822,7 @@ describe("runPipeline lane scheduling", () => {
     const handoff = JSON.parse(
       readFileSync(join(repo, ".afk", "logs", `${slug}-stub`, "handoff.json"), "utf-8"),
     );
-    expect(handoff.runStatus).toBe("SUCCEEDED");
+    expect(handoff.runStatus).toBe("FAILED");
     expect(handoff.selectedSlices).toMatchObject([
       { number: "01", ghIssue: "4001", status: "PASS" },
     ]);
@@ -830,6 +833,144 @@ describe("runPipeline lane scheduling", () => {
     expect(handoff.featureBranch).toBe(`feat-stub/${slug}`);
     expect(handoff.finalCommitSha).toMatch(/^[0-9a-f]{40}$/);
     expect(handoff.githubIssuesToClose).toEqual(["4001"]);
+  }, 60_000);
+});
+
+/**
+ * A run that dispatches nothing must say so and fail (issue #42). The
+ * honest signal is `PipelineResult.success`, and `failureReason` carries
+ * the diagnostic the three entrypoints print before their existing
+ * non-zero exit — the same per-slice hold-back the NOT-RUN log lines
+ * already spell out.
+ */
+describe("runPipeline zero-dispatch outcome (issue #42)", () => {
+  it("is unsuccessful and names every unrun slice with its unresolved blockers", async () => {
+    const repo = makeRepo();
+    const slug = "zero-dispatch-blocked";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "5001",
+        title: "Held back",
+        type: "AFK",
+        blockedBy: ["4999"],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "5002",
+        title: "Also held back",
+        type: "AFK",
+        blockedBy: ["5001"],
+        userStories: "",
+      },
+    ];
+    const records: InvocationRecord[] = [];
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: new Map<string, SliceFixture>(),
+        slices,
+        records,
+      }),
+    });
+
+    // Nothing was dispatched, so no agent was ever invoked — including
+    // the guardian reviewers, which must not grade an untouched branch.
+    expect(records).toEqual([]);
+    expect(result.success).toBe(false);
+    const reason = result.failureReason ?? "";
+    expect(reason).toContain("no slices");
+    expect(reason).toContain("#5001 Held back");
+    expect(reason).toContain("#4999 (outside run scope)");
+    expect(reason).toContain("#5002 Also held back");
+    expect(reason).toContain("#5001");
+  }, 60_000);
+
+  it("stays successful when it dispatched nothing because every slice was already complete", async () => {
+    const repo = makeRepo();
+    const slug = "zero-dispatch-complete";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "5101",
+        title: "Done last run",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    // A prior run merged the slice. Its persisted PASS is authoritative,
+    // so this run has nothing to dispatch and that is not a failure.
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      join(repo, ".afk", "state", `${slug}-stub.json`),
+      JSON.stringify({
+        version: 1,
+        prdSlug: `${slug}-stub`,
+        featureBranch: `feat-stub/${slug}`,
+        slices: {
+          "5101": {
+            phase: "PASS",
+            branch: `afk-stub/${slug}-s01`,
+            mergedToFeature: true,
+          },
+        },
+      }),
+      "utf-8",
+    );
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({
+      fixtures: new Map<string, SliceFixture>(),
+      slices,
+      records,
+    });
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        const result = await baseProvider.invoke(options);
+        if (
+          options.role === "architect-review" ||
+          options.role === "pm-review"
+        ) {
+          const specs = join(options.cwd, ".kiro", "specs", slug);
+          mkdirSync(specs, { recursive: true });
+          const fileName =
+            options.role === "architect-review"
+              ? "review-architect.md"
+              : "review-pm.md";
+          writeFileSync(
+            join(specs, fileName),
+            "# Guardian Review\n\n**Verdict:** SHIP\n",
+            "utf-8",
+          );
+        }
+        return result;
+      },
+    };
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.failureReason).toBeUndefined();
+    // No slice work ran; only the post-merge guardian reviews.
+    expect(
+      records.every((record) => record.role.endsWith("-review")),
+    ).toBe(true);
   }, 60_000);
 });
 
@@ -901,7 +1042,8 @@ describe("runPipeline summary report", () => {
       provider,
     });
 
-    expect(result.success).toBe(true);
+    // Unsuccessful: the slice passed but nothing shipped (issue #43).
+    expect(result.success).toBe(false);
     expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("#5001 Only");
@@ -1019,8 +1161,10 @@ describe("runPipeline summary report", () => {
       infrastructureRetries: 1,
     });
 
-    // Pipeline returns normally; the slice succeeded.
-    expect(result.success).toBe(true);
+    // Pipeline returns normally; the slice succeeded. The run does not:
+    // no draft PR opened, so the exit signal is unsuccessful (issue #43).
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toContain("NEVER_RAN");
     expect(result.consoleSummary).toContain(`AFK Pipeline Summary — ${slug}`);
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("#7001");
@@ -1091,8 +1235,10 @@ describe("runPipeline summary report", () => {
       infrastructureRetries: 0,
     });
 
-    // Pipeline still returns normally.
-    expect(result.success).toBe(true);
+    // Pipeline still returns normally, but the run is unsuccessful: both
+    // verdicts are absent, so nothing shipped (issue #43).
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toContain("NEVER_RAN");
     expect(result.consoleSummary).toMatch(/Succeeded \(1\)/);
     expect(result.consoleSummary).toContain("Not ready");
     expect(result.consoleSummary).toContain("architect review NEVER_RAN");
@@ -1176,7 +1322,7 @@ describe("round-scoped contract feedback", () => {
       "pnpm test",
     );
 
-    await expect(runSliceNegotiate(ctx)).resolves.toBe("LOCKED");
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(plannerRounds).toBe(2);
     expect(evaluatorRounds).toBe(2);
@@ -1259,7 +1405,7 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await expect(runSliceNegotiate(ctx)).resolves.toBe("LOCKED");
+      expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(plannerRounds).toBe(3);
       expect(evaluatorRounds).toBe(3);
@@ -1323,7 +1469,13 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await expect(runSliceNegotiate(ctx)).resolves.toBe("ESCALATE");
+      // The ESCALATE carries a verdict-class cause, not an
+      // infrastructure one — so it is terminal, not retried (ADR 0025).
+      const negotiate = await runSliceNegotiate(ctx);
+      expect(negotiate.phase).toBe("ESCALATE");
+      expect(
+        negotiate.phase === "ESCALATE" ? negotiate.cause.kind : undefined,
+      ).toBe("verdict");
       await new Promise((resolve) => setTimeout(resolve, 50));
       const stuckPath = join(ctx.absSliceDir, "stuck.md");
       expect(existsSync(stuckPath)).toBe(true);
@@ -1567,7 +1719,9 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       infrastructureRetries: 1,
     });
 
-    expect(result.success).toBe(true);
+    // The PM blocked, so the run is unsuccessful (issue #43) — but that is
+    // a verdict, not the infrastructure failure this test is about.
+    expect(result.success).toBe(false);
     // The first failure did not become terminal: the retry recovered SHIP.
     expect(architectAttempts).toBe(2);
     expect(result.consoleSummary).toContain("Architect review: SHIP");
@@ -1609,7 +1763,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       infrastructureRetries: 1,
     });
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(pmAttempts).toBe(2);
     expect(result.consoleSummary).toContain("PM review DIED_MID_RUN");
     const summary = readFileSync(
@@ -1652,7 +1806,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       provider,
     });
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(result.consoleSummary).toContain("Not ready");
     // The Not-ready outcome must still leave the evidence committed on
     // the feature branch — nothing dirty in the (removed) review worktree.
@@ -1795,8 +1949,10 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       provider,
     };
 
+    // Both runs end on the unfavorable PM verdict, so neither ships
+    // (issue #43); what this test asserts is the re-entry cost.
     const first = await runPipeline({ ...config, dag: buildDAG(slices) });
-    expect(first.success).toBe(true);
+    expect(first.success).toBe(false);
     const gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
     expect(gateRunsAfterFirst).toBe(1);
     expect(architectRuns).toBe(1);
@@ -1806,13 +1962,237 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     // the (post-review-commit) tree and the favorable architect verdict
     // against the unchanged HEAD; only the unfavorable PM review re-runs.
     const second = await runPipeline({ ...config, dag: buildDAG(slices) });
-    expect(second.success).toBe(true);
+    expect(second.success).toBe(false);
     expect(readFileSync(marker, "utf-8").length).toBe(1);
     expect(architectRuns).toBe(1);
     expect(pmRuns).toBe(2);
     expect(second.consoleSummary).toContain("Architect review: SHIP");
     expect(second.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
   }, 120_000);
+
+  /**
+   * A run that ends without a shippable branch must not report success
+   * (issue #43). `PipelineResult.success` used to be computed purely from
+   * slice outcomes, so all-slices-PASS plus a FIX-BEFORE-SHIP PM verdict
+   * exited 0 and wrapper scripts could not tell a shipped run from a
+   * blocked one. All-slices-PASS is now necessary but not sufficient.
+   */
+  describe("honest exit signal (issue #43)", () => {
+    /** Wire both guardian reviews to fixed verdicts over the passing stub. */
+    function withVerdicts(
+      slug: string,
+      baseProvider: AgentProvider,
+      verdicts: { architect?: string; pm?: string },
+    ): AgentProvider {
+      return {
+        name: baseProvider.name,
+        async invoke(options) {
+          if (options.role === "architect-review" && verdicts.architect) {
+            writeReviewFile(
+              options.cwd,
+              slug,
+              "review-architect.md",
+              verdicts.architect,
+            );
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          if (options.role === "pm-review" && verdicts.pm) {
+            writeReviewFile(options.cwd, slug, "review-pm.md", verdicts.pm);
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          return baseProvider.invoke(options);
+        },
+      };
+    }
+
+    it("is unsuccessful when every slice passed but an unfavorable PM verdict kept the draft PR closed", async () => {
+      const slug = "exit-blocked-pm";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7401");
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "FIX-BEFORE-SHIP",
+        }),
+      });
+
+      // The slice itself passed and merged — the run is unsuccessful anyway.
+      expect(result.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("draft PR");
+      expect(result.failureReason).toContain("FIX-BEFORE-SHIP");
+    }, 60_000);
+
+    it("treats an unparseable guardian verdict the same way", async () => {
+      const slug = "exit-unparseable";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7402");
+
+      // The PM finishes and writes a review, but with no recognizable
+      // verdict marker — an absent judgment, not an unfavorable one, and
+      // not an override the operator can record disagreement with.
+      const provider: AgentProvider = {
+        name: baseProvider.name,
+        async invoke(options) {
+          if (options.role === "architect-review") {
+            writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          if (options.role === "pm-review") {
+            const dir = join(options.cwd, ".kiro", "specs", slug);
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(
+              join(dir, "review-pm.md"),
+              "# Guardian Review\n\nI reviewed the branch and have thoughts.\n",
+              "utf-8",
+            );
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          return baseProvider.invoke(options);
+        },
+      };
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        // Even with the override flag on, an absent judgment is not
+        // overridable (ADR 0015) — so the run stays unsuccessful.
+        openPrOnOverride: true,
+        provider,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("PM: UNPARSEABLE");
+    }, 60_000);
+
+    it("is unsuccessful when cancellation landed after the last merge but before the ship gates", async () => {
+      const slug = "exit-cancelled-preship";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7406");
+
+      // Cancel as soon as the slice's QA lands: the merge completes, so
+      // every slice is PASS, but the sanity gate and guardians never run.
+      const controller = new AbortController();
+      const provider: AgentProvider = {
+        name: baseProvider.name,
+        async invoke(options) {
+          const result = await baseProvider.invoke(options);
+          if (options.role === "evaluator-qa") controller.abort();
+          return result;
+        },
+      };
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider,
+        signal: controller.signal,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("cancelled");
+    }, 60_000);
+
+    it("is unsuccessful when the pre-ship sanity gate failed, naming the failing step", async () => {
+      const slug = "exit-sanity-fail";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7403");
+
+      writeFileSync(
+        join(repo, "package.json"),
+        JSON.stringify(
+          {
+            name: "consumer-fixture",
+            private: true,
+            scripts: { typecheck: "node -e \"process.exit(1)\"" },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+      git(repo, ["add", "package.json"]);
+      git(repo, ["commit", "-m", "add failing typecheck"]);
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        // Favorable verdicts would open the PR — but the gate short-circuits
+        // the guardians, so the run is unsuccessful regardless.
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "SHIP",
+        }),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toContain("pre-ship sanity gate");
+      expect(result.failureReason).toContain("typecheck");
+    }, 60_000);
+
+    it("stays successful when both guardian verdicts are favorable and the draft PR opened", async () => {
+      const slug = "exit-shipped";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7404");
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "ACCEPT-WITH-NOTES",
+        }),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.failureReason).toBeUndefined();
+    }, 60_000);
+
+    it("stays successful when --open-pr-on-override opened the draft PR, with the override note recorded", async () => {
+      const slug = "exit-override";
+      const { repo, prdDir, specsDir, slices, baseProvider } =
+        makePassingSliceSetup(slug, "7405");
+
+      const result = await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        openPrOnOverride: true,
+        provider: withVerdicts(slug, baseProvider, {
+          architect: "SHIP",
+          pm: "FIX-BEFORE-SHIP",
+        }),
+      });
+
+      // The override note is the operator's recorded acknowledgement, so a
+      // deliberate override is not reported as a failure.
+      expect(result.success).toBe(true);
+      expect(result.failureReason).toBeUndefined();
+      expect(result.summary).toContain(
+        "PR opened via --open-pr-on-override despite PM verdict FIX-BEFORE-SHIP",
+      );
+    }, 60_000);
+  });
 });
 
 describe("buildReviewScopeBlock", () => {
@@ -1826,9 +2206,11 @@ describe("buildReviewScopeBlock", () => {
   });
 
   it("lists selected slices and skipped slices with their reasons", () => {
+    const selected = slice("01", "1", "Do the thing", "AFK");
     const block = buildReviewScopeBlock({
       persisted: { mode: "explicit", slices: [{ number: "01", ghIssue: "1" }] },
-      selected: [slice("01", "1", "Do the thing", "AFK")],
+      members: [selected],
+      selected: [selected],
       skipped: [
         { slice: slice("02", "2", "Human ceremony", "HITL"), reason: "hitl" },
         { slice: slice("03", "3", "Deferred work", "AFK"), reason: "not-selected" },
@@ -1841,10 +2223,36 @@ describe("buildReviewScopeBlock", () => {
     expect(block).toContain("- 03 (#3) Deferred work (not selected for this run)");
   });
 
+  it("tells the reviewer the invocation was narrowed and which members it left out", () => {
+    const passed = slice("01", "1", "Passed earlier", "AFK");
+    const selected = slice("02", "2", "Re-run of the failed slice", "AFK");
+    const block = buildReviewScopeBlock({
+      persisted: {
+        mode: "all-afk",
+        slices: [
+          { number: "01", ghIssue: "1" },
+          { number: "02", ghIssue: "2" },
+        ],
+      },
+      members: [passed, selected],
+      selected: [selected],
+      skipped: [
+        { slice: passed, reason: "narrowed" },
+      ],
+    });
+    expect(block).toContain("- 02 (#2) Re-run of the failed slice");
+    expect(block).toContain("narrowed");
+    expect(block).toContain(
+      "- 01 (#1) Passed earlier (in this run's scope of record but not run by this invocation)",
+    );
+  });
+
   it("notes when nothing was skipped", () => {
+    const selected = slice("01", "1", "Everything", "AFK");
     const block = buildReviewScopeBlock({
       persisted: { mode: "all-afk", slices: [{ number: "01", ghIssue: "1" }] },
-      selected: [slice("01", "1", "Everything", "AFK")],
+      members: [selected],
+      selected: [selected],
       skipped: [],
     });
     expect(block).toContain("No manifest slices were skipped");
@@ -1923,6 +2331,45 @@ describe("buildPrCreationPlan", () => {
       expect(plan.overridden).toBe(false);
     },
   );
+
+  /**
+   * `open` is what makes `PipelineResult.success` honest (issue #43): a
+   * closed plan is a run with no shippable branch, and an overridden-open
+   * plan is the one deliberate exception that still exits 0.
+   */
+  it("closes the plan for every unfavorable or absent verdict pair without the override", () => {
+    const outcomes = [
+      "FIX-BEFORE-SHIP",
+      "NEVER_RAN",
+      "DIED_MID_RUN",
+      "UNPARSEABLE",
+    ] as const;
+    for (const architect of outcomes) {
+      for (const pm of [...outcomes, "SHIP", "ACCEPT-WITH-NOTES"] as const) {
+        const plan = buildPrCreationPlan({
+          ...base,
+          architect,
+          pm,
+          openPrOnOverride: false,
+        });
+        expect(plan.open, `${architect}/${pm}`).toBe(false);
+        expect(plan.overrideNote, `${architect}/${pm}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("the only open-with-override case carries the note that keeps the run successful", () => {
+    for (const architect of ["SHIP", "ACCEPT-WITH-NOTES"] as const) {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect,
+        pm: "FIX-BEFORE-SHIP",
+        openPrOnOverride: true,
+      });
+      expect(plan.open).toBe(true);
+      expect(plan.overrideNote).toBeDefined();
+    }
+  });
 });
 
 
@@ -2148,7 +2595,9 @@ describe("runPipeline per-slice state persistence", () => {
       provider: provider2,
     });
 
-    expect(result.success).toBe(true);
+    // Unsuccessful only because the stub's no-op guardian reviews leave
+    // no verdict to ship on (issue #43); both slices are PASS below.
+    expect(result.success).toBe(false);
     // The re-run skipped exactly the already-merged slice — zero agent
     // invocations for 7001 — and ran the crashed slice to completion.
     expect(records2.some((r) => r.ghIssue === "7001")).toBe(false);
@@ -2243,7 +2692,9 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
       provider: recordingProvider(baseProvider, seen),
     });
 
-    expect(result.success).toBe(true);
+    // The stub's no-op guardian reviews block shipping (issue #43); the
+    // slice ran to completion, which is what the ceilings below describe.
+    expect(result.success).toBe(false);
     // Slow roles: measured generator durations on a consuming project
     // ranged ~41–60+ min, so the 60 min provider default sat directly
     // on the real distribution. These two get double the budget.
@@ -2272,7 +2723,8 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
       maxAgentDurationMs: 5_400_000,
     });
 
-    expect(result.success).toBe(true);
+    // As above: the stub's no-op reviews block shipping (issue #43).
+    expect(result.success).toBe(false);
     // Every role that ran — slice roles and guardian reviews alike —
     // received the uniform override.
     expect(seen.size).toBeGreaterThanOrEqual(5);
@@ -2749,6 +3201,95 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
     expect(runLog).toContain("Slice #9401 (Retried): PASS");
   }, 60_000);
 
+  /**
+   * Issue #40: the cause a negotiate failure was classified with has to
+   * survive the whole way out — into the run state, and back out of it
+   * into the next run's retry announcement. Before this, a dead contract
+   * evaluator persisted the fixed text "Negotiation returned ERROR", so
+   * the next run announced a retry that explained nothing.
+   *
+   * Two real pipeline runs against one repo: the first kills the contract
+   * evaluator, the second is healthy.
+   */
+  it("persists a negotiate failure cause and quotes it in the next run's retry announcement", async () => {
+    const repo = makeRepo();
+    const slug = "negotiate-cause";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "9501",
+        title: "Negotiator",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "9501",
+        {
+          files: ["src/neg.txt"],
+          qaPasses: true,
+          outputFile: "src/neg.txt",
+          outputContent: "neg",
+        },
+      ],
+    ]);
+    const healthy = buildStubProvider({ fixtures, slices, records: [] });
+    const doomed: AgentProvider = {
+      name: healthy.name,
+      async invoke(options) {
+        if (options.role === "evaluator-contract") {
+          options.logStream?.write("evaluator-contract: reading contract.md\n");
+          throw new Error("Agent evaluator-contract exited with code 1");
+        }
+        return healthy.invoke(options);
+      },
+    };
+
+    const first = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: doomed,
+      infrastructureRetries: 0,
+    });
+    expect(first.success).toBe(false);
+
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.slices["9501"].phase).toBe("ERROR");
+    const persisted: string = state.slices["9501"].error;
+    expect(persisted).toContain("exit code 1");
+    expect(persisted).toContain("evaluator-contract");
+    expect(persisted).toContain("last output:");
+    expect(persisted).not.toContain("Negotiation returned ERROR");
+    // The reason has to stay one line: the retry announcement below
+    // embeds it, and run.log is line-oriented.
+    expect(persisted).not.toContain("\n");
+
+    const second = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: healthy,
+    });
+    // The slice recovered, but the stub guardians left no shippable verdict.
+    expect(second.success).toBe(false);
+
+    // Second run's run.log — runLogOf reads the newest run directory.
+    const runLog = runLogOf(repo, slug);
+    expect(runLog).toContain(
+      `Retrying #9501 Negotiator (previous run: ERROR — ${persisted})`,
+    );
+  }, 120_000);
+
   it("emits an explicit NOT-RUN line naming the unresolved blocker for held-back slices", async () => {
     const repo = makeRepo();
     const slug = "heldback";
@@ -2821,4 +3362,573 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
       "Slice #9502 (Dependent): NOT-RUN — held back by unresolved dependency [#9501]; fix the blocker(s) and re-run",
     );
   }, 60_000);
+});
+
+/**
+ * Re-running only the failed slices (#41).
+ *
+ * Two mechanisms have to hold together for the operator journey to work.
+ * Dependency satisfaction must read the run state, so a prerequisite
+ * recorded PASS and merged unblocks its dependents even when this
+ * invocation did not select it — otherwise a narrow re-run dispatches
+ * nothing and still exits "completed". And the run scope must accept a
+ * strict subset of the persisted scope, so "re-run only what failed" is
+ * expressible at all. `--only-failed` is sugar over the same subset rule
+ * and must produce an identical run.
+ */
+describe("narrowed re-run of the failed slices (#41)", () => {
+  const NARROW_SLICES: Slice[] = [
+    { number: "01", ghIssue: "4101", title: "Foundation", type: "AFK", blockedBy: [], userStories: "" },
+    { number: "02", ghIssue: "4102", title: "Dependent", type: "AFK", blockedBy: ["4101"], userStories: "" },
+  ];
+
+  function fixturesWith(dependentPasses: boolean): Map<string, SliceFixture> {
+    return new Map<string, SliceFixture>([
+      ["4101", { files: ["src/foundation.txt"], qaPasses: true, outputFile: "src/foundation.txt", outputContent: "foundation" }],
+      ["4102", { files: ["src/dependent.txt"], qaPasses: dependentPasses, outputFile: "src/dependent.txt", outputContent: "dependent" }],
+    ]);
+  }
+
+  function latestRunDir(repo: string, slug: string): string {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const dirs = readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .sort();
+    return join(parent, dirs[dirs.length - 1]!);
+  }
+
+  /** First run: the foundation passes and merges, the dependent lands STUCK. */
+  async function runUntilDependentFails(slug: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(NARROW_SLICES),
+      provider: buildStubProvider({
+        fixtures: fixturesWith(false),
+        slices: NARROW_SLICES,
+        records: [],
+      }),
+    });
+    expect(result.success).toBe(false);
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.slices["4101"]).toMatchObject({ phase: "PASS", mergedToFeature: true });
+    expect(state.slices["4102"].phase).toBe("STUCK");
+    return { repo, prdDir, specsDir, statePath, slug };
+  }
+
+  type FailedRun = Awaited<ReturnType<typeof runUntilDependentFails>>;
+
+  /** Re-run the same PRD with a narrowing config, and observe the result. */
+  async function narrowRerun(
+    env: FailedRun,
+    narrowing: { selectedSliceNumbers?: string[] },
+  ) {
+    const records: InvocationRecord[] = [];
+    const result = await runPipeline({
+      repoRoot: env.repo,
+      prdSlug: env.slug,
+      prdDir: env.prdDir,
+      specsDir: env.specsDir,
+      dag: buildDAG(NARROW_SLICES),
+      provider: buildStubProvider({
+        fixtures: fixturesWith(true),
+        slices: NARROW_SLICES,
+        records,
+      }),
+      ...narrowing,
+    });
+    const state = JSON.parse(readFileSync(env.statePath, "utf-8"));
+    const handoff = JSON.parse(
+      readFileSync(
+        join(env.repo, ".afk", "logs", `${env.slug}-stub`, "handoff.json"),
+        "utf-8",
+      ),
+    );
+    const events = readFileSync(
+      join(latestRunDir(env.repo, env.slug), "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    return {
+      success: result.success,
+      // Slice-scoped invocations only: the post-merge review agents run
+      // for the whole branch and carry no slice id.
+      dispatched: [
+        ...new Set(records.map((r) => r.ghIssue).filter((id) => id !== "")),
+      ].sort(),
+      scope: state.scope,
+      phases: {
+        "4101": state.slices["4101"].phase,
+        "4102": state.slices["4102"].phase,
+      },
+      selectedSlices: handoff.selectedSlices,
+      skippedSlices: handoff.skippedSlices,
+      events,
+    };
+  }
+
+  it("dispatches the selected slice whose prerequisite is a merged PASS outside the selection", async () => {
+    const env = await runUntilDependentFails("narrow-subset");
+
+    const observed = await narrowRerun(env, { selectedSliceNumbers: ["02"] });
+
+    // The whole point: the run actually ran the slice it was narrowed to.
+    expect(observed.dispatched).toEqual(["4102"]);
+    // Slice work passed; the stub guardian verdicts still block shipping.
+    expect(observed.success).toBe(false);
+    expect(observed.phases).toEqual({ "4101": "PASS", "4102": "PASS" });
+
+    // The scope of record is untouched by the narrowing, so a later full
+    // re-run still knows the original scope.
+    expect(observed.scope).toEqual({
+      mode: "all-afk",
+      slices: [
+        { number: "01", ghIssue: "4101" },
+        { number: "02", ghIssue: "4102" },
+      ],
+    });
+
+    // The excluded member is reported skipped under its own reason —
+    // it did not read as a slice the pipeline dropped.
+    expect(observed.skippedSlices).toMatchObject([
+      { number: "01", ghIssue: "4101", reason: "narrowed" },
+    ]);
+    expect(observed.selectedSlices).toMatchObject([
+      { number: "02", ghIssue: "4102", status: "PASS" },
+    ]);
+
+    // The dependency satisfied from prior run state is announced.
+    const warn = observed.events.find(
+      (e) => e.type === "warn" && e.reason === "dependency-from-prior-run",
+    );
+    expect(warn).toBeDefined();
+    expect(warn!.ghIssue).toBe("4101");
+    expect(warn!.previousPhase).toBe("PASS");
+  }, 120_000);
+
+  it("rejects a re-run that adds work outside the persisted scope", async () => {
+    const env = await runUntilDependentFails("narrow-superset");
+    // Lock an explicit single-slice scope first, then try to gain work.
+    const extended: Slice[] = [
+      ...NARROW_SLICES,
+      { number: "03", ghIssue: "4103", title: "New work", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+
+    await expect(
+      runPipeline({
+        repoRoot: env.repo,
+        prdSlug: env.slug,
+        prdDir: env.prdDir,
+        specsDir: env.specsDir,
+        dag: buildDAG(extended),
+        selectedSliceNumbers: ["02", "03"],
+        provider: buildStubProvider({
+          fixtures: fixturesWith(true),
+          slices: extended,
+          records: [],
+        }),
+      }),
+    ).rejects.toThrow(/do not match the persisted run scope/);
+  }, 120_000);
+
+});
+
+/**
+ * Merge-only recovery for MERGE-PENDING slices (ADR 0029). Driven through
+ * a two-run `runPipeline` shape — run, mutate state, run again — because
+ * that is exactly what recovery is: a
+ * later invocation acting on what an earlier one persisted.
+ *
+ * Run 1 always ends the same way: a migration whose numeric prefix is
+ * already taken on the feature branch, so the merge mutex refuses and the
+ * slice is recorded MERGE-PENDING with its work intact.
+ */
+describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
+  const BLOCKED = "8001";
+  const DEPENDENT = "8002";
+
+  function slicesWithDependent(): Slice[] {
+    return [
+      { number: "01", ghIssue: BLOCKED, title: "Adds orders", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: DEPENDENT, title: "Uses orders", type: "AFK", blockedBy: [BLOCKED], userStories: "" },
+    ];
+  }
+
+  function fixturesWithDependent(): Map<string, SliceFixture> {
+    return new Map<string, SliceFixture>([
+      [BLOCKED, {
+        files: ["supabase/migrations/043_orders.sql"],
+        qaPasses: true,
+        outputFile: "supabase/migrations/042_orders.sql",
+        outputContent: "-- orders",
+      }],
+      [DEPENDENT, {
+        files: ["src/uses-orders.txt"],
+        qaPasses: true,
+        outputFile: "src/uses-orders.txt",
+        outputContent: "uses orders",
+      }],
+    ]);
+  }
+
+  /** Occupy prefix 042 on `main`, so the feature branch inherits it. */
+  function seedMigrationOnMain(repo: string, filename: string) {
+    mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
+    writeFileSync(
+      join(repo, "supabase", "migrations", filename),
+      "-- seeded\n",
+      "utf-8",
+    );
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-m", `add ${filename}`]);
+  }
+
+  interface StateSlice {
+    phase: string;
+    branch?: string;
+    mergedToFeature?: boolean;
+    error?: string;
+    collidingPrefixes?: string[];
+  }
+
+  function stateOf(repo: string, slug: string): Record<string, StateSlice> {
+    const raw = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    ) as { slices: Record<string, StateSlice> };
+    return raw.slices;
+  }
+
+  function latestRunLog(repo: string, slug: string): string {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const latest = readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .sort()
+      .at(-1)!;
+    return readFileSync(join(parent, latest, "run.log"), "utf-8");
+  }
+
+  async function createDeferredRun(slug: string) {
+    const repo = makeRepo();
+    seedMigrationOnMain(repo, "042_users.sql");
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices = slicesWithDependent();
+    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: [],
+      }),
+    });
+    expect(stateOf(repo, slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
+    return { repo, slug, slices, config, featBranch: `feat-stub/${slug}` };
+  }
+
+  it("recovers an excluded member before dispatching the narrowed dependent", async () => {
+    const env = await createDeferredRun("merge-pending-narrow-recover");
+    git(env.repo, ["checkout", env.featBranch]);
+    git(env.repo, [
+      "mv",
+      "supabase/migrations/042_users.sql",
+      "supabase/migrations/041_users.sql",
+    ]);
+    git(env.repo, ["commit", "-m", "free migration prefix 042"]);
+    git(env.repo, ["checkout", "main"]);
+
+    const records: InvocationRecord[] = [];
+    await runPipeline({
+      ...env.config,
+      dag: buildDAG(env.slices),
+      selectedSliceNumbers: ["02"],
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices: env.slices,
+        records,
+      }),
+    });
+
+    expect(stateOf(env.repo, env.slug)[BLOCKED]!.phase).toBe("PASS");
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(records.some((record) => record.ghIssue === DEPENDENT)).toBe(true);
+  }, 180_000);
+
+  it("rechecks an excluded member whose collision persists without dispatching it", async () => {
+    const env = await createDeferredRun("merge-pending-narrow-sticky");
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      ...env.config,
+      dag: buildDAG(env.slices),
+      selectedSliceNumbers: ["02"],
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices: env.slices,
+        records,
+      }),
+    });
+
+    expect(stateOf(env.repo, env.slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(records.some((record) => record.ghIssue === DEPENDENT)).toBe(false);
+  }, 180_000);
+
+  it("checks an excluded member with a missing branch but does not dispatch it", async () => {
+    const env = await createDeferredRun("merge-pending-narrow-missing");
+    const branch = stateOf(env.repo, env.slug)[BLOCKED]!.branch!;
+    const worktree = join(
+      env.repo,
+      ".afk",
+      "worktrees",
+      `afk-stub-${env.slug}-s01`,
+    );
+    git(env.repo, ["worktree", "remove", worktree, "--force"]);
+    git(env.repo, ["branch", "-D", branch]);
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      ...env.config,
+      dag: buildDAG(env.slices),
+      selectedSliceNumbers: ["02"],
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices: env.slices,
+        records,
+      }),
+    });
+
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(latestRunLog(env.repo, env.slug)).toContain(
+      "slice is outside this invocation's dispatch set",
+    );
+  }, 180_000);
+
+  it("merges the deferred slice on the next run with no agent, unblocking its dependent", async () => {
+    const repo = makeRepo();
+    const slug = "merge-pending-recover";
+    seedMigrationOnMain(repo, "042_users.sql");
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices = slicesWithDependent();
+    const featBranch = `feat-stub/${slug}`;
+    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+
+    // --- Run 1: the merge is refused; nothing is discarded. ---
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: [],
+      }),
+    });
+
+    const afterFirst = stateOf(repo, slug)[BLOCKED]!;
+    expect(afterFirst.phase).toBe("MERGE-PENDING");
+    expect(afterFirst.collidingPrefixes).toEqual(["042"]);
+    expect(afterFirst.error).toContain("retries the merge");
+    const sliceBranchName = afterFirst.branch!;
+    expect(git(repo, ["rev-parse", "--verify", sliceBranchName])).toMatch(/\w/);
+    const worktree = join(repo, ".afk", "worktrees", `afk-stub-${slug}-s01`);
+    expect(existsSync(worktree)).toBe(true);
+    // The dependent was held back — MERGE-PENDING unblocks nothing.
+    expect(stateOf(repo, slug)[DEPENDENT]).toBeUndefined();
+
+    // --- Mutate: free prefix 042 on the feature branch. ---
+    git(repo, ["checkout", featBranch]);
+    git(repo, [
+      "mv",
+      "supabase/migrations/042_users.sql",
+      "supabase/migrations/041_users.sql",
+    ]);
+    git(repo, ["commit", "-m", "renumber users migration to 041"]);
+    git(repo, ["checkout", "main"]);
+
+    // --- Run 2: recovery merges before any agent is dispatched. ---
+    const records2: InvocationRecord[] = [];
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: records2,
+      }),
+    });
+
+    const afterSecond = stateOf(repo, slug);
+    expect(afterSecond[BLOCKED]!.phase).toBe("PASS");
+    expect(afterSecond[BLOCKED]!.mergedToFeature).toBe(true);
+    // Not one agent invocation was spent on the recovered slice.
+    expect(records2.filter((r) => r.ghIssue === BLOCKED)).toEqual([]);
+    // Its worktree is gone, as it would be after any successful merge.
+    expect(existsSync(worktree)).toBe(false);
+    // The work actually landed on the feature branch.
+    git(repo, ["checkout", featBranch]);
+    expect(
+      existsSync(join(repo, "supabase", "migrations", "042_orders.sql")),
+    ).toBe(true);
+    // And the dependent, held back through all of run 1, ran and passed.
+    expect(afterSecond[DEPENDENT]!.phase).toBe("PASS");
+    expect(records2.some((r) => r.ghIssue === DEPENDENT)).toBe(true);
+  }, 180_000);
+
+  it("does not report zero dispatch when merge-only recovery is the only slice work", async () => {
+    const repo = makeRepo();
+    const slug = "merge-pending-only-work";
+    seedMigrationOnMain(repo, "042_users.sql");
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices = [slicesWithDependent()[0]!];
+    const fixtures = fixturesWithDependent();
+    fixtures.delete(DEPENDENT);
+    const featBranch = `feat-stub/${slug}`;
+    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+    expect(stateOf(repo, slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
+
+    git(repo, ["checkout", featBranch]);
+    git(repo, [
+      "mv",
+      "supabase/migrations/042_users.sql",
+      "supabase/migrations/041_users.sql",
+    ]);
+    git(repo, ["commit", "-m", "renumber users migration to 041"]);
+    git(repo, ["checkout", "main"]);
+
+    const records: InvocationRecord[] = [];
+    const baseProvider = buildStubProvider({ fixtures, slices, records });
+    const provider: AgentProvider = {
+      name: baseProvider.name,
+      async invoke(options) {
+        const result = await baseProvider.invoke(options);
+        if (
+          options.role === "architect-review" ||
+          options.role === "pm-review"
+        ) {
+          const specs = join(options.cwd, ".kiro", "specs", slug);
+          mkdirSync(specs, { recursive: true });
+          const fileName =
+            options.role === "architect-review"
+              ? "review-architect.md"
+              : "review-pm.md";
+          writeFileSync(
+            join(specs, fileName),
+            "# Guardian Review\n\n**Verdict:** SHIP\n",
+            "utf-8",
+          );
+        }
+        return result;
+      },
+    };
+
+    const result = await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.failureReason).toBeUndefined();
+    expect(stateOf(repo, slug)[BLOCKED]!.phase).toBe("PASS");
+    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
+    expect(records.every((record) => record.role.endsWith("-review"))).toBe(true);
+  }, 180_000);
+
+  it("keeps a still-colliding slice MERGE-PENDING with a refreshed reason and never regenerates it", async () => {
+    const repo = makeRepo();
+    const slug = "merge-pending-sticky";
+    seedMigrationOnMain(repo, "042_users.sql");
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices = slicesWithDependent();
+    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: [],
+      }),
+    });
+    expect(stateOf(repo, slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
+
+    // --- Run 2: nothing changed, so the collision is still there. ---
+    const records2: InvocationRecord[] = [];
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: records2,
+      }),
+    });
+
+    const after = stateOf(repo, slug)[BLOCKED]!;
+    expect(after.phase).toBe("MERGE-PENDING");
+    expect(after.collidingPrefixes).toEqual(["042"]);
+    expect(after.error).toContain("042");
+    // A repeated retry must not escalate into a regeneration nobody asked
+    // for: no agent ran against the slice in run 2 at all.
+    expect(records2.filter((r) => r.ghIssue === BLOCKED)).toEqual([]);
+    // Its branch is still there, ready for the run after this one.
+    expect(git(repo, ["rev-parse", "--verify", after.branch!])).toMatch(/\w/);
+  }, 180_000);
+
+  it("falls through to ordinary dispatch when the slice branch is gone", async () => {
+    const repo = makeRepo();
+    const slug = "merge-pending-lost-branch";
+    seedMigrationOnMain(repo, "042_users.sql");
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices = slicesWithDependent();
+    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: [],
+      }),
+    });
+    const branch = stateOf(repo, slug)[BLOCKED]!.branch!;
+
+    // --- Mutate: destroy the recoverable claim. ---
+    const worktree = join(repo, ".afk", "worktrees", `afk-stub-${slug}-s01`);
+    git(repo, ["worktree", "remove", worktree, "--force"]);
+    git(repo, ["branch", "-D", branch]);
+
+    const records2: InvocationRecord[] = [];
+    await runPipeline({
+      ...config,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({
+        fixtures: fixturesWithDependent(),
+        slices,
+        records: records2,
+      }),
+    });
+
+    // Nothing to merge, so the slice is dispatched like any other —
+    // recovery does not invent an outcome from a claim that is false.
+    expect(records2.some((r) => r.ghIssue === BLOCKED)).toBe(true);
+    expect(latestRunLog(repo, slug)).toContain(
+      "nothing to recover; dispatching normally",
+    );
+  }, 180_000);
 });

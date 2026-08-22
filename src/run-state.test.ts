@@ -78,6 +78,47 @@ describe("adaptLoadedState", () => {
       ),
     ).toThrow(/Unknown phase/);
   });
+
+  it("accepts MERGE-PENDING and keeps its colliding prefixes (ADR 0029)", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {
+          "100": {
+            phase: "MERGE-PENDING",
+            branch: "afk/demo-slice-01",
+            error: "Migration prefix collision: 042 …",
+            collidingPrefixes: ["042"],
+          },
+        },
+      },
+      "demo",
+    );
+    expect(adapted.slices["100"]!.phase).toBe("MERGE-PENDING");
+    expect(adapted.slices["100"]!.collidingPrefixes).toEqual(["042"]);
+  });
+
+  it("drops a malformed collidingPrefixes rather than wedging the load", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {
+          "100": {
+            phase: "MERGE-PENDING",
+            error: "collision",
+            collidingPrefixes: "042",
+          },
+        },
+      },
+      "demo",
+    );
+    expect(adapted.slices["100"]!.phase).toBe("MERGE-PENDING");
+    expect(adapted.slices["100"]!.collidingPrefixes).toBeUndefined();
+  });
 });
 
 describe("loadRunState + saveSliceState end-to-end", () => {
@@ -247,5 +288,23 @@ describe("sanitizeReviewPhase", () => {
     expect(state.reviewPhase).toEqual({
       architect: { headSha: "abc", verdict: "SHIP" },
     });
+  });
+});
+
+
+describe("unknown state properties", () => {
+  it("discards a legacy resume property without rejecting the state file", () => {
+    const state = adaptLoadedState(
+      {
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {},
+        resume: { "100": { attempts: 2 } },
+      },
+      "demo",
+    );
+
+    expect(state).not.toHaveProperty("resume");
   });
 });

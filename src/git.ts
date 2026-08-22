@@ -254,10 +254,64 @@ export function listMigrationFiles(repoRoot: string, ref: string): string[] {
   }
 }
 
+/**
+ * Every repo-relative file path on `ref` (committed tree only, no
+ * working-tree state). Empty array when the ref or repo is missing —
+ * the same tolerant contract as {@link listMigrationFiles}.
+ *
+ * Listing the whole tree rather than one directory is deliberate:
+ * deciding whether a path is a migration belongs to the configured
+ * recognition rule (`migrationPathsIn` in `src/lanes.ts`), and scoping
+ * the git call to a hardcoded directory is exactly what leaves
+ * {@link listMigrationFiles} blind to any layout but Supabase's.
+ */
+export function listFilesOnRef(repoRoot: string, ref: string): string[] {
+  try {
+    const output = git(["ls-tree", "-r", "--name-only", ref], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return output
+      .split(/\r?\n/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 /** Extract the leading numeric prefix of a migration filename, or null. */
 function migrationPrefix(filename: string): string | null {
   const m = /^(\d+)/.exec(filename);
   return m ? m[1]! : null;
+}
+
+/**
+ * Pure: the lowest prefix above every numeric prefix `featFiles` already
+ * uses, rendered at the width of the widest one so a zero-padded scheme
+ * stays padded (`003` → `004`) and a timestamp scheme stays a timestamp
+ * (`20240101000000` → `20240101000001`).
+ *
+ * "Above every used prefix" rather than "the first unused gap": a
+ * migration runner applies files in prefix order, so a new migration
+ * belongs at the end of the sequence. Filling a gap would insert a
+ * schema change *before* changes already applied downstream.
+ *
+ * `BigInt` because a 14-digit timestamp prefix fits a `number` but a
+ * longer one silently would not. Returns `"1"` when no file carries a
+ * numeric prefix.
+ */
+export function nextFreeMigrationPrefix(featFiles: string[]): string {
+  let highest = 0n;
+  let width = 1;
+  for (const f of featFiles) {
+    const p = migrationPrefix(f);
+    if (!p) continue;
+    const value = BigInt(p);
+    if (value > highest) highest = value;
+    if (p.length > width) width = p.length;
+  }
+  return (highest + 1n).toString().padStart(width, "0");
 }
 
 /**
@@ -301,6 +355,63 @@ export function migrationPrefixCollisions(
   return findMigrationPrefixCollisions(
     listMigrationFiles(repoRoot, featureBranch),
     listMigrationFiles(repoRoot, sliceBranch),
+  );
+}
+
+/**
+ * Outcome of one attempt at the merge-mutex critical section: either the
+ * migration prefix check refused before anything was merged, or a real
+ * merge was performed and reports its own status.
+ */
+export type MergeAttempt =
+  | { kind: "collision"; prefixes: string[] }
+  | { kind: "merge"; result: MergeResult };
+
+/**
+ * The body of the merge mutex's critical section, in one place so the
+ * wave's first attempt and a later run's merge-only recovery cannot
+ * diverge (ADR 0029). Checking the prefixes against the feature-branch
+ * tip and merging must be atomic — callers MUST invoke this inside the
+ * merge mutex.
+ */
+export function attemptMerge(
+  repoRoot: string,
+  sliceBranch: string,
+  featureBranch: string,
+  scratchMergeDir: string,
+): MergeAttempt {
+  const prefixes = migrationPrefixCollisions(
+    repoRoot,
+    sliceBranch,
+    featureBranch,
+  );
+  if (prefixes.length > 0) return { kind: "collision", prefixes };
+  return {
+    kind: "merge",
+    result: mergeSliceBranch(
+      repoRoot,
+      sliceBranch,
+      featureBranch,
+      scratchMergeDir,
+    ),
+  };
+}
+
+/**
+ * The reason text a deferred merge carries, shared by the merge mutex's
+ * refusal and by the next run's merge-only recovery so both say the same
+ * thing (ADR 0029). Names the prefixes, states that the work survived,
+ * and says what happens next — the operator has nothing to adjudicate.
+ */
+export function mergePendingReason(
+  collidingPrefixes: string[],
+  featureBranch: string,
+): string {
+  return (
+    `Migration prefix collision: ${collidingPrefixes.join(", ")} already exists on ` +
+    `${featureBranch} under a different filename. The slice's work is committed on its ` +
+    `slice branch and QA passed — merge deferred; the next run retries the merge ` +
+    `(no agent, no regeneration).`
   );
 }
 

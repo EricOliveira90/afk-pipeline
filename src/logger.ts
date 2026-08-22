@@ -20,6 +20,7 @@ import {
   lifecycle,
   statusIconFor,
   summaryStatusLabel,
+  traitsFor,
   type SliceIdentity,
   type SliceLifecycle,
   type SliceProgress,
@@ -443,6 +444,7 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
     const all = [...slices.values()];
     const succeeded = all.filter((s) => bucketFor(s.phase) === "succeeded");
     const failed = all.filter((s) => bucketFor(s.phase) === "failed");
+    const deferred = all.filter((s) => bucketFor(s.phase) === "deferred");
     const cancelled = all.filter((s) => bucketFor(s.phase) === "cancelled");
     const skipped = all.filter((s) => bucketFor(s.phase) === "skipped");
     const inFlight = all.filter((s) => bucketFor(s.phase) === "inFlight");
@@ -481,6 +483,23 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
       }
     }
     lines.push("");
+
+    // Merge deferred (ADR 0029) gets its own section: the work passed QA
+    // and is committed — reporting it under "Failed / Stuck" would tell
+    // the operator to go fix something that fixes itself next run.
+    if (deferred.length > 0) {
+      lines.push(`Merge deferred (${deferred.length}):`);
+      for (const s of deferred) {
+        const icon = statusIconFor(s.phase);
+        const label = summaryStatusLabel(s.phase);
+        const branch = s.branch || "(unknown)";
+        lines.push(
+          `  ${icon} #${s.ghIssue} ${s.title} [${label}] — branch preserved: ${branch}`,
+        );
+        if ("error" in s && s.error) lines.push(`       reason: ${s.error}`);
+      }
+      lines.push("");
+    }
 
     if (cancelled.length > 0) {
       lines.push(`Cancelled (${cancelled.length}):`);
@@ -602,6 +621,7 @@ function roundsCellFor(s: SliceLifecycle): string {
     case "ESCALATE":
     case "ERROR":
     case "CONFLICT":
+    case "MERGE-PENDING":
     case "CANCELLED":
     case "LANE-CANCELLED":
       return `gen:${s.progress.genRounds} eval:${s.progress.evalRounds}`;
@@ -611,22 +631,14 @@ function roundsCellFor(s: SliceLifecycle): string {
 }
 
 function branchInfoFor(s: SliceLifecycle): string {
-  switch (s.phase) {
-    case "PASS":
+  switch (traitsFor(s.phase).branchDisposition) {
+    case "merged":
       return "merged";
-    case "STUCK":
-    case "CONFLICT":
+    case "preserved":
       return "preserved";
-    case "SKIPPED":
+    case "none":
       return "—";
-    case "PENDING":
-    case "RUNNING":
-    case "ESCALATE":
-    case "ERROR":
-    case "CANCELLED":
-    case "LANE-CANCELLED":
+    case "branch":
       return s.branch;
-    default:
-      return assertNever(s);
   }
 }
