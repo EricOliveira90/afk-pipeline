@@ -21,6 +21,13 @@ export interface PersistedSliceState {
   mergedToFeature?: boolean;
   /** Free-text reason for failure phases; useful for postmortem after load. */
   error?: string;
+  /**
+   * Only meaningful when `phase === "MERGE-PENDING"`: the numeric
+   * migration prefixes that refused the merge. Persisted so the next
+   * run's merge-only recovery can report them without re-deriving
+   * anything (ADR 0025).
+   */
+  collidingPrefixes?: string[];
 }
 
 export interface RunState {
@@ -146,6 +153,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       branch?: string;
       mergedToFeature?: boolean;
       error?: string;
+      collidingPrefixes?: unknown;
     };
     if (typeof v.status !== "string" || !PERSISTED_PHASES.has(v.status)) {
       throw new Error(
@@ -159,6 +167,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         ? { mergedToFeature: v.mergedToFeature }
         : {}),
       ...(v.error !== undefined ? { error: v.error } : {}),
+      ...prefixesOf(v.collidingPrefixes),
     };
   }
   return {
@@ -170,12 +179,24 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
   };
 }
 
+/**
+ * Keep only a well-formed string array. A malformed list degrades to
+ * absent rather than throwing: the phase and the reason text still carry
+ * the operator-visible facts, so a broken field must not wedge a re-run.
+ */
+function prefixesOf(value: unknown): { collidingPrefixes?: string[] } {
+  if (!Array.isArray(value)) return {};
+  const prefixes = value.filter((p): p is string => typeof p === "string");
+  return prefixes.length > 0 ? { collidingPrefixes: prefixes } : {};
+}
+
 function validateV1Slice(id: string, val: unknown): PersistedSliceState {
   const v = (val ?? {}) as {
     phase?: string;
     branch?: string;
     mergedToFeature?: boolean;
     error?: string;
+    collidingPrefixes?: unknown;
   };
   if (typeof v.phase !== "string" || !PERSISTED_PHASES.has(v.phase)) {
     throw new Error(
@@ -189,6 +210,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
       ? { mergedToFeature: v.mergedToFeature }
       : {}),
     ...(v.error !== undefined ? { error: v.error } : {}),
+    ...prefixesOf(v.collidingPrefixes),
   };
 }
 
@@ -213,6 +235,13 @@ export function projectForPersistence(
       return {
         phase: "SKIPPED",
         ...(s.branch ? { branch: s.branch } : {}),
+      };
+    case "MERGE-PENDING":
+      return {
+        phase: "MERGE-PENDING",
+        ...(s.branch ? { branch: s.branch } : {}),
+        error: s.error,
+        collidingPrefixes: s.collidingPrefixes,
       };
     case "STUCK":
     case "ESCALATE":

@@ -202,6 +202,23 @@ re-eligible on the next pipeline run once the repository is verified.
 _Avoid_: "skipped" (HITL slices are skipped; lane-cancelled is
 deferral, not skip), "blocked" (DAG-blocked is a separate concept)
 
+**MERGE-PENDING**:
+A *deferred merge*. The slice's work is complete and committed on its
+slice branch, QA passed, and the merge was refused for a reason no human
+needs to adjudicate — today, only a migration prefix collision detected
+inside the merge mutex (ADR 0025). Recorded as the `MERGE-PENDING`
+status, carrying the slice branch and the colliding numeric prefixes.
+The branch is preserved and the next run retries the merge mechanically,
+before any agent is dispatched: no regeneration, no tokens. It does not
+unblock DAG dependents (nothing of its work is on the feature branch
+yet), and by the existing lane rule its lane continues past it
+(ADR 0024). Distinct from **escalation** (the agent gave up), from
+**cancellation** (user-initiated), from **lane-cancelled** (repository
+integrity), and from `CONFLICT` — which keeps meaning a real git merge
+conflict a human must resolve.
+_Avoid_: "retryable conflict", "soft conflict" (it is not a conflict at
+all — nothing needs resolving, only re-attempting)
+
 **Pre-ship sanity gate**:
 The post-merge check that runs the project's `typecheck`, `lint`, and
 test scripts against the merged feature branch before the guardian
@@ -234,6 +251,7 @@ _Avoid_: "abort" (overloads with `git merge --abort`), "interrupted"
 - Otherwise, **architect reviewer** and **PM reviewer** run against the **feature branch**
 - HITL slices are skipped entirely by the pipeline
 - Parallel slices merge in completion order; merge conflicts trigger **escalation**
+- A merge refused only by a migration prefix collision is **MERGE-PENDING**; the next run retries that merge before dispatching any agent
 - The pipeline is resumable: slices with existing `qa-report.md` PASS are skipped
 
 ## Example dialogue

@@ -34,6 +34,13 @@ describe("SliceLifecycle constructors", () => {
     expect(lifecycle.conflict(ID, P, "merge").phase).toBe("CONFLICT");
     expect(lifecycle.cancelled(ID, P, "abort").phase).toBe("CANCELLED");
     expect(lifecycle.laneCancelled(ID, P, "lane").phase).toBe("LANE-CANCELLED");
+
+    const deferred = lifecycle.mergePending(ID, P, "collision", ["042"]);
+    if (deferred.phase !== "MERGE-PENDING") {
+      throw new Error("expected MERGE-PENDING");
+    }
+    expect(deferred.error).toBe("collision");
+    expect(deferred.collidingPrefixes).toEqual(["042"]);
     expect(lifecycle.skipped(ID).phase).toBe("SKIPPED");
   });
 });
@@ -43,15 +50,23 @@ describe("bucketFor", () => {
     const buckets = ALL_PHASES.map((p) => bucketFor(p));
     // No "default" bucket should appear; each phase is explicitly mapped.
     for (const b of buckets) {
-      expect(["succeeded", "failed", "cancelled", "skipped", "inFlight"]).toContain(
-        b,
-      );
+      expect([
+        "succeeded",
+        "failed",
+        "deferred",
+        "cancelled",
+        "skipped",
+        "inFlight",
+      ]).toContain(b);
     }
     expect(bucketFor("PASS")).toBe("succeeded");
     expect(bucketFor("STUCK")).toBe("failed");
     expect(bucketFor("ESCALATE")).toBe("failed");
     expect(bucketFor("ERROR")).toBe("failed");
     expect(bucketFor("CONFLICT")).toBe("failed");
+    // A deferred merge is neither a success nor a failure: the work is
+    // intact and the next run finishes it.
+    expect(bucketFor("MERGE-PENDING")).toBe("deferred");
     expect(bucketFor("CANCELLED")).toBe("cancelled");
     expect(bucketFor("LANE-CANCELLED")).toBe("cancelled");
     expect(bucketFor("SKIPPED")).toBe("skipped");
@@ -119,6 +134,27 @@ describe("projectForPersistence + adaptLoadedState round-trip", () => {
     });
     const round = adaptLoadedState(JSON.parse(json), "x");
     expect(round.slices["1"]!.phase).toBe("ERROR");
+  });
+
+  it("round-trips MERGE-PENDING with its colliding prefixes", () => {
+    const deferred = lifecycle.mergePending(
+      ID,
+      P,
+      "Migration prefix collision: 042 …",
+      ["042", "043"],
+    );
+    const persisted = projectForPersistence(deferred)!;
+    const json = JSON.stringify({
+      version: 1,
+      prdSlug: "x",
+      featureBranch: "feat/x",
+      slices: { "1": persisted },
+    });
+    const round = adaptLoadedState(JSON.parse(json), "x");
+    expect(round.slices["1"]!.phase).toBe("MERGE-PENDING");
+    expect(round.slices["1"]!.branch).toBe("afk/test");
+    expect(round.slices["1"]!.error).toContain("042");
+    expect(round.slices["1"]!.collidingPrefixes).toEqual(["042", "043"]);
   });
 
   it("SKIPPED projects without progress", () => {

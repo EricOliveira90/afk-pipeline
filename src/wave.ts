@@ -24,12 +24,24 @@ export type WaveOutcomePhase =
   | "ERROR"
   | "CANCELLED"
   | "CONFLICT"
+  | "MERGE-PENDING"
   | "LANE-CANCELLED";
 
 export type WaveOutcome =
   | { phase: "PASS" }
+  /**
+   * Deferred merge (ADR 0025). The slice branch is intact and QA passed;
+   * only the migration prefix collision refused the merge. The prefixes
+   * ride along so the orchestrator can persist them for the next run's
+   * merge-only recovery.
+   */
   | {
-      phase: Exclude<WaveOutcomePhase, "PASS">;
+      phase: "MERGE-PENDING";
+      error: string;
+      collidingPrefixes: string[];
+    }
+  | {
+      phase: Exclude<WaveOutcomePhase, "PASS" | "MERGE-PENDING">;
       error: string;
     };
 
@@ -258,8 +270,12 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
       const continueLane = (failedIndex: number, phase: string) => {
         const rest = lane.slice(failedIndex + 1).map((s) => `#${s.ghIssue}`);
         if (rest.length === 0) return;
+        // A deferred merge is not a failure — say so, or the operator
+        // reads "failed (MERGE-PENDING)" and goes looking for a break.
+        const verb =
+          phase === "MERGE-PENDING" ? "deferred its merge" : "failed";
         logger.phase(
-          `[afk] Slice #${lane[failedIndex]!.ghIssue} failed (${phase}) — ` +
+          `[afk] Slice #${lane[failedIndex]!.ghIssue} ${verb} (${phase}) — ` +
             `its lane continues with ${rest.join(", ")} on the current ` +
             `${featBranch} tip (DAG-independent; see ADR 0024)`,
           "error",
@@ -267,7 +283,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             type: "warn",
             reason: "lane-continuation",
             ghIssue: lane[failedIndex]!.ghIssue,
-            message: `failed (${phase}) — its lane continues with ${rest.join(", ")}`,
+            message: `${verb} (${phase}) — its lane continues with ${rest.join(", ")}`,
           },
         );
       };
@@ -407,24 +423,25 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           // Collision check + merge share one critical section: checking
           // against the feature-branch tip and then merging must be atomic,
           // or a sibling lane could merge a colliding prefix in between.
-          const mergeResult = await mergeMutex(() => {
-            const collisions = git.migrationPrefixCollisions(
-              repoRoot,
-              branch,
-              featBranch,
-            );
-            if (collisions.length > 0) {
-              return Promise.resolve<git.MergeResult>({
-                status: "conflict",
-                details:
-                  `Migration prefix collision: ${collisions.join(", ")} already exists on ${featBranch} ` +
-                  `under a different filename. Renumber this slice's migration(s) to the next free prefix and re-run.`,
-              });
-            }
-            return Promise.resolve(
-              git.mergeSliceBranch(repoRoot, branch, featBranch, scratchMergeDir),
-            );
-          });
+          // See ADR 0025 — the check stays here; only the refusal changed
+          // from terminal to deferred.
+          const attempt = await mergeMutex(() =>
+            Promise.resolve(
+              git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
+            ),
+          );
+          if (attempt.kind === "collision") {
+            // Deferred merge, not a conflict: the work is committed on the
+            // slice branch and QA passed. The next run retries the merge.
+            record(id, {
+              phase: "MERGE-PENDING",
+              error: git.mergePendingReason(attempt.prefixes, featBranch),
+              collidingPrefixes: attempt.prefixes,
+            });
+            continueLane(i, "MERGE-PENDING");
+            continue;
+          }
+          const mergeResult = attempt.result;
           if (mergeResult.status === "conflict") {
             record(id, {
               phase: "CONFLICT",

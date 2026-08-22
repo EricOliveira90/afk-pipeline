@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executionLanes, runWave } from "./wave.js";
-import { makeAsyncMutex } from "./orchestrator.js";
+import { makeAsyncMutex, sliceBranch } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { Logger } from "./logger.js";
 import * as gitModule from "./git.js";
@@ -799,4 +799,155 @@ describe("runWave onOutcome", () => {
     expect(calls).toEqual(["121:PASS"]);
     expect(outcomes.get("121")?.phase).toBe("PASS");
   }, 30_000);
+});
+
+/**
+ * Deferred merge (ADR 0025). The merge-mutex migration-prefix check is
+ * unchanged and stays where it is; what changed is that its refusal is no
+ * longer terminal. These drive `runWave` the way the rest of this file
+ * does — a real temporary git repo plus per-slice fixtures — and assert
+ * the outcome an operator sees.
+ */
+describe("runWave migration prefix collision → MERGE-PENDING", () => {
+  /** Put a migration on `main` so the feature branch inherits it. */
+  function seedMigrationOnMain(repo: string, filename: string) {
+    mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
+    writeFileSync(
+      join(repo, "supabase", "migrations", filename),
+      "-- seeded\n",
+      "utf-8",
+    );
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-m", `add ${filename}`]);
+  }
+
+  it("records MERGE-PENDING with the colliding prefixes and preserves the slice branch", async () => {
+    const repo = makeRepo();
+    seedMigrationOnMain(repo, "042_users.sql");
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "601", title: "Adds orders", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Same numeric prefix, different filename — the integration-time
+    // schema-ordering collision, detected against the feature-branch tip.
+    const fixtures = new Map<string, SliceFixture>([
+      ["601", {
+        files: ["supabase/migrations/042_orders.sql"],
+        qaPasses: true,
+        outputFile: "supabase/migrations/042_orders.sql",
+        outputContent: "-- orders",
+      }],
+    ]);
+    const { config, dag, logger, featBranch, provider } = setupWave(
+      repo,
+      "wave-merge-pending",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["601"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    const outcome = outcomes.get("601");
+    expect(outcome?.phase).toBe("MERGE-PENDING");
+    if (outcome?.phase !== "MERGE-PENDING") throw new Error("expected MERGE-PENDING");
+    expect(outcome.collidingPrefixes).toEqual(["042"]);
+    expect(outcome.error).toContain("042");
+    expect(outcome.error).toContain("retries the merge");
+
+    // The whole point: the work survived. The branch still exists and
+    // still carries the commits the merge refused.
+    const branch = sliceBranch("wave-merge-pending", slices[0]!, provider);
+    expect(gitModule.branchExists(repo, branch)).toBe(true);
+    expect(gitModule.hasCommitsAhead(repo, branch, featBranch)).toBe(true);
+    // …and nothing landed on the feature branch.
+    expect(
+      gitModule.listMigrationFiles(repo, featBranch),
+    ).toEqual(["042_users.sql"]);
+  }, 30_000);
+
+  it("still records CONFLICT for a real git merge conflict", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "611", title: "Alpha", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "612", title: "Beta", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Disjoint declared files → separate lanes → both generate from the
+    // same base; both add the same untracked path with different content,
+    // so whichever merges second hits a real add/add conflict. No
+    // migrations anywhere near it.
+    const fixtures = new Map<string, SliceFixture>([
+      ["611", { files: ["src/alpha.txt"], qaPasses: true, outputFile: "src/clash.txt", outputContent: "from alpha" }],
+      ["612", { files: ["src/beta.txt"], qaPasses: true, outputFile: "src/clash.txt", outputContent: "from beta" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-real-conflict",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["611", "612"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    const phases = ["611", "612"].map((id) => outcomes.get(id)?.phase).sort();
+    expect(phases).toEqual(["CONFLICT", "PASS"]);
+  }, 60_000);
+
+  it("continues the lane past a MERGE-PENDING member", async () => {
+    const repo = makeRepo();
+    seedMigrationOnMain(repo, "042_users.sql");
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "621", title: "Collides", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "622", title: "Lane mate", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Shared declared file → one lane, 621 ahead of 622.
+    const fixtures = new Map<string, SliceFixture>([
+      ["621", {
+        files: ["src/lane.txt", "supabase/migrations/042_orders.sql"],
+        qaPasses: true,
+        outputFile: "supabase/migrations/042_orders.sql",
+        outputContent: "-- orders",
+      }],
+      ["622", { files: ["src/lane.txt"], qaPasses: true, outputFile: "src/lane.txt", outputContent: "lane mate" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-merge-pending-lane",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["621", "622"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("621")?.phase).toBe("MERGE-PENDING");
+    expect(outcomes.get("622")?.phase).toBe("PASS");
+  }, 60_000);
 });

@@ -78,6 +78,47 @@ describe("adaptLoadedState", () => {
       ),
     ).toThrow(/Unknown phase/);
   });
+
+  it("accepts MERGE-PENDING and keeps its colliding prefixes (ADR 0025)", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {
+          "100": {
+            phase: "MERGE-PENDING",
+            branch: "afk/demo-slice-01",
+            error: "Migration prefix collision: 042 …",
+            collidingPrefixes: ["042"],
+          },
+        },
+      },
+      "demo",
+    );
+    expect(adapted.slices["100"]!.phase).toBe("MERGE-PENDING");
+    expect(adapted.slices["100"]!.collidingPrefixes).toEqual(["042"]);
+  });
+
+  it("drops a malformed collidingPrefixes rather than wedging the load", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {
+          "100": {
+            phase: "MERGE-PENDING",
+            error: "collision",
+            collidingPrefixes: "042",
+          },
+        },
+      },
+      "demo",
+    );
+    expect(adapted.slices["100"]!.phase).toBe("MERGE-PENDING");
+    expect(adapted.slices["100"]!.collidingPrefixes).toBeUndefined();
+  });
 });
 
 describe("loadRunState + saveSliceState end-to-end", () => {
