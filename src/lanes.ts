@@ -2,10 +2,11 @@ import type { Slice } from "./issues-parser.js";
 
 /**
  * A lane is a serial chain of slices that share at least one declared
- * file or one lane-shared *resource* (transitive closure). Lanes run in
- * parallel; within a lane each
- * slice runs to completion and merges into the feature branch before
- * the next lane-mate starts. See `docs/adr/0005-file-overlap-lanes.md`.
+ * file, or that contend for the same lane-shared *resource* (transitive
+ * closure over both). Lanes run in parallel; within a lane each slice
+ * runs to completion and merges into the feature branch before the next
+ * lane-mate starts. See `docs/adr/0005-file-overlap-lanes.md` and
+ * `docs/adr/0025-migrations-as-lane-resource-key.md`.
  */
 export type Lane = Slice[];
 
@@ -46,27 +47,44 @@ export interface LaneResourceOptions {
   /**
    * Replaces {@link DEFAULT_MIGRATION_PATH_PATTERN}. A supplied pattern
    * *replaces* the default rather than adding to it, so a project that
-   * overrides this opts out of the `.sql` default entirely.
+   * overrides this opts out of the `.sql` default entirely. Matched
+   * case-insensitively against normalised paths; `g` and `y` flags are
+   * ignored (see {@link matcherFor}).
    */
   migrationPathPattern?: RegExp;
 }
 
 /**
- * Strip stateful flags. `RegExp.prototype.test` on a `/g` or `/y`
- * pattern advances `lastIndex`, so reusing a caller's regex across many
- * paths would match only every other one.
+ * Adapt a caller's pattern for repeated matching against normalised
+ * paths:
+ *
+ * - Drop `g` and `y`. `RegExp.prototype.test` on a stateful pattern
+ *   advances `lastIndex`, so reusing one regex across many paths would
+ *   match only every other one.
+ * - Add `i`. Paths are lowercased before matching, so a pattern written
+ *   as `/Migrations\//` would otherwise never match anything — a
+ *   silent no-op rather than a visible error.
  */
-function stateless(pattern: RegExp): RegExp {
+function matcherFor(pattern: RegExp): RegExp {
   const flags = pattern.flags.replace(/[gy]/g, "");
-  return flags === pattern.flags ? pattern : new RegExp(pattern.source, flags);
+  const wanted = flags.includes("i") ? flags : `${flags}i`;
+  return wanted === pattern.flags ? pattern : new RegExp(pattern.source, wanted);
 }
 
+/**
+ * Ascending slice-number order. `parseInt` with base 10 lets "10"
+ * follow "09" correctly (string compare wouldn't).
+ */
 const bySliceNumber = (a: Slice, b: Slice) =>
   parseInt(a.number, 10) - parseInt(b.number, 10);
 
 /**
- * Slices that declare a *shared resource* rather than a shared file,
- * keyed by resource and listed in ascending slice-number order.
+ * Slices that *contend* for a shared resource rather than a shared
+ * file, keyed by resource and listed in ascending slice-number order.
+ *
+ * Only resources with two or more declarers are reported: a lone
+ * declarer contends with nobody, so there is nothing to serialise and
+ * nothing to tell the operator about.
  *
  * Today the only resource is `migrations`. Two slices that each add
  * their own migration file overlap on no path, yet they contend for the
@@ -83,7 +101,7 @@ export function laneResourceGroups(
   slices: Slice[],
   options?: LaneResourceOptions,
 ): Map<string, string[]> {
-  const pattern = stateless(
+  const pattern = matcherFor(
     options?.migrationPathPattern ?? DEFAULT_MIGRATION_PATH_PATTERN,
   );
   const groups = new Map<string, string[]>();
@@ -97,6 +115,9 @@ export function laneResourceGroups(
     const members = groups.get(MIGRATION_RESOURCE_KEY);
     if (members) members.push(slice.ghIssue);
     else groups.set(MIGRATION_RESOURCE_KEY, [slice.ghIssue]);
+  }
+  for (const [key, members] of groups) {
+    if (members.length < 2) groups.delete(key);
   }
   return groups;
 }
@@ -197,23 +218,17 @@ export function partitionLanes(
     else buckets.set(root, [s]);
   }
 
-  // Step 5: sort each lane by slice number ascending. `parseInt` with
-  // base 10 lets "10" follow "09" correctly (string compare wouldn't).
+  // Step 5: sort each lane by slice number ascending.
   const lanes: Lane[] = [];
   for (const lane of buckets.values()) {
-    lane.sort(
-      (a, b) => parseInt(a.number, 10) - parseInt(b.number, 10),
-    );
+    lane.sort(bySliceNumber);
     lanes.push(lane);
   }
 
   // Sort lanes by their lowest slice number. Determinism is observable
   // — log line ordering, integration test assertions, and resume
   // semantics all rely on it.
-  lanes.sort(
-    (a, b) =>
-      parseInt(a[0]!.number, 10) - parseInt(b[0]!.number, 10),
-  );
+  lanes.sort((a, b) => bySliceNumber(a[0]!, b[0]!));
 
   return lanes;
 }

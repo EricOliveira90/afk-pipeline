@@ -213,13 +213,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
 
   // Which slices were serialised because they contend for a shared
   // resource rather than a shared file (ADR 0025) — reported so the
-  // grouping is legible in the log and in the event stream. A single
-  // declarer is contending with nobody, so it is not a grouping.
-  const sharedResources: Record<string, string[]> = {};
-  for (const [key, members] of laneResourceGroups(readyForLanes, laneOptions)) {
-    if (members.length > 1) sharedResources[key] = members;
-  }
-  const sharedResourceEntries = Object.entries(sharedResources);
+  // grouping is legible in the log and in the event stream.
+  const sharedResourceEntries = [
+    ...laneResourceGroups(readyForLanes, laneOptions),
+  ];
+  const sharedResources = Object.fromEntries(sharedResourceEntries);
 
   if (lanes.length > 0) {
     logger.phase(

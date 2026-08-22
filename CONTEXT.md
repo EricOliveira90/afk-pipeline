@@ -185,7 +185,7 @@ not the other way around)
 
 **Lane-shared resource**:
 Something two slices contend for as a whole rather than file by file,
-identified by a **resource key** that any declared path can map to.
+identified by a _resource key_ that any declared path can map to.
 Today the only one is `migrations`: two slices each adding their own
 migration file share no path, yet both compute the same "next free
 numeric prefix" from the same base. Every slice declaring a recognised

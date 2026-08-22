@@ -261,8 +261,12 @@ describe("partitionLanes — migration resource key", () => {
   });
 });
 
+/**
+ * The groups also feed the wave's lane-composition log line and its
+ * `lanes-partitioned` event, so their shape is observable.
+ */
 describe("laneResourceGroups", () => {
-  it("reports the migration-bearing slices in slice-number order", () => {
+  it("reports the contending slices in slice-number order", () => {
     const c = slice("03", ["migrations/c.sql"]);
     const a = slice("01", ["migrations/a.sql", "src/x.ts"]);
     const b = slice("02", ["src/y.ts"]);
@@ -271,8 +275,26 @@ describe("laneResourceGroups", () => {
     );
   });
 
+  it("reports nothing when only one slice declares a migration", () => {
+    // A lone declarer contends with nobody: no serialisation happened,
+    // so there is no grouping to report.
+    const a = slice("01", ["migrations/a.sql"]);
+    const b = slice("02", ["src/y.ts"]);
+    expect(laneResourceGroups([a, b])).toEqual(new Map());
+  });
+
   it("reports nothing when no slice declares a migration", () => {
     expect(laneResourceGroups([slice("01", ["src/x.ts"])])).toEqual(new Map());
+  });
+
+  it("matches a pattern written with uppercase, since paths are lowercased", () => {
+    const a = slice("01", ["db/Migrations/001_a.SQL"]);
+    const b = slice("02", ["db/Migrations/002_b.SQL"]);
+    expect(
+      laneResourceGroups([a, b], {
+        migrationPathPattern: /(^|\/)Migrations\/.*\.SQL$/,
+      }),
+    ).toEqual(new Map([["migrations", ["01", "02"]]]));
   });
 
   it("exposes the default pattern so callers can document it", () => {
