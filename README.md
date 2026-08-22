@@ -136,6 +136,8 @@ Skipped: #45 LGPD delete flow    ← HITL
 
 Slices that declare overlapping files are grouped into **lanes** and run serially within their lane. Merges into the feature branch are serialised via an async mutex.
 
+Lanes also union on **shared resources**, not just shared paths: every slice in a wave whose contract declares a migration file lands in one lane, so no two of them compute the same "next free prefix" from the same base (ADR 0025). Recognition defaults to a `migrations` path segment with a `.sql` extension and is configurable via `PipelineConfig.migrationPathPattern`; slices declaring no migration paths keep their parallelism, and `--serial-lanes` remains the blunt override that collapses the whole wave.
+
 ### Branch Strategy
 
 ```
@@ -382,6 +384,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0022** — Transient model unavailability retried with backoff at the orchestrator
 - **ADR 0023** — `clean-failed` subcommand for dead-slice worktree/branch debris
 - **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
+- **ADR 0025** — Migrations are a lane-shared resource: migration-bearing slices serialise into one lane
 
 ## QA Rounds and Shared Preview
 

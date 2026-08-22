@@ -515,6 +515,17 @@ export interface PipelineConfig {
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
+   * Recognises a contract's declared path as a migration when
+   * partitioning a wave into lanes, so every migration-bearing slice in
+   * the wave serialises into one lane instead of racing on the next
+   * free numeric prefix. Replaces (does not extend)
+   * `DEFAULT_MIGRATION_PATH_PATTERN` in `src/lanes.ts`, which matches a
+   * `migrations` path segment with a `.sql` extension. Matched against
+   * normalised paths — forward slashes, no leading `./`, lowercased.
+   * See ADR 0025.
+   */
+  migrationPathPattern?: RegExp;
+  /**
    * Open the draft PR despite an unfavorable PM verdict, recording the
    * override and both guardian verdicts in the PR body. Only a real
    * FIX-BEFORE-SHIP PM verdict can be overridden, and only when the

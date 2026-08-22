@@ -681,6 +681,225 @@ describe("runWave", () => {
 
 
 /**
+ * Migrations as a lane-shared resource (ADR 0025). Two slices that each
+ * declare their own migration file share no path, so they used to run
+ * concurrently from an identical base, compute the same "next free
+ * prefix", and collide hours later at the merge mutex. They must now
+ * land in one lane, which serialises them and gives the successor a
+ * base that already contains its predecessor's merged migration.
+ */
+describe("runWave — migration lane grouping", () => {
+  function readEvents(runDir: string): Array<Record<string, unknown>> {
+    const raw = readFileSync(join(runDir, "events.jsonl"), "utf-8");
+    return raw
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it("serialises two migration-bearing slices and re-negotiates the successor on the merged base", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "1001", title: "First migration", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "1002", title: "Second migration", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // Deliberately different directories: the grouping is driven by the
+    // `migrations` segment, not by one project's layout, and the two
+    // slices share no declared path.
+    const first = "supabase/migrations/20240101000000_first.sql";
+    const second = "db/migrations/20240202000000_second.sql";
+    const fixtures = new Map<string, SliceFixture>([
+      ["1001", { files: [first], qaPasses: true, outputFile: first, outputContent: "-- first" }],
+      ["1002", { files: [second], qaPasses: true, outputFile: second, outputContent: "-- second" }],
+    ]);
+    const { config, dag, logger, featBranch, provider } = setupWave(
+      repo,
+      "wave-migrations",
+      slices,
+      fixtures,
+    );
+
+    // Record, for each invocation, whether the predecessor's migration
+    // was already visible in the invoking worktree.
+    const events: string[] = [];
+    const predecessorVisible: boolean[] = [];
+    config.provider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const slice = sliceFromCwd(options.cwd, slices);
+        events.push(`invoke:${options.role}:${slice?.ghIssue ?? "?"}`);
+        if (slice?.ghIssue === "1002" && options.role === "explorer") {
+          predecessorVisible.push(existsSync(join(options.cwd, first)));
+        }
+        return provider.invoke(options);
+      },
+    };
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["1001", "1002"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+      onOutcome: (id, outcome) => events.push(`outcome:${outcome.phase}:${id}`),
+    });
+
+    expect(outcomes.get("1001")?.phase).toBe("PASS");
+    expect(outcomes.get("1002")?.phase).toBe("PASS");
+
+    // One lane, and the structured event says so.
+    const partitioned = readEvents(logger.runDir).find(
+      (e) => e.type === "lanes-partitioned",
+    );
+    expect(partitioned?.lanes).toEqual([["1001", "1002"]]);
+    expect(partitioned?.sharedResources).toEqual({
+      migrations: ["1001", "1002"],
+    });
+
+    // Serialised: 1002's lane-successor re-negotiation (its second
+    // explorer) starts only after 1001's PASS is reported.
+    const passIdx = events.indexOf("outcome:PASS:1001");
+    const explorers = events
+      .map((e, i) => (e === "invoke:explorer:1002" ? i : -1))
+      .filter((i) => i >= 0);
+    expect(explorers.length).toBeGreaterThanOrEqual(2);
+    expect(passIdx).toBeGreaterThanOrEqual(0);
+    expect(passIdx).toBeLessThan(explorers[1]!);
+
+    // The successor re-negotiated against a base that already contained
+    // the predecessor's migration — the whole point of the grouping.
+    expect(predecessorVisible[0]).toBe(false); // wave-start base
+    expect(predecessorVisible[1]).toBe(true); // refreshed base
+  }, 60_000);
+
+  it("leaves non-migration slices in their own parallel lanes", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "1011", title: "Migration", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "1012", title: "No migration", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const migration = "supabase/migrations/20240101000000_only.sql";
+    const fixtures = new Map<string, SliceFixture>([
+      ["1011", { files: [migration], qaPasses: true, outputFile: migration, outputContent: "-- only" }],
+      ["1012", { files: ["src/app.ts"], qaPasses: true, outputFile: "src/app.ts", outputContent: "app" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-migrations-mixed",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["1011", "1012"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("1011")?.phase).toBe("PASS");
+    expect(outcomes.get("1012")?.phase).toBe("PASS");
+
+    const partitioned = readEvents(logger.runDir).find(
+      (e) => e.type === "lanes-partitioned",
+    );
+    expect(partitioned?.lanes).toEqual([["1011"], ["1012"]]);
+    // A lone migration slice is contending with nobody, so the event
+    // carries no shared-resource grouping.
+    expect(partitioned?.sharedResources).toBeUndefined();
+  }, 60_000);
+
+  it("honours a configured pattern instead of the default", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "1021", title: "Changeset one", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "1022", title: "Changeset two", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const one = "db/changesets/001_one.xml";
+    const two = "db/changesets/002_two.xml";
+    const fixtures = new Map<string, SliceFixture>([
+      ["1021", { files: [one], qaPasses: true, outputFile: one, outputContent: "<one/>" }],
+      ["1022", { files: [two], qaPasses: true, outputFile: two, outputContent: "<two/>" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-migrations-configured",
+      slices,
+      fixtures,
+    );
+    config.migrationPathPattern = /(^|\/)changesets\/.*\.xml$/;
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["1021", "1022"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("1021")?.phase).toBe("PASS");
+    expect(outcomes.get("1022")?.phase).toBe("PASS");
+    const partitioned = readEvents(logger.runDir).find(
+      (e) => e.type === "lanes-partitioned",
+    );
+    expect(partitioned?.lanes).toEqual([["1021", "1022"]]);
+  }, 60_000);
+
+  it("still collapses the whole wave under --serial-lanes", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "1031", title: "Migration", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "1032", title: "Unrelated", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const migration = "supabase/migrations/20240101000000_serial.sql";
+    const fixtures = new Map<string, SliceFixture>([
+      ["1031", { files: [migration], qaPasses: true, outputFile: migration, outputContent: "-- serial" }],
+      ["1032", { files: ["src/unrelated.ts"], qaPasses: true, outputFile: "src/unrelated.ts", outputContent: "u" }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-migrations-serial",
+      slices,
+      fixtures,
+    );
+    config.serialLanes = true;
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["1031", "1032"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("1031")?.phase).toBe("PASS");
+    expect(outcomes.get("1032")?.phase).toBe("PASS");
+    const partitioned = readEvents(logger.runDir).find(
+      (e) => e.type === "lanes-partitioned",
+    );
+    expect(partitioned?.lanes).toEqual([["1031", "1032"]]);
+    expect(partitioned?.serial).toBe(true);
+  }, 60_000);
+});
+
+/**
  * Per-slice outcome hook (ADR 0018): runWave must report each slice's
  * terminal outcome the moment it lands — PASS only after the merge —
  * so the orchestrator can persist it before the wave finishes. A

@@ -5,7 +5,7 @@ import * as git from "./git.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
 import { Logger } from "./logger.js";
-import { partitionLanes } from "./lanes.js";
+import { laneResourceGroups, partitionLanes } from "./lanes.js";
 import type { PipelineConfig } from "./orchestrator.js";
 import {
   makeSliceContext,
@@ -207,18 +207,38 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   }
 
   // --- Partition into lanes. ---
-  const lanes = partitionLanes(readyForLanes);
+  const laneOptions = { migrationPathPattern: config.migrationPathPattern };
+  const lanes = partitionLanes(readyForLanes, laneOptions);
   const lanesToRun = executionLanes(lanes, config.serialLanes);
+
+  // Which slices were serialised because they contend for a shared
+  // resource rather than a shared file (ADR 0025) — reported so the
+  // grouping is legible in the log and in the event stream. A single
+  // declarer is contending with nobody, so it is not a grouping.
+  const sharedResources: Record<string, string[]> = {};
+  for (const [key, members] of laneResourceGroups(readyForLanes, laneOptions)) {
+    if (members.length > 1) sharedResources[key] = members;
+  }
+  const sharedResourceEntries = Object.entries(sharedResources);
+
   if (lanes.length > 0) {
     logger.phase(
       `[afk] Wave ${waveNumber}: ${lanesToRun.length} lane(s)${config.serialLanes ? " (serial)" : ""} — ${lanesToRun
         .map((l) => `[${l.map((s) => `#${s.ghIssue}`).join(", ")}]`)
-        .join(" ")}`,
+        .join(" ")}` +
+        sharedResourceEntries
+          .map(
+            ([key, members]) =>
+              ` — shared ${key}: ${members.map((id) => `#${id}`).join(", ")} (serialised into one lane)`,
+          )
+          .join(""),
       "error",
       {
         type: "lanes-partitioned",
         wave: waveNumber,
         lanes: lanesToRun.map((l) => l.map((s) => s.ghIssue)),
+        sharedResources:
+          sharedResourceEntries.length > 0 ? sharedResources : undefined,
         serial: config.serialLanes ? true : undefined,
       },
     );

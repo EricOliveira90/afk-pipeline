@@ -175,13 +175,28 @@ When max rounds are exhausted, the pipeline stops the slice, writes
 
 **Lane**:
 A serial chain of slices in a single wave whose declared file lists
-overlap (transitive closure on shared files). Lanes run in parallel;
-within a lane, each slice runs to completion and merges into the
-**feature branch** before the next lane-mate starts. Computed by
-`partitionLanes` from each slice's `contract.md` "Files expected to
-change". See ADR 0005.
+overlap, or which declare the same **lane-shared resource** (transitive
+closure over both). Lanes run in parallel; within a lane, each slice
+runs to completion and merges into the **feature branch** before the
+next lane-mate starts. Computed by `partitionLanes` from each slice's
+`contract.md` "Files expected to change". See ADR 0005 and ADR 0025.
 _Avoid_: "batch", "group" (too generic), "wave" (a wave contains lanes,
 not the other way around)
+
+**Lane-shared resource**:
+Something two slices contend for as a whole rather than file by file,
+identified by a **resource key** that any declared path can map to.
+Today the only one is `migrations`: two slices each adding their own
+migration file share no path, yet both compute the same "next free
+numeric prefix" from the same base. Every slice declaring a recognised
+migration path unions into one lane, so the successor re-negotiates
+against a base that already contains its predecessor's merged
+migration. Recognition is `PipelineConfig.migrationPathPattern`,
+defaulting to a `migrations` path segment with a `.sql` extension.
+See ADR 0025.
+_Avoid_: "shared file" (the point is that no path is shared), "lock"
+(nothing is held; the slices are serialised), "migration conflict"
+(the grouping exists so that no conflict occurs)
 
 **Lane leader**:
 The first slice in a lane (by ascending slice number). Negotiates its
