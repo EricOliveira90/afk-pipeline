@@ -578,6 +578,13 @@ export interface PipelineResult {
   summary: string;
   /** Grouped, scan-friendly summary for stdout. */
   consoleSummary: string;
+  /**
+   * Why the run was unsuccessful, when the reason isn't already legible
+   * from the per-slice summary — today, a run that dispatched nothing.
+   * Set only when `success` is false; the CLI prints it in place of the
+   * generic failure line before its existing non-zero exit (issue #42).
+   */
+  failureReason?: string;
 }
 
 /**
@@ -2074,6 +2081,12 @@ export async function runPipeline(
   // them in the current run — that's the whole point of the status:
   // human resolution of the predecessor first.
   const laneCancelled = new Set<string>();
+  // Slices this invocation actually handed to a wave, and slices it
+  // skipped because a prior run already merged them. Neither is derivable
+  // from `completed` afterwards — that set mixes both — and together they
+  // decide whether the run did anything at all (issue #42).
+  const dispatched = new Set<string>();
+  const alreadyComplete = new Set<string>();
 
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
@@ -2082,6 +2095,7 @@ export async function runPipeline(
   for (const [id, slice] of dag.slices) {
     if (isSliceComplete(runState, id)) {
       completed.add(id);
+      alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
       logger.transitionTo(
@@ -2324,6 +2338,7 @@ export async function runPipeline(
     // which only matter between waves.
     for (const [id, outcome] of outcomes) {
       persistOutcome(id, outcome);
+      dispatched.add(id);
       if (outcome.phase === "PASS") {
         completed.add(id);
       } else if (outcome.phase === "LANE-CANCELLED") {
@@ -2373,6 +2388,11 @@ export async function runPipeline(
   // operator doesn't have to reverse-engineer the omission from the
   // wave composition (issue #17) — and tee the same hold as a typed
   // warn event for `afk status` (spec #26).
+  //
+  // The same per-slice hold is the diagnostic a zero-dispatch failure
+  // has to report (issue #42), so it is computed once here and reused
+  // below rather than re-derived from the log lines.
+  const notRunHolds: Array<{ id: string; title: string; hold: string }> = [];
   for (const [id, slice] of dag.slices) {
     if (slice.type === "HITL") continue;
     if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) {
@@ -2387,9 +2407,12 @@ export async function runPipeline(
             )
             .join(", ")
         : "(unknown)";
+    const hold =
+      `held back by unresolved ` +
+      `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`;
+    notRunHolds.push({ id, title: slice.title, hold });
     logger.phase(
-      `[afk] Slice #${id} (${slice.title}): NOT-RUN — held back by unresolved ` +
-        `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]; ` +
+      `[afk] Slice #${id} (${slice.title}): NOT-RUN — ${hold}; ` +
         `fix the blocker(s) and re-run`,
       "error",
       {
@@ -2397,9 +2420,7 @@ export async function runPipeline(
         reason: "not-run-hold",
         ghIssue: id,
         blockedBy: unresolved,
-        message:
-          `#${id} ${slice.title}: NOT-RUN — held back by unresolved ` +
-          `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`,
+        message: `#${id} ${slice.title}: NOT-RUN — ${hold}`,
       },
     );
   }
@@ -2746,14 +2767,41 @@ export async function runPipeline(
     }
   }
 
+    // A run that handed no slice to a wave and skipped none as already
+    // complete did nothing at all. Without this it can report success —
+    // an empty selection satisfies `every` vacuously — and a 0m00s no-op
+    // reads exactly like a finished run (issue #42). Cancellation is
+    // excluded: Ctrl-C keeps its own exit path, and a run cancelled
+    // before its first wave is not a silent no-op.
+    let failureReason: string | undefined;
+    if (
+      !signal?.aborted &&
+      dispatched.size === 0 &&
+      alreadyComplete.size === 0
+    ) {
+      const holds = notRunHolds.map(
+        ({ id, title, hold }) => `  #${id} ${title} — ${hold}`,
+      );
+      failureReason = [
+        "Pipeline dispatched no slices and skipped none as already complete — nothing ran.",
+        ...(holds.length > 0
+          ? [...holds, "Fix the blocker(s) and re-run."]
+          : ["No slice in the run scope was eligible to run."]),
+      ].join("\n");
+      logger.phase(`[afk] ${failureReason}`, "error");
+    }
+
     const summary = logger.writeSummary();
     const consoleSummary = logger.formatConsoleSummary();
-    const allSuccess = afkSlices.every((s) => completed.has(s.ghIssue));
+    const allSuccess =
+      failureReason === undefined &&
+      afkSlices.every((s) => completed.has(s.ghIssue));
+
     emitHandoff(
       signal?.aborted ? "ABORTED" : allSuccess ? "SUCCEEDED" : "FAILED",
     );
 
-    return { success: allSuccess, summary, consoleSummary };
+    return { success: allSuccess, summary, consoleSummary, failureReason };
   } catch (err) {
     // Mark any slice still in flight as STUCK so the summary doesn't
     // misreport them as RUNNING/PENDING. Status keys we touch here
