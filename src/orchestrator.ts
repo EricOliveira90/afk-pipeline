@@ -28,8 +28,14 @@ import {
   isSliceComplete,
   projectForPersistence,
   type PersistedReviewPhase,
+  type RunState,
 } from "./run-state.js";
-import { resolveRunScope, type ResolvedRunScope } from "./slice-scope.js";
+import {
+  resolveOnlyFailedSelection,
+  resolveRunScope,
+  type PersistedRunScope,
+  type ResolvedRunScope,
+} from "./slice-scope.js";
 import {
   parseDraftPrNumber,
   writeTerminalHandoff,
@@ -198,6 +204,19 @@ export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
   for (const slice of scope.selected) {
     lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title}`);
   }
+  // A narrowed invocation (a subset of the persisted scope, e.g.
+  // `--only-failed`) must say so: the branch may already carry work from
+  // earlier invocations, and the reviewer must not grade this invocation
+  // against slices it never touched.
+  if (scope.skipped.some(({ reason }) => reason === "narrowed")) {
+    lines.push("");
+    lines.push(
+      "This invocation was narrowed to a subset of the run's scope of record. " +
+        "Judge only the slices listed above: the narrowed-out slices below may " +
+        "have been implemented by an earlier invocation on this branch, or not " +
+        "at all — either way they are not this invocation's work.",
+    );
+  }
   if (scope.skipped.length > 0) {
     lines.push("");
     lines.push(
@@ -208,7 +227,9 @@ export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
       const label =
         reason === "hitl"
           ? "HITL — reserved for a human; AFK never runs it"
-          : "not selected for this run";
+          : reason === "narrowed"
+            ? "in this run's scope of record but not run by this invocation"
+            : "not selected for this run";
       lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title} (${label})`);
     }
   } else {
@@ -468,6 +489,15 @@ export interface PipelineConfig {
   dryRun?: boolean;
   /** Slice numbers explicitly requested by the CLI, if any. */
   selectedSliceNumbers?: string[];
+  /**
+   * Re-run only the persisted run scope's non-PASS members. Sugar over
+   * `selectedSliceNumbers`: the selection is resolved from the run state
+   * at start-up and then travels the same subset-narrowing path, so the
+   * run is identical to naming those slice numbers by hand. Requires a
+   * persisted run scope, and cannot be combined with an explicit
+   * selection.
+   */
+  onlyFailed?: boolean;
   /** Contract negotiation cap before convergence may grant one extra round. */
   maxContractRounds?: number;
   /**
@@ -585,6 +615,61 @@ function featureBranchPrefix(provider: AgentProvider): string {
 
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
   return provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
+}
+
+/**
+ * Turn `--only-failed` into the slice numbers an operator would have
+ * typed after `--slices`. Shared by the provider CLIs (which need the
+ * selection before the run, for the echoed header and the `--dry-run`
+ * plan) and by {@link runPipeline}, so the announcement, the plan and
+ * the run can never disagree about what "the failed slices" are.
+ */
+export function resolveOnlyFailedNumbers(state: RunState): string[] {
+  if (!state.scope) {
+    throw new Error(
+      "--only-failed needs a persisted run scope; run the pipeline once before narrowing it to the failed slices",
+    );
+  }
+  return resolveOnlyFailedSelection(state.scope, (id) =>
+    isSliceComplete(state, id),
+  );
+}
+
+/** What a CLI needs to preview a `--only-failed` invocation. */
+export interface OnlyFailedNarrowing {
+  /** The derived selection, as `--slices` numbers. */
+  requestedSliceNumbers: string[];
+  /** The run's scope of record, so the preview can mark narrowed slices. */
+  persistedScope: PersistedRunScope;
+  /**
+   * Slices the run state already records complete. The pipeline counts
+   * these as satisfied dependencies even though this invocation does not
+   * select them, so a preview must seed its wave walk with them or it
+   * will claim a selected slice can never start.
+   */
+  priorCompleted: Set<string>;
+}
+
+/**
+ * Read the run state for `prdSlug`/`provider` and derive everything a
+ * provider CLI needs to echo and preview a `--only-failed` run. Throws
+ * with an operator-facing message when there is no persisted scope.
+ */
+export function narrowToFailedSlices(
+  repoRoot: string,
+  prdSlug: string,
+  provider: AgentProvider,
+): OnlyFailedNarrowing {
+  const state = loadRunState(repoRoot, pipelineRunSlug(prdSlug, provider));
+  const requestedSliceNumbers = resolveOnlyFailedNumbers(state);
+  const priorCompleted = new Set(
+    Object.keys(state.slices).filter((id) => isSliceComplete(state, id)),
+  );
+  return {
+    requestedSliceNumbers,
+    persistedScope: state.scope!,
+    priorCompleted,
+  };
 }
 
 export function sliceBranch(
@@ -1592,9 +1677,27 @@ export async function runPipeline(
 
   try {
   const runState = loadRunState(repoRoot, loggerSlug);
+  // `--only-failed` is resolved here, against the run state, and then
+  // handed to `resolveRunScope` as an ordinary requested selection — so
+  // it takes exactly the same subset-narrowing path as naming the slice
+  // numbers by hand.
+  let requestedSliceNumbers = config.selectedSliceNumbers;
+  if (config.onlyFailed) {
+    if (config.selectedSliceNumbers) {
+      throw new Error(
+        "--only-failed cannot be combined with --slices; it derives the selection from the persisted run scope",
+      );
+    }
+    requestedSliceNumbers = resolveOnlyFailedNumbers(runState);
+    logger.phase(
+      requestedSliceNumbers.length > 0
+        ? `[afk] --only-failed: re-running the non-PASS members of the run scope [${requestedSliceNumbers.join(", ")}]`
+        : "[afk] --only-failed: every member of the run scope is recorded PASS — nothing to re-run",
+    );
+  }
   scope = resolveRunScope(
     [...manifestDag.slices.values()],
-    config.selectedSliceNumbers,
+    requestedSliceNumbers,
     runState.scope,
   );
   runState.scope = scope.persisted;
@@ -1695,6 +1798,41 @@ export async function runPipeline(
         },
       );
     }
+  }
+
+  // Dependency satisfaction reads the run state, not only this
+  // invocation's DAG. A slice recorded PASS with `mergedToFeature` is a
+  // fact about the feature branch, so it unblocks its dependents whether
+  // or not this invocation selected it — without this, narrowing the
+  // selection to one failed slice dispatches nothing at all, because the
+  // prerequisite is not a member of the current DAG and never counts as
+  // satisfied (issue #41).
+  //
+  // Entries for slices no longer declared in `issues.md` are ignored
+  // rather than fatal: a manifest edit must not wedge a re-run. They
+  // still satisfy dependents that name them, and say so in the line.
+  for (const id of Object.keys(runState.slices)) {
+    if (dag.slices.has(id)) continue;
+    if (!isSliceComplete(runState, id)) continue;
+    completed.add(id);
+    const manifestSlice = manifestDag.slices.get(id);
+    const label = manifestSlice
+      ? manifestSlice.title
+      : "(no longer declared in issues.md)";
+    logger.phase(
+      `  Dependency #${id} ${label} satisfied from prior run state ` +
+        `(PASS, merged into ${featBranch}) — not part of this invocation`,
+      "log",
+      {
+        type: "warn",
+        reason: "dependency-from-prior-run",
+        ghIssue: id,
+        previousPhase: "PASS",
+        message:
+          `#${id} ${label}: dependency satisfied from prior run state ` +
+          `(PASS, merged into ${featBranch}) — outside this invocation's selection`,
+      },
+    );
   }
 
   // Process DAG level by level.

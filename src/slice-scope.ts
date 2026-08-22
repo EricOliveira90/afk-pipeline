@@ -10,7 +10,19 @@ export interface PersistedRunScope {
   slices: PersistedScopeSlice[];
 }
 
-export type SliceSkipReason = "hitl" | "not-selected";
+/**
+ * Why a manifest slice is not part of this invocation.
+ *
+ *  - `hitl`         — declared HITL; AFK never runs it.
+ *  - `not-selected` — never entered the run's scope of record.
+ *  - `narrowed`     — a member of the persisted scope that this
+ *                     invocation deliberately left out (`--slices` on a
+ *                     subset, or `--only-failed`). Distinct from
+ *                     `not-selected`: the slice is still in the run's
+ *                     scope of record, so a later full re-run picks it
+ *                     up without any flag.
+ */
+export type SliceSkipReason = "hitl" | "not-selected" | "narrowed";
 
 export interface SkippedSlice {
   slice: Slice;
@@ -109,16 +121,32 @@ function restorePersisted(
   return selected;
 }
 
-function scopeIdentity(slices: readonly Slice[]): string {
-  return slices
-    .map((slice) => `${canonicalNumber(slice.number)}:#${slice.ghIssue}`)
-    .sort()
-    .join(",");
+/**
+ * Slice numbers of the persisted scope's members that the run state does
+ * not record as complete. This is what `--only-failed` selects: sugar
+ * over the subset rule in {@link resolveRunScope}, producing exactly the
+ * selection an operator would type by hand.
+ */
+export function resolveOnlyFailedSelection(
+  persisted: PersistedRunScope,
+  isComplete: (ghIssue: string) => boolean,
+): string[] {
+  return persisted.slices
+    .filter((slice) => !isComplete(slice.ghIssue))
+    .map((slice) => slice.number);
 }
 
 /**
  * Resolve the executable AFK set. Once persisted, the resolved identities
  * win over a changed manifest so a retry cannot silently gain work.
+ *
+ * A requested selection may **narrow** a persisted scope to a strict
+ * subset — that is how "re-run only what failed" is expressed. The
+ * invariant the check protects is that a retry cannot silently *gain*
+ * work, which a narrowing does not violate; supersets and disjoint
+ * selections still throw. Narrowing never rewrites the persisted scope:
+ * the original stays the run's scope of record, and its excluded members
+ * are reported skipped under the `narrowed` reason.
  */
 export function resolveRunScope(
   slices: Slice[],
@@ -129,16 +157,28 @@ export function resolveRunScope(
     requested === undefined ? undefined : resolveRequested(slices, requested);
 
   let selected: Slice[];
+  const scopeOfRecord = new Set<string>();
   let resolved: PersistedRunScope;
   if (persisted) {
     selected = restorePersisted(slices, persisted);
-    if (
-      requestedSlices &&
-      scopeIdentity(requestedSlices) !== scopeIdentity(selected)
-    ) {
-      throw new Error(
-        "Requested slices do not match the persisted run scope; use the original selection or start with a new run-state file",
+    for (const slice of selected) scopeOfRecord.add(slice.ghIssue);
+    if (requestedSlices) {
+      const outside = requestedSlices.filter(
+        (slice) => !scopeOfRecord.has(slice.ghIssue),
       );
+      if (outside.length > 0) {
+        throw new Error(
+          `Requested slices do not match the persisted run scope: ${outside
+            .map((slice) => `${slice.number} (#${slice.ghIssue})`)
+            .join(", ")} ${outside.length === 1 ? "is" : "are"} outside it. ` +
+            "A re-run may narrow the scope to a subset but never add to it; " +
+            "use the original selection or start with a new run-state file",
+        );
+      }
+      const requestedIssues = new Set(
+        requestedSlices.map((slice) => slice.ghIssue),
+      );
+      selected = selected.filter((slice) => requestedIssues.has(slice.ghIssue));
     }
     resolved = persisted;
   } else {
@@ -155,7 +195,12 @@ export function resolveRunScope(
     .filter((slice) => !selectedIssues.has(slice.ghIssue))
     .map((slice) => ({
       slice,
-      reason: slice.type === "HITL" ? "hitl" : "not-selected",
+      reason:
+        slice.type === "HITL"
+          ? "hitl"
+          : scopeOfRecord.has(slice.ghIssue)
+            ? "narrowed"
+            : "not-selected",
     })) satisfies SkippedSlice[];
 
   return { persisted: resolved, selected, skipped };

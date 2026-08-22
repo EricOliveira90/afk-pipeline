@@ -1841,6 +1841,27 @@ describe("buildReviewScopeBlock", () => {
     expect(block).toContain("- 03 (#3) Deferred work (not selected for this run)");
   });
 
+  it("tells the reviewer the invocation was narrowed and which members it left out", () => {
+    const block = buildReviewScopeBlock({
+      persisted: {
+        mode: "all-afk",
+        slices: [
+          { number: "01", ghIssue: "1" },
+          { number: "02", ghIssue: "2" },
+        ],
+      },
+      selected: [slice("02", "2", "Re-run of the failed slice", "AFK")],
+      skipped: [
+        { slice: slice("01", "1", "Passed earlier", "AFK"), reason: "narrowed" },
+      ],
+    });
+    expect(block).toContain("- 02 (#2) Re-run of the failed slice");
+    expect(block).toContain("narrowed");
+    expect(block).toContain(
+      "- 01 (#1) Passed earlier (in this run's scope of record but not run by this invocation)",
+    );
+  });
+
   it("notes when nothing was skipped", () => {
     const block = buildReviewScopeBlock({
       persisted: { mode: "all-afk", slices: [{ number: "01", ghIssue: "1" }] },
@@ -2821,4 +2842,212 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
       "Slice #9502 (Dependent): NOT-RUN — held back by unresolved dependency [#9501]; fix the blocker(s) and re-run",
     );
   }, 60_000);
+});
+
+/**
+ * Re-running only the failed slices (#41).
+ *
+ * Two mechanisms have to hold together for the operator journey to work.
+ * Dependency satisfaction must read the run state, so a prerequisite
+ * recorded PASS and merged unblocks its dependents even when this
+ * invocation did not select it — otherwise a narrow re-run dispatches
+ * nothing and still exits "completed". And the run scope must accept a
+ * strict subset of the persisted scope, so "re-run only what failed" is
+ * expressible at all. `--only-failed` is sugar over the same subset rule
+ * and must produce an identical run.
+ */
+describe("narrowed re-run of the failed slices (#41)", () => {
+  const NARROW_SLICES: Slice[] = [
+    { number: "01", ghIssue: "4101", title: "Foundation", type: "AFK", blockedBy: [], userStories: "" },
+    { number: "02", ghIssue: "4102", title: "Dependent", type: "AFK", blockedBy: ["4101"], userStories: "" },
+  ];
+
+  function fixturesWith(dependentPasses: boolean): Map<string, SliceFixture> {
+    return new Map<string, SliceFixture>([
+      ["4101", { files: ["src/foundation.txt"], qaPasses: true, outputFile: "src/foundation.txt", outputContent: "foundation" }],
+      ["4102", { files: ["src/dependent.txt"], qaPasses: dependentPasses, outputFile: "src/dependent.txt", outputContent: "dependent" }],
+    ]);
+  }
+
+  function latestRunDir(repo: string, slug: string): string {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const dirs = readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .sort();
+    return join(parent, dirs[dirs.length - 1]!);
+  }
+
+  /** First run: the foundation passes and merges, the dependent lands STUCK. */
+  async function runUntilDependentFails(slug: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(NARROW_SLICES),
+      provider: buildStubProvider({
+        fixtures: fixturesWith(false),
+        slices: NARROW_SLICES,
+        records: [],
+      }),
+    });
+    expect(result.success).toBe(false);
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.slices["4101"]).toMatchObject({ phase: "PASS", mergedToFeature: true });
+    expect(state.slices["4102"].phase).toBe("STUCK");
+    return { repo, prdDir, specsDir, statePath, slug };
+  }
+
+  type FailedRun = Awaited<ReturnType<typeof runUntilDependentFails>>;
+
+  /** Re-run the same PRD with a narrowing config, and observe the result. */
+  async function narrowRerun(
+    env: FailedRun,
+    narrowing: { selectedSliceNumbers?: string[]; onlyFailed?: boolean },
+  ) {
+    const records: InvocationRecord[] = [];
+    const result = await runPipeline({
+      repoRoot: env.repo,
+      prdSlug: env.slug,
+      prdDir: env.prdDir,
+      specsDir: env.specsDir,
+      dag: buildDAG(NARROW_SLICES),
+      provider: buildStubProvider({
+        fixtures: fixturesWith(true),
+        slices: NARROW_SLICES,
+        records,
+      }),
+      ...narrowing,
+    });
+    const state = JSON.parse(readFileSync(env.statePath, "utf-8"));
+    const handoff = JSON.parse(
+      readFileSync(
+        join(env.repo, ".afk", "logs", `${env.slug}-stub`, "handoff.json"),
+        "utf-8",
+      ),
+    );
+    const events = readFileSync(
+      join(latestRunDir(env.repo, env.slug), "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    return {
+      success: result.success,
+      // Slice-scoped invocations only: the post-merge review agents run
+      // for the whole branch and carry no slice id.
+      dispatched: [
+        ...new Set(records.map((r) => r.ghIssue).filter((id) => id !== "")),
+      ].sort(),
+      scope: state.scope,
+      phases: {
+        "4101": state.slices["4101"].phase,
+        "4102": state.slices["4102"].phase,
+      },
+      selectedSlices: handoff.selectedSlices,
+      skippedSlices: handoff.skippedSlices,
+      events,
+    };
+  }
+
+  it("dispatches the selected slice whose prerequisite is a merged PASS outside the selection", async () => {
+    const env = await runUntilDependentFails("narrow-subset");
+
+    const observed = await narrowRerun(env, { selectedSliceNumbers: ["02"] });
+
+    // The whole point: the run actually ran the slice it was narrowed to.
+    expect(observed.dispatched).toEqual(["4102"]);
+    expect(observed.success).toBe(true);
+    expect(observed.phases).toEqual({ "4101": "PASS", "4102": "PASS" });
+
+    // The scope of record is untouched by the narrowing, so a later full
+    // re-run still knows the original scope.
+    expect(observed.scope).toEqual({
+      mode: "all-afk",
+      slices: [
+        { number: "01", ghIssue: "4101" },
+        { number: "02", ghIssue: "4102" },
+      ],
+    });
+
+    // The excluded member is reported skipped under its own reason —
+    // it did not read as a slice the pipeline dropped.
+    expect(observed.skippedSlices).toMatchObject([
+      { number: "01", ghIssue: "4101", reason: "narrowed" },
+    ]);
+    expect(observed.selectedSlices).toMatchObject([
+      { number: "02", ghIssue: "4102", status: "PASS" },
+    ]);
+
+    // The dependency satisfied from prior run state is announced.
+    const warn = observed.events.find(
+      (e) => e.type === "warn" && e.reason === "dependency-from-prior-run",
+    );
+    expect(warn).toBeDefined();
+    expect(warn!.ghIssue).toBe("4101");
+    expect(warn!.previousPhase).toBe("PASS");
+  }, 120_000);
+
+  it("rejects a re-run that adds work outside the persisted scope", async () => {
+    const env = await runUntilDependentFails("narrow-superset");
+    // Lock an explicit single-slice scope first, then try to gain work.
+    const extended: Slice[] = [
+      ...NARROW_SLICES,
+      { number: "03", ghIssue: "4103", title: "New work", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+
+    await expect(
+      runPipeline({
+        repoRoot: env.repo,
+        prdSlug: env.slug,
+        prdDir: env.prdDir,
+        specsDir: env.specsDir,
+        dag: buildDAG(extended),
+        selectedSliceNumbers: ["02", "03"],
+        provider: buildStubProvider({
+          fixtures: fixturesWith(true),
+          slices: extended,
+          records: [],
+        }),
+      }),
+    ).rejects.toThrow(/do not match the persisted run scope/);
+  }, 120_000);
+
+  it("--only-failed produces the same run as naming the failed slice numbers", async () => {
+    const byHand = await narrowRerun(
+      await runUntilDependentFails("narrow-by-hand"),
+      { selectedSliceNumbers: ["02"] },
+    );
+    const byFlag = await narrowRerun(
+      await runUntilDependentFails("narrow-only-failed"),
+      { onlyFailed: true },
+    );
+
+    expect(byFlag.dispatched).toEqual(byHand.dispatched);
+    expect(byFlag.success).toEqual(byHand.success);
+    expect(byFlag.scope).toEqual(byHand.scope);
+    expect(byFlag.phases).toEqual(byHand.phases);
+    expect(byFlag.selectedSlices).toEqual(byHand.selectedSlices);
+    expect(byFlag.skippedSlices).toEqual(byHand.skippedSlices);
+  }, 240_000);
+
+  it("ignores run-state entries for slices no longer in issues.md", async () => {
+    const env = await runUntilDependentFails("narrow-stale-state");
+    const state = JSON.parse(readFileSync(env.statePath, "utf-8"));
+    state.slices["4199"] = {
+      phase: "PASS",
+      branch: "afk-stub/removed-slice",
+      mergedToFeature: true,
+    };
+    writeFileSync(env.statePath, JSON.stringify(state, null, 2));
+
+    const observed = await narrowRerun(env, { onlyFailed: true });
+
+    expect(observed.dispatched).toEqual(["4102"]);
+    expect(observed.success).toBe(true);
+  }, 120_000);
 });
