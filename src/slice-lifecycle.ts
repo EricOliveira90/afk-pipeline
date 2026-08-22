@@ -40,6 +40,18 @@ export type SliceLifecycle =
       progress: SliceProgress;
       error: string;
     })
+  /**
+   * Deferred merge (ADR 0029): the work is complete and committed on the
+   * slice branch, QA passed, and only the migration prefix collision
+   * detected inside the merge mutex refused the merge. Carries the
+   * colliding prefixes so the next run can retry the merge without
+   * re-deriving them. Not a `FailurePhase` — nothing here needs a human.
+   */
+  | ({ phase: "MERGE-PENDING" } & SliceIdentity & {
+      progress: SliceProgress;
+      error: string;
+      collidingPrefixes: string[];
+    })
   | ({ phase: "SKIPPED" } & SliceIdentity);
 
 export type SlicePhase = SliceLifecycle["phase"];
@@ -52,6 +64,7 @@ export const ALL_PHASES = [
   "ESCALATE",
   "ERROR",
   "CONFLICT",
+  "MERGE-PENDING",
   "CANCELLED",
   "LANE-CANCELLED",
   "SKIPPED",
@@ -105,6 +118,18 @@ export const lifecycle = {
     progress,
     error,
   }),
+  mergePending: (
+    id: SliceIdentity,
+    progress: SliceProgress,
+    error: string,
+    collidingPrefixes: string[],
+  ): SliceLifecycle => ({
+    phase: "MERGE-PENDING",
+    ...id,
+    progress,
+    error,
+    collidingPrefixes,
+  }),
   cancelled: (id: SliceIdentity, progress: SliceProgress, error: string): SliceLifecycle => ({
     phase: "CANCELLED",
     ...id,
@@ -132,6 +157,8 @@ export function assertNever(x: never): never {
 export type SliceBucket =
   | "succeeded"
   | "failed"
+  /** Merge deferred, recoverable without an agent on the next run. */
+  | "deferred"
   | "cancelled"
   | "skipped"
   | "inFlight";
@@ -145,6 +172,8 @@ export function bucketFor(phase: SlicePhase): SliceBucket {
     case "ERROR":
     case "CONFLICT":
       return "failed";
+    case "MERGE-PENDING":
+      return "deferred";
     case "CANCELLED":
     case "LANE-CANCELLED":
       return "cancelled";
@@ -176,6 +205,8 @@ export function statusIconFor(phase: SlicePhase): string {
       return "🔴";
     case "CONFLICT":
       return "⚠️";
+    case "MERGE-PENDING":
+      return "⏸️";
     case "RUNNING":
       return "🔄";
     case "PENDING":

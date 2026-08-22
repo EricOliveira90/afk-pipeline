@@ -5,6 +5,7 @@ import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
 import { pipelineRunSlug, sliceBranchPrefix } from "./orchestrator.js";
 import { loadRunState, type PersistedPhase } from "./run-state.js";
+import { bucketFor } from "./slice-lifecycle.js";
 
 /**
  * `afk clean-failed` — one command for the manual, Windows-hostile
@@ -23,6 +24,10 @@ import { loadRunState, type PersistedPhase } from "./run-state.js";
  *   feature branch — committed work (a STUCK slice's partial
  *   implementation, a CONFLICT branch awaiting manual resolution) is
  *   never lost; the branch is kept and reported.
+ * - A MERGE-PENDING slice is not debris awaiting operator repair: its
+ *   branch is never a deletion candidate, because the next run's
+ *   merge-only recovery needs exactly that branch (ADR 0029). Its
+ *   worktree is still removable — recovery works from the branch alone.
  * - Registered worktrees whose slice is not in a failure phase are
  *   never removed (a concurrently-running pipeline's live worktrees
  *   stay safe), though running clean-failed during a live run is
@@ -42,6 +47,17 @@ const FAILURE_PHASES: ReadonlySet<PersistedPhase> = new Set([
   "CANCELLED",
   "LANE-CANCELLED",
 ] as PersistedPhase[]);
+
+/**
+ * Phases whose worktree is disposable but whose branch is not. Read off
+ * the lifecycle's own bucketing rather than a second list here, so a new
+ * deferred phase never has to be remembered in two places. Distinct from
+ * `FAILURE_PHASES`: nothing deferred awaits operator repair, so its
+ * branch is reported as deliberately preserved rather than assessed for
+ * deletion.
+ */
+const isDeferred = (phase: PersistedPhase): boolean =>
+  bucketFor(phase) === "deferred";
 
 export interface CleanFailedOptions {
   repoRoot: string;
@@ -130,10 +146,11 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
     }
   };
 
-  // --- Pass 1: slices recorded in a failure phase. ---
+  // --- Pass 1: slices recorded in a failure phase, plus the recoverable
+  // phases whose worktree is debris but whose branch is not. ---
   const handledDirs = new Set<string>();
   for (const [ghIssue, slice] of Object.entries(state.slices)) {
-    if (!FAILURE_PHASES.has(slice.phase)) continue;
+    if (!FAILURE_PHASES.has(slice.phase) && !isDeferred(slice.phase)) continue;
     log(`Slice #${ghIssue} (${slice.phase}):`);
 
     // Worktree: the registered location wins when git knows one for the
@@ -167,6 +184,16 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
     // Branch: delete only when nothing would be lost.
     const branch = slice.branch;
     if (!branch || !git.branchExists(repoRoot, branch)) continue;
+    if (isDeferred(slice.phase)) {
+      // Never a deletion candidate, whatever the commit comparison says:
+      // the next run's merge-only recovery merges this exact branch.
+      report.keptBranches.push({
+        branch,
+        reason: `${slice.phase} — the next run retries the merge; the branch holds the slice's committed work`,
+      });
+      log(`  kept branch ${branch} (${slice.phase} — merge retried next run)`);
+      continue;
+    }
     if (!featureExists) {
       report.keptBranches.push({
         branch,

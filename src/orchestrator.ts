@@ -31,7 +31,11 @@ import {
   isForceRestarted,
   isResumeStuckRequested,
 } from "./resume.js";
-import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
+import {
+  lifecycle,
+  type SliceIdentity,
+  type SliceLifecycle,
+} from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
@@ -755,6 +759,45 @@ export function sliceBranch(
   return `${sliceBranchPrefix(provider)}/${prdSlug}-slice-${slice.number}-${slugify(slice.title)}`;
 }
 
+/**
+ * Where a slice's worktree lives. Short dir name to stay under Windows'
+ * 260-char MAX_PATH — the full title remains in the branch name (visible
+ * in PRs and git log); the dir just needs to be unique per slice within
+ * the run.
+ */
+export function sliceWorktreeDir(
+  repoRoot: string,
+  prdSlug: string,
+  slice: Slice,
+  provider: AgentProvider,
+): string {
+  return join(
+    repoRoot,
+    ".afk",
+    "worktrees",
+    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+  );
+}
+
+/**
+ * Throwaway checkout the merge of a slice branch happens in when the
+ * feature branch has no worktree of its own. Shared by the wave's first
+ * merge attempt and the next run's merge-only recovery (ADR 0029), which
+ * must target the same directory.
+ */
+export function sliceScratchMergeDir(
+  repoRoot: string,
+  prdSlug: string,
+  slice: Slice,
+  provider: AgentProvider,
+): string {
+  return join(
+    repoRoot,
+    ".afk",
+    `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+  );
+}
+
 function featureBranch(prdSlug: string, provider: AgentProvider): string {
   return `${featureBranchPrefix(provider)}/${prdSlug}`;
 }
@@ -897,15 +940,7 @@ export function makeSliceContext(
   const { repoRoot, prdSlug, specsDir, signal } = config;
   const provider = config.provider ?? kiroProvider;
   const branch = sliceBranch(prdSlug, slice, provider);
-  // Short worktree dir name to stay under Windows' 260-char MAX_PATH.
-  // The full title remains in the branch name (visible in PRs and git
-  // log) — the dir just needs to be unique per slice within the run.
-  const worktreeDir = join(
-    repoRoot,
-    ".afk",
-    "worktrees",
-    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
-  );
+  const worktreeDir = sliceWorktreeDir(repoRoot, prdSlug, slice, provider);
   const relSliceDir = join(
     specsDir,
     "slices",
@@ -2518,12 +2553,28 @@ export async function runPipeline(
   // them in the current run — that's the whole point of the status:
   // human resolution of the predecessor first.
   const laneCancelled = new Set<string>();
-  // Slices this invocation actually handed to a wave, and slices it
-  // skipped because a prior run already merged them. Neither is derivable
-  // from `completed` afterwards — that set mixes both — and together they
-  // decide whether the run did anything at all (issue #42).
+  // Slices this invocation handed to a wave, skipped as already merged,
+  // or merged during recovery. None is derivable from `completed`
+  // afterwards because that set mixes all three; together they decide
+  // whether the run did anything at all (issue #42).
   const dispatched = new Set<string>();
   const alreadyComplete = new Set<string>();
+  const recoveredMerges = new Set<string>();
+  // Slices whose merge is deferred (ADR 0029). Like `laneCancelled` they
+  // are held out of readiness for the rest of this run — a slice that
+  // just refused its merge must not be regenerated — and they never
+  // unblock DAG dependents, because nothing of theirs is on the feature
+  // branch. They are naturally re-eligible on the next run, where the
+  // merge-only recovery pass tries the merge again before any agent runs.
+  const mergePending = new Set<string>();
+
+  /**
+   * A slice this run will not dispatch again, for any reason short of
+   * success. One predicate so a new hold-back reason is one edit, not
+   * three filter sites plus a sweep condition.
+   */
+  const heldBack = (id: string): boolean =>
+    failed.has(id) || laneCancelled.has(id) || mergePending.has(id);
 
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
@@ -2564,13 +2615,21 @@ export async function runPipeline(
     // failure reason without opening .afk/state/<slug>.json by hand.
     // There is deliberately NO retry cap: failed slices are always
     // eligible again on the next run. See issue #17.
+    //
+    // A MERGE-PENDING slice is not being retried in that sense: its work
+    // is intact and only its merge is outstanding, so it is announced as
+    // a recovery. The merge-only pass below acts on it.
     const prior = runState.slices[id];
     if (prior) {
       const reason = prior.error ? ` — ${prior.error}` : "";
       const label =
         prior.phase === "PASS" ? "PASS (merge did not complete)" : prior.phase;
+      const verb =
+        prior.phase === "MERGE-PENDING"
+          ? "Recovering the merge for"
+          : "Retrying";
       logger.phase(
-        `  Retrying #${id} ${slice.title} (previous run: ${label}${reason})`,
+        `  ${verb} #${id} ${slice.title} (previous run: ${label}${reason})`,
         "log",
         {
           type: "warn",
@@ -2684,20 +2743,38 @@ export async function runPipeline(
     // PASS is only ever reported by runWave after the merge into the
     // feature branch succeeded, so `mergedToFeature: true` is safe here
     // and `isSliceComplete` will treat the slice as resumable-complete.
-    const next =
-      outcome.phase === "PASS"
-        ? lifecycle.pass(sliceId, progress, true)
-        : outcome.phase === "LANE-CANCELLED"
-          ? lifecycle.laneCancelled(sliceId, progress, detailOf(outcome.error))
-          : outcome.phase === "CANCELLED"
-            ? lifecycle.cancelled(sliceId, progress, detailOf(outcome.error))
-            : outcome.phase === "CONFLICT"
-              ? lifecycle.conflict(sliceId, progress, detailOf(outcome.error))
-              : outcome.phase === "ESCALATE"
-                ? lifecycle.escalate(sliceId, progress, detailOf(outcome.error))
-                : outcome.phase === "ERROR"
-                  ? lifecycle.error(sliceId, progress, detailOf(outcome.error))
-                  : lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
+    const next = ((): SliceLifecycle => {
+      switch (outcome.phase) {
+        case "PASS":
+          return lifecycle.pass(sliceId, progress, true);
+        case "LANE-CANCELLED":
+          return lifecycle.laneCancelled(
+            sliceId,
+            progress,
+            detailOf(outcome.error),
+          );
+        case "CANCELLED":
+          return lifecycle.cancelled(sliceId, progress, detailOf(outcome.error));
+        case "CONFLICT":
+          return lifecycle.conflict(sliceId, progress, detailOf(outcome.error));
+        case "MERGE-PENDING":
+          // Not `detailOf`: the wave's reason names the colliding
+          // prefixes, which no earlier failure site could have recorded
+          // on the logger.
+          return lifecycle.mergePending(
+            sliceId,
+            progress,
+            outcome.error,
+            outcome.collidingPrefixes,
+          );
+        case "ESCALATE":
+          return lifecycle.escalate(sliceId, progress, detailOf(outcome.error));
+        case "ERROR":
+          return lifecycle.error(sliceId, progress, detailOf(outcome.error));
+        case "STUCK":
+          return lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
+      }
+    })();
 
     logger.transitionTo(id, next);
     saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
@@ -2713,13 +2790,138 @@ export async function runPipeline(
         { type: "slice-outcome", slice: next },
       );
     } else {
+      // Read the reason off `next` so the run.log line and the persisted
+      // record can never disagree about why the slice stopped.
+      const reason = "error" in next ? next.error : outcome.error;
       logger.phase(
-        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${detailOf(outcome.error)}`,
+        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${reason}`,
         "error",
         { type: "slice-outcome", slice: next },
       );
     }
   };
+
+  // Record an outcome the merge-only recovery pass decided. Same three
+  // steps `persistOutcome` takes for a wave outcome — transition, persist,
+  // emit the slice-outcome event — but the recovery pass owns the
+  // lifecycle value itself, because it has facts (the refreshed colliding
+  // prefixes) no wave produced.
+  const recordRecovery = (id: string, next: SliceLifecycle) => {
+    logger.transitionTo(id, next);
+    saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
+    persistedOutcomes.add(id);
+    const suffix =
+      next.phase === "PASS"
+        ? `PASS — merged into ${featBranch} by merge-only recovery (no agent invoked)`
+        : `${next.phase} — ${"error" in next ? next.error : ""}`;
+    logger.phase(`[afk] Slice #${id} (${next.title}): ${suffix}`, "error", {
+      type: "slice-outcome",
+      slice: next,
+    });
+  };
+
+  // --- Merge-only recovery, before the first wave dispatches (ADR 0029).
+  //
+  // A slice recorded MERGE-PENDING lost nothing but its merge: the work
+  // is committed on its slice branch and QA passed. Retrying it costs one
+  // git merge and zero tokens, so it runs ahead of any agent — and it
+  // must, because a recovered slice may unblock DAG dependents that would
+  // otherwise be held back for the whole run.
+  //
+  // The collision re-check happens inside the merge mutex against the
+  // current feature-branch tip, exactly as the original attempt did: this
+  // recovery is no less safe than the merge it is repeating.
+  for (const [id, slice] of dag.slices) {
+    // Ctrl-C during recovery stops it where it stands; the wave loop's
+    // abort sweep marks whatever is left (ADR 0003).
+    if (signal?.aborted) break;
+    const prior = runState.slices[id];
+    if (prior?.phase !== "MERGE-PENDING") continue;
+
+    const branch = prior.branch ?? sliceBranch(prdSlug, slice, provider);
+    const sliceId: SliceIdentity = { ghIssue: id, title: slice.title, branch };
+    const progress = logger.getSliceProgress(id);
+
+    // The recoverable claim is "the work is committed on this branch". If
+    // the branch is gone or carries nothing, the claim is false and there
+    // is nothing to merge — fall through to ordinary dispatch rather than
+    // inventing an outcome.
+    if (
+      !git.branchExists(repoRoot, branch) ||
+      !git.hasCommitsAhead(repoRoot, branch, featBranch)
+    ) {
+      logger.phase(
+        `  #${id} ${slice.title}: MERGE-PENDING, but ${branch} is missing or has no ` +
+          `commits ahead of ${featBranch} — nothing to recover; dispatching normally`,
+        "log",
+        {
+          type: "warn",
+          reason: "prior-run-state",
+          ghIssue: id,
+          previousPhase: "MERGE-PENDING",
+          message:
+            `#${id} ${slice.title}: recoverable merge claim is false ` +
+            `(${branch} missing or empty) — dispatching normally`,
+        },
+      );
+      continue;
+    }
+
+    const scratchMergeDir = sliceScratchMergeDir(
+      repoRoot,
+      prdSlug,
+      slice,
+      provider,
+    );
+    const attempt = await mergeMutex(() =>
+      Promise.resolve(
+        git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
+      ),
+    );
+
+    // Still colliding: stay MERGE-PENDING with a reason refreshed against
+    // the current tip. Deliberately NOT escalated to a regeneration — a
+    // repeated retry must never spend tokens the operator didn't ask for.
+    if (attempt.kind === "collision") {
+      recordRecovery(
+        id,
+        lifecycle.mergePending(
+          sliceId,
+          progress,
+          git.mergePendingReason(attempt.prefixes, featBranch),
+          attempt.prefixes,
+        ),
+      );
+      mergePending.add(id);
+      continue;
+    }
+
+    // A real merge conflict is a different animal: it needs a human, and
+    // CONFLICT keeps meaning exactly that.
+    if (attempt.result.status === "conflict") {
+      recordRecovery(
+        id,
+        lifecycle.conflict(sliceId, progress, attempt.result.details),
+      );
+      failed.add(id);
+      continue;
+    }
+
+    if (attempt.result.cleanupWarning) {
+      logger.phase(`[afk] Warning: ${attempt.result.cleanupWarning}`);
+    }
+    await mergeMutex(() =>
+      Promise.resolve(
+        git.removeWorktree(
+          repoRoot,
+          sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
+        ),
+      ),
+    );
+    recordRecovery(id, lifecycle.pass(sliceId, progress, true));
+    completed.add(id);
+    recoveredMerges.add(id);
+  }
 
   let waveNumber = 0;
   while (true) {
@@ -2732,9 +2934,7 @@ export async function runPipeline(
     const readyResult = await Promise.race([
       Promise.resolve().then(() => {
         const ready = dag.ready(completed);
-        return ready.filter(
-          (id) => !failed.has(id) && !laneCancelled.has(id),
-        );
+        return ready.filter((id) => !heldBack(id));
       }),
       new Promise<never>((_, reject) => {
         const timer = setTimeout(() => {
@@ -2780,6 +2980,8 @@ export async function runPipeline(
         completed.add(id);
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
+      } else if (outcome.phase === "MERGE-PENDING") {
+        mergePending.add(id);
       } else {
         failed.add(id);
       }
@@ -2812,9 +3014,7 @@ export async function runPipeline(
 
     // If no progress was made this round, we're stuck.
     const newReady = dag.ready(completed);
-    const newToRun = newReady.filter(
-      (id) => !failed.has(id) && !laneCancelled.has(id),
-    );
+    const newToRun = newReady.filter((id) => !heldBack(id));
     if (newToRun.length === 0) break;
   }
 
@@ -2832,9 +3032,7 @@ export async function runPipeline(
   const notRunHolds: Array<{ id: string; title: string; hold: string }> = [];
   for (const [id, slice] of dag.slices) {
     if (slice.type === "HITL") continue;
-    if (completed.has(id) || failed.has(id) || laneCancelled.has(id)) {
-      continue;
-    }
+    if (completed.has(id) || heldBack(id)) continue;
     const unresolved = slice.blockedBy.filter((dep) => !completed.has(dep));
     const blockerText =
       unresolved.length > 0
@@ -3224,8 +3422,8 @@ export async function runPipeline(
     }
   }
 
-    // A run that handed no slice to a wave and skipped none as already
-    // complete did nothing at all. Without this it can report success —
+    // A run that handed no slice to a wave, skipped none as already
+    // complete, and recovered no deferred merge did nothing at all. Without this it can report success —
     // an empty selection satisfies `every` vacuously — and a 0m00s no-op
     // reads exactly like a finished run (issue #42). Cancellation is
     // excluded: Ctrl-C keeps its own exit path, and a run cancelled
@@ -3234,7 +3432,8 @@ export async function runPipeline(
     if (
       !signal?.aborted &&
       dispatched.size === 0 &&
-      alreadyComplete.size === 0
+      alreadyComplete.size === 0 &&
+      recoveredMerges.size === 0
     ) {
       const holds = notRunHolds.map(
         ({ id, title, hold }) => `  #${id} ${title} — ${hold}`,

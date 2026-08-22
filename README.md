@@ -446,6 +446,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0023** — `clean-failed` subcommand for dead-slice worktree/branch debris
 - **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
 - **ADR 0027** — Migrations are a lane-shared resource: migration-bearing slices serialise into one lane
+- **ADR 0029** — Recoverable merge deferral: `MERGE-PENDING` keeps the slice branch and the next run retries the merge
 
 ## QA Rounds and Shared Preview
 

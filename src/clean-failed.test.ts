@@ -249,6 +249,63 @@ describe("runCleanFailed", () => {
     expect(report.deletedBranches).toEqual([branch]);
   });
 
+  it("preserves a MERGE-PENDING slice's branch — the next run merges it (ADR 0029)", () => {
+    const repo = makeRepo();
+    setUp(repo, [
+      {
+        ghIssue: "103",
+        number: "03",
+        phase: "MERGE-PENDING",
+        materialise: true,
+        withCommit: true,
+      },
+    ]);
+    const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s03`);
+    const branch = `afk/${SLUG}-slice-03-fixture`;
+
+    const report = runCleanFailed({
+      repoRoot: repo,
+      prdSlug: SLUG,
+      log: () => {},
+    });
+
+    // The worktree is debris — merge-only recovery works from the branch
+    // alone — but the branch itself carries the slice's committed work.
+    expect(existsSync(dir)).toBe(false);
+    expect(report.removedWorktrees).toEqual([dir]);
+    expect(git.branchExists(repo, branch)).toBe(true);
+    expect(report.deletedBranches).toEqual([]);
+    expect(report.keptBranches).toHaveLength(1);
+    expect(report.keptBranches[0]!.branch).toBe(branch);
+    expect(report.keptBranches[0]!.reason).toContain("MERGE-PENDING");
+    expect(report.keptBranches[0]!.reason).toContain("retries the merge");
+  });
+
+  it("keeps a MERGE-PENDING branch even when it has no commits ahead", () => {
+    const repo = makeRepo();
+    setUp(repo, [
+      {
+        ghIssue: "104",
+        number: "04",
+        phase: "MERGE-PENDING",
+        materialise: true,
+      },
+    ]);
+    const branch = `afk/${SLUG}-slice-04-fixture`;
+
+    const report = runCleanFailed({
+      repoRoot: repo,
+      prdSlug: SLUG,
+      log: () => {},
+    });
+
+    // The commit comparison never gets a say: a MERGE-PENDING branch is
+    // never a deletion candidate. (The next run finds it empty and falls
+    // through to ordinary dispatch — the pipeline's call, not cleanup's.)
+    expect(git.branchExists(repo, branch)).toBe(true);
+    expect(report.deletedBranches).toEqual([]);
+  });
+
   it("is a no-op with an empty report when there is no state file", () => {
     const repo = makeRepo();
     const report = runCleanFailed({

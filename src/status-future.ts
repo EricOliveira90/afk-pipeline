@@ -8,9 +8,9 @@
  * - A slice is done when events carry a terminal PASS slice-outcome
  *   for it, or persisted state says PASS + mergedToFeature. Failure
  *   outcomes (STUCK/ESCALATE/ERROR/CONFLICT/CANCELLED/LANE-CANCELLED)
- *   are terminal too — the slice is not pending work, but it never
- *   unblocks dependents (only `completed` unblocks — the PRD 012
- *   run-1 contract).
+ *   and the deferred-merge outcome (MERGE-PENDING) are terminal for this
+ *   run too — the slice is not pending work, but it never unblocks
+ *   dependents (only `completed` unblocks — the PRD 012 run-1 contract).
  * - Remaining phases per pending slice: the fixed agent sequence
  *   explorer → planner → evaluator-contract → generator → evaluator-qa
  *   minus the agents with a phase-ended event. A slice with no events
@@ -45,9 +45,10 @@ export const AGENT_SEQUENCE = [
 export interface FutureBlockerRef {
   ghIssue: string;
   /**
-   * "pending" | "in flight" | "HITL" | a failure phase (e.g. "STUCK").
-   * A failure phase or "HITL" means the blocker will not resolve
-   * without human intervention.
+   * "pending" | "in flight" | "HITL" | a failure phase (e.g. "STUCK") |
+   * the deferred-merge annotation. A failure phase or "HITL" means the
+   * blocker will not resolve without human intervention; MERGE-PENDING
+   * says the opposite — the next run retries its merge unattended.
    */
   status: string;
 }
@@ -96,11 +97,19 @@ export interface FutureSection {
   notes: string[];
 }
 
-const FAILURE_PHASES = new Set([
+/**
+ * Phases that end a slice's work for this run. `MERGE-PENDING` belongs
+ * here even though it needs no human: this run will not touch the slice
+ * again, and it never unblocks dependents (nothing of its work is on the
+ * feature branch yet). The blocker annotation below says which of the two
+ * it is, so "wait for the next run" doesn't read like "go fix something".
+ */
+const TERMINAL_THIS_RUN_PHASES = new Set([
   "STUCK",
   "ESCALATE",
   "ERROR",
   "CONFLICT",
+  "MERGE-PENDING",
   "CANCELLED",
   "LANE-CANCELLED",
 ]);
@@ -261,10 +270,12 @@ export function buildFutureSection(input: {
     }
   }
 
-  /** Failure phase for a slice this run, if any. */
-  const failurePhaseOf = (ghIssue: string): string | undefined => {
+  /** Phase that ended a slice's work this run, if any. */
+  const terminalPhaseOf = (ghIssue: string): string | undefined => {
     const phase = facts.outcomePhase.get(ghIssue);
-    return phase !== undefined && FAILURE_PHASES.has(phase) ? phase : undefined;
+    return phase !== undefined && TERMINAL_THIS_RUN_PHASES.has(phase)
+      ? phase
+      : undefined;
   };
 
   const hitl = new Set<string>();
@@ -277,8 +288,11 @@ export function buildFutureSection(input: {
 
   /** Why a blocker still blocks, for waitsOn annotations. */
   const blockerStatus = (ghIssue: string): string => {
-    const failure = failurePhaseOf(ghIssue);
-    if (failure !== undefined) return failure;
+    const terminal = terminalPhaseOf(ghIssue);
+    if (terminal === "MERGE-PENDING") {
+      return "MERGE-PENDING — the next run retries the merge";
+    }
+    if (terminal !== undefined) return terminal;
     if (hitl.has(ghIssue)) return "HITL";
     if (facts.hasPhaseEvents.has(ghIssue)) return "in flight";
     return "pending";
@@ -296,7 +310,7 @@ export function buildFutureSection(input: {
         continue;
       }
       if (completed.has(id)) continue;
-      if (failurePhaseOf(id) !== undefined) continue; // terminal this run
+      if (terminalPhaseOf(id) !== undefined) continue; // terminal this run
       pending.push({
         ghIssue: id,
         title: slice.title,
@@ -336,7 +350,7 @@ export function buildFutureSection(input: {
     // Degraded mode: derive pending slices from the event stream alone.
     for (const id of facts.seenSlices) {
       if (completed.has(id)) continue;
-      if (failurePhaseOf(id) !== undefined) continue;
+      if (terminalPhaseOf(id) !== undefined) continue;
       if (hitl.has(id)) {
         skipped.push({ ghIssue: id, title: facts.titles.get(id) ?? "" });
         continue;

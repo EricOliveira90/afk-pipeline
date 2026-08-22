@@ -453,6 +453,63 @@ export function lastCommitEpochSeconds(worktreeDir: string): number | null {
 }
 
 /**
+ * Outcome of one attempt at the merge-mutex critical section: either the
+ * migration prefix check refused before anything was merged, or a real
+ * merge was performed and reports its own status.
+ */
+export type MergeAttempt =
+  | { kind: "collision"; prefixes: string[] }
+  | { kind: "merge"; result: MergeResult };
+
+/**
+ * The body of the merge mutex's critical section, in one place so the
+ * wave's first attempt and a later run's merge-only recovery cannot
+ * diverge (ADR 0029). Checking the prefixes against the feature-branch
+ * tip and merging must be atomic — callers MUST invoke this inside the
+ * merge mutex.
+ */
+export function attemptMerge(
+  repoRoot: string,
+  sliceBranch: string,
+  featureBranch: string,
+  scratchMergeDir: string,
+): MergeAttempt {
+  const prefixes = migrationPrefixCollisions(
+    repoRoot,
+    sliceBranch,
+    featureBranch,
+  );
+  if (prefixes.length > 0) return { kind: "collision", prefixes };
+  return {
+    kind: "merge",
+    result: mergeSliceBranch(
+      repoRoot,
+      sliceBranch,
+      featureBranch,
+      scratchMergeDir,
+    ),
+  };
+}
+
+/**
+ * The reason text a deferred merge carries, shared by the merge mutex's
+ * refusal and by the next run's merge-only recovery so both say the same
+ * thing (ADR 0029). Names the prefixes, states that the work survived,
+ * and says what happens next — the operator has nothing to adjudicate.
+ */
+export function mergePendingReason(
+  collidingPrefixes: string[],
+  featureBranch: string,
+): string {
+  return (
+    `Migration prefix collision: ${collidingPrefixes.join(", ")} already exists on ` +
+    `${featureBranch} under a different filename. The slice's work is committed on its ` +
+    `slice branch and QA passed — merge deferred; the next run retries the merge ` +
+    `(no agent, no regeneration).`
+  );
+}
+
+/**
  * Merge a source branch into a target branch.
  * Returns true on success, false on conflict.
  */
