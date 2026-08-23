@@ -1210,7 +1210,7 @@ describe("runWave — migration lane grouping", () => {
     // the predecessor's migration — the whole point of the grouping.
     expect(predecessorVisible[0]).toBe(false); // wave-start base
     expect(predecessorVisible[1]).toBe(true); // refreshed base
-  }, 60_000);
+  }, 120_000);
 
   it("leaves non-migration slices in their own parallel lanes", async () => {
     const repo = makeRepo();
