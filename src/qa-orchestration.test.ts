@@ -327,11 +327,20 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const evidence = JSON.parse(
       readFileSync(join(evidenceDir, evidenceFile), "utf-8"),
     );
-    expect(evidence.results).toHaveLength(1);
-    expect(evidence.results[0]).toMatchObject({
-      gateId: "typecheck",
-      status: "INFRASTRUCTURE",
-    });
+    expect(evidence.results).toEqual([]);
+    const events = readFileSync(
+      join(ctx.logger.runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    expect(events.some((event) => event.type === "gate-outcome")).toBe(false);
+    const partialLogs = readdirSync(join(evidenceDir, "gate-logs"));
+    expect(partialLogs).toHaveLength(1);
+    expect(
+      readFileSync(join(evidenceDir, "gate-logs", partialLogs[0]!), "utf-8"),
+    ).toContain("[gate:typecheck] START");
     const childPid = Number(readFileSync(childPidPath, "utf-8"));
     expect(() => process.kill(childPid, 0)).toThrow();
   }, 30_000);

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -220,7 +221,7 @@ describe("runGates", () => {
     });
   });
 
-  it("records cancellation as infrastructure and starts no later gate", async () => {
+  it("retains a partial log without inventing a result on cancellation", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const controller = new AbortController();
     const starts: string[] = [];
@@ -256,12 +257,12 @@ describe("runGates", () => {
     });
 
     expect(starts).toEqual(["long-running"]);
-    expect(result.evidence.results).toHaveLength(1);
-    expect(result.evidence.results[0]).toMatchObject({
-      status: "INFRASTRUCTURE",
-      failureKind: null,
-      exitCode: null,
-    });
+    expect(result.evidence.results).toEqual([]);
+    const partialLogs = readdirSync(join(evidenceDir, "gate-logs"));
+    expect(partialLogs).toHaveLength(1);
+    expect(
+      readFileSync(join(evidenceDir, "gate-logs", partialLogs[0]!), "utf-8"),
+    ).toContain("[gate:long-running] START");
   });
 
   it("preserves distinct attempts and rejects unversioned evidence", async () => {

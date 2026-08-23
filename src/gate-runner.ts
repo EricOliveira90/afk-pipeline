@@ -244,6 +244,8 @@ export async function runGates(
       results.push(result);
       break;
     }
+    if (execution.outcome === "CANCELLED") break;
+
     const classification = classifyExecution(
       execution.outcome,
       execution.exitCode,
@@ -266,7 +268,6 @@ export async function runGates(
       `[gate:${declaration.id}] ${result.status} (${result.durationMs}ms)\n`,
     );
     results.push(result);
-    if (execution.outcome === "CANCELLED") break;
   }
 
   const evidence: GateEvidence = {
