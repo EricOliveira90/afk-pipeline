@@ -117,7 +117,6 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     let evaluators = 0;
     let artifactDir = "";
     const generatorPrompts: string[] = [];
-    const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -131,7 +130,6 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           );
         } else if (options.role === "evaluator-qa") {
           evaluators++;
-          evaluatorPrompts.push(options.prompt);
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -153,10 +151,6 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
     expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
     expect(generatorPrompts[1]).toMatch(/test\.log/);
-    expect(evaluatorPrompts[0]).toMatch(/attempt-[\w]+\.json/);
-    expect(evaluatorPrompts[0]).toContain(
-      "do not rerun the baseline sanity commands",
-    );
 
     const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
     const evidenceFiles = readdirSync(evidenceDir)

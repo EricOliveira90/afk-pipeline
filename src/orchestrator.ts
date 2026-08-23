@@ -1910,7 +1910,6 @@ export async function runQAStage(
   round: number,
   stage: "deterministic" | "shared-preview",
   previousReports: readonly string[],
-  gateEvidence: readonly string[] = [],
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -1956,9 +1955,6 @@ export async function runQAStage(
           REPORT_PATH: reportDisplayPath,
           PREVIOUS_QA_REPORTS: previousReports.length > 0
             ? previousReports.map((path) => `- \`${path}\``).join("\n")
-            : "(none)",
-          GATE_EVIDENCE: gateEvidence.length > 0
-            ? gateEvidence.map((path) => `- \`${path}\``).join("\n")
             : "(none)",
           COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
           HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
@@ -2282,7 +2278,6 @@ export async function runSliceExecute(
           round,
           "deterministic",
           qaReports,
-          [evidenceDisplayPath],
         );
         logger.event({
           type: "phase-ended",
@@ -2316,7 +2311,6 @@ export async function runSliceExecute(
             round,
             "shared-preview",
             qaReports,
-            [evidenceDisplayPath],
           );
           logger.event({
             type: "phase-ended",
