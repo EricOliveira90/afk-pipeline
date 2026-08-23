@@ -20,7 +20,7 @@ export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
 
 /**
- * Event payloads as emitted at call sites — the Logger stamps `ts`.
+ * Event payloads as emitted at call sites — the RunJournal stamps `ts`.
  */
 export type RunEventPayload =
   | { type: "header"; version: typeof EVENTS_SCHEMA_VERSION }

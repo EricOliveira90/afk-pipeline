@@ -8,7 +8,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Logger } from "./logger.js";
+import {
+  RunJournal as Logger,
+  type TerminalOutcome,
+} from "./run-journal.js";
 import { lifecycle } from "./slice-lifecycle.js";
 
 const tempDirs: string[] = [];
@@ -36,51 +39,48 @@ function id(ghIssue: string, title: string, branch: string) {
   return { ghIssue, title, branch };
 }
 
+function recordTerminal(
+  log: Logger,
+  sliceId: ReturnType<typeof id>,
+  outcome: TerminalOutcome,
+) {
+  log.trackSlice(lifecycle.running(sliceId, PROGRESS));
+  log.recordTerminal(sliceId, outcome);
+}
+
 describe("Logger.formatConsoleSummary", () => {
   it("groups every phase into its bucket exhaustively", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "buckets");
     log.setFeatureBranch("feat/buckets");
 
-    log.transitionTo(
-      "1",
-      lifecycle.pass(id("1", "Pass", "afk/1"), PROGRESS, true),
-    );
-    log.transitionTo(
-      "2",
-      lifecycle.stuck(id("2", "Stuck", "afk/2"), PROGRESS, "QA failed"),
-    );
-    log.transitionTo(
-      "3",
-      lifecycle.escalate(
-        id("3", "Esc", "afk/3"),
-        PROGRESS,
-        "negotiation gave up",
-      ),
-    );
-    log.transitionTo(
-      "4",
-      lifecycle.error(id("4", "Err", "afk/4"), PROGRESS, "boom"),
-    );
-    log.transitionTo(
-      "5",
-      lifecycle.conflict(id("5", "Conf", "afk/5"), PROGRESS, "merge"),
-    );
-    log.transitionTo(
-      "6",
-      lifecycle.cancelled(id("6", "Can", "afk/6"), PROGRESS, "user abort"),
-    );
-    log.transitionTo(
-      "7",
-      lifecycle.laneCancelled(
-        id("7", "Lane", "afk/7"),
-        PROGRESS,
-        "predecessor failed",
-      ),
-    );
-    log.transitionTo("8", lifecycle.skipped(id("8", "Hitl", "—")));
-    log.transitionTo(
-      "9",
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    recordTerminal(log, id("2", "Stuck", "afk/2"), {
+      phase: "STUCK",
+      error: "QA failed",
+    });
+    recordTerminal(log, id("3", "Esc", "afk/3"), {
+      phase: "ESCALATE",
+      error: "negotiation gave up",
+    });
+    recordTerminal(log, id("4", "Err", "afk/4"), {
+      phase: "ERROR",
+      error: "boom",
+    });
+    recordTerminal(log, id("5", "Conf", "afk/5"), {
+      phase: "CONFLICT",
+      error: "merge",
+    });
+    recordTerminal(log, id("6", "Can", "afk/6"), {
+      phase: "CANCELLED",
+      error: "user abort",
+    });
+    recordTerminal(log, id("7", "Lane", "afk/7"), {
+      phase: "LANE-CANCELLED",
+      error: "predecessor failed",
+    });
+    log.trackSlice(lifecycle.skipped(id("8", "Hitl", "—")));
+    log.trackSlice(
       lifecycle.running(id("9", "Run", "afk/9"), PROGRESS),
     );
 
@@ -102,7 +102,7 @@ describe("Logger.bumpGenRound / bumpEvalRound", () => {
   it("bumps counters without changing phase", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "bumps");
-    log.transitionTo("1", lifecycle.running(id("1", "x", "afk/1"), {
+    log.trackSlice(lifecycle.running(id("1", "x", "afk/1"), {
       genRounds: 0,
       evalRounds: 0,
     }));
@@ -116,7 +116,7 @@ describe("Logger.bumpGenRound / bumpEvalRound", () => {
   it("throws when bumping rounds on a SKIPPED slice", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "bumps");
-    log.transitionTo("1", lifecycle.skipped(id("1", "h", "—")));
+    log.trackSlice(lifecycle.skipped(id("1", "h", "—")));
     expect(() => log.bumpGenRound("1", 1)).toThrow(/SKIPPED/);
   });
 });
@@ -127,22 +127,15 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
     const log = new Logger(repo, "summary");
     log.setFeatureBranch("feat/summary");
 
-    log.transitionTo(
-      "1",
-      lifecycle.pass(id("1", "Pass", "afk/1"), PROGRESS, true),
-    );
-    log.transitionTo(
-      "2",
-      lifecycle.escalate(
-        id("2", "Esc", "afk/2"),
-        PROGRESS,
-        "negotiation gave up",
-      ),
-    );
-    log.transitionTo(
-      "3",
-      lifecycle.error(id("3", "Err", "afk/3"), PROGRESS, "boom"),
-    );
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    recordTerminal(log, id("2", "Esc", "afk/2"), {
+      phase: "ESCALATE",
+      error: "negotiation gave up",
+    });
+    recordTerminal(log, id("3", "Err", "afk/3"), {
+      phase: "ERROR",
+      error: "boom",
+    });
 
     const md = log.writeSummary();
     // Header row + three data rows + totals row
@@ -270,10 +263,7 @@ describe("Logger.writeSummary per-run copy", () => {
   it("writes run-summary.md to both the stable path and the run directory", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "summary-copy");
-    log.transitionTo(
-      "1",
-      lifecycle.pass(id("1", "Pass", "afk/1"), PROGRESS, true),
-    );
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
     const md = log.writeSummary();
 
     const stable = join(repo, ".afk", "logs", "summary-copy", "run-summary.md");

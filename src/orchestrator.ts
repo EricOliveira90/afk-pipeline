@@ -19,7 +19,7 @@ import type { AgentProvider } from "./agent-provider.js";
 import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
-import { Logger } from "./logger.js";
+import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave, type WaveOutcome } from "./wave.js";
@@ -34,7 +34,6 @@ import {
 import {
   lifecycle,
   type SliceIdentity,
-  type SliceLifecycle,
 } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
@@ -45,10 +44,8 @@ import {
 import {
   loadRunState,
   saveRunState,
-  saveSliceState,
   saveReviewPhase,
   isSliceComplete,
-  projectForPersistence,
   getResumeAttempts,
   recordRetryDecision,
   type PersistedReviewPhase,
@@ -751,7 +748,7 @@ export function makeAsyncMutex() {
 export interface SliceContext {
   config: PipelineConfig;
   slice: Slice;
-  logger: Logger;
+  logger: RunJournal;
   featBranch: string;
   relevantFilesBlock: string;
   branch: string;
@@ -827,7 +824,7 @@ export interface SliceContext {
 export function makeSliceContext(
   config: PipelineConfig,
   slice: Slice,
-  logger: Logger,
+  logger: RunJournal,
   featBranch: string,
   relevantFilesBlock: string,
   testCommand: string,
@@ -1524,8 +1521,7 @@ async function negotiateAttempt(
     }
   };
 
-  logger.transitionTo(
-    slice.ghIssue,
+  logger.trackSlice(
     lifecycle.running(
       { ghIssue: slice.ghIssue, title: slice.title, branch: ctx.branch },
       logger.getSliceProgress(slice.ghIssue),
@@ -1836,7 +1832,6 @@ async function negotiateAttempt(
           verdict,
           round,
         });
-        logger.markEscalated(slice.ghIssue, cause.summary);
         return { phase: "ESCALATE", cause };
       }
     }
@@ -1858,7 +1853,6 @@ async function negotiateAttempt(
         verdict: lastVerdict,
         round: lastRound,
       });
-      logger.markStuck(slice.ghIssue, cause.summary);
       // Previously this path was silent — a slice could end negotiation
       // still NEGOTIATING with no visible trace, indistinguishable from
       // one awaiting a lane-successor refresh. See ADR 0017.
@@ -1871,11 +1865,9 @@ async function negotiateAttempt(
     return { phase: "LOCKED" };
   } catch (err) {
     if (isCancelled(err, signal)) {
-      logger.markCancelled(slice.ghIssue, "Cancelled by user");
       return { phase: "CANCELLED" };
     }
     const cause = negotiateFailureCauseOf(err) ?? internalNegotiateCause(err);
-    logger.markError(slice.ghIssue, cause.summary);
     return { phase: "ERROR", cause };
   }
 }
@@ -2023,7 +2015,7 @@ export async function runQAStage(
 
 export async function runSliceExecute(
   ctx: SliceContext,
-): Promise<"PASS" | "STUCK" | "ERROR" | "CANCELLED"> {
+): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
   const qaReports: string[] = [];
@@ -2157,21 +2149,15 @@ export async function runSliceExecute(
         if (!config.sharedPreview && migrationMode !== "skip" && sliceTouchedMigrations(ctx.worktreeDir, featBranch)) {
           const migrationCheck = verifyMigrationSync(ctx.worktreeDir, migrationMode);
           if (!migrationCheck.ok) {
-            logger.markStuck(slice.ghIssue, `Migration sync check failed: ${migrationCheck.error}`);
-            return "STUCK";
+            return {
+              phase: "STUCK",
+              error: `Migration sync check failed: ${migrationCheck.error}`,
+            };
           }
         }
 
         logger.phase(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
-        logger.transitionTo(
-          slice.ghIssue,
-          lifecycle.pass(
-            { ghIssue: slice.ghIssue, title: slice.title, branch: ctx.branch },
-            logger.getSliceProgress(slice.ghIssue),
-            false,
-          ),
-        );
-        return "PASS";
+        return { phase: "PASS" };
       }
 
       if (round === MAX_GENERATOR_ROUNDS) {
@@ -2198,15 +2184,19 @@ export async function runSliceExecute(
           sliceNumber: slice.number,
           agent: "generator-stuck",
         });
-        logger.markStuck(slice.ghIssue, `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`);
-        return "STUCK";
+        return {
+          phase: "STUCK",
+          error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+        };
       }
     }
-    return "STUCK";
+    return {
+      phase: "STUCK",
+      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+    };
   } catch (err) {
     if (isCancelled(err, signal)) {
-      logger.markCancelled(slice.ghIssue, "Cancelled by user");
-      return "CANCELLED";
+      return { phase: "CANCELLED", error: "Cancelled by user" };
     }
     const message = err instanceof Error ? err.message : String(err);
     // A wall-clock ceiling kill is terminal by design, not an
@@ -2214,13 +2204,12 @@ export async function runSliceExecute(
     // against the same ceiling and doubles the wasted wall-clock.
     // Point the operator at the remedy instead. Committed work is
     // preserved on the slice branch. See ADR 0019.
-    logger.markError(
-      slice.ghIssue,
-      /wall-clock ceiling/.test(message)
+    return {
+      phase: "ERROR",
+      error: /wall-clock ceiling/.test(message)
         ? `${message}. Terminal by design (ADR 0019): committed work is preserved on ${ctx.branch}; rerun with a larger --max-agent-duration-ms.`
         : message,
-    );
-    return "ERROR";
+    };
   }
 }
 /**
@@ -2233,7 +2222,7 @@ export async function runSliceExecute(
 async function runSlice(
   config: PipelineConfig,
   slice: Slice,
-  logger: Logger,
+  logger: RunJournal,
   featBranch: string,
   relevantFilesBlock: string,
   testCommand: string,
@@ -2248,7 +2237,7 @@ async function runSlice(
   );
   const negotiate = await runSliceNegotiate(ctx);
   if (negotiate.phase !== "LOCKED") return negotiate.phase;
-  return runSliceExecute(ctx);
+  return (await runSliceExecute(ctx)).phase;
 }
 
 /** Main pipeline: process all slices respecting the DAG, then run reviews. */
@@ -2265,7 +2254,7 @@ export async function runPipeline(
   } = config;
   const provider = config.provider ?? kiroProvider;
   const loggerSlug = pipelineRunSlug(prdSlug, provider);
-  const logger = new Logger(repoRoot, loggerSlug);
+  const logger = new RunJournal(repoRoot, loggerSlug);
   // First run.log line — tells the operator where this run's logs live
   // and gives `tail -f` a stable target from second zero.
   logger.phase(
@@ -2399,8 +2388,7 @@ export async function runPipeline(
   // Mark manifest HITL slices as skipped for the human-readable summary.
   for (const [id, slice] of manifestDag.slices) {
     if (slice.type === "HITL") {
-      logger.transitionTo(
-        id,
+      logger.trackSlice(
         lifecycle.skipped({ ghIssue: id, title: slice.title, branch: "—" }),
       );
     }
@@ -2448,14 +2436,7 @@ export async function runPipeline(
       alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
-      logger.transitionTo(
-        id,
-        lifecycle.pass(
-          { ghIssue: id, title: slice.title, branch },
-          { genRounds: 0, evalRounds: 0 },
-          true,
-        ),
-      );
+      logger.restoreCompleted({ ghIssue: id, title: slice.title, branch });
       logger.phase(
         `  Skipping #${id} ${slice.title} (already completed)`,
         "log",
@@ -2560,126 +2541,19 @@ export async function runPipeline(
   // ready and the loop will exit once no toRun remain.
   const mergeMutex = makeAsyncMutex();
 
-  // Persist a slice's terminal outcome the moment it lands. `runWave`
-  // invokes this via `onOutcome` right after each outcome is decided —
-  // for PASS, immediately after the merge and worktree removal — so a
-  // hard-kill mid-wave cannot lose the record of already-merged work.
-  // See ADR 0018.
-  //
-  // The guard set makes the post-wave loop a reconciliation pass: it
-  // re-issues persistence only for outcomes whose immediate write threw
-  // (runWave contains callback errors), and never double-writes or
-  // double-logs. The id is added to the set only after the write
-  // succeeded, so a failed write stays eligible for the retry.
-  //
-  // Concurrency: lanes run in parallel, but `saveSliceState` is a fully
-  // synchronous read-modify-write with no awaits, so two lanes can never
-  // interleave inside it — no lost updates, no mutex needed.
-  const persistedOutcomes = new Set<string>();
+  // `runWave` reports terminal outcomes at the moment they land. The
+  // journal turns that one report into the lifecycle, run-state, run-log,
+  // and typed-event projections, and owns retry idempotency.
   const persistOutcome = (id: string, outcome: WaveOutcome) => {
-    if (persistedOutcomes.has(id)) return;
     const slice = dag.slices.get(id)!;
-    const branch = sliceBranch(prdSlug, slice, provider);
-    const sliceId: SliceIdentity = {
-      ghIssue: id,
-      title: slice.title,
-      branch,
-    };
-    const progress = logger.getSliceProgress(id);
-
-    // The wave layer reports generic labels ("Phase B returned ERROR");
-    // the failure site usually already recorded the specific detail on
-    // the logger via markError/markStuck — e.g. a wall-clock ceiling
-    // kill and its remedy (ADR 0019). When the phases agree, prefer
-    // that detail so state.json and run.log say WHY the slice stopped,
-    // not just where.
-    const current = logger.getSlice(id);
-    const detailOf = (waveError: string): string =>
-      current &&
-      current.phase === outcome.phase &&
-      "error" in current &&
-      current.error
-        ? current.error
-        : waveError;
-
-    // PASS is only ever reported by runWave after the merge into the
-    // feature branch succeeded, so `mergedToFeature: true` is safe here
-    // and `isSliceComplete` will treat the slice as resumable-complete.
-    const next = ((): SliceLifecycle => {
-      switch (outcome.phase) {
-        case "PASS":
-          return lifecycle.pass(sliceId, progress, true);
-        case "LANE-CANCELLED":
-          return lifecycle.laneCancelled(
-            sliceId,
-            progress,
-            detailOf(outcome.error),
-          );
-        case "CANCELLED":
-          return lifecycle.cancelled(sliceId, progress, detailOf(outcome.error));
-        case "CONFLICT":
-          return lifecycle.conflict(sliceId, progress, detailOf(outcome.error));
-        case "MERGE-PENDING":
-          // Not `detailOf`: the wave's reason names the colliding
-          // prefixes, which no earlier failure site could have recorded
-          // on the logger.
-          return lifecycle.mergePending(
-            sliceId,
-            progress,
-            outcome.error,
-            outcome.collidingPrefixes,
-          );
-        case "ESCALATE":
-          return lifecycle.escalate(sliceId, progress, detailOf(outcome.error));
-        case "ERROR":
-          return lifecycle.error(sliceId, progress, detailOf(outcome.error));
-        case "STUCK":
-          return lifecycle.stuck(sliceId, progress, detailOf(outcome.error));
-      }
-    })();
-
-    logger.transitionTo(id, next);
-    saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
-    persistedOutcomes.add(id);
-
-    // Every terminal outcome gets a timestamped run.log line so an
-    // operator can always tell WHY a slice stopped — a LANE-CANCELLED
-    // deferral reads differently from a dropped negotiation. ADR 0017.
-    if (outcome.phase === "PASS") {
-      logger.phase(
-        `[afk] Slice #${id} (${slice.title}): PASS — merged into ${featBranch}`,
-        "error",
-        { type: "slice-outcome", slice: next },
-      );
-    } else {
-      // Read the reason off `next` so the run.log line and the persisted
-      // record can never disagree about why the slice stopped.
-      const reason = "error" in next ? next.error : outcome.error;
-      logger.phase(
-        `[afk] Slice #${id} (${slice.title}): ${outcome.phase} — ${reason}`,
-        "error",
-        { type: "slice-outcome", slice: next },
-      );
-    }
-  };
-
-  // Record an outcome the merge-only recovery pass decided. Same three
-  // steps `persistOutcome` takes for a wave outcome — transition, persist,
-  // emit the slice-outcome event — but the recovery pass owns the
-  // lifecycle value itself, because it has facts (the refreshed colliding
-  // prefixes) no wave produced.
-  const recordRecovery = (id: string, next: SliceLifecycle) => {
-    logger.transitionTo(id, next);
-    saveSliceState(repoRoot, loggerSlug, id, projectForPersistence(next)!);
-    persistedOutcomes.add(id);
-    const suffix =
-      next.phase === "PASS"
-        ? `PASS — merged into ${featBranch} by merge-only recovery (no agent invoked)`
-        : `${next.phase} — ${"error" in next ? next.error : ""}`;
-    logger.phase(`[afk] Slice #${id} (${next.title}): ${suffix}`, "error", {
-      type: "slice-outcome",
-      slice: next,
-    });
+    logger.recordTerminal(
+      {
+        ghIssue: id,
+        title: slice.title,
+        branch: sliceBranch(prdSlug, slice, provider),
+      },
+      outcome,
+    );
   };
 
   // --- Merge-only recovery, before the first wave dispatches (ADR 0029).
@@ -2703,7 +2577,6 @@ export async function runPipeline(
 
     const branch = prior.branch ?? sliceBranch(prdSlug, slice, provider);
     const sliceId: SliceIdentity = { ghIssue: id, title: slice.title, branch };
-    const progress = logger.getSliceProgress(id);
 
     // The recoverable claim is "the work is committed on this branch". If
     // the branch is gone or carries nothing, the claim is false and there
@@ -2753,15 +2626,11 @@ export async function runPipeline(
     // the current tip. Deliberately NOT escalated to a regeneration — a
     // repeated retry must never spend tokens the operator didn't ask for.
     if (attempt.kind === "collision") {
-      recordRecovery(
-        id,
-        lifecycle.mergePending(
-          sliceId,
-          progress,
-          git.mergePendingReason(attempt.prefixes, featBranch),
-          attempt.prefixes,
-        ),
-      );
+      logger.recordTerminal(sliceId, {
+        phase: "MERGE-PENDING",
+        error: git.mergePendingReason(attempt.prefixes, featBranch),
+        collidingPrefixes: attempt.prefixes,
+      });
       mergePending.add(id);
       continue;
     }
@@ -2769,10 +2638,10 @@ export async function runPipeline(
     // A real merge conflict is a different animal: it needs a human, and
     // CONFLICT keeps meaning exactly that.
     if (attempt.result.status === "conflict") {
-      recordRecovery(
-        id,
-        lifecycle.conflict(sliceId, progress, attempt.result.details),
-      );
+      logger.recordTerminal(sliceId, {
+        phase: "CONFLICT",
+        error: attempt.result.details,
+      });
       failed.add(id);
       continue;
     }
@@ -2788,7 +2657,7 @@ export async function runPipeline(
         ),
       ),
     );
-    recordRecovery(id, lifecycle.pass(sliceId, progress, true));
+    logger.recordTerminal(sliceId, { phase: "PASS", recovered: true });
     completed.add(id);
     recoveredMerges.add(id);
   }
@@ -2866,17 +2735,9 @@ export async function runPipeline(
         if (slice.type === "HITL") continue;
         if (completed.has(id) || failed.has(id)) continue;
         const branch = sliceBranch(prdSlug, slice, provider);
-        const cancelled = lifecycle.cancelled(
+        logger.recordTerminal(
           { ghIssue: id, title: slice.title, branch },
-          logger.getSliceProgress(id),
-          "Cancelled by user",
-        );
-        logger.transitionTo(id, cancelled);
-        saveSliceState(
-          repoRoot,
-          loggerSlug,
-          id,
-          projectForPersistence(cancelled)!,
+          { phase: "CANCELLED", error: "Cancelled by user" },
         );
         failed.add(id);
       }
@@ -3402,22 +3263,14 @@ export async function runPipeline(
     // misreport them as RUNNING/PENDING. Status keys we touch here
     // are the only mutation; persistent run-state already reflects
     // whatever progress slice loops were able to record.
-    for (const slice of scope?.selected ?? []) {
-      const id = slice.ghIssue;
-      const cur = logger.getSlice(id);
-      if (!cur) {
-        logger.transitionTo(
-          id,
-          lifecycle.stuck(
-            { ghIssue: id, title: slice.title, branch: "" },
-            { genRounds: 0, evalRounds: 0 },
-            "Pipeline aborted before slice finished",
-          ),
-        );
-      } else if (cur.phase === "RUNNING" || cur.phase === "PENDING") {
-        logger.markStuck(id, "Pipeline aborted before slice finished");
-      }
-    }
+    logger.summarizeAborted(
+      (scope?.selected ?? []).map((slice) => ({
+        ghIssue: slice.ghIssue,
+        title: slice.title,
+        branch: logger.getSlice(slice.ghIssue)?.branch ?? "",
+      })),
+      "Pipeline aborted before slice finished",
+    );
     let summary = "";
     try {
       summary = logger.writeSummary();

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { lifecycle } from "./slice-lifecycle.js";
-import { Logger } from "./logger.js";
+import { RunJournal as Logger } from "./run-journal.js";
 import {
   makeSliceContext,
   runQAStage,
@@ -64,8 +64,7 @@ function makeContext(
     ...configOverrides,
   };
   const logger = new Logger(repo, "prd-070-test");
-  logger.transitionTo(
-    slice.ghIssue,
+  logger.trackSlice(
     lifecycle.running(
       { ghIssue: slice.ghIssue, title: slice.title, branch: "main" },
       { genRounds: 0, evalRounds: 0 },
@@ -117,7 +116,7 @@ describe("PRD 070 QA retry behavior", () => {
     const ctx = makeContext(repo, provider);
     artifactDir = ctx.absSliceDir;
 
-    await expect(runSliceExecute(ctx)).resolves.toBe("PASS");
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generators).toBe(1);
     expect(evaluators).toBe(2);
     expect(ctx.logger.getSliceProgress("70")).toEqual({ genRounds: 1, evalRounds: 1 });
@@ -148,7 +147,10 @@ describe("PRD 070 QA retry behavior", () => {
     const ctx = makeContext(repo, provider);
     artifactDir = ctx.absSliceDir;
 
-    await expect(runSliceExecute(ctx)).resolves.toBe("STUCK");
+    await expect(runSliceExecute(ctx)).resolves.toEqual({
+      phase: "STUCK",
+      error: "QA failed after 3 implementation rounds",
+    });
     expect(generatorPrompts).toHaveLength(3);
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
     expect(generatorPrompts[2]).toContain("qa-report-r1-a1.md");
