@@ -13,7 +13,7 @@ import { createCandidateCheckpointRestorer } from "./git.js";
 export const GATE_EVIDENCE_VERSION = 1;
 
 export type GateStatus = "PASS" | "FAIL" | "INFRASTRUCTURE" | "SKIPPED";
-export type GateFailureKind = "CONFIGURATION" | "IMPLEMENTATION" | null;
+export type GateFailureKind = "COMMAND" | "CONFIGURATION" | null;
 
 export interface GateDeclaration {
   id: string;
@@ -392,10 +392,10 @@ function classifyExecution(
   if (outcome === "EXITED") {
     return exitCode === 0
       ? { status: "PASS", failureKind: null }
-      : { status: "FAIL", failureKind: "IMPLEMENTATION" };
+      : { status: "FAIL", failureKind: "COMMAND" };
   }
   if (outcome === "INACTIVITY_TIMEOUT" || outcome === "WALL_CLOCK_TIMEOUT") {
-    return { status: "FAIL", failureKind: "IMPLEMENTATION" };
+    return { status: "FAIL", failureKind: "COMMAND" };
   }
   if (outcome === "SPAWN_ERROR" && errorCode === "ENOENT") {
     return { status: "FAIL", failureKind: "CONFIGURATION" };
@@ -419,7 +419,7 @@ function isGateResult(value: unknown): value is GateResult {
     typeof value.stage === "string" &&
     value.stage.trim() !== "" &&
     ["PASS", "FAIL", "INFRASTRUCTURE", "SKIPPED"].includes(status) &&
-    [null, "CONFIGURATION", "IMPLEMENTATION"].includes(
+    [null, "COMMAND", "CONFIGURATION"].includes(
       failureKind,
     ) &&
     (status === "FAIL"

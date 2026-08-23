@@ -145,7 +145,7 @@ describe("runGates", () => {
       gateId: "tests",
       stage: "base",
       status: "FAIL",
-      failureKind: "IMPLEMENTATION",
+      failureKind: "COMMAND",
       exitCode: 23,
     });
     for (const gate of result.evidence.results) {

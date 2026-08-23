@@ -176,7 +176,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           attempt.results.filter(
             (gate: { status: string; failureKind: string }) =>
               gate.status === "FAIL" &&
-              gate.failureKind === "IMPLEMENTATION",
+              gate.failureKind === "COMMAND",
           ).length === 2,
       ),
     ).toBe(true);

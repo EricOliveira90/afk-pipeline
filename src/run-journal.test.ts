@@ -148,7 +148,7 @@ describe("RunJournal.recordGateAttempt", () => {
     const journal = new RunJournal(repo, "gates");
     const statuses = [
       ["pass", "PASS", null],
-      ["implementation", "FAIL", "IMPLEMENTATION"],
+      ["command", "FAIL", "COMMAND"],
       ["configuration", "FAIL", "CONFIGURATION"],
       ["infrastructure", "INFRASTRUCTURE", null],
       ["optional", "SKIPPED", null],
@@ -192,13 +192,14 @@ describe("RunJournal.recordGateAttempt", () => {
       sliceNumber: "01",
       round: 2,
       attemptId: "attempt-1",
-      gateId: "implementation",
+      gateId: "command",
       durationMs: 11,
-      failureKind: "IMPLEMENTATION",
+      failureKind: "COMMAND",
     });
 
     const summary = journal.writeSummary();
     expect(summary).toContain("| 49 | 2 | pass | PASS | 10ms |");
+    expect(summary).toContain("| 49 | 2 | command | FAIL (COMMAND) | 11ms |");
     expect(summary).toContain(
       "| 49 | 2 | configuration | FAIL (CONFIGURATION) | 12ms |",
     );
