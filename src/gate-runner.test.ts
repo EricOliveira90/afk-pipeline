@@ -249,4 +249,32 @@ describe("runGates", () => {
       /unsupported gate evidence version: 2/i,
     );
   });
+
+  it("classifies an unavailable working directory as infrastructure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-gates-"));
+    dirs.push(root);
+    const result = await runGates({
+      treeId: "cccccccccccccccccccccccccccccccccccccccc",
+      cwd: join(root, "missing-checkout"),
+      evidenceDir: join(root, "evidence"),
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results[0]).toMatchObject({
+      status: "INFRASTRUCTURE",
+      failureKind: null,
+      exitCode: null,
+    });
+  });
 });

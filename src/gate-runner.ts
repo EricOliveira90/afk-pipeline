@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
@@ -110,6 +111,26 @@ export async function runGates(
       emit(`[gate:${declaration.id}] ${result.status} (0ms)\n`);
       results.push(result);
       continue;
+    }
+
+    if (!existsSync(options.cwd)) {
+      const now = new Date().toISOString();
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "INFRASTRUCTURE",
+        failureKind: null,
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        detail: `Gate working directory is unavailable: ${options.cwd}`,
+      };
+      emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
+      results.push(result);
+      break;
     }
 
     const execution = await runBoundedCommand(
