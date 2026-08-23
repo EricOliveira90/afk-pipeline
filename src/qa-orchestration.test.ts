@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,6 +98,96 @@ function makeContext(
 }
 
 describe("PRD 070 QA retry behavior", () => {
+  it("blocks evaluation until every required checkpoint gate passes", async () => {
+    const repo = makeRepo();
+    const gateScript =
+      "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "gate-fixture",
+        scripts: { typecheck: gateScript, test: gateScript },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add gate scripts"]);
+
+    let generators = 0;
+    let evaluators = 0;
+    let artifactDir = "";
+    const generatorPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          generators++;
+          generatorPrompts.push(options.prompt);
+          writeFileSync(
+            join(repo, "gate-state.txt"),
+            generators === 1 ? "fail" : "pass",
+            "utf-8",
+          );
+        } else if (options.role === "evaluator-qa") {
+          evaluators++;
+          evaluatorPrompts.push(options.prompt);
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, {
+      commandTimeoutMs: 5_000,
+      heartbeatIntervalMs: 20,
+    });
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
+    expect(generators).toBe(2);
+    expect(evaluators).toBe(1);
+    expect(generatorPrompts[1]).toMatch(/gate-attempt-[\w-]+\.json/);
+    expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
+    expect(generatorPrompts[1]).toMatch(/test\.log/);
+    expect(evaluatorPrompts[0]).toMatch(/gate-attempt-[\w-]+\.json/);
+    expect(evaluatorPrompts[0]).toContain(
+      "do not rerun the baseline sanity commands",
+    );
+
+    const evidenceDir = join(artifactDir, "gate-evidence");
+    const evidenceFiles = readdirSync(evidenceDir)
+      .filter((name) => name.endsWith(".json"))
+      .sort();
+    expect(evidenceFiles).toHaveLength(2);
+    const attempts = evidenceFiles.map((name) =>
+      JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
+    );
+    expect(attempts[0].results.map((gate: { gateId: string }) => gate.gateId))
+      .toEqual(["typecheck", "lint", "test"]);
+    expect(
+      attempts.some(
+        (attempt) =>
+          attempt.results.filter(
+            (gate: { status: string; failureKind: string }) =>
+              gate.status === "FAIL" &&
+              gate.failureKind === "IMPLEMENTATION",
+          ).length === 2,
+      ),
+    ).toBe(true);
+    expect(
+      attempts.some(
+        (attempt) =>
+          attempt.results.filter(
+            (gate: { status: string }) => gate.status === "PASS",
+          ).length === 2,
+      ),
+    ).toBe(true);
+  });
+
   it("retries infrastructure without consuming an implementation round", async () => {
     const repo = makeRepo();
     let generators = 0;

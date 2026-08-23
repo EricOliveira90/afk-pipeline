@@ -29,6 +29,8 @@ Also read:
 {{SIBLING_HANDOFFS}}
 - Prior deterministic and shared-preview QA reports:
 {{PREVIOUS_QA_REPORTS}}
+- Orchestrator-owned base-gate evidence for this exact candidate:
+{{GATE_EVIDENCE}}
 
 # Failure Classification
 
@@ -43,11 +45,16 @@ Also read:
 
 # Pass 1: Functional Correctness
 
-For deterministic slice QA, run every sanity command below in order:
+For deterministic slice QA, do not rerun the baseline sanity commands.
+AFK already ran them against the immutable candidate checkpoint. Confirm every
+required base gate is `PASS` in the versioned evidence above before evaluating
+behavior. Treat missing, unsupported, or non-passing required evidence as a
+blocking finding.
 
 {{SANITY_COMMANDS}}
 
-`{{TEST_COMMAND}}` is informational; do not run the project tests twice.
+`{{TEST_COMMAND}}` and the sanity list are informational; do not run the
+project tests twice.
 For shared-preview UAT, skip the sanity list and run only remote scenarios from
 the contract.
 
