@@ -1,8 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { EventEmitter } from "node:events";
-import { Readable, Writable } from "node:stream";
-import type { StreamEvent } from "./agent-provider.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { TerminationReport } from "./kill-tree.js";
+import { makeFakeProc, type FakeProc } from "./test/fake-proc.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const terminateMock = vi.hoisted(() => vi.fn());
@@ -25,26 +23,7 @@ const CLEAN_KILL: TerminationReport = {
 };
 
 // Imported AFTER the mock is wired.
-const { handleStreamEvent, invoke, parseStreamLine } = await import("./claude.js");
-
-interface FakeProc extends EventEmitter {
-  stdin: Writable;
-  stdout: Readable;
-  stderr: Readable;
-  kill: ReturnType<typeof vi.fn>;
-  unref: ReturnType<typeof vi.fn>;
-}
-
-function makeFakeProc(): FakeProc {
-  const proc = new EventEmitter() as FakeProc;
-  // Sinks that swallow writes — invoke pipes the prompt into stdin.
-  proc.stdin = new Writable({ write(_c, _e, cb) { cb(); } });
-  proc.stdout = new Readable({ read() {} });
-  proc.stderr = new Readable({ read() {} });
-  proc.kill = vi.fn(() => true);
-  proc.unref = vi.fn();
-  return proc;
-}
+const { invoke, parseStreamLine } = await import("./claude.js");
 
 beforeEach(() => {
   terminateMock.mockReset();
@@ -164,207 +143,33 @@ describe("invoke spawn args", () => {
     // resolve to the default agent and waste a CLI flag.
     expect(args).not.toContain("--agent");
   });
-});
-
-describe("invoke maxToolCalls cap", () => {
-  beforeEach(() => {
-    spawnMock.mockReset();
-  });
-
-  it("kills the session and rejects with a cap message when tool calls exceed maxToolCalls", async () => {
+  it("extracts cost while the runtime dispatches parsed result events", async () => {
     const proc = makeFakeProc();
+    const onStreamEvent = vi.fn();
     spawnMock.mockReturnValue(proc);
-
     const promise = invoke({
-      role: "evaluator-qa",
-      prompt: "noop",
-      cwd: "/tmp",
-      maxToolCalls: 2,
+      role: "planner",
+      prompt: "go",
+      cwd: "/tmp/x",
+      onStreamEvent,
     });
 
-    // Push 3 tool_use lines — the 3rd trips the cap (count > 2).
-    proc.stdout.push(toolUseLine());
-    proc.stdout.push(toolUseLine());
-    proc.stdout.push(toolUseLine());
-
-    await expect(promise).rejects.toThrow(
-      /Agent evaluator-qa exceeded 2 tool calls — killed/,
+    proc.stdout.push(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        total_cost_usd: 1.25,
+      }) + "\n",
     );
-    expect(terminateMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not fire the cap when tool calls stay at or below the limit", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-
-    const promise = invoke({
-      role: "evaluator-qa",
-      prompt: "noop",
-      cwd: "/tmp",
-      maxToolCalls: 5,
-    });
-
-    proc.stdout.push(toolUseLine());
-    proc.stdout.push(toolUseLine());
-    // `Readable.push` schedules `data` events on nextTick — let them
-    // fire before closing, otherwise the buffered chunks are dropped.
-    await new Promise((r) => setImmediate(r));
-    proc.stdout.push(null); // EOF
+    await new Promise((resolve) => setImmediate(resolve));
     proc.emit("exit", 0);
 
-    const result = await promise;
-    expect(result.exitCode).toBe(0);
-    expect(result.stats.toolCallCount).toBe(2);
-    expect(terminateMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("invoke maxDurationMs ceiling", () => {
-  beforeEach(() => {
-    spawnMock.mockReset();
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("kills a session that outlives the wall-clock ceiling despite steady output", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-
-    const promise = invoke({
-      role: "generator",
-      prompt: "build",
-      cwd: "/tmp",
-      idleTimeoutMs: 10_000,
-      maxDurationMs: 30_000,
+    await expect(promise).resolves.toMatchObject({
+      stats: { costUsd: 1.25, toolCallCount: 0 },
     });
-
-    // Output every 5s keeps the idle watcher happy forever; only the
-    // ceiling can end this session.
-    for (let i = 0; i < 7; i++) {
-      proc.stdout.emit("data", Buffer.from(`{"type":"noise"}\n`));
-      vi.advanceTimersByTime(5_000);
-    }
-
-    expect(terminateMock).toHaveBeenCalledTimes(1);
-    proc.emit("exit", null);
-    await expect(promise).rejects.toThrow(/wall-clock ceiling/);
-  });
-
-  it("appends surviving PIDs to the kill error when the tree outlives the kill", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    terminateMock.mockImplementation(async () => ({
-      rootDead: true,
-      survivors: [4242, 777],
-      verified: true,
-    }));
-
-    const promise = invoke({
-      role: "generator",
-      prompt: "build",
-      cwd: "/tmp",
-      idleTimeoutMs: 10_000,
-      maxDurationMs: 30_000,
+    expect(onStreamEvent).toHaveBeenCalledWith({
+      type: "result",
+      result: "done",
     });
-
-    vi.advanceTimersByTime(30_000);
-    proc.emit("exit", null);
-    await expect(promise).rejects.toThrow(
-      /wall-clock ceiling.*WARNING: 2 process\(es\) survived the kill \(PIDs 4242, 777\)/s,
-    );
-  });
-
-  it("settles even when the child never emits exit because the root would not die", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    terminateMock.mockImplementation(async () => ({
-      rootDead: false,
-      survivors: [1234],
-      verified: true,
-    }));
-
-    const promise = invoke({
-      role: "generator",
-      prompt: "build",
-      cwd: "/tmp",
-      idleTimeoutMs: 10_000,
-      maxDurationMs: 30_000,
-    });
-
-    vi.advanceTimersByTime(30_000);
-    // No `exit` is ever emitted — settlement must come from the
-    // termination report alone.
-    await expect(promise).rejects.toThrow(/survived the kill \(PIDs 1234\)/);
-  });
-});
-
-describe("handleStreamEvent", () => {
-  function makeCounters() {
-    const resets: number[] = [];
-    const events: StreamEvent[] = [];
-    return {
-      watcher: {
-        reset: () => resets.push(Date.now()),
-        stop: () => {},
-      },
-      onStreamEvent: (e: StreamEvent) => events.push(e),
-      resets,
-      events,
-    };
-  }
-
-  it("calls watcher.reset() for a tool_call event", () => {
-    const c = makeCounters();
-    const result = handleStreamEvent({
-      event: { type: "tool_call", name: "Bash", args: "echo x" },
-      watcher: c.watcher,
-      toolCallCount: 0,
-      maxToolCalls: 100,
-      onStreamEvent: c.onStreamEvent,
-    });
-    expect(c.resets.length).toBe(1);
-    expect(result.toolCallCount).toBe(1);
-    expect(result.capExceeded).toBe(false);
-    expect(c.events).toEqual([{ type: "tool_call", name: "Bash", args: "echo x" }]);
-  });
-
-  it("does NOT call watcher.reset() for a text event", () => {
-    const c = makeCounters();
-    handleStreamEvent({
-      event: { type: "text", text: "thinking..." },
-      watcher: c.watcher,
-      toolCallCount: 0,
-      maxToolCalls: 100,
-      onStreamEvent: c.onStreamEvent,
-    });
-    expect(c.resets.length).toBe(0);
-  });
-
-  it("flags capExceeded when tool calls exceed maxToolCalls", () => {
-    const c = makeCounters();
-    const result = handleStreamEvent({
-      event: { type: "tool_call", name: "Bash", args: "x" },
-      watcher: c.watcher,
-      toolCallCount: 100,
-      maxToolCalls: 100,
-      onStreamEvent: c.onStreamEvent,
-    });
-    expect(result.toolCallCount).toBe(101);
-    expect(result.capExceeded).toBe(true);
-  });
-
-  it("forwards the event to onStreamEvent before counting", () => {
-    const c = makeCounters();
-    handleStreamEvent({
-      event: { type: "result", result: "done" },
-      watcher: c.watcher,
-      toolCallCount: 0,
-      maxToolCalls: 100,
-      onStreamEvent: c.onStreamEvent,
-    });
-    expect(c.events).toEqual([{ type: "result", result: "done" }]);
   });
 });
