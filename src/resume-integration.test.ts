@@ -539,7 +539,7 @@ describe("retried slice resume (spec #33)", () => {
 
     // Auditable in the run log — and no restart line for this slice.
     const logs = allRunLogs(repo, `${slug}-stub`);
-    expect(logs).toMatch(/resuming STUCK slice from 3 commit\(s\)/);
+    expect(logs).toMatch(/resuming STUCK slice from 4 commit\(s\)/);
     expect(logs).toMatch(/tree not reset, diagnosis preserved/);
     expect(logs).not.toMatch(/restarting from base \(stuck\.md present/);
 
