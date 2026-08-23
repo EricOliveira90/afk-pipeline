@@ -14,6 +14,7 @@ import {
   assertWorktreeRegistered,
   branchExists,
   countCommitsAhead,
+  createCandidateCheckpoint,
   createWorktree,
   isWorktreeRegistered,
   lastCommitEpochSeconds,
@@ -44,6 +45,50 @@ import {
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
 }
+
+describe("git.createCandidateCheckpoint", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-checkpoint-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    writeFileSync(join(repoDir, "tracked.txt"), "before\n", "utf-8");
+    git(repoDir, ["add", "tracked.txt"]);
+    git(repoDir, ["commit", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("captures generator output in an immutable detached checkout", () => {
+    writeFileSync(join(repoDir, "tracked.txt"), "candidate", "utf-8");
+    writeFileSync(join(repoDir, "untracked.txt"), "included", "utf-8");
+    const checkoutDir = join(repoDir, ".afk", "checkpoints", "round-1");
+
+    const checkpoint = createCandidateCheckpoint(
+      repoDir,
+      checkoutDir,
+      "feat(#49): checkpoint candidate",
+    );
+
+    expect(checkpoint.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(checkpoint.treeId).toMatch(/^[0-9a-f]{40}$/);
+    expect(readFileSync(join(checkoutDir, "tracked.txt"), "utf-8")).toBe(
+      "candidate",
+    );
+    expect(readFileSync(join(checkoutDir, "untracked.txt"), "utf-8")).toBe(
+      "included",
+    );
+
+    writeFileSync(join(repoDir, "tracked.txt"), "later mutation", "utf-8");
+    expect(readFileSync(join(checkoutDir, "tracked.txt"), "utf-8")).toBe(
+      "candidate",
+    );
+  });
+});
 
 describe("git.branchExists", () => {
   let repoDir: string;
