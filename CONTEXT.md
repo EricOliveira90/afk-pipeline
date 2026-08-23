@@ -76,6 +76,13 @@ terminal outcomes across the **run state**, **run log**, and typed event
 history. A terminal outcome and its reason enter the run record once.
 _Avoid_: "logger" (only one artifact), "outcome callback", "persistence helper"
 
+**RunSnapshot**:
+The single read-side account of a pipeline run, reconciling its event
+history with its **run state** into phases, outcomes, lanes, and waves.
+Status views derive from it rather than interpreting run records
+independently. See ADR 0032.
+_Avoid_: "event facts", "status fold", "dashboard state"
+
 **Scope of record**:
 The set of slices a run owns, fixed on its first invocation (all AFK
 slices, or whatever `--slices` named) and persisted in the **run state**.

@@ -12,7 +12,10 @@
  */
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { RunEvent } from "./run-events.js";
+import type {
+  RunSnapshot,
+  SnapshotPhaseInvocation,
+} from "./run-snapshot.js";
 
 /**
  * Both thresholds must hold before an entry is flagged: the phase has
@@ -60,16 +63,9 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}m`;
 }
 
-interface OpenPhase {
-  ghIssue: string;
-  sliceNumber?: string;
-  agent: string;
-  round?: number;
-  startedTs: string;
-}
-
-function keyOf(e: { ghIssue: string; agent: string; round?: number }): string {
-  return `${e.ghIssue}|${e.agent}|${e.round ?? ""}`;
+export interface AgentLogActivity {
+  lastActivityTs: string;
+  logBytes: number;
 }
 
 /**
@@ -107,63 +103,43 @@ function freshestAgentLog(
 }
 
 export function buildPresentSection(input: {
-  runDir: string;
-  events: RunEvent[];
+  snapshot: RunSnapshot;
+  activity: ReadonlyMap<SnapshotPhaseInvocation, AgentLogActivity>;
   now: Date;
 }): PresentSection {
-  const { runDir, events, now } = input;
-
-  // Open phases per slice×agent×round; a terminal outcome closes
-  // everything the slice still had open (the invocation died with it).
-  const open = new Map<string, OpenPhase>();
-  for (const event of events) {
-    switch (event.type) {
-      case "phase-started":
-        open.set(keyOf(event), {
-          ghIssue: event.ghIssue,
-          sliceNumber: event.sliceNumber,
-          agent: event.agent,
-          round: event.round,
-          startedTs: event.ts,
-        });
-        break;
-      case "phase-ended":
-        open.delete(keyOf(event));
-        break;
-      case "slice-outcome":
-        for (const [key, phase] of open) {
-          if (phase.ghIssue === event.slice.ghIssue) open.delete(key);
-        }
-        break;
-      default:
-        break;
-    }
-  }
+  const { snapshot, activity, now } = input;
 
   const active: PresentActiveSlice[] = [];
-  for (const phase of open.values()) {
-    const timeInPhaseMs = Math.max(
-      0,
-      now.getTime() - Date.parse(phase.startedTs),
-    );
-    const log =
-      phase.sliceNumber !== undefined
-        ? freshestAgentLog(runDir, phase.sliceNumber, phase.agent)
+  for (const ghIssue of snapshot.sliceOrder) {
+    const slice = snapshot.slices[ghIssue]!;
+    for (const phase of slice.invocations) {
+      if (phase.closeReason !== undefined || phase.startedTs === undefined) {
+        continue;
+      }
+      const timeInPhaseMs = Math.max(
+        0,
+        now.getTime() - Date.parse(phase.startedTs),
+      );
+      const log = activity.get(phase);
+      const lastActivityMs =
+        log === undefined ? Number.NaN : Date.parse(log.lastActivityTs);
+      const silentMs = Number.isFinite(lastActivityMs)
+        ? now.getTime() - lastActivityMs
         : null;
-    const silentMs = log ? now.getTime() - log.mtime.getTime() : null;
-    active.push({
-      ghIssue: phase.ghIssue,
-      agent: phase.agent,
-      round: phase.round,
-      startedTs: phase.startedTs,
-      timeInPhaseMs,
-      lastActivityTs: log?.mtime.toISOString(),
-      silentMs: silentMs !== null ? Math.max(0, silentMs) : undefined,
-      logBytes: log?.size,
-      stale:
-        timeInPhaseMs >= STALE_AFTER_MS &&
-        (silentMs === null || silentMs >= STALE_AFTER_MS),
-    });
+      active.push({
+        ghIssue: phase.ghIssue,
+        agent: phase.agent,
+        round: phase.round,
+        startedTs: phase.startedTs,
+        timeInPhaseMs,
+        lastActivityTs: log?.lastActivityTs,
+        silentMs: silentMs !== null ? Math.max(0, silentMs) : undefined,
+        logBytes: log?.logBytes,
+        stale:
+          timeInPhaseMs >= STALE_AFTER_MS &&
+          (silentMs === null || silentMs >= STALE_AFTER_MS),
+      });
+    }
   }
   // Stable order for rendering and JSON consumers.
   active.sort((a, b) =>
@@ -172,6 +148,39 @@ export function buildPresentSection(input: {
       : a.ghIssue.localeCompare(b.ghIssue),
   );
   return { active };
+}
+
+/**
+ * Read the latest matching agent log for each invocation the snapshot
+ * still considers open. The section builder above has no filesystem I/O.
+ */
+export function readAgentLogActivity(
+  runDir: string,
+  snapshot: RunSnapshot,
+): ReadonlyMap<SnapshotPhaseInvocation, AgentLogActivity> {
+  const activity = new Map<SnapshotPhaseInvocation, AgentLogActivity>();
+  for (const slice of Object.values(snapshot.slices)) {
+    for (const invocation of slice.invocations) {
+      if (
+        invocation.closeReason !== undefined ||
+        invocation.sliceNumber === undefined
+      ) {
+        continue;
+      }
+      const log = freshestAgentLog(
+        runDir,
+        invocation.sliceNumber,
+        invocation.agent,
+      );
+      if (log) {
+        activity.set(invocation, {
+          lastActivityTs: log.mtime.toISOString(),
+          logBytes: log.size,
+        });
+      }
+    }
+  }
+  return activity;
 }
 
 /**

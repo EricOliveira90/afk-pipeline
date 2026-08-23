@@ -12,15 +12,21 @@
  */
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { parseIssuesMd } from "./issues-parser.js";
 import { readRunEvents, type RunEvent } from "./run-events.js";
+import { loadRunState } from "./run-state.js";
+import { foldEvents, type RunSnapshot } from "./run-snapshot.js";
 import {
   buildFutureSection,
+  prdSlugFromRunSlug,
   renderFutureSection,
   type FutureSection,
+  type ManifestReadResult,
 } from "./status-future.js";
 import {
   buildPresentSection,
   formatDuration,
+  readAgentLogActivity,
   renderPresentSection,
   type PresentSection,
 } from "./status-present.js";
@@ -70,11 +76,35 @@ export function findLatestRunDir(repoRoot: string): string | null {
   return best?.path ?? null;
 }
 
+function readManifest(
+  repoRoot: string,
+  snapshot: RunSnapshot,
+): ManifestReadResult {
+  const { slug, provider } = snapshot.run;
+  if (slug === undefined || provider === undefined) {
+    return { status: "unavailable" };
+  }
+  const prdSlug = prdSlugFromRunSlug(slug, provider);
+  const path = join(repoRoot, ".kiro", "specs", prdSlug, "issues.md");
+  if (!existsSync(path)) return { status: "missing", path };
+  try {
+    return { status: "available", slices: parseIssuesMd(path) };
+  } catch (error) {
+    return {
+      status: "invalid",
+      path,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 /** Build the status model from a run directory, or explain why not. */
 export function buildStatusModel(
   runDir: string,
   repoRoot: string,
-): { ok: true; model: StatusModel } | { ok: false; message: string } {
+):
+  | { ok: true; model: StatusModel; snapshot: RunSnapshot }
+  | { ok: false; message: string } {
   const parsed = readRunEvents(runDir);
   if (parsed === null) {
     return {
@@ -83,18 +113,25 @@ export function buildStatusModel(
     };
   }
   const now = new Date();
+  const started = parsed.events.find((event) => event.type === "run-started");
+  const runState =
+    started?.type === "run-started"
+      ? loadRunState(repoRoot, started.runSlug)
+      : undefined;
+  const snapshot = foldEvents(parsed.events, runState);
+  const manifest = readManifest(repoRoot, snapshot);
   const present = buildPresentSection({
-    runDir,
-    events: parsed.events,
+    snapshot,
+    activity: readAgentLogActivity(runDir, snapshot),
     now,
   });
   const future = buildFutureSection({
-    repoRoot,
-    runDir,
-    events: parsed.events,
+    snapshot,
+    manifest,
   });
   return {
     ok: true,
+    snapshot,
     model: {
       schemaVersion: parsed.version,
       runDir,
@@ -102,8 +139,8 @@ export function buildStatusModel(
       present,
       future,
       pipeline: buildPipelineSection({
-        repoRoot,
-        events: parsed.events,
+        snapshot,
+        manifest,
         present,
         future,
         now,
@@ -117,49 +154,34 @@ function clock(ts: string): string {
   return ts.length >= 19 ? ts.slice(11, 19) : ts;
 }
 
-/** Key that pairs a phase-ended with its phase-started. */
-function phaseKey(e: { ghIssue: string; agent: string; round?: number }): string {
-  return `${e.ghIssue}|${e.agent}|${e.round ?? ""}`;
-}
-
-export function renderStatus(model: StatusModel): string {
+export function renderStatus(model: StatusModel, snapshot: RunSnapshot): string {
   const lines: string[] = [];
   lines.push(`Run: ${model.runDir}`);
   lines.push("");
   lines.push("Past:");
   let any = false;
-  // Start timestamps of phases whose end we haven't rendered yet, so a
-  // phase-ended line can carry its computed duration. Keyed per
-  // slice × agent × round; a re-opened phase (lane successor re-runs)
-  // pairs with its most recent start.
-  const openPhases = new Map<string, string[]>();
-  for (const event of model.events) {
-    switch (event.type) {
-      case "header":
-        break;
-      case "run-started":
+  for (const entry of snapshot.chronology) {
+    switch (entry.type) {
+      case "run-started": {
+        const { event } = entry;
         any = true;
         lines.push(`  ${clock(event.ts)}  run started (${event.provider})`);
         break;
-      case "wave-dispatched":
+      }
+      case "wave-dispatched": {
+        const { event } = entry;
         any = true;
         lines.push(
           `  ${clock(event.ts)}  wave ${event.wave} dispatched — ${event.slices.length} slice(s): ${event.slices.map((s) => `#${s}`).join(", ")}`,
         );
         break;
-      case "phase-started": {
-        const starts = openPhases.get(phaseKey(event)) ?? [];
-        starts.push(event.ts);
-        openPhases.set(phaseKey(event), starts);
-        break;
       }
       case "phase-ended": {
+        const { event } = entry;
         any = true;
-        const starts = openPhases.get(phaseKey(event));
-        const startTs = starts?.pop();
         const duration =
-          startTs !== undefined
-            ? ` — ${formatDuration(Date.parse(event.ts) - Date.parse(startTs))}`
+          entry.durationMs !== undefined
+            ? ` — ${formatDuration(entry.durationMs)}`
             : "";
         const round = event.round !== undefined ? ` (round ${event.round})` : "";
         const verdict = event.verdict ? ` — ${event.verdict}` : "";
@@ -169,6 +191,7 @@ export function renderStatus(model: StatusModel): string {
         break;
       }
       case "warn": {
+        const { event } = entry;
         any = true;
         // Warn lines carry a marker so failure signals stand out from
         // the phase chronology around them. Producers may already
@@ -182,6 +205,7 @@ export function renderStatus(model: StatusModel): string {
         break;
       }
       case "slice-outcome": {
+        const { event } = entry;
         any = true;
         const s = event.slice;
         const reason =
@@ -198,10 +222,6 @@ export function renderStatus(model: StatusModel): string {
         );
         break;
       }
-      default:
-        // Forward compatibility: an events.jsonl written by a newer
-        // pipeline may carry event types this renderer predates.
-        break;
     }
   }
   if (!any) lines.push("  (no events)");
@@ -269,7 +289,7 @@ export function runStatus(args: readonly string[], repoRoot: string): StatusResu
     return { output: JSON.stringify(built.model, null, 2), exitCode: 0 };
   }
 
-  const view = renderStatus(built.model);
+  const view = renderStatus(built.model, built.snapshot);
   return {
     output: autoDetected
       ? `Auto-detected latest run: ${runDir}\n\n${view}`
