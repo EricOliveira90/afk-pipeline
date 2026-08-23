@@ -83,6 +83,7 @@ export async function runGates(
   options: RunGatesOptions,
 ): Promise<RunGatesResult> {
   const attemptId = randomUUID();
+  const attemptKey = attemptId.replace(/-/g, "").slice(0, 12);
   mkdirSync(options.evidenceDir, { recursive: true });
   const logsDir = join(options.evidenceDir, "gate-logs");
   mkdirSync(logsDir, { recursive: true });
@@ -103,11 +104,11 @@ export async function runGates(
 
   for (const [index, declaration] of options.declarations.entries()) {
     const safeId =
-      declaration.id.replace(/[^a-zA-Z0-9._-]/g, "_") ||
+      declaration.id.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 24) ||
       `gate-${index + 1}`;
     const logArtifactId = join(
       "gate-logs",
-      `${attemptId}-${String(index + 1).padStart(3, "0")}-${safeId}.log`,
+      `${attemptKey}-${String(index + 1).padStart(2, "0")}-${safeId}.log`,
     );
     const logPath = join(options.evidenceDir, logArtifactId);
     const emit = (text: string) => {
@@ -274,7 +275,7 @@ export async function runGates(
     treeId: options.treeId,
     results,
   };
-  const evidencePath = join(options.evidenceDir, `gate-attempt-${attemptId}.json`);
+  const evidencePath = join(options.evidenceDir, `attempt-${attemptKey}.json`);
   writeFileSync(evidencePath, JSON.stringify(evidence, null, 2) + "\n", {
     encoding: "utf-8",
     flag: "wx",

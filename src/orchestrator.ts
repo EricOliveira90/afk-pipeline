@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -2156,7 +2156,7 @@ export async function runSliceExecute(
         checkpointDir,
         `feat(#${slice.ghIssue}): checkpoint candidate round ${round}`,
       );
-      const evidenceDir = join(ctx.absSliceDir, "gate-evidence");
+      const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
       const infrastructureRetries =
         config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
       if (
@@ -2205,9 +2205,7 @@ export async function runSliceExecute(
               round,
             },
             gateEvidence,
-            gateEvidencePath
-              .slice(ctx.worktreeDir.length + 1)
-              .replace(/\\/g, "/"),
+            relative(config.repoRoot, gateEvidencePath).replace(/\\/g, "/"),
           );
           const infrastructureFailure = gateEvidence.results.some(
             (gate) =>
@@ -2238,9 +2236,7 @@ export async function runSliceExecute(
       if (signal?.aborted) {
         return { phase: "CANCELLED", error: "Cancelled by user" };
       }
-      const evidenceDisplayPath = gateEvidencePath
-        .slice(ctx.worktreeDir.length + 1)
-        .replace(/\\/g, "/");
+      const evidenceDisplayPath = gateEvidencePath.replace(/\\/g, "/");
       const requiredInfrastructure = gateEvidence.results.filter(
         (gate) =>
           isRequired(gate.gateId) && gate.status === "INFRASTRUCTURE",
@@ -2259,10 +2255,7 @@ export async function runSliceExecute(
         repairReferences.push(evidenceDisplayPath);
         repairReferences.push(
           ...requiredFailures.map((gate) =>
-            join(ctx.relSliceDir, "gate-evidence", gate.logArtifactId).replace(
-              /\\/g,
-              "/",
-            ),
+            join(evidenceDir, gate.logArtifactId).replace(/\\/g, "/"),
           ),
         );
         if (round < MAX_GENERATOR_ROUNDS) continue;

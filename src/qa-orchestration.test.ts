@@ -150,19 +150,27 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generators).toBe(2);
     expect(evaluators).toBe(1);
-    expect(generatorPrompts[1]).toMatch(/gate-attempt-[\w-]+\.json/);
+    expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
     expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
     expect(generatorPrompts[1]).toMatch(/test\.log/);
-    expect(evaluatorPrompts[0]).toMatch(/gate-attempt-[\w-]+\.json/);
+    expect(evaluatorPrompts[0]).toMatch(/attempt-[\w]+\.json/);
     expect(evaluatorPrompts[0]).toContain(
       "do not rerun the baseline sanity commands",
     );
 
-    const evidenceDir = join(artifactDir, "gate-evidence");
+    const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
     const evidenceFiles = readdirSync(evidenceDir)
       .filter((name) => name.endsWith(".json"))
       .sort();
     expect(evidenceFiles).toHaveLength(2);
+    expect(evidenceFiles.every((name) => name.length <= 32)).toBe(true);
+    expect(existsSync(join(artifactDir, "gate-evidence"))).toBe(false);
+    expect(
+      execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+        cwd: repo,
+        encoding: "utf-8",
+      }),
+    ).not.toContain("gate-evidence");
     const attempts = evidenceFiles.map((name) =>
       JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
     );
@@ -318,7 +326,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       evalRounds: 0,
     });
 
-    const evidenceDir = join(ctx.absSliceDir, "gate-evidence");
+    const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
     const evidenceFile = readdirSync(evidenceDir).find((name) =>
       name.endsWith(".json"),
     )!;
@@ -385,7 +393,7 @@ describe("provider-independent policy-less base gates", () => {
 
       await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
       expect(evaluators).toBe(1);
-      const evidenceDir = join(artifactDir, "gate-evidence");
+      const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
       const evidenceFile = readdirSync(evidenceDir).find((name) =>
         name.endsWith(".json"),
       )!;
