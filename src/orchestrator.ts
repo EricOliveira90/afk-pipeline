@@ -2170,6 +2170,17 @@ export async function runSliceExecute(
           });
           gateEvidencePath = gateRun.evidencePath;
           gateEvidence = readGateEvidence(gateEvidencePath);
+          logger.recordGateAttempt(
+            {
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              round,
+            },
+            gateEvidence,
+            gateEvidencePath
+              .slice(ctx.worktreeDir.length + 1)
+              .replace(/\\/g, "/"),
+          );
           const infrastructureFailure = gateEvidence.results.some(
             (gate) =>
               isRequired(gate.gateId) &&

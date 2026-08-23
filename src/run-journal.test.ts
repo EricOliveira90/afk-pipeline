@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { RunJournal } from "./run-journal.js";
 import { loadRunState } from "./run-state.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
+import type { GateEvidence } from "./gate-runner.js";
 
 const tempDirs: string[] = [];
 const SLICE: SliceIdentity = {
@@ -138,5 +139,72 @@ describe("RunJournal.recordTerminal", () => {
     expect(
       eventsOf(journal).find((event) => event.type === "slice-outcome")?.slice,
     ).toEqual(recorded);
+  });
+});
+
+describe("RunJournal.recordGateAttempt", () => {
+  it("projects every gate outcome and elapsed time to events and summary", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "gates");
+    const statuses = [
+      ["pass", "PASS", null],
+      ["implementation", "FAIL", "IMPLEMENTATION"],
+      ["configuration", "FAIL", "CONFIGURATION"],
+      ["infrastructure", "INFRASTRUCTURE", null],
+      ["optional", "SKIPPED", null],
+    ] as const;
+    const evidence: GateEvidence = {
+      version: 1,
+      attemptId: "attempt-1",
+      treeId: "0123456789abcdef0123456789abcdef01234567",
+      results: statuses.map(([gateId, status, failureKind], index) => ({
+        gateId,
+        stage: "base",
+        status,
+        failureKind,
+        startedAt: "2026-08-23T10:00:00.000Z",
+        endedAt: "2026-08-23T10:00:00.010Z",
+        durationMs: index + 10,
+        exitCode: status === "FAIL" ? 1 : null,
+        treeId: "0123456789abcdef0123456789abcdef01234567",
+        logArtifactId: `gate-logs/${gateId}.log`,
+      })),
+    };
+
+    journal.recordGateAttempt(
+      { ghIssue: "49", sliceNumber: "01", round: 2 },
+      evidence,
+      "specs/slice/gate-attempt-attempt-1.json",
+    );
+
+    const outcomes = eventsOf(journal).filter(
+      (event) => event.type === "gate-outcome",
+    );
+    expect(outcomes.map((event) => event.status)).toEqual([
+      "PASS",
+      "FAIL",
+      "FAIL",
+      "INFRASTRUCTURE",
+      "SKIPPED",
+    ]);
+    expect(outcomes[1]).toMatchObject({
+      ghIssue: "49",
+      sliceNumber: "01",
+      round: 2,
+      attemptId: "attempt-1",
+      gateId: "implementation",
+      durationMs: 11,
+      failureKind: "IMPLEMENTATION",
+    });
+
+    const summary = journal.writeSummary();
+    expect(summary).toContain("| 49 | 2 | pass | PASS | 10ms |");
+    expect(summary).toContain(
+      "| 49 | 2 | configuration | FAIL (CONFIGURATION) | 12ms |",
+    );
+    expect(summary).toContain(
+      "| 49 | 2 | infrastructure | INFRASTRUCTURE | 13ms |",
+    );
+    expect(summary).toContain("| 49 | 2 | optional | SKIPPED | 14ms |");
   });
 });

@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import type { GateEvidence, GateResult } from "./gate-runner.js";
 import {
   assertNever,
   bucketFor,
@@ -40,6 +41,7 @@ export interface RunLog {
   featureBranch?: string;
   slices: Map<string, SliceLifecycle>;
   totals: Map<string, SliceTotals>;
+  gateAttempts: GateSummaryEntry[];
   architectVerdict?: string;
   pmVerdict?: string;
   /** Failure detail (e.g. the agent's stderr line) for a failed architect review. */
@@ -50,6 +52,14 @@ export interface RunLog {
   prUrl?: string;
   /** Set when the PR was opened via --open-pr-on-override (ADR 0015). */
   prOverrideNote?: string;
+}
+
+interface GateSummaryEntry {
+  ghIssue: string;
+  round: number;
+  attemptId: string;
+  evidenceArtifactId: string;
+  result: GateResult;
 }
 
 /**
@@ -97,6 +107,7 @@ export class Logger {
       startedAt,
       slices,
       totals: new Map(),
+      gateAttempts: [],
     };
   }
 
@@ -171,6 +182,23 @@ export class Logger {
     this.runLog.prUrl = url;
   }
 
+  addGateAttempt(
+    ghIssue: string,
+    round: number,
+    evidence: GateEvidence,
+    evidenceArtifactId: string,
+  ) {
+    for (const result of evidence.results) {
+      this.runLog.gateAttempts.push({
+        ghIssue,
+        round,
+        attemptId: evidence.attemptId,
+        evidenceArtifactId,
+        result,
+      });
+    }
+  }
+
   writeSummary() {
     this.runLog.finishedAt = new Date();
     const {
@@ -185,6 +213,7 @@ export class Logger {
       sanityGate,
       prUrl,
       prOverrideNote,
+      gateAttempts,
     } = this.runLog;
 
     const totals = this.runLog.totals;
@@ -208,6 +237,25 @@ export class Logger {
       .join("\n");
 
     const totalsRow = `| **Run totals** | | | | **${runCost > 0 ? `$${runCost.toFixed(4)}` : "—"}** | **${runToolCalls}** |`;
+    const gateRows = gateAttempts
+      .map(({ ghIssue, round, evidenceArtifactId, result }) => {
+        const status =
+          result.status === "FAIL" && result.failureKind
+            ? `${result.status} (${result.failureKind})`
+            : result.status;
+        return `| ${ghIssue} | ${round} | ${result.gateId} | ${status} | ${result.durationMs}ms | ${evidenceArtifactId} | ${result.logArtifactId} |`;
+      })
+      .join("\n");
+    const gateSection =
+      gateAttempts.length === 0
+        ? ""
+        : `
+## Base Gates
+
+| Slice | Round | Gate | Status | Elapsed | Evidence | Log |
+|-------|-------|------|--------|---------|----------|-----|
+${gateRows}
+`;
 
     const summary = `# Run Summary — ${prdSlug}
 
@@ -218,6 +266,7 @@ Finished: ${finishedAt!.toISOString()}
 |-------|--------|--------|--------|------|------------|
 ${rows}
 ${totalsRow}
+${gateSection}
 
 Pre-ship sanity gate: ${
       sanityGate

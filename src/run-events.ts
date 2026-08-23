@@ -15,6 +15,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SliceLifecycle } from "./slice-lifecycle.js";
+import type {
+  GateFailureKind,
+  GateStatus,
+} from "./gate-runner.js";
 
 export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
@@ -79,6 +83,24 @@ export type RunEventPayload =
        * ESCALATE/UNKNOWN; evaluator-qa/-uat → PASS/IMPLEMENTATION.
        */
       verdict?: string;
+    }
+  | {
+      type: "gate-outcome";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      attemptId: string;
+      gateId: string;
+      stage: string;
+      status: GateStatus;
+      failureKind: GateFailureKind;
+      startedAt: string;
+      endedAt: string;
+      durationMs: number;
+      exitCode: number | null;
+      treeId: string;
+      evidenceArtifactId: string;
+      logArtifactId: string;
     }
   | {
       type: "run-phase-started";
