@@ -146,7 +146,7 @@ export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
   return BASE_GATE_STEPS.map((step) => {
     const scriptName = step.scripts.find((name) => scripts[name] != null);
     return {
-      id: scriptName ?? step.scripts[step.scripts.length - 1]!,
+      id: step.name,
       stage: "base",
       required: scriptName != null,
       ...(scriptName

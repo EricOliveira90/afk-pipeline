@@ -150,7 +150,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
     expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
     expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
-    expect(generatorPrompts[1]).toMatch(/test\.log/);
+    expect(generatorPrompts[1]).toMatch(/tests\.log/);
 
     const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
     const evidenceFiles = readdirSync(evidenceDir)
@@ -348,7 +348,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
 describe("provider-independent policy-less base gates", () => {
   for (const providerName of ["kiro", "claude-code", "codex"]) {
-    it(`uses typecheck, lint, and test:run for ${providerName}`, async () => {
+    it(`uses stable typecheck, lint, and tests IDs for ${providerName}`, async () => {
       const repo = makeRepo();
       writeFileSync(
         join(repo, "package.json"),
@@ -404,7 +404,7 @@ describe("provider-independent policy-less base gates", () => {
         readFileSync(join(evidenceDir, evidenceFile), "utf-8"),
       );
       expect(evidence.results.map((gate: { gateId: string }) => gate.gateId))
-        .toEqual(["typecheck", "lint", "test:run"]);
+        .toEqual(["typecheck", "lint", "tests"]);
       expect(
         evidence.results.every(
           (gate: { status: string }) => gate.status === "PASS",
