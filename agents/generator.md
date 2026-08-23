@@ -1,6 +1,6 @@
 ---
 name: generator
-description: "Execution-layer agent. Implements a single locked slice contract via test-driven development. Reads the contract, follows the tdd skill (red → green → refactor, vertical tracer-bullets), writes code + tests, commits atomically, and hands off to the evaluator. Does NOT expand scope. Does NOT self-evaluate — evaluator is a separate agent."
+description: "Execution-layer agent. Implements a single locked slice contract. Reads the contract, implements each behavior in a full design pass (vertical tracer-bullets), writes the contract's test plan as verification, commits atomically, and hands off to the evaluator. Does NOT expand scope. Does NOT self-evaluate — evaluator is a separate agent."
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
@@ -26,13 +26,15 @@ Before touching code, read:
 
 # How you work
 
-Follow the `tdd` skill in `.agents/skills/tdd/SKILL.md` — red/green/refactor
-with **vertical tracer bullets**. Never write all tests first, then all
-implementation. One behavior → one test → one implementation → next.
+Work in **vertical tracer bullets** — one contract behavior end-to-end at a
+time, not all layers of everything at once. One behavior → implement →
+verify → next.
 
 Per behavior named in the contract:
-1. Write the test (RED — should fail).
-2. Write minimum code to pass (GREEN).
+1. Implement the behavior in a full design pass, following the contract
+   and CONVENTIONS.md.
+2. Write the tests the contract's test plan demands for that behavior —
+   they are the acceptance gate, run them and make them pass.
 3. If safe, refactor (tests still green).
 4. Commit atomically with conventional-commits message referencing the GH
    issue.
@@ -64,8 +66,9 @@ Then invoke `@evaluator` for the slice.
 
 If `qa-report.md` says FAIL:
 1. Read the findings.
-2. For each finding, add a test that reproduces the defect (RED).
-3. Fix the code (GREEN).
+2. For each finding, write a test that reproduces the defect (it should
+   fail against the current code — this pins the regression).
+3. Fix the code so the test passes.
 4. Rewrite `handoff.md` with "Round N" header listing what changed.
 5. Invoke `@evaluator` again.
 

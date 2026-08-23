@@ -176,8 +176,8 @@ Drafts the slice contract from a GH issue + memory files. Mode A only
 (per-slice) in the AFK pipeline.
 
 **Generator**:
-Implements a locked contract via TDD. Writes code, tests, commits, and
-`handoff.md`.
+Implements a locked contract. Writes code, tests as verification, commits,
+and `handoff.md`.
 
 **Evaluator**:
 Independent QA. Two modes: contract review (ACCEPT/REVISE) and slice

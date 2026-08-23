@@ -13,7 +13,8 @@ verified, executed, and delivered in a single agent session.
    observe pass/fail?" If a test plan entry requires human judgment or
    can't be automated (Playwright, CLI, API call), flag it.
 3. **Single-session feasibility.** Ask: "Can one generator session
-   deliver this scope via TDD?" If the slice feels like two days of work
+   deliver this scope with passing tests?" If the slice feels like two
+   days of work
    or requires multiple sequential integrations, it's too large.
 4. **Boundary explicitness.** At least one non-goal is named. New
    patterns or dependencies are either justified or "None."

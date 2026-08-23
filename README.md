@@ -87,7 +87,7 @@ Each AFK slice runs on its own git worktree and branch:
      ↓
              contract LOCKED
      ↓
-@generator   → implements via TDD, commits, writes handoff.md
+@generator   → implements, writes tests as verification, commits, writes handoff.md
      ↓
 @evaluator   → grades implementation → PASS or FAIL (max 3 rounds)
      ├── PASS  → merge slice branch into feature branch

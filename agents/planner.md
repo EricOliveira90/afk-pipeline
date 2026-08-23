@@ -141,7 +141,7 @@ Max **2 rounds**. After round 2, escalate to human.
 - **Don't write implementation.** The contract says *what* and *how it's
   verified*, never *how to build it*. Generator owns "how."
 - **Don't write tests.** You plan what tests must exist; generator writes
-  them under TDD (see `.agents/skills/tdd/SKILL.md`).
+  them as verification of the implementation.
 - **Boundary-first.** If you can't clearly name what's NOT in this slice,
   the slice isn't sliced tight enough. Split it.
 - **Escalate, don't assume.** If anything in the PRD or issue contradicts
