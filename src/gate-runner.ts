@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -8,7 +9,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { runBoundedCommand } from "./command-runtime.js";
-import { createCandidateCheckpointRestorer } from "./git.js";
+import { resolveCommit, resolveTree } from "./git.js";
 
 export const GATE_EVIDENCE_VERSION = 1;
 
@@ -402,6 +403,35 @@ function classifyExecution(
     return { status: "FAIL", failureKind: "CONFIGURATION" };
   }
   return { status: "INFRASTRUCTURE", failureKind: null };
+}
+
+function createCandidateCheckpointRestorer(
+  cwd: string,
+  expectedTreeId: string,
+): () => void {
+  const commitSha = resolveCommit(cwd, "HEAD");
+  const treeId = resolveTree(cwd, "HEAD");
+  if (!commitSha || treeId !== expectedTreeId) {
+    throw new Error(
+      `Gate checkout tree does not match checkpoint ${expectedTreeId}`,
+    );
+  }
+
+  return () => {
+    execFileSync("git", ["reset", "--hard", commitSha], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    execFileSync("git", ["clean", "-fdx"], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (resolveTree(cwd, "HEAD") !== expectedTreeId) {
+      throw new Error(
+        `Could not restore gate checkout to checkpoint ${expectedTreeId}`,
+      );
+    }
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

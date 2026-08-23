@@ -97,6 +97,48 @@ describe("runGates", () => {
     );
   });
 
+  it("removes ignored output before the next gate starts", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint({
+      ".gitignore": "ignored-output.txt\n",
+    });
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "producing-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "require('fs').writeFileSync('ignored-output.txt', 'generated')",
+          ],
+        },
+        {
+          id: "observing-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "process.exit(require('fs').existsSync('ignored-output.txt') ? 23 : 0)",
+          ],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results.map(({ status }) => status)).toEqual([
+      "PASS",
+      "PASS",
+    ]);
+  });
+
   it("runs declarations in order and preserves structured evidence and logs", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const output: string[] = [];
