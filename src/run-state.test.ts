@@ -16,6 +16,8 @@ import {
   sanitizeReviewPhase,
   isSliceComplete,
   adaptLoadedState,
+  getResumeAttempts,
+  recordRetryDecision,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
@@ -292,19 +294,76 @@ describe("sanitizeReviewPhase", () => {
 });
 
 
-describe("unknown state properties", () => {
-  it("discards a legacy resume property without rejecting the state file", () => {
-    const state = adaptLoadedState(
-      {
+/**
+ * Per-slice resume-attempt tracking (spec #33 / #36). The counter lives
+ * in the run-state file so it survives launcher restarts; existing
+ * state files without it must read as zero attempts.
+ */
+describe("resume-attempt tracking", () => {
+  it("reads zero attempts from a state file that predates the field (backward compat)", () => {
+    const repo = makeRepo();
+    const p = join(repo, ".afk", "state", "demo.json");
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: { "100": { phase: "ERROR", error: "died" } },
+      }),
+      "utf-8",
+    );
+    const state = loadRunState(repo, "demo");
+    expect(getResumeAttempts(state, "100")).toBe(0);
+    expect(getResumeAttempts(state, "999")).toBe(0);
+  });
+
+  it("persists attempts + last decision across a reload, preserving slice records", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "100", { phase: "ERROR", error: "died" });
+    recordRetryDecision(repo, "demo", "100", {
+      attempts: 1,
+      lastDecision: "resumed from 3 commits",
+    });
+
+    const state = loadRunState(repo, "demo");
+    expect(getResumeAttempts(state, "100")).toBe(1);
+    expect(state.resume?.["100"]?.lastDecision).toBe("resumed from 3 commits");
+    // The slice's own record was not clobbered.
+    expect(state.slices["100"]!.phase).toBe("ERROR");
+  });
+
+  it("a later saveSliceState does not clobber the resume record", () => {
+    const repo = makeRepo();
+    recordRetryDecision(repo, "demo", "100", {
+      attempts: 2,
+      lastDecision: "resumed from 5 commits",
+    });
+    saveSliceState(repo, "demo", "100", { phase: "STUCK", error: "gave up" });
+
+    const state = loadRunState(repo, "demo");
+    expect(getResumeAttempts(state, "100")).toBe(2);
+    expect(state.slices["100"]!.phase).toBe("STUCK");
+  });
+
+  it("drops malformed resume entries instead of throwing", () => {
+    const repo = makeRepo();
+    const p = join(repo, ".afk", "state", "demo.json");
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      p,
+      JSON.stringify({
         version: 1,
         prdSlug: "demo",
         featureBranch: "feat/demo",
         slices: {},
-        resume: { "100": { attempts: 2 } },
-      },
-      "demo",
+        resume: { "100": { attempts: "not-a-number" }, "200": { attempts: 1 } },
+      }),
+      "utf-8",
     );
-
-    expect(state).not.toHaveProperty("resume");
+    const state = loadRunState(repo, "demo");
+    expect(getResumeAttempts(state, "100")).toBe(0);
+    expect(getResumeAttempts(state, "200")).toBe(1);
   });
 });
