@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assessContractExtension,
+  collectRequiredGateFailures,
   makeAsyncMutex,
   makeSliceContext,
   runPipeline,
@@ -36,6 +37,7 @@ import type {
   InvokeResult,
 } from "./agent-provider.js";
 import { TransientProviderError } from "./agent-provider.js";
+import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -66,6 +68,64 @@ afterEach(() => {
       // Best effort
     }
   }
+});
+
+describe("base gate infrastructure retries", () => {
+  it("retains a required command failure after a later retry passes", () => {
+    const declarations: GateDeclaration[] = [
+      { id: "typecheck", stage: "base", required: true, command: "pnpm" },
+      { id: "lint", stage: "base", required: true, command: "pnpm" },
+    ];
+    const result = (
+      gateId: string,
+      status: "PASS" | "FAIL" | "INFRASTRUCTURE",
+    ) => ({
+      gateId,
+      stage: "base",
+      status,
+      failureKind: status === "FAIL" ? ("COMMAND" as const) : null,
+      startedAt: "2026-08-23T10:00:00.000Z",
+      endedAt: "2026-08-23T10:00:00.010Z",
+      durationMs: 10,
+      exitCode: status === "FAIL" ? 1 : status === "PASS" ? 0 : null,
+      treeId: "tree-1",
+      logArtifactId: `gate-logs/${gateId}.log`,
+    });
+    const attempts: Array<{ evidence: GateEvidence; evidencePath: string }> = [
+      {
+        evidencePath: "attempt-1.json",
+        evidence: {
+          version: 1,
+          attemptId: "attempt-1",
+          treeId: "tree-1",
+          results: [
+            result("typecheck", "FAIL"),
+            result("lint", "INFRASTRUCTURE"),
+          ],
+        },
+      },
+      {
+        evidencePath: "attempt-2.json",
+        evidence: {
+          version: 1,
+          attemptId: "attempt-2",
+          treeId: "tree-1",
+          results: [result("typecheck", "PASS"), result("lint", "PASS")],
+        },
+      },
+    ];
+
+    expect(collectRequiredGateFailures(attempts, declarations)).toEqual([
+      {
+        evidencePath: "attempt-1.json",
+        result: expect.objectContaining({
+          gateId: "typecheck",
+          status: "FAIL",
+          failureKind: "COMMAND",
+        }),
+      },
+    ]);
+  });
 });
 
 describe("runPreShipSanity", () => {

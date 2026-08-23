@@ -47,6 +47,7 @@ import {
   type GateDeclaration,
   type GateEvidence,
   type GateEvidenceArtifact,
+  type GateResult,
 } from "./gate-runner.js";
 import {
   loadRunState,
@@ -1702,6 +1703,25 @@ function assertGateEvidenceReleasesEvaluation(
   }
 }
 
+export function collectRequiredGateFailures(
+  attempts: readonly { evidence: GateEvidence; evidencePath: string }[],
+  declarations: readonly GateDeclaration[],
+): Array<{ evidencePath: string; result: GateResult }> {
+  const requiredGateIds = new Set(
+    declarations
+      .filter((declaration) => declaration.required)
+      .map((declaration) => declaration.id),
+  );
+  return attempts.flatMap(({ evidence, evidencePath }) =>
+    evidence.results
+      .filter(
+        (result) =>
+          requiredGateIds.has(result.gateId) && result.status === "FAIL",
+      )
+      .map((result) => ({ evidencePath, result })),
+  );
+}
+
 export async function runSliceExecute(
   ctx: SliceContext,
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
@@ -1811,6 +1831,10 @@ export async function runSliceExecute(
         );
       let gateEvidence: GateEvidence | undefined;
       let gateEvidencePath = "";
+      const gateAttempts: Array<{
+        evidence: GateEvidence;
+        evidencePath: string;
+      }> = [];
       try {
         for (
           let gateAttempt = 1;
@@ -1834,6 +1858,10 @@ export async function runSliceExecute(
           gateEvidencePath = gateRun.evidencePath;
           gateArtifacts.push(gateRun.artifact);
           gateEvidence = verifyGateEvidence(gateRun.artifact);
+          gateAttempts.push({
+            evidence: gateEvidence,
+            evidencePath: gateEvidencePath,
+          });
           logger.recordGateAttempt(
             {
               ghIssue: slice.ghIssue,
@@ -1883,15 +1911,21 @@ export async function runSliceExecute(
           error: `Base gate infrastructure failed: ${requiredInfrastructure.map((gate) => gate.gateId).join(", ")} (${evidenceDisplayPath})`,
         };
       }
-      const requiredFailures = gateEvidence.results.filter(
-        (gate) =>
-          isRequired(gate.gateId) && gate.status === "FAIL",
+      const requiredFailures = collectRequiredGateFailures(
+        gateAttempts,
+        declarations,
       );
       if (requiredFailures.length > 0) {
-        repairReferences.push(evidenceDisplayPath);
         repairReferences.push(
-          ...requiredFailures.map((gate) =>
-            join(evidenceDir, gate.logArtifactId).replace(/\\/g, "/"),
+          ...new Set(
+            requiredFailures.map(({ evidencePath }) =>
+              evidencePath.replace(/\\/g, "/"),
+            ),
+          ),
+        );
+        repairReferences.push(
+          ...requiredFailures.map(({ result }) =>
+            join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
           ),
         );
         if (round < MAX_GENERATOR_ROUNDS) continue;
