@@ -255,6 +255,159 @@ describe("PRD 070 QA retry behavior", () => {
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
     expect(readFileSync(join(artifactDir, "qa-report-r3-a1.md"), "utf-8")).toContain("Finding 3");
   });
+
+  it("cancels a base gate process tree without evaluator or repair", async () => {
+    const repo = makeRepo();
+    const childPidPath = join(repo, "gate-child.pid");
+    writeFileSync(
+      join(repo, "gate.cjs"),
+      [
+        "const { spawn } = require('node:child_process');",
+        "const { writeFileSync } = require('node:fs');",
+        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+        `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+      "utf-8",
+    );
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "cancel-fixture",
+        scripts: {
+          typecheck: "node gate.cjs",
+          lint: "node -e \"process.exit(0)\"",
+          test: "node -e \"process.exit(0)\"",
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "gate.cjs", "package.json"]);
+    git(repo, ["commit", "-m", "add cancellation gate"]);
+
+    const controller = new AbortController();
+    let generators = 0;
+    let evaluators = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          generators++;
+          writeFileSync(join(repo, "change.txt"), "candidate\n", "utf-8");
+          setTimeout(() => controller.abort(), 1_500);
+        } else if (options.role === "evaluator-qa") {
+          evaluators++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, {
+      signal: controller.signal,
+      commandTimeoutMs: 10_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    await expect(runSliceExecute(ctx)).resolves.toEqual({
+      phase: "CANCELLED",
+      error: "Cancelled by user",
+    });
+    expect(generators).toBe(1);
+    expect(evaluators).toBe(0);
+    expect(ctx.logger.getSliceProgress("70")).toEqual({
+      genRounds: 1,
+      evalRounds: 0,
+    });
+
+    const evidenceDir = join(ctx.absSliceDir, "gate-evidence");
+    const evidenceFile = readdirSync(evidenceDir).find((name) =>
+      name.endsWith(".json"),
+    )!;
+    const evidence = JSON.parse(
+      readFileSync(join(evidenceDir, evidenceFile), "utf-8"),
+    );
+    expect(evidence.results).toHaveLength(1);
+    expect(evidence.results[0]).toMatchObject({
+      gateId: "typecheck",
+      status: "INFRASTRUCTURE",
+    });
+    const childPid = Number(readFileSync(childPidPath, "utf-8"));
+    expect(() => process.kill(childPid, 0)).toThrow();
+  }, 30_000);
+});
+
+describe("provider-independent policy-less base gates", () => {
+  for (const providerName of ["kiro", "claude-code", "codex"]) {
+    it(`uses typecheck, lint, and test:run for ${providerName}`, async () => {
+      const repo = makeRepo();
+      writeFileSync(
+        join(repo, "package.json"),
+        JSON.stringify({
+          name: `${providerName}-fixture`,
+          scripts: {
+            typecheck: "node -e \"process.exit(0)\"",
+            lint: "node -e \"process.exit(0)\"",
+            "test:run": "node -e \"process.exit(0)\"",
+            test: "node -e \"process.exit(23)\"",
+          },
+        }),
+        "utf-8",
+      );
+      git(repo, ["add", "package.json"]);
+      git(repo, ["commit", "-m", "add baseline scripts"]);
+
+      let artifactDir = "";
+      let evaluators = 0;
+      const provider: AgentProvider = {
+        name: providerName,
+        async invoke(options: InvokeOptions): Promise<InvokeResult> {
+          if (options.role === "generator") {
+            writeFileSync(
+              join(repo, "provider-output.txt"),
+              providerName,
+              "utf-8",
+            );
+          } else if (options.role === "evaluator-qa") {
+            evaluators++;
+            writeFileSync(
+              join(artifactDir, "qa-report.md"),
+              "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+              "utf-8",
+            );
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+      const ctx = makeContext(repo, provider, {
+        commandTimeoutMs: 5_000,
+        heartbeatIntervalMs: 20,
+      });
+      artifactDir = ctx.absSliceDir;
+
+      await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
+      expect(evaluators).toBe(1);
+      const evidenceDir = join(artifactDir, "gate-evidence");
+      const evidenceFile = readdirSync(evidenceDir).find((name) =>
+        name.endsWith(".json"),
+      )!;
+      const evidence = JSON.parse(
+        readFileSync(join(evidenceDir, evidenceFile), "utf-8"),
+      );
+      expect(evidence.results.map((gate: { gateId: string }) => gate.gateId))
+        .toEqual(["typecheck", "lint", "test:run"]);
+      expect(
+        evidence.results.every(
+          (gate: { status: string }) => gate.status === "PASS",
+        ),
+      ).toBe(true);
+      expect(
+        execFileSync(
+          "git",
+          ["show", `${evidence.treeId}:provider-output.txt`],
+          { cwd: repo, encoding: "utf-8" },
+        ),
+      ).toBe(providerName);
+    }, 30_000);
+  }
 });
 
 describe("shared-preview QA", () => {
