@@ -1,8 +1,14 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { parseIssuesMd, type Slice } from "./issues-parser.js";
-import type { RunEvent } from "./run-events.js";
-import { prdSlugFromRunSlug, type FutureSection } from "./status-future.js";
+import type { Slice } from "./issues-parser.js";
+import type {
+  RunSnapshot,
+  SnapshotPhaseInvocation,
+  SnapshotSliceOutcome,
+} from "./run-snapshot.js";
+import { bucketFor } from "./slice-lifecycle.js";
+import type {
+  FutureSection,
+  ManifestReadResult,
+} from "./status-future.js";
 import type { PresentSection } from "./status-present.js";
 
 export type PipelineState =
@@ -86,21 +92,11 @@ export interface PipelineSection {
   notes: string[];
 }
 
-interface InvocationBuilder {
-  invocation: PipelineInvocation;
-  startMs?: number;
-}
-
-const FAILURE_OUTCOMES = new Set([
-  "STUCK",
-  "ESCALATE",
-  "ERROR",
-  "CONFLICT",
-  "CANCELLED",
-  "LANE-CANCELLED",
-]);
-
-function elapsed(startTs: string | undefined, endTs: string | undefined, now: number) {
+function elapsed(
+  startTs: string | undefined,
+  endTs: string | undefined,
+  now: number,
+) {
   if (!startTs) return undefined;
   const start = Date.parse(startTs);
   const end = endTs ? Date.parse(endTs) : now;
@@ -108,126 +104,81 @@ function elapsed(startTs: string | undefined, endTs: string | undefined, now: nu
   return Math.max(0, end - start);
 }
 
-function invocationKey(input: {
-  ghIssue: string;
-  agent: string;
-  round?: number;
-}): string {
-  return `${input.ghIssue}|${input.agent}|${input.round ?? ""}`;
-}
-
-function manifestFor(
-  repoRoot: string,
-  events: RunEvent[],
-  notes: string[],
-): Slice[] {
-  const started = events.find((event) => event.type === "run-started");
-  if (!started || started.type !== "run-started") return [];
-  const slug = prdSlugFromRunSlug(started.runSlug, started.provider);
-  const path = join(repoRoot, ".kiro", "specs", slug, "issues.md");
-  if (!existsSync(path)) {
-    notes.push("issues.md is unavailable; titles and projected dependencies may be unknown");
-    return [];
-  }
-  try {
-    return parseIssuesMd(path);
-  } catch {
-    notes.push("issues.md could not be parsed; the matrix uses observed events only");
-    return [];
-  }
-}
-
 function invocationState(invocation: PipelineInvocation): PipelineState {
   if (!invocation.endedTs) return "active";
   const verdict = invocation.verdict?.toUpperCase();
-  return verdict && [
-    "FAIL",
-    "FAILED",
-    "ERROR",
-    "ESCALATE",
-    "IMPLEMENTATION",
-    "FIX-BEFORE-SHIP",
-    "NEVER_RAN",
-    "DIED_MID_RUN",
-    "UNPARSEABLE",
-  ].includes(verdict)
+  return verdict &&
+    [
+      "FAIL",
+      "FAILED",
+      "ERROR",
+      "ESCALATE",
+      "IMPLEMENTATION",
+      "FIX-BEFORE-SHIP",
+      "NEVER_RAN",
+      "DIED_MID_RUN",
+      "UNPARSEABLE",
+    ].includes(verdict)
     ? "failed"
     : "done";
 }
 
+function stateForClosedInvocation(
+  invocation: SnapshotPhaseInvocation,
+  outcome: SnapshotSliceOutcome | undefined,
+): PipelineState {
+  if (invocation.closeReason === undefined) return "active";
+  if (invocation.closeReason === "phase-ended") {
+    if (invocation.startedTs === undefined) return "unknown";
+    return invocationState({
+      agent: invocation.agent,
+      state: "unknown",
+      endedTs: invocation.endedTs,
+      verdict: invocation.verdict,
+    });
+  }
+  if (outcome) {
+    const bucket = bucketFor(outcome.phase);
+    if (bucket === "failed" || bucket === "cancelled") return "failed";
+  }
+  return "done";
+}
+
 function buildSliceInvocations(
-  events: RunEvent[],
+  snapshot: RunSnapshot,
   present: PresentSection,
   now: number,
 ): Map<string, PipelineInvocation[]> {
-  const invocations = new Map<string, PipelineInvocation[]>();
-  const open = new Map<string, InvocationBuilder[]>();
-  const occurrences = new Map<string, number>();
-  const activeByKey = new Map(
-    present.active.map((active) => [
-      invocationKey(active),
-      active,
-    ]),
-  );
-
-  for (const event of events) {
-    if (event.type === "phase-started") {
-      const key = invocationKey(event);
-      const attempt = (occurrences.get(key) ?? 0) + 1;
-      occurrences.set(key, attempt);
-      const invocation: PipelineInvocation = {
-        agent: event.agent,
-        attempt,
-        round: event.round,
-        state: "active",
-        startedTs: event.ts,
+  const bySlice = new Map<string, PipelineInvocation[]>();
+  for (const ghIssue of snapshot.sliceOrder) {
+    const slice = snapshot.slices[ghIssue]!;
+    const invocations = slice.invocations.map((phase): PipelineInvocation => {
+      const active = present.active.find(
+        (item) =>
+          item.ghIssue === phase.ghIssue &&
+          item.agent === phase.agent &&
+          item.round === phase.round &&
+          item.startedTs === phase.startedTs,
+      );
+      return {
+        agent: phase.agent,
+        attempt: phase.attempt,
+        round: phase.round,
+        state: stateForClosedInvocation(phase, slice.outcome),
+        startedTs: phase.startedTs,
+        endedTs: phase.endedTs,
+        elapsedMs: elapsed(
+          phase.startedTs,
+          phase.closedTs ?? phase.endedTs,
+          now,
+        ),
+        verdict: phase.verdict,
+        stale: active?.stale ?? false,
       };
-      const list = invocations.get(event.ghIssue) ?? [];
-      list.push(invocation);
-      invocations.set(event.ghIssue, list);
-      const builders = open.get(key) ?? [];
-      builders.push({ invocation, startMs: Date.parse(event.ts) });
-      open.set(key, builders);
-    } else if (event.type === "phase-ended") {
-      const builders = open.get(invocationKey(event));
-      const builder = builders?.shift();
-      if (!builder) {
-        const invocation: PipelineInvocation = {
-          agent: event.agent,
-          round: event.round,
-          state: "unknown",
-          endedTs: event.ts,
-          verdict: event.verdict,
-        };
-        const list = invocations.get(event.ghIssue) ?? [];
-        list.push(invocation);
-        invocations.set(event.ghIssue, list);
-        continue;
-      }
-      builder.invocation.endedTs = event.ts;
-      builder.invocation.verdict = event.verdict;
-      builder.invocation.elapsedMs = elapsed(
-        builder.invocation.startedTs,
-        event.ts,
-        now,
-      );
-      builder.invocation.state = invocationState(builder.invocation);
-    }
+    });
+    if (invocations.length > 0) bySlice.set(ghIssue, invocations);
   }
-
-  for (const [key, builders] of open) {
-    const active = activeByKey.get(key);
-    for (const builder of builders) {
-      if (builder.invocation.endedTs) continue;
-      builder.invocation.elapsedMs = elapsed(
-        builder.invocation.startedTs,
-        undefined,
-        now,
-      );
-      builder.invocation.stale = active?.stale ?? false;
-    }
-  }
-  return invocations;
+  return bySlice;
 }
 
 function latest(invocations: PipelineInvocation[], agent: string) {
@@ -266,12 +217,15 @@ function roundsFor(
 }
 
 function inferSliceState(
-  outcome: string | undefined,
+  outcome: SnapshotSliceOutcome | undefined,
   invocations: PipelineInvocation[],
   waitsOn: string[],
 ): PipelineState {
-  if (outcome === "PASS") return "done";
-  if (outcome && FAILURE_OUTCOMES.has(outcome)) return "failed";
+  if (outcome) {
+    const bucket = bucketFor(outcome.phase);
+    if (bucket === "succeeded") return "done";
+    if (bucket === "failed" || bucket === "cancelled") return "failed";
+  }
   if (invocations.some((invocation) => invocation.state === "active")) {
     return "active";
   }
@@ -279,7 +233,10 @@ function inferSliceState(
   return "queued";
 }
 
-function aggregateStages(events: RunEvent[], now: number): PipelineAggregateStage[] {
+function aggregateStages(
+  snapshot: RunSnapshot,
+  now: number,
+): PipelineAggregateStage[] {
   const definitions = [
     ["sanity", "Pre-ship sanity"],
     ["architect-review", "Architect review"],
@@ -287,36 +244,30 @@ function aggregateStages(events: RunEvent[], now: number): PipelineAggregateStag
     ["draft-pr", "Draft PR"],
   ] as const;
   const byPhase = new Map<string, PipelineInvocation[]>();
-  const open = new Map<string, PipelineInvocation[]>();
-  for (const event of events) {
-    if (event.type === "run-phase-started") {
-      const invocation: PipelineInvocation = {
-        agent: event.phase,
-        attempt: event.attempt,
-        cached: event.cached,
-        startedTs: event.ts,
-        elapsedMs: elapsed(event.ts, undefined, now),
-        state: "active",
-      };
-      const list = byPhase.get(event.phase) ?? [];
-      list.push(invocation);
-      byPhase.set(event.phase, list);
-      const key = `${event.phase}|${event.attempt ?? ""}`;
-      const pending = open.get(key) ?? [];
-      pending.push(invocation);
-      open.set(key, pending);
-    } else if (event.type === "run-phase-ended") {
-      const key = `${event.phase}|${event.attempt ?? ""}`;
-      const invocation = open.get(key)?.shift();
-      if (invocation) {
-        invocation.endedTs = event.ts;
-        invocation.verdict = event.verdict;
-        invocation.cached = event.cached ?? invocation.cached;
-        invocation.elapsedMs = elapsed(invocation.startedTs, event.ts, now);
-        invocation.state = invocationState(invocation);
-      }
-    }
+  for (const phase of snapshot.runPhases) {
+    if (phase.startedTs === undefined) continue;
+    const invocation: PipelineInvocation = {
+      agent: phase.phase,
+      attempt: phase.attempt,
+      cached: phase.cached,
+      startedTs: phase.startedTs,
+      endedTs: phase.endedTs,
+      elapsedMs: elapsed(phase.startedTs, phase.endedTs, now),
+      verdict: phase.verdict,
+      state: phase.endedTs
+        ? invocationState({
+            agent: phase.phase,
+            state: "unknown",
+            endedTs: phase.endedTs,
+            verdict: phase.verdict,
+          })
+        : "active",
+    };
+    const list = byPhase.get(phase.phase) ?? [];
+    list.push(invocation);
+    byPhase.set(phase.phase, list);
   }
+
   let previousFailed = false;
   return definitions.map(([id, label]) => {
     const attempts = byPhase.get(id) ?? [];
@@ -324,7 +275,9 @@ function aggregateStages(events: RunEvent[], now: number): PipelineAggregateStag
     let state: PipelineState;
     if (attempts.some((item) => item.state === "active")) state = "active";
     else if (attempts.length > 0) {
-      state = attempts.some((item) => item.state === "failed") ? "failed" : "done";
+      state = attempts.some((item) => item.state === "failed")
+        ? "failed"
+        : "done";
     } else {
       state = previousFailed ? "blocked" : "queued";
     }
@@ -333,54 +286,31 @@ function aggregateStages(events: RunEvent[], now: number): PipelineAggregateStag
   });
 }
 
+function manifestNotes(manifest: ManifestReadResult): string[] {
+  if (manifest.status === "missing") {
+    return [
+      "issues.md is unavailable; titles and projected dependencies may be unknown",
+    ];
+  }
+  if (manifest.status === "invalid") {
+    return ["issues.md could not be parsed; the matrix uses observed events only"];
+  }
+  return [];
+}
+
 export function buildPipelineSection(input: {
-  repoRoot: string;
-  events: RunEvent[];
+  snapshot: RunSnapshot;
+  manifest: ManifestReadResult;
   future: FutureSection;
   present: PresentSection;
   now: Date;
 }): PipelineSection {
-  const { events, future, present } = input;
+  const { snapshot, future, present } = input;
   const now = input.now.getTime();
-  const notes: string[] = [];
-  const manifest = manifestFor(input.repoRoot, events, notes);
+  const manifest: Slice[] =
+    input.manifest.status === "available" ? input.manifest.slices : [];
   const manifestById = new Map(manifest.map((slice) => [slice.ghIssue, slice]));
-  const invocationBySlice = buildSliceInvocations(events, present, now);
-  const outcomes = new Map<string, { phase: string; title: string }>();
-  const waves = new Map<number, {
-    slices: string[];
-    lanes?: string[][];
-    startedTs?: string;
-    endedTs?: string;
-  }>();
-  let runStarted: Extract<RunEvent, { type: "run-started" }> | undefined;
-  let runEnded: Extract<RunEvent, { type: "run-ended" }> | undefined;
-
-  for (const event of events) {
-    if (event.type === "run-started") runStarted = event;
-    else if (event.type === "run-ended") runEnded = event;
-    else if (event.type === "wave-dispatched") {
-      waves.set(event.wave, {
-        ...waves.get(event.wave),
-        slices: event.slices,
-        startedTs: event.ts,
-      });
-    } else if (event.type === "lanes-partitioned") {
-      const wave = waves.get(event.wave) ?? { slices: event.lanes.flat() };
-      wave.lanes = event.lanes;
-      waves.set(event.wave, wave);
-    } else if (event.type === "wave-completed") {
-      const wave = waves.get(event.wave) ?? { slices: [] };
-      wave.endedTs = event.ts;
-      waves.set(event.wave, wave);
-    } else if (event.type === "slice-outcome") {
-      outcomes.set(event.slice.ghIssue, {
-        phase: event.slice.phase,
-        title: event.slice.title,
-      });
-    }
-  }
-
+  const invocationBySlice = buildSliceInvocations(snapshot, present, now);
   const waitsBySlice = new Map(
     future.pending.map((slice) => [
       slice.ghIssue,
@@ -389,36 +319,44 @@ export function buildPipelineSection(input: {
   );
   const makeSlice = (ghIssue: string): PipelineSlice => {
     const manifestSlice = manifestById.get(ghIssue);
-    const outcome = outcomes.get(ghIssue);
+    const snapshotSlice = snapshot.slices[ghIssue];
     const invocations = invocationBySlice.get(ghIssue) ?? [];
     const waitsOn = waitsBySlice.get(ghIssue) ?? [];
     return {
       ghIssue,
       number: manifestSlice?.number ?? ghIssue,
-      title: manifestSlice?.title ?? outcome?.title ?? "",
-      state: inferSliceState(outcome?.phase, invocations, waitsOn),
+      title: manifestSlice?.title ?? snapshotSlice?.title ?? "",
+      state: inferSliceState(snapshotSlice?.outcome, invocations, waitsOn),
       waitsOn,
       explorer: latest(invocations, "explorer"),
-      contractRounds: roundsFor(invocations, "planner", ["evaluator-contract"]),
+      contractRounds: roundsFor(invocations, "planner", [
+        "evaluator-contract",
+      ]),
       implementationRounds: roundsFor(invocations, "generator", [
         "evaluator-qa",
         "evaluator-uat",
       ]),
-      outcome: outcome?.phase,
+      outcome: snapshotSlice?.outcome?.phase,
     };
   };
 
-  const projected = new Set<number>();
+  const waves = new Map(
+    snapshot.waves.map((wave) => [wave.wave, { ...wave, projected: false }]),
+  );
   for (const futureWave of future.upcomingWaves) {
     if (!waves.has(futureWave.wave)) {
-      waves.set(futureWave.wave, { slices: futureWave.slices });
-      projected.add(futureWave.wave);
+      waves.set(futureWave.wave, {
+        wave: futureWave.wave,
+        slices: futureWave.slices,
+        serial: false,
+        projected: true,
+      });
     }
   }
 
-  const renderedWaves: PipelineWave[] = [...waves.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([waveNumber, wave]) => {
+  const renderedWaves: PipelineWave[] = [...waves.values()]
+    .sort((a, b) => a.wave - b.wave)
+    .map((wave) => {
       const laneIds = wave.lanes ?? wave.slices.map((slice) => [slice]);
       const lanes = laneIds.map((ids, index) => ({
         lane: index + 1,
@@ -427,13 +365,19 @@ export function buildPipelineSection(input: {
       const slices = lanes.flatMap((lane) => lane.slices);
       let state: PipelineState;
       if (wave.endedTs) {
-        state = slices.some((slice) => slice.state === "failed") ? "failed" : "done";
-      } else if (slices.some((slice) => slice.state === "active")) state = "active";
-      else if (slices.some((slice) => slice.state === "blocked")) state = "blocked";
-      else state = "queued";
+        state = slices.some((slice) => slice.state === "failed")
+          ? "failed"
+          : "done";
+      } else if (slices.some((slice) => slice.state === "active")) {
+        state = "active";
+      } else if (slices.some((slice) => slice.state === "blocked")) {
+        state = "blocked";
+      } else {
+        state = "queued";
+      }
       return {
-        wave: waveNumber,
-        projected: projected.has(waveNumber),
+        wave: wave.wave,
+        projected: wave.projected,
         state,
         startedTs: wave.startedTs,
         endedTs: wave.endedTs,
@@ -442,29 +386,29 @@ export function buildPipelineSection(input: {
       };
     });
 
-  const outcome = runEnded?.outcome;
+  const outcome = snapshot.run.outcome;
   const runState: PipelineState =
     outcome === "SUCCEEDED"
       ? "done"
       : outcome
         ? "failed"
-        : runStarted
+        : snapshot.run.startedTs
           ? "active"
           : "unknown";
   return {
     run: {
-      slug: runStarted?.runSlug,
-      provider: runStarted?.provider,
+      slug: snapshot.run.slug,
+      provider: snapshot.run.provider,
       state: runState,
-      startedTs: runStarted?.ts,
-      endedTs: runEnded?.ts,
-      elapsedMs: elapsed(runStarted?.ts, runEnded?.ts, now),
-      contractRoundLimit: runStarted?.contractRoundLimit,
-      implementationRoundLimit: runStarted?.implementationRoundLimit,
+      startedTs: snapshot.run.startedTs,
+      endedTs: snapshot.run.endedTs,
+      elapsedMs: elapsed(snapshot.run.startedTs, snapshot.run.endedTs, now),
+      contractRoundLimit: snapshot.run.contractRoundLimit,
+      implementationRoundLimit: snapshot.run.implementationRoundLimit,
       outcome,
     },
     waves: renderedWaves,
-    aggregateStages: aggregateStages(events, now),
-    notes: [...future.notes, ...notes],
+    aggregateStages: aggregateStages(snapshot, now),
+    notes: [...future.notes, ...manifestNotes(input.manifest)],
   };
 }

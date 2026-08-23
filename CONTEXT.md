@@ -70,6 +70,13 @@ lose the record of already-merged work. A persisted PASS
 ADR 0018.
 _Avoid_: "state cache", "checkpoint" (it is authoritative, not a cache)
 
+**RunSnapshot**:
+The single read-side account of a pipeline run, reconciling its event
+history with its **run state** into phases, outcomes, lanes, and waves.
+Status views derive from it rather than interpreting run records
+independently. See ADR 0032.
+_Avoid_: "event facts", "status fold", "dashboard state"
+
 **Scope of record**:
 The set of slices a run owns, fixed on its first invocation (all AFK
 slices, or whatever `--slices` named) and persisted in the **run state**.

@@ -1,132 +1,193 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { RunEvent, RunEventPayload } from "./run-events.js";
-import { lifecycle } from "./slice-lifecycle.js";
+import { describe, expect, it } from "vitest";
+import type { Slice } from "./issues-parser.js";
+import type {
+  RunSnapshot,
+  SnapshotSliceOutcome,
+} from "./run-snapshot.js";
 import {
   buildFutureSection,
   renderFutureSection,
   type FutureSection,
+  type ManifestReadResult,
 } from "./status-future.js";
 
-/**
- * Filesystem-contract tests for the `afk status` future section
- * (spec #30): fixture directories in — a fake repoRoot with
- * `.kiro/specs/<prd-slug>/issues.md`, optional `.afk/state/<runSlug>.json`,
- * and a run directory — derived model / rendered lines out. No mocking
- * of internals: the section goes through the real issues parser and
- * run-state loader.
- */
+const MANIFEST: Slice[] = [
+  {
+    number: "01",
+    ghIssue: "100",
+    title: "Foundation",
+    type: "AFK",
+    blockedBy: [],
+    userStories: "1",
+  },
+  {
+    number: "02",
+    ghIssue: "101",
+    title: "Widget on foundation",
+    type: "AFK",
+    blockedBy: ["100"],
+    userStories: "2",
+  },
+  {
+    number: "03",
+    ghIssue: "102",
+    title: "Mobile gestures on widget",
+    type: "AFK",
+    blockedBy: ["101"],
+    userStories: "3",
+  },
+  {
+    number: "04",
+    ghIssue: "103",
+    title: "Cron on foundation",
+    type: "AFK",
+    blockedBy: ["100"],
+    userStories: "4",
+  },
+  {
+    number: "05",
+    ghIssue: "200",
+    title: "Manual setup",
+    type: "HITL",
+    blockedBy: [],
+    userStories: "5",
+  },
+];
 
-const PRD_SLUG = "demo";
-const RUN_SLUG = "demo-stub";
-const PROVIDER = "stub";
+const AVAILABLE: ManifestReadResult = {
+  status: "available",
+  slices: MANIFEST,
+};
 
-const ISSUES_MD = `# Issues
-
-| Slice | GH Issue | Title | Type | Blocked by | User stories covered |
-|-------|----------|-------|------|------------|----------------------|
-| 01 | #100 | Foundation | AFK | — | 1 |
-| 02 | #101 | Widget on foundation | AFK | #100 | 2 |
-| 03 | #102 | Mobile gestures on widget | AFK | #101 | 3 |
-| 04 | #103 | Cron on foundation | AFK | #100 | 4 |
-| 05 | #200 | Manual setup | HITL | — | 5 |
-`;
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-interface FixtureOptions {
-  issuesMd?: string | null;
-  /** Written verbatim as `.afk/state/<runSlug>.json` when provided. */
-  stateJson?: unknown;
+function snapshotFixture(): RunSnapshot {
+  return {
+    run: {
+      slug: "demo-stub",
+      provider: "stub",
+      startedTs: "2025-01-01T00:00:01.000Z",
+    },
+    chronology: [],
+    slices: {
+      "100": {
+        ghIssue: "100",
+        title: "",
+        dispatched: true,
+        blockedBy: [],
+        invocations: [
+          {
+            ghIssue: "100",
+            agent: "explorer",
+            attempt: 1,
+            startedTs: "2025-01-01T00:00:02.000Z",
+            endedTs: "2025-01-01T00:00:03.000Z",
+            closedTs: "2025-01-01T00:00:03.000Z",
+            closeReason: "phase-ended",
+          },
+          {
+            ghIssue: "100",
+            agent: "planner",
+            round: 1,
+            attempt: 1,
+            startedTs: "2025-01-01T00:00:04.000Z",
+            endedTs: "2025-01-01T00:00:05.000Z",
+            closedTs: "2025-01-01T00:00:05.000Z",
+            closeReason: "phase-ended",
+          },
+          {
+            ghIssue: "100",
+            agent: "evaluator-contract",
+            round: 1,
+            attempt: 1,
+            startedTs: "2025-01-01T00:00:06.000Z",
+            endedTs: "2025-01-01T00:00:07.000Z",
+            closedTs: "2025-01-01T00:00:07.000Z",
+            closeReason: "phase-ended",
+          },
+          {
+            ghIssue: "100",
+            agent: "generator",
+            round: 1,
+            attempt: 1,
+            startedTs: "2025-01-01T00:00:08.000Z",
+          },
+        ],
+      },
+    },
+    sliceOrder: ["100"],
+    waves: [
+      {
+        wave: 1,
+        slices: ["100"],
+        lanes: [["100"]],
+        serial: false,
+        startedTs: "2025-01-01T00:00:01.500Z",
+      },
+    ],
+    maxDispatchedWave: 1,
+    currentLanes: { wave: 1, lanes: [["100"]], serial: false },
+    runPhases: [],
+  };
 }
 
-function makeRepo(opts: FixtureOptions = {}): { repoRoot: string; runDir: string } {
-  const repoRoot = mkdtempSync(join(tmpdir(), "afk-status-future-"));
-  tempDirs.push(repoRoot);
-
-  const issuesMd = opts.issuesMd === undefined ? ISSUES_MD : opts.issuesMd;
-  if (issuesMd !== null) {
-    const specDir = join(repoRoot, ".kiro", "specs", PRD_SLUG);
-    mkdirSync(specDir, { recursive: true });
-    writeFileSync(join(specDir, "issues.md"), issuesMd, "utf-8");
-  }
-
-  if (opts.stateJson !== undefined) {
-    const stateDir = join(repoRoot, ".afk", "state");
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(
-      join(stateDir, `${RUN_SLUG}.json`),
-      JSON.stringify(opts.stateJson, null, 2),
-      "utf-8",
-    );
-  }
-
-  const runDir = join(repoRoot, ".afk", "logs", PRD_SLUG, "run-20250101-000000");
-  mkdirSync(runDir, { recursive: true });
-  return { repoRoot, runDir };
+function addOutcome(
+  snapshot: RunSnapshot,
+  ghIssue: string,
+  outcome: SnapshotSliceOutcome,
+): void {
+  snapshot.slices[ghIssue] ??= {
+    ghIssue,
+    title: outcome.title ?? "",
+    dispatched: false,
+    blockedBy: [],
+    invocations: [],
+  };
+  snapshot.slices[ghIssue]!.outcome = outcome;
+  if (!snapshot.sliceOrder.includes(ghIssue)) snapshot.sliceOrder.push(ghIssue);
 }
 
-let clockSeq = 0;
-function ev(payload: RunEventPayload): RunEvent {
-  clockSeq++;
-  const ts = `2025-01-01T00:${String(Math.floor(clockSeq / 60)).padStart(2, "0")}:${String(clockSeq % 60).padStart(2, "0")}.000Z`;
-  return { ...payload, ts } as RunEvent;
-}
-
-function baseEvents(): RunEvent[] {
-  return [
-    ev({ type: "header", version: 1 }),
-    ev({ type: "run-started", provider: PROVIDER, runSlug: RUN_SLUG }),
-  ];
-}
-
-function phasePair(ghIssue: string, agent: string, round?: number): RunEvent[] {
-  return [
-    ev({ type: "phase-started", ghIssue, agent, ...(round !== undefined ? { round } : {}) }),
-    ev({ type: "phase-ended", ghIssue, agent, ...(round !== undefined ? { round } : {}) }),
-  ];
+function build(
+  snapshot = snapshotFixture(),
+  manifest: ManifestReadResult = AVAILABLE,
+): FutureSection {
+  return buildFutureSection({ snapshot, manifest });
 }
 
 function pendingFor(future: FutureSection, ghIssue: string) {
-  const entry = future.pending.find((p) => p.ghIssue === ghIssue);
+  const entry = future.pending.find((pending) => pending.ghIssue === ghIssue);
   expect(entry, `expected pending entry for #${ghIssue}`).toBeDefined();
   return entry!;
 }
 
-describe("buildFutureSection — partially complete run", () => {
-  function build(): FutureSection {
-    const { repoRoot, runDir } = makeRepo();
-    const events = [
-      ...baseEvents(),
-      ev({ type: "wave-dispatched", wave: 1, slices: ["100"] }),
-      ...phasePair("100", "explorer"),
-      ...phasePair("100", "planner", 1),
-      ...phasePair("100", "evaluator-contract", 1),
-      // generator started but not ended — mid-invocation.
-      ev({ type: "phase-started", ghIssue: "100", agent: "generator", round: 1 }),
-    ];
-    return buildFutureSection({ repoRoot, runDir, events });
-  }
-
-  it("lists exactly the remaining phases for a mid-pipeline slice", () => {
+describe("buildFutureSection", () => {
+  it("derives remaining phases, blockers, waves, titles, lanes, and HITL from a snapshot fixture", () => {
     const future = build();
+
     expect(pendingFor(future, "100").remainingPhases).toEqual([
       "generator",
       "evaluator-qa",
     ]);
+    expect(pendingFor(future, "101")).toMatchObject({
+      title: "Widget on foundation",
+      inFlight: false,
+      waitsOn: [{ ghIssue: "100", status: "in flight" }],
+    });
+    expect(future.upcomingWaves).toEqual([
+      { wave: 1, slices: ["100"] },
+      { wave: 2, slices: ["101", "103"] },
+      { wave: 3, slices: ["102"] },
+    ]);
+    expect(future.currentLanes).toEqual({
+      wave: 1,
+      lanes: [["100"]],
+      serial: false,
+    });
+    expect(future.skipped).toEqual([
+      { ghIssue: "200", title: "Manual setup" },
+    ]);
   });
 
-  it("a slice with no events has the whole sequence ahead", () => {
-    const future = build();
-    expect(pendingFor(future, "101").remainingPhases).toEqual([
+  it("gives an untouched manifest slice the whole agent sequence", () => {
+    expect(pendingFor(build(), "101").remainingPhases).toEqual([
       "explorer",
       "planner",
       "evaluator-contract",
@@ -135,235 +196,188 @@ describe("buildFutureSection — partially complete run", () => {
     ]);
   });
 
-  it("unresolved dependencies surface as waitsOn blocker references", () => {
-    const future = build();
-    expect(pendingFor(future, "101").waitsOn.map((b) => b.ghIssue)).toEqual(["100"]);
-    expect(pendingFor(future, "102").waitsOn.map((b) => b.ghIssue)).toEqual(["101"]);
-    expect(pendingFor(future, "100").waitsOn).toEqual([]);
-  });
-
-  it("projects upcoming waves in DAG order, continuing the wave count", () => {
-    const future = build();
-    // Wave 1 is in flight (#100); #101/#103 unblock next; #102 after #101.
-    expect(future.upcomingWaves).toEqual([
-      { wave: 1, slices: ["100"] },
-      { wave: 2, slices: ["101", "103"] },
-      { wave: 3, slices: ["102"] },
-    ]);
-  });
-
-  it("shows HITL slices as skipped, not pending work", () => {
-    const future = build();
-    expect(future.skipped.map((s) => s.ghIssue)).toEqual(["200"]);
-    expect(future.pending.map((p) => p.ghIssue)).not.toContain("200");
-    for (const wave of future.upcomingWaves) {
-      expect(wave.slices).not.toContain("200");
+  it("treats event PASS and merged persisted PASS as completed", () => {
+    for (const source of ["event", "run-state"] as const) {
+      const snapshot = snapshotFixture();
+      addOutcome(snapshot, "100", {
+        phase: "PASS",
+        source,
+        mergedToFeature: true,
+      });
+      const future = build(snapshot);
+      expect(future.pending.map((pending) => pending.ghIssue)).not.toContain(
+        "100",
+      );
+      expect(pendingFor(future, "101").waitsOn).toEqual([]);
     }
   });
 
-  it("carries slice titles from issues.md", () => {
-    const future = build();
-    expect(pendingFor(future, "101").title).toBe("Widget on foundation");
-  });
-});
+  it("continues projected wave numbers after an event-derived PASS", () => {
+    const snapshot = snapshotFixture();
+    addOutcome(snapshot, "100", {
+      phase: "PASS",
+      source: "event",
+      mergedToFeature: true,
+    });
 
-describe("buildFutureSection — completed slices drop out", () => {
-  it("a slice with a terminal PASS slice-outcome event is not pending", () => {
-    const { repoRoot, runDir } = makeRepo();
-    const events = [
-      ...baseEvents(),
-      ev({ type: "wave-dispatched", wave: 1, slices: ["100"] }),
-      ...phasePair("100", "explorer"),
-      ev({
-        type: "slice-outcome",
-        slice: lifecycle.pass(
-          { ghIssue: "100", title: "Foundation", branch: "afk/demo/slice-01-stub" },
-          { genRounds: 1, evalRounds: 1 },
-          true,
-        ),
-      }),
-    ];
-    const future = buildFutureSection({ repoRoot, runDir, events });
-    expect(future.pending.map((p) => p.ghIssue)).not.toContain("100");
-    // #101 and #103 are unblocked by the pass.
-    expect(pendingFor(future, "101").waitsOn).toEqual([]);
-    expect(future.upcomingWaves).toEqual([
+    expect(build(snapshot).upcomingWaves).toEqual([
       { wave: 2, slices: ["101", "103"] },
       { wave: 3, slices: ["102"] },
     ]);
   });
 
-  it("persisted PASS + mergedToFeature counts as done even without events", () => {
-    const { repoRoot, runDir } = makeRepo({
-      stateJson: {
-        version: 1,
-        prdSlug: RUN_SLUG,
-        featureBranch: `feat/${PRD_SLUG}`,
-        slices: {
-          "100": { phase: "PASS", mergedToFeature: true },
-        },
-      },
+  it("starts projected waves at one after a persisted PASS with no dispatch", () => {
+    const snapshot = snapshotFixture();
+    snapshot.waves = [];
+    snapshot.maxDispatchedWave = 0;
+    snapshot.slices["100"]!.dispatched = false;
+    addOutcome(snapshot, "100", {
+      phase: "PASS",
+      source: "run-state",
+      mergedToFeature: true,
     });
-    const events = baseEvents();
-    const future = buildFutureSection({ repoRoot, runDir, events });
-    expect(future.pending.map((p) => p.ghIssue)).not.toContain("100");
-    expect(pendingFor(future, "101").waitsOn).toEqual([]);
-    expect(future.upcomingWaves).toEqual([
+
+    expect(build(snapshot).upcomingWaves).toEqual([
       { wave: 1, slices: ["101", "103"] },
       { wave: 2, slices: ["102"] },
     ]);
   });
-});
 
-describe("buildFutureSection — dependency-held slices", () => {
-  it("a slice blocked by a failed slice shows the blocker with its phase", () => {
-    const { repoRoot, runDir } = makeRepo();
-    const events = [
-      ...baseEvents(),
-      ev({ type: "wave-dispatched", wave: 1, slices: ["100"] }),
-      ev({
-        type: "slice-outcome",
-        slice: lifecycle.stuck(
-          { ghIssue: "100", title: "Foundation", branch: "afk/demo/slice-01-stub" },
-          { genRounds: 3, evalRounds: 3 },
-          "generator rounds exhausted",
-        ),
-      }),
-    ];
-    const future = buildFutureSection({ repoRoot, runDir, events });
-    // The failed slice is terminal — not pending work.
-    expect(future.pending.map((p) => p.ghIssue)).not.toContain("100");
-    // Its dependents wait on it and never enter a projected wave.
-    const held = pendingFor(future, "101");
-    expect(held.waitsOn).toEqual([{ ghIssue: "100", status: "STUCK" }]);
-    for (const wave of future.upcomingWaves) {
-      expect(wave.slices).not.toContain("101");
-      expect(wave.slices).not.toContain("102");
-      expect(wave.slices).not.toContain("103");
-    }
+  it("does not complete an unmerged persisted PASS record", () => {
+    const snapshot = snapshotFixture();
+    addOutcome(snapshot, "100", {
+      phase: "PASS",
+      source: "run-state",
+      mergedToFeature: false,
+    });
+
+    expect(build(snapshot).pending.map((pending) => pending.ghIssue)).toContain(
+      "100",
+    );
   });
-});
 
-describe("buildFutureSection — missing issues.md degradation", () => {
-  it("degrades to events-only derivation with a note instead of throwing", () => {
-    const { repoRoot, runDir } = makeRepo({ issuesMd: null });
-    const events = [
-      ...baseEvents(),
-      ev({ type: "wave-dispatched", wave: 1, slices: ["100"] }),
-      ...phasePair("100", "explorer"),
-    ];
-    const future = buildFutureSection({ repoRoot, runDir, events });
-    expect(future.notes.some((n) => n.includes("issues.md"))).toBe(true);
-    // Remaining phases still derivable from events alone.
+  it("uses a persisted failure when events.jsonl has no matching outcome", () => {
+    const snapshot = snapshotFixture();
+    addOutcome(snapshot, "100", {
+      phase: "ERROR",
+      source: "run-state",
+      error: "state write beat event flush",
+    });
+
+    const future = build(snapshot);
+
+    expect(future.pending.map((pending) => pending.ghIssue)).not.toContain(
+      "100",
+    );
+    expect(pendingFor(future, "101").waitsOn).toEqual([
+      { ghIssue: "100", status: "ERROR" },
+    ]);
+    expect(future.upcomingWaves).toEqual([]);
+  });
+
+  it("marks MERGE-PENDING terminal while explaining its automatic retry", () => {
+    const snapshot = snapshotFixture();
+    addOutcome(snapshot, "100", {
+      phase: "MERGE-PENDING",
+      source: "run-state",
+      error: "migration prefix collision",
+      collidingPrefixes: ["042"],
+    });
+
+    const future = build(snapshot);
+    expect(future.pending.map((pending) => pending.ghIssue)).not.toContain(
+      "100",
+    );
+    expect(pendingFor(future, "101").waitsOn).toEqual([
+      {
+        ghIssue: "100",
+        status: "MERGE-PENDING — the next run retries the merge",
+      },
+    ]);
+  });
+
+  it("degrades to observed snapshot slices when issues.md is missing", () => {
+    const future = build(snapshotFixture(), {
+      status: "missing",
+      path: "C:\\repo\\.kiro\\specs\\demo\\issues.md",
+    });
+
+    expect(future.notes[0]).toContain("issues.md");
+    expect(future.pending).toHaveLength(1);
     expect(pendingFor(future, "100").remainingPhases).toEqual([
-      "planner",
-      "evaluator-contract",
       "generator",
       "evaluator-qa",
     ]);
-    // No DAG — no wave projection.
     expect(future.upcomingWaves).toEqual([]);
+  });
+
+  it("reports an invalid manifest without discarding observed progress", () => {
+    const future = build(snapshotFixture(), {
+      status: "invalid",
+      path: "C:\\repo\\.kiro\\specs\\demo\\issues.md",
+      error: "No slice table found",
+    });
+
+    expect(future.notes[0]).toContain("No slice table found");
+    expect(pendingFor(future, "100").remainingPhases).toEqual([
+      "generator",
+      "evaluator-qa",
+    ]);
+  });
+
+  it("explains when run identity is unavailable", () => {
+    const snapshot = snapshotFixture();
+    snapshot.run = {};
+
+    const future = build(snapshot, { status: "unavailable" });
+    expect(future.notes[0]).toContain("no run-started event");
+    expect(future.pending.map((pending) => pending.ghIssue)).toEqual(["100"]);
   });
 });
 
 describe("renderFutureSection", () => {
-  function buildPartial(): FutureSection {
-    const { repoRoot, runDir } = makeRepo();
-    const events = [
-      ...baseEvents(),
-      ev({ type: "wave-dispatched", wave: 1, slices: ["100"] }),
-      ...phasePair("100", "explorer"),
-      ...phasePair("100", "planner", 1),
-      ...phasePair("100", "evaluator-contract", 1),
-    ];
-    return buildFutureSection({ repoRoot, runDir, events });
-  }
+  it("renders phases, projected waves, blockers, lanes, and skipped slices", () => {
+    const lines = renderFutureSection(build());
+    const rendered = lines.join("\n");
 
-  it("emits two-space-indented lines with no trailing newline", () => {
-    const lines = renderFutureSection(buildPartial());
-    expect(lines.length).toBeGreaterThan(0);
-    for (const line of lines) {
-      expect(line).toMatch(/^  /);
-      expect(line.endsWith("\n")).toBe(false);
-    }
+    expect(lines.every((line) => line.startsWith("  "))).toBe(true);
+    expect(lines.every((line) => !line.endsWith("\n"))).toBe(true);
+    expect(rendered).toContain("#100 Foundation — generator → evaluator-qa");
+    expect(rendered).toContain("waits on #100 (in flight)");
+    expect(rendered).toContain("wave 1");
+    expect(rendered).toContain("wave 2");
+    expect(rendered).toContain("Lanes (wave 1): [#100]");
+    expect(rendered).toContain("Skipped (HITL)");
+    expect(rendered).toContain("#200 Manual setup");
   });
 
-  it("renders remaining phases per pending slice", () => {
-    const lines = renderFutureSection(buildPartial());
-    const sliceLine = lines.find((l) => l.includes("#100"));
-    expect(sliceLine).toBeDefined();
-    expect(sliceLine).toContain("Foundation");
-    expect(sliceLine).toContain("generator");
-    expect(sliceLine).toContain("evaluator-qa");
-    expect(sliceLine).not.toContain("explorer");
-  });
-
-  it("renders wave composition so the operator can read what unblocks what", () => {
-    const lines = renderFutureSection(buildPartial()).join("\n");
-    expect(lines).toContain("wave 1");
-    expect(lines).toContain("wave 2");
-    expect(lines).toContain("wave 3");
-    expect(lines).toContain("waits on #100");
-  });
-
-  it("renders the blocking reference for dependency-held slices", () => {
-    const { repoRoot, runDir } = makeRepo();
-    const events = [
-      ...baseEvents(),
-      ev({
-        type: "slice-outcome",
-        slice: lifecycle.stuck(
-          { ghIssue: "100", title: "Foundation", branch: "b" },
-          { genRounds: 3, evalRounds: 3 },
-          "generator rounds exhausted",
-        ),
-      }),
-    ];
-    const future = buildFutureSection({ repoRoot, runDir, events });
-    const rendered = renderFutureSection(future).join("\n");
-    expect(rendered).toContain("waits on #100 (STUCK)");
-  });
-
-  it("renders HITL slices as skipped", () => {
-    const rendered = renderFutureSection(buildPartial()).join("\n");
-    expect(rendered).toContain("#200");
-    expect(rendered).toMatch(/HITL/);
-  });
-
-  it("renders degradation notes when issues.md is missing", () => {
-    const { repoRoot, runDir } = makeRepo({ issuesMd: null });
-    const future = buildFutureSection({
-      repoRoot,
-      runDir,
-      events: baseEvents(),
+  it("renders persisted failure blockers with their canonical phase", () => {
+    const snapshot = snapshotFixture();
+    addOutcome(snapshot, "100", {
+      phase: "STUCK",
+      source: "run-state",
+      error: "generator rounds exhausted",
     });
-    const rendered = renderFutureSection(future).join("\n");
-    expect(rendered).toContain("issues.md");
+
+    expect(renderFutureSection(build(snapshot)).join("\n")).toContain(
+      "waits on #100 (STUCK)",
+    );
   });
 
-  it("says so when nothing is ahead", () => {
-    const { repoRoot, runDir } = makeRepo();
-    const events = [
-      ...baseEvents(),
-      ...["100", "101", "102", "103"].map((ghIssue) =>
-        ev({
-          type: "slice-outcome",
-          slice: lifecycle.pass(
-            { ghIssue, title: `Slice ${ghIssue}`, branch: "b" },
-            { genRounds: 1, evalRounds: 1 },
-            true,
-          ),
-        }),
-      ),
-    ];
-    const future = buildFutureSection({ repoRoot, runDir, events });
+  it("says so when nothing is ahead and round-trips through JSON", () => {
+    const snapshot = snapshotFixture();
+    for (const ghIssue of ["100", "101", "102", "103"]) {
+      addOutcome(snapshot, ghIssue, {
+        phase: "PASS",
+        source: "event",
+        mergedToFeature: true,
+      });
+    }
+
+    const future = build(snapshot);
     expect(future.pending).toEqual([]);
-    const lines = renderFutureSection(future);
-    expect(lines.some((l) => l.includes("nothing"))).toBe(true);
-  });
-
-  it("model is JSON-serializable round-trip", () => {
-    const future = buildPartial();
+    expect(renderFutureSection(future).some((line) => line.includes("nothing")))
+      .toBe(true);
     expect(JSON.parse(JSON.stringify(future))).toEqual(future);
   });
 });
