@@ -1954,7 +1954,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     const first = await runPipeline({ ...config, dag: buildDAG(slices) });
     expect(first.success).toBe(false);
     const gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
-    expect(gateRunsAfterFirst).toBe(1);
+    expect(gateRunsAfterFirst).toBe(2);
     expect(architectRuns).toBe(1);
     expect(pmRuns).toBe(1);
 
@@ -1963,7 +1963,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     // against the unchanged HEAD; only the unfavorable PM review re-runs.
     const second = await runPipeline({ ...config, dag: buildDAG(slices) });
     expect(second.success).toBe(false);
-    expect(readFileSync(marker, "utf-8").length).toBe(1);
+    expect(readFileSync(marker, "utf-8").length).toBe(2);
     expect(architectRuns).toBe(1);
     expect(pmRuns).toBe(2);
     expect(second.consoleSummary).toContain("Architect review: SHIP");
@@ -2109,6 +2109,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       const slug = "exit-sanity-fail";
       const { repo, prdDir, specsDir, slices, baseProvider } =
         makePassingSliceSetup(slug, "7403");
+      const marker = join(repo, ".afk-sanity-marker.txt").replace(/\\/g, "/");
 
       writeFileSync(
         join(repo, "package.json"),
@@ -2116,7 +2117,9 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
           {
             name: "consumer-fixture",
             private: true,
-            scripts: { typecheck: "node -e \"process.exit(1)\"" },
+            scripts: {
+              typecheck: `node -e "const fs=require('fs');const p='${marker}';const n=fs.existsSync(p)?fs.readFileSync(p,'utf-8').length:0;fs.appendFileSync(p,'x');process.exit(n===0?0:1)"`,
+            },
           },
           null,
           2,
