@@ -59,7 +59,7 @@ npx afk-codex --prd-dir .kiro/specs/<prd-slug> --slices 01,02,03,04
 ```
 explorer → context.md (codebase search, read-only)
 planner  → contract.md (scope + acceptance criteria, max 3 rounds with evaluator)
-generator → implements via TDD, commits (max 3 rounds with evaluator-qa)
+generator → implements + tests as verification, commits (max 3 rounds with evaluator-qa)
   PASS  → merge into feature branch
   STUCK → stuck.md written, worktree preserved
 ```

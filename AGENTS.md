@@ -1,6 +1,6 @@
-# AFK Pipeline
+# AFK Pipeline — agent instructions
 
-Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD slices autonomously. Consumed by other projects via `pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git`.
+Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD slices autonomously.
 
 ## Directory map
 
@@ -10,8 +10,7 @@ Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD sli
 - `docs/adr/` — Architecture decision records
 - `dist/` — Compiled JS (built via `pnpm build`, gitignored)
 
-
-## Test loop discipline (agents: read this)
+## Test loop discipline (read this)
 
 The full suite (`pnpm test`) takes 20+ minutes on Windows — the pipeline
 integration suites (`orchestrator`, `wave`, `resume-integration`,

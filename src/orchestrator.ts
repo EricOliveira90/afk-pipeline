@@ -11,7 +11,6 @@ import {
   statSync,
   type WriteStream,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { finished } from "node:stream/promises";
 import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
@@ -52,11 +51,9 @@ import {
 import {
   loadRunState,
   saveRunState,
-  saveReviewPhase,
   isSliceComplete,
   getResumeAttempts,
   recordRetryDecision,
-  type PersistedReviewPhase,
   type RunState,
 } from "./run-state.js";
 import {
@@ -68,6 +65,17 @@ import {
   writeTerminalHandoff,
   type RunStatus,
 } from "./handoff.js";
+import {
+  resolveSanityCommands,
+  resolveTestCommand,
+} from "./preship.js";
+import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
+import {
+  DEFAULT_MIGRATION_VALIDATION,
+  sliceTouchedMigrations,
+  verifyMigrationSync,
+  type MigrationValidation,
+} from "./migration-gate.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -109,14 +117,11 @@ const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
 const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
 
 /**
- * Pre-ship sanity gate steps, in order. Each step maps to a `package.json`
- * script name and a fallback. Steps whose primary AND fallback are absent
- * from `package.json` are skipped (not failed) — projects that don't have
- * a lint script aren't penalised. Order is intentional: typecheck first
- * because it's the cheapest fast-fail; tests last because they're the
- * slowest.
+ * Base gate steps, in order — mirrors preship.ts `SANITY_STEPS` (ADR 0012):
+ * the per-slice base gates and the aggregate pre-ship sanity gate walk the
+ * same `package.json` discovery set so the two checks cannot drift.
  */
-const SANITY_STEPS: ReadonlyArray<{
+const BASE_GATE_STEPS: ReadonlyArray<{
   name: string;
   scripts: ReadonlyArray<string>;
 }> = [
@@ -134,45 +139,10 @@ function readPackageScripts(cwd: string): Record<string, string> | null {
   }
 }
 
-/**
- * Resolves the consumer project's test command from its `package.json`.
- * Prefers `test:run` (Vitest convention for one-shot, non-watch runs) over
- * `test`. Returns `undefined` if neither exists or `package.json` is
- * missing — callers fall back to a literal `pnpm test` and let the agent
- * report the absence. Shared with the pre-ship sanity gate so the QA
- * evaluator and the gate can't pick different runners.
- */
-export function resolveTestCommand(cwd: string): string | undefined {
-  const scripts = readPackageScripts(cwd);
-  if (!scripts) return undefined;
-  const scriptName = ["test:run", "test"].find((s) => scripts[s] != null);
-  return scriptName ? `pnpm ${scriptName}` : undefined;
-}
-
-/**
- * Returns the exact `pnpm run <script>` invocations the pre-ship sanity
- * gate would execute against `cwd`, in the gate's order. Walks the same
- * `SANITY_STEPS` constant `runPreShipSanity` walks, applying the same
- * "skip steps whose primary AND fallback are absent" rule. Used to
- * inject the same command set into the evaluator-qa prompt so a slice
- * cannot pass QA on a state the gate would later reject for a typecheck
- * or lint failure. Returns `[]` when `package.json` is missing.
- */
-export function resolveSanityCommands(cwd: string): string[] {
-  const scripts = readPackageScripts(cwd);
-  if (!scripts) return [];
-  const cmds: string[] = [];
-  for (const step of SANITY_STEPS) {
-    const scriptName = step.scripts.find((s) => scripts[s] != null);
-    if (scriptName) cmds.push(`pnpm run ${scriptName}`);
-  }
-  return cmds;
-}
-
 /** Derive the policy-less base gate set shared by every agent provider. */
 export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
   const scripts = readPackageScripts(cwd) ?? {};
-  return SANITY_STEPS.map((step) => {
+  return BASE_GATE_STEPS.map((step) => {
     const scriptName = step.scripts.find((name) => scripts[name] != null);
     return {
       id: scriptName ?? step.scripts[step.scripts.length - 1]!,
@@ -184,336 +154,6 @@ export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
     };
   });
 }
-
-/**
- * Pre-ship sanity gate: runs the project's typecheck + lint + tests against
- * the merged feature branch in `cwd`, before opening the PR. This is the
- * same guard a human's pre-push hook would apply — necessary because every
- * AFK commit goes through `git.commitAll` with `--no-verify`, so husky never
- * runs and lint debt would otherwise surface only when a human tries to
- * push. Returns `{ ok, failures }`; `failures` lists step names that tripped.
- *
- * Skips steps whose script isn't defined in `package.json` so projects
- * without a lint script aren't false-failed.
- */
-export function runPreShipSanity(cwd: string): {
-  ok: boolean;
-  failures: string[];
-} {
-  const scripts = readPackageScripts(cwd);
-  if (!scripts) {
-    // No package.json (or unreadable) — nothing to gate on.
-    return { ok: true, failures: [] };
-  }
-
-  const failures: string[] = [];
-  for (const step of SANITY_STEPS) {
-    const scriptName = step.scripts.find((s) => scripts[s] != null);
-    if (!scriptName) continue; // step not defined in this project — skip
-    try {
-      execFileSync("pnpm", ["run", scriptName], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["ignore", "inherit", "inherit"],
-      });
-    } catch {
-      failures.push(step.name);
-    }
-  }
-  return { ok: failures.length === 0, failures };
-}
-
-/** Outcome of one guardian review run, with failure detail when it died. */
-export interface ReviewRunResult {
-  outcome: artifacts.ReviewOutcome;
-  /**
-   * The failing invocation's error message — for the codex provider this
-   * includes the agent's stderr (e.g. the codex-wrapper spawn error).
-   * Surfaced in run-summary.md, not only in launcher stderr. ADR 0015.
-   */
-  detail?: string;
-}
-
-/**
- * Render the run's slice scope for the PM review prompt (ADR 0015): the
- * PM guardian must separate blockers within the selected slices from
- * PRD-level gaps that belong to skipped (typically HITL) slices — a PRD
- * with HITL slices would otherwise dead-end at FIX-BEFORE-SHIP forever.
- */
-export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
-  const lines: string[] = [];
-  lines.push("This run implemented ONLY the following slices:");
-  lines.push("");
-  for (const slice of scope.selected) {
-    lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title}`);
-  }
-  // A narrowed invocation (a subset of the persisted scope, e.g.
-  // `--only-failed`) must say so: the branch may already carry work from
-  // earlier invocations, and the reviewer must not grade this invocation
-  // against slices it never touched.
-  if (scope.skipped.some(({ reason }) => reason === "narrowed")) {
-    lines.push("");
-    lines.push(
-      "This invocation was narrowed to a subset of the run's scope of record. " +
-        "Judge only the slices listed above: the narrowed-out slices below may " +
-        "have been implemented by an earlier invocation on this branch, or not " +
-        "at all — either way they are not this invocation's work.",
-    );
-  }
-  if (scope.skipped.length > 0) {
-    lines.push("");
-    lines.push(
-      "The following manifest slices were NOT executed by this run and are out of scope for this branch:",
-    );
-    lines.push("");
-    for (const { slice, reason } of scope.skipped) {
-      const label =
-        reason === "hitl"
-          ? "HITL — reserved for a human; AFK never runs it"
-          : reason === "narrowed"
-            ? "in this run's scope of record but not run by this invocation"
-            : "not selected for this run";
-      lines.push(`- ${slice.number} (#${slice.ghIssue}) ${slice.title} (${label})`);
-    }
-  } else {
-    lines.push("");
-    lines.push("No manifest slices were skipped — the full manifest ran.");
-  }
-  return lines.join("\n");
-}
-
-/** Draft-PR decision for the post-review gate. See ADR 0015. */
-export interface PrCreationPlan {
-  /** Whether the draft PR should be opened. */
-  open: boolean;
-  /** True when opened via --open-pr-on-override despite the PM verdict. */
-  overridden: boolean;
-  title: string;
-  body: string;
-  /** One-line note for logs and run-summary.md when overridden. */
-  overrideNote?: string;
-}
-
-/**
- * Decide whether the draft PR opens, and build its title/body.
- *
- * Normal gate: both guardian outcomes favorable (SHIP or
- * ACCEPT-WITH-NOTES). With `openPrOnOverride`, a real FIX-BEFORE-SHIP PM
- * verdict can be overridden — but only when the architect verdict is
- * favorable, and never for infrastructure failures or UNPARSEABLE (an
- * override records disagreement with a judgment, not absence of one).
- * The override and both verdicts are recorded in the PR body.
- */
-export function buildPrCreationPlan(args: {
-  prdSlug: string;
-  specsDir: string;
-  architect: artifacts.ReviewOutcome;
-  pm: artifacts.ReviewOutcome;
-  openPrOnOverride: boolean;
-  closesIssues: readonly string[];
-}): PrCreationPlan {
-  const archOk = artifacts.isFavorableReviewOutcome(args.architect);
-  const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
-  const overridden =
-    args.openPrOnOverride && archOk && !pmOk && args.pm === "FIX-BEFORE-SHIP";
-  const open = (archOk && pmOk) || overridden;
-  const specsPath = args.specsDir.replace(/\\/g, "/");
-
-  const sections: string[] = [
-    `Automated implementation of ${args.prdSlug}.`,
-    `See ${specsPath}/ for artifacts (including review-architect.md and review-pm.md).`,
-  ];
-  if (overridden) {
-    sections.push(
-      [
-        "## Human override (--open-pr-on-override)",
-        "",
-        "This draft PR was opened by explicit operator override despite an unfavorable PM verdict.",
-        "",
-        `- Architect review: **${args.architect}**`,
-        `- PM review: **${args.pm}** (overridden)`,
-        "",
-        `Read ${specsPath}/review-pm.md for the blocking findings before merging.`,
-      ].join("\n"),
-    );
-  }
-  sections.push(
-    args.closesIssues.map((issue) => `Closes #${issue}`).join("\n"),
-  );
-
-  return {
-    open,
-    overridden,
-    title: `feat: ${args.prdSlug}`,
-    body: sections.join("\n\n"),
-    overrideNote: overridden
-      ? `PR opened via --open-pr-on-override despite PM verdict ${args.pm} (architect: ${args.architect}).`
-      : undefined,
-  };
-}
-
-/**
-/**
- * How the post-PASS migration gate validates a slice's new migrations.
- *
- *  - `"skip"`        — no gate (default). The consumer's CI already
- *                      validates migrations per-branch (see PR #350), so
- *                      the in-pipeline gate is redundant; leaving it on
- *                      can only produce false STUCKs for net-new
- *                      migrations the pipeline never pushes.
- *  - `"local-stack"` — boot a throwaway DB-only Supabase stack in the
- *                      slice worktree; `supabase start` auto-applies that
- *                      branch's `supabase/migrations/**`. Clean apply ==
- *                      valid. No remote, no push, no cross-branch
- *                      contamination. Requires Docker on the AFK host.
- *  - `"linked"`      — legacy: compare local migrations against a linked
- *                      cloud remote. Unsatisfiable for net-new migrations
- *                      (the pipeline never pushes) — opt-in only, never the
- *                      gating default.
- */
-export type MigrationValidation = "skip" | "local-stack" | "linked";
-
-export const DEFAULT_MIGRATION_VALIDATION: MigrationValidation = "skip";
-
-type MigrationCheck = { ok: true } | { ok: false; error: string };
-
-/** DB-only services for an ephemeral migration-apply stack (mirrors PR #350). */
-const LOCAL_STACK_EXCLUDE =
-  "studio,realtime,storage-api,imgproxy,edge-runtime,logflare,vector,mailpit,postgrest";
-
-/**
- * Apply this worktree's `supabase/migrations/**` to a throwaway local
- * stack. A clean `supabase start` means the migrations are valid. `stop`
- * always runs in `finally`. If Docker is unavailable we skip with a
- * warning rather than STUCK — a missing optional validator must not fail
- * a slice that already passed QA.
- */
-function verifyMigrationLocalStack(cwd: string): MigrationCheck {
-  try {
-    execFileSync("pnpm", ["supabase", "start", "-x", LOCAL_STACK_EXCLUDE], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/docker/i.test(msg) && /(not running|cannot connect|daemon|found)/i.test(msg)) {
-      console.error(
-        `[afk] Docker unavailable — skipping local-stack migration check: ${msg}`,
-      );
-      return { ok: true };
-    }
-    return {
-      ok: false,
-      error: `Migrations failed to apply on ephemeral local stack: ${msg}`,
-    };
-  } finally {
-    try {
-      execFileSync("pnpm", ["supabase", "stop", "--no-backup"], {
-        cwd,
-        stdio: "ignore",
-      });
-    } catch {
-      // Best effort — leftover containers get reaped on the next start.
-    }
-  }
-}
-
-/**
- * Legacy linked-remote drift check. Flags any local migration row with no
- * matching remote. MUST run from a cwd where the Supabase project is linked
- * (worktrees aren't), and is unsatisfiable for net-new migrations the
- * pipeline never pushes — hence opt-in only.
- */
-function verifyMigrationLinked(cwd: string): MigrationCheck {
-  try {
-    const output = execFileSync(
-      "pnpm",
-      ["supabase", "migration", "list", "--linked"],
-      { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-    const lines = output
-      .replace(/\u001b\[[0-9;]*m/g, "")
-      .split(/\r?\n/)
-      .filter((l) => /^\s*[│|]/.test(l) && /\d/.test(l));
-    const missing: string[] = [];
-    for (const line of lines) {
-      const parts = line
-        .split(/[│|]/)
-        .map((p) => p.trim())
-        .filter((p) => p !== "");
-      if (parts.length < 2) continue;
-      const [local, remote] = parts;
-      if (local && /^\d+/.test(local) && (!remote || remote === "")) {
-        missing.push(local);
-      }
-    }
-    if (missing.length > 0) {
-      return {
-        ok: false,
-        error: `Migration drift — local migrations not applied to remote: ${missing.join(", ")}. Re-apply via 'pnpm supabase db query --linked --file <migration>.sql' and verify the expected tables actually exist (pg_tables).`,
-      };
-    }
-    return { ok: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `Could not verify migration sync: ${msg}` };
-  }
-}
-
-/**
- * Dispatch the migration gate by mode. `cwd` MUST be the slice worktree
- * (where the unmerged migration lives), not `repoRoot`.
- */
-export function verifyMigrationSync(
-  cwd: string,
-  mode: MigrationValidation,
-): MigrationCheck {
-  switch (mode) {
-    case "skip":
-      return { ok: true };
-    case "local-stack":
-      return verifyMigrationLocalStack(cwd);
-    case "linked":
-      return verifyMigrationLinked(cwd);
-  }
-}
-
-/**
- * Returns true if this slice's branch has any commit that touches files
- * under `supabase/migrations/` compared to the feature branch base.
- * Used to gate the migration drift check: there's no point running the
- * linked-remote check for a slice that didn't change any migrations.
- */
-function sliceTouchedMigrations(
-  worktreeDir: string,
-  featBranch: string,
-): boolean {
-  try {
-    const output = execFileSync(
-      "git",
-      [
-        "diff",
-        "--name-only",
-        `${featBranch}...HEAD`,
-        "--",
-        "supabase/migrations/",
-      ],
-      {
-        cwd: worktreeDir,
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    return output.trim().length > 0;
-  } catch {
-    // If the diff errors (e.g., feat branch not yet created on first run),
-    // be conservative and skip the check rather than false-fail the slice.
-    return false;
-  }
-}
-
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
   verifyMigrationCommand: string;
@@ -3002,425 +2642,82 @@ export async function runPipeline(
     );
   }
 
-  // --- Post-implementation reviews (only if all AFK slices passed) ---
+  // --- Post-implementation ship gate (only if all AFK slices passed) ---
   const afkSlices = [...dag.slices.values()].filter((s) => s.type === "AFK");
   const allPassed = afkSlices.every((s) => completed.has(s.ghIssue));
+  const readyForShipGate = allPassed && afkSlices.length > 0;
 
-  /** Every slice merged, so the branch is ready for the ship gates. */
-  const readyForShipGates = allPassed && afkSlices.length > 0;
-
-  if (readyForShipGates && signal?.aborted) {
-    // Cancelled in the window between the last merge and the post-merge
-    // phase: every slice passed, but nothing gated or reviewed the feature
-    // branch and no PR opened, so the run did not ship (issue #43). The
-    // cancellation exit path itself is untouched — a second Ctrl-C still
-    // hard-exits 130 before this is ever read.
-    shipBlocker =
-      "cancelled before the pre-ship sanity gate and guardian reviews ran";
-  }
-
-  if (readyForShipGates && !signal?.aborted) {
-    // Reviews need a worktree on the feature branch. Prefer an existing
-    // checkout (commonly the main repo) — `git worktree add` refuses to
-    // check out the same branch twice. Fall back to a scratch worktree
-    // only when the feature branch isn't checked out anywhere. Same
-    // pattern as mergeSliceBranch.
-    const existingFeatWorktree = git.findWorktreeForBranch(
-      repoRoot,
-      featBranch,
-    );
-    let reviewDir: string;
-    let cleanupReviewDir = false;
-    if (existingFeatWorktree) {
-      reviewDir = existingFeatWorktree;
-    } else {
-      reviewDir = join(
+  if (readyForShipGate) {
+    const invokeShipGate = (reviewDir: string) =>
+      runShipGate({
         repoRoot,
-        ".afk",
-        "worktrees",
-        `${featBranch.replace(/\//g, "-")}-review`,
-      );
-      git.createWorktree(repoRoot, featBranch, reviewDir, defaultBranch);
-      git.assertWorktreeRegistered(repoRoot, featBranch, reviewDir);
-      cleanupReviewDir = true;
-    }
-
-    try {
-      // Relative specs path for prompts
-      const relSpecsDir = specsDir.replace(/\\/g, "/");
-
-      // --- Pre-ship sanity gate ---
-      // Runs the project's typecheck + lint + tests against the merged
-      // feature branch before any guardian review or PR creation. This is
-      // the guard the human's pre-push hook would apply — necessary
-      // because AFK commits use --no-verify (see git.commitAll), so husky
-      // is bypassed throughout the run. Failing here skips the guardian
-      // reviews and the PR: there's no point asking architect/PM to grade
-      // code that won't pass the basic quality gate.
-      logger.phase("Running pre-ship sanity gate...", "log");
-      // Cache the gate by the reviewed tree's SHA (ADR 0015): a re-entry
-      // run against the same content — e.g. after a review infrastructure
-      // failure, or when only docs/review commits landed — must not pay
-      // the full typecheck+lint+tests cost again. Only PASS is cached.
-      const treeShaBefore = git.resolveTree(reviewDir);
-      const cachedSanity = runState.reviewPhase?.sanity;
-      let sanity: { ok: boolean; failures: string[] };
-      if (treeShaBefore && cachedSanity?.treeSha === treeShaBefore) {
-        logger.event({
-          type: "run-phase-started",
-          phase: "sanity",
-          cached: true,
-        });
-        sanity = { ok: true, failures: [] };
-        logger.phase(
-          `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
-          "log",
-        );
-      } else {
-        logger.event({ type: "run-phase-started", phase: "sanity" });
-        sanity = runPreShipSanity(reviewDir);
-      }
-      logger.event({
-        type: "run-phase-ended",
-        phase: "sanity",
-        cached:
-          treeShaBefore && cachedSanity?.treeSha === treeShaBefore
-            ? true
-            : undefined,
-        verdict: sanity.ok ? "PASS" : "FAIL",
-      });
-      logger.setSanityGate(sanity);
-      if (!sanity.ok) {
-        const failedSteps = sanity.failures.join(", ");
-        shipBlocker = `pre-ship sanity gate failed (${failedSteps}) — guardian reviews and PR creation were skipped`;
-        logger.phase(
-          `  ❌ Pre-ship sanity gate failed: ${failedSteps}. Skipping guardian reviews and PR creation.`,
-        );
-      } else {
-        logger.phase("  ✅ Pre-ship sanity gate passed.", "log");
-
-        const reviewRetries =
-          config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
-        // Reviews inspect diffs and may run narrowly-scoped commands;
-        // give them the same generous inactivity budget as generator /
-        // evaluator-qa instead of the 180 s provider default that killed
-        // the PRD 070 PM review mid-run.
-        const reviewIdleTimeoutMs =
-          config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
-        const reviewHeartbeatMs =
-          config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-        const runScopeBlock = buildReviewScopeBlock(scope);
-        const headShaBefore = git.resolveCommit(reviewDir, "HEAD");
-
-        /**
-         * Run one guardian review with ADR 0014-style infrastructure
-         * retries. NEVER_RAN / DIED_MID_RUN failures retry within the
-         * run; only UNPARSEABLE and real verdicts are terminal. Throws
-         * only on cancellation.
-         */
-        const runGuardianReview = async (
-          kind: "architect" | "pm",
-        ): Promise<ReviewRunResult> => {
-          const role = kind === "architect" ? "architect-review" : "pm-review";
-          const label = kind === "architect" ? "Architect" : "PM";
-          const reviewFileName =
-            kind === "architect" ? "review-architect.md" : "review-pm.md";
-          const prompt =
-            kind === "architect"
-              ? renderPrompt("architect-review", {
-                  SPECS_DIR: relSpecsDir,
-                  RELEVANT_FILES: relevantFilesBlock,
-                })
-              : renderPrompt("pm-review", {
-                  SPECS_DIR: relSpecsDir,
-                  RELEVANT_FILES: relevantFilesBlock,
-                  RUN_SCOPE: runScopeBlock,
-                });
-          let lastFailure: ReviewRunResult = { outcome: "NEVER_RAN" };
-          for (let attempt = 1; attempt <= reviewRetries + 1; attempt++) {
-            logger.event({
-              type: "run-phase-started",
-              phase: role,
-              attempt,
-            });
-            const log = logger.agentLog(
-              "all",
-              role,
-              attempt > 1 ? attempt : undefined,
-            );
-            let sawOutput = false;
-            try {
-              await invoke({
-                role,
-                agent: role,
-                // Bare mode: third-party Claude Code plugins (e.g.
-                // `superpowers:using-superpowers`) install `SessionStart`
-                // hooks that demand the agent invoke a skill before
-                // responding. Guardian agents have no skills loaded, so
-                // the hook coerces them into emitting a fake `<tool_use>`
-                // block as plain text and ending the turn — no review
-                // file is ever written. `--bare` strips plugin hooks for
-                // this invocation only. See ADR 0011.
-                bare: true,
-                prompt,
-                cwd: reviewDir,
-                logStream: log,
-                idleTimeoutMs: reviewIdleTimeoutMs,
-                idleWarningIntervalMs: reviewHeartbeatMs,
-                maxDurationMs: config.maxAgentDurationMs,
-                onStreamEvent: () => {
-                  sawOutput = true;
-                },
-              });
-            } catch (error) {
-              if (isCancelled(error, signal)) throw error;
-              const failureClass = artifacts.classifyReviewFailure(
-                error,
-                sawOutput,
-              );
-              const message =
-                error instanceof Error ? error.message : String(error);
-              lastFailure = { outcome: failureClass, detail: message };
-              logger.event({
-                type: "run-phase-ended",
-                phase: role,
-                attempt,
-                verdict: failureClass,
-              });
-              if (attempt <= reviewRetries) {
-                logger.phase(
-                  `  ⚠️  ${label} review ${failureClass}: ${message}. Infrastructure retry ${attempt}/${reviewRetries}.`,
-                );
-                continue;
-              }
-              logger.phase(
-                `  ⚠️  ${label} review ${failureClass} after ${attempt} attempt(s): ${message}. No PR will be opened.`,
-              );
-              return lastFailure;
-            } finally {
-              await closeAgentLog(log);
-            }
-            const reviewPath = join(reviewDir, specsDir, reviewFileName);
-            const verdict = artifacts.readReviewVerdict(reviewPath);
-            if (verdict === "UNPARSEABLE") {
-              logger.phase(
-                `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
-                "warn",
-              );
-            }
-            logger.event({
-              type: "run-phase-ended",
-              phase: role,
-              attempt,
-              verdict,
-            });
-            return { outcome: verdict };
-          }
-          return lastFailure;
-        };
-
-        /** Reuse a favorable verdict recorded against the current HEAD. */
-        const reuseCachedReview = (
-          cached: { headSha: string; verdict: "SHIP" | "ACCEPT-WITH-NOTES" } | undefined,
-          label: string,
-        ): ReviewRunResult | undefined => {
-          if (cached && headShaBefore && cached.headSha === headShaBefore) {
-            logger.phase(
-              `  ↩️  Reusing cached ${label} review verdict ${cached.verdict} for unchanged HEAD ${headShaBefore.slice(0, 12)}.`,
-              "log",
-            );
-            return { outcome: cached.verdict };
-          }
-          return undefined;
-        };
-        const cachedArch = reuseCachedReview(
-          runState.reviewPhase?.architect,
-          "architect",
-        );
-        const cachedPm = reuseCachedReview(runState.reviewPhase?.pm, "PM");
-        for (const [phase, cached] of [
-          ["architect-review", cachedArch],
-          ["pm-review", cachedPm],
-        ] as const) {
-          if (!cached) continue;
-          logger.event({
-            type: "run-phase-started",
-            phase,
-            cached: true,
-          });
-          logger.event({
-            type: "run-phase-ended",
-            phase,
-            cached: true,
-            verdict: cached.outcome,
-          });
-        }
-
-        let archResult: ReviewRunResult;
-        let pmResult: ReviewRunResult;
-        if (config.serialLanes) {
-          // --serial-lanes also serializes the two guardian reviews:
-          // operators pass it precisely to avoid concurrent agent
-          // processes contending for shared local resources.
-          archResult = cachedArch ?? (await runGuardianReview("architect"));
-          pmResult = cachedPm ?? (await runGuardianReview("pm"));
-        } else {
-          const [archSettled, pmSettled] = await Promise.allSettled([
-            cachedArch ? Promise.resolve(cachedArch) : runGuardianReview("architect"),
-            cachedPm ? Promise.resolve(cachedPm) : runGuardianReview("pm"),
-          ]);
-          // runGuardianReview only rejects on cancellation — propagate
-          // after both settle so neither rejection goes unobserved.
-          if (archSettled.status === "rejected") throw archSettled.reason;
-          if (pmSettled.status === "rejected") throw pmSettled.reason;
-          archResult = archSettled.value;
-          pmResult = pmSettled.value;
-        }
-
-        logger.setReviewOutcomes(archResult, pmResult);
-
-        // Commit guardian artifacts regardless of verdict (ADR 0015).
-        // review-architect.md / review-pm.md and any governance-log
-        // append the guardians made are evidence either way; leaving
-        // them dirty in the review worktree breaks consumer flows that
-        // require a clean tree after the reviewed SHA (e.g. UAT
-        // verify-draft) and loses them entirely when the scratch
-        // worktree is removed below.
-        if (git.hasUncommittedChanges(reviewDir)) {
-          try {
-            git.commitAll(
-              reviewDir,
-              `docs(${prdSlug}): add post-impl guardian reviews`,
-            );
-          } catch (error) {
-            // On Windows, `git status` can report phantom modifications
-            // when only line endings differ; `git add` normalizes them
-            // away and the commit fails with "nothing to commit". If the
-            // tree is clean after the attempt there was nothing real to
-            // record — any other failure must surface.
-            if (git.hasUncommittedChanges(reviewDir)) throw error;
-          }
-        }
-
-        // Refresh the cheap re-entry cache (ADR 0015) against the
-        // post-commit state: the review commit is docs-only, so a
-        // passing sanity gate carries over to the new tree, and
-        // favorable verdicts are recorded against the new HEAD so an
-        // unchanged re-entry can skip them.
-        const headShaAfter = git.resolveCommit(reviewDir, "HEAD");
-        const treeShaAfter = git.resolveTree(reviewDir);
-        const nextReviewPhase: PersistedReviewPhase = {};
-        if (sanity.ok && treeShaAfter) {
-          nextReviewPhase.sanity = { treeSha: treeShaAfter, ok: true };
-        }
-        if (headShaAfter) {
-          if (artifacts.isFavorableReviewOutcome(archResult.outcome)) {
-            nextReviewPhase.architect = {
-              headSha: headShaAfter,
-              verdict: archResult.outcome,
-            };
-          }
-          if (artifacts.isFavorableReviewOutcome(pmResult.outcome)) {
-            nextReviewPhase.pm = {
-              headSha: headShaAfter,
-              verdict: pmResult.outcome,
-            };
-          }
-        }
-        saveReviewPhase(
-          repoRoot,
-          loggerSlug,
-          Object.keys(nextReviewPhase).length > 0
-            ? nextReviewPhase
-            : undefined,
-        );
-
-        // Create the draft PR when both reviews are favorable, or when
-        // the operator explicitly overrides an unfavorable PM verdict
-        // (--open-pr-on-override, ADR 0015).
-        const prPlan = buildPrCreationPlan({
-          prdSlug,
-          specsDir,
-          architect: archResult.outcome,
-          pm: pmResult.outcome,
+        reviewDir,
+        featureBranch: featBranch,
+        defaultBranch,
+        prdSlug,
+        runSlug: loggerSlug,
+        specsDir,
+        relevantFilesBlock,
+        reviewScope: buildReviewScopeBlock(scope!),
+        closesIssues: scope!.selected.map((slice) => slice.ghIssue),
+        cachedReviewPhase: runState.reviewPhase,
+        invoke,
+        journal: logger,
+        options: {
+          reviewRetries:
+            config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+          reviewIdleTimeoutMs:
+            config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS,
+          reviewIdleWarningIntervalMs:
+            config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+          maxAgentDurationMs: config.maxAgentDurationMs,
+          serialReviews: config.serialLanes === true,
           openPrOnOverride: config.openPrOnOverride === true,
-          closesIssues: scope.selected.map((slice) => slice.ghIssue),
-        });
-        logger.event({ type: "run-phase-started", phase: "draft-pr" });
-        if (!prPlan.open) {
-          // No shippable branch: an unfavorable verdict, or an absent one
-          // (UNPARSEABLE / an exhausted infrastructure retry). Either way
-          // the operator has something to do, so the run is unsuccessful.
-          shipBlocker = `guardian verdicts kept the draft PR closed (architect: ${archResult.outcome}, PM: ${pmResult.outcome})`;
-        } else {
-          if (prPlan.overridden) {
-            logger.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
-            logger.setPrOverrideNote(prPlan.overrideNote!);
-          }
-          try {
-            // Push the feature branch (includes the review commit)
-            execFileSync("git", ["push", "-u", "origin", featBranch], {
-              cwd: repoRoot,
-              encoding: "utf-8",
-            });
-            // Create draft PR
-            const prUrl = execFileSync(
-              "gh",
-              [
-                "pr",
-                "create",
-                "--draft",
-                "--base",
-                defaultBranch,
-                "--head",
-                featBranch,
-                "--title",
-                prPlan.title,
-                "--body",
-                prPlan.body,
-              ],
-              { cwd: repoRoot, encoding: "utf-8" },
-            ).trim();
-            draftPrUrl = prUrl;
-            draftPrNumber = parseDraftPrNumber(prUrl);
-            logger.setPrUrl(prUrl);
-          } catch {
-            // Creation may fail because a PR already exists for this branch.
-            // Recover its URL so resumed runs still produce complete handoff data.
-            try {
-              const existing = JSON.parse(
-                execFileSync(
-                  "gh",
-                  ["pr", "view", featBranch, "--json", "number,url"],
-                  { cwd: repoRoot, encoding: "utf-8" },
-                ),
-              ) as { number?: number; url?: string };
-              if (existing.url) {
-                draftPrUrl = existing.url;
-                draftPrNumber =
-                  existing.number ?? parseDraftPrNumber(existing.url);
-                logger.setPrUrl(existing.url);
-              }
-            } catch {
-              // PR creation and lookup are best-effort.
-            }
-          }
-        }
-        logger.event({
-          type: "run-phase-ended",
-          phase: "draft-pr",
-          verdict: prPlan.open
-            ? draftPrUrl
-              ? "READY"
-              : "FAILED"
-            : "SKIPPED",
-        });
+        },
+        signal,
+      });
+
+    let shipResult;
+    if (signal?.aborted) {
+      // runShipGate returns the issue #43 blocked-ship result before touching
+      // the placeholder review directory.
+      shipResult = await invokeShipGate(repoRoot);
+    } else {
+      // Prefer an existing feature-branch checkout. Git refuses to check out
+      // the same branch in a second worktree, so create a scratch review
+      // worktree only when needed.
+      const existingFeatWorktree = git.findWorktreeForBranch(
+        repoRoot,
+        featBranch,
+      );
+      let reviewDir: string;
+      let cleanupReviewDir = false;
+      if (existingFeatWorktree) {
+        reviewDir = existingFeatWorktree;
+      } else {
+        reviewDir = join(
+          repoRoot,
+          ".afk",
+          "worktrees",
+          `${featBranch.replace(/\//g, "-")}-review`,
+        );
+        git.createWorktree(repoRoot, featBranch, reviewDir, defaultBranch);
+        git.assertWorktreeRegistered(repoRoot, featBranch, reviewDir);
+        cleanupReviewDir = true;
       }
-    } finally {
-      if (cleanupReviewDir) {
-        git.removeWorktree(repoRoot, reviewDir);
+
+      try {
+        shipResult = await invokeShipGate(reviewDir);
+      } finally {
+        if (cleanupReviewDir) {
+          git.removeWorktree(repoRoot, reviewDir);
+        }
       }
     }
+
+    shipBlocker = shipResult.failureReason;
+    draftPrUrl = shipResult.pr.url;
+    draftPrNumber = shipResult.pr.number;
   }
 
     // A run that handed no slice to a wave, skipped none as already

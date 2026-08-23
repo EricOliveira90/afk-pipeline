@@ -6,8 +6,8 @@ import {
   formatRunFailure,
   runPipeline,
   PipelineError,
-  type MigrationValidation,
 } from "./orchestrator.js";
+import type { MigrationValidation } from "./migration-gate.js";
 import { kiroProvider } from "./kiro.js";
 import {
   DEFAULT_MAX_CONTRACT_ROUNDS,
