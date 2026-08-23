@@ -13,7 +13,13 @@ import { join } from "node:path";
 import {
   assertWorktreeRegistered,
   branchExists,
+  countCommitsAhead,
   createWorktree,
+  isWorktreeRegistered,
+  lastCommitEpochSeconds,
+  logCommitsWithStat,
+  mergeBranchIntoWorktree,
+  resetWorktreeToHead,
   findMigrationPrefixCollisions,
   findWorktreeForBranch,
   getDefaultBranch,
@@ -76,6 +82,7 @@ describe("git.branchExists", () => {
     expect(branchExists(repoDir, "origin/main")).toBe(false);
   });
 });
+
 describe("git.getDefaultBranch", () => {
   let repoDir: string;
   let originDir: string;
@@ -673,6 +680,242 @@ describe("git.listMigrationFiles / migrationPrefixCollisions", () => {
 
     expect(migrationPrefixCollisions(repoDir, "afk/slice", "feat/x")).toEqual(
       [],
+    );
+  });
+});
+
+
+/**
+ * Primitives backing the resume-a-dead-slice feature (spec #33, design
+ * note on #15). Each test drives a real temp repo — the convention for
+ * git behavior in this suite — because these primitives guard hours of
+ * committed work on a surviving slice branch.
+ */
+describe("resume git primitives", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-resume-git-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    writeFileSync(join(repoDir, "base.txt"), "base\n", "utf-8");
+    git(repoDir, ["add", "base.txt"]);
+    git(repoDir, ["commit", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  function commitFile(cwd: string, name: string, content: string, msg: string) {
+    writeFileSync(join(cwd, name), content, "utf-8");
+    git(cwd, ["add", name]);
+    git(cwd, ["commit", "-m", msg]);
+  }
+
+  describe("countCommitsAhead", () => {
+    it("counts commits on the slice branch beyond the base", () => {
+      git(repoDir, ["checkout", "-b", "slice"]);
+      commitFile(repoDir, "a.txt", "a", "feat: a");
+      commitFile(repoDir, "b.txt", "b", "feat: b");
+      expect(countCommitsAhead(repoDir, "slice", "main")).toBe(2);
+    });
+
+    it("returns 0 when the branch sits exactly on the base", () => {
+      git(repoDir, ["branch", "slice"]);
+      expect(countCommitsAhead(repoDir, "slice", "main")).toBe(0);
+    });
+
+    it("returns 0 when either ref is missing", () => {
+      expect(countCommitsAhead(repoDir, "no-such-branch", "main")).toBe(0);
+      expect(countCommitsAhead(repoDir, "main", "no-such-base")).toBe(0);
+    });
+  });
+
+  describe("isWorktreeRegistered", () => {
+    it("returns true for the registered worktree of the branch", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      expect(isWorktreeRegistered(repoDir, "slice", wt)).toBe(true);
+    });
+
+    it("returns false when no worktree has the branch checked out", () => {
+      git(repoDir, ["branch", "slice"]);
+      expect(
+        isWorktreeRegistered(repoDir, "slice", join(repoDir, ".afk", "gone")),
+      ).toBe(false);
+    });
+
+    it("returns false when the branch is registered at a different path", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      expect(
+        isWorktreeRegistered(repoDir, "slice", join(repoDir, ".afk", "other")),
+      ).toBe(false);
+    });
+  });
+
+  describe("resetWorktreeToHead", () => {
+    it("discards uncommitted modifications and untracked files, keeping commits", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      commitFile(wt, "kept.txt", "committed work", "feat: kept");
+      // Simulate a mid-edit death: a tracked file modified, an
+      // untracked half-written file, and an untracked directory.
+      writeFileSync(join(wt, "kept.txt"), "half-applied edit", "utf-8");
+      writeFileSync(join(wt, "orphan.txt"), "never committed", "utf-8");
+      mkdirSync(join(wt, "scratch"), { recursive: true });
+      writeFileSync(join(wt, "scratch", "tmp.txt"), "junk", "utf-8");
+
+      resetWorktreeToHead(wt);
+
+      expect(readFileSync(join(wt, "kept.txt"), "utf-8")).toBe("committed work");
+      expect(existsSync(join(wt, "orphan.txt"))).toBe(false);
+      expect(existsSync(join(wt, "scratch"))).toBe(false);
+      // The commit itself survives.
+      expect(git(wt, ["log", "--format=%s", "-1"])).toBe("feat: kept");
+    });
+
+    it("preserves untracked files under excluded paths (slice artifacts)", () => {
+      // context.md / contract.md are written by explorer/planner and
+      // never committed. The resume clean must not destroy them — the
+      // contract is reused verbatim and explorer/planner stay skipped
+      // (spec #33). Everything else untracked still goes.
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      commitFile(wt, "kept.txt", "committed work", "feat: kept");
+      const sliceDir = join(wt, ".kiro", "specs", "demo", "slices", "01-x");
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(join(sliceDir, "contract.md"), "**Status:** LOCKED", "utf-8");
+      writeFileSync(join(wt, "orphan.txt"), "never committed", "utf-8");
+
+      resetWorktreeToHead(wt, [".kiro/specs/demo"]);
+
+      expect(readFileSync(join(sliceDir, "contract.md"), "utf-8")).toBe(
+        "**Status:** LOCKED",
+      );
+      expect(existsSync(join(wt, "orphan.txt"))).toBe(false);
+    });
+  });
+
+  describe("lastCommitEpochSeconds", () => {
+    it("returns the HEAD commit's committer timestamp", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      commitFile(wt, "a.txt", "a", "feat: a");
+      const expected = parseInt(git(wt, ["log", "-1", "--format=%ct"]), 10);
+      expect(lastCommitEpochSeconds(wt)).toBe(expected);
+    });
+
+    it("returns null for a directory that is not inside a git repo", () => {
+      const plain = mkdtempSync(join(tmpdir(), "afk-plain-"));
+      try {
+        expect(lastCommitEpochSeconds(plain)).toBeNull();
+      } finally {
+        rmSync(plain, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("logCommitsWithStat", () => {
+    it("returns the slice's own commit log with per-file stats", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      commitFile(wt, "feature.ts", "export const x = 1;\n", "feat(#42): add x");
+      commitFile(wt, "feature.test.ts", "test\n", "test(#42): cover x");
+
+      const log = logCommitsWithStat(wt, "main");
+
+      expect(log).toContain("feat(#42): add x");
+      expect(log).toContain("test(#42): cover x");
+      expect(log).toContain("feature.ts");
+      expect(log).toContain("feature.test.ts");
+    });
+
+    it("returns an empty string when there are no commits beyond base", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      expect(logCommitsWithStat(wt, "main")).toBe("");
+    });
+  });
+});
+
+
+/**
+ * Base refresh for resumed slices (#35): merge the feature branch INTO
+ * the slice branch, inside the slice worktree. The generic mergeBranch
+ * helper is unsafe here — it checks out in the repo root.
+ */
+describe("git.mergeBranchIntoWorktree", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-refresh-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    writeFileSync(join(repoDir, "shared.txt"), "line1\nline2\nline3\n", "utf-8");
+    git(repoDir, ["add", "shared.txt"]);
+    git(repoDir, ["commit", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  function commitFile(cwd: string, name: string, content: string, msg: string) {
+    writeFileSync(join(cwd, name), content, "utf-8");
+    git(cwd, ["add", name]);
+    git(cwd, ["commit", "-m", msg]);
+  }
+
+  it("merges an advanced feature branch into the slice branch inside the worktree", () => {
+    const wt = join(repoDir, ".afk", "wt-slice");
+    createWorktree(repoDir, "slice", wt, "main");
+    commitFile(wt, "slice-work.ts", "slice\n", "feat: slice work");
+    // Feature branch (main here) advances after the fork.
+    commitFile(repoDir, "other-slice.ts", "sibling\n", "feat: sibling merged");
+
+    const result = mergeBranchIntoWorktree(wt, "main");
+
+    expect(result.status).toBe("merged");
+    // The feature commit is now part of the slice worktree's world.
+    expect(existsSync(join(wt, "other-slice.ts"))).toBe(true);
+    // The slice's own work survived.
+    expect(existsSync(join(wt, "slice-work.ts"))).toBe(true);
+    // The repo root's checkout was never touched (merge ran in the worktree).
+    expect(git(repoDir, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("main");
+  });
+
+  it("is a no-op merge when the feature branch has not moved", () => {
+    const wt = join(repoDir, ".afk", "wt-slice");
+    createWorktree(repoDir, "slice", wt, "main");
+    commitFile(wt, "slice-work.ts", "slice\n", "feat: slice work");
+    const tipBefore = git(wt, ["rev-parse", "HEAD"]);
+
+    const result = mergeBranchIntoWorktree(wt, "main");
+
+    expect(result.status).toBe("merged");
+    expect(git(wt, ["rev-parse", "HEAD"])).toBe(tipBefore);
+  });
+
+  it("aborts a conflicting merge cleanly, leaving the branch and worktree untouched", () => {
+    const wt = join(repoDir, ".afk", "wt-slice");
+    createWorktree(repoDir, "slice", wt, "main");
+    commitFile(wt, "shared.txt", "slice version\n", "feat: slice edit");
+    const tipBefore = git(wt, ["rev-parse", "HEAD"]);
+    // Conflicting edit to the same file on the feature branch.
+    commitFile(repoDir, "shared.txt", "feature version\n", "feat: conflicting edit");
+
+    const result = mergeBranchIntoWorktree(wt, "main");
+
+    expect(result.status).toBe("conflict");
+    // Merge aborted: branch tip untouched, worktree clean, file content intact.
+    expect(git(wt, ["rev-parse", "HEAD"])).toBe(tipBefore);
+    expect(git(wt, ["status", "--porcelain"])).toBe("");
+    expect(readFileSync(join(wt, "shared.txt"), "utf-8").replace(/\r\n/g, "\n")).toBe(
+      "slice version\n",
     );
   });
 });
