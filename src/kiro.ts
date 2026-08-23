@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,18 +6,9 @@ import type {
   InvokeOptions,
   InvokeResult,
 } from "./agent-provider.js";
-import { CancelledError, TransientProviderError } from "./agent-provider.js";
-import { createIdleWatcher } from "./idle-watcher.js";
-import { createBusyProbe } from "./busy-probe.js";
-import {
-  formatTerminationWarning,
-  terminateProcessTree,
-  type TerminationReport,
-} from "./kill-tree.js";
+import { TransientProviderError } from "./agent-provider.js";
+import { runInvocation } from "./invocation-runtime.js";
 import { createProgressFilter } from "./liveness.js";
-
-/** Wall-clock ceiling default — see ADR 0016 and agent-provider.ts. */
-const DEFAULT_MAX_DURATION_MS = 3_600_000;
 
 /**
  * Role-based model policy: the read-only explorer runs on the cheaper
@@ -161,35 +151,11 @@ export function classifyExitError(
  * ADR 0016 and src/liveness.ts.
  */
 export function invoke(options: InvokeOptions): Promise<InvokeResult> {
-  const {
-    role,
-    agent,
-    prompt,
-    cwd,
-    logStream,
-    idleTimeoutMs = 180_000,
-    idleWarningIntervalMs = 60_000,
-    maxDurationMs = DEFAULT_MAX_DURATION_MS,
-    signal,
-    onIdleWarning,
-    onIdleDeferral,
-  } = options;
-
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new CancelledError());
-      return;
-    }
-
+  return runInvocation(options, () => {
+    const { role, agent, prompt } = options;
     const model =
       options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
-
-    // Prompt-only invocations (no caller-supplied agent config) run
-    // under the managed worker config so the toolset is deterministic:
-    // no nested sub-agents, no MCP leakage. Throws inside the executor
-    // reject the returned promise.
     const agentName = agent ?? ensureWorkerAgentConfig();
-
     const args = [
       "chat",
       "--no-interactive",
@@ -200,206 +166,33 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       agentName,
       prompt,
     ];
-
-    const proc = spawn("kiro-cli", args, {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const stdoutChunks: string[] = [];
-    let killed = false;
-    let ceilingHit = false;
-    let agentLoadFailed = false;
-    let cancelled = false;
-    let settled = false;
-    let termination: Promise<TerminationReport> | undefined;
-    const busyProbe = createBusyProbe(proc.pid);
-    let busyDescendants = 0;
-    // Recent combined output, kept bounded, for classifying a nonzero
-    // exit as transient (model outage) vs. real. See ADR 0022.
+    const stdoutProgress = createProgressFilter();
+    const stderrProgress = createProgressFilter();
+    const marker = agentFallbackMarker(agentName);
+    let headText = "";
     let outputTail = "";
-    const appendTail = (text: string) => {
-      outputTail = (outputTail + text).slice(-OUTPUT_TAIL_LIMIT);
-    };
 
-    const settle = (finish: () => void) => {
-      if (settled) return;
-      settled = true;
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      finish();
-    };
-
-    /**
-     * Drop our ends of the child's stdio and the process handle from
-     * the event loop. Orphaned grandchildren inherit the pipe write
-     * ends; without this a survived kill holds the orchestrator's
-     * event loop open forever after the run. Kill paths only — natural
-     * exits close their pipes on their own. See ADR 0020.
-     */
-    const releaseChildHandles = () => {
-      proc.stdout?.destroy();
-      proc.stderr?.destroy();
-      proc.unref();
-    };
-
-    const killedError = (): Error => {
-      if (cancelled) return new CancelledError(`Agent ${role} cancelled`);
-      if (agentLoadFailed) {
+    return {
+      command: "kiro-cli",
+      args,
+      activityFilter: (stream, text) =>
+        stream === "stdout"
+          ? stdoutProgress.update(text)
+          : stderrProgress.update(text),
+      onOutput: (_stream, text) => {
+        outputTail = (outputTail + text).slice(-OUTPUT_TAIL_LIMIT);
+        if (headText.length > 16_384) return undefined;
+        headText += text;
+        if (!headText.includes(marker)) return undefined;
         return new Error(
           `Agent ${role}: kiro-cli could not load agent config ` +
             `"${agentName}" and would fall back to the unrestricted ` +
             `default agent — killed`,
         );
-      }
-      if (ceilingHit) {
-        return new Error(
-          `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling — killed`,
-        );
-      }
-      if (killed) {
-        return new Error(
-          `Agent ${role} idle for ${idleTimeoutMs / 1000}s — killed`,
-        );
-      }
-      return new Error(`Agent ${role} was killed`);
-    };
-
-    /**
-     * Settle a killed invocation — but only once the termination
-     * report is in, so a terminal outcome is never recorded while the
-     * process tree may still be alive. Survivors are surfaced loudly
-     * in both the rejection and the invocation log.
-     */
-    const settleKill = (report: TerminationReport) =>
-      settle(() => {
-        releaseChildHandles();
-        const error = killedError();
-        const warning = formatTerminationWarning(report);
-        if (warning) {
-          error.message += ` — ${warning}`;
-          logStream?.write(`\n${warning}\n`);
-        }
-        reject(error);
-      });
-
-    /**
-     * Tree-first kill (ADR 0020): terminate and verify the whole tree
-     * while its root is still alive. No SIGTERM-then-grace on Windows —
-     * Node's "SIGTERM" there is already an ungraceful TerminateProcess
-     * of the shim only, which is how zombie agents were born. If even
-     * the root refuses to die, `exit` never fires — settle from the
-     * termination report instead of awaiting the event forever.
-     */
-    const stopProcess = () => {
-      if (termination) return;
-      termination = terminateProcessTree(proc);
-      void termination.then((report) => {
-        if (!report.rootDead) settleKill(report);
-      });
-    };
-
-    const onAbort = () => {
-      cancelled = true;
-      stopProcess();
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    const watcher = createIdleWatcher({
-      idleTimeoutMs,
-      idleWarningIntervalMs,
-      onTimeout: () => {
-        killed = true;
-        stopProcess();
       },
-      onWarning: onIdleWarning,
-      // Silence with a live spawned process is work, not a wedge: the
-      // agent's shell tool may be mid-flight in a long test suite whose
-      // output is piped through a filter. Defer the kill while the
-      // process tree holds PIDs that weren't in the post-spawn
-      // baseline; the wall-clock ceiling still bounds the invocation.
-      // See ADR 0021 / issue #14.
-      shouldDefer: async () => {
-        busyDescendants = await busyProbe.check();
-        return busyDescendants > 0;
-      },
-      onDefer: () => {
-        logStream?.write(
-          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
-            `${busyDescendants} spawned process(es) still running — ` +
-            `deferring idle kill (wall-clock ceiling still applies)\n`,
-        );
-        onIdleDeferral?.({
-          silentSeconds: idleTimeoutMs / 1000,
-          busyProcesses: busyDescendants,
-        });
-      },
-    });
-
-    // Wall-clock ceiling — independent of the idle watcher, so a hung
-    // session that keeps painting decorative output still dies.
-    const ceilingTimer = setTimeout(() => {
-      ceilingHit = true;
-      stopProcess();
-    }, maxDurationMs);
-    ceilingTimer.unref();
-
-    // Separate filter per stream — each keeps its own line state.
-    const stdoutProgress = createProgressFilter();
-    const stderrProgress = createProgressFilter();
-
-    // The fallback marker appears in kiro-cli's startup banner; keep a
-    // bounded head of combined output so a marker split across chunk
-    // boundaries is still caught.
-    const marker = agentFallbackMarker(agentName);
-    let headText = "";
-    const checkAgentFallback = (text: string) => {
-      if (agentLoadFailed || headText.length > 16_384) return;
-      headText += text;
-      if (headText.includes(marker)) {
-        agentLoadFailed = true;
-        stopProcess();
-      }
+      classifyExit: ({ exitCode }) =>
+        classifyExitError(role, exitCode, outputTail),
     };
-
-    proc.stdout!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdoutChunks.push(text);
-      logStream?.write(text);
-      checkAgentFallback(text);
-      appendTail(text);
-      if (stdoutProgress.update(text)) watcher.reset();
-    });
-
-    proc.stderr!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      logStream?.write(text);
-      checkAgentFallback(text);
-      appendTail(text);
-      if (stderrProgress.update(text)) watcher.reset();
-    });
-
-    proc.on("error", (err) => {
-      settle(() => reject(err));
-    });
-
-    proc.on("exit", (code) => {
-      // A kill was issued: hold the outcome until the termination
-      // report confirms (or denies) that the whole tree is gone.
-      if (termination) {
-        void termination.then(settleKill);
-        return;
-      }
-      settle(() => {
-        const exitCode = code ?? 1;
-        if (exitCode !== 0) {
-          reject(classifyExitError(role, exitCode, outputTail));
-        } else {
-          resolve({ exitCode, stdout: stdoutChunks.join(""), stats: {} });
-        }
-      });
-    });
   });
 }
 

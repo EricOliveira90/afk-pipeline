@@ -1,18 +1,10 @@
-import { spawn } from "node:child_process";
 import type {
   AgentProvider,
   InvokeOptions,
   InvokeResult,
   StreamEvent,
 } from "./agent-provider.js";
-import { CancelledError } from "./agent-provider.js";
-import { createIdleWatcher } from "./idle-watcher.js";
-import { createBusyProbe } from "./busy-probe.js";
-import {
-  formatTerminationWarning,
-  terminateProcessTree,
-  type TerminationReport,
-} from "./kill-tree.js";
+import { runInvocation } from "./invocation-runtime.js";
 
 const DEFAULT_MODEL = "claude-opus-5";
 const EXPLORER_MODEL = "claude-sonnet-5";
@@ -87,69 +79,17 @@ export function parseStreamLine(line: string): StreamEvent[] {
 }
 
 /**
- * Per-event handler for the parsed stream. Centralises the idle-watcher
- * reset and the tool-call cap so they can be unit-tested without
- * spawning a child process. See ADR 0008.
- *
- * Idle reset on `tool_call` matters because the agent may emit a Bash
- * tool_call and then wait silently while the harness backgrounds the
- * command — chunks of stdout from the agent stop, but the session is
- * healthy. Without this reset, a long `pnpm test` invocation would
- * trip the idle floor and the agent would be killed mid-implementation.
- */
-export function handleStreamEvent(args: {
-  event: StreamEvent;
-  watcher: { reset: () => void };
-  toolCallCount: number;
-  maxToolCalls: number;
-  onStreamEvent?: (e: StreamEvent) => void;
-}): { toolCallCount: number; capExceeded: boolean } {
-  const { event, watcher, maxToolCalls, onStreamEvent } = args;
-  let { toolCallCount } = args;
-  let capExceeded = false;
-
-  if (event.type === "tool_call") {
-    watcher.reset();
-    toolCallCount++;
-    if (toolCallCount > maxToolCalls) capExceeded = true;
-  }
-
-  onStreamEvent?.(event);
-  return { toolCallCount, capExceeded };
-}
-
-/**
  * Invoke `claude -p` in non-interactive mode with a specific agent and prompt.
  * Streams stream-json output line-by-line, parses events, and surfaces them
  * via onStreamEvent. The final `result` event carries cost/usage; we surface
  * cost on the resolved value.
  */
 export function invoke(options: InvokeOptions): Promise<InvokeResult> {
-  const {
-    role,
-    agent,
-    prompt,
-    cwd,
-    logStream,
-    idleTimeoutMs = 180_000,
-    idleWarningIntervalMs = 60_000,
-    maxToolCalls = 100,
-    maxDurationMs = 3_600_000,
-    signal,
-    onIdleWarning,
-    onIdleDeferral,
-    onStreamEvent,
-  } = options;
-
-  const bare = options.bare === true;
-  const model =
-    options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
-
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new CancelledError());
-      return;
-    }
+  return runInvocation(options, () => {
+    const { role, agent, prompt, cwd } = options;
+    const bare = options.bare === true;
+    const model =
+      options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
 
     // Pass the prompt via stdin instead of argv. Avoids Windows cmd.exe
     // argv-reparsing breakage where prompts containing `:`, `"`, `&`, `(`,
@@ -181,13 +121,9 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
           ...(agent ? ["--agent", agent] : []),
           // Isolate subagents from the invoking session's MCP servers. Unlike
           // `--bare` (above), the `--agent` path keeps MCP auto-discovery, so
-          // user-level servers (andes/builder/slack/etc.) connect into each
-          // `claude -p` child non-deterministically. That floods the agent's
-          // toolset past its frontmatter `tools` allowlist and lets it spawn
-          // nested Agent subagents — whose activity emits no tool_call events,
-          // so the idle watcher kills the process and negotiate returns ERROR.
-          // Strict = load only --mcp-config servers (none), so the per-agent
-          // allowlist holds and the toolset is deterministic.
+          // user-level servers connect into each `claude -p` child
+          // non-deterministically. Strict loads no inherited MCP servers, so
+          // the per-agent allowlist remains deterministic.
           "--strict-mcp-config",
           "--dangerously-skip-permissions",
           "--model",
@@ -196,208 +132,31 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
           "stream-json",
           "--verbose",
         ];
-
-    const proc = spawn("claude", args, {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32",
-    });
-
-    proc.stdin!.write(prompt);
-    proc.stdin!.end();
-
-    const stdoutChunks: string[] = [];
-    let buffer = "";
     let costUsd: number | undefined;
-    let toolCallCount = 0;
-    let killed = false;
-    let ceilingHit = false;
-    let toolCapExceeded = false;
-    let cancelled = false;
-    let settled = false;
-    let termination: Promise<TerminationReport> | undefined;
-    const busyProbe = createBusyProbe(proc.pid);
-    let busyDescendants = 0;
 
-    const settle = (finish: () => void) => {
-      if (settled) return;
-      settled = true;
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      finish();
-    };
-
-    // See kiro.ts / ADR 0020 for the rationale of the shared kill
-    // machinery below: tree-first verified kills, settlement decoupled
-    // from the `exit` event, and stdio release so surviving orphans
-    // cannot hold the orchestrator's event loop open.
-    const releaseChildHandles = () => {
-      proc.stdout?.destroy();
-      proc.stderr?.destroy();
-      proc.stdin?.destroy();
-      proc.unref();
-    };
-
-    const killedError = (): Error => {
-      if (cancelled) return new CancelledError(`Agent ${role} cancelled`);
-      if (toolCapExceeded) {
-        return new Error(
-          `Agent ${role} exceeded ${maxToolCalls} tool calls — killed`,
-        );
-      }
-      if (ceilingHit) {
-        return new Error(
-          `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling — killed`,
-        );
-      }
-      if (killed) {
-        return new Error(
-          `Agent ${role} idle for ${idleTimeoutMs / 1000}s — killed`,
-        );
-      }
-      return new Error(`Agent ${role} was killed`);
-    };
-
-    const settleKill = (report: TerminationReport) =>
-      settle(() => {
-        releaseChildHandles();
-        const error = killedError();
-        const warning = formatTerminationWarning(report);
-        if (warning) {
-          error.message += ` — ${warning}`;
-          logStream?.write(`\n${warning}\n`);
-        }
-        reject(error);
-      });
-
-    const stopProcess = () => {
-      if (termination) return;
-      termination = terminateProcessTree(proc);
-      void termination.then((report) => {
-        if (!report.rootDead) settleKill(report);
-      });
-    };
-
-    const onAbort = () => {
-      cancelled = true;
-      stopProcess();
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    const watcher = createIdleWatcher({
-      idleTimeoutMs,
-      idleWarningIntervalMs,
-      onTimeout: () => {
-        killed = true;
-        stopProcess();
-      },
-      onWarning: onIdleWarning,
-      // The tool_call reset (handleStreamEvent) only fires once when a
-      // command STARTS; a suite that then runs silently past the idle
-      // floor still got killed. Defer while the process tree holds
-      // PIDs outside the post-spawn baseline — a live spawned command.
-      // The wall-clock ceiling still bounds the invocation. ADR 0021.
-      shouldDefer: async () => {
-        busyDescendants = await busyProbe.check();
-        return busyDescendants > 0;
-      },
-      onDefer: () => {
-        logStream?.write(
-          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
-            `${busyDescendants} spawned process(es) still running — ` +
-            `deferring idle kill (wall-clock ceiling still applies)\n`,
-        );
-        onIdleDeferral?.({
-          silentSeconds: idleTimeoutMs / 1000,
-          busyProcesses: busyDescendants,
-        });
-      },
-    });
-
-    // Wall-clock ceiling — independent of the idle watcher and the
-    // tool-call cap, so a hung session that keeps emitting output
-    // still dies. See ADR 0016.
-    const ceilingTimer = setTimeout(() => {
-      ceilingHit = true;
-      stopProcess();
-    }, maxDurationMs);
-    ceilingTimer.unref();
-
-    proc.stdout!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdoutChunks.push(text);
-      logStream?.write(text);
-      watcher.reset();
-
-      buffer += text;
-      let nl;
-      while ((nl = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-
-        // Cost extraction — direct JSON peek (the parsed StreamEvent
-        // doesn't carry total_cost_usd; that field lives only on the
-        // raw `result` envelope).
+    return {
+      command: "claude",
+      args,
+      shell: process.platform === "win32",
+      stdin: prompt,
+      parseStreamLine: (line) => {
         if (line.startsWith("{")) {
           try {
-            const evt = JSON.parse(line);
-            if (evt.type === "result" && typeof evt.total_cost_usd === "number") {
-              costUsd = evt.total_cost_usd;
+            const event = JSON.parse(line);
+            if (
+              event.type === "result" &&
+              typeof event.total_cost_usd === "number"
+            ) {
+              costUsd = event.total_cost_usd;
             }
           } catch {
-            // not JSON — fine, parseStreamLine returns [] below
+            // parseStreamLine handles malformed input below.
           }
         }
-
-        for (const event of parseStreamLine(line)) {
-          const next = handleStreamEvent({
-            event,
-            watcher,
-            toolCallCount,
-            maxToolCalls,
-            onStreamEvent,
-          });
-          toolCallCount = next.toolCallCount;
-          if (next.capExceeded && !toolCapExceeded) {
-            toolCapExceeded = true;
-            killed = true;
-            stopProcess();
-          }
-        }
-      }
-    });
-
-    proc.stderr!.on("data", (chunk: Buffer) => {
-      logStream?.write(chunk.toString());
-      watcher.reset();
-    });
-
-    proc.on("error", (err) => {
-      settle(() => reject(err));
-    });
-
-    proc.on("exit", (code) => {
-      // A kill was issued: hold the outcome until the termination
-      // report confirms (or denies) that the whole tree is gone.
-      if (termination) {
-        void termination.then(settleKill);
-        return;
-      }
-      settle(() => {
-        const exitCode = code ?? 1;
-        if (exitCode !== 0) {
-          reject(new Error(`Agent ${role} exited with code ${exitCode}`));
-        } else {
-          resolve({
-            exitCode,
-            stdout: stdoutChunks.join(""),
-            stats: { costUsd, toolCallCount },
-          });
-        }
-      });
-    });
+        return parseStreamLine(line);
+      },
+      stats: () => ({ costUsd }),
+    };
   });
 }
 

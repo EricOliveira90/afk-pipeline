@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { EventEmitter } from "node:events";
-import { Readable } from "node:stream";
 import { join } from "node:path";
 import type { TerminationReport } from "./kill-tree.js";
+import { makeFakeProc, type FakeProc } from "./test/fake-proc.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const terminateMock = vi.hoisted(() => vi.fn());
@@ -49,22 +48,6 @@ const WORKER_CONFIG_PATH = join(
 
 /** A spinner frame as kiro-cli paints it — CR-rewritten, never committed. */
 const SPINNER_FRAME = "\r⠋ Dividing up the work...";
-
-interface FakeProc extends EventEmitter {
-  stdout: Readable;
-  stderr: Readable;
-  kill: ReturnType<typeof vi.fn>;
-  unref: ReturnType<typeof vi.fn>;
-}
-
-function makeFakeProc(): FakeProc {
-  const proc = new EventEmitter() as FakeProc;
-  proc.stdout = new Readable({ read() {} });
-  proc.stderr = new Readable({ read() {} });
-  proc.kill = vi.fn(() => true);
-  proc.unref = vi.fn();
-  return proc;
-}
 
 beforeEach(() => {
   spawnMock.mockReset();
@@ -336,113 +319,7 @@ describe("liveness and bounds", () => {
     proc.emit("exit", 0);
     await expect(promise).resolves.toMatchObject({ exitCode: 0 });
   });
-
-  it("the wall-clock ceiling kills a session even while output flows", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-
-    const promise = invoke({
-      role: "generator",
-      prompt: "build",
-      cwd: "/tmp/x",
-      idleTimeoutMs: 10_000,
-      idleWarningIntervalMs: 60_000,
-      maxDurationMs: 2_000,
-    });
-
-    for (let i = 0; i < 4; i++) {
-      proc.stdout.emit("data", Buffer.from(`still going ${i}\n`));
-      vi.advanceTimersByTime(500);
-    }
-
-    expect(terminateMock).toHaveBeenCalledTimes(1);
-    proc.emit("exit", null);
-    await expect(promise).rejects.toThrow(/wall-clock ceiling/);
-  });
 });
-
-describe("kill termination confirmation (ADR 0020)", () => {
-  it("appends surviving PIDs to the kill error and the log stream", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    terminateMock.mockImplementation(async (p: FakeProc) => {
-      setImmediate(() => p.emit("exit", null));
-      return { rootDead: true, survivors: [4242, 777], verified: true };
-    });
-    const logged: string[] = [];
-    const logStream = { write: (text: string) => logged.push(text) };
-
-    const promise = invoke({
-      role: "planner",
-      prompt: "go",
-      cwd: "/tmp/x",
-      logStream: logStream as never,
-    });
-    proc.stderr.emit(
-      "data",
-      Buffer.from("Error: no agent with name afk-worker found\n"),
-    );
-
-    await expect(promise).rejects.toThrow(
-      /WARNING: 2 process\(es\) survived the kill \(PIDs 4242, 777\)/,
-    );
-    expect(logged.join("")).toContain("survived the kill (PIDs 4242, 777)");
-  });
-
-  it("settles even when the child never emits exit because the root would not die", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    // Root refuses to die: no `exit` will ever fire.
-    terminateMock.mockImplementation(async () => ({
-      rootDead: false,
-      survivors: [1234, 5678],
-      verified: true,
-    }));
-
-    const promise = invoke({
-      role: "planner",
-      prompt: "go",
-      cwd: "/tmp/x",
-    });
-    proc.stderr.emit(
-      "data",
-      Buffer.from("Error: no agent with name afk-worker found\n"),
-    );
-
-    await expect(promise).rejects.toThrow(
-      /survived the kill \(PIDs 1234, 5678\)/,
-    );
-    // The kill path releases our ends of the child's handles so
-    // orphans cannot wedge the orchestrator's event loop at exit.
-    expect(proc.unref).toHaveBeenCalled();
-    expect(proc.stdout.destroyed).toBe(true);
-    expect(proc.stderr.destroyed).toBe(true);
-  });
-
-  it("warns loudly when tree termination could not be verified", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    terminateMock.mockImplementation(async (p: FakeProc) => {
-      setImmediate(() => p.emit("exit", null));
-      return { rootDead: true, survivors: [], verified: false };
-    });
-
-    const promise = invoke({
-      role: "planner",
-      prompt: "go",
-      cwd: "/tmp/x",
-    });
-    proc.stderr.emit(
-      "data",
-      Buffer.from("Error: no agent with name afk-worker found\n"),
-    );
-
-    await expect(promise).rejects.toThrow(
-      /could not verify process-tree termination/,
-    );
-  });
-});
-
 
 /**
  * Transient-failure classification (ADR 0022, issue #16): kiro-cli

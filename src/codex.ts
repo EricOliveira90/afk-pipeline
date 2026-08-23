@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -14,14 +13,7 @@ import type {
   InvokeResult,
   StreamEvent,
 } from "./agent-provider.js";
-import { CancelledError } from "./agent-provider.js";
-import { createIdleWatcher } from "./idle-watcher.js";
-import { createBusyProbe } from "./busy-probe.js";
-import {
-  formatTerminationWarning,
-  terminateProcessTree,
-  type TerminationReport,
-} from "./kill-tree.js";
+import { runInvocation } from "./invocation-runtime.js";
 
 const MODEL = "openai.gpt-5.6-sol";
 
@@ -234,50 +226,10 @@ export function parseStreamLine(line: string): StreamEvent[] {
   return [];
 }
 
-export function handleStreamEvent(args: {
-  event: StreamEvent;
-  watcher: { reset: () => void };
-  toolCallCount: number;
-  maxToolCalls: number;
-  onStreamEvent?: (event: StreamEvent) => void;
-}): { toolCallCount: number; capExceeded: boolean } {
-  const { event, watcher, maxToolCalls, onStreamEvent } = args;
-  let { toolCallCount } = args;
-  let capExceeded = false;
-
-  if (event.type === "tool_call") {
-    watcher.reset();
-    toolCallCount++;
-    capExceeded = toolCallCount > maxToolCalls;
-  }
-
-  onStreamEvent?.(event);
-  return { toolCallCount, capExceeded };
-}
-
 export function invoke(options: InvokeOptions): Promise<InvokeResult> {
-  const {
-    role,
-    prompt,
-    cwd,
-    logStream,
-    idleTimeoutMs = 180_000,
-    idleWarningIntervalMs = 60_000,
-    maxToolCalls = 100,
-    maxDurationMs = 3_600_000,
-    signal,
-    onIdleWarning,
-    onIdleDeferral,
-    onStreamEvent,
-  } = options;
-  const reasoningEffort = role === "explorer" ? "medium" : "high";
-
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new CancelledError());
-      return;
-    }
-
+  return runInvocation(options, () => {
+    const { role, prompt } = options;
+    const reasoningEffort = role === "explorer" ? "medium" : "high";
     const args = [
       "exec",
       "--json",
@@ -290,219 +242,24 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       "-",
     ];
     const preparedEnv = prepareCodexSpawnEnv(process.env);
-    const proc = spawn("codex", args, {
-      cwd,
+
+    return {
+      command: "codex",
+      args,
       env: preparedEnv.env,
-      stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
-    });
-
-    proc.stdin!.write(prompt);
-    proc.stdin!.end();
-
-    const stdoutChunks: string[] = [];
-    const stderrChunks: string[] = [];
-    let buffer = "";
-    let toolCallCount = 0;
-    let killed = false;
-    let ceilingHit = false;
-    let toolCapExceeded = false;
-    let cancelled = false;
-    let providerError: Error | undefined;
-    let settled = false;
-    let termination: Promise<TerminationReport> | undefined;
-    const busyProbe = createBusyProbe(proc.pid);
-    let busyDescendants = 0;
-
-    const settle = (finish: () => void) => {
-      if (settled) return;
-      settled = true;
-      watcher.stop();
-      clearTimeout(ceilingTimer);
-      signal?.removeEventListener("abort", onAbort);
-      preparedEnv.cleanup();
-      finish();
-    };
-
-    // See kiro.ts / ADR 0020 for the rationale of the shared kill
-    // machinery below: tree-first verified kills, settlement decoupled
-    // from the `exit` event, and stdio release so surviving orphans
-    // cannot hold the orchestrator's event loop open.
-    const releaseChildHandles = () => {
-      proc.stdout?.destroy();
-      proc.stderr?.destroy();
-      proc.stdin?.destroy();
-      proc.unref();
-    };
-
-    const killedError = (): Error => {
-      if (cancelled) return new CancelledError(`Agent ${role} cancelled`);
-      if (providerError) return providerError;
-      if (toolCapExceeded) {
+      stdin: prompt,
+      parseStreamLine,
+      classifyExit: ({ exitCode, stderr }) => {
+        const detail = stderr.trim();
         return new Error(
-          `Agent ${role} exceeded ${maxToolCalls} tool calls - killed`,
+          `Agent ${role} exited with code ${exitCode}${
+            detail ? `: ${detail}` : ""
+          }`,
         );
-      }
-      if (ceilingHit) {
-        return new Error(
-          `Agent ${role} exceeded ${maxDurationMs / 1000}s wall-clock ceiling - killed`,
-        );
-      }
-      if (killed) {
-        return new Error(
-          `Agent ${role} idle for ${idleTimeoutMs / 1000}s - killed`,
-        );
-      }
-      return new Error(`Agent ${role} was killed`);
-    };
-
-    const settleKill = (report: TerminationReport) =>
-      settle(() => {
-        releaseChildHandles();
-        const error = killedError();
-        const warning = formatTerminationWarning(report);
-        if (warning) {
-          error.message += ` - ${warning}`;
-          logStream?.write(`\n${warning}\n`);
-        }
-        reject(error);
-      });
-
-    const stopProcess = () => {
-      if (termination) return;
-      termination = terminateProcessTree(proc);
-      void termination.then((report) => {
-        if (!report.rootDead) settleKill(report);
-      });
-    };
-
-    const onAbort = () => {
-      cancelled = true;
-      stopProcess();
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    const watcher = createIdleWatcher({
-      idleTimeoutMs,
-      idleWarningIntervalMs,
-      onTimeout: () => {
-        killed = true;
-        stopProcess();
       },
-      onWarning: onIdleWarning,
-      // The tool_call reset (handleStreamEvent) only fires once when a
-      // command STARTS; a suite that then runs silently past the idle
-      // floor still got killed. Defer while the process tree holds
-      // PIDs outside the post-spawn baseline — a live spawned command.
-      // The wall-clock ceiling still bounds the invocation. ADR 0021.
-      shouldDefer: async () => {
-        busyDescendants = await busyProbe.check();
-        return busyDescendants > 0;
-      },
-      onDefer: () => {
-        logStream?.write(
-          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
-            `${busyDescendants} spawned process(es) still running — ` +
-            `deferring idle kill (wall-clock ceiling still applies)\n`,
-        );
-        onIdleDeferral?.({
-          silentSeconds: idleTimeoutMs / 1000,
-          busyProcesses: busyDescendants,
-        });
-      },
-    });
-
-    // Wall-clock ceiling — independent of the idle watcher and the
-    // tool-call cap, so a hung session that keeps emitting output
-    // still dies. See ADR 0016.
-    const ceilingTimer = setTimeout(() => {
-      ceilingHit = true;
-      stopProcess();
-    }, maxDurationMs);
-    ceilingTimer.unref();
-
-    const processLine = (line: string) => {
-      if (!line) return;
-      try {
-        for (const event of parseStreamLine(line)) {
-          const next = handleStreamEvent({
-            event,
-            watcher,
-            toolCallCount,
-            maxToolCalls,
-            onStreamEvent,
-          });
-          toolCallCount = next.toolCallCount;
-          if (next.capExceeded && !toolCapExceeded) {
-            toolCapExceeded = true;
-            killed = true;
-            stopProcess();
-          }
-        }
-      } catch (error) {
-        if (!providerError) {
-          providerError =
-            error instanceof Error ? error : new Error(String(error));
-          stopProcess();
-        }
-      }
+      onSettled: preparedEnv.cleanup,
     };
-
-    proc.stdout!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdoutChunks.push(text);
-      logStream?.write(text);
-      watcher.reset();
-
-      buffer += text;
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-        processLine(buffer.slice(0, newlineIndex).trim());
-        buffer = buffer.slice(newlineIndex + 1);
-      }
-    });
-
-    proc.stderr!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stderrChunks.push(text);
-      logStream?.write(text);
-      watcher.reset();
-    });
-
-    proc.on("error", (error) => {
-      settle(() => reject(error));
-    });
-
-    proc.on("exit", (code) => {
-      processLine(buffer.trim());
-      // A kill was issued: hold the outcome until the termination
-      // report confirms (or denies) that the whole tree is gone.
-      if (termination) {
-        void termination.then(settleKill);
-        return;
-      }
-      settle(() => {
-        const exitCode = code ?? 1;
-        if (providerError) {
-          reject(providerError);
-        } else if (exitCode !== 0) {
-          const detail = stderrChunks.join("").trim();
-          reject(
-            new Error(
-              `Agent ${role} exited with code ${exitCode}${
-                detail ? `: ${detail}` : ""
-              }`,
-            ),
-          );
-        } else {
-          resolve({
-            exitCode,
-            stdout: stdoutChunks.join(""),
-            stats: { toolCallCount },
-          });
-        }
-      });
-    });
   });
 }
 

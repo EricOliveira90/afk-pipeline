@@ -1,34 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventEmitter } from "node:events";
-import type { ChildProcess } from "node:child_process";
 import {
   collectTree,
   formatTerminationWarning,
   parsePidPpidOutput,
   terminateProcessTree,
 } from "./kill-tree.js";
-
-/**
- * Minimal stand-in for a spawned child. kill-tree only reads pid,
- * exitCode and signalCode, and listens for `exit`.
- */
-interface FakeProc extends EventEmitter {
-  pid: number | undefined;
-  exitCode: number | null;
-  signalCode: NodeJS.Signals | null;
-  kill: ReturnType<typeof vi.fn>;
-}
-
-function makeFakeProc(pid: number | undefined = 100): FakeProc {
-  const proc = new EventEmitter() as FakeProc;
-  proc.pid = pid;
-  proc.exitCode = null;
-  proc.signalCode = null;
-  proc.kill = vi.fn(() => true);
-  return proc;
-}
-
-const asChild = (proc: FakeProc) => proc as unknown as ChildProcess;
+import { asChildProcess, makeFakeProc } from "./test/fake-proc.js";
 
 /**
  * A mutable fake Windows process table: pid -> ppid. Kill primitives
@@ -65,7 +42,7 @@ describe("terminateProcessTree on win32", () => {
     });
     const killPid = vi.fn(async () => {});
 
-    const report = await terminateProcessTree(asChild(proc), {
+    const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "win32",
       listPidPpid: state.listPidPpid,
       killTree,
@@ -94,7 +71,7 @@ describe("terminateProcessTree on win32", () => {
     });
     const killPid = vi.fn(async () => {});
 
-    const report = await terminateProcessTree(asChild(proc), {
+    const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "win32",
       listPidPpid: state.listPidPpid,
       killTree,
@@ -122,7 +99,7 @@ describe("terminateProcessTree on win32", () => {
     const killTree = vi.fn(async () => {}); // taskkill on a dead PID: no-op
     const killPid = vi.fn(async (pid: number) => state.remove(pid));
 
-    const report = await terminateProcessTree(asChild(proc), {
+    const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "win32",
       listPidPpid: state.listPidPpid,
       killTree,
@@ -141,7 +118,7 @@ describe("terminateProcessTree on win32", () => {
       proc.exitCode = 1;
     });
 
-    const report = await terminateProcessTree(asChild(proc), {
+    const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "win32",
       listPidPpid: async () => undefined,
       killTree,
@@ -168,7 +145,7 @@ describe("terminateProcessTree on POSIX", () => {
       return true;
     });
 
-    const report = await terminateProcessTree(asChild(proc), {
+    const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "linux",
       graceMs: 20,
       ...FAST,
@@ -191,7 +168,7 @@ describe("terminateProcessTree on POSIX", () => {
       return true;
     });
 
-    const report = await terminateProcessTree(asChild(proc), {
+    const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "linux",
       graceMs: 100,
       ...FAST,

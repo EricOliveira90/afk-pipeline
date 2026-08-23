@@ -1,4 +1,3 @@
-import { EventEmitter } from "node:events";
 import {
   existsSync,
   mkdtempSync,
@@ -8,10 +7,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable, Writable } from "node:stream";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import type { StreamEvent } from "./agent-provider.js";
 import type { TerminationReport } from "./kill-tree.js";
+import { emitExit, makeFakeProc, type FakeProc } from "./test/fake-proc.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const terminateMock = vi.hoisted(() => vi.fn());
@@ -46,47 +44,12 @@ beforeEach(() => {
 const {
   codexProvider,
   findManagedCodexAwsProfile,
-  handleStreamEvent,
   invoke,
   isRecoverableStreamError,
   parseStreamLine,
   prepareCodexSpawnEnv,
   resolveCodexSpawnEnv,
 } = await import("./codex.js");
-
-interface FakeProc extends EventEmitter {
-  stdin: Writable;
-  stdinText: string;
-  stdout: Readable;
-  stderr: Readable;
-  exitCode: number | null;
-  signalCode: NodeJS.Signals | null;
-  kill: ReturnType<typeof vi.fn>;
-  unref: ReturnType<typeof vi.fn>;
-}
-
-function makeFakeProc(): FakeProc {
-  const proc = new EventEmitter() as FakeProc;
-  proc.stdinText = "";
-  proc.stdin = new Writable({
-    write(chunk, _encoding, callback) {
-      proc.stdinText += chunk.toString();
-      callback();
-    },
-  });
-  proc.stdout = new Readable({ read() {} });
-  proc.stderr = new Readable({ read() {} });
-  proc.exitCode = null;
-  proc.signalCode = null;
-  proc.kill = vi.fn(() => true);
-  proc.unref = vi.fn();
-  return proc;
-}
-
-function exit(proc: FakeProc, code: number): void {
-  proc.exitCode = code;
-  proc.emit("exit", code);
-}
 
 function jsonLine(value: unknown): string {
   return JSON.stringify(value) + "\n";
@@ -207,7 +170,7 @@ describe("Codex command construction", () => {
       prompt: "prompt with & shell characters",
       cwd: "/tmp/repo",
     });
-    exit(proc, 0);
+    emitExit(proc, 0);
     await promise;
 
     expect(spawnMock).toHaveBeenCalledWith(
@@ -243,14 +206,14 @@ describe("Codex command construction", () => {
       .mockReturnValueOnce(evaluatorProc);
 
     const explorer = invoke({ role: "explorer", prompt: "x", cwd: "/tmp" });
-    exit(explorerProc, 0);
+    emitExit(explorerProc, 0);
     await explorer;
     const evaluator = invoke({
       role: "evaluator-qa",
       prompt: "x",
       cwd: "/tmp",
     });
-    exit(evaluatorProc, 0);
+    emitExit(evaluatorProc, 0);
     await evaluator;
 
     expect(spawnMock.mock.calls[0]![1]).toContain(
@@ -321,58 +284,9 @@ credential_process = codex credential-process
   });
 });
 
-describe("Codex invocation lifecycle", () => {
+describe("Codex runtime hooks", () => {
   beforeEach(() => {
     spawnMock.mockReset();
-  });
-
-  it("counts tools and resolves a successful completion", async () => {
-    const proc = makeFakeProc();
-    const events: StreamEvent[] = [];
-    spawnMock.mockReturnValue(proc);
-    const promise = invoke({
-      role: "generator",
-      prompt: "go",
-      cwd: "/tmp",
-      onStreamEvent: (event) => events.push(event),
-    });
-
-    proc.stdout.push(
-      jsonLine({ type: "thread.started", thread_id: "thread-1" }) +
-        commandLine("git status") +
-        jsonLine({
-          type: "item.completed",
-          item: { type: "agent_message", text: "complete" },
-        }),
-    );
-    await new Promise((resolve) => setImmediate(resolve));
-    exit(proc, 0);
-
-    const result = await promise;
-    expect(result.exitCode).toBe(0);
-    expect(result.stats.toolCallCount).toBe(1);
-    expect(events).toEqual([
-      { type: "session_id", sessionId: "thread-1" },
-      { type: "tool_call", name: "command_execution", args: "git status" },
-      { type: "result", result: "complete" },
-    ]);
-  });
-
-  it("kills and rejects when the tool-call cap is exceeded", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    const promise = invoke({
-      role: "evaluator-qa",
-      prompt: "go",
-      cwd: "/tmp",
-      maxToolCalls: 2,
-    });
-
-    proc.stdout.push(commandLine("one") + commandLine("two") + commandLine("three"));
-    await expect(promise).rejects.toThrow(
-      "Agent evaluator-qa exceeded 2 tool calls - killed",
-    );
-    expect(terminateMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects provider-reported stdout errors", async () => {
@@ -383,194 +297,24 @@ describe("Codex invocation lifecycle", () => {
     await expect(promise).rejects.toThrow("Codex error: login required");
   });
 
-  it("survives a reconnect error event and resolves on success", async () => {
-    const proc = makeFakeProc();
-    const events: StreamEvent[] = [];
-    spawnMock.mockReturnValue(proc);
-    const promise = invoke({
-      role: "generator",
-      prompt: "go",
-      cwd: "/tmp",
-      onStreamEvent: (event) => events.push(event),
-    });
-
-    proc.stdout.push(
-      commandLine("pnpm test") +
-        jsonLine({
-          type: "error",
-          message:
-            "Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)",
-        }) +
-        jsonLine({
-          type: "item.completed",
-          item: { type: "agent_message", text: "recovered and finished" },
-        }),
-    );
-    await new Promise((resolve) => setImmediate(resolve));
-    exit(proc, 0);
-
-    const result = await promise;
-    expect(result.exitCode).toBe(0);
-    expect(result.stats.toolCallCount).toBe(1);
-    expect(terminateMock).not.toHaveBeenCalled();
-    expect(events).toEqual([
-      { type: "tool_call", name: "command_execution", args: "pnpm test" },
-      { type: "result", result: "recovered and finished" },
-    ]);
-  });
-
-  it("still fails terminally after reconnects when the turn fails", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp" });
-
-    proc.stdout.push(
-      jsonLine({
-        type: "error",
-        message: "Reconnecting... 5/5 (stream disconnected before completion)",
-      }) +
-        jsonLine({
-          type: "turn.failed",
-          error: { message: "Internal server error" },
-        }),
-    );
-    await expect(promise).rejects.toThrow(
-      "Codex turn.failed: Internal server error",
-    );
-    expect(terminateMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("includes stderr in nonzero-exit errors", async () => {
+  it("includes stderr detail in nonzero-exit errors", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);
     const promise = invoke({ role: "planner", prompt: "go", cwd: "/tmp" });
     proc.stderr.push("unknown model\n");
     await new Promise((resolve) => setImmediate(resolve));
-    exit(proc, 2);
+    emitExit(proc, 2);
     await expect(promise).rejects.toThrow(
       "Agent planner exited with code 2: unknown model",
     );
   });
-
-  it("cancels an in-flight process", async () => {
-    const proc = makeFakeProc();
-    const controller = new AbortController();
-    spawnMock.mockReturnValue(proc);
-    const promise = invoke({
-      role: "generator",
-      prompt: "go",
-      cwd: "/tmp",
-      signal: controller.signal,
-    });
-    controller.abort();
-    await expect(promise).rejects.toMatchObject({ name: "CancelledError" });
-    expect(terminateMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects immediately when already cancelled", async () => {
-    const controller = new AbortController();
-    controller.abort();
-    await expect(
-      invoke({
-        role: "generator",
-        prompt: "go",
-        cwd: "/tmp",
-        signal: controller.signal,
-      }),
-    ).rejects.toMatchObject({ name: "CancelledError" });
-    expect(spawnMock).not.toHaveBeenCalled();
-  });
 });
-
-describe("Codex maxDurationMs ceiling", () => {
-  beforeEach(() => {
-    spawnMock.mockReset();
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("kills a session that outlives the wall-clock ceiling despite steady output", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-
-    const promise = invoke({
-      role: "generator",
-      prompt: "build",
-      cwd: "/tmp",
-      idleTimeoutMs: 10_000,
-      maxDurationMs: 30_000,
-    });
-
-    // Output every 5s keeps the idle watcher happy forever; only the
-    // ceiling can end this session.
-    for (let i = 0; i < 7; i++) {
-      proc.stdout.emit("data", Buffer.from(jsonLine({ type: "noise" })));
-      vi.advanceTimersByTime(5_000);
-    }
-
-    expect(terminateMock).toHaveBeenCalledTimes(1);
-    proc.emit("exit", null);
-    await expect(promise).rejects.toThrow(/wall-clock ceiling/);
-  });
-
-  it("appends surviving PIDs to the kill error when the tree outlives the kill", async () => {
-    const proc = makeFakeProc();
-    spawnMock.mockReturnValue(proc);
-    terminateMock.mockImplementation(async () => ({
-      rootDead: true,
-      survivors: [31337],
-      verified: true,
-    }));
-
-    const promise = invoke({
-      role: "generator",
-      prompt: "build",
-      cwd: "/tmp",
-      idleTimeoutMs: 10_000,
-      maxDurationMs: 30_000,
-    });
-
-    vi.advanceTimersByTime(30_000);
-    proc.emit("exit", null);
-    await expect(promise).rejects.toThrow(
-      /survived the kill \(PIDs 31337\)/,
-    );
-  });
-});
-
-describe("Codex provider metadata and event handling", () => {
-  it("uses the codex namespace", () => {
+describe("Codex provider metadata", () => {
+  it("uses the codex namespace and parser", () => {
     expect(codexProvider.name).toBe("codex");
     expect(codexProvider.parseStreamLine).toBe(parseStreamLine);
   });
-
-  it("resets liveness and increments only for tool calls", () => {
-    const reset = vi.fn();
-    const onStreamEvent = vi.fn();
-    const result = handleStreamEvent({
-      event: { type: "tool_call", name: "command_execution", args: "ls" },
-      watcher: { reset },
-      toolCallCount: 0,
-      maxToolCalls: 1,
-      onStreamEvent,
-    });
-    expect(result).toEqual({ toolCallCount: 1, capExceeded: false });
-    expect(reset).toHaveBeenCalledOnce();
-    expect(onStreamEvent).toHaveBeenCalledOnce();
-  });
 });
-
-
-/**
- * ADR 0015: the codex wrapper persists the file named by AWS_CONFIG_FILE.
- * Concurrent invocations sharing that file race on the persist rename and
- * the loser dies at spawn ("failed to persist AWS config file: … Access is
- * denied. (os error 5)" — observed in the PRD 070 run). Each invocation
- * must therefore get its own throwaway copy.
- */
 describe("prepareCodexSpawnEnv AWS config isolation", () => {
   function makeConfigDir(content: string): { dir: string; source: string } {
     const dir = mkdtempSync(join(tmpdir(), "afk-awscfg-"));
@@ -654,8 +398,8 @@ describe("codex invoke AWS config isolation (regression: PRD 070 persist race)",
       expect(existsSync(envA.AWS_CONFIG_FILE!)).toBe(true);
       expect(existsSync(envB.AWS_CONFIG_FILE!)).toBe(true);
 
-      exit(procA, 0);
-      exit(procB, 0);
+      emitExit(procA, 0);
+      emitExit(procB, 0);
       await promiseA;
       await promiseB;
 
