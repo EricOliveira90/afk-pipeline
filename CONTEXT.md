@@ -70,6 +70,12 @@ lose the record of already-merged work. A persisted PASS
 ADR 0018.
 _Avoid_: "state cache", "checkpoint" (it is authoritative, not a cache)
 
+**RunJournal**:
+The single record keeper for a pipeline run's slice lifecycle and
+terminal outcomes across the **run state**, **run log**, and typed event
+history. A terminal outcome and its reason enter the run record once.
+_Avoid_: "logger" (only one artifact), "outcome callback", "persistence helper"
+
 **Scope of record**:
 The set of slices a run owns, fixed on its first invocation (all AFK
 slices, or whatever `--slices` named) and persisted in the **run state**.

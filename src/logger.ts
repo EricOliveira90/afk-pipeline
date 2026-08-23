@@ -2,28 +2,18 @@ import {
   mkdirSync,
   createWriteStream,
   writeFileSync,
-  appendFileSync,
   existsSync,
   WriteStream,
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
 import {
-  EVENTS_FILE,
-  EVENTS_SCHEMA_VERSION,
-  serializeRunEvent,
-  type RunEventPayload,
-} from "./run-events.js";
-import {
   assertNever,
   bucketFor,
-  lifecycle,
   statusIconFor,
   summaryStatusLabel,
   traitsFor,
-  type SliceIdentity,
   type SliceLifecycle,
-  type SliceProgress,
 } from "./slice-lifecycle.js";
 
 /** Sum of invocation stats across all agent invocations for a slice. */
@@ -62,8 +52,6 @@ export interface RunLog {
   prOverrideNote?: string;
 }
 
-const ZERO_PROGRESS: SliceProgress = { genRounds: 0, evalRounds: 0 };
-
 /**
  * Directory name for one pipeline run's logs, derived from its start
  * time (e.g. `run-20260808-214501`). A numeric suffix disambiguates
@@ -94,7 +82,11 @@ export class Logger {
    */
   readonly runDir: string;
 
-  constructor(repoRoot: string, prdSlug: string) {
+  constructor(
+    repoRoot: string,
+    prdSlug: string,
+    slices: Map<string, SliceLifecycle>,
+  ) {
     this.logDir = join(repoRoot, ".afk", "logs", prdSlug);
     mkdirSync(this.logDir, { recursive: true });
     const startedAt = new Date();
@@ -103,62 +95,9 @@ export class Logger {
     this.runLog = {
       prdSlug,
       startedAt,
-      slices: new Map(),
+      slices,
       totals: new Map(),
     };
-    // Structured tee header (spec #26): events.jsonl starts with a
-    // version event, copying the handoff.json convention, so readers
-    // can gate on schema before parsing the rest. Best-effort like all
-    // event writes — a failed write never takes down the pipeline.
-    this.event({ type: "header", version: EVENTS_SCHEMA_VERSION });
-  }
-
-  /**
-   * Tee a structured event into this run's `events.jsonl` (one JSON
-   * line per event, timestamped at append time). Synchronous and
-   * best-effort for the same reasons as `phase()`: freshness is the
-   * point, and logging failure never takes down the pipeline. The
-   * human `run.log` is untouched by this write.
-   */
-  event(payload: RunEventPayload) {
-    try {
-      appendFileSync(
-        join(this.runDir, EVENTS_FILE),
-        serializeRunEvent({ ...payload, ts: new Date().toISOString() }),
-      );
-    } catch {
-      // Best effort — the run.log / console remain the human contract.
-    }
-  }
-
-  /**
-   * Record a pipeline phase transition: appends a timestamped line to
-   * this run's `run.log` and echoes it to the console. The file write
-   * is synchronous (no buffered stream), so the log's mtime and
-   * content are current the moment the line is emitted — an operator
-   * tailing the file sees phase transitions even when the process's
-   * stdio is lost (e.g. `pnpm exec` swallowing stderr on Windows).
-   * Best-effort: a failed file write never takes down the pipeline.
-   *
-   * An optional structured payload tees the same transition into
-   * `events.jsonl` (spec #26) — the human line and its machine form
-   * are emitted by one call site, so they cannot drift apart.
-   */
-  phase(
-    message: string,
-    via: "error" | "log" | "warn" = "error",
-    event?: RunEventPayload,
-  ) {
-    try {
-      appendFileSync(
-        join(this.runDir, "run.log"),
-        `[${new Date().toISOString()}] ${message}\n`,
-      );
-    } catch {
-      // Console echo below still happens.
-    }
-    if (event) this.event(event);
-    console[via](message);
   }
 
   /** Add invocation stats to the running slice totals. */
@@ -197,85 +136,6 @@ export class Logger {
   }
 
   /**
-   * Replace a slice's lifecycle state. The full variant is required, so
-   * the type system rejects invalid transitions (e.g. PASS without
-   * `mergedToFeature`).
-   */
-  transitionTo(ghIssue: string, next: SliceLifecycle) {
-    this.runLog.slices.set(ghIssue, next);
-  }
-
-  /** Increment generator-round counter without changing phase. Throws on
-   * SKIPPED — HITL slices have no generator rounds. */
-  bumpGenRound(ghIssue: string, round: number) {
-    const cur = this.requireWithProgress(ghIssue, "bumpGenRound");
-    this.runLog.slices.set(ghIssue, {
-      ...cur,
-      progress: { ...cur.progress, genRounds: round },
-    });
-  }
-
-  /** Increment evaluator-round counter without changing phase. */
-  bumpEvalRound(ghIssue: string, round: number) {
-    const cur = this.requireWithProgress(ghIssue, "bumpEvalRound");
-    this.runLog.slices.set(ghIssue, {
-      ...cur,
-      progress: { ...cur.progress, evalRounds: round },
-    });
-  }
-
-  /** Move slice to STUCK, preserving identity and progress. */
-  markStuck(ghIssue: string, error: string) {
-    const cur = this.requireSlice(ghIssue, "markStuck");
-    const id = identityOf(cur);
-    const progress = progressOf(cur) ?? ZERO_PROGRESS;
-    this.runLog.slices.set(ghIssue, lifecycle.stuck(id, progress, error));
-  }
-
-  /** Move slice to CANCELLED, preserving identity and progress. */
-  markCancelled(ghIssue: string, error: string) {
-    const cur = this.requireSlice(ghIssue, "markCancelled");
-    const id = identityOf(cur);
-    const progress = progressOf(cur) ?? ZERO_PROGRESS;
-    this.runLog.slices.set(ghIssue, lifecycle.cancelled(id, progress, error));
-  }
-
-  /** Move slice to ESCALATE, preserving identity and progress. */
-  markEscalated(ghIssue: string, error: string) {
-    const cur = this.requireSlice(ghIssue, "markEscalated");
-    const id = identityOf(cur);
-    const progress = progressOf(cur) ?? ZERO_PROGRESS;
-    this.runLog.slices.set(ghIssue, lifecycle.escalate(id, progress, error));
-  }
-
-  /** Move slice to ERROR, preserving identity and progress. */
-  markError(ghIssue: string, error: string) {
-    const cur = this.requireSlice(ghIssue, "markError");
-    const id = identityOf(cur);
-    const progress = progressOf(cur) ?? ZERO_PROGRESS;
-    this.runLog.slices.set(ghIssue, lifecycle.error(id, progress, error));
-  }
-
-  /** Move slice to CONFLICT, preserving identity and progress. */
-  markConflict(ghIssue: string, error: string) {
-    const cur = this.requireSlice(ghIssue, "markConflict");
-    const id = identityOf(cur);
-    const progress = progressOf(cur) ?? ZERO_PROGRESS;
-    this.runLog.slices.set(ghIssue, lifecycle.conflict(id, progress, error));
-  }
-
-  /** Move slice to LANE-CANCELLED, preserving identity and progress. */
-  markLaneCancelled(ghIssue: string, error: string) {
-    const cur = this.requireSlice(ghIssue, "markLaneCancelled");
-    const id = identityOf(cur);
-    const progress = progressOf(cur) ?? ZERO_PROGRESS;
-    this.runLog.slices.set(
-      ghIssue,
-      lifecycle.laneCancelled(id, progress, error),
-    );
-  }
-
-  /**
    * Record full review outcomes, including the failure detail (typically
    * the failing agent's stderr line) that must surface in the run
    * summary — not only in launcher stderr. See ADR 0015.
@@ -303,42 +163,12 @@ export class Logger {
     this.runLog.featureBranch = name;
   }
 
-  /** Snapshot of a slice's current lifecycle, or undefined if not tracked. */
-  getSlice(ghIssue: string): SliceLifecycle | undefined {
-    return this.runLog.slices.get(ghIssue);
-  }
-
-  /** Current progress counters, or zeros if the slice isn't tracked yet. */
-  getSliceProgress(ghIssue: string): SliceProgress {
-    const cur = this.runLog.slices.get(ghIssue);
-    return cur ? (progressOf(cur) ?? ZERO_PROGRESS) : ZERO_PROGRESS;
-  }
-
   setSanityGate(result: SanityGateResult) {
     this.runLog.sanityGate = result;
   }
 
   setPrUrl(url: string) {
     this.runLog.prUrl = url;
-  }
-
-  private requireSlice(ghIssue: string, op: string): SliceLifecycle {
-    const cur = this.runLog.slices.get(ghIssue);
-    if (!cur) {
-      throw new Error(`Logger.${op}: slice ${ghIssue} is not tracked yet`);
-    }
-    return cur;
-  }
-
-  private requireWithProgress(
-    ghIssue: string,
-    op: string,
-  ): Exclude<SliceLifecycle, { phase: "SKIPPED" }> {
-    const cur = this.requireSlice(ghIssue, op);
-    if (cur.phase === "SKIPPED") {
-      throw new Error(`Logger.${op}: cannot bump rounds on a SKIPPED slice`);
-    }
-    return cur;
   }
 
   writeSummary() {
@@ -591,10 +421,6 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
   }
 }
 
-function identityOf(s: SliceLifecycle): SliceIdentity {
-  return { ghIssue: s.ghIssue, title: s.title, branch: s.branch };
-}
-
 /**
  * Collapse a failure detail (often multi-line agent stderr) to a single
  * bounded line so it can sit inline in run-summary.md.
@@ -604,10 +430,6 @@ function sanitizeDetail(detail: string | undefined): string | undefined {
   const collapsed = detail.replace(/\s+/g, " ").trim();
   if (collapsed.length === 0) return undefined;
   return collapsed.length > 400 ? `${collapsed.slice(0, 397)}...` : collapsed;
-}
-
-function progressOf(s: SliceLifecycle): SliceProgress | null {
-  return s.phase === "SKIPPED" ? null : s.progress;
 }
 
 function roundsCellFor(s: SliceLifecycle): string {

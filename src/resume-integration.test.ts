@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestrator.js";
-import { Logger } from "./logger.js";
+import { RunJournal as Logger } from "./run-journal.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 

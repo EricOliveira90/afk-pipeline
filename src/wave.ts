@@ -4,7 +4,7 @@ import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
-import { Logger } from "./logger.js";
+import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import {
   laneResourceGroups,
   migrationPathsIn,
@@ -32,30 +32,14 @@ export type WaveOutcomePhase =
   | "MERGE-PENDING"
   | "LANE-CANCELLED";
 
-export type WaveOutcome =
-  | { phase: "PASS" }
-  /**
-   * Deferred merge (ADR 0029). The slice branch is intact and QA passed;
-   * only the migration prefix collision refused the merge. The prefixes
-   * ride along so the orchestrator can persist them for the next run's
-   * merge-only recovery.
-   */
-  | {
-      phase: "MERGE-PENDING";
-      error: string;
-      collidingPrefixes: string[];
-    }
-  | {
-      phase: Exclude<WaveOutcomePhase, "PASS" | "MERGE-PENDING">;
-      error: string;
-    };
+export type WaveOutcome = TerminalOutcome;
 
 export interface WaveInput {
   waveNumber: number;
   readyIds: string[];
   config: PipelineConfig;
   dag: DAG;
-  logger: Logger;
+  logger: RunJournal;
   featBranch: string;
   relevantFilesBlock: string;
   testCommand: string;
@@ -416,7 +400,6 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               return;
             }
             const msg = err instanceof Error ? err.message : String(err);
-            logger.markError(id, msg);
             record(id, { phase: "ERROR", error: msg });
             continueLane(i, "ERROR");
             continue;
@@ -426,24 +409,12 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         // Run Phase B.
         let outcome: WaveOutcome;
         try {
-          const phaseB = await runSliceExecute(ctx);
-          outcome =
-            phaseB === "PASS"
-              ? PASS
-              : phaseB === "CANCELLED"
-                ? { phase: "CANCELLED", error: "Cancelled by user" }
-                : phaseB === "STUCK"
-                  ? {
-                      phase: "STUCK",
-                      error: "Phase B returned STUCK",
-                    }
-                  : { phase: "ERROR", error: "Phase B returned ERROR" };
+          outcome = await runSliceExecute(ctx);
         } catch (err) {
           if (isCancelled(err, signal)) {
             outcome = { phase: "CANCELLED", error: "Cancelled by user" };
           } else {
             const msg = err instanceof Error ? err.message : String(err);
-            logger.markError(id, msg);
             outcome = { phase: "ERROR", error: msg };
           }
         }
@@ -549,7 +520,6 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             return;
           }
           const msg = err instanceof Error ? err.message : String(err);
-          logger.markError(id, msg);
           record(id, { phase: "ERROR", error: msg });
           continueLane(i, "ERROR");
           continue;

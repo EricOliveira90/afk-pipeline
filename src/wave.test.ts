@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
 import { makeAsyncMutex, sliceBranch } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
-import { Logger } from "./logger.js";
+import { RunJournal as Logger } from "./run-journal.js";
 import * as gitModule from "./git.js";
 import type {
   AgentProvider,

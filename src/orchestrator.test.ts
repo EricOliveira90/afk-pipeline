@@ -25,7 +25,7 @@ import {
   runPreShipSanity,
 } from "./orchestrator.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
-import { Logger } from "./logger.js";
+import { RunJournal as Logger } from "./run-journal.js";
 import type {
   AgentProvider,
   InvokeOptions,
