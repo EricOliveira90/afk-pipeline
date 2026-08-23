@@ -10,7 +10,7 @@ import { CancelledError } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
 import * as git from "./git.js";
 import { parseDraftPrNumber } from "./handoff.js";
-import { runPreShipSanity } from "./preship.js";
+import { runPreShipSanity, type PreShipSanityResult } from "./preship.js";
 import { renderPrompt } from "./prompt-template.js";
 import type { RunJournal } from "./run-journal.js";
 import {
@@ -146,7 +146,7 @@ export type ShipGateJournal = Pick<
 export interface ShipGateOptions {
   reviewRetries: number;
   reviewIdleTimeoutMs: number;
-  reviewHeartbeatMs: number;
+  reviewIdleWarningIntervalMs: number;
   maxAgentDurationMs?: number;
   serialReviews: boolean;
   openPrOnOverride: boolean;
@@ -262,11 +262,15 @@ export async function runShipGate(
   const relativeSpecsDir = specsDir.replace(/\\/g, "/");
 
   journal.phase("Running pre-ship sanity gate...", "log");
+  // Cache the gate by the reviewed tree's SHA (ADR 0015): a re-entry
+  // against the same content — e.g. after a review infrastructure
+  // failure, or when only docs/review commits landed — must not pay
+  // the full typecheck+lint+tests cost again. Only PASS is cached.
   const treeShaBefore = git.resolveTree(reviewDir);
   const cachedSanity = cachedReviewPhase?.sanity;
   const usesCachedSanity =
     !!treeShaBefore && cachedSanity?.treeSha === treeShaBefore;
-  let sanity: { ok: boolean; failures: string[] };
+  let sanity: PreShipSanityResult;
   if (usesCachedSanity) {
     journal.event({
       type: "run-phase-started",
@@ -342,7 +346,7 @@ export async function runShipGate(
           cwd: reviewDir,
           logStream: log,
           idleTimeoutMs: options.reviewIdleTimeoutMs,
-          idleWarningIntervalMs: options.reviewHeartbeatMs,
+          idleWarningIntervalMs: options.reviewIdleWarningIntervalMs,
           maxDurationMs: options.maxAgentDurationMs,
           onStreamEvent: () => {
             sawOutput = true;
@@ -470,7 +474,10 @@ export async function runShipGate(
   const headShaAfter = git.resolveCommit(reviewDir, "HEAD");
   const treeShaAfter = git.resolveTree(reviewDir);
   const nextReviewPhase: PersistedReviewPhase = {};
-  if (treeShaAfter) {
+  // Only PASS is cached (ADR 0015). Sanity failure returns BLOCKED before
+  // reaching this point, but the guard keeps the invariant enforced at the
+  // write site rather than by control flow alone.
+  if (sanity.ok && treeShaAfter) {
     nextReviewPhase.sanity = { treeSha: treeShaAfter, ok: true };
   }
   if (headShaAfter) {

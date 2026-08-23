@@ -121,7 +121,7 @@ function makeArgs(
     options: {
       reviewRetries: 1,
       reviewIdleTimeoutMs: 600_000,
-      reviewHeartbeatMs: 30_000,
+      reviewIdleWarningIntervalMs: 30_000,
       serialReviews: true,
       openPrOnOverride: false,
     },

@@ -90,6 +90,10 @@ function verifyMigrationLinked(cwd: string): MigrationCheck {
   }
 }
 
+/**
+ * Dispatch the migration gate by mode. `cwd` MUST be the slice worktree
+ * (where the unmerged migration lives), not `repoRoot`.
+ */
 export function verifyMigrationSync(
   cwd: string,
   mode: MigrationValidation,
@@ -104,7 +108,12 @@ export function verifyMigrationSync(
   }
 }
 
-/** Whether the slice branch changed any Supabase migration. */
+/**
+ * Returns true if this slice's branch has any commit that touches files
+ * under `supabase/migrations/` compared to the feature branch base.
+ * Used to gate the migration drift check: there's no point running the
+ * linked-remote check for a slice that didn't change any migrations.
+ */
 export function sliceTouchedMigrations(
   worktreeDir: string,
   featBranch: string,
@@ -127,6 +136,8 @@ export function sliceTouchedMigrations(
     );
     return output.trim().length > 0;
   } catch {
+    // If the diff errors (e.g., feat branch not yet created on first run),
+    // be conservative and skip the check rather than false-fail the slice.
     return false;
   }
 }

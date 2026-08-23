@@ -2435,7 +2435,7 @@ export async function runPipeline(
             config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
           reviewIdleTimeoutMs:
             config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS,
-          reviewHeartbeatMs:
+          reviewIdleWarningIntervalMs:
             config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
           maxAgentDurationMs: config.maxAgentDurationMs,
           serialReviews: config.serialLanes === true,
