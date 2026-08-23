@@ -214,6 +214,37 @@ export interface CandidateCheckpoint {
 }
 
 /**
+ * Bind a detached checkpoint checkout to its original commit and return a
+ * restorer that removes writes made by a gate. The tree check prevents a
+ * caller from labelling one checkout with another checkpoint's identity.
+ */
+export function createCandidateCheckpointRestorer(
+  cwd: string,
+  expectedTreeId: string,
+): () => void {
+  const commitSha = resolveCommit(cwd, "HEAD");
+  const treeId = resolveTree(cwd, "HEAD");
+  if (!commitSha || treeId !== expectedTreeId) {
+    throw new Error(
+      `Gate checkout tree does not match checkpoint ${expectedTreeId}`,
+    );
+  }
+
+  return () => {
+    git(["reset", "--hard", commitSha], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    git(["clean", "-fd"], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    if (resolveTree(cwd, "HEAD") !== expectedTreeId) {
+      throw new Error(
+        `Could not restore gate checkout to checkpoint ${expectedTreeId}`,
+      );
+    }
+  };
+}
+
+/**
  * Capture the writable candidate and materialize that exact commit in a
  * detached worktree. Later writes to the slice worktree cannot change the
  * files observed by deterministic gates.

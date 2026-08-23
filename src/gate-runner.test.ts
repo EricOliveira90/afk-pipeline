@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,6 +13,33 @@ import { readGateEvidence, runGates } from "./gate-runner.js";
 
 const dirs: string[] = [];
 
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+}
+
+function makeCheckpoint(
+  files: Record<string, string> = { "tracked.txt": "candidate" },
+) {
+  const root = mkdtempSync(join(tmpdir(), "afk-gates-"));
+  dirs.push(root);
+  const cwd = join(root, "checkpoint");
+  mkdirSync(cwd);
+  git(cwd, ["init", "--initial-branch=main"]);
+  git(cwd, ["config", "user.email", "test@example.com"]);
+  git(cwd, ["config", "user.name", "Test"]);
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(join(cwd, name), content, "utf-8");
+  }
+  git(cwd, ["add", "-A"]);
+  git(cwd, ["commit", "-m", "candidate"]);
+  return {
+    root,
+    cwd,
+    evidenceDir: join(root, "evidence"),
+    treeId: git(cwd, ["rev-parse", "HEAD^{tree}"]),
+  };
+}
+
 afterEach(() => {
   for (const dir of dirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -18,13 +47,56 @@ afterEach(() => {
 });
 
 describe("runGates", () => {
+  it("starts every gate from the exact candidate tree", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint({
+      "candidate.txt": "candidate",
+    });
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "mutating-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "require('fs').writeFileSync('candidate.txt', 'mutated')",
+          ],
+        },
+        {
+          id: "observing-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "process.exit(require('fs').readFileSync('candidate.txt','utf8') === 'candidate' ? 0 : 23)",
+          ],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results.map(({ status }) => status)).toEqual([
+      "PASS",
+      "PASS",
+    ]);
+    expect(readFileSync(join(cwd, "candidate.txt"), "utf-8")).toBe(
+      "candidate",
+    );
+  });
+
   it("runs declarations in order and preserves structured evidence and logs", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "afk-gates-"));
-    dirs.push(cwd);
-    const evidenceDir = join(cwd, "evidence");
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const output: string[] = [];
     const result = await runGates({
-      treeId: "0123456789abcdef0123456789abcdef01234567",
+      treeId,
       cwd,
       evidenceDir,
       declarations: [
@@ -63,7 +135,7 @@ describe("runGates", () => {
       status: "PASS",
       failureKind: null,
       exitCode: 0,
-      treeId: "0123456789abcdef0123456789abcdef01234567",
+      treeId,
     });
     expect(result.evidence.results[1]).toMatchObject({
       gateId: "tests",
@@ -88,12 +160,11 @@ describe("runGates", () => {
   });
 
   it("classifies missing and invalid declarations without hiding later gates", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "afk-gates-"));
-    dirs.push(cwd);
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const result = await runGates({
-      treeId: "fedcba9876543210fedcba9876543210fedcba98",
+      treeId,
       cwd,
-      evidenceDir: join(cwd, "evidence"),
+      evidenceDir,
       declarations: [
         {
           id: "missing-tool",
@@ -146,16 +217,15 @@ describe("runGates", () => {
   });
 
   it("records cancellation as infrastructure and starts no later gate", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "afk-gates-"));
-    dirs.push(cwd);
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const controller = new AbortController();
     const starts: string[] = [];
     setTimeout(() => controller.abort(), 100);
 
     const result = await runGates({
-      treeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      treeId,
       cwd,
-      evidenceDir: join(cwd, "evidence"),
+      evidenceDir,
       declarations: [
         {
           id: "long-running",
@@ -191,11 +261,9 @@ describe("runGates", () => {
   });
 
   it("preserves distinct attempts and rejects unversioned evidence", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "afk-gates-"));
-    dirs.push(cwd);
-    const evidenceDir = join(cwd, "evidence");
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const options = {
-      treeId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      treeId,
       cwd,
       evidenceDir,
       declarations: [

@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { runBoundedCommand } from "./command-runtime.js";
+import { createCandidateCheckpointRestorer } from "./git.js";
 
 export const GATE_EVIDENCE_VERSION = 1;
 
@@ -68,6 +69,19 @@ export async function runGates(
   const logsDir = join(options.evidenceDir, "gate-logs");
   mkdirSync(logsDir, { recursive: true });
   const results: GateResult[] = [];
+  let restoreCheckpoint: (() => void) | undefined;
+  let checkpointError: string | undefined;
+  if (existsSync(options.cwd)) {
+    try {
+      restoreCheckpoint = createCandidateCheckpointRestorer(
+        options.cwd,
+        options.treeId,
+      );
+    } catch (error) {
+      checkpointError =
+        error instanceof Error ? error.message : String(error);
+    }
+  }
 
   for (const [index, declaration] of options.declarations.entries()) {
     const safeId =
@@ -133,6 +147,49 @@ export async function runGates(
       break;
     }
 
+    if (checkpointError || !restoreCheckpoint) {
+      const now = new Date().toISOString();
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "INFRASTRUCTURE",
+        failureKind: null,
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        detail: checkpointError ?? "Gate checkpoint is unavailable",
+      };
+      emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
+      results.push(result);
+      break;
+    }
+
+    try {
+      restoreCheckpoint();
+    } catch (error) {
+      const now = new Date().toISOString();
+      const detail = error instanceof Error ? error.message : String(error);
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "INFRASTRUCTURE",
+        failureKind: null,
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        detail,
+      };
+      emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
+      results.push(result);
+      break;
+    }
+
     const execution = await runBoundedCommand(
       declaration.command,
       declaration.args ?? [],
@@ -145,6 +202,29 @@ export async function runGates(
         onOutput: emit,
       },
     );
+    try {
+      restoreCheckpoint();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "INFRASTRUCTURE",
+        failureKind: null,
+        startedAt: execution.startedAt,
+        endedAt: new Date().toISOString(),
+        durationMs: Date.now() - Date.parse(execution.startedAt),
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        detail,
+      };
+      emit(
+        `[gate:${declaration.id}] INFRASTRUCTURE (${result.durationMs}ms)\n`,
+      );
+      results.push(result);
+      break;
+    }
     const classification = classifyExecution(
       execution.outcome,
       execution.exitCode,
