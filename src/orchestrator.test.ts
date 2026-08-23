@@ -14,16 +14,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assessContractExtension,
-  buildPrCreationPlan,
-  buildReviewScopeBlock,
   makeAsyncMutex,
   makeSliceContext,
-  resolveSanityCommands,
-  resolveTestCommand,
   runPipeline,
   runSliceNegotiate,
-  runPreShipSanity,
 } from "./orchestrator.js";
+import {
+  buildPrCreationPlan,
+  buildReviewScopeBlock,
+} from "./ship-gate.js";
+import {
+  resolveSanityCommands,
+  resolveTestCommand,
+  runPreShipSanity,
+} from "./preship.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import type {

@@ -293,6 +293,19 @@ guardians and the PR; the run-summary records the failing step names,
 and the run is a **blocked ship**.
 _Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
 
+**Ship gate**:
+The post-wave module that decides whether the merged **feature branch** may
+ship. It runs or reuses the **pre-ship sanity gate**, invokes or reuses the
+**architect reviewer** and **PM reviewer**, commits guardian artifacts,
+persists the review phase in **run state**, and applies the normal or
+`--open-pr-on-override` draft-PR decision. It returns a ship verdict and PR
+outcome to the AFK pipeline; push and GitHub CLI failures remain best-effort
+after the gate opens. See ADR 0033.
+_Avoid_: "pre-ship sanity gate" (that is one check inside the ship gate),
+"review phase" (omits sanity, caching, and the PR decision), "PR creator"
+(opening the gate and creating the remote PR are distinct), "release gate"
+(the output is a draft PR, not a release)
+
 **Agent failure cause**:
 What ended an agent-driven phase short of success, classified at the
 point of failure into one of five kinds: `provider-exit` (the **agent
