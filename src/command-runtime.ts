@@ -21,78 +21,152 @@ export interface CommandTimeoutOptions {
   onOutput?: (text: string) => void;
 }
 
-/** Run a command whose inactivity timeout resets on stdout or stderr. */
-export function runHeartbeatCommand(
+export type CommandOutcome =
+  | "EXITED"
+  | "SPAWN_ERROR"
+  | "CANCELLED"
+  | "INACTIVITY_TIMEOUT"
+  | "WALL_CLOCK_TIMEOUT";
+
+export interface BoundedCommandOptions extends CommandTimeoutOptions {
+  wallClockTimeoutMs?: number;
+  shell?: boolean;
+}
+
+export interface CommandExecutionResult {
+  outcome: CommandOutcome;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  exitCode: number | null;
+  errorCode?: string;
+  detail?: string;
+}
+
+/**
+ * Run one process with output-driven inactivity, wall-clock, and cancellation
+ * bounds. Timeout and cancellation outcomes settle only after verified
+ * process-tree termination completes.
+ */
+export function runBoundedCommand(
   command: string,
-  options: CommandTimeoutOptions,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(command, {
+  args: readonly string[],
+  options: BoundedCommandOptions,
+): Promise<CommandExecutionResult> {
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+
+  return new Promise((resolve) => {
+    const proc = spawn(command, [...args], {
       cwd: options.cwd,
-      shell: true,
+      shell: options.shell ?? false,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let settled = false;
-    let terminalError: Error | undefined;
+    let terminating = false;
     let lastActivity = Date.now();
+    let heartbeat: NodeJS.Timeout | undefined;
+    let wallClock: NodeJS.Timeout | undefined;
 
     const cleanup = () => {
-      clearInterval(heartbeat);
+      if (heartbeat) clearInterval(heartbeat);
+      if (wallClock) clearTimeout(wallClock);
       options.signal?.removeEventListener("abort", onAbort);
     };
-    const terminate = (error: Error) => {
-      if (settled || terminalError) return;
-      terminalError = error;
+    const settle = (
+      outcome: CommandOutcome,
+      exitCode: number | null,
+      detail?: string,
+      errorCode?: string,
+    ) => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      // Tree-first verified kill (ADR 0020). If even the root refuses
-      // to die, `exit` never fires — settle from the termination
-      // report instead of hanging forever. Survivors and verification
-      // failures are surfaced through onOutput.
+      const endedAtMs = Date.now();
+      resolve({
+        outcome,
+        startedAt,
+        endedAt: new Date(endedAtMs).toISOString(),
+        durationMs: endedAtMs - startedAtMs,
+        exitCode,
+        ...(errorCode ? { errorCode } : {}),
+        ...(detail ? { detail } : {}),
+      });
+    };
+    const terminate = (outcome: CommandOutcome, detail: string) => {
+      if (settled || terminating) return;
+      terminating = true;
+      cleanup();
       void terminateProcessTree(proc).then((report) => {
         const warning = formatTerminationWarning(report);
         if (warning) options.onOutput?.(`\n${warning}\n`);
-        if (!report.rootDead && !settled) {
-          settled = true;
-          reject(
-            new Error(`${error.message}${warning ? ` — ${warning}` : ""}`),
-          );
-        }
+        settle(
+          outcome,
+          null,
+          warning ? `${detail} - ${warning}` : detail,
+        );
       });
     };
-    const heartbeat = setInterval(() => {
-      if (Date.now() - lastActivity < options.inactivityTimeoutMs) return;
-      terminate(
-        new Error(
-          `Command produced no heartbeat for ${options.inactivityTimeoutMs}ms: ${command}`,
-        ),
-      );
-    }, Math.min(options.heartbeatIntervalMs, options.inactivityTimeoutMs));
-    heartbeat.unref();
-
-    const onAbort = () => terminate(new Error(`Command cancelled: ${command}`));
-    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () =>
+      terminate("CANCELLED", `Command cancelled: ${command}`);
     const onData = (chunk: Buffer) => {
       lastActivity = Date.now();
       options.onOutput?.(chunk.toString());
     };
+
     proc.stdout?.on("data", onData);
     proc.stderr?.on("data", onData);
-    proc.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
+    proc.on("error", (error: NodeJS.ErrnoException) => {
+      if (terminating) return;
+      settle("SPAWN_ERROR", null, error.message, error.code);
     });
     proc.on("exit", (code) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (terminalError) reject(terminalError);
-      else if (code !== 0) {
-        reject(new Error(`Command exited with code ${code ?? 1}: ${command}`));
-      } else resolve();
+      if (terminating) return;
+      settle("EXITED", code);
     });
+
+    heartbeat = setInterval(() => {
+      if (Date.now() - lastActivity < options.inactivityTimeoutMs) return;
+      terminate(
+        "INACTIVITY_TIMEOUT",
+        `Command produced no heartbeat for ${options.inactivityTimeoutMs}ms: ${command}`,
+      );
+    }, Math.min(options.heartbeatIntervalMs, options.inactivityTimeoutMs));
+    heartbeat.unref();
+
+    if (options.wallClockTimeoutMs != null) {
+      wallClock = setTimeout(
+        () =>
+          terminate(
+            "WALL_CLOCK_TIMEOUT",
+            `Command exceeded wall-clock ceiling of ${options.wallClockTimeoutMs}ms: ${command}`,
+          ),
+        options.wallClockTimeoutMs,
+      );
+      wallClock.unref();
+    }
+
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
   });
+}
+
+/** Run a command whose inactivity timeout resets on stdout or stderr. */
+export async function runHeartbeatCommand(
+  command: string,
+  options: CommandTimeoutOptions,
+): Promise<void> {
+  const result = await runBoundedCommand(command, [], {
+    ...options,
+    shell: true,
+  });
+  if (result.outcome === "EXITED" && result.exitCode === 0) return;
+  if (result.outcome === "EXITED") {
+    throw new Error(
+      `Command exited with code ${result.exitCode ?? 1}: ${command}`,
+    );
+  }
+  throw new Error(result.detail ?? `Command failed: ${command}`);
 }
 
 export interface CrossProcessLockOptions {

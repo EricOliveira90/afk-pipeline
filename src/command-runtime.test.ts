@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runHeartbeatCommand, withCrossProcessLock } from "./command-runtime.js";
+import {
+  runBoundedCommand,
+  runHeartbeatCommand,
+  withCrossProcessLock,
+} from "./command-runtime.js";
 
 const dirs: string[] = [];
 
@@ -37,6 +41,105 @@ describe("runHeartbeatCommand", () => {
         heartbeatIntervalMs: 10,
       }),
     ).rejects.toThrow(/no heartbeat for 40ms/);
+  });
+});
+
+describe("runBoundedCommand", () => {
+  it("streams stdout and stderr and returns structured exit evidence", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
+    dirs.push(cwd);
+    const output: string[] = [];
+
+    const result = await runBoundedCommand(
+      process.execPath,
+      [
+        "-e",
+        "process.stdout.write('out'); process.stderr.write('err'); process.exit(23)",
+      ],
+      {
+        cwd,
+        inactivityTimeoutMs: 1_000,
+        heartbeatIntervalMs: 20,
+        wallClockTimeoutMs: 2_000,
+        onOutput: (text) => output.push(text),
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: "EXITED", exitCode: 23 });
+    expect(output.join("")).toContain("out");
+    expect(output.join("")).toContain("err");
+  });
+
+  it("kills a silent parent and descendant on inactivity", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
+    dirs.push(cwd);
+    const childPidPath = join(cwd, "child.pid");
+    const childScript = join(cwd, "child.cjs");
+    const parentScript = join(cwd, "parent.cjs");
+    writeFileSync(childScript, "setInterval(() => {}, 1000);", "utf-8");
+    writeFileSync(
+      parentScript,
+      [
+        "const { spawn } = require('node:child_process');",
+        "const { writeFileSync } = require('node:fs');",
+        `const child = spawn(process.execPath, [${JSON.stringify(childScript)}], { stdio: 'ignore' });`,
+        `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const result = await runBoundedCommand(process.execPath, [parentScript], {
+      cwd,
+      inactivityTimeoutMs: 100,
+      heartbeatIntervalMs: 20,
+      wallClockTimeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("INACTIVITY_TIMEOUT");
+    const childPid = Number(readFileSync(childPidPath, "utf-8"));
+    expect(() => process.kill(childPid, 0)).toThrow();
+  });
+
+  it("enforces the wall-clock limit despite continuous output", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
+    dirs.push(cwd);
+    const result = await runBoundedCommand(
+      process.execPath,
+      [
+        "-e",
+        "setInterval(() => process.stdout.write('beat\\n'), 20)",
+      ],
+      {
+        cwd,
+        inactivityTimeoutMs: 1_000,
+        heartbeatIntervalMs: 20,
+        wallClockTimeoutMs: 150,
+      },
+    );
+
+    expect(result.outcome).toBe("WALL_CLOCK_TIMEOUT");
+  });
+
+  it("propagates cancellation through process-tree termination", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
+    dirs.push(cwd);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+
+    const result = await runBoundedCommand(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      {
+        cwd,
+        inactivityTimeoutMs: 1_000,
+        heartbeatIntervalMs: 20,
+        wallClockTimeoutMs: 2_000,
+        signal: controller.signal,
+      },
+    );
+
+    expect(result.outcome).toBe("CANCELLED");
   });
 });
 
