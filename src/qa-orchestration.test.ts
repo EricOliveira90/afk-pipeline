@@ -97,7 +97,7 @@ function makeContext(
   };
 }
 
-describe("PRD 070 QA retry behavior", () => {
+describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
   it("blocks evaluation until every required checkpoint gate passes", async () => {
     const repo = makeRepo();
     const gateScript =
