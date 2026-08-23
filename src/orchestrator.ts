@@ -42,6 +42,7 @@ import {
   withCrossProcessLock,
 } from "./command-runtime.js";
 import {
+  createCandidateCheckpoint,
   runGates,
   verifyGateEvidence,
   type GateDeclaration,
@@ -1807,10 +1808,9 @@ export async function runSliceExecute(
         "checkpoints",
         `${config.prdSlug}-s${slice.number}-r${round}-${randomUUID()}`,
       );
-      const checkpoint = git.createCandidateCheckpoint(
+      const checkpoint = createCandidateCheckpoint(
         ctx.worktreeDir,
         checkpointDir,
-        `feat(#${slice.ghIssue}): checkpoint candidate round ${round}`,
       );
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
       const infrastructureRetries =
@@ -1862,15 +1862,30 @@ export async function runSliceExecute(
             evidence: gateEvidence,
             evidencePath: gateEvidencePath,
           });
-          logger.recordGateAttempt(
-            {
+          const evidenceArtifactId = relative(
+            config.repoRoot,
+            gateEvidencePath,
+          ).replace(/\\/g, "/");
+          for (const result of gateEvidence.results) {
+            logger.event({
+              type: "gate-outcome",
               ghIssue: slice.ghIssue,
               sliceNumber: slice.number,
               round,
-            },
-            gateEvidence,
-            relative(config.repoRoot, gateEvidencePath).replace(/\\/g, "/"),
-          );
+              attemptId: gateEvidence.attemptId,
+              gateId: result.gateId,
+              stage: result.stage,
+              status: result.status,
+              failureKind: result.failureKind,
+              startedAt: result.startedAt,
+              endedAt: result.endedAt,
+              durationMs: result.durationMs,
+              exitCode: result.exitCode,
+              treeId: result.treeId,
+              evidenceArtifactId,
+              logArtifactId: result.logArtifactId,
+            });
+          }
           const infrastructureFailure = gateEvidence.results.some(
             (gate) =>
               isRequired(gate.gateId) &&

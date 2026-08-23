@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
-import type { GateEvidence, GateResult } from "./gate-runner.js";
+import { readRunEvents } from "./run-events.js";
 import {
   assertNever,
   bucketFor,
@@ -41,7 +41,6 @@ export interface RunLog {
   featureBranch?: string;
   slices: Map<string, SliceLifecycle>;
   totals: Map<string, SliceTotals>;
-  gateAttempts: GateSummaryEntry[];
   architectVerdict?: string;
   pmVerdict?: string;
   /** Failure detail (e.g. the agent's stderr line) for a failed architect review. */
@@ -52,14 +51,6 @@ export interface RunLog {
   prUrl?: string;
   /** Set when the PR was opened via --open-pr-on-override (ADR 0015). */
   prOverrideNote?: string;
-}
-
-interface GateSummaryEntry {
-  ghIssue: string;
-  round: number;
-  attemptId: string;
-  evidenceArtifactId: string;
-  result: GateResult;
 }
 
 /**
@@ -107,7 +98,6 @@ export class Logger {
       startedAt,
       slices,
       totals: new Map(),
-      gateAttempts: [],
     };
   }
 
@@ -182,23 +172,6 @@ export class Logger {
     this.runLog.prUrl = url;
   }
 
-  addGateAttempt(
-    ghIssue: string,
-    round: number,
-    evidence: GateEvidence,
-    evidenceArtifactId: string,
-  ) {
-    for (const result of evidence.results) {
-      this.runLog.gateAttempts.push({
-        ghIssue,
-        round,
-        attemptId: evidence.attemptId,
-        evidenceArtifactId,
-        result,
-      });
-    }
-  }
-
   writeSummary() {
     this.runLog.finishedAt = new Date();
     const {
@@ -213,8 +186,10 @@ export class Logger {
       sanityGate,
       prUrl,
       prOverrideNote,
-      gateAttempts,
     } = this.runLog;
+    const gateAttempts = (readRunEvents(this.runDir)?.events ?? []).filter(
+      (event) => event.type === "gate-outcome",
+    );
 
     const totals = this.runLog.totals;
     let runCost = 0;
@@ -238,12 +213,12 @@ export class Logger {
 
     const totalsRow = `| **Run totals** | | | | **${runCost > 0 ? `$${runCost.toFixed(4)}` : "—"}** | **${runToolCalls}** |`;
     const gateRows = gateAttempts
-      .map(({ ghIssue, round, evidenceArtifactId, result }) => {
+      .map((event) => {
         const status =
-          result.status === "FAIL" && result.failureKind
-            ? `${result.status} (${result.failureKind})`
-            : result.status;
-        return `| ${ghIssue} | ${round} | ${result.gateId} | ${status} | ${result.durationMs}ms | ${evidenceArtifactId} | ${result.logArtifactId} |`;
+          event.status === "FAIL" && event.failureKind
+            ? `${event.status} (${event.failureKind})`
+            : event.status;
+        return `| ${event.ghIssue} | ${event.round} | ${event.gateId} | ${status} | ${event.durationMs}ms | ${event.evidenceArtifactId} | ${event.logArtifactId} |`;
       })
       .join("\n");
     const gateSection =

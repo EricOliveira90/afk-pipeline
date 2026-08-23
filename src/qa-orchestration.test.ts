@@ -169,7 +169,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
     );
     expect(attempts[0].results.map((gate: { gateId: string }) => gate.gateId))
-      .toEqual(["typecheck", "lint", "test"]);
+      .toEqual(["typecheck", "lint", "tests"]);
     expect(
       attempts.some(
         (attempt) =>
@@ -419,6 +419,78 @@ describe("provider-independent policy-less base gates", () => {
       ).toBe(providerName);
     }, 30_000);
   }
+});
+
+describe("base gate observability", () => {
+  it("projects every completed outcome to typed events and the run summary", () => {
+    const repo = makeRepo();
+    const ctx = makeContext(repo, {
+      name: "observability",
+      async invoke() {
+        throw new Error("not invoked");
+      },
+    });
+    const statuses = [
+      ["pass", "PASS", null],
+      ["command", "FAIL", "COMMAND"],
+      ["configuration", "FAIL", "CONFIGURATION"],
+      ["infrastructure", "INFRASTRUCTURE", null],
+      ["optional", "SKIPPED", null],
+    ] as const;
+
+    for (const [index, [gateId, status, failureKind]] of statuses.entries()) {
+      ctx.logger.event({
+        type: "gate-outcome",
+        ghIssue: "70",
+        sliceNumber: "01",
+        round: 2,
+        attemptId: "attempt-1",
+        gateId,
+        stage: "base",
+        status,
+        failureKind,
+        startedAt: "2026-08-23T10:00:00.000Z",
+        endedAt: "2026-08-23T10:00:00.010Z",
+        durationMs: index + 10,
+        exitCode: status === "FAIL" ? 1 : null,
+        treeId: "0123456789abcdef0123456789abcdef01234567",
+        evidenceArtifactId: "gates/s01/attempt-1.json",
+        logArtifactId: `gate-logs/${gateId}.log`,
+      });
+    }
+
+    const events = readFileSync(
+      join(ctx.logger.runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "gate-outcome");
+    expect(events.map((event) => event.status)).toEqual([
+      "PASS",
+      "FAIL",
+      "FAIL",
+      "INFRASTRUCTURE",
+      "SKIPPED",
+    ]);
+    expect(events[1]).toMatchObject({
+      gateId: "command",
+      durationMs: 11,
+      failureKind: "COMMAND",
+    });
+
+    const summary = ctx.logger.writeSummary();
+    expect(summary).toContain("| 70 | 2 | pass | PASS | 10ms |");
+    expect(summary).toContain("| 70 | 2 | command | FAIL (COMMAND) | 11ms |");
+    expect(summary).toContain(
+      "| 70 | 2 | configuration | FAIL (CONFIGURATION) | 12ms |",
+    );
+    expect(summary).toContain(
+      "| 70 | 2 | infrastructure | INFRASTRUCTURE | 13ms |",
+    );
+    expect(summary).toContain("| 70 | 2 | optional | SKIPPED | 14ms |");
+  });
 });
 
 describe("shared-preview QA", () => {

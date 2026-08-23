@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createCandidateCheckpoint,
   readGateEvidence,
   runGates,
   verifyGateEvidence,
@@ -49,6 +50,37 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("createCandidateCheckpoint", () => {
+  it("captures generator output without advancing the source branch", () => {
+    const { root, cwd } = makeCheckpoint();
+    const sourceHead = git(cwd, ["rev-parse", "HEAD"]);
+    writeFileSync(join(cwd, "tracked.txt"), "generated", "utf-8");
+    writeFileSync(join(cwd, "untracked.txt"), "included", "utf-8");
+
+    const checkpoint = createCandidateCheckpoint(
+      cwd,
+      join(root, "detached-checkpoint"),
+    );
+
+    expect(git(cwd, ["rev-parse", "HEAD"])).toBe(sourceHead);
+    expect(checkpoint.commitSha).not.toBe(sourceHead);
+    expect(checkpoint.treeId).toBe(
+      git(checkpoint.worktreeDir, ["rev-parse", "HEAD^{tree}"]),
+    );
+    expect(
+      readFileSync(join(checkpoint.worktreeDir, "tracked.txt"), "utf-8"),
+    ).toBe("generated");
+    expect(
+      readFileSync(join(checkpoint.worktreeDir, "untracked.txt"), "utf-8"),
+    ).toBe("included");
+
+    writeFileSync(join(cwd, "tracked.txt"), "later mutation", "utf-8");
+    expect(
+      readFileSync(join(checkpoint.worktreeDir, "tracked.txt"), "utf-8"),
+    ).toBe("generated");
+  });
 });
 
 describe("runGates", () => {
@@ -434,6 +466,74 @@ describe("runGates", () => {
     expect(result.evidence.results[0]).toMatchObject({
       status: "INFRASTRUCTURE",
       failureKind: null,
+      exitCode: null,
+    });
+  });
+
+  it("terminates a silent command tree on inactivity", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    const childPidPath = join(root, "child.pid");
+    const command = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "silent",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", command],
+        },
+      ],
+      inactivityTimeoutMs: 100,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results[0]).toMatchObject({
+      status: "FAIL",
+      failureKind: "COMMAND",
+      exitCode: null,
+    });
+    const childPid = Number(readFileSync(childPidPath, "utf-8"));
+    expect(() => process.kill(childPid, 0)).toThrow();
+  });
+
+  it("enforces the wall-clock limit despite continuous output", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "continuous",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "setInterval(() => process.stdout.write('beat\\n'), 20)",
+          ],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 150,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results[0]).toMatchObject({
+      status: "FAIL",
+      failureKind: "COMMAND",
       exitCode: null,
     });
   });

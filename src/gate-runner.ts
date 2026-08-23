@@ -3,11 +3,14 @@ import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { runBoundedCommand } from "./command-runtime.js";
 import { resolveCommit, resolveTree } from "./git.js";
 
@@ -78,6 +81,65 @@ export interface GateEvidenceArtifact {
     path: string;
     sha256: string;
   }[];
+}
+
+export interface CandidateCheckpoint {
+  commitSha: string;
+  treeId: string;
+  worktreeDir: string;
+}
+
+/**
+ * Materialize the current candidate in a detached worktree without moving the
+ * source branch. A temporary index captures tracked and untracked output while
+ * leaving the generator worktree and its real index untouched.
+ */
+export function createCandidateCheckpoint(
+  cwd: string,
+  worktreeDir: string,
+): CandidateCheckpoint {
+  if (existsSync(worktreeDir)) {
+    throw new Error(`Candidate checkpoint path already exists: ${worktreeDir}`);
+  }
+
+  const baseCommit = resolveCommit(cwd, "HEAD");
+  const baseTree = resolveTree(cwd, "HEAD");
+  if (!baseCommit || !baseTree) {
+    throw new Error("Cannot checkpoint a candidate without a committed HEAD");
+  }
+
+  const indexDir = mkdtempSync(join(tmpdir(), "afk-checkpoint-index-"));
+  const env = {
+    ...process.env,
+    GIT_INDEX_FILE: join(indexDir, "index"),
+  };
+  let commitSha = baseCommit;
+  let treeId = baseTree;
+  try {
+    execFileSync("git", ["read-tree", baseCommit], { cwd, env });
+    execFileSync("git", ["add", "-A"], { cwd, env });
+    treeId = execFileSync("git", ["write-tree"], {
+      cwd,
+      env,
+      encoding: "utf-8",
+    }).trim();
+    if (treeId !== baseTree) {
+      commitSha = execFileSync(
+        "git",
+        ["commit-tree", treeId, "-p", baseCommit, "-m", "AFK candidate checkpoint"],
+        { cwd, encoding: "utf-8" },
+      ).trim();
+    }
+  } finally {
+    rmSync(indexDir, { recursive: true, force: true });
+  }
+
+  mkdirSync(dirname(worktreeDir), { recursive: true });
+  execFileSync("git", ["worktree", "add", "--detach", worktreeDir, commitSha], {
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  return { commitSha, treeId, worktreeDir };
 }
 
 export async function runGates(

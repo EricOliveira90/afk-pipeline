@@ -1,7 +1,6 @@
 import { appendFileSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
-import type { GateEvidence } from "./gate-runner.js";
 import { Logger, type SanityGateResult } from "./logger.js";
 import {
   EVENTS_FILE,
@@ -171,37 +170,6 @@ export class RunJournal {
 
   addInvocationStats(ghIssue: string, stats: InvocationStats) {
     this.logger.addInvocationStats(ghIssue, stats);
-  }
-
-  recordGateAttempt(
-    identity: { ghIssue: string; sliceNumber: string; round: number },
-    evidence: GateEvidence,
-    evidenceArtifactId: string,
-  ) {
-    this.logger.addGateAttempt(
-      identity.ghIssue,
-      identity.round,
-      evidence,
-      evidenceArtifactId,
-    );
-    for (const result of evidence.results) {
-      this.event({
-        type: "gate-outcome",
-        ...identity,
-        attemptId: evidence.attemptId,
-        gateId: result.gateId,
-        stage: result.stage,
-        status: result.status,
-        failureKind: result.failureKind,
-        startedAt: result.startedAt,
-        endedAt: result.endedAt,
-        durationMs: result.durationMs,
-        exitCode: result.exitCode,
-        treeId: result.treeId,
-        evidenceArtifactId,
-        logArtifactId: result.logArtifactId,
-      });
-    }
   }
 
   writeIdleWarning(stream: WriteStream, agent: string, minutes: number) {

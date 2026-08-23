@@ -1,6 +1,6 @@
 import { execFileSync, ExecFileSyncOptions } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 const git = (args: string[], opts?: ExecFileSyncOptions): string =>
   (execFileSync("git", args, { encoding: "utf-8", ...opts }) as string).trim();
@@ -205,38 +205,6 @@ export function hasUncommittedChanges(cwd: string): boolean {
 export function commitAll(cwd: string, message: string) {
   git(["add", "-A"], { cwd });
   git(["commit", "-m", message, "--no-verify"], { cwd });
-}
-
-export interface CandidateCheckpoint {
-  commitSha: string;
-  treeId: string;
-  worktreeDir: string;
-}
-
-/**
- * Capture the writable candidate and materialize that exact commit in a
- * detached worktree. Later writes to the slice worktree cannot change the
- * files observed by deterministic gates.
- */
-export function createCandidateCheckpoint(
-  cwd: string,
-  worktreeDir: string,
-  commitMessage: string,
-): CandidateCheckpoint {
-  if (existsSync(worktreeDir)) {
-    throw new Error(`Candidate checkpoint path already exists: ${worktreeDir}`);
-  }
-  if (hasUncommittedChanges(cwd)) commitAll(cwd, commitMessage);
-
-  const commitSha = resolveCommit(cwd, "HEAD");
-  const treeId = resolveTree(cwd, "HEAD");
-  if (!commitSha || !treeId) {
-    throw new Error("Cannot checkpoint a candidate without a committed HEAD");
-  }
-
-  mkdirSync(dirname(worktreeDir), { recursive: true });
-  git(["worktree", "add", "--detach", worktreeDir, commitSha], { cwd });
-  return { commitSha, treeId, worktreeDir };
 }
 
 /**
