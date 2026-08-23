@@ -1,0 +1,1085 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AFK Pipeline Visualizer Prototype</title>
+  <!-- PROTOTYPE: Three pipeline-monitoring variants, switchable via ?variant=A|B|C. -->
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f4f6f8;
+      --surface: #ffffff;
+      --surface-muted: #edf1f4;
+      --ink: #17202a;
+      --muted: #64717d;
+      --line: #cbd3da;
+      --done: #177245;
+      --done-bg: #e4f4eb;
+      --active: #1769aa;
+      --active-bg: #e5f1fb;
+      --queued: #687581;
+      --queued-bg: #eef1f3;
+      --blocked: #93610c;
+      --blocked-bg: #fff3d6;
+      --failed: #b42318;
+      --failed-bg: #fde9e7;
+      --terminal: #5b3f94;
+      --terminal-bg: #eee9f8;
+      --shadow: 0 8px 28px rgba(27, 39, 51, 0.14);
+      --radius: 6px;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: Inter, "Segoe UI", Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--canvas);
+      color: var(--ink);
+      font-family: var(--sans);
+      letter-spacing: 0;
+    }
+
+    button, select { font: inherit; letter-spacing: 0; }
+    button { cursor: pointer; }
+    button:focus-visible, select:focus-visible {
+      outline: 3px solid rgba(23, 105, 170, 0.28);
+      outline-offset: 2px;
+    }
+
+    .app-shell { min-height: 100vh; padding-bottom: 92px; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      align-items: center;
+      min-height: 64px;
+      padding: 10px 24px;
+      color: #fff;
+      background: #18222c;
+      border-bottom: 1px solid #263746;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 12px;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      border: 1px solid #5d7183;
+      background: #243544;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.2;
+    }
+
+    .brand p {
+      margin: 3px 0 0;
+      overflow: hidden;
+      color: #aebbc6;
+      font-family: var(--mono);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .top-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #dce5ec;
+      font-size: 12px;
+    }
+
+    .pulse {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #57cf8b;
+      box-shadow: 0 0 0 4px rgba(87, 207, 139, 0.14);
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .run-meta, .run-actions, .legend {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .meta-item {
+      padding-right: 12px;
+      border-right: 1px solid var(--line);
+    }
+
+    .meta-item:last-child { border-right: 0; }
+
+    .eyebrow {
+      display: block;
+      margin-bottom: 2px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .meta-value { font-size: 12px; font-weight: 700; }
+
+    .control {
+      min-height: 34px;
+      padding: 7px 11px;
+      border: 1px solid #aab5be;
+      border-radius: 4px;
+      color: var(--ink);
+      background: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .control.primary {
+      border-color: #1769aa;
+      color: #fff;
+      background: #1769aa;
+    }
+
+    .control.danger { color: var(--failed); border-color: #dc938c; }
+    .control:hover { filter: brightness(0.96); }
+
+    .workspace {
+      max-width: 1580px;
+      margin: 0 auto;
+      padding: 20px 24px 32px;
+    }
+
+    .workspace-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 14px;
+    }
+
+    .workspace-head h2 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+
+    .workspace-head p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend { justify-content: flex-end; }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .legend-dot {
+      width: 9px;
+      height: 9px;
+      border: 1px solid currentColor;
+      border-radius: 50%;
+    }
+
+    .legend-dot.done { color: var(--done); background: var(--done); }
+    .legend-dot.active { color: var(--active); background: var(--active); }
+    .legend-dot.queued { color: var(--queued); background: #fff; }
+    .legend-dot.blocked { color: var(--blocked); background: var(--blocked-bg); }
+    .legend-dot.failed { color: var(--failed); background: var(--failed); }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(90px, 1fr));
+      margin-bottom: 16px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .summary-stat {
+      padding: 10px 14px;
+      border-right: 1px solid var(--line);
+    }
+
+    .summary-stat:last-child { border-right: 0; }
+    .summary-stat strong { display: block; font-size: 18px; }
+    .summary-stat span { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+
+    .status-done { --state: var(--done); --state-bg: var(--done-bg); }
+    .status-active { --state: var(--active); --state-bg: var(--active-bg); }
+    .status-queued { --state: var(--queued); --state-bg: var(--queued-bg); }
+    .status-blocked { --state: var(--blocked); --state-bg: var(--blocked-bg); }
+    .status-failed { --state: var(--failed); --state-bg: var(--failed-bg); }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 3px 7px;
+      border: 1px solid color-mix(in srgb, var(--state) 45%, white);
+      border-radius: 999px;
+      color: var(--state);
+      background: var(--state-bg);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .status-active .status-pill::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      margin-right: 5px;
+      border-radius: 50%;
+      background: var(--active);
+      animation: blink 1.4s infinite;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0.25; }
+    }
+
+    /* Variant A: graph-first operations map */
+    .map-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: 16px;
+    }
+
+    .map-board {
+      overflow-x: auto;
+      min-height: 560px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background-color: #fff;
+      background-image:
+        linear-gradient(#e9edf0 1px, transparent 1px),
+        linear-gradient(90deg, #e9edf0 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+
+    .map-section + .map-section { margin-top: 26px; }
+
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 10px;
+      color: #54626e;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .section-label::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: #d5dce2;
+    }
+
+    .flow-row {
+      display: flex;
+      align-items: stretch;
+      min-width: 1040px;
+    }
+
+    .flow-arrow {
+      position: relative;
+      width: 26px;
+      flex: 0 0 26px;
+    }
+
+    .flow-arrow::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: 4px;
+      left: 0;
+      border-top: 2px solid #9eabb5;
+    }
+
+    .flow-arrow::after {
+      content: "";
+      position: absolute;
+      top: calc(50% - 4px);
+      right: 1px;
+      border-width: 4px 0 4px 6px;
+      border-style: solid;
+      border-color: transparent transparent transparent #9eabb5;
+    }
+
+    .flow-node {
+      position: relative;
+      width: 132px;
+      min-height: 106px;
+      flex: 0 0 132px;
+      padding: 10px;
+      border: 1px solid color-mix(in srgb, var(--state) 52%, #cbd3da);
+      border-top: 4px solid var(--state);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgba(20, 31, 42, 0.05);
+      text-align: left;
+    }
+
+    button.flow-node:hover, button.flow-node.selected {
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--state) 18%, transparent);
+    }
+
+    .node-index {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 700;
+    }
+
+    .flow-node h3 {
+      margin: 8px 0 5px;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .flow-node p {
+      margin: 0 0 9px;
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.35;
+    }
+
+    .optional-node {
+      border-style: dashed;
+      background: color-mix(in srgb, var(--state-bg) 42%, white);
+    }
+
+    .retry-loop {
+      display: flex;
+      justify-content: center;
+      min-width: 1040px;
+      height: 30px;
+      margin-top: 5px;
+      color: var(--failed);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 700;
+    }
+
+    .retry-loop span {
+      width: 56%;
+      padding-top: 8px;
+      border-right: 1px dashed #d99089;
+      border-bottom: 1px dashed #d99089;
+      border-left: 1px dashed #d99089;
+      text-align: center;
+    }
+
+    .inspector {
+      align-self: start;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .inspector-head {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafb;
+    }
+
+    .inspector-head h3 { margin: 6px 0 3px; font-size: 16px; }
+    .inspector-head p { margin: 0; color: var(--muted); font-size: 11px; }
+    .inspector-body { padding: 14px; }
+
+    .detail-list {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 10px;
+      margin: 0;
+      font-size: 11px;
+    }
+
+    .detail-list dt { color: var(--muted); }
+    .detail-list dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+
+    .activity {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .activity h4 { margin: 0 0 9px; font-size: 11px; text-transform: uppercase; }
+
+    .log-line {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid #edf0f2;
+      font-family: var(--mono);
+      font-size: 9px;
+      line-height: 1.4;
+    }
+
+    .log-time { color: var(--muted); }
+
+    /* Variant B: chronological rail */
+    .rail-layout {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      min-height: 590px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .rail-nav {
+      padding: 16px 0;
+      background: #202b35;
+      color: #d9e2e8;
+    }
+
+    .rail-nav h3 {
+      margin: 0 16px 14px;
+      color: #8fa1af;
+      font-family: var(--mono);
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .rail-nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      padding: 9px 16px;
+      border: 0;
+      border-left: 3px solid transparent;
+      color: inherit;
+      background: transparent;
+      text-align: left;
+      font-size: 11px;
+    }
+
+    .rail-nav-item.current {
+      border-left-color: #56a7df;
+      background: #2a3946;
+      color: #fff;
+    }
+
+    .rail-nav-item span:last-child {
+      color: #8fa1af;
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .rail-main { min-width: 0; padding: 18px 22px; }
+
+    .rail-stage {
+      position: relative;
+      display: grid;
+      grid-template-columns: 84px 22px minmax(180px, 1fr) 150px;
+      align-items: start;
+      min-height: 78px;
+      gap: 10px;
+    }
+
+    .rail-time {
+      padding-top: 5px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      text-align: right;
+    }
+
+    .rail-marker {
+      position: relative;
+      width: 13px;
+      height: 13px;
+      margin-top: 4px;
+      border: 3px solid var(--state);
+      border-radius: 50%;
+      background: var(--state-bg);
+      z-index: 1;
+    }
+
+    .rail-stage:not(:last-child) .rail-marker::after {
+      content: "";
+      position: absolute;
+      top: 12px;
+      left: 3px;
+      width: 1px;
+      height: 64px;
+      background: #c7d0d7;
+    }
+
+    .rail-copy {
+      min-width: 0;
+      padding-bottom: 16px;
+      border-bottom: 1px solid #e5e9ec;
+    }
+
+    .rail-copy h3 { margin: 0 0 4px; font-size: 13px; }
+    .rail-copy p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+
+    .rail-evidence {
+      padding: 7px 9px;
+      border-left: 2px solid var(--state);
+      background: var(--state-bg);
+      font-family: var(--mono);
+      font-size: 9px;
+      overflow-wrap: anywhere;
+    }
+
+    /* Variant C: parallel slice matrix */
+    .matrix-layout {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: 150px repeat(3, minmax(190px, 1fr));
+      min-width: 820px;
+    }
+
+    .matrix-cell {
+      min-height: 55px;
+      padding: 9px 11px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .matrix-cell:nth-child(4n) { border-right: 0; }
+
+    .matrix-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #202b35;
+      color: #fff;
+    }
+
+    .matrix-head .eyebrow { color: #93a4b1; }
+
+    .stage-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #495762;
+      background: #f5f7f8;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .matrix-job {
+      position: relative;
+      border-left: 4px solid var(--state);
+      background: var(--state-bg);
+    }
+
+    .matrix-job strong { display: block; margin-bottom: 3px; font-size: 11px; }
+    .matrix-job small { color: var(--muted); font-size: 9px; }
+    .matrix-job .status-pill { float: right; margin-left: 8px; }
+    .matrix-job.dimmed { opacity: 0.5; }
+
+    .aggregate {
+      display: grid;
+      grid-template-columns: 150px repeat(5, minmax(140px, 1fr));
+      min-width: 850px;
+      border-top: 4px solid #303d48;
+    }
+
+    .aggregate .matrix-cell { border-bottom: 0; }
+
+    .aggregate-node {
+      border-top: 3px solid var(--state);
+      background: var(--state-bg);
+    }
+
+    .aggregate-node strong { display: block; font-size: 11px; }
+    .aggregate-node small { color: var(--muted); font-size: 9px; }
+
+    .prototype-switcher {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      z-index: 50;
+      display: grid;
+      grid-template-columns: 40px minmax(190px, auto) 40px;
+      align-items: center;
+      overflow: hidden;
+      min-height: 46px;
+      transform: translateX(-50%);
+      border: 1px solid #43515d;
+      border-radius: 999px;
+      color: #fff;
+      background: #17212a;
+      box-shadow: var(--shadow);
+    }
+
+    .switch-button {
+      height: 46px;
+      border: 0;
+      color: #fff;
+      background: transparent;
+      font-size: 20px;
+    }
+
+    .switch-button:hover { background: #2a3946; }
+    .switch-label { padding: 0 14px; text-align: center; }
+    .switch-label strong { display: block; font-size: 11px; }
+    .switch-label span { display: block; color: #9fb0bd; font-size: 9px; }
+
+    @media (max-width: 900px) {
+      .topbar { grid-template-columns: 1fr; gap: 8px; }
+      .top-status { display: none; }
+      .toolbar, .workspace-head { align-items: flex-start; flex-direction: column; }
+      .map-layout, .rail-layout { grid-template-columns: 1fr; }
+      .inspector { position: static; }
+      .rail-nav { display: none; }
+      .summary-strip { grid-template-columns: repeat(3, 1fr); }
+      .summary-stat { border-bottom: 1px solid var(--line); }
+    }
+
+    @media (max-width: 560px) {
+      .topbar, .toolbar, .workspace { padding-right: 14px; padding-left: 14px; }
+      .summary-strip { grid-template-columns: repeat(2, 1fr); }
+      .legend { justify-content: flex-start; }
+      .rail-main { padding: 14px 10px; }
+      .rail-stage { grid-template-columns: 50px 18px minmax(150px, 1fr); }
+      .rail-evidence { display: none; }
+      .prototype-switcher { bottom: 10px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">AFK</div>
+        <div>
+          <h1>Pipeline Run</h1>
+          <p>prd-084 / feat-codex/pipeline-hardening</p>
+        </div>
+      </div>
+      <div class="top-status">
+        <span class="pulse" aria-hidden="true"></span>
+        <span id="topStatus">Run active</span>
+        <span>08:42:17 elapsed</span>
+      </div>
+    </header>
+
+    <section class="toolbar" aria-label="Run controls">
+      <div class="run-meta">
+        <div class="meta-item">
+          <span class="eyebrow">Run</span>
+          <span class="meta-value">run-20260822-0914</span>
+        </div>
+        <div class="meta-item">
+          <span class="eyebrow">Provider</span>
+          <span class="meta-value">Codex</span>
+        </div>
+        <div class="meta-item">
+          <span class="eyebrow">Scope</span>
+          <span class="meta-value">3 AFK slices</span>
+        </div>
+      </div>
+      <div class="run-actions">
+        <select id="scenarioSelect" class="control" aria-label="Run scenario">
+          <option value="normal">Normal run</option>
+          <option value="parallel">Parallel slices</option>
+          <option value="blocked">Blocked dependency</option>
+        </select>
+        <button id="resetButton" class="control" type="button" title="Reset run">Reset</button>
+        <button id="failButton" class="control danger" type="button">Fail active</button>
+        <button id="advanceButton" class="control primary" type="button">Advance</button>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <div class="workspace-head">
+        <div>
+          <h2 id="variantTitle">Operations map</h2>
+          <p id="variantSubtitle">Full pipeline topology with the active stage in context.</p>
+        </div>
+        <div class="legend" aria-label="Status legend">
+          <span class="legend-item"><i class="legend-dot done"></i>Done</span>
+          <span class="legend-item"><i class="legend-dot active"></i>Active</span>
+          <span class="legend-item"><i class="legend-dot queued"></i>Queued</span>
+          <span class="legend-item"><i class="legend-dot blocked"></i>Blocked</span>
+          <span class="legend-item"><i class="legend-dot failed"></i>Failed</span>
+        </div>
+      </div>
+
+      <section id="summaryStrip" class="summary-strip" aria-label="Run summary"></section>
+      <div id="variantRoot"></div>
+    </main>
+  </div>
+
+  <nav class="prototype-switcher" aria-label="Prototype variants">
+    <button id="previousVariant" class="switch-button" type="button" aria-label="Previous variant">&#8249;</button>
+    <div class="switch-label">
+      <strong id="switcherName">A - Operations map</strong>
+      <span>UI prototype</span>
+    </div>
+    <button id="nextVariant" class="switch-button" type="button" aria-label="Next variant">&#8250;</button>
+  </nav>
+
+  <script>
+    const stages = [
+      { id: "intake", group: "Definition", name: "PRD intake", role: "Human + parser", detail: "Scope and DAG loaded", evidence: "issues.md parsed", duration: "00:08" },
+      { id: "explorer", group: "Definition", name: "Explore", role: "Explorer", detail: "Codebase context captured", evidence: "context.md", duration: "02:11" },
+      { id: "planner", group: "Definition", name: "Contract", role: "Planner", detail: "Acceptance boundary drafted", evidence: "contract.md", duration: "03:46" },
+      { id: "contract-review", group: "Definition", name: "Contract review", role: "Evaluator", detail: "Falsifiability checked", evidence: "ACCEPT round 2", duration: "01:54" },
+      { id: "generator", group: "Implementation", name: "Implement", role: "Generator", detail: "Tests and code committed", evidence: "4 commits", duration: "31:28" },
+      { id: "base-gates", group: "Implementation", name: "Base gates", role: "Orchestrator", detail: "Typecheck, lint, tests", evidence: "3/3 commands", duration: "04:18" },
+      { id: "cleaner", group: "Hardening", name: "Clean", role: "Cleaner", detail: "Complexity and duplication repair", evidence: "CRAP <= 8", duration: "07:02", optional: true },
+      { id: "quality-gates", group: "Hardening", name: "Quality gates", role: "Orchestrator", detail: "Coverage and architecture", evidence: "coverage 91%", duration: "02:22", optional: true },
+      { id: "hardener", group: "Hardening", name: "Harden", role: "Hardener", detail: "Weak assertions repaired", evidence: "12 mutants", duration: "08:40", optional: true },
+      { id: "mutation", group: "Hardening", name: "Mutation gate", role: "Orchestrator", detail: "Changed modules attacked", evidence: "score pending", duration: "—", optional: true },
+      { id: "behavior-qa", group: "Verification", name: "Behavior QA", role: "Evaluator", detail: "Executable contract scenarios", evidence: "acceptance.yaml", duration: "—" },
+      { id: "scope-gate", group: "Verification", name: "Scope gate", role: "Orchestrator", detail: "Changed files checked", evidence: "git diff", duration: "—" },
+      { id: "merge", group: "Integration", name: "Merge slice", role: "Orchestrator", detail: "Slice joins feature branch", evidence: "merge mutex", duration: "—" },
+      { id: "aggregate-gates", group: "Integration", name: "Aggregate gates", role: "Orchestrator", detail: "Merged tree verified", evidence: "tree SHA", duration: "—" },
+      { id: "guardians", group: "Ship", name: "Guardians", role: "Architect + PM", detail: "Parallel read-only review", evidence: "2 verdicts", duration: "—" },
+      { id: "remediation", group: "Ship", name: "Remediation", role: "Remediator", detail: "Only cited blockers repaired", evidence: "conditional", duration: "—", optional: true },
+      { id: "draft-pr", group: "Ship", name: "Draft PR", role: "Orchestrator", detail: "Evidence and issue links published", evidence: "gh pr create", duration: "—" }
+    ];
+
+    const variants = {
+      A: {
+        name: "Operations map",
+        subtitle: "Full pipeline topology with the active stage in context."
+      },
+      B: {
+        name: "Execution rail",
+        subtitle: "Chronological evidence stream optimized for diagnosis."
+      },
+      C: {
+        name: "Slice matrix",
+        subtitle: "Parallel slice progress with the integration path kept visible."
+      }
+    };
+
+    const state = {
+      cursor: 7,
+      failed: new Set(),
+      blocked: new Set(),
+      selected: "quality-gates",
+      scenario: "normal"
+    };
+
+    function stageStatus(index, id) {
+      if (state.failed.has(id)) return "failed";
+      if (state.blocked.has(id)) return "blocked";
+      if (index < state.cursor) return "done";
+      if (index === state.cursor) return "active";
+      return "queued";
+    }
+
+    function currentVariant() {
+      const candidate = new URLSearchParams(location.search).get("variant");
+      return variants[candidate] ? candidate : "A";
+    }
+
+    function setVariant(key) {
+      const url = new URL(location.href);
+      url.searchParams.set("variant", key);
+      history.replaceState({}, "", url);
+      render();
+    }
+
+    function cycleVariant(direction) {
+      const keys = Object.keys(variants);
+      const index = keys.indexOf(currentVariant());
+      setVariant(keys[(index + direction + keys.length) % keys.length]);
+    }
+
+    function counts() {
+      return stages.reduce((result, stage, index) => {
+        result[stageStatus(index, stage.id)] += 1;
+        return result;
+      }, { done: 0, active: 0, queued: 0, blocked: 0, failed: 0 });
+    }
+
+    function statusLabel(status) {
+      return status === "done" ? "Done" :
+        status === "active" ? "Running" :
+        status === "queued" ? "Queued" :
+        status === "blocked" ? "Blocked" : "Failed";
+    }
+
+    function renderSummary() {
+      const summary = counts();
+      document.getElementById("summaryStrip").innerHTML = [
+        ["Done", summary.done],
+        ["Active", summary.active],
+        ["Queued", summary.queued],
+        ["Blocked", summary.blocked],
+        ["Failed", summary.failed]
+      ].map(([label, value]) =>
+        `<div class="summary-stat"><strong>${value}</strong><span>${label}</span></div>`
+      ).join("");
+    }
+
+    function node(stage, index) {
+      const status = stageStatus(index, stage.id);
+      const selected = state.selected === stage.id ? " selected" : "";
+      const optional = stage.optional ? " optional-node" : "";
+      return `<button class="flow-node status-${status}${selected}${optional}" data-stage="${stage.id}" type="button">
+        <span class="node-index">${String(index + 1).padStart(2, "0")} / ${stage.role}</span>
+        <h3>${stage.name}</h3>
+        <p>${stage.detail}</p>
+        <span class="status-pill">${statusLabel(status)}</span>
+      </button>`;
+    }
+
+    function renderMap() {
+      const groups = ["Definition", "Implementation", "Hardening", "Verification", "Integration", "Ship"];
+      const sections = groups.map(group => {
+        const members = stages
+          .map((stage, index) => ({ stage, index }))
+          .filter(item => item.stage.group === group);
+        return `<section class="map-section">
+          <div class="section-label">${group}</div>
+          <div class="flow-row">${members.map((item, i) =>
+            `${i ? '<i class="flow-arrow" aria-hidden="true"></i>' : ""}${node(item.stage, item.index)}`
+          ).join("")}</div>
+          ${group === "Hardening" ? '<div class="retry-loop"><span>failed gate returns to repair agent</span></div>' : ""}
+        </section>`;
+      }).join("");
+
+      return `<div class="map-layout">
+        <div class="map-board">${sections}</div>
+        <aside id="inspector" class="inspector"></aside>
+      </div>`;
+    }
+
+    function renderInspector() {
+      const stage = stages.find(item => item.id === state.selected) || stages[state.cursor];
+      const index = stages.indexOf(stage);
+      const status = stageStatus(index, stage.id);
+      const next = stages[Math.min(index + 1, stages.length - 1)];
+      const inspector = document.getElementById("inspector");
+      if (!inspector) return;
+      inspector.innerHTML = `
+        <div class="inspector-head status-${status}">
+          <span class="status-pill">${statusLabel(status)}</span>
+          <h3>${stage.name}</h3>
+          <p>${stage.detail}</p>
+        </div>
+        <div class="inspector-body">
+          <dl class="detail-list">
+            <dt>Owner</dt><dd>${stage.role}</dd>
+            <dt>Stage</dt><dd>${stage.group}</dd>
+            <dt>Duration</dt><dd>${stage.duration}</dd>
+            <dt>Evidence</dt><dd>${stage.evidence}</dd>
+            <dt>Next</dt><dd>${next.name}</dd>
+          </dl>
+          <div class="activity">
+            <h4>Latest activity</h4>
+            <div class="log-line"><span class="log-time">09:44:12</span><span>Gate runner started</span></div>
+            <div class="log-line"><span class="log-time">09:44:17</span><span>coverage: 91.4%</span></div>
+            <div class="log-line"><span class="log-time">09:44:18</span><span>architecture: checking imports</span></div>
+          </div>
+        </div>`;
+    }
+
+    function renderRail() {
+      const groups = [...new Set(stages.map(stage => stage.group))];
+      const nav = groups.map(group => {
+        const active = stages[state.cursor] && stages[state.cursor].group === group;
+        const groupStages = stages.filter(stage => stage.group === group);
+        const complete = groupStages.filter(stage => {
+          const index = stages.indexOf(stage);
+          return stageStatus(index, stage.id) === "done";
+        }).length;
+        return `<button class="rail-nav-item${active ? " current" : ""}" type="button">
+          <span>${group}</span><span>${complete}/${groupStages.length}</span>
+        </button>`;
+      }).join("");
+
+      const rows = stages.map((stage, index) => {
+        const status = stageStatus(index, stage.id);
+        const clock = index <= state.cursor ? `09:${String(12 + index * 2).padStart(2, "0")}` : "—";
+        return `<article class="rail-stage status-${status}">
+          <time class="rail-time">${clock}</time>
+          <i class="rail-marker" aria-hidden="true"></i>
+          <div class="rail-copy">
+            <h3>${stage.name} <span class="status-pill">${statusLabel(status)}</span></h3>
+            <p>${stage.role} · ${stage.detail}</p>
+          </div>
+          <code class="rail-evidence">${stage.evidence}</code>
+        </article>`;
+      }).join("");
+
+      return `<div class="rail-layout">
+        <aside class="rail-nav"><h3>Run stages</h3>${nav}</aside>
+        <section class="rail-main">${rows}</section>
+      </div>`;
+    }
+
+    function matrixCell(stage, index, sliceIndex) {
+      const offset = sliceIndex === 0 ? 0 : sliceIndex === 1 ? -2 : -4;
+      const virtualCursor = Math.max(0, state.cursor + offset);
+      let status = index < virtualCursor ? "done" : index === virtualCursor ? "active" : "queued";
+      if (state.scenario === "blocked" && sliceIndex === 2 && index >= 3) status = "blocked";
+      if (state.failed.has(stage.id) && sliceIndex === 0) status = "failed";
+      const dimmed = status === "queued" ? " dimmed" : "";
+      return `<div class="matrix-cell matrix-job status-${status}${dimmed}">
+        <span class="status-pill">${statusLabel(status)}</span>
+        <strong>${stage.role}</strong>
+        <small>${status === "done" ? stage.evidence : status === "active" ? stage.detail : "Waiting"}</small>
+      </div>`;
+    }
+
+    function renderMatrix() {
+      const sliceStages = stages.slice(1, 13);
+      const headers = ["", "Slice 01 · Gate runner", "Slice 02 · Scope lock", "Slice 03 · Hardener"];
+      const grid = [
+        ...headers.map((header, index) =>
+          `<div class="matrix-cell matrix-head">${index ? `<span class="eyebrow">Lane ${index}</span><strong>${header}</strong>` : '<span class="eyebrow">Per-slice flow</span>'}</div>`
+        ),
+        ...sliceStages.flatMap(stage => {
+          const index = stages.indexOf(stage);
+          return [
+            `<div class="matrix-cell stage-name"><span>${String(index).padStart(2, "0")}</span>${stage.name}</div>`,
+            matrixCell(stage, index, 0),
+            matrixCell(stage, index, 1),
+            matrixCell(stage, index, 2)
+          ];
+        })
+      ].join("");
+
+      const aggregateStages = stages.slice(13);
+      const aggregate = [
+        '<div class="matrix-cell stage-name">Feature branch</div>',
+        ...aggregateStages.map(stage => {
+          const index = stages.indexOf(stage);
+          const status = stageStatus(index, stage.id);
+          return `<div class="matrix-cell aggregate-node status-${status}">
+            <strong>${stage.name}</strong>
+            <small>${statusLabel(status)} · ${stage.role}</small>
+          </div>`;
+        })
+      ].join("");
+
+      return `<div class="matrix-layout">
+        <section class="matrix">${grid}</section>
+        <section class="aggregate">${aggregate}</section>
+      </div>`;
+    }
+
+    function render() {
+      const key = currentVariant();
+      const variant = variants[key];
+      document.getElementById("variantTitle").textContent = variant.name;
+      document.getElementById("variantSubtitle").textContent = variant.subtitle;
+      document.getElementById("switcherName").textContent = `${key} - ${variant.name}`;
+      document.getElementById("topStatus").textContent =
+        state.failed.size ? "Run needs attention" :
+        state.cursor >= stages.length ? "Run complete" : "Run active";
+      renderSummary();
+      const root = document.getElementById("variantRoot");
+      root.innerHTML = key === "A" ? renderMap() : key === "B" ? renderRail() : renderMatrix();
+      root.querySelectorAll("[data-stage]").forEach(button => {
+        button.addEventListener("click", () => {
+          state.selected = button.dataset.stage;
+          render();
+        });
+      });
+      renderInspector();
+    }
+
+    document.getElementById("advanceButton").addEventListener("click", () => {
+      if (state.failed.size) state.failed.clear();
+      state.cursor = Math.min(stages.length, state.cursor + 1);
+      state.selected = stages[Math.min(state.cursor, stages.length - 1)].id;
+      render();
+    });
+
+    document.getElementById("failButton").addEventListener("click", () => {
+      if (state.cursor < stages.length) {
+        state.failed.add(stages[state.cursor].id);
+        state.selected = stages[state.cursor].id;
+      }
+      render();
+    });
+
+    document.getElementById("resetButton").addEventListener("click", () => {
+      state.cursor = 7;
+      state.failed.clear();
+      state.blocked.clear();
+      state.selected = "quality-gates";
+      state.scenario = "normal";
+      document.getElementById("scenarioSelect").value = "normal";
+      render();
+    });
+
+    document.getElementById("scenarioSelect").addEventListener("change", event => {
+      state.scenario = event.target.value;
+      state.blocked.clear();
+      if (state.scenario === "blocked") {
+        state.blocked.add("behavior-qa");
+        state.blocked.add("scope-gate");
+      }
+      render();
+    });
+
+    document.getElementById("previousVariant").addEventListener("click", () => cycleVariant(-1));
+    document.getElementById("nextVariant").addEventListener("click", () => cycleVariant(1));
+
+    document.addEventListener("keydown", event => {
+      const target = event.target;
+      if (target.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "ArrowLeft") cycleVariant(-1);
+      if (event.key === "ArrowRight") cycleVariant(1);
+    });
+
+    window.addEventListener("popstate", render);
+    render();
+  </script>
+</body>
+</html>
