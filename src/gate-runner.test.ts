@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readGateEvidence, runGates } from "./gate-runner.js";
+import {
+  readGateEvidence,
+  runGates,
+  verifyGateEvidence,
+} from "./gate-runner.js";
 
 const dirs: string[] = [];
 
@@ -316,6 +320,51 @@ describe("runGates", () => {
     expect(() => readGateEvidence(unsupportedVersionPath)).toThrow(
       /unsupported gate evidence version: 2/i,
     );
+  });
+
+  it("detects later changes to evidence and retained gate logs", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.stdout.write('retained')"],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+    const evidenceBytes = readFileSync(result.evidencePath, "utf-8");
+    const logPath = join(
+      evidenceDir,
+      result.evidence.results[0]!.logArtifactId,
+    );
+    const logBytes = readFileSync(logPath, "utf-8");
+
+    expect(verifyGateEvidence(result.artifact)).toEqual(result.evidence);
+
+    writeFileSync(
+      result.evidencePath,
+      JSON.stringify({ ...result.evidence, results: [] }),
+      "utf-8",
+    );
+    expect(() => verifyGateEvidence(result.artifact)).toThrow(
+      /gate evidence integrity/i,
+    );
+
+    writeFileSync(result.evidencePath, evidenceBytes, "utf-8");
+    writeFileSync(logPath, "changed later", "utf-8");
+    expect(() => verifyGateEvidence(result.artifact)).toThrow(
+      /gate log integrity/i,
+    );
+    writeFileSync(logPath, logBytes, "utf-8");
   });
 
   it("classifies an unavailable working directory as infrastructure", async () => {

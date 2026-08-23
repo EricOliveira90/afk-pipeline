@@ -43,10 +43,11 @@ import {
   withCrossProcessLock,
 } from "./command-runtime.js";
 import {
-  readGateEvidence,
   runGates,
+  verifyGateEvidence,
   type GateDeclaration,
   type GateEvidence,
+  type GateEvidenceArtifact,
 } from "./gate-runner.js";
 import {
   loadRunState,
@@ -2040,6 +2041,31 @@ export async function runQAStage(
   throw new Error(`${stage} QA exhausted without a result`);
 }
 
+function assertGateEvidenceReleasesEvaluation(
+  evidence: GateEvidence,
+  declarations: readonly GateDeclaration[],
+  treeId: string,
+): void {
+  const complete =
+    evidence.treeId === treeId &&
+    evidence.results.length === declarations.length &&
+    evidence.results.every((result, index) => {
+      const declaration = declarations[index];
+      return (
+        declaration != null &&
+        result.gateId === declaration.id &&
+        result.stage === declaration.stage &&
+        result.treeId === treeId &&
+        (!declaration.required || result.status === "PASS")
+      );
+    });
+  if (!complete) {
+    throw new Error(
+      `Gate evidence does not release evaluation for checkpoint ${treeId}`,
+    );
+  }
+}
+
 export async function runSliceExecute(
   ctx: SliceContext,
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
@@ -2047,6 +2073,7 @@ export async function runSliceExecute(
   const { signal } = config;
   const qaReports: string[] = [];
   const repairReferences: string[] = [];
+  const gateArtifacts: GateEvidenceArtifact[] = [];
 
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
@@ -2169,7 +2196,8 @@ export async function runSliceExecute(
             onOutput: (_gateId, text) => process.stderr.write(text),
           });
           gateEvidencePath = gateRun.evidencePath;
-          gateEvidence = readGateEvidence(gateEvidencePath);
+          gateArtifacts.push(gateRun.artifact);
+          gateEvidence = verifyGateEvidence(gateRun.artifact);
           logger.recordGateAttempt(
             {
               ghIssue: slice.ghIssue,
@@ -2239,6 +2267,12 @@ export async function runSliceExecute(
         );
         if (round < MAX_GENERATOR_ROUNDS) continue;
       } else {
+        assertGateEvidenceReleasesEvaluation(
+          gateEvidence,
+          declarations,
+          checkpoint.treeId,
+        );
+        for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
         logger.phase(
           `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
           "error",
@@ -2308,7 +2342,12 @@ export async function runSliceExecute(
 
         logger.bumpEvalRound(slice.ghIssue, round);
         if (!implementationFailed) {
-          readGateEvidence(gateEvidencePath);
+          for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+          assertGateEvidenceReleasesEvaluation(
+            verifyGateEvidence(gateArtifacts.at(-1)!),
+            declarations,
+            checkpoint.treeId,
+          );
           if (git.hasUncommittedChanges(ctx.worktreeDir)) {
             git.commitAll(
               ctx.worktreeDir,

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -6,7 +6,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { runBoundedCommand } from "./command-runtime.js";
 import { createCandidateCheckpointRestorer } from "./git.js";
 
@@ -59,6 +59,24 @@ export interface RunGatesOptions {
 export interface RunGatesResult {
   evidence: GateEvidence;
   evidencePath: string;
+  artifact: GateEvidenceArtifact;
+}
+
+export interface GateEvidenceArtifact {
+  evidencePath: string;
+  evidenceSha256: string;
+  attemptId: string;
+  treeId: string;
+  declarations: readonly {
+    gateId: string;
+    stage: string;
+    required: boolean;
+  }[];
+  logs: readonly {
+    logArtifactId: string;
+    path: string;
+    sha256: string;
+  }[];
 }
 
 export async function runGates(
@@ -261,7 +279,26 @@ export async function runGates(
     encoding: "utf-8",
     flag: "wx",
   });
-  return { evidence, evidencePath };
+  const artifact: GateEvidenceArtifact = {
+    evidencePath,
+    evidenceSha256: sha256(readFileSync(evidencePath)),
+    attemptId,
+    treeId: options.treeId,
+    declarations: options.declarations.map((declaration) => ({
+      gateId: declaration.id,
+      stage: declaration.stage,
+      required: declaration.required,
+    })),
+    logs: results.map((result) => {
+      const path = join(options.evidenceDir, result.logArtifactId);
+      return {
+        logArtifactId: result.logArtifactId,
+        path,
+        sha256: sha256(readFileSync(path)),
+      };
+    }),
+  };
+  return { evidence, evidencePath, artifact };
 }
 
 export function readGateEvidence(path: string): GateEvidence {
@@ -274,13 +311,71 @@ export function readGateEvidence(path: string): GateEvidence {
   }
   if (
     typeof parsed.attemptId !== "string" ||
+    parsed.attemptId.trim() === "" ||
     typeof parsed.treeId !== "string" ||
     !Array.isArray(parsed.results) ||
     !parsed.results.every(isGateResult)
   ) {
     throw new Error("Invalid gate evidence");
   }
-  return parsed as unknown as GateEvidence;
+  const evidence = parsed as unknown as GateEvidence;
+  if (
+    evidence.results.some((result) => result.treeId !== evidence.treeId) ||
+    new Set(evidence.results.map((result) => result.gateId)).size !==
+      evidence.results.length ||
+    new Set(evidence.results.map((result) => result.logArtifactId)).size !==
+      evidence.results.length
+  ) {
+    throw new Error("Invalid gate evidence");
+  }
+  return evidence;
+}
+
+/**
+ * Revalidate bytes retained by the orchestrator, not only their JSON shape.
+ * The digest reference stays in process memory while agents can write files.
+ */
+export function verifyGateEvidence(
+  artifact: GateEvidenceArtifact,
+): GateEvidence {
+  if (
+    !existsSync(artifact.evidencePath) ||
+    sha256(readFileSync(artifact.evidencePath)) !== artifact.evidenceSha256
+  ) {
+    throw new Error(
+      `Gate evidence integrity check failed: ${artifact.evidencePath}`,
+    );
+  }
+  const evidence = readGateEvidence(artifact.evidencePath);
+  if (
+    evidence.attemptId !== artifact.attemptId ||
+    evidence.treeId !== artifact.treeId ||
+    evidence.results.length > artifact.declarations.length
+  ) {
+    throw new Error(
+      `Gate evidence checkpoint binding failed: ${artifact.evidencePath}`,
+    );
+  }
+
+  for (const [index, result] of evidence.results.entries()) {
+    const declaration = artifact.declarations[index];
+    const log = artifact.logs[index];
+    if (
+      !declaration ||
+      declaration.gateId !== result.gateId ||
+      declaration.stage !== result.stage ||
+      !log ||
+      log.logArtifactId !== result.logArtifactId
+    ) {
+      throw new Error(
+        `Gate evidence declaration binding failed: ${artifact.evidencePath}`,
+      );
+    }
+    if (!existsSync(log.path) || sha256(readFileSync(log.path)) !== log.sha256) {
+      throw new Error(`Gate log integrity check failed: ${log.path}`);
+    }
+  }
+  return evidence;
 }
 
 function classifyExecution(
@@ -313,20 +408,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isGateResult(value: unknown): value is GateResult {
   if (!isRecord(value)) return false;
+  const status = String(value.status);
+  const failureKind = value.failureKind as null | string;
+  const startedAt = Date.parse(String(value.startedAt));
+  const endedAt = Date.parse(String(value.endedAt));
   return (
     typeof value.gateId === "string" &&
+    value.gateId.trim() !== "" &&
     typeof value.stage === "string" &&
-    ["PASS", "FAIL", "INFRASTRUCTURE", "SKIPPED"].includes(
-      String(value.status),
-    ) &&
+    value.stage.trim() !== "" &&
+    ["PASS", "FAIL", "INFRASTRUCTURE", "SKIPPED"].includes(status) &&
     [null, "CONFIGURATION", "IMPLEMENTATION"].includes(
-      value.failureKind as null | string,
+      failureKind,
     ) &&
+    (status === "FAIL"
+      ? failureKind !== null
+      : failureKind === null) &&
     typeof value.startedAt === "string" &&
     typeof value.endedAt === "string" &&
+    Number.isFinite(startedAt) &&
+    Number.isFinite(endedAt) &&
+    endedAt >= startedAt &&
     typeof value.durationMs === "number" &&
+    Number.isFinite(value.durationMs) &&
+    value.durationMs >= 0 &&
     (value.exitCode === null || typeof value.exitCode === "number") &&
     typeof value.treeId === "string" &&
-    typeof value.logArtifactId === "string"
+    typeof value.logArtifactId === "string" &&
+    isSafeLogArtifactId(value.logArtifactId)
   );
+}
+
+function isSafeLogArtifactId(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/");
+  return (
+    normalized.startsWith("gate-logs/") &&
+    !isAbsolute(value) &&
+    !normalized.split("/").includes("..")
+  );
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
