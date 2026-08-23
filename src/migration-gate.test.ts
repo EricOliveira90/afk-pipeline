@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { execFileSync } = vi.hoisted(() => ({ execFileSync: vi.fn() }));
 vi.mock("node:child_process", () => ({ execFileSync }));
 
-import { verifyMigrationSync } from "./orchestrator.js";
+import { verifyMigrationSync } from "./migration-gate.js";
 
 /** Args arrays passed to each execFileSync call, for assertions. */
 function calls(): string[][] {
