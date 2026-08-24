@@ -3,11 +3,11 @@ import {
   createWriteStream,
   mkdirSync,
   mkdtempSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmDirWithRetry } from "./test-support.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvokeOptions, InvokeResult } from "./agent-provider.js";
 import {
@@ -21,7 +21,7 @@ const tempDirs: string[] = [];
 
 afterEach(() => {
   while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop()!, { recursive: true, force: true });
+    rmDirWithRetry(tempDirs.pop()!);
   }
 });
 

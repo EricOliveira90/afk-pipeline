@@ -4,7 +4,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   readdirSync,
   writeFileSync,
@@ -12,6 +11,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmDirWithRetry } from "./test-support.js";
 import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
 import { makeAsyncMutex, sliceBranch } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
@@ -32,7 +32,7 @@ afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmDirWithRetry(dir);
     } catch {
       // best effort
     }
