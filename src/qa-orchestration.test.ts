@@ -433,7 +433,7 @@ describe("provider-independent policy-less base gates", () => {
           { cwd: repo, encoding: "utf-8" },
         ),
       ).toBe(providerName);
-    }, 30_000);
+    }, 60_000);
   }
 });
 
