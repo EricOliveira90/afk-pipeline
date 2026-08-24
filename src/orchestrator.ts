@@ -1808,10 +1808,15 @@ export async function runSliceExecute(
         "checkpoints",
         `${config.prdSlug}-s${slice.number}-r${round}-${randomUUID()}`,
       );
-      const checkpoint = createCandidateCheckpoint(
-        ctx.worktreeDir,
-        checkpointDir,
-      );
+      const declarations = resolveBaseGateDeclarations(ctx.worktreeDir);
+      const checkpoint = declarations.some(
+        (declaration) => declaration.command != null,
+      )
+        ? createCandidateCheckpoint(ctx.worktreeDir, checkpointDir)
+        : createCandidateCheckpoint(ctx.worktreeDir, checkpointDir, {
+            materialize: false,
+          });
+      const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
       const infrastructureRetries =
         config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -1821,9 +1826,6 @@ export async function runSliceExecute(
       ) {
         throw new Error("infrastructureRetries must be a non-negative integer");
       }
-      const declarations = resolveBaseGateDeclarations(
-        checkpoint.worktreeDir,
-      );
       const isRequired = (gateId: string) =>
         declarations.some(
           (declaration) =>
@@ -1843,7 +1845,7 @@ export async function runSliceExecute(
         ) {
           const gateRun = await runGates({
             treeId: checkpoint.treeId,
-            cwd: checkpoint.worktreeDir,
+            cwd: gateCwd,
             evidenceDir,
             declarations,
             signal,
@@ -1906,7 +1908,9 @@ export async function runSliceExecute(
           }
         }
       } finally {
-        git.removeWorktree(ctx.worktreeDir, checkpoint.worktreeDir);
+        if (checkpoint.worktreeDir) {
+          git.removeWorktree(ctx.worktreeDir, checkpoint.worktreeDir);
+        }
       }
 
       if (!gateEvidence) {

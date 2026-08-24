@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -48,7 +49,12 @@ function makeCheckpoint(
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 });
 
@@ -80,6 +86,27 @@ describe("createCandidateCheckpoint", () => {
     expect(
       readFileSync(join(checkpoint.worktreeDir, "tracked.txt"), "utf-8"),
     ).toBe("generated");
+  });
+
+  it("identifies an immutable checkpoint without materializing a checkout", () => {
+    const { root, cwd } = makeCheckpoint();
+    writeFileSync(join(cwd, "tracked.txt"), "generated", "utf-8");
+    const checkpointDir = join(root, "detached-checkpoint");
+
+    const checkpoint = createCandidateCheckpoint(cwd, checkpointDir, {
+      materialize: false,
+    });
+
+    expect(checkpoint.worktreeDir).toBeUndefined();
+    expect(existsSync(checkpointDir)).toBe(false);
+    expect(git(cwd, ["rev-parse", `${checkpoint.commitSha}^{tree}`])).toBe(
+      checkpoint.treeId,
+    );
+
+    writeFileSync(join(cwd, "tracked.txt"), "later mutation", "utf-8");
+    expect(git(cwd, ["rev-parse", `${checkpoint.commitSha}^{tree}`])).toBe(
+      checkpoint.treeId,
+    );
   });
 });
 

@@ -86,18 +86,32 @@ export interface GateEvidenceArtifact {
 export interface CandidateCheckpoint {
   commitSha: string;
   treeId: string;
+  worktreeDir?: string;
+}
+
+export interface MaterializedCandidateCheckpoint extends CandidateCheckpoint {
   worktreeDir: string;
 }
 
 /**
- * Materialize the current candidate in a detached worktree without moving the
- * source branch. A temporary index captures tracked and untracked output while
- * leaving the generator worktree and its real index untouched.
+ * Capture the current candidate without moving the source branch. A temporary
+ * index includes tracked and untracked output while leaving the generator
+ * worktree and its real index untouched.
  */
 export function createCandidateCheckpoint(
   cwd: string,
   worktreeDir: string,
-): CandidateCheckpoint {
+): MaterializedCandidateCheckpoint;
+export function createCandidateCheckpoint(
+  cwd: string,
+  worktreeDir: string,
+  options: { materialize: false },
+): CandidateCheckpoint;
+export function createCandidateCheckpoint(
+  cwd: string,
+  worktreeDir: string,
+  options: { materialize?: boolean } = {},
+): CandidateCheckpoint | MaterializedCandidateCheckpoint {
   if (existsSync(worktreeDir)) {
     throw new Error(`Candidate checkpoint path already exists: ${worktreeDir}`);
   }
@@ -132,6 +146,10 @@ export function createCandidateCheckpoint(
     }
   } finally {
     rmSync(indexDir, { recursive: true, force: true });
+  }
+
+  if (options.materialize === false) {
+    return { commitSha, treeId };
   }
 
   mkdirSync(dirname(worktreeDir), { recursive: true });
