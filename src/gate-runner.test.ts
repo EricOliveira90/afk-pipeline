@@ -6,7 +6,6 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +16,7 @@ import {
   runGates,
   verifyGateEvidence,
 } from "./gate-runner.js";
+import { rmDirWithRetry } from "./test-support.js";
 
 const dirs: string[] = [];
 
@@ -47,23 +47,9 @@ function makeCheckpoint(
   };
 }
 
-afterEach(async () => {
+afterEach(() => {
   for (const dir of dirs.splice(0)) {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-        break;
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (
-          attempt >= 20 ||
-          !["EBUSY", "ENOTEMPTY", "EPERM"].includes(code ?? "")
-        ) {
-          throw error;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
+    rmDirWithRetry(dir);
   }
 });
 

@@ -5,7 +5,6 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -22,26 +21,13 @@ import {
   type SliceContext,
 } from "./orchestrator.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
+import { rmDirWithRetry } from "./test-support.js";
 
 const dirs: string[] = [];
 
-afterEach(async () => {
+afterEach(() => {
   for (const dir of dirs.splice(0)) {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-        break;
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (
-          attempt >= 5 ||
-          !["EBUSY", "ENOTEMPTY", "EPERM"].includes(code ?? "")
-        ) {
-          throw error;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
+    rmDirWithRetry(dir);
   }
 });
 
@@ -509,12 +495,12 @@ describe("base gate observability", () => {
   });
 
   it.runIf(process.platform === "win32")(
-    "retries cleanup while a child briefly owns the repository directory",
+    "retries cleanup while a child outlives a short fixed retry window",
     async () => {
       const repo = makeRepo();
       const child = spawn(
         process.execPath,
-        ["-e", "console.log('ready'); setTimeout(() => {}, 250)"],
+        ["-e", "console.log('ready'); setTimeout(() => {}, 1000)"],
         {
           cwd: repo,
           stdio: ["ignore", "pipe", "ignore"],
