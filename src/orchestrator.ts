@@ -69,7 +69,6 @@ import {
 } from "./handoff.js";
 import {
   resolveSanityCommands,
-  resolveSanityStepScripts,
   resolveTestCommand,
 } from "./preship.js";
 import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
@@ -119,11 +118,25 @@ const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
  */
 const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
 
+const BASE_GATE_IDS = ["typecheck", "lint", "tests"] as const;
+
 /** Derive the policy-less base gate set shared by every agent provider. */
 export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
-  return resolveSanityStepScripts(cwd).map(({ name, scriptName }) => {
+  const scriptsByGate = new Map(
+    resolveSanityCommands(cwd).map((command) => {
+      const scriptName = command.slice("pnpm run ".length);
+      const gateId =
+        scriptName === "test" || scriptName === "test:run"
+          ? "tests"
+          : scriptName;
+      return [gateId, scriptName];
+    }),
+  );
+
+  return BASE_GATE_IDS.map((id) => {
+    const scriptName = scriptsByGate.get(id);
     return {
-      id: name,
+      id,
       stage: "base",
       required: scriptName != null,
       ...(scriptName

@@ -28,7 +28,6 @@ import {
 } from "./ship-gate.js";
 import {
   resolveSanityCommands,
-  resolveSanityStepScripts,
   resolveTestCommand,
   runPreShipSanity,
 } from "./preship.js";
@@ -273,23 +272,23 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
       test: "vitest",
     });
 
-    const discovered = resolveSanityStepScripts(dir);
-
-    expect(discovered).toEqual([
-      { name: "typecheck", scriptName: "typecheck" },
-      { name: "lint", scriptName: undefined },
-      { name: "tests", scriptName: "test" },
-    ]);
-    expect(resolveBaseGateDeclarations(dir)).toEqual(
-      discovered.map(({ name, scriptName }) => ({
-        id: name,
+    expect(resolveBaseGateDeclarations(dir)).toEqual([
+      {
+        id: "typecheck",
         stage: "base",
-        required: scriptName != null,
-        ...(scriptName
-          ? { command: "pnpm", args: ["run", scriptName] }
-          : {}),
-      })),
-    );
+        required: true,
+        command: "pnpm",
+        args: ["run", "typecheck"],
+      },
+      { id: "lint", stage: "base", required: false },
+      {
+        id: "tests",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "test"],
+      },
+    ]);
     expect(resolveSanityCommands(dir)).toEqual([
       "pnpm run typecheck",
       "pnpm run test",

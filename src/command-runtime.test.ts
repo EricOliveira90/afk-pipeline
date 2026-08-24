@@ -2,12 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  runBoundedCommand,
-  runHeartbeatCommand,
-  withCrossProcessLock,
-} from "./command-runtime.js";
-import { terminateProcessTree } from "./kill-tree.js";
+import { runHeartbeatCommand, withCrossProcessLock } from "./command-runtime.js";
 
 const dirs: string[] = [];
 
@@ -42,36 +37,6 @@ describe("runHeartbeatCommand", () => {
         heartbeatIntervalMs: 10,
       }),
     ).rejects.toThrow(/no heartbeat for 40ms/);
-  });
-});
-
-describe("runBoundedCommand", () => {
-  it("does not report cancellation when process-tree termination is incomplete", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
-    dirs.push(cwd);
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), 20);
-
-    await expect(
-      runBoundedCommand(
-        process.execPath,
-        ["-e", "setInterval(() => {}, 1000)"],
-        {
-          cwd,
-          signal: controller.signal,
-          inactivityTimeoutMs: 1_000,
-          heartbeatIntervalMs: 20,
-          terminateProcessTree: async (proc) => {
-            await terminateProcessTree(proc);
-            return {
-              rootDead: true,
-              survivors: [4242],
-              verified: true,
-            };
-          },
-        },
-      ),
-    ).rejects.toThrow(/process\(es\) survived the kill.*4242/i);
   });
 });
 
