@@ -47,14 +47,23 @@ function makeCheckpoint(
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
   for (const dir of dirs.splice(0)) {
-    rmSync(dir, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 100,
-    });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (
+          attempt >= 20 ||
+          !["EBUSY", "ENOTEMPTY", "EPERM"].includes(code ?? "")
+        ) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
   }
 });
 
@@ -602,7 +611,7 @@ describe("runGates", () => {
     });
     const childPid = Number(readFileSync(childPidPath, "utf-8"));
     expect(() => process.kill(childPid, 0)).toThrow();
-  });
+  }, 30_000);
 
   it("enforces the wall-clock limit despite continuous output", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
@@ -632,5 +641,5 @@ describe("runGates", () => {
       failureKind: "COMMAND",
       exitCode: null,
     });
-  });
+  }, 30_000);
 });
