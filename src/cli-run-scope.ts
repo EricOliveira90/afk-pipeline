@@ -21,6 +21,7 @@ export function resolveCliRunScope(args: {
   provider: AgentProvider;
   slices: Slice[];
   selectedSliceNumbers?: string[];
+  manifestSelectedSliceNumbers?: string[];
   onlyFailed: boolean;
 }): CliRunScope {
   if (args.onlyFailed && args.selectedSliceNumbers) {
@@ -45,6 +46,40 @@ export function resolveCliRunScope(args: {
       fullScope.members,
       (id) => isSliceComplete(state, id),
     );
+  } else if (requestedSliceNumbers === undefined && args.manifestSelectedSliceNumbers) {
+    requestedSliceNumbers = [...args.manifestSelectedSliceNumbers];
+  }
+
+  if (args.manifestSelectedSliceNumbers) {
+    const allowed = new Set(
+      args.manifestSelectedSliceNumbers.map((number) => String(Number(number))),
+    );
+    const conflicting = (requestedSliceNumbers ?? []).filter(
+      (number) => !allowed.has(String(Number(number))),
+    );
+    if (conflicting.length > 0) {
+      throw new Error(
+        `CLI scope conflicts with afk.json: slice${conflicting.length === 1 ? "" : "s"} ` +
+          `${conflicting.join(", ")} ${conflicting.length === 1 ? "is" : "are"} outside selectedSlices`,
+      );
+    }
+  }
+
+  const scope = resolveRunScope(args.slices, requestedSliceNumbers, state.scope);
+  if (args.manifestSelectedSliceNumbers) {
+    const allowed = new Set(
+      args.manifestSelectedSliceNumbers.map((number) => String(Number(number))),
+    );
+    const conflicting = scope.members.filter(
+      (slice) => !allowed.has(String(Number(slice.number))),
+    );
+    if (conflicting.length > 0) {
+      throw new Error(
+        `Persisted run scope conflicts with afk.json: ${conflicting
+          .map((slice) => `${slice.number} (#${slice.ghIssue})`)
+          .join(", ")}`,
+      );
+    }
   }
 
   return {
@@ -52,10 +87,6 @@ export function resolveCliRunScope(args: {
     priorCompleted: new Set(
       Object.keys(state.slices).filter((id) => isSliceComplete(state, id)),
     ),
-    scope: resolveRunScope(
-      args.slices,
-      requestedSliceNumbers,
-      state.scope,
-    ),
+    scope,
   };
 }

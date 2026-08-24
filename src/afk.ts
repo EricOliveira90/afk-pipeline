@@ -20,6 +20,7 @@ import { resolveCliRunScope } from "./cli-run-scope.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runStatus } from "./status.js";
 import { runStatusWeb } from "./status-web.js";
+import { loadAfkManifest } from "./afk-manifest.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -136,6 +137,7 @@ async function main() {
     process.exit(2);
   }
   assertPrdNotOnHold(prdDir);
+  const afkManifest = loadAfkManifest(prdDir);
 
   const prdSlug = basename(prdDir);
   const specsDir = prdDir
@@ -154,6 +156,7 @@ async function main() {
       provider: kiroProvider,
       slices,
       selectedSliceNumbers,
+      manifestSelectedSliceNumbers: afkManifest?.selectedSlices,
       onlyFailed,
     });
   } catch (err) {
@@ -264,6 +267,7 @@ async function main() {
       dryRun,
       maxContractRounds,
       selectedSliceNumbers: requestedSliceNumbers,
+      manifest: afkManifest,
       migrationValidation,
       signal: controller.signal,
       ...runtimeOptions,

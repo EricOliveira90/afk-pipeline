@@ -46,6 +46,12 @@ Do this for each behavior BEFORE writing the RED test.
   output is your heartbeat. If a suite is verbose, prefer the runner's
   compact reporter (e.g. `--reporter=dot`) over silencing it.
 - If `contract.md` Status is not `LOCKED`, stop and report immediately.
+- Migration ownership is a machine gate. Use only the exact assignment
+  below and create exactly the migration paths locked in the contract.
+
+# Migration assignment
+
+{{MIGRATION_RESERVATION}}
 
 # Required reading
 

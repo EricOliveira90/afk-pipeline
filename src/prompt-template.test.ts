@@ -24,6 +24,7 @@ describe("renderPrompt", () => {
       REVISION_NOTE: "",
       RELEVANT_FILES: "",
       SLICE_BODY: "Local issue body",
+      MIGRATION_RESERVATION: "No claim yet",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).not.toContain("{{");
@@ -69,12 +70,13 @@ describe("renderPrompt", () => {
         REVISION_NOTE: "",
         RELEVANT_FILES: "",
         SLICE_BODY: "Fetch with gh",
+        MIGRATION_RESERVATION: "No claim yet",
       }),
     ).toBeTruthy();
     expect(
       renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "", PREVIOUS_FEEDBACK_NOTE: "No previous round." }),
     ).toBeTruthy();
-    expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test" })).toBeTruthy();
+    expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", PREVIOUS_QA_REPORTS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();

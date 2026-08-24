@@ -68,6 +68,10 @@ no config file today (the on-hold marker is the only file it reads), and
 adding one is out of scope for this change; `--serial-lanes` remains the
 operator's blunt override.
 
+> **Amended by ADR 0034:** the pipeline now reads `<prd-dir>/afk.json`
+> when present — its first config file. `migrationPathPattern` itself
+> remains programmatic config.
+
 ## The trade
 
 Migration-bearing slices in a wave lose intra-wave parallelism in
@@ -90,6 +94,10 @@ alternative in every direction:
   serialised successor computes the free prefix against a base that
   already has its predecessor's migration. Revisit only if collisions
   persist.
+
+  > **Adopted by ADR 0034** for runs with an `afk.json` manifest: the
+  > multi-PRD concurrency case is one lane serialisation cannot fix.
+  > The lane grouping stays regardless.
 - **Detect the cross-contract collision between siblings at
   contract-lock** — a sibling gate is unnecessary once migration-bearing
   slices share a lane, because the successor re-negotiates after its

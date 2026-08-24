@@ -143,6 +143,13 @@ run out, so an escalated slice says why.
   scope in the parent spec, and handing the planner the free prefix gets
   the same outcome inside the rounds it already has.
 
+  > **Amended by ADR 0034:** for runs with an `afk.json` manifest, the
+  > planner is handed an exact pipeline-owned *claim* rather than the
+  > next free prefix, and renumbering guidance is removed from the
+  > generator prompts — agents never calculate prefixes. This gate and
+  > the merge-mutex check are unchanged and remain the path for
+  > manifest-less runs.
+
 ## Extends
 
 Extends ADR 0027 (which named this check as worthwhile and tracked

@@ -195,6 +195,47 @@ Post-implementation review of all slices against PRODUCT.md. Writes
 
 ### Pipeline concepts
 
+**AFK manifest**:
+The `<prd-dir>/afk.json` file a preparation step (`to-afk`) writes and
+commits before a run: `version`, `selectedSlices` (the default run
+scope), `migrationPrefixes` (the **migration reservation pool**), and
+`protectedIssues` (source GH issues whose state must be preserved).
+Loaded automatically when present; absence is the documented legacy
+mode. Parsed by `parseAfkManifest`, exported as the package's
+`./afk-manifest` entry so the consuming repository's preflight applies
+the same rules. A CLI slice selection that conflicts with it fails
+closed. See ADR 0034.
+_Avoid_: bare "manifest" (ambiguous — `issues.md` is the DAG manifest),
+"config file" (undersells that it is a cross-repo contract)
+
+**Migration reservation pool**:
+The `migrationPrefixes` list in the **AFK manifest**: exact, contiguous
+numeric prefixes reserved for one PRD, allocated by `to-afk` against
+`origin/main` so concurrent PRDs cannot overlap. A pool, not a
+per-slice assignment — binding happens at contract time via **migration
+claims**. Unclaimed reservations are trimmed from `afk.json` before the
+**ship gate** so the verified draft carries none. See ADR 0034.
+_Avoid_: "prefix range" (it is an explicit list), "assignments"
+
+**Migration claim**:
+The pipeline-owned allocation of specific pool prefixes to one slice,
+keyed by GH issue in **run state** (`migrations.claims`). Claimed when
+a locked contract declares `New migration files: <count>` > 0, handed
+verbatim to planner and generator, enforced by machine gates at
+contract, generation, QA, and merge, and reused across retries and
+resumes. Agents never calculate the next migration prefix. Pool
+exhaustion fails before generation. See ADR 0034.
+_Avoid_: "lock" (nothing is held against other processes), "assignment
+from the manifest" (the manifest owns the pool; the pipeline owns
+claims)
+
+**Protected issue**:
+A source GH issue listed in the **AFK manifest** whose GitHub state the
+run must not disturb (e.g. a parent spec issue that must stay open).
+The pipeline parses and preserves the field; enforcement belongs to the
+preparation/babysit tooling that owns issue state. See ADR 0034.
+_Avoid_: "pinned issue", "locked issue"
+
 **DAG**:
 Directed acyclic graph built from the `issues.md` dependency table.
 Determines which slices can run in parallel.
@@ -386,6 +427,7 @@ _Avoid_: "abort" (overloads with `git merge --abort`), "interrupted"
 ## Flagged ambiguities
 
 - **"Issue"** — overloaded: GH issue (the container) vs slice (the work unit). Use **slice** for the work, "GH issue" for the tracker item.
+- **"Manifest"** — overloaded: `issues.md` is the DAG manifest (`manifestDag`), `afk.json` is the **AFK manifest**. Never say "manifest" bare; qualify which.
 - **"Agent"** — could mean the Kiro agent config or the conceptual role. Always qualify: "explorer agent", "planner agent", or "the `@planner` Kiro agent config."
 - **"Branch"** — could mean slice branch or feature branch. Always qualify.
 - **"Backend"** / **"Invoker"** — retired terms. Use **agent provider** for the pluggable adapter; reserve "invoker" only for the function call itself, not the type.

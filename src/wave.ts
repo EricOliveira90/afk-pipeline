@@ -13,6 +13,7 @@ import {
 import type { NegotiateOutcome, PipelineConfig } from "./orchestrator.js";
 import {
   makeSliceContext,
+  pipelineRunSlug,
   type SliceContext,
   runSliceNegotiate,
   runSliceExecute,
@@ -21,6 +22,13 @@ import {
   isCancelled,
 } from "./orchestrator.js";
 import { kiroProvider } from "./kiro.js";
+import {
+  claimMigrationPrefixes,
+  migrationClaimFor,
+  readContractMigrationCount,
+  validateContractMigrationClaim,
+  validateGeneratedMigrations,
+} from "./migration-claims.js";
 
 export type WaveOutcomePhase =
   | "PASS"
@@ -102,6 +110,7 @@ export function executionLanes(
 function migrationPrefixGate(
   config: PipelineConfig,
   featBranch: string,
+  ghIssue: string,
 ): (contractPath: string) => string | null {
   const laneOptions = { migrationPathPattern: config.migrationPathPattern };
   // `migrationPathsIn` normalises to forward slashes, so the POSIX
@@ -111,6 +120,28 @@ function migrationPrefixGate(
   const basename = (p: string) => posix.basename(p);
 
   return (contractPath) => {
+    if (config.manifest) {
+      const count = readContractMigrationCount(contractPath);
+      if (count === null) {
+        return (
+          'Add a "## Migration requirements" section containing exactly ' +
+          '"- New migration files: <count>". Use 0 when this slice creates none.'
+        );
+      }
+      const claim = claimMigrationPrefixes({
+        repoRoot: config.repoRoot,
+        runSlug: pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+        ghIssue,
+        count,
+        expectedPool: config.manifest.migrationPrefixes,
+      });
+      return validateContractMigrationClaim({
+        contractPath,
+        claim,
+        options: laneOptions,
+      });
+    }
+
     const declared = artifacts.readContractFiles(contractPath);
     // `undefined` (no such section) and `[]` (nothing usable declared)
     // both mean the contract names no migration to check.
@@ -189,7 +220,6 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   // because the gate is the wave's business: reading a locked contract's
   // declared file list is what the wave does next anyway, and the gate
   // is that read moved to the moment the contract locks.
-  const contractGate = migrationPrefixGate(config, featBranch);
   const ctxById = new Map<string, SliceContext>();
   for (const id of readyIds) {
     const slice = dag.slices.get(id)!;
@@ -202,7 +232,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         relevantFilesBlock,
         testCommand,
       ),
-      onContractLocked: contractGate,
+      onContractLocked: migrationPrefixGate(config, featBranch, id),
     });
   }
 
@@ -434,6 +464,27 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         // outer Promise.all and aborting sibling lanes still in
         // flight. See ADR 0009.
         try {
+          if (config.manifest) {
+            const claim = migrationClaimFor(
+              repoRoot,
+              pipelineRunSlug(prdSlug, provider),
+              id,
+            );
+            if (!claim) {
+              throw new Error(`Slice #${id} reached merge without a migration claim record`);
+            }
+            const generated = validateGeneratedMigrations({
+              worktreeDir: ctx.worktreeDir,
+              featBranch,
+              contractPath: join(ctx.absSliceDir, "contract.md"),
+              claim,
+              options: laneOptions,
+            });
+            if (!generated.ok) {
+              throw new Error(`Migration claim gate failed before merge: ${generated.error}`);
+            }
+          }
+
           // Distinguish "branch missing" from "0 commits ahead". A
           // missing slice branch after a successful generator run is
           // the signature of the silent-corruption bug (worktree was
