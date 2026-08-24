@@ -37,6 +37,7 @@ import {
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
+  ProcessTreeTerminationError,
   runHeartbeatCommand,
   withCrossProcessLock,
 } from "./command-runtime.js";
@@ -363,6 +364,7 @@ function featureBranch(prdSlug: string, provider: AgentProvider): string {
 }
 
 export function isCancelled(err: unknown, signal?: AbortSignal): boolean {
+  if (err instanceof ProcessTreeTerminationError) return false;
   return err instanceof CancelledError || signal?.aborted === true;
 }
 

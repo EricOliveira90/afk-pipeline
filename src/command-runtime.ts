@@ -44,6 +44,13 @@ export interface CommandExecutionResult {
   detail?: string;
 }
 
+export class ProcessTreeTerminationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProcessTreeTerminationError";
+  }
+}
+
 /**
  * Run one process with output-driven inactivity, wall-clock, and cancellation
  * bounds. Timeout and cancellation outcomes settle only after verified
@@ -110,7 +117,7 @@ export function runBoundedCommand(
         ) {
           settled = true;
           reject(
-            new Error(
+            new ProcessTreeTerminationError(
               warning ||
                 "WARNING: command root process survived termination",
             ),

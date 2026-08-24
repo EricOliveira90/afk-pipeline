@@ -15,6 +15,7 @@ import { join } from "node:path";
 import {
   assessContractExtension,
   collectRequiredGateFailures,
+  isCancelled,
   makeAsyncMutex,
   makeSliceContext,
   resolveBaseGateDeclarations,
@@ -39,6 +40,7 @@ import type {
   InvokeResult,
 } from "./agent-provider.js";
 import { TransientProviderError } from "./agent-provider.js";
+import { ProcessTreeTerminationError } from "./command-runtime.js";
 import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
 
 /**
@@ -70,6 +72,22 @@ afterEach(() => {
       // Best effort
     }
   }
+});
+
+describe("cancellation classification", () => {
+  it("does not hide failed process-tree termination behind an aborted signal", () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(
+      isCancelled(
+        new ProcessTreeTerminationError(
+          "command process tree survived termination",
+        ),
+        controller.signal,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("base gate infrastructure retries", () => {
