@@ -978,6 +978,118 @@ describe("runPipeline zero-dispatch outcome (issue #42)", () => {
   }, 60_000);
 });
 
+/**
+ * The pre-ship-gate reservation trim (ADR 0034 step 7, issue #65): only
+ * prefixes claimed by *merged* slices survive into the verified draft's
+ * afk.json. A claim held by a failed or descoped slice is an unused
+ * reservation and must be released — both from the manifest on the
+ * reviewed feature branch and from the run state's claim record.
+ */
+describe("ship-gate migration reservation trim (#65)", () => {
+  it("drops a failed slice's reservation from afk.json on the reviewed feature branch and releases its claim", async () => {
+    const repo = makeRepo();
+    const slug = "trim-failed-claims";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const manifest = {
+      version: 1 as const,
+      selectedSlices: ["01", "02"],
+      migrationPrefixes: ["144", "145", "146"],
+      protectedIssues: [],
+    };
+    // afk.json must sit on the base branch: the trim edits the review
+    // worktree's checkout of the feature branch.
+    writeFileSync(
+      join(prdDir, "afk.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf-8",
+    );
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "prd fixture with afk.json"]);
+
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "6501", title: "Merged", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "6502", title: "Escalated", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    // A prior run merged slice 01 with prefix 144 and escalated slice 02
+    // holding 145; 146 was never claimed. Narrowed to the merged slice,
+    // this run reaches the ship gate with the failed claim still on file.
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      join(repo, ".afk", "state", `${slug}-stub.json`),
+      JSON.stringify({
+        version: 1,
+        prdSlug: `${slug}-stub`,
+        featureBranch: `feat-stub/${slug}`,
+        scope: {
+          mode: "all-afk",
+          slices: [
+            { number: "01", ghIssue: "6501" },
+            { number: "02", ghIssue: "6502" },
+          ],
+        },
+        slices: {
+          "6501": {
+            phase: "PASS",
+            branch: `afk-stub/${slug}-s01`,
+            mergedToFeature: true,
+          },
+          "6502": {
+            phase: "ESCALATE",
+            branch: `afk-stub/${slug}-s02`,
+            error: "contract rounds exhausted",
+          },
+        },
+        migrations: {
+          pool: ["144", "145", "146"],
+          claims: { "6501": ["144"], "6502": ["145"] },
+        },
+      }),
+      "utf-8",
+    );
+
+    const records: InvocationRecord[] = [];
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      selectedSliceNumbers: ["01"],
+      manifest,
+      provider: buildStubProvider({
+        fixtures: new Map<string, SliceFixture>(),
+        slices,
+        records,
+      }),
+    });
+
+    // The stub's no-op reviews leave no verdict, so the PR stays blocked
+    // (issue #43) — but the trim runs before the reviews and must have
+    // landed on the feature branch regardless.
+    expect(result.success).toBe(false);
+
+    const featBranch = `feat-stub/${slug}`;
+    const shipped = JSON.parse(
+      git(repo, ["show", `${featBranch}:.kiro/specs/${slug}/afk.json`]),
+    );
+    expect(shipped.migrationPrefixes).toEqual(["144"]);
+    expect(git(repo, ["log", "--format=%s", featBranch])).toContain(
+      "release unused migration reservations",
+    );
+
+    // Run state stays loadable for a later run: the failed slice's claim
+    // is released together with its prefix, never left dangling outside
+    // the trimmed pool.
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.migrations).toEqual({
+      pool: ["144"],
+      claims: { "6501": ["144"] },
+    });
+  }, 60_000);
+});
+
 function firstTimestamp(
   records: InvocationRecord[],
   ghIssue: string,

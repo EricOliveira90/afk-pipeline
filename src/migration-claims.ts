@@ -8,6 +8,7 @@ import {
   loadRunState,
   saveRunState,
   assertMigrationClaimShape,
+  isSliceComplete,
   type MigrationClaimState,
   type RunState,
 } from "./run-state.js";
@@ -247,11 +248,29 @@ export function validateGeneratedMigrations(args: {
   return { ok: true };
 }
 
-export function allClaimedPrefixes(state: RunState): string[] {
+/**
+ * Retain the migration claims of merged slices and release every other
+ * claim, returning the retained prefixes in pool order. Ship-gate
+ * input: a claim held by a slice that failed, escalated, or was
+ * descoped from a narrowed re-run never delivered a migration to the
+ * reviewed branch, so its reservation must not survive into the
+ * verified draft (#65) — the parent spec's "unused reservations do not
+ * remain in the verified draft". The claim record is dropped alongside
+ * the trim so pool and claims stay consistent (`validateClaimState`
+ * requires claims inside the pool); a slice retried after the trim
+ * fails closed on pool exhaustion and re-enters through a fresh
+ * `to-afk` reservation rather than a stale claim.
+ */
+export function releaseUnmergedMigrationClaims(state: RunState): string[] {
   if (!state.migrations) return [];
   validateClaimState(state.migrations);
-  const claimed = new Set(Object.values(state.migrations.claims).flat());
-  return state.migrations.pool.filter((prefix) => claimed.has(prefix));
+  for (const ghIssue of Object.keys(state.migrations.claims)) {
+    if (!isSliceComplete(state, ghIssue)) {
+      delete state.migrations.claims[ghIssue];
+    }
+  }
+  const merged = new Set(Object.values(state.migrations.claims).flat());
+  return state.migrations.pool.filter((prefix) => merged.has(prefix));
 }
 
 /**

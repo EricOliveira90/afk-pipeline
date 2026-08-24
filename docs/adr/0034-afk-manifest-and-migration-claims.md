@@ -71,10 +71,17 @@ The claim flow (`migration-claims.ts`):
    slice keeps its original prefixes across rounds and across runs.
 6. Pool exhaustion fails **before generation**, when it costs a message
    rather than a discarded slice.
-7. Before the ship gate, `trimUnclaimedMigrationPrefixes` removes
-   unclaimed reservations from `afk.json` and commits the trim, so the
-   verified draft does not carry reservations the PRD never used and a
-   sibling PRD's `to-afk` can re-reserve them.
+7. Before the ship gate, the orchestrator keeps only the prefixes
+   claimed by slices that actually merged
+   (`releaseUnmergedMigrationClaims`) — a claim held by a failed,
+   escalated, or descoped slice counts as unused — and
+   `trimUnclaimedMigrationPrefixes` removes every other reservation
+   from `afk.json`, committing the trim, so the verified draft does
+   not carry reservations the PRD never used and a sibling PRD's
+   `to-afk` can re-reserve them. The released slice's claim record is
+   dropped from run state alongside the trim (claims must stay inside
+   the pool); retrying that slice after the trim fails closed on pool
+   exhaustion and re-enters through a fresh reservation.
 
 Run state gains one optional field (extending ADR 0018's schema):
 

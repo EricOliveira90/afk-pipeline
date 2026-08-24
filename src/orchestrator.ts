@@ -73,10 +73,10 @@ import {
   trimUnclaimedMigrationPrefixes,
 } from "./afk-manifest.js";
 import {
-  allClaimedPrefixes,
   checkClaimedGeneratedMigrations,
   initializeMigrationClaims,
   migrationClaimFor,
+  releaseUnmergedMigrationClaims,
 } from "./migration-claims.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
@@ -2562,7 +2562,11 @@ export async function runPipeline(
       try {
         if (config.manifest) {
           const latestState = loadRunState(repoRoot, loggerSlug);
-          const claimed = allClaimedPrefixes(latestState);
+          // Keep only prefixes whose slice merged; a failed or descoped
+          // slice's reservation must not ride into the verified draft
+          // (#65). Releasing its claim record here keeps run state
+          // consistent with the trimmed pool below.
+          const claimed = releaseUnmergedMigrationClaims(latestState);
           const trimmed = trimUnclaimedMigrationPrefixes(
             join(reviewDir, specsDir),
             claimed,

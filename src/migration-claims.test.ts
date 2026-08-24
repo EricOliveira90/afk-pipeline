@@ -7,6 +7,7 @@ import {
   claimMigrationPrefixes,
   initializeMigrationClaims,
   migrationClaimFor,
+  releaseUnmergedMigrationClaims,
   validateContractMigrationClaim,
   validateGeneratedMigrations,
 } from "./migration-claims.js";
@@ -67,6 +68,27 @@ describe("migration claims", () => {
       repoRoot: setup.root, runSlug: setup.slug, ghIssue: "1001", count: 2,
       expectedPool: setup.pool,
     })).toThrow(/pool exhausted before generation/);
+  });
+
+  it("releases claims of slices that never merged, keeping merged claims (#65)", () => {
+    const setup = stateRoot();
+    const claim = (ghIssue: string) =>
+      claimMigrationPrefixes({
+        repoRoot: setup.root, runSlug: setup.slug, ghIssue, count: 1,
+        expectedPool: setup.pool,
+      });
+    expect(claim("1001")).toEqual(["144"]);
+    expect(claim("1002")).toEqual(["145"]);
+
+    const state = loadRunState(setup.root, setup.slug);
+    state.slices["1001"] = { phase: "PASS", mergedToFeature: true };
+    state.slices["1002"] = { phase: "ESCALATE", error: "contract rounds exhausted" };
+
+    // The escalated slice's reservation is unused: it never delivered a
+    // migration to the feature branch, so the ship-gate trim must not
+    // carry it into the verified draft.
+    expect(releaseUnmergedMigrationClaims(state)).toEqual(["144"]);
+    expect(state.migrations?.claims).toEqual({ "1001": ["144"] });
   });
 
   it("keeps separate PRD pools isolated", () => {
