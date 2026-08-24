@@ -23,11 +23,8 @@ import {
 } from "./orchestrator.js";
 import { kiroProvider } from "./kiro.js";
 import {
-  claimMigrationPrefixes,
-  migrationClaimFor,
-  readContractMigrationCount,
-  validateContractMigrationClaim,
-  validateGeneratedMigrations,
+  checkClaimedGeneratedMigrations,
+  claimContractMigrations,
 } from "./migration-claims.js";
 
 export type WaveOutcomePhase =
@@ -121,23 +118,12 @@ function migrationPrefixGate(
 
   return (contractPath) => {
     if (config.manifest) {
-      const count = readContractMigrationCount(contractPath);
-      if (count === null) {
-        return (
-          'Add a "## Migration requirements" section containing exactly ' +
-          '"- New migration files: <count>". Use 0 when this slice creates none.'
-        );
-      }
-      const claim = claimMigrationPrefixes({
+      return claimContractMigrations({
         repoRoot: config.repoRoot,
         runSlug: pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
         ghIssue,
-        count,
-        expectedPool: config.manifest.migrationPrefixes,
-      });
-      return validateContractMigrationClaim({
         contractPath,
-        claim,
+        expectedPool: config.manifest.migrationPrefixes,
         options: laneOptions,
       });
     }
@@ -465,23 +451,21 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         // flight. See ADR 0009.
         try {
           if (config.manifest) {
-            const claim = migrationClaimFor(
+            const gate = checkClaimedGeneratedMigrations({
               repoRoot,
-              pipelineRunSlug(prdSlug, provider),
-              id,
-            );
-            if (!claim) {
-              throw new Error(`Slice #${id} reached merge without a migration claim record`);
-            }
-            const generated = validateGeneratedMigrations({
+              runSlug: pipelineRunSlug(prdSlug, provider),
+              ghIssue: id,
               worktreeDir: ctx.worktreeDir,
               featBranch,
               contractPath: join(ctx.absSliceDir, "contract.md"),
-              claim,
               options: laneOptions,
             });
-            if (!generated.ok) {
-              throw new Error(`Migration claim gate failed before merge: ${generated.error}`);
+            if (!gate.ok) {
+              throw new Error(
+                gate.reason === "missing-claim"
+                  ? `Slice #${id} reached merge without a migration claim record`
+                  : `Migration claim gate failed before merge: ${gate.error}`,
+              );
             }
           }
 

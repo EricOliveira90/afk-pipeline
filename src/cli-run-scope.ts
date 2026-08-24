@@ -1,5 +1,6 @@
 import type { AgentProvider } from "./agent-provider.js";
 import type { Slice } from "./issues-parser.js";
+import { assertWithinManifestScope } from "./afk-manifest.js";
 import { pipelineRunSlug } from "./orchestrator.js";
 import { isSliceComplete, loadRunState } from "./run-state.js";
 import {
@@ -51,35 +52,27 @@ export function resolveCliRunScope(args: {
   }
 
   if (args.manifestSelectedSliceNumbers) {
-    const allowed = new Set(
-      args.manifestSelectedSliceNumbers.map((number) => String(Number(number))),
-    );
-    const conflicting = (requestedSliceNumbers ?? []).filter(
-      (number) => !allowed.has(String(Number(number))),
-    );
-    if (conflicting.length > 0) {
-      throw new Error(
+    assertWithinManifestScope({
+      selectedSlices: args.manifestSelectedSliceNumbers,
+      candidates: requestedSliceNumbers ?? [],
+      sliceNumberOf: (number) => number,
+      describeConflict: (conflicting) =>
         `CLI scope conflicts with afk.json: slice${conflicting.length === 1 ? "" : "s"} ` +
-          `${conflicting.join(", ")} ${conflicting.length === 1 ? "is" : "are"} outside selectedSlices`,
-      );
-    }
+        `${conflicting.join(", ")} ${conflicting.length === 1 ? "is" : "are"} outside selectedSlices`,
+    });
   }
 
   const scope = resolveRunScope(args.slices, requestedSliceNumbers, state.scope);
   if (args.manifestSelectedSliceNumbers) {
-    const allowed = new Set(
-      args.manifestSelectedSliceNumbers.map((number) => String(Number(number))),
-    );
-    const conflicting = scope.members.filter(
-      (slice) => !allowed.has(String(Number(slice.number))),
-    );
-    if (conflicting.length > 0) {
-      throw new Error(
+    assertWithinManifestScope({
+      selectedSlices: args.manifestSelectedSliceNumbers,
+      candidates: scope.members,
+      sliceNumberOf: (slice) => slice.number,
+      describeConflict: (conflicting) =>
         `Persisted run scope conflicts with afk.json: ${conflicting
           .map((slice) => `${slice.number} (#${slice.ghIssue})`)
           .join(", ")}`,
-      );
-    }
+    });
   }
 
   return {

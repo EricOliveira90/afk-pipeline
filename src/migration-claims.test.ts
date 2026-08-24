@@ -7,6 +7,7 @@ import {
   claimMigrationPrefixes,
   initializeMigrationClaims,
   migrationClaimFor,
+  releaseUnmergedMigrationClaims,
   validateContractMigrationClaim,
   validateGeneratedMigrations,
 } from "./migration-claims.js";
@@ -33,21 +34,35 @@ function stateRoot(slug = "run", pool = ["144", "145", "146"]) {
 }
 
 describe("migration claims", () => {
-  it("serializes concurrent slice allocations to unique prefixes", async () => {
-    const setup = stateRoot();
-    const [first, second] = await Promise.all([
-      Promise.resolve().then(() => claimMigrationPrefixes({
-        repoRoot: setup.root, runSlug: setup.slug, ghIssue: "1001", count: 1,
+  it("never overlaps allocations across issue keys — allocation is synchronous by construction", () => {
+    // Regression note (#66): a previous version wrapped two claims in
+    // Promise.all over Promise.resolve().then(sync fn), which still ran
+    // them one after the other on the microtask queue — it exercised no
+    // real race. There is none to exercise: claimMigrationPrefixes is a
+    // single-process synchronous read-modify-write of run state, so
+    // "allocation inside one run is serial by construction" (ADR 0034).
+    // Sequential claims from mixed issue keys are the real-world shape;
+    // assert the invariant they must uphold — allocations never overlap
+    // and drain the pool in order, with re-claims reusing, not
+    // re-allocating.
+    const setup = stateRoot("run", ["144", "145", "146", "147"]);
+    const claim = (ghIssue: string, count: number) =>
+      claimMigrationPrefixes({
+        repoRoot: setup.root, runSlug: setup.slug, ghIssue, count,
         expectedPool: setup.pool,
-      })),
-      Promise.resolve().then(() => claimMigrationPrefixes({
-        repoRoot: setup.root, runSlug: setup.slug, ghIssue: "1002", count: 1,
-        expectedPool: setup.pool,
-      })),
-    ]);
+      });
 
-    expect(first).toEqual(["144"]);
-    expect(second).toEqual(["145"]);
+    const allocations = [
+      claim("1001", 1),
+      claim("1002", 2),
+      claim("1001", 1), // re-claim between fresh claims must not re-allocate
+      claim("1003", 1),
+    ];
+
+    expect(allocations).toEqual([["144"], ["145", "146"], ["144"], ["147"]]);
+    const distinct = new Set(allocations.flat());
+    expect(distinct.size).toBe(4); // no prefix has two owners
+    expect(() => claim("1004", 1)).toThrow(/pool exhausted before generation/);
   });
 
   it("reuses the same claim on resume", () => {
@@ -67,6 +82,56 @@ describe("migration claims", () => {
       repoRoot: setup.root, runSlug: setup.slug, ghIssue: "1001", count: 2,
       expectedPool: setup.pool,
     })).toThrow(/pool exhausted before generation/);
+  });
+
+  it("releases claims of slices that never merged, keeping merged claims (#65)", () => {
+    const setup = stateRoot();
+    const claim = (ghIssue: string) =>
+      claimMigrationPrefixes({
+        repoRoot: setup.root, runSlug: setup.slug, ghIssue, count: 1,
+        expectedPool: setup.pool,
+      });
+    expect(claim("1001")).toEqual(["144"]);
+    expect(claim("1002")).toEqual(["145"]);
+
+    const state = loadRunState(setup.root, setup.slug);
+    state.slices["1001"] = { phase: "PASS", mergedToFeature: true };
+    state.slices["1002"] = { phase: "ESCALATE", error: "contract rounds exhausted" };
+
+    // The escalated slice's reservation is unused: it never delivered a
+    // migration to the feature branch, so the ship-gate trim must not
+    // carry it into the verified draft.
+    expect(releaseUnmergedMigrationClaims(state)).toEqual({
+      retained: ["144"],
+      released: ["1002"],
+    });
+    expect(state.migrations?.claims).toEqual({ "1001": ["144"] });
+  });
+
+  it("reports every released slice key, so the caller knows to save (#65)", () => {
+    const setup = stateRoot();
+    const claim = (ghIssue: string, count: number) =>
+      claimMigrationPrefixes({
+        repoRoot: setup.root, runSlug: setup.slug, ghIssue, count,
+        expectedPool: setup.pool,
+      });
+    claim("1001", 1);
+    claim("1002", 0);
+
+    const state = loadRunState(setup.root, setup.slug);
+    state.slices["1001"] = { phase: "PASS", mergedToFeature: true };
+    state.slices["1002"] = { phase: "ESCALATE", error: "boom" };
+
+    // Regression: a released slice does not always change the manifest.
+    // Slice 1002 claimed no prefix, and a reviewed manifest already
+    // trimmed by an earlier run needs no trim either. The caller must
+    // save on `released` alone; on the trim alone the drop lives in
+    // memory and the stale claim rides into the next run. ADR 0034 step 7.
+    expect(releaseUnmergedMigrationClaims(state)).toEqual({
+      retained: ["144"],
+      released: ["1002"],
+    });
+    expect(state.migrations?.claims).toEqual({ "1001": ["144"] });
   });
 
   it("keeps separate PRD pools isolated", () => {
