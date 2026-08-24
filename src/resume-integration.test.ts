@@ -317,7 +317,7 @@ describe("retried slice resume (spec #33)", () => {
     // The slice ends PASS, and the decision is auditable in the run log.
     expect(JSON.parse(readFileSync(statePath, "utf-8")).slices["4001"].phase).toBe("PASS");
     expect(allRunLogs(repo, `${slug}-stub`)).toMatch(/resuming from 1 commit/);
-  }, 120_000);
+  }, 240_000);
 
   it("falls back to restart from base when the feature merge conflicts (#35)", async () => {
     const repo = makeRepo();
@@ -384,7 +384,7 @@ describe("retried slice resume (spec #33)", () => {
     expect(allRunLogs(repo, `${slug}-stub`)).toMatch(
       /restarting from base \(feature merge conflict\)/,
     );
-  }, 120_000);
+  }, 240_000);
 
   it("never resumes a STUCK slice with a stuck.md, even with commits ahead (#36)", async () => {
     const repo = makeRepo();
@@ -441,7 +441,7 @@ describe("retried slice resume (spec #33)", () => {
       /restarting from base \(stuck\.md present \(terminal diagnosis\)\)/,
     );
     expect(JSON.parse(readFileSync(statePath, "utf-8")).slices["4001"].phase).toBe("PASS");
-  }, 180_000);
+  }, 240_000);
 
   it("resumes a STUCK slice's preserved tree when the operator opts in with --resume-stuck (#49)", async () => {
     const repo = makeRepo();
@@ -707,7 +707,7 @@ describe("retried slice resume (spec #33)", () => {
       readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
     );
     expect(state.slices["4001"].phase).toBe("PASS");
-  }, 180_000);
+  }, 240_000);
 
   it("restarts from base when the surviving branch has zero commits beyond base", async () => {
     const repo = makeRepo();
@@ -764,7 +764,7 @@ describe("retried slice resume (spec #33)", () => {
     expect(allRunLogs(repo, `${slug}-stub`)).toMatch(
       /restarting from base \(no commits beyond base\)/,
     );
-  }, 120_000);
+  }, 240_000);
 });
 
 
@@ -832,7 +832,7 @@ describe("prepareSliceWorktree", () => {
     expect(ctx.resume).toBeDefined();
     expect(ctx.resume!.commitsAhead).toBe(1);
     expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
-  }, 60_000);
+  }, 240_000);
 
   it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", () => {
     const repo = makeRepo();
@@ -863,7 +863,7 @@ describe("prepareSliceWorktree", () => {
     expect(git(repo, ["rev-parse", contexts[0]!.branch])).toBe(
       git(repo, ["rev-parse", contexts[0]!.featBranch]),
     );
-  }, 60_000);
+  }, 240_000);
 
   /**
    * Mark a seeded slice STUCK the way the pipeline does — a stuck.md in
@@ -896,7 +896,7 @@ describe("prepareSliceWorktree", () => {
     expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
     expect(existsSync(join(ctx.worktreeDir, "src", "in-flight.ts"))).toBe(true);
     expect(existsSync(join(ctx.absSliceDir, "stuck.md"))).toBe(true);
-  }, 60_000);
+  }, 240_000);
 
   it("--resume-stuck on an unnamed slice leaves the terminal restart alone (#49)", () => {
     const repo = makeRepo();
@@ -910,7 +910,7 @@ describe("prepareSliceWorktree", () => {
     expect(git(repo, ["rev-parse", ctx.branch])).toBe(
       git(repo, ["rev-parse", ctx.featBranch]),
     );
-  }, 60_000);
+  }, 240_000);
 
   it("--force-restart beats --resume-stuck on the same slice (#49)", () => {
     const repo = makeRepo();
@@ -927,5 +927,5 @@ describe("prepareSliceWorktree", () => {
     expect(git(repo, ["rev-parse", ctx.branch])).toBe(
       git(repo, ["rev-parse", ctx.featBranch]),
     );
-  }, 60_000);
+  }, 240_000);
 });

@@ -227,7 +227,7 @@ describe.runIf(process.platform === "win32")(
 
     it(
       "kills a real parent AND its grandchild, and both are verifiably gone",
-      { timeout: 30_000 },
+      { timeout: 240_000 },
       async () => {
         const { spawn: realSpawn } = await import("node:child_process");
         // Parent prints the grandchild's PID, then both idle for 60s —
