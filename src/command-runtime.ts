@@ -31,6 +31,7 @@ export type CommandOutcome =
 export interface BoundedCommandOptions extends CommandTimeoutOptions {
   wallClockTimeoutMs?: number;
   shell?: boolean;
+  terminateProcessTree?: typeof terminateProcessTree;
 }
 
 export interface CommandExecutionResult {
@@ -56,7 +57,7 @@ export function runBoundedCommand(
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const proc = spawn(command, [...args], {
       cwd: options.cwd,
       shell: options.shell ?? false,
@@ -97,9 +98,25 @@ export function runBoundedCommand(
       if (settled || terminating) return;
       terminating = true;
       cleanup();
-      void terminateProcessTree(proc).then((report) => {
+      const terminateCommandTree =
+        options.terminateProcessTree ?? terminateProcessTree;
+      void terminateCommandTree(proc).then((report) => {
         const warning = formatTerminationWarning(report);
         if (warning) options.onOutput?.(`\n${warning}\n`);
+        if (
+          !report.rootDead ||
+          !report.verified ||
+          report.survivors.length > 0
+        ) {
+          settled = true;
+          reject(
+            new Error(
+              warning ||
+                "WARNING: command root process survived termination",
+            ),
+          );
+          return;
+        }
         settle(
           outcome,
           null,
