@@ -39,8 +39,12 @@ import type {
   InvokeResult,
 } from "./agent-provider.js";
 import { TransientProviderError } from "./agent-provider.js";
-import { ProcessTreeTerminationError } from "./command-runtime.js";
+import {
+  ProcessTreeTerminationError,
+  runBoundedCommand,
+} from "./command-runtime.js";
 import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
+import { terminateProcessTree } from "./kill-tree.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -74,19 +78,39 @@ afterEach(() => {
 });
 
 describe("cancellation classification", () => {
-  it("does not hide failed process-tree termination behind an aborted signal", () => {
+  it("does not hide failed process-tree termination behind an aborted signal", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
+    tempDirs.push(cwd);
     const controller = new AbortController();
-    controller.abort();
+    setTimeout(() => controller.abort(), 20);
 
-    expect(
-      isCancelled(
-        new ProcessTreeTerminationError(
-          "command process tree survived termination",
-        ),
-        controller.signal,
-      ),
-    ).toBe(false);
-  });
+    let thrown: unknown;
+    try {
+      await runBoundedCommand(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        {
+          cwd,
+          signal: controller.signal,
+          inactivityTimeoutMs: 1_000,
+          heartbeatIntervalMs: 20,
+          terminateProcessTree: async (proc) => {
+            await terminateProcessTree(proc);
+            return {
+              rootDead: true,
+              survivors: [4242],
+              verified: true,
+            };
+          },
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProcessTreeTerminationError);
+    expect(isCancelled(thrown, controller.signal)).toBe(false);
+  }, 30_000);
 });
 
 describe("base gate infrastructure retries", () => {
