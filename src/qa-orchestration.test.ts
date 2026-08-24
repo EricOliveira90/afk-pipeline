@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -25,7 +25,12 @@ import { rmDirWithRetry } from "./test-support.js";
 
 const dirs: string[] = [];
 
+beforeEach(() => {
+  vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+});
+
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) {
     rmDirWithRetry(dir);
   }
