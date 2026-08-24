@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildDAG, type Slice } from "./issues-parser.js";
@@ -25,8 +25,24 @@ import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provide
 
 const dirs: string[] = [];
 
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+  for (const dir of dirs.splice(0)) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (
+          attempt >= 5 ||
+          !["EBUSY", "ENOTEMPTY", "EPERM"].includes(code ?? "")
+        ) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
 });
 
 function git(cwd: string, args: string[]): void {
@@ -491,6 +507,25 @@ describe("base gate observability", () => {
     );
     expect(summary).toContain("| 70 | 2 | optional | SKIPPED | 14ms |");
   });
+
+  it.runIf(process.platform === "win32")(
+    "retries cleanup while a child briefly owns the repository directory",
+    async () => {
+      const repo = makeRepo();
+      const child = spawn(
+        process.execPath,
+        ["-e", "console.log('ready'); setTimeout(() => {}, 250)"],
+        {
+          cwd: repo,
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+
+      await new Promise<void>((resolve) => {
+        child.stdout!.once("data", () => resolve());
+      });
+    },
+  );
 });
 
 describe("shared-preview QA", () => {
