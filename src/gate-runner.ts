@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { runBoundedCommand } from "./command-runtime.js";
 import { resolveCommit, resolveTree } from "./git.js";
 
@@ -116,21 +117,37 @@ export function createCandidateCheckpoint(
     throw new Error(`Candidate checkpoint path already exists: ${worktreeDir}`);
   }
 
-  const baseCommit = resolveCommit(cwd, "HEAD");
-  const baseTree = resolveTree(cwd, "HEAD");
-  if (!baseCommit || !baseTree) {
+  let candidateBase: string[];
+  try {
+    candidateBase = execFileSync(
+      "git",
+      ["rev-parse", "HEAD^{commit}", "HEAD^{tree}", "--git-path", "index"],
+      {
+        cwd,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    )
+      .trim()
+      .split(/\r?\n/);
+  } catch {
+    throw new Error("Cannot checkpoint a candidate without a committed HEAD");
+  }
+  const [baseCommit, baseTree, sourceIndexPath] = candidateBase;
+  if (!baseCommit || !baseTree || !sourceIndexPath) {
     throw new Error("Cannot checkpoint a candidate without a committed HEAD");
   }
 
   const indexDir = mkdtempSync(join(tmpdir(), "afk-checkpoint-index-"));
+  const indexPath = join(indexDir, "index");
   const env = {
     ...process.env,
-    GIT_INDEX_FILE: join(indexDir, "index"),
+    GIT_INDEX_FILE: indexPath,
   };
   let commitSha = baseCommit;
   let treeId = baseTree;
   try {
-    execFileSync("git", ["read-tree", baseCommit], { cwd, env });
+    copyFileSync(resolve(cwd, sourceIndexPath), indexPath);
     execFileSync("git", ["add", "-A"], { cwd, env });
     treeId = execFileSync("git", ["write-tree"], {
       cwd,

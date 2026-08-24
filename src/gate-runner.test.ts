@@ -103,6 +103,52 @@ describe("createCandidateCheckpoint", () => {
       checkpoint.treeId,
     );
   });
+
+  it.runIf(process.platform === "win32")(
+    "captures an unmaterialized checkpoint with bounded Git process fanout",
+    () => {
+      const { root, cwd } = makeCheckpoint();
+      writeFileSync(join(cwd, "tracked.txt"), "staged", "utf-8");
+      git(cwd, ["add", "tracked.txt"]);
+      writeFileSync(join(cwd, "tracked.txt"), "generated", "utf-8");
+      writeFileSync(join(cwd, "untracked.txt"), "included", "utf-8");
+
+      const invocationLog = join(root, "git-invocations.log");
+
+      const originalTrace = process.env.GIT_TRACE2_EVENT;
+      let checkpoint;
+      try {
+        process.env.GIT_TRACE2_EVENT = invocationLog;
+        checkpoint = createCandidateCheckpoint(
+          cwd,
+          join(root, "detached-checkpoint"),
+          { materialize: false },
+        );
+      } finally {
+        if (originalTrace == null) {
+          delete process.env.GIT_TRACE2_EVENT;
+        } else {
+          process.env.GIT_TRACE2_EVENT = originalTrace;
+        }
+      }
+
+      const invocations = readFileSync(invocationLog, "utf-8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+        .filter((event) => event.event === "start")
+        .map((event) => event.argv ?? []);
+      expect(invocations).toHaveLength(4);
+      expect(invocations.some((args) => args.includes("read-tree"))).toBe(false);
+      expect(git(cwd, ["show", `${checkpoint.commitSha}:tracked.txt`])).toBe(
+        "generated",
+      );
+      expect(git(cwd, ["show", `${checkpoint.commitSha}:untracked.txt`])).toBe(
+        "included",
+      );
+      expect(git(cwd, ["show", ":tracked.txt"])).toBe("staged");
+    },
+  );
 });
 
 describe("runGates", () => {
