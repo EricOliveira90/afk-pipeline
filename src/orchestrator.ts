@@ -117,6 +117,7 @@ const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
  * Mirrors the SLOW_AGENT_IDLE_TIMEOUT_MS precedent above. See ADR 0019.
  */
 const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
+const DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS = 7_200_000;
 
 const BASE_GATE_IDS = ["typecheck", "lint", "tests"] as const;
 
@@ -1841,8 +1842,7 @@ export async function runSliceExecute(
             signal,
             inactivityTimeoutMs:
               config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-            wallClockTimeoutMs:
-              config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+            wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
             heartbeatIntervalMs:
               config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
             onOutput: (_gateId, text) => process.stderr.write(text),

@@ -140,6 +140,47 @@ function makeContext(
 }
 
 describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
+  it("does not treat the inactivity timeout as the base-gate wall-clock limit", async () => {
+    const repo = makeRepo();
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "active-gate-fixture",
+        scripts: {
+          test: "node -e \"let ticks=0; const timer=setInterval(()=>console.log(++ticks),50); setTimeout(()=>clearInterval(timer),2500)\"",
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add active gate"]);
+
+    let artifactDir = "";
+    let evaluators = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "evaluator-qa") {
+          evaluators++;
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, {
+      commandTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
+    expect(evaluators).toBe(1);
+  });
+
   it("blocks evaluation until every required checkpoint gate passes", async () => {
     const repo = makeRepo();
     const gateScript =
