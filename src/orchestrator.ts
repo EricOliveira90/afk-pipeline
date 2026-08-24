@@ -5,7 +5,6 @@ import {
   existsSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readSync,
   rmSync,
   statSync,
@@ -69,6 +68,7 @@ import {
 } from "./handoff.js";
 import {
   resolveSanityCommands,
+  resolveSanityStepScripts,
   resolveTestCommand,
 } from "./preship.js";
 import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
@@ -118,36 +118,11 @@ const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
  */
 const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
 
-/**
- * Base gate steps, in order — mirrors preship.ts `SANITY_STEPS` (ADR 0012):
- * the per-slice base gates and the aggregate pre-ship sanity gate walk the
- * same `package.json` discovery set so the two checks cannot drift.
- */
-const BASE_GATE_STEPS: ReadonlyArray<{
-  name: string;
-  scripts: ReadonlyArray<string>;
-}> = [
-  { name: "typecheck", scripts: ["typecheck"] },
-  { name: "lint", scripts: ["lint"] },
-  { name: "tests", scripts: ["test:run", "test"] },
-];
-
-function readPackageScripts(cwd: string): Record<string, string> | null {
-  try {
-    const pkgRaw = readFileSync(join(cwd, "package.json"), "utf-8");
-    return (JSON.parse(pkgRaw).scripts ?? {}) as Record<string, string>;
-  } catch {
-    return null;
-  }
-}
-
 /** Derive the policy-less base gate set shared by every agent provider. */
 export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
-  const scripts = readPackageScripts(cwd) ?? {};
-  return BASE_GATE_STEPS.map((step) => {
-    const scriptName = step.scripts.find((name) => scripts[name] != null);
+  return resolveSanityStepScripts(cwd).map(({ name, scriptName }) => {
     return {
-      id: step.name,
+      id: name,
       stage: "base",
       required: scriptName != null,
       ...(scriptName

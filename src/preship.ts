@@ -25,6 +25,20 @@ function readPackageScripts(cwd: string): Record<string, string> | null {
   }
 }
 
+export interface SanityStepScript {
+  name: string;
+  scriptName: string | undefined;
+}
+
+/** Resolve the ordered baseline script set shared by slice and aggregate gates. */
+export function resolveSanityStepScripts(cwd: string): SanityStepScript[] {
+  const scripts = readPackageScripts(cwd) ?? {};
+  return SANITY_STEPS.map((step) => ({
+    name: step.name,
+    scriptName: step.scripts.find((script) => scripts[script] != null),
+  }));
+}
+
 /**
  * Resolves the consumer project's test command from its `package.json`.
  * Prefers `test:run` over `test`.
@@ -41,11 +55,8 @@ export function resolveTestCommand(cwd: string): string | undefined {
  * consumes this same list so the two checks cannot drift (ADR 0012).
  */
 export function resolveSanityCommands(cwd: string): string[] {
-  const scripts = readPackageScripts(cwd);
-  if (!scripts) return [];
   const commands: string[] = [];
-  for (const step of SANITY_STEPS) {
-    const scriptName = step.scripts.find((s) => scripts[s] != null);
+  for (const { scriptName } of resolveSanityStepScripts(cwd)) {
     if (scriptName) commands.push(`pnpm run ${scriptName}`);
   }
   return commands;
@@ -62,12 +73,8 @@ export interface PreShipSanityResult {
  * failed step.
  */
 export function runPreShipSanity(cwd: string): PreShipSanityResult {
-  const scripts = readPackageScripts(cwd);
-  if (!scripts) return { ok: true, failures: [] };
-
   const failures: string[] = [];
-  for (const step of SANITY_STEPS) {
-    const scriptName = step.scripts.find((s) => scripts[s] != null);
+  for (const { name, scriptName } of resolveSanityStepScripts(cwd)) {
     if (!scriptName) continue;
     try {
       execFileSync("pnpm", ["run", scriptName], {
@@ -76,7 +83,7 @@ export function runPreShipSanity(cwd: string): PreShipSanityResult {
         stdio: ["ignore", "inherit", "inherit"],
       });
     } catch {
-      failures.push(step.name);
+      failures.push(name);
     }
   }
   return { ok: failures.length === 0, failures };

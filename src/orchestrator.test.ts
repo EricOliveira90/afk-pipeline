@@ -17,6 +17,7 @@ import {
   collectRequiredGateFailures,
   makeAsyncMutex,
   makeSliceContext,
+  resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
 } from "./orchestrator.js";
@@ -26,6 +27,7 @@ import {
 } from "./ship-gate.js";
 import {
   resolveSanityCommands,
+  resolveSanityStepScripts,
   resolveTestCommand,
   runPreShipSanity,
 } from "./preship.js";
@@ -246,6 +248,35 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
     if (!existsSync(marker)) return [];
     return readFileSync(marker, "utf-8").trim().split("\n").filter(Boolean);
   }
+
+  it("projects base gates and aggregate commands from one discovery result", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      test: "vitest",
+    });
+
+    const discovered = resolveSanityStepScripts(dir);
+
+    expect(discovered).toEqual([
+      { name: "typecheck", scriptName: "typecheck" },
+      { name: "lint", scriptName: undefined },
+      { name: "tests", scriptName: "test" },
+    ]);
+    expect(resolveBaseGateDeclarations(dir)).toEqual(
+      discovered.map(({ name, scriptName }) => ({
+        id: name,
+        stage: "base",
+        required: scriptName != null,
+        ...(scriptName
+          ? { command: "pnpm", args: ["run", scriptName] }
+          : {}),
+      })),
+    );
+    expect(resolveSanityCommands(dir)).toEqual([
+      "pnpm run typecheck",
+      "pnpm run test",
+    ]);
+  });
 
   it("matches when all three steps are defined", () => {
     const dir = makeProject({
