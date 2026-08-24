@@ -101,7 +101,36 @@ describe("migration claims", () => {
     // The escalated slice's reservation is unused: it never delivered a
     // migration to the feature branch, so the ship-gate trim must not
     // carry it into the verified draft.
-    expect(releaseUnmergedMigrationClaims(state)).toEqual(["144"]);
+    expect(releaseUnmergedMigrationClaims(state)).toEqual({
+      retained: ["144"],
+      released: ["1002"],
+    });
+    expect(state.migrations?.claims).toEqual({ "1001": ["144"] });
+  });
+
+  it("reports every released slice key, so the caller knows to save (#65)", () => {
+    const setup = stateRoot();
+    const claim = (ghIssue: string, count: number) =>
+      claimMigrationPrefixes({
+        repoRoot: setup.root, runSlug: setup.slug, ghIssue, count,
+        expectedPool: setup.pool,
+      });
+    claim("1001", 1);
+    claim("1002", 0);
+
+    const state = loadRunState(setup.root, setup.slug);
+    state.slices["1001"] = { phase: "PASS", mergedToFeature: true };
+    state.slices["1002"] = { phase: "ESCALATE", error: "boom" };
+
+    // Regression: a released slice does not always change the manifest.
+    // Slice 1002 claimed no prefix, and a reviewed manifest already
+    // trimmed by an earlier run needs no trim either. The caller must
+    // save on `released` alone; on the trim alone the drop lives in
+    // memory and the stale claim rides into the next run. ADR 0034 step 7.
+    expect(releaseUnmergedMigrationClaims(state)).toEqual({
+      retained: ["144"],
+      released: ["1002"],
+    });
     expect(state.migrations?.claims).toEqual({ "1001": ["144"] });
   });
 

@@ -2566,16 +2566,19 @@ export async function runPipeline(
           // slice's reservation must not ride into the verified draft
           // (#65). Releasing its claim record here keeps run state
           // consistent with the trimmed pool below.
-          const claimed = releaseUnmergedMigrationClaims(latestState);
+          const release = releaseUnmergedMigrationClaims(latestState);
           const trimmed = trimUnclaimedMigrationPrefixes(
             join(reviewDir, specsDir),
-            claimed,
+            release.retained,
           );
+          // Save on either half. A release with no trim happens when the
+          // manifest already lists exactly the retained prefixes; gating
+          // the save on the trim alone drops the claim in memory only.
+          if (latestState.migrations && (trimmed.changed || release.released.length > 0)) {
+            latestState.migrations.pool = [...trimmed.manifest.migrationPrefixes];
+            saveRunState(repoRoot, latestState);
+          }
           if (trimmed.changed) {
-            if (latestState.migrations) {
-              latestState.migrations.pool = [...trimmed.manifest.migrationPrefixes];
-              saveRunState(repoRoot, latestState);
-            }
             git.commitAll(
               reviewDir,
               `chore(${prdSlug}): release unused migration reservations`,

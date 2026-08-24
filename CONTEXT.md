@@ -223,8 +223,11 @@ keyed by GH issue in **run state** (`migrations.claims`). Claimed when
 a locked contract declares `New migration files: <count>` > 0, handed
 verbatim to planner and generator, enforced by machine gates at
 contract, generation, QA, and merge, and reused across retries and
-resumes. Agents never calculate the next migration prefix. Pool
-exhaustion fails before generation. See ADR 0034.
+resumes. One exception: before the **ship gate** the run drops the
+claim of every slice that did not merge, so that reservation leaves
+both `afk.json` on the reviewed branch and the run-state pool. Agents
+never calculate the next migration prefix. Pool exhaustion fails
+before generation. See ADR 0034.
 _Avoid_: "lock" (nothing is held against other processes), "assignment
 from the manifest" (the manifest owns the pool; the pipeline owns
 claims)

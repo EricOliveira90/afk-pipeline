@@ -248,29 +248,43 @@ export function validateGeneratedMigrations(args: {
   return { ok: true };
 }
 
+export interface MigrationClaimRelease {
+  /** Prefixes still claimed by a merged slice, in pool order. */
+  retained: string[];
+  /** Slice keys whose claim record this call dropped. */
+  released: string[];
+}
+
 /**
  * Retain the migration claims of merged slices and release every other
- * claim, returning the retained prefixes in pool order. Ship-gate
- * input: a claim held by a slice that failed, escalated, or was
- * descoped from a narrowed re-run never delivered a migration to the
- * reviewed branch, so its reservation must not survive into the
- * verified draft (#65) — the parent spec's "unused reservations do not
- * remain in the verified draft". The claim record is dropped alongside
- * the trim so pool and claims stay consistent (`validateClaimState`
- * requires claims inside the pool); a slice retried after the trim
- * fails closed on pool exhaustion and re-enters through a fresh
- * `to-afk` reservation rather than a stale claim.
+ * claim. Ship-gate input: a claim held by a slice that failed,
+ * escalated, or was descoped from a narrowed re-run never delivered a
+ * migration to the reviewed branch, so its reservation must not survive
+ * into the verified draft (#65) — the parent spec's "unused
+ * reservations do not remain in the verified draft".
+ *
+ * This mutates `state.migrations.claims`. The caller must save run state
+ * whenever `released` is non-empty, even when the manifest needed no
+ * trim, or the drop lives in memory only and the stale claim rides into
+ * the next run. `released` exists to make that condition testable.
  */
-export function releaseUnmergedMigrationClaims(state: RunState): string[] {
-  if (!state.migrations) return [];
+export function releaseUnmergedMigrationClaims(
+  state: RunState,
+): MigrationClaimRelease {
+  if (!state.migrations) return { retained: [], released: [] };
   validateClaimState(state.migrations);
+  const released: string[] = [];
   for (const ghIssue of Object.keys(state.migrations.claims)) {
     if (!isSliceComplete(state, ghIssue)) {
       delete state.migrations.claims[ghIssue];
+      released.push(ghIssue);
     }
   }
   const merged = new Set(Object.values(state.migrations.claims).flat());
-  return state.migrations.pool.filter((prefix) => merged.has(prefix));
+  return {
+    retained: state.migrations.pool.filter((prefix) => merged.has(prefix)),
+    released,
+  };
 }
 
 /**

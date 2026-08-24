@@ -76,12 +76,26 @@ The claim flow (`migration-claims.ts`):
    (`releaseUnmergedMigrationClaims`) — a claim held by a failed,
    escalated, or descoped slice counts as unused — and
    `trimUnclaimedMigrationPrefixes` removes every other reservation
-   from `afk.json`, committing the trim, so the verified draft does
-   not carry reservations the PRD never used and a sibling PRD's
-   `to-afk` can re-reserve them. The released slice's claim record is
-   dropped from run state alongside the trim (claims must stay inside
-   the pool); retrying that slice after the trim fails closed on pool
-   exhaustion and re-enters through a fresh reservation.
+   from `afk.json` **on the reviewed feature branch**, committing the
+   trim, so the verified draft does not carry reservations the PRD
+   never used. The released slice's claim record is dropped from run
+   state, and run state is saved whenever the release drops a record —
+   not only when the manifest changed. The two conditions differ: a
+   reviewed manifest an earlier run already trimmed needs no second
+   trim, and a slice that declared zero migrations holds an empty
+   claim record. Gating the save on the trim alone leaves that stale
+   claim on file, and the next run hands its prefix out again while
+   the trimmed branch already advertises the prefix as free.
+
+   The release reaches a sibling PRD by two paths with different
+   timing. The run-state pool frees immediately, so `to-afk`'s
+   run-state scan stops counting the prefix as reserved. The
+   base-branch manifest frees only when the draft merges:
+   `loadAfkManifest` reads the PRD directory on the base branch, which
+   the trim never touches. A **new run** after the trim therefore
+   restores the untrimmed pool and can re-claim a released prefix
+   instead of failing closed. Treat the trim as "do not ship unused
+   reservations", not as an in-run release.
 
 Run state gains one optional field (extending ADR 0018's schema):
 
