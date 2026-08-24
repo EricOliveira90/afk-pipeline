@@ -19,6 +19,7 @@
 - Loaded provider gate failures: the provider-independence fixture uses a 30-second inactivity budget instead of racing real `pnpm run` startup at five seconds; dedicated gate-runner tests retain tight 100ms and 150ms timeout coverage.
 - Contract-owned `EBUSY` cleanup failures: QA fixtures now own child lifetimes and await child closure before directory removal, so cleanup no longer depends on a child exiting within a fixed retry window.
 - Reporter RPC failure: the merged feature base suppresses console capture and live reporter summaries in `vitest.config.ts`; that path remains outside this slice's locked diff.
+- Tight timeout overrides: the refreshed feature base raises the explicit `git` and `wave` integration-test ceilings to 240 seconds, so they no longer override the generous global ceiling with the 30-second bounds that caused teardown cascades; those paths remain outside this slice's locked diff.
 - Verification: the exact implicated matrix passed all 126 tests across `gate-runner`, `qa-orchestration`, `git`, and `wave` with two workers and no timeout cascade, `EBUSY`, or reporter RPC failure.
 
 ## Decisions made during implementation
@@ -38,6 +39,7 @@
 - Windows does not permit removal of a repository while a child process still uses it as its working directory; retry-only cleanup remains duration-dependent unless teardown owns that process.
 - A five-second inactivity budget can classify healthy `pnpm` startup as a command failure under two-worker Git load even when the same fixture passes in isolation.
 - The reporter fix is owned by the feature branch's `vitest.config.ts`; it is intentionally absent from this locked slice diff.
+- The explicit `git` and `wave` timeout raises are also owned by the refreshed feature branch and intentionally absent from this locked slice diff.
 - The full `pnpm test` suite was not rerun in this attempt because the resume instructions reserve it for the normal QA gate.
 
 ## Status
