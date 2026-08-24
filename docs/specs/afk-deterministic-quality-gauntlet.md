@@ -126,6 +126,20 @@ The pipeline remains incremental. It applies the gauntlet to small slices and pr
 
 ## Implementation Decisions
 
+### 0. Terminology: three different manifests
+
+ADR 0034 introduced a file called a manifest after this specification was
+written. Three distinct artifacts now carry that word. Always qualify it.
+
+| Term | Artifact | Owner | Purpose |
+| --- | --- | --- | --- |
+| AFK run manifest | `<prd-dir>/afk.json` | The `to-afk` preparation step | Declares `selectedSlices`, the `migrationPrefixes` reservation pool, and `protectedIssues` for one run (ADR 0034) |
+| Acceptance manifest | Versioned artifact beside the slice contract | Planner, locked by the contract evaluator | Maps every in-scope behavior to an executable acceptance gate (§8) |
+| Role context manifest | Versioned per-role declaration inside AFK | AFK | Declares one role's objective, write scope, accepted inputs, and size budget (§6) |
+
+These three are unrelated. The AFK run manifest is not a quality policy, does
+not describe behavior, and does not configure prompts.
+
 ### 1. Delivery shape
 
 - This is a parent specification and must be implemented as small dependent slices, not one agent invocation.
@@ -141,6 +155,9 @@ The pipeline remains incremental. It applies the gauntlet to small slices and pr
   9. Final evaluation of every final tree changed after candidate approval.
   10. Aggregate guardian remediation and complete observability.
 - Each slice must preserve AFK's existing DAG, wave, lane, narrowed-invocation, resumption, cancellation, MERGE-PENDING, and blocked-ship semantics.
+- Each slice must also preserve the behavior added after this specification was written. Two decisions landed later and are load-bearing:
+  - ADR 0033 extracted post-wave shipping into `ship-gate.ts`, the pre-ship sanity command policy into `preship.ts`, and migration validation into `migration-gate.ts`. Aggregate gates, guardian invocation, guardian artifact commits, review caching, and PR planning belong to those modules. A slice that adds aggregate or guardian behavior extends the ship gate through its interface. It does not move the phase back inline into `runPipeline`.
+  - ADR 0034 added `afk.json` and pipeline-owned migration claims. Manifest run scope (`selectedSlices` as the default scope, out-of-manifest slices failing closed), the migration prefix pool, per-slice claims in run state, the contract-lock claim gate, the pre-QA and pre-merge generated-migration checks, and the pre-ship trim of unused reservations all remain intact.
 
 ### 2. One deterministic gate-runner module
 
@@ -157,6 +174,10 @@ The pipeline remains incremental. It applies the gauntlet to small slices and pr
 ### 3. Versioned project quality policy
 
 - Add one optional, versioned project quality policy consumed by all providers.
+- The policy lives in its own file, separate from the AFK run manifest (`afk.json`). It is not a section inside `afk.json`. Three reasons:
+  - `to-afk` writes `afk.json` per run. The quality policy is human-owned strategic configuration that outlives any single run (§14, user story 63).
+  - `afk.json` is a cross-repository contract parsed strictly by this pipeline and by the consuming repository's preflight through the `./afk-manifest` entry point (ADR 0034). Adding an unrelated schema there gives one file two owners and two reasons to change.
+  - Absence of `afk.json` is documented legacy mode. Absence of a quality policy is the staged-adoption baseline. The two must fail independently, so they cannot share a version field.
 - The policy declares named gates for these stages: base, acceptance, clean, harden, architecture, and aggregate.
 - A gate declaration includes a stable ID, command, required/optional status, scope, prerequisite IDs, timeout override when needed, and whether a passing result is cacheable.
 - Acceptance scenarios reference gate IDs, never agent-generated arbitrary commands.
@@ -238,6 +259,11 @@ The context manifests implement these narrow role contracts. The table defines l
 - The generator must revert unauthorized changes. A writing agent cannot expand a locked contract.
 - If the slice genuinely needs additional scope, it escalates for contract revision rather than silently self-authorizing.
 - The same normalized declaration feeds lane partitioning, lane-shared-resource recognition, contract-lock gates, and final scope enforcement.
+- "The same declaration" means one shared source, not the only input. Migration-bearing slices carry an additional, separate lane resource key (ADR 0027) and additional contract-lock and pre-merge gates (ADR 0034). The scope work composes with them and replaces neither:
+  - Lane partitioning reads the normalized declaration **and** the migration resource key. A slice that serializes only on declared file overlap breaks ADR 0027's migration lane grouping.
+  - Contract lock runs the scope check **and** `validateContractMigrationClaim`. A contract that uses a prefix outside its claim is refused and spends a contract round, exactly like a scope refusal.
+  - Pre-merge enforcement runs the changed-file gate **and** `validateGeneratedMigrations`, which diffs generated migration files against both the contract and the claim.
+- The AFK artifact allowlist must account for paths the orchestrator itself writes. `<prd-dir>/afk.json` is one: before the ship gate, AFK trims unused migration reservations and commits that change on the reviewed feature branch (ADR 0034). Per-slice artifacts under `.kiro/specs/<prd>/slices/<slice>/` are another. An allowlist derived only from agent-written paths will reject the orchestrator's own commits.
 
 ### 8. Executable acceptance manifest and regression baseline
 
@@ -245,7 +271,7 @@ The context manifests implement these narrow role contracts. The table defines l
 - Every in-scope behavior has a stable behavior ID, source citation, Given/When/Then description, observable result, preservation relevance, and one or more configured acceptance gate IDs.
 - Every acceptance scenario is written from an external user, CLI, API, or UI perspective.
 - The contract evaluator refuses lock when an in-scope behavior lacks an executable mapping, requires unbounded human judgment, or references an undefined gate.
-- The generator receives the locked manifest and implements the code and tests needed to satisfy it.
+- The generator receives the locked acceptance manifest and implements the code and tests needed to satisfy it.
 - The orchestrator executes acceptance gates before each candidate behavioral evaluation. Their results, not evaluator prose, decide whether review can start.
 - After candidate approval, the locked contract, acceptance manifest, candidate PASS, and passing gate results form the approved behavior baseline.
 - After every cleaner or hardener checkpoint, the orchestrator reruns base and acceptance gates plus all previously passed gates that the edit can affect.
@@ -317,6 +343,7 @@ The context manifests implement these narrow role contracts. The table defines l
 - Every stage emits structured run events for start, end, round, attempt, tree identity, gate IDs, outcomes, and duration.
 - Run summaries show which stages were enabled, passed, failed, skipped, cached, or exhausted.
 - Resumption reuses only canonical PASS evidence tied to the current tree and unchanged policy definition.
+- Gauntlet evidence extends the run-state schema; it does not rewrite it. Run state already carries an optional `migrations` field holding the prefix pool and per-issue claims (ADR 0034, extending ADR 0018). A slice keeps its claimed prefixes across rounds and across runs, and claim state is validated on every load. New gate, checkpoint, and stage evidence must preserve that field and its validation.
 - Cancellation uses the existing cancellation signal and process-tree termination behavior.
 - No retry may erase evidence from an earlier attempt.
 
@@ -407,6 +434,17 @@ The context manifests implement these narrow role contracts. The table defines l
 - Assert that failed evidence prevents merge and PR creation, not merely that an internal function returned false.
 - Keep deterministic tools deterministic in tests; agent stubs may attempt to lie or mutate so the orchestrator's protections are actually exercised.
 
+### Test harness constraints on Windows
+
+The gauntlet multiplies the number of tests that spawn real processes. Three
+harness rules keep that suite honest, because a flaky suite cannot gate a
+slice:
+
+- Remove fixture directories through the shared `rmDirWithRetry` helper, never a bare `rmSync`. A just-exited git child can still hold a handle, which makes teardown throw `EBUSY` and fails a passing test.
+- Do not rely on the default per-test timeout for a git-heavy case. The global ceiling is generous on purpose; a suite that needs a tighter bound sets it per `describe`.
+- Do not depend on test console output reaching the reporter. Passing tests run with their console output suppressed, because forwarding every pipeline log line over the reporter RPC backs up under load and fails an otherwise green run with `Timeout calling "onTaskUpdate"`. Assert against artifacts, events, and run state instead of captured stdout.
+- Cover both AFK run manifest modes. A run with `afk.json` present and a legacy run without it take different scope and migration paths, so a gauntlet gate must be proven in both.
+
 ## Out of Scope
 
 - Building language-specific CRAP, coverage, complexity, duplication, mutation, browser, or architecture-analysis tools inside AFK.
@@ -441,3 +479,6 @@ The context manifests implement these narrow role contracts. The table defines l
 - Architecture policy is deterministic only after a human defines it. The system may enforce permitted dependencies, forbidden imports, module cycles, or interface rules, but the lead engineer remains responsible for choosing those rules.
 - This specification is expected to produce multiple implementation issues. Its ordering is part of the decision: evidence integrity and orchestrator-owned baseline gates come before adding more agent roles.
 - Relevant existing decisions include orchestrator ownership of contract status, evaluator QA using the sanity command set, deterministic/shared-preview QA separation, guardian review failure classes, per-run evidence directories, per-slice state persistence, invocation bounds, cancellation, lane continuation, lane-shared resources, contract-lock gates, MERGE-PENDING, and blocked-ship semantics.
+- Two decisions landed after this specification was written and change where gauntlet code belongs. Read both before planning a slice that touches shipping, scope, or migrations:
+  - ADR 0033 (ship gate extraction): `preship.ts` owns sanity command discovery and `runPreShipSanity`; `migration-gate.ts` owns `verifyMigrationSync` and `sliceTouchedMigrations`; `ship-gate.ts` owns the post-wave shipping decision through one `runShipGate` interface. `classifyReviewFailure` stays in `artifacts.ts`.
+  - ADR 0034 (AFK manifest and migration claims): `afk.json` is the pipeline's first config file, and the pipeline allocates migration prefixes from its pool. Agents never calculate a migration prefix; they receive an exact claim.
