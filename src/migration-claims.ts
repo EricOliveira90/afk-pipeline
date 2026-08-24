@@ -7,12 +7,24 @@ import { migrationPathsIn, type LaneResourceOptions } from "./lanes.js";
 import {
   loadRunState,
   saveRunState,
+  assertMigrationClaimShape,
   type MigrationClaimState,
   type RunState,
 } from "./run-state.js";
 
 const MIGRATION_REQUIREMENTS_HEADING = /^##\s+Migration requirements\s*$/im;
 const MIGRATION_COUNT = /^\s*[-*]\s+New migration files:\s*(\d+)\s*$/im;
+
+/**
+ * Planner-facing objection for a contract that omits the section the
+ * claim flow starts from (ADR 0034 step 1). One string, because two
+ * gates raise it: contract-lock (`claimContractMigrations`) when there
+ * is no count to claim against, and contract validation
+ * (`validateContractMigrationClaim`) when re-checking a locked contract.
+ */
+export const MISSING_MIGRATION_REQUIREMENTS_OBJECTION =
+  'Add a "## Migration requirements" section containing exactly ' +
+  '"- New migration files: <count>". Use 0 when this slice creates none.';
 
 export function readContractMigrationCount(
   contractPath: string,
@@ -35,21 +47,9 @@ export function migrationPrefixOf(path: string): string | null {
 }
 
 function validateClaimState(state: MigrationClaimState): void {
-  if (
-    !Array.isArray(state.pool) ||
-    state.pool.some((prefix) => typeof prefix !== "string") ||
-    new Set(state.pool).size !== state.pool.length
-  ) {
-    throw new Error("Run state contains an invalid migration prefix pool");
-  }
-  if (!state.claims || typeof state.claims !== "object" || Array.isArray(state.claims)) {
-    throw new Error("Run state contains invalid migration claims");
-  }
+  assertMigrationClaimShape(state);
   const seen = new Map<string, string>();
   for (const [issue, prefixes] of Object.entries(state.claims)) {
-    if (!Array.isArray(prefixes)) {
-      throw new Error(`Run state contains invalid migration claims for #${issue}`);
-    }
     for (const prefix of prefixes) {
       if (!state.pool.includes(prefix)) {
         throw new Error(
@@ -176,10 +176,7 @@ export function validateContractMigrationClaim(args: {
 }): string | null {
   const count = readContractMigrationCount(args.contractPath);
   if (count === null) {
-    return (
-      'Add a "## Migration requirements" section containing exactly ' +
-      '"- New migration files: <count>". Use 0 when this slice creates none.'
-    );
+    return MISSING_MIGRATION_REQUIREMENTS_OBJECTION;
   }
   if (count !== args.claim.length) {
     return (
@@ -255,4 +252,73 @@ export function allClaimedPrefixes(state: RunState): string[] {
   validateClaimState(state.migrations);
   const claimed = new Set(Object.values(state.migrations.claims).flat());
   return state.migrations.pool.filter((prefix) => claimed.has(prefix));
+}
+
+/**
+ * Contract-lock half of the claim flow (ADR 0034 steps 1–3): read the
+ * contract's declared migration count, claim that many prefixes from
+ * the reserved pool, and validate the contract against the claim.
+ * Returns the planner-facing objection, or `null` when the contract
+ * satisfies its claim.
+ */
+export function claimContractMigrations(args: {
+  repoRoot: string;
+  runSlug: string;
+  ghIssue: string;
+  contractPath: string;
+  expectedPool: readonly string[];
+  options?: LaneResourceOptions;
+}): string | null {
+  const count = readContractMigrationCount(args.contractPath);
+  if (count === null) return MISSING_MIGRATION_REQUIREMENTS_OBJECTION;
+  const claim = claimMigrationPrefixes({
+    repoRoot: args.repoRoot,
+    runSlug: args.runSlug,
+    ghIssue: args.ghIssue,
+    count,
+    expectedPool: args.expectedPool,
+  });
+  return validateContractMigrationClaim({
+    contractPath: args.contractPath,
+    claim,
+    options: args.options,
+  });
+}
+
+/**
+ * Post-generation half of the claim flow (ADR 0034 step 4): look up the
+ * slice's persisted claim and diff the generated migration files against
+ * the contract and the claim. Shared verbatim by the pre-QA gate
+ * (orchestrator) and the pre-merge gate (wave); only the error wrapping
+ * differs, so `reason` lets each caller keep its own message.
+ */
+export function checkClaimedGeneratedMigrations(args: {
+  repoRoot: string;
+  runSlug: string;
+  ghIssue: string;
+  worktreeDir: string;
+  featBranch: string;
+  contractPath: string;
+  options?: LaneResourceOptions;
+}):
+  | { ok: true }
+  | { ok: false; reason: "missing-claim" | "mismatch"; error: string } {
+  const claim = migrationClaimFor(args.repoRoot, args.runSlug, args.ghIssue);
+  if (!claim) {
+    return {
+      ok: false,
+      reason: "missing-claim",
+      error: "no persisted claim record",
+    };
+  }
+  const generated = validateGeneratedMigrations({
+    worktreeDir: args.worktreeDir,
+    featBranch: args.featBranch,
+    contractPath: args.contractPath,
+    claim,
+    options: args.options,
+  });
+  return generated.ok
+    ? { ok: true }
+    : { ok: false, reason: "mismatch", error: generated.error };
 }

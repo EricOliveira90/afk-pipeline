@@ -146,30 +146,53 @@ export function sanitizeResumeMap(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * Structural half of migration-claim validation: the pool is a
+ * duplicate-free string array and claims map issue keys to string
+ * arrays. Shared by load-time sanitising below and by
+ * `validateClaimState` in migration-claims.ts, which layers
+ * pool-membership and single-owner checks on top.
+ */
+export function assertMigrationClaimShape(value: {
+  pool?: unknown;
+  claims?: unknown;
+}): asserts value is MigrationClaimState {
+  if (
+    !Array.isArray(value.pool) ||
+    value.pool.some((prefix) => typeof prefix !== "string") ||
+    new Set(value.pool).size !== value.pool.length
+  ) {
+    throw new Error("Run state contains an invalid migration prefix pool");
+  }
+  if (
+    typeof value.claims !== "object" ||
+    value.claims === null ||
+    Array.isArray(value.claims)
+  ) {
+    throw new Error("Run state contains invalid migration claims");
+  }
+  for (const [issue, prefixes] of Object.entries(value.claims)) {
+    if (
+      !Array.isArray(prefixes) ||
+      prefixes.some((prefix) => typeof prefix !== "string")
+    ) {
+      throw new Error(`Run state contains invalid migration claims for #${issue}`);
+    }
+  }
+}
+
 function sanitizeMigrationClaims(value: unknown): MigrationClaimState | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "object" || value === null) {
     throw new Error("Run state contains invalid migration claims");
   }
   const input = value as { pool?: unknown; claims?: unknown };
-  if (
-    !Array.isArray(input.pool) ||
-    input.pool.some((prefix) => typeof prefix !== "string") ||
-    new Set(input.pool).size !== input.pool.length ||
-    typeof input.claims !== "object" ||
-    input.claims === null ||
-    Array.isArray(input.claims)
-  ) {
-    throw new Error("Run state contains invalid migration claims");
-  }
+  assertMigrationClaimShape(input);
   const claims: Record<string, string[]> = {};
   for (const [issue, prefixes] of Object.entries(input.claims)) {
-    if (!Array.isArray(prefixes) || prefixes.some((prefix) => typeof prefix !== "string")) {
-      throw new Error(`Run state contains invalid migration claims for #${issue}`);
-    }
-    claims[issue] = [...prefixes] as string[];
+    claims[issue] = [...prefixes];
   }
-  return { pool: [...input.pool] as string[], claims };
+  return { pool: [...input.pool], claims };
 }
 
 function statePath(repoRoot: string, prdSlug: string): string {

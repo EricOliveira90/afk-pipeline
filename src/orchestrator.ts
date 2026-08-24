@@ -68,12 +68,15 @@ import {
   type MigrationValidation,
 } from "./migration-gate.js";
 import type { AfkManifest } from "./afk-manifest.js";
-import { trimUnclaimedMigrationPrefixes } from "./afk-manifest.js";
+import {
+  assertWithinManifestScope,
+  trimUnclaimedMigrationPrefixes,
+} from "./afk-manifest.js";
 import {
   allClaimedPrefixes,
+  checkClaimedGeneratedMigrations,
   initializeMigrationClaims,
   migrationClaimFor,
-  validateGeneratedMigrations,
 } from "./migration-claims.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
@@ -1761,28 +1764,19 @@ export async function runSliceExecute(
       });
 
       if (config.manifest) {
-        const claim = migrationClaimFor(
-          config.repoRoot,
-          pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
-          slice.ghIssue,
-        );
-        if (!claim) {
-          return {
-            phase: "ERROR",
-            error: "Migration claim gate failed before QA: no persisted claim record",
-          };
-        }
-        const generated = validateGeneratedMigrations({
+        const gate = checkClaimedGeneratedMigrations({
+          repoRoot: config.repoRoot,
+          runSlug: pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+          ghIssue: slice.ghIssue,
           worktreeDir: ctx.worktreeDir,
           featBranch,
           contractPath: join(ctx.absSliceDir, "contract.md"),
-          claim,
           options: { migrationPathPattern: config.migrationPathPattern },
         });
-        if (!generated.ok) {
+        if (!gate.ok) {
           return {
             phase: "ERROR",
-            error: `Migration claim gate failed before QA: ${generated.error}`,
+            error: `Migration claim gate failed before QA: ${gate.error}`,
           };
         }
       }
@@ -2058,17 +2052,13 @@ export async function runPipeline(
   const requestedSliceNumbers =
     config.selectedSliceNumbers ?? config.manifest?.selectedSlices;
   if (config.manifest && requestedSliceNumbers) {
-    const allowed = new Set(
-      config.manifest.selectedSlices.map((number) => String(Number(number))),
-    );
-    const conflicting = requestedSliceNumbers.filter(
-      (number) => !allowed.has(String(Number(number))),
-    );
-    if (conflicting.length > 0) {
-      throw new Error(
+    assertWithinManifestScope({
+      selectedSlices: config.manifest.selectedSlices,
+      candidates: requestedSliceNumbers,
+      sliceNumberOf: (number) => number,
+      describeConflict: (conflicting) =>
         `Run scope conflicts with afk.json selectedSlices: ${conflicting.join(", ")}`,
-      );
-    }
+    });
   }
   scope = resolveRunScope(
     [...manifestDag.slices.values()],

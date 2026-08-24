@@ -116,6 +116,30 @@ export function parseAfkManifest(
   };
 }
 
+/**
+ * Fail closed when a slice selection reaches outside the manifest's
+ * `selectedSlices`. Every scope funnel — CLI flags and persisted run
+ * scope (`cli-run-scope.ts`), `runPipeline` — shares this comparison,
+ * with slice numbers normalised so `"2"` and `"02"` agree; only how the
+ * conflict is named differs, so the caller supplies the message.
+ */
+export function assertWithinManifestScope<T>(args: {
+  selectedSlices: readonly string[];
+  candidates: readonly T[];
+  sliceNumberOf: (candidate: T) => string;
+  describeConflict: (conflicting: T[]) => string;
+}): void {
+  const allowed = new Set(
+    args.selectedSlices.map((number) => String(Number(number))),
+  );
+  const conflicting = args.candidates.filter(
+    (candidate) => !allowed.has(String(Number(args.sliceNumberOf(candidate)))),
+  );
+  if (conflicting.length > 0) {
+    throw new Error(args.describeConflict(conflicting));
+  }
+}
+
 /** Load `<prd-dir>/afk.json`; absence is the documented legacy mode. */
 export function loadAfkManifest(prdDir: string): AfkManifest | null {
   const path = join(prdDir, "afk.json");
