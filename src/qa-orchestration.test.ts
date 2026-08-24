@@ -7,7 +7,12 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  type ChildProcess,
+  type SpawnOptions,
+} from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildDAG, type Slice } from "./issues-parser.js";
@@ -24,17 +29,47 @@ import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provide
 import { rmDirWithRetry } from "./test-support.js";
 
 const dirs: string[] = [];
+const fixtureChildren = new Set<ChildProcess>();
 
 beforeEach(() => {
   vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
+  await terminateFixtureChildren();
   for (const dir of dirs.splice(0)) {
     rmDirWithRetry(dir);
   }
 });
+
+function spawnFixtureChild(
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+): ChildProcess {
+  const child = spawn(command, args, options);
+  fixtureChildren.add(child);
+  child.once("close", () => fixtureChildren.delete(child));
+  return child;
+}
+
+async function terminateFixtureChildren(): Promise<void> {
+  await Promise.all(
+    [...fixtureChildren].map(
+      (child) =>
+        new Promise<void>((resolve, reject) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          child.once("close", () => resolve());
+          child.once("error", reject);
+          child.kill();
+        }),
+    ),
+  );
+}
 
 function git(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
@@ -500,12 +535,12 @@ describe("base gate observability", () => {
   });
 
   it.runIf(process.platform === "win32")(
-    "retries cleanup while a child outlives a short fixed retry window",
+    "terminates a fixture child before removing its repository",
     async () => {
       const repo = makeRepo();
-      const child = spawn(
+      const child = spawnFixtureChild(
         process.execPath,
-        ["-e", "console.log('ready'); setTimeout(() => {}, 1000)"],
+        ["-e", "console.log('ready'); setTimeout(() => {}, 10000)"],
         {
           cwd: repo,
           stdio: ["ignore", "pipe", "ignore"],
