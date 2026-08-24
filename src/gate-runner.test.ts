@@ -339,6 +339,43 @@ describe("runGates", () => {
     ).toContain("[gate:long-running] START");
   });
 
+  it("omits a cancelled result even when checkpoint restoration fails", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const controller = new AbortController();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "destructive-cancel",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "require('node:fs').rmSync('.git', { recursive: true, force: true }); process.stdout.write('metadata-removed'); setInterval(() => {}, 1000)",
+          ],
+        },
+      ],
+      signal: controller.signal,
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+      onOutput: (_gateId, text) => {
+        if (text.includes("metadata-removed")) controller.abort();
+      },
+    });
+
+    expect(result.evidence.results).toEqual([]);
+    const partialLogs = readdirSync(join(evidenceDir, "gate-logs"));
+    expect(partialLogs).toHaveLength(1);
+    expect(
+      readFileSync(join(evidenceDir, "gate-logs", partialLogs[0]!), "utf-8"),
+    ).toContain("metadata-removed");
+  });
+
   it("preserves distinct attempts and rejects unversioned evidence", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const options = {

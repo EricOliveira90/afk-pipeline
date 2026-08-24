@@ -284,6 +284,8 @@ export async function runGates(
         onOutput: emit,
       },
     );
+    if (execution.outcome === "CANCELLED") break;
+
     try {
       restoreCheckpoint();
     } catch (error) {
@@ -307,7 +309,6 @@ export async function runGates(
       results.push(result);
       break;
     }
-    if (execution.outcome === "CANCELLED") break;
 
     const classification = classifyExecution(
       execution.outcome,
