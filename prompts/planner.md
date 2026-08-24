@@ -32,6 +32,13 @@ evaluator grades against.
 - "Files expected to change" must use exact repo-relative paths, one
   bullet per file. The lane partitioner parses this section to detect
   file-overlap with sibling slices.
+- Always write `## Migration requirements` with one line:
+  `- New migration files: N`. Follow the AFK reservation below exactly.
+  AFK owns prefix allocation; never calculate a next prefix from the tree.
+
+# Migration reservation
+
+{{MIGRATION_RESERVATION}}
 
 # Required reading
 
@@ -88,6 +95,9 @@ lines), not an accumulated review transcript:
   If you genuinely cannot enumerate yet, write `- <unknown>`.
 -->
 - <path>
+
+## Migration requirements
+- New migration files: <count>
 
 ## New patterns / deps / schema (if any)
 - <list anything new, OR write "None — uses existing patterns">

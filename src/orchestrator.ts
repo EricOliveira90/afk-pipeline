@@ -67,6 +67,14 @@ import {
   verifyMigrationSync,
   type MigrationValidation,
 } from "./migration-gate.js";
+import type { AfkManifest } from "./afk-manifest.js";
+import { trimUnclaimedMigrationPrefixes } from "./afk-manifest.js";
+import {
+  allClaimedPrefixes,
+  initializeMigrationClaims,
+  migrationClaimFor,
+  validateGeneratedMigrations,
+} from "./migration-claims.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -125,6 +133,8 @@ export interface PipelineConfig {
   dryRun?: boolean;
   /** Slice numbers explicitly requested by the CLI, if any. */
   selectedSliceNumbers?: string[];
+  /** Parsed `<prd-dir>/afk.json`; absent preserves legacy behavior. */
+  manifest?: AfkManifest | null;
   /** Contract negotiation cap before convergence may grant one extra round. */
   maxContractRounds?: number;
   /**
@@ -547,6 +557,45 @@ export function makeSliceContext(
     siblingHandoffsBlock,
     invoke,
   };
+}
+
+function migrationReservationBlock(
+  config: PipelineConfig,
+  ghIssue: string,
+): string {
+  if (!config.manifest) {
+    return (
+      "No afk.json reservation is active; preserve legacy behavior. " +
+      "The contract predates merges from other slices, so for concrete identifiers " +
+      "the current tree wins over the contract. If your migration prefix collides " +
+      "with one merged from the feature branch, renumber yours to the next free prefix."
+    );
+  }
+  const provider = config.provider ?? kiroProvider;
+  const claim = migrationClaimFor(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, provider),
+    ghIssue,
+  );
+  if (claim === undefined) {
+    return (
+      "AFK has not assigned this slice a prefix yet. Declare the exact count under " +
+      '`## Migration requirements` as `- New migration files: N`. Use ' +
+      "`RESERVED_PREFIX_<name>.sql` placeholders for new migration paths. " +
+      "Never inspect the tree or calculate a prefix; AFK will assign it after this draft."
+    );
+  }
+  if (claim.length === 0) {
+    return (
+      "This slice owns no migration prefixes. Declare `- New migration files: 0` " +
+      "and do not create a migration file."
+    );
+  }
+  return (
+    `This slice owns exactly: ${claim.join(", ")}. Declare ` +
+    `\`- New migration files: ${claim.length}\` and use those exact prefixes, in order, ` +
+    "for the new migration paths. Never calculate or substitute another prefix."
+  );
 }
 
 export interface ContractExtensionEvidence {
@@ -1304,6 +1353,7 @@ async function negotiateAttempt(
               RELEVANT_FILES: relevantFilesBlock,
               SLICE_BODY: sliceBodyNote,
               REVISION_NOTE: revisionNote(round, pendingObjection),
+              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
@@ -1669,6 +1719,7 @@ export async function runSliceExecute(
                 : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
               STUCK_NOTE: ctx.resume.stuckNote ?? "",
               HANDOFF_NOTE: ctx.resume.handoffNote,
+              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             })
           : round === 1 && ctx.resume
           ? renderPrompt("generator-resume", {
@@ -1680,6 +1731,7 @@ export async function runSliceExecute(
               COMMIT_LOG: ctx.resume.commitLog,
               FEAT_BRANCH: featBranch,
               HANDOFF_NOTE: ctx.resume.handoffNote,
+              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             })
           : renderPrompt("generator", {
               SLICE_DIR: ctx.relSliceDir,
@@ -1689,6 +1741,7 @@ export async function runSliceExecute(
               RETRY_NOTE: round > 1
                 ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
                 : "",
+              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             });
       await invoke({
         role: "generator",
@@ -1706,6 +1759,33 @@ export async function runSliceExecute(
         agent: "generator",
         round,
       });
+
+      if (config.manifest) {
+        const claim = migrationClaimFor(
+          config.repoRoot,
+          pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+          slice.ghIssue,
+        );
+        if (!claim) {
+          return {
+            phase: "ERROR",
+            error: "Migration claim gate failed before QA: no persisted claim record",
+          };
+        }
+        const generated = validateGeneratedMigrations({
+          worktreeDir: ctx.worktreeDir,
+          featBranch,
+          contractPath: join(ctx.absSliceDir, "contract.md"),
+          claim,
+          options: { migrationPathPattern: config.migrationPathPattern },
+        });
+        if (!generated.ok) {
+          return {
+            phase: "ERROR",
+            error: `Migration claim gate failed before QA: ${generated.error}`,
+          };
+        }
+      }
 
       logger.phase(
         `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
@@ -1974,9 +2054,25 @@ export async function runPipeline(
 
   try {
   const runState = loadRunState(repoRoot, loggerSlug);
+  initializeMigrationClaims(runState, config.manifest ?? null);
+  const requestedSliceNumbers =
+    config.selectedSliceNumbers ?? config.manifest?.selectedSlices;
+  if (config.manifest && requestedSliceNumbers) {
+    const allowed = new Set(
+      config.manifest.selectedSlices.map((number) => String(Number(number))),
+    );
+    const conflicting = requestedSliceNumbers.filter(
+      (number) => !allowed.has(String(Number(number))),
+    );
+    if (conflicting.length > 0) {
+      throw new Error(
+        `Run scope conflicts with afk.json selectedSlices: ${conflicting.join(", ")}`,
+      );
+    }
+  }
   scope = resolveRunScope(
     [...manifestDag.slices.values()],
-    config.selectedSliceNumbers,
+    requestedSliceNumbers,
     runState.scope,
   );
   runState.scope = scope.persisted;
@@ -2474,6 +2570,24 @@ export async function runPipeline(
       }
 
       try {
+        if (config.manifest) {
+          const latestState = loadRunState(repoRoot, loggerSlug);
+          const claimed = allClaimedPrefixes(latestState);
+          const trimmed = trimUnclaimedMigrationPrefixes(
+            join(reviewDir, specsDir),
+            claimed,
+          );
+          if (trimmed.changed) {
+            if (latestState.migrations) {
+              latestState.migrations.pool = [...trimmed.manifest.migrationPrefixes];
+              saveRunState(repoRoot, latestState);
+            }
+            git.commitAll(
+              reviewDir,
+              `chore(${prdSlug}): release unused migration reservations`,
+            );
+          }
+        }
         shipResult = await invokeShipGate(reviewDir);
       } finally {
         if (cleanupReviewDir) {

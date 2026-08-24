@@ -49,6 +49,13 @@ export interface RunState {
    * state files that predate the field stay loadable unchanged.
    */
   resume?: Record<string, SliceResumeState>;
+  /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
+  migrations?: MigrationClaimState;
+}
+
+export interface MigrationClaimState {
+  pool: string[];
+  claims: Record<string, string[]>;
 }
 
 /** Resume bookkeeping for one slice — see `RunState.resume`. */
@@ -139,6 +146,32 @@ export function sanitizeResumeMap(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function sanitizeMigrationClaims(value: unknown): MigrationClaimState | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Run state contains invalid migration claims");
+  }
+  const input = value as { pool?: unknown; claims?: unknown };
+  if (
+    !Array.isArray(input.pool) ||
+    input.pool.some((prefix) => typeof prefix !== "string") ||
+    new Set(input.pool).size !== input.pool.length ||
+    typeof input.claims !== "object" ||
+    input.claims === null ||
+    Array.isArray(input.claims)
+  ) {
+    throw new Error("Run state contains invalid migration claims");
+  }
+  const claims: Record<string, string[]> = {};
+  for (const [issue, prefixes] of Object.entries(input.claims)) {
+    if (!Array.isArray(prefixes) || prefixes.some((prefix) => typeof prefix !== "string")) {
+      throw new Error(`Run state contains invalid migration claims for #${issue}`);
+    }
+    claims[issue] = [...prefixes] as string[];
+  }
+  return { pool: [...input.pool] as string[], claims };
+}
+
 function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
 }
@@ -167,6 +200,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
     resume?: unknown;
+    migrations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -178,6 +212,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     }
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     const resume = sanitizeResumeMap(r.resume);
+    const migrations = sanitizeMigrationClaims(r.migrations);
     return {
       version: 1,
       prdSlug,
@@ -186,6 +221,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
       ...(resume !== undefined ? { resume } : {}),
+      ...(migrations !== undefined ? { migrations } : {}),
     };
   }
 

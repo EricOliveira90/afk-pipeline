@@ -8,6 +8,12 @@
     "afk-claude": "./dist/afk-claude.js",
     "afk-codex": "./dist/afk-codex.js"
   },
+  "exports": {
+    "./afk-manifest": {
+      "types": "./dist/afk-manifest.d.ts",
+      "import": "./dist/afk-manifest.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepare": "tsc -p tsconfig.build.json",

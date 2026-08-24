@@ -42,14 +42,12 @@ marks the boundary between finished and unfinished work.
 
 Your contract was locked before you died; the world has moved since.
 
-- **Tree wins over contract for concrete identifiers:**
-  the contract predates merges from other slices.
-  Where it names concrete identifiers (migration numbers, generated
-  file names), the current tree wins over the contract — satisfy the
-  contract's *behavior* against the identifiers the tree actually has.
-- **Migration-prefix collisions:**
-  if your migration prefix collides with one merged from the feature
-  branch, renumber yours to the next free prefix.
+- **Migration instructions are authoritative:** follow the mode-specific
+  instructions below exactly.
+
+# Migration assignment
+
+{{MIGRATION_RESERVATION}}
 
 {{HANDOFF_NOTE}}
 

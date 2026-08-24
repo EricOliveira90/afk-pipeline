@@ -31,6 +31,34 @@ function provider(name: string): AgentProvider {
 }
 
 describe("resolveCliRunScope", () => {
+  it("uses manifest selectedSlices as the default", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-cli-scope-"));
+    roots.push(repoRoot);
+    const resolved = resolveCliRunScope({
+      repoRoot,
+      prdSlug: "manifest-default",
+      provider: provider("kiro"),
+      slices: SLICES,
+      manifestSelectedSliceNumbers: ["02"],
+      onlyFailed: false,
+    });
+    expect(resolved.scope.selected.map((slice) => slice.number)).toEqual(["02"]);
+  });
+
+  it("fails closed when CLI scope conflicts with the manifest", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-cli-scope-"));
+    roots.push(repoRoot);
+    expect(() => resolveCliRunScope({
+      repoRoot,
+      prdSlug: "manifest-conflict",
+      provider: provider("kiro"),
+      slices: SLICES,
+      selectedSliceNumbers: ["03"],
+      manifestSelectedSliceNumbers: ["02"],
+      onlyFailed: false,
+    })).toThrow(/CLI scope conflicts with afk.json/);
+  });
+
   it.each(["kiro", "claude", "codex"])(
     "uses the %s run slug and returns one selection for display and dispatch",
     (name) => {
