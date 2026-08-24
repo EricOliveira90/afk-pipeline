@@ -403,6 +403,38 @@ describe("runGates", () => {
     ).toContain("metadata-removed");
   });
 
+  it("retains the command exit code when checkpoint restoration fails", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "destructive-failure",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "require('node:fs').rmSync('.git', { recursive: true, force: true }); process.exit(23)",
+          ],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results[0]).toMatchObject({
+      gateId: "destructive-failure",
+      status: "INFRASTRUCTURE",
+      failureKind: null,
+      exitCode: 23,
+    });
+  });
+
   it("preserves distinct attempts and rejects unversioned evidence", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const options = {

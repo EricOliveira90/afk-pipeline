@@ -316,7 +316,7 @@ export async function runGates(
         startedAt: execution.startedAt,
         endedAt: new Date().toISOString(),
         durationMs: Date.now() - Date.parse(execution.startedAt),
-        exitCode: null,
+        exitCode: execution.exitCode,
         treeId: options.treeId,
         logArtifactId,
         detail,
