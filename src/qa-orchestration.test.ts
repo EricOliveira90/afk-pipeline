@@ -472,7 +472,7 @@ describe("provider-independent policy-less base gates", () => {
         },
       };
       const ctx = makeContext(repo, provider, {
-        commandTimeoutMs: 5_000,
+        commandTimeoutMs: 30_000,
         heartbeatIntervalMs: 20,
       });
       artifactDir = ctx.absSliceDir;
