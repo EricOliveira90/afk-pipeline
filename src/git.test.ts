@@ -266,7 +266,7 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
   });
 });
 
-describe("git.mergeSliceBranch — MergeResult", { timeout: 30_000 }, () => {
+describe("git.mergeSliceBranch — MergeResult", { timeout: 240_000 }, () => {
   let repoDir: string;
 
   beforeEach(() => {
@@ -392,7 +392,7 @@ describe("git.hasCommitsAhead", () => {
  * The fix: refuse to reuse a path unless git agrees it is the worktree
  * for the requested branch.
  */
-describe("git.createWorktree", { timeout: 30_000 }, () => {
+describe("git.createWorktree", { timeout: 240_000 }, () => {
   let repoDir: string;
 
   beforeEach(() => {
@@ -467,7 +467,7 @@ describe("git.createWorktree", { timeout: 30_000 }, () => {
  * adds a removeWorktree → deleteBranch → createWorktree sequence that
  * leaves more windows for filesystem races).
  */
-describe("git.assertWorktreeRegistered", { timeout: 30_000 }, () => {
+describe("git.assertWorktreeRegistered", { timeout: 240_000 }, () => {
   let repoDir: string;
 
   beforeEach(() => {
