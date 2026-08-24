@@ -12,6 +12,12 @@
 - Cancellation and isolation fixes: `src/gate-runner.ts:runGates` exits on a cancelled execution before checkpoint restoration or result classification, retains the interrupted log without a terminal outcome, and removes tracked, untracked, and ignored output before each subsequent gate.
 - Termination failure classification: `src/command-runtime.ts:ProcessTreeTerminationError` and `src/orchestrator.ts:isCancelled` prevent an aborted signal from hiding incomplete process-tree termination behind `CANCELLED`.
 - Skipped-gate checkpoint efficiency: `src/gate-runner.ts:createCandidateCheckpoint` can retain an immutable commit/tree identity without materializing a checkout; `src/orchestrator.ts:runSliceExecute` uses that mode only when every discovered gate is skipped.
+- Deterministic QA fixture teardown: `src/qa-orchestration.test.ts:terminateFixtureChildren` closes every registered fixture child before its temporary repository is removed.
+
+## How the STUCK findings were cleared
+- Full-suite timeout cascades: the current feature base provides 60-second test and hook budgets for Git-heavy suites, shared retrying Windows fixture cleanup, and suppressed reporter RPC traffic for passing tests.
+- Contract-owned `EBUSY` cleanup failures: QA fixtures now own child lifetimes and await child closure before directory removal, so cleanup no longer depends on a child exiting within a fixed retry window.
+- Contract-owned gate-runner timeouts: the targeted gate-runner suite passes under the current bounded two-worker configuration, including ignored-output restoration, inactivity termination, and wall-clock termination.
 
 ## Decisions made during implementation
 - Store gate evidence in the orchestrator-owned run directory, outside writable slice artifact trees.
@@ -22,11 +28,12 @@
 - Check cancellation before post-command restoration so restoration failure cannot invent an `INFRASTRUCTURE` result or terminal event for an interrupted gate.
 - Keep incomplete process-tree termination distinct from normal cancellation even when the shared signal is aborted.
 - Keep cancellation and sanity-discovery regression tests in contract-declared test files.
+- Keep the shared Windows directory-removal helper outside the locked slice diff and consume it from the contract-owned QA test.
+- Terminate and await registered fixture children before applying filesystem cleanup retries.
 
 ## Gotchas / learnings
-- The final full `pnpm test` run exited 1 after seven test timeouts and three unhandled errors, including `[vitest-worker]: Timeout calling "onTaskUpdate"`.
-- Two provider gate integration cases exceeded their 30-second limits during that run; their contract-owned timeout is now 60 seconds. The other five timeouts are in locked-out `git-metadata`, `git`, `ship-gate`, and `wave` test files.
-- Windows process-tree verification can exceed the repository's 15-second default test timeout under load; the two real termination scenarios use explicit 30-second bounds.
+- Windows does not permit removal of a repository while a child process still uses it as its working directory; retry-only cleanup remains duration-dependent unless teardown owns that process.
+- The full `pnpm test` suite was not rerun in this attempt because the resume instructions reserve it for the normal QA gate.
 
 ## Status
-Typecheck and build passing locally. The latest full `pnpm test` run exited 1 with seven timeout failures and three unhandled errors.
+Targeted finding tests, typecheck, and build passing locally. Full suite deferred to the normal QA gate.
