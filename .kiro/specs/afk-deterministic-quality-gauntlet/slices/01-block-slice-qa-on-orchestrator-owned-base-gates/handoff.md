@@ -24,8 +24,9 @@
 - Keep cancellation and sanity-discovery regression tests in contract-declared test files.
 
 ## Gotchas / learnings
-- The final full `pnpm test` run had zero failed tests but exited 1 because Vitest reported `[vitest-worker]: Timeout calling "onTaskUpdate"`.
+- The final full `pnpm test` run exited 1 after seven test timeouts and three unhandled errors, including `[vitest-worker]: Timeout calling "onTaskUpdate"`.
+- Two provider gate integration cases exceeded their 30-second limits during that run; their contract-owned timeout is now 60 seconds. The other five timeouts are in locked-out `git-metadata`, `git`, `ship-gate`, and `wave` test files.
 - Windows process-tree verification can exceed the repository's 15-second default test timeout under load; the two real termination scenarios use explicit 30-second bounds.
 
 ## Status
-Typecheck and build passing locally. All test assertions passed in the latest full run; `pnpm test` exited 1 on a Vitest worker RPC timeout.
+Typecheck and build passing locally. The latest full `pnpm test` run exited 1 with seven timeout failures and three unhandled errors.
