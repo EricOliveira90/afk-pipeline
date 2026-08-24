@@ -34,21 +34,35 @@ function stateRoot(slug = "run", pool = ["144", "145", "146"]) {
 }
 
 describe("migration claims", () => {
-  it("serializes concurrent slice allocations to unique prefixes", async () => {
-    const setup = stateRoot();
-    const [first, second] = await Promise.all([
-      Promise.resolve().then(() => claimMigrationPrefixes({
-        repoRoot: setup.root, runSlug: setup.slug, ghIssue: "1001", count: 1,
+  it("never overlaps allocations across issue keys — allocation is synchronous by construction", () => {
+    // Regression note (#66): a previous version wrapped two claims in
+    // Promise.all over Promise.resolve().then(sync fn), which still ran
+    // them one after the other on the microtask queue — it exercised no
+    // real race. There is none to exercise: claimMigrationPrefixes is a
+    // single-process synchronous read-modify-write of run state, so
+    // "allocation inside one run is serial by construction" (ADR 0034).
+    // Sequential claims from mixed issue keys are the real-world shape;
+    // assert the invariant they must uphold — allocations never overlap
+    // and drain the pool in order, with re-claims reusing, not
+    // re-allocating.
+    const setup = stateRoot("run", ["144", "145", "146", "147"]);
+    const claim = (ghIssue: string, count: number) =>
+      claimMigrationPrefixes({
+        repoRoot: setup.root, runSlug: setup.slug, ghIssue, count,
         expectedPool: setup.pool,
-      })),
-      Promise.resolve().then(() => claimMigrationPrefixes({
-        repoRoot: setup.root, runSlug: setup.slug, ghIssue: "1002", count: 1,
-        expectedPool: setup.pool,
-      })),
-    ]);
+      });
 
-    expect(first).toEqual(["144"]);
-    expect(second).toEqual(["145"]);
+    const allocations = [
+      claim("1001", 1),
+      claim("1002", 2),
+      claim("1001", 1), // re-claim between fresh claims must not re-allocate
+      claim("1003", 1),
+    ];
+
+    expect(allocations).toEqual([["144"], ["145", "146"], ["144"], ["147"]]);
+    const distinct = new Set(allocations.flat());
+    expect(distinct.size).toBe(4); // no prefix has two owners
+    expect(() => claim("1004", 1)).toThrow(/pool exhausted before generation/);
   });
 
   it("reuses the same claim on resume", () => {
