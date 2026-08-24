@@ -579,6 +579,50 @@ describe("runGates", () => {
     writeFileSync(logPath, logBytes, "utf-8");
   });
 
+  it("seals a gate log only after inherited output handles close", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const delayedWriter = [
+      "setTimeout(() => {",
+      "  process.stdout.write('delayed-output');",
+      "}, 200);",
+    ].join("\n");
+    const command = [
+      "const { spawn } = require('node:child_process');",
+      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(delayedWriter)}], {`,
+      "  detached: true,",
+      "  stdio: ['ignore', process.stdout, process.stderr],",
+      "});",
+      "child.unref();",
+    ].join("\n");
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "delayed-output",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", command],
+        },
+      ],
+      inactivityTimeoutMs: 1_000,
+      wallClockTimeoutMs: 2_000,
+      heartbeatIntervalMs: 20,
+    });
+    const logPath = join(
+      evidenceDir,
+      result.evidence.results[0]!.logArtifactId,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(readFileSync(logPath, "utf-8")).toContain("delayed-output");
+    expect(verifyGateEvidence(result.artifact)).toEqual(result.evidence);
+  });
+
   it("classifies an unavailable working directory as infrastructure", async () => {
     const root = mkdtempSync(join(tmpdir(), "afk-gates-"));
     dirs.push(root);

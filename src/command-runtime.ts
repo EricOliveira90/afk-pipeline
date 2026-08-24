@@ -72,6 +72,7 @@ export function runBoundedCommand(
     });
     let settled = false;
     let terminating = false;
+    let observedExitCode: number | null = null;
     let lastActivity = Date.now();
     let heartbeat: NodeJS.Timeout | undefined;
     let wallClock: NodeJS.Timeout | undefined;
@@ -145,8 +146,11 @@ export function runBoundedCommand(
       settle("SPAWN_ERROR", null, error.message, error.code);
     });
     proc.on("exit", (code) => {
+      observedExitCode = code;
+    });
+    proc.on("close", (code) => {
       if (terminating) return;
-      settle("EXITED", code);
+      settle("EXITED", code ?? observedExitCode);
     });
 
     heartbeat = setInterval(() => {
