@@ -14,12 +14,19 @@ export default defineConfig({
     // report, and suites that want a tighter bound set it per `describe`.
     testTimeout: 60_000,
     hookTimeout: 60_000,
-    // The orchestrator suites log every pipeline step to stderr, and the
-    // worker forwards each write to the main thread over the reporter RPC.
-    // On a loaded host that backs up until vitest reports
+    // The orchestrator suites log every pipeline step, and the worker sends
+    // each write to the main thread over the reporter RPC. The RPC timeout is
+    // 60s. On a loaded host the main thread stops answering `onTaskUpdate`
+    // inside that window, and vitest reports
     // `[vitest-worker]: Timeout calling "onTaskUpdate"` as an unhandled
-    // error, which fails the run with exit 1 even when every test passes.
-    // Keep the output for tests that fail, drop it for the ones that pass.
-    silent: "passed-only",
+    // error — exit 1 even when every test passed.
+    //
+    // `silent: "passed-only"` is not enough: it suppresses printing but still
+    // ships every line to the main thread so it can be replayed if the test
+    // later fails. Suppress the capture itself, and drop the live summary the
+    // default reporter re-renders on every task update. Tests here assert on
+    // artifacts, events, and run state, not on captured stdout.
+    silent: true,
+    reporters: [["default", { summary: false }]],
   },
 });
