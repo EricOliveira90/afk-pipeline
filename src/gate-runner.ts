@@ -54,6 +54,17 @@ export interface RunGatesOptions {
   cwd: string;
   evidenceDir: string;
   declarations: readonly GateDeclaration[];
+  /**
+   * Dependency install that makes the declarations runnable at all. A
+   * candidate checkpoint is materialized from a git tree, so it carries
+   * tracked files only and never `node_modules` — without this every
+   * `pnpm run` exits instantly and the gate reads a missing toolchain as a
+   * red suite (#101, and the same bug on the per-round path). Runs once
+   * before the gates and outside the evidence declarations: it describes the
+   * environment, not the candidate. Its failure is INFRASTRUCTURE, so the
+   * orchestrator's retry applies instead of blaming the generator.
+   */
+  prepare?: GateDeclaration;
   signal?: AbortSignal;
   inactivityTimeoutMs: number;
   wallClockTimeoutMs: number;
@@ -197,6 +208,59 @@ export async function runGates(
     } catch (error) {
       checkpointError =
         error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  // Prepare the environment inside the checkpoint before any gate runs. A
+  // failure here is recorded against the first declaration by the
+  // `checkpointError` path below, which keeps the evidence's
+  // declaration-to-result binding intact while still reporting
+  // INFRASTRUCTURE.
+  const prepareCommand = options.prepare?.command;
+  if (options.prepare && prepareCommand && restoreCheckpoint && !checkpointError) {
+    const prepare = options.prepare;
+    const logPath = join(
+      logsDir,
+      `${attemptKey}-00-${
+        prepare.id.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 24) || "prepare"
+      }.log`,
+    );
+    const emit = (text: string) => {
+      appendFileSync(logPath, text);
+      options.onOutput?.(prepare.id, text);
+    };
+    emit(`[gate:${prepare.id}] START\n`);
+    try {
+      restoreCheckpoint();
+      const execution = await runBoundedCommand(
+        prepareCommand,
+        prepare.args ?? [],
+        {
+          cwd: options.cwd,
+          signal: options.signal,
+          inactivityTimeoutMs: options.inactivityTimeoutMs,
+          wallClockTimeoutMs: options.wallClockTimeoutMs,
+          heartbeatIntervalMs: options.heartbeatIntervalMs,
+          onOutput: emit,
+        },
+      );
+      if (
+        execution.outcome !== "CANCELLED" &&
+        (execution.outcome !== "EXITED" || execution.exitCode !== 0)
+      ) {
+        checkpointError =
+          `Gate environment preparation failed: ` +
+          `${[prepare.command, ...(prepare.args ?? [])].join(" ")} ` +
+          `(${execution.outcome}, exit ${String(execution.exitCode)})`;
+      }
+      emit(
+        `[gate:${prepare.id}] ${
+          checkpointError ? "INFRASTRUCTURE" : "PASS"
+        } (${execution.durationMs}ms)\n`,
+      );
+    } catch (error) {
+      checkpointError = error instanceof Error ? error.message : String(error);
+      emit(`[gate:${prepare.id}] INFRASTRUCTURE (0ms)\n`);
     }
   }
 
@@ -520,7 +584,13 @@ function createCandidateCheckpointRestorer(
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    execFileSync("git", ["clean", "-ffdx"], {
+    // `node_modules` is excluded deliberately. The restore runs before and
+    // after every gate, so cleaning it would delete the prepared toolchain
+    // between gates and leave every gate after the first with nothing to
+    // run. It is ignored content, so keeping it cannot change the tree
+    // identity asserted below, and the candidate stays exactly the
+    // checkpoint.
+    execFileSync("git", ["clean", "-ffdx", "-e", "node_modules"], {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });

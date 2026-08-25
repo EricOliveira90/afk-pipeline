@@ -244,6 +244,93 @@ describe("runGates", () => {
     ]);
   });
 
+  it("prepares the toolchain once and keeps it across every gate", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          "require('fs').mkdirSync('node_modules/.bin', { recursive: true });" +
+            "require('fs').writeFileSync('node_modules/.bin/tool', 'installed')",
+        ],
+      },
+      declarations: [
+        {
+          id: "first-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "process.exit(require('fs').existsSync('node_modules/.bin/tool') ? 0 : 23)",
+          ],
+        },
+        {
+          id: "second-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "process.exit(require('fs').existsSync('node_modules/.bin/tool') ? 0 : 23)",
+          ],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results.map(({ status }) => status)).toEqual([
+      "PASS",
+      "PASS",
+    ]);
+  });
+
+  it("reports an unpreparable environment as infrastructure, not a red gate", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: ["-e", "process.exit(1)"],
+      },
+      declarations: [
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results).toHaveLength(1);
+    const [gate] = result.evidence.results;
+    expect(gate?.status).toBe("INFRASTRUCTURE");
+    expect(gate?.failureKind).toBeNull();
+    expect(gate?.detail).toContain("Gate environment preparation failed");
+    verifyGateEvidence(result.artifact);
+  });
+
   it("removes an untracked nested repository before the next gate starts", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const nestedRepository = "nested-output";
