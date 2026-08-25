@@ -42,7 +42,7 @@ function normalizePath(raw: unknown, source: string): string {
   }
   if (
     path.startsWith("/") ||
-    /^[a-z]:\//i.test(path) ||
+    /^[a-z]:/i.test(path) ||
     path.startsWith("//") ||
     path.split("/").some((segment) => segment === "." || segment === "..")
   ) {

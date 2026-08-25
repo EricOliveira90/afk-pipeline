@@ -553,16 +553,15 @@ describe("runWave", () => {
     expect(outcomes.get("502")?.phase).toBe("CANCELLED");
   }, 240_000);
 
-  it("collapses wave to one lane when a slice has undeclared files", async () => {
+  it("refuses undeclared machine scope instead of treating prose as a lane fallback", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
       { number: "01", ghIssue: "601", title: "Known", type: "AFK", blockedBy: [], userStories: "" },
       { number: "02", ghIssue: "602", title: "Unknown", type: "AFK", blockedBy: [], userStories: "" },
     ];
 
-    // 602 has an empty files list in the fixture — but the provider
-    // won't write "Files expected to change" for it, so
-    // readContractFiles returns undefined → undeclared → collapse.
+    // Neither planner writes acceptance-manifest.json. Prose shape is
+    // irrelevant: both slices must fail before lane partitioning.
     const undeclaredProvider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -646,9 +645,13 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    // Both should pass (serial within one lane, no failure).
-    expect(outcomes.get("601")?.phase).toBe("PASS");
-    expect(outcomes.get("602")?.phase).toBe("PASS");
+    expect(outcomes.get("601")?.phase).toBe("ESCALATE");
+    expect(outcomes.get("602")?.phase).toBe("ESCALATE");
+    expect(
+      readRunEvents(logger.runDir)?.events.some(
+        (event) => event.type === "lanes-partitioned",
+      ),
+    ).toBe(false);
   }, 240_000);
 
   // Regression for the PRD 024 crash: when one lane's post-merge git

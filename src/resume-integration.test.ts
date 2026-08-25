@@ -143,6 +143,15 @@ function buildProvider(opts: {
           "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- src/work.ts\n",
           "utf-8",
         );
+        writeFileSync(
+          join(artifactDir, "acceptance-manifest.json"),
+          JSON.stringify({
+            version: 1,
+            fileScope: { kind: "paths", paths: ["src/work.ts"] },
+            migrationCount: 0,
+          }),
+          "utf-8",
+        );
       } else if (role === "evaluator-contract" && artifactDir) {
         writeFileSync(
           join(artifactDir, "feedback-r1.md"),

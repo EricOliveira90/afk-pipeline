@@ -1384,14 +1384,20 @@ async function negotiateAttempt(
     // before skipping negotiation altogether; a refusal reopens the
     // contract and the round loop below runs normally.
     if (contractStatus === "LOCKED") {
+      let manifestObjection: string | null = null;
       try {
         loadAcceptanceManifest(ctx.absSliceDir);
-        lockRefusedByGate("a previous run");
       } catch (error) {
+        manifestObjection =
+          error instanceof Error ? error.message : String(error);
+      }
+      if (manifestObjection !== null) {
         refuseInvalidManifest(
-          error instanceof Error ? error.message : String(error),
+          manifestObjection,
           "a previous LOCKED contract",
         );
+      } else {
+        lockRefusedByGate("a previous run");
       }
     }
 
@@ -1608,7 +1614,7 @@ async function negotiateAttempt(
           feedbackPath,
           capDecisions.join(" "),
         );
-        logger.bumpEvalRound(slice.ghIssue, round);
+        logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
         const cause = negotiateVerdictCause({
           outcome: "ESCALATE",
           verdict,
