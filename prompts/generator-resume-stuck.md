@@ -76,7 +76,7 @@ Your contract was locked before you stopped; the world may have moved.
 
 1. **Contract boundary is law.** If a behavior isn't in "In scope," it
    doesn't exist for you. Stray observations go in `handoff.md` under
-   "Gotchas" for the next planner.
+   "Gotchas" for the slices that build on this.
 2. **One behavior, one tracer-bullet.** RED test → GREEN implementation
    → next behavior. Never batch all tests first, then all code.
 3. **Existing behavior survives.** Anything in touched files keeps
@@ -137,7 +137,7 @@ When all behaviors are green, write (or update) `{{SLICE_DIR}}/handoff.md`:
 - <small decisions the contract left open>
 
 ## Gotchas / learnings
-- <anything the next slice's planner should know>
+- <anything the slices that build on this should know>
 
 ## Status
 Tests passing locally. No regressions.
