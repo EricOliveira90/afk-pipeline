@@ -2146,6 +2146,14 @@ describe("runWave — contract-lock migration prefix gate", () => {
       "supabase/migrations/003_users.sql": "-- existing\n",
       [`${sliceDir}/contract.md`]:
         "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- supabase/migrations/003_orders.sql\n",
+      [`${sliceDir}/acceptance-manifest.json`]: JSON.stringify({
+        version: 1,
+        fileScope: {
+          kind: "paths",
+          paths: ["supabase/migrations/003_orders.sql"],
+        },
+        migrationCount: 1,
+      }),
     });
 
     const plannerPrompts: string[] = [];
@@ -2173,7 +2181,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     // planner entirely and carried the stale colliding contract into
     // generation. The gate reopened it, so the planner ran once.
     expect(plannerPrompts).toHaveLength(1);
-    expect(plannerPrompts[0]).toMatch(/REJECTED by the/i);
+    expect(plannerPrompts[0]).toMatch(/pipeline REJECTED/i);
 
     // Announced as a refusal by a previous run's lock, not by a round
     // this run never ran.
@@ -2191,6 +2199,87 @@ describe("runWave — contract-lock migration prefix gate", () => {
       existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
     ).toBe(false);
   }, 240_000);
+
+  it.each([
+    ["missing", null, /acceptance-manifest\.json is missing/],
+    ["malformed", "{", /not valid JSON/],
+  ])(
+    "reopens a prior LOCKED contract with a %s companion manifest before evaluation",
+    async (_case, manifestContent, expectedDefect) => {
+      const repo = makeRepo();
+      const slices: Slice[] = [
+        { number: "01", ghIssue: "2052", title: "Invalid prior lock", type: "AFK", blockedBy: [], userStories: "" },
+      ];
+      const slug = `wave-prior-lock-${_case}`;
+      const { config, dag, logger, featBranch } = setupWave(
+        repo,
+        slug,
+        slices,
+        new Map<string, SliceFixture>(),
+      );
+      config.maxContractRounds = 2;
+      const sliceDir = `.kiro/specs/${slug}/slices/01-invalid-prior-lock`;
+      const seeded: Record<string, string> = {
+        [`${sliceDir}/contract.md`]:
+          "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- src/x.ts\n",
+      };
+      if (manifestContent !== null) {
+        seeded[`${sliceDir}/acceptance-manifest.json`] = manifestContent;
+      }
+      commitToFeatBranch(repo, featBranch, seeded);
+
+      const plannerPrompts: string[] = [];
+      let evaluatorInvocations = 0;
+      let generatorInvocations = 0;
+      config.provider = {
+        name: "stub",
+        async invoke(options: InvokeOptions): Promise<InvokeResult> {
+          const dir = findSliceArtifactDir(options.cwd, "01");
+          if (options.role === "explorer" && dir) {
+            writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+          } else if (options.role === "planner") {
+            plannerPrompts.push(options.prompt);
+          } else if (options.role === "evaluator-contract") {
+            evaluatorInvocations++;
+          } else if (options.role === "generator") {
+            generatorInvocations++;
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["2052"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      expect(outcomes.get("2052")?.phase).toBe("ESCALATE");
+      expect(plannerPrompts).toHaveLength(2);
+      expect(plannerPrompts[0]).toMatch(expectedDefect);
+      expect(evaluatorInvocations).toBe(0);
+      expect(generatorInvocations).toBe(0);
+      const archivedContract = readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "contract.md",
+        ),
+        "utf-8",
+      );
+      expect(archivedContract).toMatch(/^\*\*Status:\*\*\s*NEGOTIATING$/m);
+    },
+    240_000,
+  );
 });
 
 /**

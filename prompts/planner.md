@@ -30,8 +30,8 @@ evaluator grades against.
   orchestrator flips it to `LOCKED` after the contract evaluator
   ACCEPTs — never write `LOCKED` yourself.
 - "Files expected to change" must use exact repo-relative paths, one
-  bullet per file. The lane partitioner parses this section to detect
-  file-overlap with sibling slices.
+  bullet per file, as the human-readable view of the matching machine
+  declaration.
 - Always write `## Migration requirements` with one line:
   `- New migration files: N`. Follow the AFK reservation below exactly.
   AFK owns prefix allocation; never calculate a next prefix from the tree.

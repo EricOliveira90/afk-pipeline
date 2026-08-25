@@ -1330,6 +1330,30 @@ async function negotiateAttempt(
       return true;
     };
 
+    const refuseInvalidManifest = (
+      objection: string,
+      refusedAt: string,
+    ): void => {
+      gateObjection = objection;
+      if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+        artifacts.reopenContract(contractPath);
+      }
+      contractStatus = "NEGOTIATING";
+      capDecisions.push(
+        `The acceptance-manifest scope gate refused ${refusedAt}: ${objection}`,
+      );
+      logger.phase(
+        `${ctx.tag}: contract lock refused before evaluation — ${objection}`,
+        "error",
+        {
+          type: "warn",
+          reason: "contract-lock-refused",
+          ghIssue: slice.ghIssue,
+          message: objection,
+        },
+      );
+    };
+
     /**
      * The planner's REVISION_NOTE for `round`. A pending gate objection
      * takes the lead: it is a concrete, mechanical correction, and the
@@ -1346,8 +1370,8 @@ async function negotiateAttempt(
           : "";
       }
       return (
-        `The previous contract was accepted by the evaluator and then REJECTED by the ` +
-        `pipeline, before any code was generated:\n\n${objection}\n\n` +
+        `The pipeline REJECTED the previous contract before any code was generated:\n\n` +
+        `${objection}\n\n` +
         `Resolve exactly that in this revision.` +
         (priorFeedback
           ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
@@ -1360,7 +1384,15 @@ async function negotiateAttempt(
     // before skipping negotiation altogether; a refusal reopens the
     // contract and the round loop below runs normally.
     if (contractStatus === "LOCKED") {
-      lockRefusedByGate("a previous run");
+      try {
+        loadAcceptanceManifest(ctx.absSliceDir);
+        lockRefusedByGate("a previous run");
+      } catch (error) {
+        refuseInvalidManifest(
+          error instanceof Error ? error.message : String(error),
+          "a previous LOCKED contract",
+        );
+      }
     }
 
     if (contractStatus !== "LOCKED") {
@@ -1414,27 +1446,9 @@ async function negotiateAttempt(
         } catch (error) {
           const objection =
             error instanceof Error ? error.message : String(error);
-          gateObjection = objection;
-          contractStatus = artifacts.readContractStatus(contractPath);
-          if (contractStatus === "LOCKED") {
-            artifacts.reopenContract(contractPath);
-            contractStatus = "NEGOTIATING";
-          }
+          refuseInvalidManifest(objection, `planner round ${round}`);
           lastRound = round;
           lastVerdict = "UNKNOWN";
-          capDecisions.push(
-            `The acceptance-manifest scope gate refused planner round ${round}: ${objection}`,
-          );
-          logger.phase(
-            `${ctx.tag}: contract lock refused before evaluation — ${objection}`,
-            "error",
-            {
-              type: "warn",
-              reason: "contract-lock-refused",
-              ghIssue: slice.ghIssue,
-              message: objection,
-            },
-          );
           if (round < allowedContractRounds) continue;
 
           const reason =
