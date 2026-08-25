@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import { readRunEvents } from "./run-events.js";
 import {
   assertNever,
   bucketFor,
@@ -186,6 +187,9 @@ export class Logger {
       prUrl,
       prOverrideNote,
     } = this.runLog;
+    const gateAttempts = (readRunEvents(this.runDir)?.events ?? []).filter(
+      (event) => event.type === "gate-outcome",
+    );
 
     const totals = this.runLog.totals;
     let runCost = 0;
@@ -208,6 +212,25 @@ export class Logger {
       .join("\n");
 
     const totalsRow = `| **Run totals** | | | | **${runCost > 0 ? `$${runCost.toFixed(4)}` : "—"}** | **${runToolCalls}** |`;
+    const gateRows = gateAttempts
+      .map((event) => {
+        const status =
+          event.status === "FAIL" && event.failureKind
+            ? `${event.status} (${event.failureKind})`
+            : event.status;
+        return `| ${event.ghIssue} | ${event.round} | ${event.gateId} | ${status} | ${event.durationMs}ms | ${event.evidenceArtifactId} | ${event.logArtifactId} |`;
+      })
+      .join("\n");
+    const gateSection =
+      gateAttempts.length === 0
+        ? ""
+        : `
+## Base Gates
+
+| Slice | Round | Gate | Status | Elapsed | Evidence | Log |
+|-------|-------|------|--------|---------|----------|-----|
+${gateRows}
+`;
 
     const summary = `# Run Summary — ${prdSlug}
 
@@ -218,6 +241,7 @@ Finished: ${finishedAt!.toISOString()}
 |-------|--------|--------|--------|------|------------|
 ${rows}
 ${totalsRow}
+${gateSection}
 
 Pre-ship sanity gate: ${
       sanityGate

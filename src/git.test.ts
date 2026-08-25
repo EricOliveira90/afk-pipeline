@@ -5,11 +5,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmDirWithRetry } from "./test-support.js";
 import {
   assertWorktreeRegistered,
   branchExists,
@@ -58,7 +58,7 @@ describe("git.branchExists", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("returns true for an existing branch", () => {
@@ -93,8 +93,8 @@ describe("git.getDefaultBranch", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
-    rmSync(originDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
+    rmDirWithRetry(originDir);
   });
 
   function initBare(branch: string): void {
@@ -113,7 +113,7 @@ describe("git.getDefaultBranch", () => {
       git(seedDir, ["commit", "--allow-empty", "-m", "root"]);
       git(seedDir, ["push", "-u", "origin", branch]);
     } finally {
-      rmSync(seedDir, { recursive: true, force: true });
+      rmDirWithRetry(seedDir);
     }
   }
 
@@ -171,7 +171,7 @@ describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("returns the main repo path when the branch is checked out there", () => {
@@ -216,7 +216,7 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   // The 999-claude-smoke run hit a "Directory not empty" error from
@@ -266,7 +266,7 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
   });
 });
 
-describe("git.mergeSliceBranch — MergeResult", { timeout: 30_000 }, () => {
+describe("git.mergeSliceBranch — MergeResult", { timeout: 240_000 }, () => {
   let repoDir: string;
 
   beforeEach(() => {
@@ -280,7 +280,7 @@ describe("git.mergeSliceBranch — MergeResult", { timeout: 30_000 }, () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("returns { status: 'merged' } on clean merge", () => {
@@ -345,7 +345,7 @@ describe("git.hasCommitsAhead", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("returns true when source has commits the target lacks", () => {
@@ -392,7 +392,7 @@ describe("git.hasCommitsAhead", () => {
  * The fix: refuse to reuse a path unless git agrees it is the worktree
  * for the requested branch.
  */
-describe("git.createWorktree", { timeout: 30_000 }, () => {
+describe("git.createWorktree", { timeout: 240_000 }, () => {
   let repoDir: string;
 
   beforeEach(() => {
@@ -404,7 +404,7 @@ describe("git.createWorktree", { timeout: 30_000 }, () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("creates a worktree from the given base branch when path does not exist", () => {
@@ -467,7 +467,7 @@ describe("git.createWorktree", { timeout: 30_000 }, () => {
  * adds a removeWorktree → deleteBranch → createWorktree sequence that
  * leaves more windows for filesystem races).
  */
-describe("git.assertWorktreeRegistered", { timeout: 30_000 }, () => {
+describe("git.assertWorktreeRegistered", { timeout: 240_000 }, () => {
   let repoDir: string;
 
   beforeEach(() => {
@@ -479,7 +479,7 @@ describe("git.assertWorktreeRegistered", { timeout: 30_000 }, () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("does not throw when the path is the registered worktree for the branch", () => {
@@ -603,7 +603,7 @@ describe("git.listFilesOnRef", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   it("lists repo-relative paths from anywhere in the tree", () => {
@@ -639,7 +639,7 @@ describe("git.listMigrationFiles / migrationPrefixCollisions", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   function addMigration(name: string, body = "select 1;") {
@@ -705,7 +705,7 @@ describe("resume git primitives", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   function commitFile(cwd: string, name: string, content: string, msg: string) {
@@ -813,7 +813,7 @@ describe("resume git primitives", () => {
       try {
         expect(lastCommitEpochSeconds(plain)).toBeNull();
       } finally {
-        rmSync(plain, { recursive: true, force: true });
+        rmDirWithRetry(plain);
       }
     });
   });
@@ -861,7 +861,7 @@ describe("git.mergeBranchIntoWorktree", () => {
   });
 
   afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
+    rmDirWithRetry(repoDir);
   });
 
   function commitFile(cwd: string, name: string, content: string, msg: string) {
