@@ -1,6 +1,11 @@
 import { execFileSync, ExecFileSyncOptions } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import {
+  formatQuiesceDetail,
+  quiesceWorktree,
+  type WorktreeQuiesceReport,
+} from "./worktree-processes.js";
 
 const git = (args: string[], opts?: ExecFileSyncOptions): string =>
   (execFileSync("git", args, { encoding: "utf-8", ...opts }) as string).trim();
@@ -163,15 +168,28 @@ export function assertWorktreeRegistered(
 /** Errors Windows raises while another process still holds a handle. */
 const TRANSIENT_RM_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM", "EACCES"]);
 
+/** Default budget for retrying the on-disk delete. */
+export const DEFAULT_REMOVAL_TIMEOUT_MS = 10_000;
+
 /**
- * Block the thread briefly between removal retries. `Atomics.wait` rather
- * than a busy loop so the backoff does not burn CPU on a contended host.
- * Synchronous on purpose: the git module is synchronous throughout, and
- * several callers invoke removeWorktree from `finally` blocks.
+ * Sleep between removal retries. Deliberately asynchronous: teardown
+ * runs on the pipeline's main loop, where a blocked thread would starve
+ * the SIGINT/abort listener (ADR 0003), the wall-clock ceiling (ADR
+ * 0019), the idle watcher (ADR 0021) and the heartbeats of every sibling
+ * lane still running an agent. The timer is ref'd — waiting out a live
+ * handle is exactly when the loop must stay alive.
  */
-function sleepSync(ms: number): void {
-  const shared = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(shared, 0, 0, ms);
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 export interface RemoveWorktreeResult {
@@ -181,82 +199,230 @@ export interface RemoveWorktreeResult {
   attempts: number;
   /** Last filesystem error message when `removed` is false. */
   lastError?: string;
+  /**
+   * What became of the processes AFK spawned inside the tree. Absent
+   * only when quiescing was skipped entirely.
+   */
+  processes?: WorktreeQuiesceReport;
 }
 
 export interface RemoveWorktreeOptions {
   /**
-   * Budget for retrying on-disk removal while another process releases
-   * its handles (issue #102: a straggler child with cwd inside the
-   * worktree locks it on Windows for a short window after the invocation
-   * root settles). Default 10s — comfortably longer than the observed
-   * handle lifetimes, bounded so a genuinely wedged process cannot hang
-   * teardown forever.
+   * Budget for retrying the on-disk delete once the tree is quiet
+   * (antivirus, a pending Windows delete, or a foreign process AFK never
+   * spawned). Default `DEFAULT_REMOVAL_TIMEOUT_MS`, bounded so a
+   * genuinely wedged handle cannot hang teardown forever.
    */
   timeoutMs?: number;
+  /**
+   * How long processes AFK spawned inside the tree get to exit on their
+   * own before teardown terminates them (ADR 0035). Default
+   * `DEFAULT_QUIESCE_WAIT_MS`.
+   */
+  processWaitMs?: number;
+  /** Hard-stop (ADR 0003): cuts the waiting short, on both phases. */
+  signal?: AbortSignal;
+  /**
+   * Serializes the git-admin steps (`worktree remove`, `worktree prune`)
+   * against sibling lanes. The waiting phases run OUTSIDE it on purpose:
+   * outliving a live handle can take seconds and must not hold the merge
+   * mutex against another lane's merge.
+   */
+  gitAdminMutex?: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** Injectable for tests. */
+  quiesce?: typeof quiesceWorktree;
+  /** Injectable for tests. */
+  now?: () => number;
 }
 
 /**
- * Remove a worktree: git first, then on-disk leftovers, then prune.
+ * Remove a worktree: quiesce the processes inside it, unregister it with
+ * git, delete on-disk leftovers, prune.
  *
  * Never throws — teardown runs in `finally` blocks and after merges, where
  * an exception would mask the real outcome. Instead the result reports
  * whether the directory is actually gone; callers decide whether a
- * survivor is a loud warning (post-merge cleanup) or a hard stop
- * (recreateWorktreeFromBase). Issue #102: the previous version swallowed
- * every failure after ~600ms of retries, silently producing the ADR 0010
- * partial-tree signature (dir on disk, admin state pruned) whenever a
- * live process still held handles inside the tree.
+ * survivor is a loud warning (`removeWorktreeOrWarn`, post-merge cleanup)
+ * or a hard stop (`recreateWorktreeFromBase`). Issue #102: the previous
+ * version swallowed every failure after ~600ms of retries, silently
+ * producing the ADR 0010 partial-tree signature (dir on disk, admin state
+ * pruned) whenever a live process still held handles inside the tree.
+ *
+ * The order matters. Step 0 answers "is anything still running in here?"
+ * — waiting for it, then terminating and confirming (ADR 0020) — so the
+ * later steps race nothing. Retrying `rmSync` on its own only ever
+ * *inferred* handle release from a filesystem side-effect; it stays as
+ * the backstop for locks that are not ours to wait for.
  */
-export function removeWorktree(
+export async function removeWorktree(
   repoRoot: string,
   worktreeDir: string,
   options: RemoveWorktreeOptions = {},
-): RemoveWorktreeResult {
-  const timeoutMs = options.timeoutMs ?? 10_000;
+): Promise<RemoveWorktreeResult> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REMOVAL_TIMEOUT_MS;
+  const now = options.now ?? Date.now;
+  const signal = options.signal;
+  const runAdmin =
+    options.gitAdminMutex ?? (<T>(fn: () => Promise<T>) => fn());
 
-  // Step 1: ask git to remove. On Windows this often fails when a live
-  // process holds handles inside the tree ("Permission denied") or when
-  // pnpm has populated `node_modules/.pnpm/` ("Directory not empty") —
-  // and git unregisters the admin metadata on the FIRST attempt even when
-  // the on-disk delete fails, so there is no point retrying this step:
-  // a second call just reports "not a working tree".
-  try {
-    git(["worktree", "remove", worktreeDir, "--force"], { cwd: repoRoot });
-  } catch {
-    // Already removed, doesn't exist, or stragglers — fall through.
-  }
+  // Step 0: wait for (or terminate and confirm) every process we spawned
+  // inside the tree. See ADR 0035.
+  const quiesce = options.quiesce ?? quiesceWorktree;
+  const processes = await quiesce(worktreeDir, {
+    waitMs: options.processWaitMs,
+    signal,
+  });
 
-  // Step 2: remove on-disk leftovers, waiting out transient handle locks.
-  // Node's rmSync handles pnpm's junctions/symlinks reliably on Windows
-  // where git stumbles. A straggler's handles release when it exits, so
-  // the failure is usually transient — retry with bounded backoff instead
-  // of giving up after rmSync's built-in ~600ms.
-  const deadline = Date.now() + timeoutMs;
+  // Step 1: ask git to remove. On Windows this can still fail when a
+  // foreign process holds handles inside the tree ("Permission denied")
+  // or when pnpm has populated `node_modules/.pnpm/` ("Directory not
+  // empty") — and git unregisters the admin metadata on the FIRST attempt
+  // even when the on-disk delete fails, so there is no point retrying
+  // this step: a second call just reports "not a working tree".
+  await runAdmin(async () => {
+    try {
+      git(["worktree", "remove", worktreeDir, "--force"], { cwd: repoRoot });
+    } catch {
+      // Already removed, doesn't exist, or stragglers — fall through.
+    }
+  });
+
+  // Step 2: remove on-disk leftovers. Node's rmSync handles pnpm's
+  // junctions/symlinks reliably on Windows where git stumbles. Every exit
+  // from this loop is bounded: the deadline and the abort signal are
+  // checked at the TOP, so a directory that survives a *successful*
+  // rmSync (a pending Windows delete, a junction, a process recreating
+  // entries under us) is retried on the same budget as a thrown EBUSY
+  // rather than spun on forever.
+  const deadline = now() + timeoutMs;
   let attempts = 0;
   let lastError: string | undefined;
+  let fatal = false;
   while (existsSync(worktreeDir)) {
+    if (attempts > 0) {
+      if (fatal || signal?.aborted || now() >= deadline) break;
+      await sleep(Math.min(50 * attempts, 400), signal);
+    }
     attempts++;
     try {
       rmSync(worktreeDir, { recursive: true, force: true });
+      lastError = undefined;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       lastError = err.message ?? String(error);
-      if (Date.now() >= deadline || !TRANSIENT_RM_CODES.has(err.code ?? "")) {
-        break;
-      }
-      sleepSync(Math.min(50 * attempts, 400));
+      // A non-transient error will not clear by waiting.
+      fatal = !TRANSIENT_RM_CODES.has(err.code ?? "");
     }
   }
 
   // Step 3: reconcile git's admin state in case step 1 silently failed.
-  try {
-    git(["worktree", "prune"], { cwd: repoRoot });
-  } catch {
-    // Best effort.
-  }
+  await runAdmin(async () => {
+    try {
+      git(["worktree", "prune"], { cwd: repoRoot });
+    } catch {
+      // Best effort.
+    }
+  });
 
   const removed = !existsSync(worktreeDir);
-  return { removed, attempts, lastError: removed ? undefined : lastError };
+  return {
+    removed,
+    attempts,
+    processes,
+    lastError: removed
+      ? undefined
+      : (lastError ??
+        "rmSync reported success but the directory is still present " +
+          "(pending delete, junction, or a live process recreating entries)"),
+  };
+}
+
+/**
+ * Operator-facing sentence for a worktree that would not go away. The one
+ * place a `RemoveWorktreeResult` turns into prose: four call sites used to
+ * hand-roll their own wording for the same condition.
+ */
+export function formatWorktreeSurvivorWarning(
+  label: string,
+  worktreeDir: string,
+  result: RemoveWorktreeResult,
+): string {
+  const detail = result.processes
+    ? formatQuiesceDetail(result.processes)
+    : undefined;
+  return (
+    `${label} cleanup incomplete: ${worktreeDir} still on disk after ` +
+    `${result.attempts} removal attempt(s)` +
+    (detail ? `; ${detail}` : "") +
+    (result.lastError ? ` (${result.lastError})` : "") +
+    ` — something is still holding handles inside it; the next run will ` +
+    `refuse the stale directory (ADR 0010) until it is removed`
+  );
+}
+
+/**
+ * A worktree could not be freed, so a destructive refresh refused to
+ * start. An infrastructure condition, not a slice failure: the branch and
+ * its committed work are untouched, and a re-run retries the slice once
+ * whatever holds the handles is gone. `retryable` is the marker callers
+ * classify on — issue #102 asked for teardown failure to be *treated* as
+ * retryable, which means saying so where the outcome is recorded.
+ */
+export class WorktreeBusyError extends Error {
+  readonly retryable = true;
+
+  constructor(
+    readonly branch: string,
+    readonly worktreeDir: string,
+    readonly removal: RemoveWorktreeResult,
+  ) {
+    const detail = removal.processes
+      ? formatQuiesceDetail(removal.processes)
+      : undefined;
+    super(
+      `Cannot refresh worktree for ${branch}: ${worktreeDir} is still ` +
+        `present after ${removal.attempts} removal attempt(s)` +
+        (detail ? `; ${detail}` : "") +
+        (removal.lastError ? ` (${removal.lastError})` : "") +
+        `. A live process is holding handles inside it — the branch and ` +
+        `its commits were left intact; close the process (or let it exit) ` +
+        `and re-run to retry this slice.`,
+    );
+    this.name = "WorktreeBusyError";
+  }
+}
+
+/** True for the retryable teardown failure above. */
+export function isWorktreeBusyError(err: unknown): err is WorktreeBusyError {
+  return err instanceof WorktreeBusyError;
+}
+
+export interface WorktreeTeardownNotice {
+  /** Names the directory for the operator, e.g. `slice #42 worktree`. */
+  label: string;
+  /** Receives the composed warning; callers add their own log prefix. */
+  warn: (message: string) => void;
+}
+
+/**
+ * Tear down a worktree and, when the directory survives, say so once in
+ * one voice. Post-merge and post-gate teardown all want exactly this:
+ * the work is done and the phase is unaffected, but the host needs
+ * cleaning before the next run can reuse the path.
+ */
+export async function removeWorktreeOrWarn(
+  repoRoot: string,
+  worktreeDir: string,
+  notice: WorktreeTeardownNotice,
+  options: RemoveWorktreeOptions = {},
+): Promise<RemoveWorktreeResult> {
+  const result = await removeWorktree(repoRoot, worktreeDir, options);
+  if (!result.removed) {
+    notice.warn(
+      formatWorktreeSurvivorWarning(notice.label, worktreeDir, result),
+    );
+  }
+  return result;
 }
 
 export function hasUncommittedChanges(cwd: string): boolean {
@@ -530,12 +696,12 @@ export type MergeAttempt =
  * tip and merging must be atomic — callers MUST invoke this inside the
  * merge mutex.
  */
-export function attemptMerge(
+export async function attemptMerge(
   repoRoot: string,
   sliceBranch: string,
   featureBranch: string,
   scratchMergeDir: string,
-): MergeAttempt {
+): Promise<MergeAttempt> {
   const prefixes = migrationPrefixCollisions(
     repoRoot,
     sliceBranch,
@@ -544,7 +710,7 @@ export function attemptMerge(
   if (prefixes.length > 0) return { kind: "collision", prefixes };
   return {
     kind: "merge",
-    result: mergeSliceBranch(
+    result: await mergeSliceBranch(
       repoRoot,
       sliceBranch,
       featureBranch,
@@ -674,12 +840,12 @@ export function findWorktreeForBranch(
  * `scratchMergeDir` is chosen by the caller so it can keep the path short
  * (Windows MAX_PATH).
  */
-export function mergeSliceBranch(
+export async function mergeSliceBranch(
   repoRoot: string,
   sliceBranch: string,
   featureBranch: string,
   scratchMergeDir: string,
-): MergeResult {
+): Promise<MergeResult> {
   const existingWorktree = findWorktreeForBranch(repoRoot, featureBranch);
 
   let mergeDir: string;
@@ -709,11 +875,18 @@ export function mergeSliceBranch(
   }
 
   if (cleanupWorktree) {
-    removeWorktree(repoRoot, mergeDir);
-    if (existsSync(mergeDir) && result.status === "merged") {
+    // The scratch merge dir is read through the same structured result as
+    // every other teardown — one answer to "did teardown succeed?", not a
+    // post-hoc existsSync.
+    const removal = await removeWorktree(repoRoot, mergeDir);
+    if (!removal.removed && result.status === "merged") {
       result = {
         status: "merged",
-        cleanupWarning: `Worktree directory still exists after cleanup: ${mergeDir}`,
+        cleanupWarning: formatWorktreeSurvivorWarning(
+          "scratch merge worktree",
+          mergeDir,
+          removal,
+        ),
       };
     }
   }
@@ -750,28 +923,21 @@ export function deleteBranch(repoRoot: string, branch: string) {
  * Caller is responsible for re-creating any per-slice scratch files
  * (context.md, contract.md) inside the new worktree.
  */
-export function recreateWorktreeFromBase(
+export async function recreateWorktreeFromBase(
   repoRoot: string,
   branch: string,
   worktreeDir: string,
   base: string,
-  options: { removalTimeoutMs?: number } = {},
-): void {
-  const removal = removeWorktree(repoRoot, worktreeDir, {
-    timeoutMs: options.removalTimeoutMs,
-  });
-  if (!removal.removed) {
+  removal: RemoveWorktreeOptions = {},
+): Promise<void> {
+  const result = await removeWorktree(repoRoot, worktreeDir, removal);
+  if (!result.removed) {
     // Issue #102: proceeding here deleted the branch and then failed in
     // createWorktree with a misleading "stale directory" error — after
-    // destroying the branch. A locked tree is a retryable infrastructure
-    // condition; stop before any destructive step and say why.
-    throw new Error(
-      `Cannot refresh worktree for ${branch}: directory still present after ` +
-        `removal retries (${removal.attempts} attempt(s)): ${worktreeDir}. ` +
-        `A live process is likely holding handles inside it` +
-        (removal.lastError ? ` (${removal.lastError})` : "") +
-        `. Close the process (or wait for it to exit) and re-run.`,
-    );
+    // destroying the branch. Stop before any destructive step and say why,
+    // classified so callers can tell an infrastructure condition that a
+    // re-run clears from a slice that genuinely failed.
+    throw new WorktreeBusyError(branch, worktreeDir, result);
   }
   deleteBranch(repoRoot, branch);
   createWorktree(repoRoot, branch, worktreeDir, base);

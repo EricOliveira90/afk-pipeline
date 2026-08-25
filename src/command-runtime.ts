@@ -12,6 +12,7 @@ import {
   formatTerminationWarning,
   terminateProcessTree,
 } from "./kill-tree.js";
+import { registerWorktreeProcess } from "./worktree-processes.js";
 
 export interface CommandTimeoutOptions {
   cwd: string;
@@ -70,6 +71,9 @@ export function runBoundedCommand(
       shell: options.shell ?? false,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // Gate/QA commands run with `cwd` inside a slice worktree; teardown
+    // of that worktree must wait for this tree (ADR 0035 / issue #102).
+    registerWorktreeProcess(options.cwd, proc);
     let settled = false;
     let terminating = false;
     let observedExitCode: number | null = null;

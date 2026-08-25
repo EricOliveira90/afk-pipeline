@@ -13,6 +13,7 @@ import {
   terminateProcessTree,
   type TerminationReport,
 } from "./kill-tree.js";
+import { registerWorktreeProcess } from "./worktree-processes.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_IDLE_WARNING_INTERVAL_MS = 60_000;
@@ -92,6 +93,10 @@ export function runInvocation(
       reject(error);
       return;
     }
+
+    // Teardown of `cwd`'s worktree must wait for this tree, not race it
+    // (ADR 0035 / issue #102).
+    registerWorktreeProcess(cwd, proc);
 
     if (invocation.stdin !== undefined) {
       proc.stdin!.write(invocation.stdin);

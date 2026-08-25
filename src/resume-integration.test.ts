@@ -820,13 +820,13 @@ describe("prepareSliceWorktree", () => {
     git(ctx.worktreeDir, ["commit", "-m", `feat(#${ctx.slice.ghIssue}): work`]);
   }
 
-  it("a feature branch that has not moved is a no-op refresh and still resumes (#35)", () => {
+  it("a feature branch that has not moved is a no-op refresh and still resumes (#35)", async () => {
     const repo = makeRepo();
     const ctx = makeCtx(repo, "noop-refresh", sliceAt("01", "4001"));
     seedResumableSlice(repo, ctx);
     const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
 
-    prepareSliceWorktree(ctx);
+    await prepareSliceWorktree(ctx);
 
     // Resumed — and the no-op merge added no commit.
     expect(ctx.resume).toBeDefined();
@@ -834,7 +834,7 @@ describe("prepareSliceWorktree", () => {
     expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
   }, 240_000);
 
-  it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", () => {
+  it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", async () => {
     const repo = makeRepo();
     const slug = "multi-force";
     const forced = ["01", "4003"]; // slice 01 by number, slice 03 by GH issue
@@ -854,7 +854,7 @@ describe("prepareSliceWorktree", () => {
       git(ctx.worktreeDir, ["commit", "-m", `feat(#${ctx.slice.ghIssue}): work`]);
     }
 
-    for (const ctx of contexts) prepareSliceWorktree(ctx);
+    for (const ctx of contexts) await prepareSliceWorktree(ctx);
 
     expect(contexts[0]!.resume).toBeUndefined(); // forced by slice number
     expect(contexts[1]!.resume).toBeDefined(); // unnamed — resumes
@@ -875,14 +875,14 @@ describe("prepareSliceWorktree", () => {
     writeFileSync(join(ctx.worktreeDir, "src", "in-flight.ts"), "export const x =", "utf-8");
   }
 
-  it("--resume-stuck keeps the preserved tip, the dirty tree, and stuck.md (#49)", () => {
+  it("--resume-stuck keeps the preserved tip, the dirty tree, and stuck.md (#49)", async () => {
     const repo = makeRepo();
     const ctx = makeCtx(repo, "stuck-optin", sliceAt("20", "49"), { resumeStuck: ["49"] });
     seedResumableSlice(repo, ctx);
     markStuckWithDirtyTree(ctx);
     const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
 
-    prepareSliceWorktree(ctx);
+    await prepareSliceWorktree(ctx);
 
     expect(ctx.resume).toEqual({
       mode: "stuck",
@@ -898,13 +898,13 @@ describe("prepareSliceWorktree", () => {
     expect(existsSync(join(ctx.absSliceDir, "stuck.md"))).toBe(true);
   }, 240_000);
 
-  it("--resume-stuck on an unnamed slice leaves the terminal restart alone (#49)", () => {
+  it("--resume-stuck on an unnamed slice leaves the terminal restart alone (#49)", async () => {
     const repo = makeRepo();
     const ctx = makeCtx(repo, "stuck-unnamed", sliceAt("20", "49"), { resumeStuck: ["21"] });
     seedResumableSlice(repo, ctx);
     markStuckWithDirtyTree(ctx);
 
-    prepareSliceWorktree(ctx);
+    await prepareSliceWorktree(ctx);
 
     expect(ctx.resume).toBeUndefined();
     expect(git(repo, ["rev-parse", ctx.branch])).toBe(
@@ -912,7 +912,7 @@ describe("prepareSliceWorktree", () => {
     );
   }, 240_000);
 
-  it("--force-restart beats --resume-stuck on the same slice (#49)", () => {
+  it("--force-restart beats --resume-stuck on the same slice (#49)", async () => {
     const repo = makeRepo();
     const ctx = makeCtx(repo, "stuck-contested", sliceAt("20", "49"), {
       forceRestart: ["20"],
@@ -921,7 +921,7 @@ describe("prepareSliceWorktree", () => {
     seedResumableSlice(repo, ctx);
     markStuckWithDirtyTree(ctx);
 
-    prepareSliceWorktree(ctx);
+    await prepareSliceWorktree(ctx);
 
     expect(ctx.resume).toBeUndefined();
     expect(git(repo, ["rev-parse", ctx.branch])).toBe(

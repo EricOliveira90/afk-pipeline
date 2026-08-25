@@ -102,11 +102,17 @@ which path got us there.
 - Recovering the consumer-side commits already misrouted before this
   fix lands — that's a one-time human cherry-pick from the wrong
   branch's reflog, not something the pipeline should automate.
-- Reworking `removeWorktree` to surface failures structurally — left
+- ~~Reworking `removeWorktree` to surface failures structurally — left
   as an architecture follow-up. The current fix makes leaks loud at
   the next run; structural error returns from `removeWorktree` would
   let the orchestrator refuse to start at all, which is a stronger
-  guarantee but a bigger change.
+  guarantee but a bigger change.~~ **Closed by ADR 0035** (issue #102):
+  `removeWorktree` returns `RemoveWorktreeResult`, teardown waits for
+  and confirms the processes inside the tree first, and
+  `recreateWorktreeFromBase` refuses a locked tree before it deletes
+  anything. The invariant this ADR enforces at creation time is now
+  also defended at teardown time, so cleanup no longer manufactures the
+  partial-tree signature it was written to catch.
 - Eliminating the underlying Windows-specific causes (path length,
   antivirus, junction permissions). The pre-dispatch assertion makes
   these failure modes visible; root-causing them is a follow-up if

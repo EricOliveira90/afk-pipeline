@@ -23,8 +23,19 @@ _Avoid_: "spec", "requirements"
 
 **Worktree**:
 A git worktree created per-slice on its own branch. Provides branch-level
-isolation without containers.
+isolation without containers. Creation refuses a directory git does not
+recognise as the branch's worktree (ADR 0010); teardown waits for — or
+terminates and confirms — every process AFK spawned inside it before
+deleting, and reports what it could not remove (ADR 0035).
 _Avoid_: "sandbox", "workspace", "clone"
+
+**Quiescing**:
+Waiting for every process AFK spawned inside a worktree to be gone,
+terminating and confirming (ADR 0020) whatever outlives the wait. What
+teardown does before it deletes anything (ADR 0035). Distinct from a
+**kill**: quiescing prefers a natural exit and only escalates on a
+deadline or a fired `AbortSignal`.
+_Avoid_: "draining", "settling", "cleanup"
 
 **Feature branch**:
 The `feat/<prd-slug>` branch that all slice branches merge into. Created
