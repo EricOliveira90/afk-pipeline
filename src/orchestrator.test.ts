@@ -225,6 +225,86 @@ describe("runPreShipSanity", () => {
     expect(result.ok).toBe(false);
     expect(result.failures).toEqual(["typecheck", "lint"]);
   });
+
+  // Regression for #101: the ship gate's scratch review worktree is a fresh
+  // `git worktree add` with no node_modules, so every sanity command failed
+  // instantly and the gate reported a code failure on a green branch.
+  it("installs missing dependencies before running sanity steps (#101)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
+    tempDirs.push(dir);
+    const markerPkg = join(dir, "marker-pkg");
+    mkdirSync(markerPkg);
+    writeFileSync(
+      join(markerPkg, "package.json"),
+      JSON.stringify({ name: "afk-marker", version: "1.0.0" }),
+      "utf-8",
+    );
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        dependencies: { "afk-marker": "file:./marker-pkg" },
+        scripts: {
+          // Fails exactly the way the incident did — unless the gate
+          // installed dependencies first.
+          typecheck:
+            "node -e \"require('node:fs').accessSync('node_modules/afk-marker')\"",
+        },
+      }),
+      "utf-8",
+    );
+
+    const result = runPreShipSanity(dir);
+
+    expect(result).toEqual({ ok: true, failures: [] });
+    expect(existsSync(join(dir, "node_modules", "afk-marker"))).toBe(true);
+  }, 180_000);
+
+  it("skips the dependency install when node_modules already exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
+    tempDirs.push(dir);
+    // An install would fail (the file: target does not exist) — proving it
+    // was never attempted when the checkout already carries node_modules.
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        dependencies: { "afk-missing": "file:./does-not-exist" },
+        scripts: { typecheck: "node -e \"process.exit(0)\"" },
+      }),
+      "utf-8",
+    );
+    mkdirSync(join(dir, "node_modules"));
+
+    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+  });
+
+  it("skips the dependency install when the project declares no dependencies", () => {
+    // The crafted fixtures above never had node_modules either — a project
+    // with only scripts must not pay (or fail) an install.
+    const dir = makeProject({ typecheck: "node -e \"process.exit(0)\"" });
+    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+  });
+
+  it("classifies a failed dependency install as a configuration failure, not a code failure (#101)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
+    tempDirs.push(dir);
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        dependencies: { "afk-missing": "file:./does-not-exist" },
+        scripts: { typecheck: "node -e \"process.exit(0)\"" },
+      }),
+      "utf-8",
+    );
+
+    const result = runPreShipSanity(dir);
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toEqual(["install"]);
+    expect(result.configurationFailure).toContain("pnpm install");
+  }, 60_000);
 });
 
 /**

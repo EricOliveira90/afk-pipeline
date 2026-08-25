@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   createWriteStream,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   writeFileSync,
@@ -303,4 +304,112 @@ describe("runShipGate", () => {
       "https://github.com/acme/repo/pull/63",
     );
   });
+
+  // Regression for #101: the orchestrator hands the ship gate a scratch
+  // review worktree (`git worktree add`, fresh checkout, no node_modules).
+  // Every sanity command failed instantly and the gate blocked the ship as
+  // a code failure on a green branch, skipping guardians and the draft PR.
+  it("ships from an uninstalled review worktree by installing dependencies before sanity (#101)", async () => {
+    const repo = makeRepo();
+    const slug = "uninstalled-worktree";
+    const markerPkg = join(repo, "marker-pkg");
+    mkdirSync(markerPkg);
+    writeFileSync(
+      join(markerPkg, "package.json"),
+      JSON.stringify({ name: "afk-marker", version: "1.0.0" }),
+      "utf-8",
+    );
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        dependencies: { "afk-marker": "file:./marker-pkg" },
+        scripts: {
+          typecheck:
+            "node -e \"require('node:fs').accessSync('node_modules/afk-marker')\"",
+        },
+      }),
+      "utf-8",
+    );
+    writeFileSync(join(repo, ".gitignore"), ".afk/\nnode_modules/\n", "utf-8");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "add sanity scripts"]);
+    // The exact incident shape: a fresh worktree of the feature branch with
+    // no node_modules.
+    const reviewDir = mkdtempSync(join(tmpdir(), "afk-review-wt-"));
+    tempDirs.push(reviewDir);
+    git(repo, [
+      "worktree",
+      "add",
+      "--force",
+      reviewDir,
+      "-b",
+      `feat/${slug}`,
+    ]);
+
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      writeReview(
+        options,
+        slug,
+        options.role === "architect-review" ? "architect" : "pm",
+        options.role === "architect-review" ? "SHIP" : "ACCEPT-WITH-NOTES",
+      );
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) => {
+      if (command === "gh" && args[1] === "create") {
+        return "https://github.com/acme/repo/pull/101\n";
+      }
+      return "";
+    });
+
+    const result = await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      reviewDir,
+    });
+
+    expect(result.verdict).toBe("SHIP");
+    expect(existsSync(join(reviewDir, "node_modules", "afk-marker"))).toBe(
+      true,
+    );
+    expect(
+      fixture.phase.mock.calls.some(([message]) =>
+        String(message).includes("Pre-ship sanity gate passed"),
+      ),
+    ).toBe(true);
+  }, 240_000);
+
+  it("blocks with a configuration failure — not a code failure — when the sanity install fails (#101)", async () => {
+    const repo = makeRepo();
+    const slug = "install-config-failure";
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        dependencies: { "afk-missing": "file:./does-not-exist" },
+        scripts: { typecheck: "node -e \"process.exit(0)\"" },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "add broken dependency"]);
+
+    const fixture = makeJournal();
+    const invoke = vi.fn(async () => {
+      throw new Error("a configuration failure must not reach guardians");
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+
+    const result = await runShipGate(
+      makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+    );
+
+    expect(result.verdict).toBe("BLOCKED");
+    expect(result.failureReason).toContain(
+      "configuration failure, not a code failure",
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(runCommand).not.toHaveBeenCalled();
+  }, 60_000);
 });

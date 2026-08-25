@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -16,13 +16,24 @@ const SANITY_STEPS: ReadonlyArray<{
   { name: "tests", scripts: ["test:run", "test"] },
 ];
 
-function readPackageScripts(cwd: string): Record<string, string> | null {
+interface PackageManifest {
+  scripts?: Record<string, string>;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+}
+
+function readPackageManifest(cwd: string): PackageManifest | null {
   try {
     const pkgRaw = readFileSync(join(cwd, "package.json"), "utf-8");
-    return (JSON.parse(pkgRaw).scripts ?? {}) as Record<string, string>;
+    return JSON.parse(pkgRaw) as PackageManifest;
   } catch {
     return null;
   }
+}
+
+function readPackageScripts(cwd: string): Record<string, string> | null {
+  const pkg = readPackageManifest(cwd);
+  return pkg ? (pkg.scripts ?? {}) : null;
 }
 
 /**
@@ -54,6 +65,51 @@ export function resolveSanityCommands(cwd: string): string[] {
 export interface PreShipSanityResult {
   ok: boolean;
   failures: string[];
+  /**
+   * Set when the sanity environment could not be prepared (the dependency
+   * install failed). `failures` then names the install step, and the
+   * blocker is a configuration failure of the environment — not a code
+   * failure of the reviewed tree (#101).
+   */
+  configurationFailure?: string;
+}
+
+/**
+ * Prepare the checkout so the sanity commands can actually run. The ship
+ * gate's scratch review worktree is a fresh `git worktree add` with no
+ * `node_modules`, so `pnpm run typecheck` there fails instantly and the
+ * gate misreports the environment gap as a code failure (#101). Install
+ * dependencies when the project declares any and the checkout has none;
+ * checkouts that already carry `node_modules` (an existing feature-branch
+ * checkout, a slice worktree a generator worked in) are left untouched.
+ */
+function ensureSanityDependencies(
+  cwd: string,
+): { ok: true } | { ok: false; detail: string } {
+  if (existsSync(join(cwd, "node_modules"))) return { ok: true };
+  const pkg = readPackageManifest(cwd);
+  const declaresDependencies =
+    Object.keys(pkg?.dependencies ?? {}).length > 0 ||
+    Object.keys(pkg?.devDependencies ?? {}).length > 0;
+  if (!declaresDependencies) return { ok: true };
+
+  // Prefer a reproducible install when the lockfile is checked in; a
+  // project without one still gets a plain install rather than a
+  // guaranteed --frozen-lockfile failure.
+  const installArgs = existsSync(join(cwd, "pnpm-lock.yaml"))
+    ? ["install", "--frozen-lockfile"]
+    : ["install"];
+  try {
+    execFileSync("pnpm", installArgs, {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, detail: `pnpm ${installArgs.join(" ")} failed: ${message}` };
+  }
 }
 
 /**
@@ -64,6 +120,15 @@ export interface PreShipSanityResult {
 export function runPreShipSanity(cwd: string): PreShipSanityResult {
   const scripts = readPackageScripts(cwd);
   if (!scripts) return { ok: true, failures: [] };
+
+  const install = ensureSanityDependencies(cwd);
+  if (!install.ok) {
+    return {
+      ok: false,
+      failures: ["install"],
+      configurationFailure: install.detail,
+    };
+  }
 
   const failures: string[] = [];
   for (const step of SANITY_STEPS) {

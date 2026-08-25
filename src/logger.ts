@@ -31,6 +31,12 @@ export interface SliceTotals {
 export interface SanityGateResult {
   ok: boolean;
   failures: string[];
+  /**
+   * Set when the sanity environment could not be prepared (dependency
+   * install failed) — the block is a configuration failure, not a code
+   * failure (#101).
+   */
+  configurationFailure?: string;
 }
 
 export interface RunLog {

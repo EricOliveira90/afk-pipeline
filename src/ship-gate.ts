@@ -294,6 +294,16 @@ export async function runShipGate(
   });
   journal.setSanityGate(sanity);
   if (!sanity.ok) {
+    if (sanity.configurationFailure) {
+      journal.phase(
+        `  ❌ Pre-ship sanity environment could not be prepared: ${sanity.configurationFailure}. ` +
+          "This is a configuration failure, not a code failure. Skipping guardian reviews and PR creation.",
+      );
+      return blocked(
+        `pre-ship sanity environment could not be prepared (${sanity.configurationFailure}) — ` +
+          "configuration failure, not a code failure; guardian reviews and PR creation were skipped",
+      );
+    }
     const failedSteps = sanity.failures.join(", ");
     journal.phase(
       `  ❌ Pre-ship sanity gate failed: ${failedSteps}. Skipping guardian reviews and PR creation.`,
