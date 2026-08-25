@@ -37,10 +37,9 @@ export interface InvokeOptions {
    * when exceeded. No default: unset means no tool-call kill, and the
    * wall-clock ceiling (`maxDurationMs`) is the backstop for runaway
    * sessions. Tool calls are always counted for `InvocationStats`
-   * either way. A 100-call default retired after killing a healthy
-   * generator mid-verification: a TDD loop against a slow suite
-   * legitimately spends 100+ commands. Only enforced by providers that
-   * parse a structured stream. See ADR 0007 and ADR 0036.
+   * either way. Only enforced by providers that parse a structured
+   * stream. Rationale for retiring the former 100-call default:
+   * ADR 0036 (see also ADR 0007).
    */
   maxToolCalls?: number;
   /**

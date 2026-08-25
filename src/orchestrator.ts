@@ -14,7 +14,7 @@ import { finished } from "node:stream/promises";
 import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
-import type { AgentProvider } from "./agent-provider.js";
+import type { AgentProvider, InvokeOptions } from "./agent-provider.js";
 import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
@@ -130,6 +130,34 @@ const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
  */
 const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
 const DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS = 7_200_000;
+
+/**
+ * Invocation bounds for the long-command roles — generator and
+ * evaluator-qa (including its shared-preview UAT stage), the roles
+ * that legitimately shell out to a full test suite. One home for the
+ * role→policy mapping: these roles get the slow-agent wall-clock
+ * ceiling (ADR 0019) and earn busy-probe idle-kill deferral
+ * (ADR 0021, ADR 0037); every other role keeps provider defaults and
+ * the plain idle timeout.
+ */
+function longCommandRoleBounds(bounds: {
+  idleTimeoutMs: number;
+  idleWarningIntervalMs: number;
+  maxDurationMs: number | undefined;
+}): Pick<
+  InvokeOptions,
+  | "idleTimeoutMs"
+  | "idleWarningIntervalMs"
+  | "maxDurationMs"
+  | "deferIdleKillWhenBusy"
+> {
+  return {
+    idleTimeoutMs: bounds.idleTimeoutMs,
+    idleWarningIntervalMs: bounds.idleWarningIntervalMs,
+    maxDurationMs: bounds.maxDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
+    deferIdleKillWhenBusy: true,
+  };
+}
 
 const BASE_GATE_IDS = ["typecheck", "lint", "tests"] as const;
 
@@ -1650,12 +1678,11 @@ export async function runQAStage(
         }),
         cwd: ctx.worktreeDir,
         logStream: evalLog,
-        idleTimeoutMs: commandTimeoutMs,
-        idleWarningIntervalMs: heartbeatIntervalMs,
-        maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
-        // QA legitimately runs the full suite with piped output —
-        // deferral is earned here. See ADR 0037.
-        deferIdleKillWhenBusy: true,
+        ...longCommandRoleBounds({
+          idleTimeoutMs: commandTimeoutMs,
+          idleWarningIntervalMs: heartbeatIntervalMs,
+          maxDurationMs: config.maxAgentDurationMs,
+        }),
       }).finally(() => closeAgentLog(evalLog));
     };
 
@@ -1843,12 +1870,11 @@ export async function runSliceExecute(
         prompt: generatorPrompt,
         cwd: ctx.worktreeDir,
         logStream: genLog,
-        idleTimeoutMs: timeoutMs,
-        idleWarningIntervalMs: heartbeatMs,
-        maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
-        // Generators run TDD loops against real test suites — the one
-        // role deferral was built for. See ADR 0021 and ADR 0037.
-        deferIdleKillWhenBusy: true,
+        ...longCommandRoleBounds({
+          idleTimeoutMs: timeoutMs,
+          idleWarningIntervalMs: heartbeatMs,
+          maxDurationMs: config.maxAgentDurationMs,
+        }),
       }).finally(() => closeAgentLog(genLog));
       logger.event({
         type: "phase-ended",
