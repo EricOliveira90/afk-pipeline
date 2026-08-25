@@ -35,6 +35,26 @@ evaluator grades against.
 - Always write `## Migration requirements` with one line:
   `- New migration files: N`. Follow the AFK reservation below exactly.
   AFK owns prefix allocation; never calculate a next prefix from the tree.
+- Always write `{{SLICE_DIR}}/acceptance-manifest.json` beside
+  `contract.md`. It is the machine source for file scope and migration
+  count. Overwrite it on every round with exactly this version 1 shape:
+
+```json
+{
+  "version": 1,
+  "fileScope": {
+    "kind": "paths",
+    "paths": ["exact/repo-relative/file.ts"]
+  },
+  "migrationCount": 0
+}
+```
+
+  Use a non-empty `paths` array of exact file paths, or use
+  `"fileScope": { "kind": "no-repository-changes" }` with
+  `"migrationCount": 0`. Never use placeholders, globs, absolute paths,
+  directories, or `.` / `..` segments. Keep the prose file list and
+  migration count in `contract.md` as the matching human-readable view.
 
 # Migration reservation
 
