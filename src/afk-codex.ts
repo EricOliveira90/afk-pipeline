@@ -28,7 +28,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--open-pr-on-override] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-codex clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--open-pr-on-override] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-codex clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }

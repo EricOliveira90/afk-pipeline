@@ -394,9 +394,10 @@ describe("resolveTestCommand", () => {
 /**
  * The generator's verification command is a separate decision from the
  * gate's command set: an operator may hand the generator a fast subset so
- * whole-suite runs stay out of every edit cycle. These cases pin the
- * precedence; the drift test below pins that doing so leaves the gate and
- * the QA evaluator on the full set.
+ * whole-suite runs stay out of every edit cycle (ADR 0038). These cases
+ * pin the precedence only. That an override cannot reach the gate or the
+ * QA evaluator is pinned where it can actually fail — through
+ * `runPipeline`, in "generator verification command (ADR 0038)" below.
  */
 describe("resolveGeneratorTestCommand", () => {
   it("prefers an explicit override over the project's test script", () => {
@@ -416,15 +417,16 @@ describe("resolveGeneratorTestCommand", () => {
     expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test");
   });
 
-  it("leaves the sanity gate's command set untouched", () => {
+  it("resolves independently of the sanity gate's command set", () => {
     const dir = makeProject({
       typecheck: "tsc --noEmit",
       "test:run": "vitest run",
     });
-    const sanityBefore = resolveSanityCommands(dir);
-    resolveGeneratorTestCommand(dir, "pnpm test:fast");
-    expect(resolveSanityCommands(dir)).toEqual(sanityBefore);
-    expect(sanityBefore.join(" ")).toContain("pnpm run test:run");
+    // The two answers can differ, and the gate keeps the full one.
+    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
+      "pnpm test:fast",
+    );
+    expect(resolveSanityCommands(dir).join(" ")).toContain("pnpm run test:run");
   });
 });
 
@@ -3205,6 +3207,138 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
     expect(state.slices["9303"].error).toContain("wall-clock ceiling");
     expect(state.slices["9303"].error).toContain("--max-agent-duration-ms");
     expect(result.consoleSummary).toContain("[STUCK]");
+  }, 240_000);
+});
+
+/**
+ * Generator verification command (ADR 0038). An operator narrows what the
+ * generator runs between edits; nothing else may narrow with it. The risk
+ * this pins is a run-time one — `config.testCommand` leaking into the
+ * block QA is handed or into what the gate executes — so it is asserted
+ * through `runPipeline` against a real repo, reading the prompts the
+ * provider actually received.
+ */
+describe("generator verification command (ADR 0038)", () => {
+  /** Repo whose own test script differs from the override below. */
+  function makeSetup(slug: string, ghIssue: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify(
+        {
+          name: "consumer-fixture",
+          private: true,
+          scripts: { "test:run": `node -e "0"` },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add test script"]);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue,
+        title: "Verification slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        ghIssue,
+        {
+          files: ["src/verify.txt"],
+          qaPasses: true,
+          outputFile: "src/verify.txt",
+          outputContent: "verify",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    return {
+      repo,
+      prdDir,
+      specsDir,
+      slices,
+      baseProvider: buildStubProvider({ fixtures, slices, records }),
+    };
+  }
+
+  /** Wrap the stub to keep the prompt text each role received. */
+  function promptCapturingProvider(
+    baseProvider: AgentProvider,
+    prompts: Map<string, string[]>,
+  ): AgentProvider {
+    return {
+      name: baseProvider.name,
+      async invoke(options) {
+        const list = prompts.get(options.role) ?? [];
+        list.push(options.prompt);
+        prompts.set(options.role, list);
+        return baseProvider.invoke(options);
+      },
+    };
+  }
+
+  it("hands the override to the generator and the full sanity set to QA", async () => {
+    const slug = "generator-test-command";
+    const { repo, prdDir, specsDir, slices, baseProvider } = makeSetup(
+      slug,
+      "9501",
+    );
+    const prompts = new Map<string, string[]>();
+
+    // The stub's no-op guardian reviews block shipping (issue #43); the
+    // slice ran to completion, which is what the prompts below describe.
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: promptCapturingProvider(baseProvider, prompts),
+      testCommand: "pnpm test:fast",
+    });
+    expect(result.success).toBe(false);
+
+    const generatorPrompt = prompts.get("generator")?.[0];
+    expect(generatorPrompt).toBeDefined();
+    expect(generatorPrompt!).toContain("pnpm test:fast");
+
+    // QA is told the gate's command set and is never shown the override.
+    const qaPrompt = prompts.get("evaluator-qa")?.[0];
+    expect(qaPrompt).toBeDefined();
+    expect(qaPrompt!).toContain("pnpm run test:run");
+    expect(qaPrompt!).not.toContain("test:fast");
+  }, 240_000);
+
+  it("leaves the generator on the project's test script when no override is given", async () => {
+    const slug = "generator-test-command-default";
+    const { repo, prdDir, specsDir, slices, baseProvider } = makeSetup(
+      slug,
+      "9502",
+    );
+    const prompts = new Map<string, string[]>();
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: promptCapturingProvider(baseProvider, prompts),
+    });
+    expect(result.success).toBe(false);
+
+    const generatorPrompt = prompts.get("generator")?.[0];
+    expect(generatorPrompt).toBeDefined();
+    expect(generatorPrompt!).toContain("pnpm test:run");
   }, 240_000);
 });
 

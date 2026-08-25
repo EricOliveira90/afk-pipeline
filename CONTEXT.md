@@ -347,12 +347,8 @@ all — nothing needs resolving, only re-attempting)
 The command the generator is told to verify with while it iterates,
 resolved by `resolveGeneratorTestCommand` from `--test-command`, else the
 project's `test:run`/`test` script, else `pnpm test`. Deliberately a
-separate decision from the **sanity command set**: the gate wants the
-whole suite, while a generator re-running the whole suite after every
-edit spends its **wall-clock ceiling** inside test processes. Overriding
-it moves the whole-suite guarantee from per-edit to per-checkpoint, never
-away — the QA prompt treats it as informational and the gate never reads
-it.
+separate decision from the **sanity command set**, and reaching only the
+generator roles (ADR 0038).
 _Avoid_: "test command" bare (ambiguous with the sanity set), "QA
 command" (the evaluator runs the sanity set, not this)
 

@@ -43,8 +43,8 @@ export interface PipelineRuntimeOptions {
    * The command the generator verifies with while it iterates, replacing
    * the `package.json` script AFK would otherwise pick. Point it at a
    * fast subset (`pnpm test:fast`) to keep whole-suite runs out of every
-   * generator round; the pre-ship sanity gate and evaluator QA still run
-   * the full set, so the guarantee moves per-checkpoint rather than away.
+   * generator round; the gate and QA still run the full set. See
+   * ADR 0038.
    */
   testCommand?: string;
   /** Execute otherwise independent slice lanes one at a time. */
@@ -90,15 +90,19 @@ function optionValue(args: readonly string[], flag: string): string | undefined 
 }
 
 /**
- * A whitespace-only `--test-command` would reach the generator prompt as an
- * empty verification instruction, so reject it here rather than let the
- * agent improvise a command AFK never chose.
+ * Read a flag whose value is a shell command. A whitespace-only value
+ * would reach a prompt or a spawn as an empty instruction, so reject it
+ * here rather than let an agent improvise a command AFK never chose.
  */
-function parseTestCommand(value: string | undefined): string | undefined {
+function parseCommandOption(
+  args: readonly string[],
+  flag: string,
+): string | undefined {
+  const value = optionValue(args, flag);
   if (value === undefined) return undefined;
   const trimmed = value.trim();
   if (trimmed === "") {
-    throw new Error("--test-command requires a non-empty command");
+    throw new Error(`${flag} requires a non-empty command`);
   }
   return trimmed;
 }
@@ -178,7 +182,7 @@ export function parsePipelineRuntimeOptions(
     "--max-agent-duration-ms",
     false,
   );
-  const testCommand = parseTestCommand(optionValue(args, "--test-command"));
+  const testCommand = parseCommandOption(args, "--test-command");
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
   const forceRestart = parseSliceIdList(args, "--force-restart");
@@ -197,8 +201,8 @@ export function parsePipelineRuntimeOptions(
       `--force-restart and --resume-stuck both name ${contested.join(", ")}; pick one per slice`,
     );
   }
-  const verifyMigrationCommand = optionValue(args, "--preview-verify-command");
-  const applyMigrationCommand = optionValue(args, "--preview-apply-command");
+  const verifyMigrationCommand = parseCommandOption(args, "--preview-verify-command");
+  const applyMigrationCommand = parseCommandOption(args, "--preview-apply-command");
   if ((verifyMigrationCommand === undefined) !== (applyMigrationCommand === undefined)) {
     throw new Error("--preview-verify-command and --preview-apply-command must be provided together");
   }

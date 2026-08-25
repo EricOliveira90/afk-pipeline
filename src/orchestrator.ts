@@ -247,20 +247,9 @@ export interface PipelineConfig {
   maxAgentDurationMs?: number;
   /**
    * The command the generator is told to verify with while it iterates,
-   * overriding the `package.json` script `resolveTestCommand` would pick.
-   *
-   * Exists because the two audiences for a test command want different
-   * things. The pre-ship sanity gate and evaluator QA need the whole
-   * suite — that is the guarantee. A generator re-running the whole
-   * suite after every edit spends its wall-clock ceiling on it: in the
-   * PRD 1 run one generator round spent roughly 75 of 105 minutes
-   * inside test processes and died before handing off to QA.
-   *
-   * Overriding this does NOT weaken the gate. `resolveSanityPlan` still
-   * owns what the sanity gate executes and what QA is told to run
-   * (ADR 0012); the QA prompt treats `{{TEST_COMMAND}}` as
-   * informational. The guarantee moves from per-edit to per-checkpoint,
-   * not away.
+   * overriding the `package.json` script `resolveTestCommand` would
+   * pick. Does not reach the sanity gate or the QA evaluator — the
+   * whole-suite guarantee moves per-checkpoint, not away. See ADR 0038.
    */
   testCommand?: string;
   /** Execute independent lanes serially to avoid shared-service contention. */
@@ -1684,7 +1673,10 @@ export async function runQAStage(
           SLICE_DIR: ctx.relSliceDir,
           RELEVANT_FILES: ctx.relevantFilesBlock,
           SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-          TEST_COMMAND: ctx.testCommand,
+          // No TEST_COMMAND: QA is told the sanity command set and
+          // nothing else, so a narrowed generator command cannot reach
+          // it (ADR 0038). `renderPrompt` enforces this — the template
+          // rejects an arg it does not reference.
           SANITY_COMMANDS: ctx.sanityCommandsBlock,
           QA_SCOPE: scope,
           REPORT_PATH: reportDisplayPath,

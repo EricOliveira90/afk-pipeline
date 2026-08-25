@@ -496,9 +496,9 @@ iterates, replacing the `package.json` script AFK would otherwise resolve
 (`test:run`, then `test`). Point it at a fast subset — `--test-command "pnpm
 test:fast"` — when the full suite is slow enough that re-running it after every
 edit consumes the generator's ceiling. This does not weaken the gate: the
-pre-ship sanity gate and the QA evaluator keep running the full command set
-(ADR 0012), so the whole-suite guarantee applies per checkpoint instead of per
-edit.
+pre-ship sanity gate and the QA evaluator keep running the full command set, so
+the whole-suite guarantee applies per checkpoint instead of per edit — see
+ADR 0038.
 
 ## Development
 

@@ -31,7 +31,8 @@ session kept emitting bytes — every chunk reset the watcher, so it never
 fired. The slice never reached a verdict; the run hung indefinitely.
 
 The hardcoded test command is fixed separately by the
-`{{TEST_COMMAND}}` placeholder injected from `resolveTestCommand`. This
+`{{TEST_COMMAND}}` placeholder injected from
+`resolveGeneratorTestCommand` (ADR 0038). This
 ADR covers the second failure surface: a wedged session needs a bound
 that doesn't depend on the agent eventually going silent.
 
