@@ -160,32 +160,91 @@ export function assertWorktreeRegistered(
   }
 }
 
-export function removeWorktree(repoRoot: string, worktreeDir: string) {
-  // Step 1: ask git to remove. On Windows this often fails with
-  // "Directory not empty" when pnpm has populated `node_modules/.pnpm/`
-  // — git's libc-style unlink walk leaves stragglers behind even with
-  // --force. Admin metadata is still unregistered, so the dir is
-  // orphaned: not a worktree per `git worktree list`, but on disk.
+/** Errors Windows raises while another process still holds a handle. */
+const TRANSIENT_RM_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM", "EACCES"]);
+
+/**
+ * Block the thread briefly between removal retries. `Atomics.wait` rather
+ * than a busy loop so the backoff does not burn CPU on a contended host.
+ * Synchronous on purpose: the git module is synchronous throughout, and
+ * several callers invoke removeWorktree from `finally` blocks.
+ */
+function sleepSync(ms: number): void {
+  const shared = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(shared, 0, 0, ms);
+}
+
+export interface RemoveWorktreeResult {
+  /** True when the directory is gone from disk. */
+  removed: boolean;
+  /** rmSync attempts made against on-disk leftovers (0 if git got it). */
+  attempts: number;
+  /** Last filesystem error message when `removed` is false. */
+  lastError?: string;
+}
+
+export interface RemoveWorktreeOptions {
+  /**
+   * Budget for retrying on-disk removal while another process releases
+   * its handles (issue #102: a straggler child with cwd inside the
+   * worktree locks it on Windows for a short window after the invocation
+   * root settles). Default 10s — comfortably longer than the observed
+   * handle lifetimes, bounded so a genuinely wedged process cannot hang
+   * teardown forever.
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Remove a worktree: git first, then on-disk leftovers, then prune.
+ *
+ * Never throws — teardown runs in `finally` blocks and after merges, where
+ * an exception would mask the real outcome. Instead the result reports
+ * whether the directory is actually gone; callers decide whether a
+ * survivor is a loud warning (post-merge cleanup) or a hard stop
+ * (recreateWorktreeFromBase). Issue #102: the previous version swallowed
+ * every failure after ~600ms of retries, silently producing the ADR 0010
+ * partial-tree signature (dir on disk, admin state pruned) whenever a
+ * live process still held handles inside the tree.
+ */
+export function removeWorktree(
+  repoRoot: string,
+  worktreeDir: string,
+  options: RemoveWorktreeOptions = {},
+): RemoveWorktreeResult {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+
+  // Step 1: ask git to remove. On Windows this often fails when a live
+  // process holds handles inside the tree ("Permission denied") or when
+  // pnpm has populated `node_modules/.pnpm/` ("Directory not empty") —
+  // and git unregisters the admin metadata on the FIRST attempt even when
+  // the on-disk delete fails, so there is no point retrying this step:
+  // a second call just reports "not a working tree".
   try {
     git(["worktree", "remove", worktreeDir, "--force"], { cwd: repoRoot });
   } catch {
     // Already removed, doesn't exist, or stragglers — fall through.
   }
 
-  // Step 2: nuke any on-disk leftovers. Node's rmSync handles pnpm's
-  // junctions/symlinks reliably on Windows where git stumbles.
-  if (existsSync(worktreeDir)) {
+  // Step 2: remove on-disk leftovers, waiting out transient handle locks.
+  // Node's rmSync handles pnpm's junctions/symlinks reliably on Windows
+  // where git stumbles. A straggler's handles release when it exits, so
+  // the failure is usually transient — retry with bounded backoff instead
+  // of giving up after rmSync's built-in ~600ms.
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+  let lastError: string | undefined;
+  while (existsSync(worktreeDir)) {
+    attempts++;
     try {
-      rmSync(worktreeDir, {
-        recursive: true,
-        force: true,
-        maxRetries: 3,
-        retryDelay: 200,
-      });
-    } catch {
-      // If even rmSync can't get it (file lock from a still-running
-      // child process), leave the dir — pruneWorktrees() will at least
-      // reconcile git's admin state below.
+      rmSync(worktreeDir, { recursive: true, force: true });
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      lastError = err.message ?? String(error);
+      if (Date.now() >= deadline || !TRANSIENT_RM_CODES.has(err.code ?? "")) {
+        break;
+      }
+      sleepSync(Math.min(50 * attempts, 400));
     }
   }
 
@@ -195,6 +254,9 @@ export function removeWorktree(repoRoot: string, worktreeDir: string) {
   } catch {
     // Best effort.
   }
+
+  const removed = !existsSync(worktreeDir);
+  return { removed, attempts, lastError: removed ? undefined : lastError };
 }
 
 export function hasUncommittedChanges(cwd: string): boolean {
@@ -693,8 +755,24 @@ export function recreateWorktreeFromBase(
   branch: string,
   worktreeDir: string,
   base: string,
+  options: { removalTimeoutMs?: number } = {},
 ): void {
-  removeWorktree(repoRoot, worktreeDir);
+  const removal = removeWorktree(repoRoot, worktreeDir, {
+    timeoutMs: options.removalTimeoutMs,
+  });
+  if (!removal.removed) {
+    // Issue #102: proceeding here deleted the branch and then failed in
+    // createWorktree with a misleading "stale directory" error — after
+    // destroying the branch. A locked tree is a retryable infrastructure
+    // condition; stop before any destructive step and say why.
+    throw new Error(
+      `Cannot refresh worktree for ${branch}: directory still present after ` +
+        `removal retries (${removal.attempts} attempt(s)): ${worktreeDir}. ` +
+        `A live process is likely holding handles inside it` +
+        (removal.lastError ? ` (${removal.lastError})` : "") +
+        `. Close the process (or wait for it to exit) and re-run.`,
+    );
+  }
   deleteBranch(repoRoot, branch);
   createWorktree(repoRoot, branch, worktreeDir, base);
 }

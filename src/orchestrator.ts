@@ -1973,7 +1973,18 @@ export async function runSliceExecute(
         }
       } finally {
         if (checkpoint.worktreeDir) {
-          git.removeWorktree(ctx.worktreeDir, checkpoint.worktreeDir);
+          const removal = git.removeWorktree(
+            ctx.worktreeDir,
+            checkpoint.worktreeDir,
+          );
+          if (!removal.removed) {
+            logger.phase(
+              `${ctx.tag}: checkpoint worktree cleanup incomplete: ` +
+                `${checkpoint.worktreeDir} still on disk` +
+                (removal.lastError ? ` (${removal.lastError})` : "") +
+                ` — a live gate process likely holds handles inside it`,
+            );
+          }
         }
       }
 
@@ -2628,14 +2639,20 @@ export async function runPipeline(
     if (attempt.result.cleanupWarning) {
       logger.phase(`[afk] Warning: ${attempt.result.cleanupWarning}`);
     }
-    await mergeMutex(() =>
-      Promise.resolve(
-        git.removeWorktree(
-          repoRoot,
-          sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
-        ),
-      ),
-    );
+    await mergeMutex(() => {
+      const removal = git.removeWorktree(
+        repoRoot,
+        sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
+      );
+      if (!removal.removed) {
+        logger.phase(
+          `[afk] Warning: worktree cleanup incomplete for recovered slice ${sliceId}` +
+            (removal.lastError ? ` (${removal.lastError})` : "") +
+            ` — a live process likely holds handles inside it`,
+        );
+      }
+      return Promise.resolve();
+    });
     logger.recordTerminal(sliceId, { phase: "PASS", recovered: true });
     completed.add(id);
     recoveredMerges.add(id);
@@ -2864,7 +2881,14 @@ export async function runPipeline(
         shipResult = await invokeShipGate(reviewDir);
       } finally {
         if (cleanupReviewDir) {
-          git.removeWorktree(repoRoot, reviewDir);
+          const removal = git.removeWorktree(repoRoot, reviewDir);
+          if (!removal.removed) {
+            logger.phase(
+              `[afk] Warning: review worktree cleanup incomplete: ${reviewDir} still on disk` +
+                (removal.lastError ? ` (${removal.lastError})` : "") +
+                ` — a live process likely holds handles inside it`,
+            );
+          }
         }
       }
     }

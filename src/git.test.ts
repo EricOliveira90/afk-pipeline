@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -29,6 +29,7 @@ import {
   mergeSliceBranch,
   migrationPrefixCollisions,
   nextFreeMigrationPrefix,
+  recreateWorktreeFromBase,
   removeWorktree,
 } from "./git.js";
 
@@ -264,7 +265,105 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
     // Second call must not throw.
     expect(() => removeWorktree(repoDir, wt)).not.toThrow();
   });
+
+  it("reports a successful removal in its result", () => {
+    const wt = join(repoDir, "wt-result");
+    git(repoDir, ["branch", "feature/result"]);
+    git(repoDir, ["worktree", "add", wt, "feature/result"]);
+    const result = removeWorktree(repoDir, wt);
+    expect(result.removed).toBe(true);
+  });
 });
+
+// Issue #102: worktree teardown races live Windows file handles. A spawned
+// process whose cwd is inside the worktree (the shape of any straggler an
+// agent invocation or gate command leaves behind — natural-exit settlement
+// never verifies the process tree) locks the directory against deletion on
+// Windows. removeWorktree's old ~600ms rmSync retry then swallowed the
+// failure and returned silently, leaving the ADR 0010 partial-tree
+// signature: directory on disk, git admin state already pruned. The cwd
+// lock is Windows-specific, so these tests only run there.
+describe.runIf(process.platform === "win32")(
+  "git.removeWorktree — issue #102 live-handle races (win32)",
+  { timeout: 30_000 },
+  () => {
+    let repoDir: string;
+    let holder: ChildProcess | undefined;
+
+    beforeEach(() => {
+      repoDir = mkdtempSync(join(tmpdir(), "afk-rm102-"));
+      git(repoDir, ["init", "--initial-branch=main"]);
+      git(repoDir, ["config", "user.email", "test@example.com"]);
+      git(repoDir, ["config", "user.name", "Test"]);
+      git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+    });
+
+    afterEach(async () => {
+      if (holder && holder.exitCode === null) {
+        holder.kill();
+        await new Promise((r) => holder!.once("exit", r));
+      }
+      holder = undefined;
+      rmDirWithRetry(repoDir);
+    });
+
+    /** Spawn a process that holds `dir` via its cwd for `lifetimeMs`. */
+    async function holdDir(dir: string, lifetimeMs: number) {
+      holder = spawn(
+        process.execPath,
+        ["-e", `setTimeout(() => {}, ${lifetimeMs})`],
+        { cwd: dir, stdio: "ignore" },
+      );
+      // Let the child be fully alive before teardown races it.
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    function addWorktree(name: string): string {
+      const wt = join(repoDir, name);
+      git(repoDir, ["branch", `feature/${name}`]);
+      git(repoDir, ["worktree", "add", wt, `feature/${name}`]);
+      return wt;
+    }
+
+    it("outlives a transient handle and fully removes the worktree", async () => {
+      const wt = addWorktree("wt-transient");
+      await holdDir(wt, 2000); // dies well within the default retry budget
+
+      const result = removeWorktree(repoDir, wt);
+
+      expect(result.removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    it("reports a persistent handle instead of returning silently on a partial tree", async () => {
+      const wt = addWorktree("wt-stuck");
+      await holdDir(wt, 60_000); // outlives any reasonable budget
+
+      const result = removeWorktree(repoDir, wt, { timeoutMs: 1000 });
+
+      expect(result.removed).toBe(false);
+      expect(result.lastError).toBeTruthy();
+      // The directory genuinely survives — the result must say so.
+      expect(existsSync(wt)).toBe(true);
+    });
+
+    it("recreateWorktreeFromBase refuses a locked tree before deleting the branch", async () => {
+      const wt = addWorktree("wt-refresh");
+      await holdDir(wt, 60_000);
+
+      expect(() =>
+        recreateWorktreeFromBase(repoDir, "feature/wt-refresh", wt, "main", {
+          removalTimeoutMs: 1000,
+        }),
+      ).toThrow(/still present|live process|holding/i);
+
+      // The old behaviour deleted the branch and only then blew up in
+      // createWorktree — destroying state while the tree was locked. The
+      // branch must survive a refused refresh.
+      expect(branchExists(repoDir, "feature/wt-refresh")).toBe(true);
+    });
+  },
+);
 
 describe("git.mergeSliceBranch — MergeResult", { timeout: 240_000 }, () => {
   let repoDir: string;

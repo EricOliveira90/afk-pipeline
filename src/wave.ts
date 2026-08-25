@@ -541,9 +541,19 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             logger.phase(`[afk] Warning: ${mergeResult.cleanupWarning}`);
           }
 
-          await mergeMutex(() =>
-            Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
-          );
+          await mergeMutex(() => {
+            const removal = git.removeWorktree(repoRoot, ctx.worktreeDir);
+            if (!removal.removed) {
+              logger.phase(
+                `[afk] Warning: worktree cleanup incomplete for slice #${id}: ` +
+                  `${ctx.worktreeDir} still on disk after ${removal.attempts} attempt(s)` +
+                  (removal.lastError ? ` (${removal.lastError})` : "") +
+                  ` — a live process likely holds handles inside it; the next run ` +
+                  `will refuse the stale directory until it is removed`,
+              );
+            }
+            return Promise.resolve();
+          });
 
           record(id, PASS);
         } catch (err) {
