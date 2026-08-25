@@ -1,49 +1,25 @@
 # Handoff
 
 ## What shipped
-- Immutable candidate checkpoints: `src/gate-runner.ts:createCandidateCheckpoint` captures generator output with a temporary Git index and creates a detached checkpoint without advancing the slice branch; `createCandidateCheckpointRestorer` restores that exact tree between gates.
-- Provider-independent bounded execution: `src/command-runtime.ts:runBoundedCommand` streams both output channels, enforces cancellation, inactivity, and wall-clock bounds, and rejects incomplete or unverified process-tree termination.
-- Ordered structured base-gate evidence: `src/gate-runner.ts:runGates` runs discovered declarations in order, retains logs and versioned results, continues after independent command failures, and preserves an observed command exit code when checkpoint restoration fails.
-- Required failure classification: `src/gate-runner.ts:classifyExecution` distinguishes `FAIL/COMMAND`, `FAIL/CONFIGURATION`, `INFRASTRUCTURE/null`, and optional `SKIPPED/null`.
-- Evaluation and merge gating: `src/orchestrator.ts:runSliceExecute` retries infrastructure without consuming a generator round, retains command failures from every retry, and calls `assertGateEvidenceReleasesEvaluation` before evaluator invocation and PASS.
-- Retained evidence integrity: `src/gate-runner.ts:verifyGateEvidence` binds evidence and log bytes to declarations, attempt identity, and checkpoint tree identity across later attempts.
-- Gate observability: `src/orchestrator.ts:runSliceExecute` emits typed outcomes through the existing journal API, while `src/logger.ts:writeSummary` projects status, failure kind, elapsed time, and artifact references from the event stream.
-- Existing baseline discovery: `src/orchestrator.ts:resolveBaseGateDeclarations` projects stable base-gate declarations from `resolveSanityCommands`, preserving the aggregate `typecheck`, `lint`, then `test:run`/`test` policy without changing `src/preship.ts`.
-- Cancellation and isolation fixes: `src/gate-runner.ts:runGates` exits on a cancelled execution before checkpoint restoration or result classification, retains the interrupted log without a terminal outcome, and removes tracked, untracked, and ignored output before each subsequent gate.
-- Termination failure classification: `src/command-runtime.ts:ProcessTreeTerminationError` and `src/orchestrator.ts:isCancelled` prevent an aborted signal from hiding incomplete process-tree termination behind `CANCELLED`.
-- Skipped-gate checkpoint efficiency: `src/gate-runner.ts:createCandidateCheckpoint` can retain an immutable commit/tree identity without materializing a checkout, and snapshots the source index with four Git processes instead of six; `src/orchestrator.ts:runSliceExecute` uses that mode only when every discovered gate is skipped.
-- Deterministic QA fixture teardown: `src/qa-orchestration.test.ts:terminateFixtureChildren` closes every registered fixture child before its temporary repository is removed.
-- Hermetic Git fixtures: `src/qa-orchestration.test.ts:makeRepo` and `src/gate-runner.test.ts:makeCheckpoint` override machine-global Git hooks with an empty repository-local hooks directory.
-
-## How the STUCK findings were cleared
-- Full-suite timeout cascades: temporary repositories no longer invoke machine-global post-commit scanners. This removed the external process and filesystem-handle load from every contract-owned fixture while preserving a regression test that installs a synthetic global hook and proves it cannot run.
-- Loaded provider gate failures: the provider-independence fixture uses a 30-second inactivity budget instead of racing real `pnpm run` startup at five seconds; dedicated gate-runner tests retain tight 100ms and 150ms timeout coverage.
-- Contract-owned `EBUSY` cleanup failures: fixture repositories set a local empty `core.hooksPath`, so GitDefender cannot outlive a fixture commit and hold the repository root during teardown. QA fixtures also own and await their explicit child processes.
-- Reporter RPC failure: the merged feature base disables Vitest console interception and stops treating the worker's reporter-RPC bookkeeping timeout as a test failure in `vitest.config.ts`; that path remains outside this slice's locked diff.
-- Tight timeout overrides: the refreshed feature base raises the explicit `git` and `wave` integration-test ceilings to 240 seconds, so they no longer override the generous global ceiling with the 30-second bounds that caused teardown cascades; those paths remain outside this slice's locked diff.
-- Verification: the exact implicated matrix passed all 141 tests across `gate-runner`, `qa-orchestration`, `git`, `wave`, and `resume-integration` with no timeout cascade, `EBUSY`, or reporter RPC failure.
+- Immutable candidate checkpoints: `src/gate-runner.ts:createCandidateCheckpoint` captures generator output without advancing the slice branch; `createCandidateCheckpointRestorer` restores the exact tree between gates, including removal of nested repositories created by prior gates.
+- Provider-independent bounded execution: `src/command-runtime.ts:runBoundedCommand` streams stdout and stderr, enforces cancellation, inactivity and wall-clock bounds, and verifies process-tree termination.
+- Ordered structured base-gate evidence: `src/gate-runner.ts:runGates` executes discovered declarations in order, continues after independent failures, and retains versioned results and logs per checkpoint attempt.
+- Required failure classification: `src/gate-runner.ts:classifyExecution` distinguishes command failures, configuration failures, infrastructure failures, and optional skipped gates.
+- Evaluation and merge gating: `src/orchestrator.ts:runSliceExecute` retries infrastructure without consuming a generator round, sends accumulated command failures to the next generator, and releases evaluation only after required gates pass.
+- Retained evidence and observability: `src/gate-runner.ts:verifyGateEvidence`, `src/run-events.ts:RunEvent`, and `src/logger.ts:writeSummary` preserve and expose checkpoint-bound status, failure kind, duration, and artifact references.
+- Existing discovery and cancellation behavior: `src/orchestrator.ts:resolveBaseGateDeclarations` uses the existing ordered sanity discovery, while `src/gate-runner.ts:runGates` retains partial logs and omits terminal results for interrupted gates.
 
 ## Decisions made during implementation
-- Store gate evidence in the orchestrator-owned run directory, outside writable slice artifact trees.
-- Restore the detached checkpoint before and after every gate because project commands may write files.
-- Keep SHA-256 references in orchestrator memory and revalidate retained evidence before evaluation and merge.
-- Keep the configured command timeout as the inactivity bound and use a separate 60-minute base-gate wall-clock ceiling.
-- Use the final infrastructure attempt to determine recovery, while retaining required command failures from every attempt on the checkpoint.
-- Check cancellation before post-command restoration so restoration failure cannot invent an `INFRASTRUCTURE` result or terminal event for an interrupted gate.
-- Keep incomplete process-tree termination distinct from normal cancellation even when the shared signal is aborted.
-- Keep cancellation and sanity-discovery regression tests in contract-declared test files.
-- Keep the shared Windows directory-removal helper outside the locked slice diff and consume it from the contract-owned QA test.
-- Terminate and await registered fixture children before applying filesystem cleanup retries.
-- Copy the source Git index into the temporary checkpoint index, then apply `git add -A`; this preserves the source index while reducing process contention.
-- Override ambient Git hooks in each temporary repository instead of changing the operator's Git configuration or production Git behavior.
+- Store gate evidence in the orchestrator-owned run directory outside writable slice artifact trees.
+- Restore the detached checkpoint before and after every executable gate.
+- Use Git's double-force clean mode so untracked nested repositories cannot survive checkpoint restoration.
+- Keep SHA-256 evidence references in orchestrator memory and revalidate retained bytes before evaluation and merge.
+- Use the configured command timeout for inactivity and a separate 60-minute base-gate wall-clock limit.
+- Avoid materializing a checkpoint checkout when every discovered gate is skipped.
 
 ## Gotchas / learnings
-- A machine-global `core.hooksPath` applies inside newly initialized test repositories. On this host GitDefender's post-commit scanner wrote `refs/code-defender/scans` and retained repository handles long enough to exhaust cleanup retries.
-- Retry-only cleanup cannot make fixtures hermetic. Temporary Git repositories that create commits must override ambient hooks before their first commit.
-- A five-second inactivity budget can classify healthy `pnpm` startup as a command failure under two-worker Git load even when the same fixture passes in isolation.
-- The reporter fix is owned by the feature branch's `vitest.config.ts`; it is intentionally absent from this locked slice diff.
-- The explicit `git` and `wave` timeout raises are also owned by the refreshed feature branch and intentionally absent from this locked slice diff.
-- The full `pnpm test` suite was not rerun in this attempt because the resume instructions reserve it for the normal QA gate.
+- `git clean -fdx` preserves untracked nested repositories; exact checkpoint restoration requires a second force flag.
+- Temporary Git repositories must override ambient hooks before their first commit to keep integration fixtures isolated from machine-global hook processes.
 
 ## Status
-Tests passing locally. No regressions in the targeted 141-test finding matrix. Typecheck and build pass. Full suite deferred to the normal QA gate as instructed.
+Tests passing locally. No regressions.
