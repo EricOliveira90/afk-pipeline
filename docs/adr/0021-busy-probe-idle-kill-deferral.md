@@ -1,5 +1,10 @@
 # Busy probe: defer idle kills while a spawned process is still running
 
+> **Narrowed by ADR 0037 (2026-08-25).** Deferral is no longer wired
+> into every invocation: `deferIdleKillWhenBusy` is opt-in, set by the
+> orchestrator only for generator and evaluator-qa. Other roles hit the
+> plain idle timeout. The probe's mechanics below are unchanged.
+
 ## Failure mode
 
 The idle watcher judges liveness by output. Generators routinely run a

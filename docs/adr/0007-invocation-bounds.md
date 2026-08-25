@@ -1,5 +1,11 @@
 # Per-invocation bounds: idle floor + tool-call ceiling
 
+> **Amended by ADR 0036 (2026-08-25).** The tool-call ceiling's
+> 100-call default is retired: `maxToolCalls` is now opt-in with no
+> default, and the wall-clock ceiling (ADR 0016/0019) is the backstop
+> for runaway sessions. The mechanism, kill class, and counting below
+> remain accurate for callers that opt in.
+
 Each provider invocation is bounded by two independent caps:
 
 - **Idle floor.** `idleTimeoutMs` defaults to **180_000** (3 min). No

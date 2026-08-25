@@ -17,7 +17,6 @@ import { registerWorktreeProcess } from "./worktree-processes.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_IDLE_WARNING_INTERVAL_MS = 60_000;
-const DEFAULT_MAX_TOOL_CALLS = 100;
 const DEFAULT_MAX_DURATION_MS = 3_600_000;
 
 export type InvocationStream = "stdout" | "stderr";
@@ -61,8 +60,9 @@ export function runInvocation(
     logStream,
     idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
     idleWarningIntervalMs = DEFAULT_IDLE_WARNING_INTERVAL_MS,
-    maxToolCalls = DEFAULT_MAX_TOOL_CALLS,
+    maxToolCalls,
     maxDurationMs = DEFAULT_MAX_DURATION_MS,
+    deferIdleKillWhenBusy = false,
     signal,
     onIdleWarning,
     onIdleDeferral,
@@ -116,7 +116,12 @@ export function runInvocation(
     let termination: Promise<TerminationReport> | undefined;
     let watcher: IdleWatcher | undefined;
     let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
-    const busyProbe = createBusyProbe(proc.pid);
+    // The busy probe is role-scoped (ADR 0037): only invocations
+    // expected to run long commands opt in. Without it the idle
+    // timeout kills unconditionally.
+    const busyProbe = deferIdleKillWhenBusy
+      ? createBusyProbe(proc.pid)
+      : undefined;
     let busyDescendants = 0;
 
     const settle = (finish: () => void) => {
@@ -190,21 +195,25 @@ export function runInvocation(
         stopProcess();
       },
       onWarning: onIdleWarning,
-      shouldDefer: async () => {
-        busyDescendants = await busyProbe.check();
-        return busyDescendants > 0;
-      },
-      onDefer: () => {
-        logStream?.write(
-          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
-            `${busyDescendants} spawned process(es) still running — ` +
-            `deferring idle kill (wall-clock ceiling still applies)\n`,
-        );
-        onIdleDeferral?.({
-          silentSeconds: idleTimeoutMs / 1000,
-          busyProcesses: busyDescendants,
-        });
-      },
+      ...(busyProbe
+        ? {
+            shouldDefer: async () => {
+              busyDescendants = await busyProbe.check();
+              return busyDescendants > 0;
+            },
+            onDefer: () => {
+              logStream?.write(
+                `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
+                  `${busyDescendants} spawned process(es) still running — ` +
+                  `deferring idle kill (wall-clock ceiling still applies)\n`,
+              );
+              onIdleDeferral?.({
+                silentSeconds: idleTimeoutMs / 1000,
+                busyProcesses: busyDescendants,
+              });
+            },
+          }
+        : {}),
     });
 
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -224,7 +233,14 @@ export function runInvocation(
           if (event.type === "tool_call") {
             watcher!.reset();
             toolCallCount++;
-            if (toolCallCount > maxToolCalls && !toolCapExceeded) {
+            // Kill only when a caller opted into a cap (no default —
+            // the wall-clock ceiling is the backstop; ADR 0036). The
+            // count itself always feeds InvocationStats.
+            if (
+              maxToolCalls !== undefined &&
+              toolCallCount > maxToolCalls &&
+              !toolCapExceeded
+            ) {
               toolCapExceeded = true;
             }
           }

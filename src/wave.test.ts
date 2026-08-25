@@ -954,6 +954,36 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(plannerRounds).toEqual([1]);
   }, 240_000);
 
+  it("refuses to retry a tool-call-cap kill even with retries available", async () => {
+    // The cap only exists when a caller opted in (ADR 0036), so
+    // tripping it is the configured bound working, not infrastructure
+    // flaking — retrying verbatim would spend another full budget
+    // re-hitting the same cap.
+    const setup = oneSlice("neg-toolcap-noretry", "1501", {
+      // Would recover on the second invocation if a retry were granted.
+      deaths: [{ role: "evaluator-contract", kind: "tool-cap-kill", times: 1 }],
+    });
+    setup.config.infrastructureRetries = 2;
+
+    const outcomes = await dispatch(setup, ["1501"]);
+
+    expect(outcomes.get("1501")?.phase).toBe("ERROR");
+    const reason = reasonOf(outcomes.get("1501"));
+    expect(reason).toContain("tool-call cap");
+    expect(reason).toContain("the orchestrator killed");
+
+    // No retry was attempted: one evaluator invocation, no
+    // infrastructure-retry warn events.
+    expect(
+      setup.records.filter((r) => r === "evaluator-contract:1501"),
+    ).toHaveLength(1);
+    const events = readRunEvents(setup.logger.runDir);
+    const retries = (events?.events ?? []).filter(
+      (e: RunEvent) => e.type === "warn" && e.reason === "infrastructure-retry",
+    );
+    expect(retries).toHaveLength(0);
+  }, 240_000);
+
   it.each(["explorer", "planner"] as const)(
     "retries only the failed %s invocation with the same prompt",
     async (role) => {
