@@ -26,6 +26,10 @@ import {
   checkClaimedGeneratedMigrations,
   claimContractMigrations,
 } from "./migration-claims.js";
+import {
+  acceptanceManifestPaths,
+  loadAcceptanceManifest,
+} from "./acceptance-manifest.js";
 
 export type WaveOutcomePhase =
   | "PASS"
@@ -267,13 +271,14 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     return { outcomes };
   }
 
-  // --- Read each LOCKED slice's "Files expected to change" list. ---
+  // --- Read each LOCKED slice's validated machine file scope. ---
   const readyForLanes: Slice[] = [];
   for (const id of lockedIds) {
     const slice = dag.slices.get(id)!;
     const ctx = ctxById.get(id)!;
-    const contractPath = join(ctx.absSliceDir, "contract.md");
-    slice.files = artifacts.readContractFiles(contractPath);
+    slice.files = acceptanceManifestPaths(
+      loadAcceptanceManifest(ctx.absSliceDir),
+    );
     readyForLanes.push(slice);
   }
 

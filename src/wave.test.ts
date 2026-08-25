@@ -57,6 +57,8 @@ function makeRepo(): string {
 
 interface SliceFixture {
   files: string[];
+  /** `null` is explicit no-repository-change; absent mirrors `files`. */
+  manifestFiles?: string[] | null;
   qaPasses: boolean;
   outputFile: string;
   outputContent: string;
@@ -66,6 +68,25 @@ interface SliceFixture {
    * and decided, so nothing about it is an infrastructure death.
    */
   contractVerdict?: "ACCEPT" | "ESCALATE";
+}
+
+function writeAcceptanceManifest(
+  artifactDir: string,
+  paths: string[] | null,
+): void {
+  const migrationCount =
+    paths?.filter((path) =>
+      /(^|[\\/])migrations[\\/].*\.sql$/i.test(path),
+    ).length ?? 0;
+  const fileScope =
+    paths === null
+      ? { kind: "no-repository-changes" }
+      : { kind: "paths", paths };
+  writeFileSync(
+    join(artifactDir, "acceptance-manifest.json"),
+    JSON.stringify({ version: 1, fileScope, migrationCount }),
+    "utf-8",
+  );
 }
 
 /**
@@ -190,6 +211,12 @@ function buildStubProvider(opts: {
           join(sliceArtifactDir, "contract.md"),
           `# Slice Contract\n\n**Status:** DRAFT\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
+        );
+        writeAcceptanceManifest(
+          sliceArtifactDir,
+          fixture.manifestFiles === undefined
+            ? fixture.files
+            : fixture.manifestFiles,
         );
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
         const verdict = fixture?.contractVerdict ?? "ACCEPT";
@@ -397,6 +424,70 @@ describe("runWave", () => {
 
     expect(outcomes.get("401")?.phase).toBe("PASS");
     expect(outcomes.get("402")?.phase).toBe("PASS");
+  }, 240_000);
+
+  it("partitions normalized concrete and explicit no-change scope from acceptance manifests", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "411", title: "First", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "412", title: "Second", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "03", ghIssue: "413", title: "No change", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["411", {
+        files: ["src/prose-a.ts"],
+        manifestFiles: ["./SRC/shared.ts"],
+        qaPasses: true,
+        outputFile: "src/first.txt",
+        outputContent: "first",
+      }],
+      ["412", {
+        files: ["src/prose-b.ts"],
+        manifestFiles: ["src/shared.ts"],
+        qaPasses: true,
+        outputFile: "src/second.txt",
+        outputContent: "second",
+      }],
+      ["413", {
+        files: ["src/prose-a.ts"],
+        manifestFiles: null,
+        qaPasses: true,
+        outputFile: "src/no-change-observation.txt",
+        outputContent: "no change fixture",
+      }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-acceptance-scope",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["411", "412", "413"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect([...outcomes.values()].map((outcome) => outcome.phase)).toEqual([
+      "PASS",
+      "PASS",
+      "PASS",
+    ]);
+    const partitioned = readRunEvents(logger.runDir)?.events.find(
+      (event) => event.type === "lanes-partitioned",
+    );
+    expect(
+      partitioned?.type === "lanes-partitioned"
+        ? partitioned.lanes
+        : undefined,
+    ).toEqual([["411", "412"], ["413"]]);
   }, 240_000);
 
   it("returns CANCELLED for all slices when signal fires during Phase A", async () => {

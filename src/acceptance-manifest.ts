@@ -144,6 +144,14 @@ export function loadAcceptanceManifest(sliceDir: string): AcceptanceManifest {
   }
   return parseAcceptanceManifest(readFileSync(path, "utf-8"), path);
 }
+
+export function acceptanceManifestPaths(
+  manifest: AcceptanceManifest,
+): string[] {
+  return manifest.fileScope.kind === "paths"
+    ? [...manifest.fileScope.paths]
+    : [];
+}
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
