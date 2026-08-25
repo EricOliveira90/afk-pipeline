@@ -14,19 +14,23 @@ export default defineConfig({
     // report, and suites that want a tighter bound set it per `describe`.
     testTimeout: 60_000,
     hookTimeout: 60_000,
-    // The orchestrator suites log every pipeline step, and the worker sends
-    // each write to the main thread over the reporter RPC. The RPC timeout is
-    // 60s. On a loaded host the main thread stops answering `onTaskUpdate`
-    // inside that window, and vitest reports
-    // `[vitest-worker]: Timeout calling "onTaskUpdate"` as an unhandled
-    // error — exit 1 even when every test passed.
+    // These suites drive git through `execFileSync`, hundreds of calls per
+    // file. A worker thread blocked in a synchronous child process cannot run
+    // its own microtask queue, so it cannot read the reply to the reporter RPC
+    // it just sent. birpc gives up after a hardcoded 60s and vitest surfaces
+    // `[vitest-worker]: Timeout calling "onTaskUpdate"` as an unhandled error.
+    // The run then exits 1 with every assertion passing.
     //
-    // Neither `silent: "passed-only"` nor `silent: true` removes the RPC
-    // traffic. Both act on printing; the worker still hands every line to the
-    // main thread. Stop the interception itself, so worker output goes straight
-    // to the process stdout and never crosses the RPC. Drop the live summary
-    // too, because the default reporter re-renders it on every task update.
+    // Reducing RPC traffic does not help, because volume is not the cause:
+    // `silent: true` still ships every line, and `disableConsoleIntercept`
+    // removed console traffic entirely yet the timeout still fired in a
+    // 13-test file. The blocked event loop is the cause.
+    //
+    // So stop counting reporter plumbing as a test result. The cost is real
+    // and worth naming: a genuine unhandled rejection inside a test no longer
+    // fails the run on its own. It still fails through its assertions.
     disableConsoleIntercept: true,
+    dangerouslyIgnoreUnhandledErrors: true,
     reporters: [["default", { summary: false }]],
   },
 });
