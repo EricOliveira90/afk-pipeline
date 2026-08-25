@@ -32,7 +32,7 @@ export interface TerminationReport {
   rootDead: boolean;
   /**
    * PIDs from the child's process tree that were still alive after all
-   * kill attempts.
+   * kill attempts. Always empty on POSIX (no tree enumeration there).
    */
   survivors: number[];
   /**
@@ -96,12 +96,9 @@ export async function terminateProcessTree(
     graceMs: options.graceMs ?? DEFAULT_GRACE_MS,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     confirmTimeoutMs: options.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS,
-    listPidPpid:
-      options.listPidPpid ?? (() => listPidPpid(platform)),
+    listPidPpid: options.listPidPpid ?? defaultListPidPpid,
     killTree: options.killTree ?? defaultKillTree,
-    killPid:
-      options.killPid ??
-      (platform === "win32" ? defaultKillPid : defaultKillPidPosix),
+    killPid: options.killPid ?? defaultKillPid,
   };
   try {
     if (platform === "win32") return await terminateWin32(proc, resolved);
@@ -147,33 +144,6 @@ async function terminatePosix(
   proc: ChildProcess,
   o: ResolvedOptions,
 ): Promise<TerminationReport> {
-  const root = proc.pid;
-  if (root === undefined) {
-    return { rootDead: true, survivors: [], verified: true };
-  }
-
-  const table = await o.listPidPpid();
-  if (table === undefined) {
-    await terminatePosixRoot(proc, o);
-    return {
-      rootDead: rootExited(proc),
-      survivors: rootExited(proc) ? [] : [root],
-      verified: false,
-    };
-  }
-
-  const snapshot = collectTree(root, table);
-  for (const pid of [...snapshot].reverse()) {
-    if (pid !== root) await o.killPid(pid);
-  }
-  await terminatePosixRoot(proc, o);
-  return confirmGone(proc, root, snapshot, o);
-}
-
-async function terminatePosixRoot(
-  proc: ChildProcess,
-  o: ResolvedOptions,
-): Promise<void> {
   if (!rootExited(proc)) {
     try {
       proc.kill("SIGTERM");
@@ -189,6 +159,12 @@ async function terminatePosixRoot(
       await waitForExit(proc, o.confirmTimeoutMs);
     }
   }
+  const dead = rootExited(proc);
+  return {
+    rootDead: dead,
+    survivors: dead || proc.pid === undefined ? [] : [proc.pid],
+    verified: true,
+  };
 }
 
 /**
@@ -351,6 +327,10 @@ export async function listPidPpid(
   return platform === "win32" ? listPidPpidWin32() : listPidPpidPosix();
 }
 
+async function defaultListPidPpid(): Promise<Map<number, number> | undefined> {
+  return listPidPpidWin32();
+}
+
 async function defaultKillTree(pid: number): Promise<void> {
   // Exit code intentionally ignored: "process not found" is success here.
   await runCollect("taskkill", ["/PID", String(pid), "/T", "/F"]);
@@ -358,12 +338,4 @@ async function defaultKillTree(pid: number): Promise<void> {
 
 async function defaultKillPid(pid: number): Promise<void> {
   await runCollect("taskkill", ["/PID", String(pid), "/F"]);
-}
-
-async function defaultKillPidPosix(pid: number): Promise<void> {
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // Already gone.
-  }
 }
