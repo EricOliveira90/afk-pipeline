@@ -998,7 +998,7 @@ function negotiateFailureCauseOf(
  * auto-deleted (`createWorktree` throws its descriptive error), and
  * every path ends registered-and-asserted before agent dispatch.
  */
-export function prepareSliceWorktree(ctx: SliceContext): void {
+export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   const { repoRoot } = ctx.config;
   const provider = ctx.config.provider ?? kiroProvider;
   const runSlug = pipelineRunSlug(ctx.config.prdSlug, provider);
@@ -1024,9 +1024,9 @@ export function prepareSliceWorktree(ctx: SliceContext): void {
   // Restart teardown + bookkeeping shared by the decision's restart
   // path and the refresh-conflict fallback. The attempt counter resets:
   // a fresh tree earns a fresh resume budget (#36).
-  const restartFromBase = (reason: string): void => {
+  const restartFromBase = async (reason: string): Promise<void> => {
     ctx.logger.phase(`${ctx.tag}: restarting from base (${reason})`);
-    git.recreateWorktreeFromBase(
+    await git.recreateWorktreeFromBase(
       repoRoot,
       ctx.branch,
       ctx.worktreeDir,
@@ -1053,7 +1053,7 @@ export function prepareSliceWorktree(ctx: SliceContext): void {
     // against the world it will eventually merge into.
     const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
     if (refresh.status === "conflict") {
-      restartFromBase("feature merge conflict");
+      await restartFromBase("feature merge conflict");
     } else {
       ctx.resume = {
         mode: "killed",
@@ -1135,7 +1135,7 @@ export function prepareSliceWorktree(ctx: SliceContext): void {
         git.resolveCommit(repoRoot, ctx.featBranch) &&
       !git.hasUncommittedChanges(ctx.worktreeDir);
     if (!alreadyAtBase) {
-      restartFromBase(plan.reason);
+      await restartFromBase(plan.reason);
     }
   } else {
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
@@ -1234,7 +1234,7 @@ async function negotiateAttempt(
   );
 
   try {
-    prepareSliceWorktree(ctx);
+    await prepareSliceWorktree(ctx);
     mkdirSync(ctx.absSliceDir, { recursive: true });
 
     // --- Step 1: Explorer ---
@@ -1969,7 +1969,15 @@ export async function runSliceExecute(
         }
       } finally {
         if (checkpoint.worktreeDir) {
-          git.removeWorktree(ctx.worktreeDir, checkpoint.worktreeDir);
+          await git.removeWorktreeOrWarn(
+            ctx.worktreeDir,
+            checkpoint.worktreeDir,
+            {
+              label: "checkpoint worktree",
+              warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
+            },
+            { signal },
+          );
         }
       }
 
@@ -2592,9 +2600,7 @@ export async function runPipeline(
       provider,
     );
     const attempt = await mergeMutex(() =>
-      Promise.resolve(
-        git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
-      ),
+      git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
     );
 
     // Still colliding: stay MERGE-PENDING with a reason refreshed against
@@ -2624,13 +2630,14 @@ export async function runPipeline(
     if (attempt.result.cleanupWarning) {
       logger.phase(`[afk] Warning: ${attempt.result.cleanupWarning}`);
     }
-    await mergeMutex(() =>
-      Promise.resolve(
-        git.removeWorktree(
-          repoRoot,
-          sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
-        ),
-      ),
+    await git.removeWorktreeOrWarn(
+      repoRoot,
+      sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
+      {
+        label: `recovered slice ${sliceId} worktree`,
+        warn: (message) => logger.phase(`[afk] Warning: ${message}`),
+      },
+      { gitAdminMutex: mergeMutex, signal },
     );
     logger.recordTerminal(sliceId, { phase: "PASS", recovered: true });
     completed.add(id);
@@ -2860,7 +2867,15 @@ export async function runPipeline(
         shipResult = await invokeShipGate(reviewDir);
       } finally {
         if (cleanupReviewDir) {
-          git.removeWorktree(repoRoot, reviewDir);
+          await git.removeWorktreeOrWarn(
+            repoRoot,
+            reviewDir,
+            {
+              label: "review worktree",
+              warn: (message) => logger.phase(`[afk] Warning: ${message}`),
+            },
+            { signal },
+          );
         }
       }
     }

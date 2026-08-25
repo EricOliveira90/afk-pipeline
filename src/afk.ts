@@ -65,7 +65,7 @@ async function main() {
   // `clean-failed` removes dead slice worktrees/branches left by
   // failed runs — see issue #19.
   if (args[0] === "clean-failed") {
-    process.exit(runCleanFailedCli(args.slice(1)));
+    process.exit(await runCleanFailedCli(args.slice(1)));
   }
   let runtimeOptions;
   try {

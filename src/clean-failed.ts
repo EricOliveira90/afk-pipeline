@@ -82,7 +82,9 @@ function normalise(p: string): string {
   return process.platform === "win32" ? n.toLowerCase() : n;
 }
 
-export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
+export async function runCleanFailed(
+  options: CleanFailedOptions,
+): Promise<CleanFailedReport> {
   const { repoRoot, prdSlug, dryRun = false } = options;
   const provider = options.provider ?? kiroProvider;
   const log = options.log ?? ((line: string) => console.log(line));
@@ -121,19 +123,20 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
   const registered = git.listWorktrees(repoRoot);
   const registeredPaths = new Set(registered.map((w) => normalise(w.path)));
 
-  const removeDir = (dir: string, bucket: "worktree" | "scratch") => {
+  const removeDir = async (dir: string, bucket: "worktree" | "scratch") => {
     const key = bucket === "worktree" ? "removedWorktrees" : "removedScratchDirs";
     if (dryRun) {
       report[key].push(dir);
       log(`[dry-run] would remove ${dir}`);
       return;
     }
-    git.removeWorktree(repoRoot, dir);
-    if (existsSync(dir)) {
+    // Read the structured result, like every other teardown call site —
+    // not a post-hoc existsSync (issue #102).
+    const removal = await git.removeWorktree(repoRoot, dir);
+    if (!removal.removed) {
       report.skipped.push({
         target: dir,
-        reason:
-          "directory still present after removal (file lock from a live process?) — close handles and re-run",
+        reason: git.formatWorktreeSurvivorWarning("directory", dir, removal),
       });
       log(`  ! could not fully remove ${dir} — see report`);
     } else {
@@ -166,7 +169,7 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
       const expectedParent = normalise(join(repoRoot, ".afk", "worktrees"));
       if (normalise(dir).startsWith(expectedParent)) {
         if (existsSync(dir) || registeredPaths.has(normalise(dir))) {
-          removeDir(dir, "worktree");
+          await removeDir(dir, "worktree");
         }
         handledDirs.add(normalise(dir));
       } else {
@@ -237,7 +240,7 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
         });
         continue;
       }
-      removeDir(dir, "worktree");
+      await removeDir(dir, "worktree");
     }
   }
 
@@ -249,7 +252,7 @@ export function runCleanFailed(options: CleanFailedOptions): CleanFailedReport {
   if (existsSync(afkRoot)) {
     for (const entry of readdirSync(afkRoot)) {
       if (!scratchPattern.test(entry)) continue;
-      removeDir(join(afkRoot, entry), "scratch");
+      await removeDir(join(afkRoot, entry), "scratch");
     }
   }
 
@@ -263,10 +266,10 @@ function escapeRegExp(s: string): string {
 }
 
 /** Shared CLI entry for the `clean-failed` subcommand of all three bins. */
-export function runCleanFailedCli(
+export async function runCleanFailedCli(
   args: readonly string[],
   provider?: AgentProvider,
-): number {
+): Promise<number> {
   let prdDirArg: string | undefined;
   let dryRun = false;
   for (let i = 0; i < args.length; i++) {
@@ -287,7 +290,7 @@ export function runCleanFailedCli(
   console.log(
     `Cleaning failed-slice debris for ${prdSlug}${dryRun ? " (dry run)" : ""}...`,
   );
-  const report = runCleanFailed({ repoRoot, prdSlug, provider, dryRun });
+  const report = await runCleanFailed({ repoRoot, prdSlug, provider, dryRun });
 
   console.log("");
   console.log(
