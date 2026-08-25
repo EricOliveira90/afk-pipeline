@@ -244,6 +244,45 @@ describe("runGates", () => {
     ]);
   });
 
+  it("removes an untracked nested repository before the next gate starts", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const nestedRepository = "nested-output";
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "producing-gate",
+          stage: "base",
+          required: true,
+          command: "git",
+          args: ["init", nestedRepository],
+        },
+        {
+          id: "observing-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            `process.exit(require('node:fs').existsSync(${JSON.stringify(nestedRepository)}) ? 23 : 0)`,
+          ],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results.map(({ status }) => status)).toEqual([
+      "PASS",
+      "PASS",
+    ]);
+    expect(existsSync(join(cwd, nestedRepository))).toBe(false);
+  });
+
   it("runs declarations in order and preserves structured evidence and logs", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const output: string[] = [];

@@ -520,7 +520,7 @@ function createCandidateCheckpointRestorer(
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    execFileSync("git", ["clean", "-fdx"], {
+    execFileSync("git", ["clean", "-ffdx"], {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
