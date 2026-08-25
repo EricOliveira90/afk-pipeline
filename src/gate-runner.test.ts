@@ -244,6 +244,194 @@ describe("runGates", () => {
     ]);
   });
 
+  it("prepares the toolchain once and keeps it across every gate", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          "require('fs').mkdirSync('node_modules/.bin', { recursive: true });" +
+            "require('fs').writeFileSync('node_modules/.bin/tool', 'installed')",
+        ],
+      },
+      declarations: [
+        {
+          id: "first-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "process.exit(require('fs').existsSync('node_modules/.bin/tool') ? 0 : 23)",
+          ],
+        },
+        {
+          id: "second-gate",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            "process.exit(require('fs').existsSync('node_modules/.bin/tool') ? 0 : 23)",
+          ],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results.map(({ status }) => status)).toEqual([
+      "PASS",
+      "PASS",
+    ]);
+  });
+
+  it("reports an unpreparable environment as infrastructure, not a red gate", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: ["-e", "process.exit(1)"],
+      },
+      declarations: [
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results).toHaveLength(1);
+    const [gate] = result.evidence.results;
+    expect(gate?.status).toBe("INFRASTRUCTURE");
+    expect(gate?.failureKind).toBeNull();
+    expect(gate?.detail).toContain("Gate environment preparation failed");
+    verifyGateEvidence(result.artifact);
+  });
+
+  it("routes a lockfile drift in the candidate to the generator as a gate FAIL", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          "console.error('ERR_PNPM_OUTDATED_LOCKFILE Cannot install with frozen-lockfile because pnpm-lock.yaml is not up to date with package.json');" +
+            "process.exit(1)",
+        ],
+      },
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    // Deterministic, candidate-caused: every declaration carries the FAIL so
+    // the failure routes to the generator, never the infrastructure retry.
+    expect(
+      result.evidence.results.map(({ gateId, status, failureKind }) => ({
+        gateId,
+        status,
+        failureKind,
+      })),
+    ).toEqual([
+      { gateId: "typecheck", status: "FAIL", failureKind: "CONFIGURATION" },
+      { gateId: "tests", status: "FAIL", failureKind: "CONFIGURATION" },
+    ]);
+    for (const gate of result.evidence.results) {
+      expect(gate.detail).toContain("Gate environment preparation failed");
+      expect(gate.detail).toContain("ERR_PNPM_OUTDATED_LOCKFILE");
+    }
+    verifyGateEvidence(result.artifact);
+  });
+
+  it("keeps a missing package manager as infrastructure, not a candidate failure", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: "afk-executable-that-does-not-exist",
+      },
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results).toHaveLength(1);
+    const [gate] = result.evidence.results;
+    expect(gate?.gateId).toBe("typecheck");
+    expect(gate?.status).toBe("INFRASTRUCTURE");
+    expect(gate?.failureKind).toBeNull();
+    expect(gate?.detail).toContain("Gate environment preparation failed");
+    verifyGateEvidence(result.artifact);
+  });
+
   it("removes an untracked nested repository before the next gate starts", async () => {
     const { cwd, evidenceDir, treeId } = makeCheckpoint();
     const nestedRepository = "nested-output";
