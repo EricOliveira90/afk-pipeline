@@ -68,9 +68,9 @@ import {
   type RunStatus,
 } from "./handoff.js";
 import {
+  resolveGeneratorTestCommand,
   resolveSanityCommands,
   resolveSanityPlan,
-  resolveTestCommand,
 } from "./preship.js";
 import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
 import {
@@ -245,6 +245,24 @@ export interface PipelineConfig {
    * See ADR 0019.
    */
   maxAgentDurationMs?: number;
+  /**
+   * The command the generator is told to verify with while it iterates,
+   * overriding the `package.json` script `resolveTestCommand` would pick.
+   *
+   * Exists because the two audiences for a test command want different
+   * things. The pre-ship sanity gate and evaluator QA need the whole
+   * suite — that is the guarantee. A generator re-running the whole
+   * suite after every edit spends its wall-clock ceiling on it: in the
+   * PRD 1 run one generator round spent roughly 75 of 105 minutes
+   * inside test processes and died before handing off to QA.
+   *
+   * Overriding this does NOT weaken the gate. `resolveSanityPlan` still
+   * owns what the sanity gate executes and what QA is told to run
+   * (ADR 0012); the QA prompt treats `{{TEST_COMMAND}}` as
+   * informational. The guarantee moves from per-edit to per-checkpoint,
+   * not away.
+   */
+  testCommand?: string;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -2314,10 +2332,8 @@ export async function runPipeline(
   const featBranch = featureBranch(prdSlug, provider);
   logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
-  // Resolve the consumer project's test command once per run. Falls back
-  // to `pnpm test` when no test script is defined — matches the pre-ship
-  // gate's forgiving stance.
-  const testCommand = resolveTestCommand(repoRoot) ?? "pnpm test";
+  // Resolve the generator's local verification command once per run.
+  const testCommand = resolveGeneratorTestCommand(repoRoot, config.testCommand);
   let scope: ResolvedRunScope | undefined;
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;

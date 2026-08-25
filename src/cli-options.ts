@@ -39,6 +39,14 @@ export interface PipelineRuntimeOptions {
    * everything else. See ADR 0019.
    */
   maxAgentDurationMs?: number;
+  /**
+   * The command the generator verifies with while it iterates, replacing
+   * the `package.json` script AFK would otherwise pick. Point it at a
+   * fast subset (`pnpm test:fast`) to keep whole-suite runs out of every
+   * generator round; the pre-ship sanity gate and evaluator QA still run
+   * the full set, so the guarantee moves per-checkpoint rather than away.
+   */
+  testCommand?: string;
   /** Execute otherwise independent slice lanes one at a time. */
   serialLanes?: boolean;
   /**
@@ -79,6 +87,20 @@ function optionValue(args: readonly string[], flag: string): string | undefined 
     throw new Error(`${flag} requires a value`);
   }
   return value;
+}
+
+/**
+ * A whitespace-only `--test-command` would reach the generator prompt as an
+ * empty verification instruction, so reject it here rather than let the
+ * agent improvise a command AFK never chose.
+ */
+function parseTestCommand(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    throw new Error("--test-command requires a non-empty command");
+  }
+  return trimmed;
 }
 
 function parseIntegerOption(
@@ -156,6 +178,7 @@ export function parsePipelineRuntimeOptions(
     "--max-agent-duration-ms",
     false,
   );
+  const testCommand = parseTestCommand(optionValue(args, "--test-command"));
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
   const forceRestart = parseSliceIdList(args, "--force-restart");
@@ -186,6 +209,7 @@ export function parsePipelineRuntimeOptions(
     infrastructureRetries,
     transientRetryWindowMs,
     maxAgentDurationMs,
+    testCommand,
     serialLanes,
     openPrOnOverride,
     forceRestart,

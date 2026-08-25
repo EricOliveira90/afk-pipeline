@@ -27,6 +27,7 @@ import {
   buildReviewScopeBlock,
 } from "./ship-gate.js";
 import {
+  resolveGeneratorTestCommand,
   resolveSanityCommands,
   resolveTestCommand,
   runPreShipSanity,
@@ -387,6 +388,43 @@ describe("resolveTestCommand", () => {
     const dir = mkdtempSync(join(tmpdir(), "afk-resolve-"));
     tempDirs.push(dir);
     expect(resolveTestCommand(dir)).toBeUndefined();
+  });
+});
+
+/**
+ * The generator's verification command is a separate decision from the
+ * gate's command set: an operator may hand the generator a fast subset so
+ * whole-suite runs stay out of every edit cycle. These cases pin the
+ * precedence; the drift test below pins that doing so leaves the gate and
+ * the QA evaluator on the full set.
+ */
+describe("resolveGeneratorTestCommand", () => {
+  it("prefers an explicit override over the project's test script", () => {
+    const dir = makeProject({ "test:run": "vitest run" });
+    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
+      "pnpm test:fast",
+    );
+  });
+
+  it("resolves the project's test script when no override is given", () => {
+    const dir = makeProject({ "test:run": "vitest run" });
+    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test:run");
+  });
+
+  it("falls back to `pnpm test` when the project defines no test script", () => {
+    const dir = makeProject({ build: "tsc" });
+    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test");
+  });
+
+  it("leaves the sanity gate's command set untouched", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      "test:run": "vitest run",
+    });
+    const sanityBefore = resolveSanityCommands(dir);
+    resolveGeneratorTestCommand(dir, "pnpm test:fast");
+    expect(resolveSanityCommands(dir)).toEqual(sanityBefore);
+    expect(sanityBefore.join(" ")).toContain("pnpm run test:run");
   });
 });
 
