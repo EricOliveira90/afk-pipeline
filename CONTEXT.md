@@ -343,6 +343,21 @@ conflict a human must resolve.
 _Avoid_: "retryable conflict", "soft conflict" (it is not a conflict at
 all — nothing needs resolving, only re-attempting)
 
+**Generator test command**:
+The command the generator is told to verify with while it iterates,
+resolved by `resolveGeneratorTestCommand` from `--test-command`, else the
+project's `test:run`/`test` script, else `pnpm test`. Deliberately a
+separate decision from the **sanity command set**, and reaching only the
+generator roles (ADR 0038).
+_Avoid_: "test command" bare (ambiguous with the sanity set), "QA
+command" (the evaluator runs the sanity set, not this)
+
+**Sanity command set**:
+What `resolveSanityPlan` says the **pre-ship sanity gate** executes and
+what the QA evaluator is told to run — one source, so QA cannot be told a
+different command set than the gate runs (ADR 0012). Unaffected by the
+**generator test command**.
+
 **Pre-ship sanity gate**:
 The post-merge check that runs the project's `typecheck`, `lint`, and
 test scripts against the merged feature branch before the guardian

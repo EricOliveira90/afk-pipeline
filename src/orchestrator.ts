@@ -68,9 +68,9 @@ import {
   type RunStatus,
 } from "./handoff.js";
 import {
+  resolveGeneratorTestCommand,
   resolveSanityCommands,
   resolveSanityPlan,
-  resolveTestCommand,
 } from "./preship.js";
 import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
 import {
@@ -245,6 +245,13 @@ export interface PipelineConfig {
    * See ADR 0019.
    */
   maxAgentDurationMs?: number;
+  /**
+   * The command the generator is told to verify with while it iterates,
+   * overriding the `package.json` script `resolveTestCommand` would
+   * pick. Does not reach the sanity gate or the QA evaluator — the
+   * whole-suite guarantee moves per-checkpoint, not away. See ADR 0038.
+   */
+  testCommand?: string;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -1666,7 +1673,10 @@ export async function runQAStage(
           SLICE_DIR: ctx.relSliceDir,
           RELEVANT_FILES: ctx.relevantFilesBlock,
           SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-          TEST_COMMAND: ctx.testCommand,
+          // No TEST_COMMAND: QA is told the sanity command set and
+          // nothing else, so a narrowed generator command cannot reach
+          // it (ADR 0038). `renderPrompt` enforces this — the template
+          // rejects an arg it does not reference.
           SANITY_COMMANDS: ctx.sanityCommandsBlock,
           QA_SCOPE: scope,
           REPORT_PATH: reportDisplayPath,
@@ -2314,10 +2324,8 @@ export async function runPipeline(
   const featBranch = featureBranch(prdSlug, provider);
   logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
-  // Resolve the consumer project's test command once per run. Falls back
-  // to `pnpm test` when no test script is defined — matches the pre-ship
-  // gate's forgiving stance.
-  const testCommand = resolveTestCommand(repoRoot) ?? "pnpm test";
+  // Resolve the generator's local verification command once per run.
+  const testCommand = resolveGeneratorTestCommand(repoRoot, config.testCommand);
   let scope: ResolvedRunScope | undefined;
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;
