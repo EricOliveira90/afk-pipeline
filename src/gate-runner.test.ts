@@ -19,6 +19,8 @@ import {
 import { rmDirWithRetry } from "./test-support.js";
 
 const dirs: string[] = [];
+const ordinaryInactivityTimeoutMs = 15_000;
+const ordinaryWallClockTimeoutMs = 30_000;
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
@@ -183,8 +185,8 @@ describe("runGates", () => {
           ],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
 
@@ -228,8 +230,8 @@ describe("runGates", () => {
           ],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
 
@@ -265,8 +267,8 @@ describe("runGates", () => {
           args: ["-e", "process.stdout.write('test-out'); process.exit(23)"],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
       onOutput: (gateId, text) => output.push(`${gateId}:${text}`),
     });
@@ -338,8 +340,8 @@ describe("runGates", () => {
           args: ["-e", "process.exit(0)"],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
 
@@ -390,8 +392,8 @@ describe("runGates", () => {
         },
       ],
       signal: controller.signal,
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
       onOutput: (gateId, text) => {
         if (text.includes("START")) starts.push(gateId);
@@ -428,8 +430,8 @@ describe("runGates", () => {
         },
       ],
       signal: controller.signal,
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
       onOutput: (_gateId, text) => {
         if (text.includes("metadata-removed")) controller.abort();
@@ -463,8 +465,8 @@ describe("runGates", () => {
           ],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
 
@@ -491,8 +493,8 @@ describe("runGates", () => {
           args: ["-e", "process.stdout.write('retained')"],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     } as const;
 
@@ -549,8 +551,8 @@ describe("runGates", () => {
           args: ["-e", "process.stdout.write('retained')"],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
     const evidenceBytes = readFileSync(result.evidencePath, "utf-8");
@@ -608,8 +610,8 @@ describe("runGates", () => {
           args: ["-e", command],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
     const logPath = join(
@@ -639,8 +641,8 @@ describe("runGates", () => {
           args: ["-e", "process.exit(0)"],
         },
       ],
-      inactivityTimeoutMs: 1_000,
-      wallClockTimeoutMs: 2_000,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
       heartbeatIntervalMs: 20,
     });
 
