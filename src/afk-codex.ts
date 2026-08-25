@@ -38,7 +38,7 @@ async function main() {
   // Subcommand dispatch (bare first token). `clean-failed` removes dead
   // slice worktrees/branches left by failed runs — see issue #19.
   if (args[0] === "clean-failed") {
-    process.exit(runCleanFailedCli(args.slice(1), codexProvider));
+    process.exit(await runCleanFailedCli(args.slice(1), codexProvider));
   }
   let runtimeOptions;
   try {

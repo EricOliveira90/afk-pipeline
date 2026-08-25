@@ -106,7 +106,7 @@ function setUp(repo: string, slices: SliceFixture[]): void {
 }
 
 describe("runCleanFailed", () => {
-  it("removes the worktree and deletes the branch of an ERRORed slice with no unmerged commits", () => {
+  it("removes the worktree and deletes the branch of an ERRORed slice with no unmerged commits", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "101", number: "01", phase: "ERROR", materialise: true },
@@ -115,7 +115,7 @@ describe("runCleanFailed", () => {
     const branch = `afk/${SLUG}-slice-01-fixture`;
     expect(existsSync(dir)).toBe(true);
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -128,7 +128,7 @@ describe("runCleanFailed", () => {
     expect(report.keptBranches).toEqual([]);
   });
 
-  it("keeps a branch with commits ahead of the feature branch but still removes its worktree", () => {
+  it("keeps a branch with commits ahead of the feature branch but still removes its worktree", async () => {
     const repo = makeRepo();
     setUp(repo, [
       {
@@ -142,7 +142,7 @@ describe("runCleanFailed", () => {
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s02`);
     const branch = `afk/${SLUG}-slice-02-fixture`;
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -156,7 +156,7 @@ describe("runCleanFailed", () => {
     expect(report.keptBranches[0]!.reason).toContain("commits ahead");
   });
 
-  it("removes unregistered leftover dirs in this PRD's namespace and ignores other PRDs' debris", () => {
+  it("removes unregistered leftover dirs in this PRD's namespace and ignores other PRDs' debris", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "103", number: "03", phase: "LANE-CANCELLED" },
@@ -178,7 +178,7 @@ describe("runCleanFailed", () => {
     );
     mkdirSync(overlapping, { recursive: true });
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -190,14 +190,14 @@ describe("runCleanFailed", () => {
     expect(report.removedWorktrees).toContain(mine);
   });
 
-  it("never touches a registered worktree whose slice is not in a failure phase", () => {
+  it("never touches a registered worktree whose slice is not in a failure phase", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "104", number: "04", phase: "PASS", materialise: true },
     ]);
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s04`);
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -209,7 +209,7 @@ describe("runCleanFailed", () => {
     expect(report.skipped.some((s) => s.target === dir)).toBe(true);
   });
 
-  it("removes leftover scratch merge dirs in this PRD's namespace", () => {
+  it("removes leftover scratch merge dirs in this PRD's namespace", async () => {
     const repo = makeRepo();
     setUp(repo, []);
     const scratch = join(repo, ".afk", `merge-afk-${SLUG}-s05`);
@@ -217,7 +217,7 @@ describe("runCleanFailed", () => {
     const foreignScratch = join(repo, ".afk", "merge-afk-otherprd-s01");
     mkdirSync(foreignScratch, { recursive: true });
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -228,7 +228,7 @@ describe("runCleanFailed", () => {
     expect(report.removedScratchDirs).toEqual([scratch]);
   });
 
-  it("dry-run reports the full plan without touching anything", () => {
+  it("dry-run reports the full plan without touching anything", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "106", number: "06", phase: "ERROR", materialise: true },
@@ -236,7 +236,7 @@ describe("runCleanFailed", () => {
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s06`);
     const branch = `afk/${SLUG}-slice-06-fixture`;
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       dryRun: true,
@@ -249,7 +249,7 @@ describe("runCleanFailed", () => {
     expect(report.deletedBranches).toEqual([branch]);
   });
 
-  it("preserves a MERGE-PENDING slice's branch — the next run merges it (ADR 0029)", () => {
+  it("preserves a MERGE-PENDING slice's branch — the next run merges it (ADR 0029)", async () => {
     const repo = makeRepo();
     setUp(repo, [
       {
@@ -263,7 +263,7 @@ describe("runCleanFailed", () => {
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s03`);
     const branch = `afk/${SLUG}-slice-03-fixture`;
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -281,7 +281,7 @@ describe("runCleanFailed", () => {
     expect(report.keptBranches[0]!.reason).toContain("retries the merge");
   });
 
-  it("keeps a MERGE-PENDING branch even when it has no commits ahead", () => {
+  it("keeps a MERGE-PENDING branch even when it has no commits ahead", async () => {
     const repo = makeRepo();
     setUp(repo, [
       {
@@ -293,7 +293,7 @@ describe("runCleanFailed", () => {
     ]);
     const branch = `afk/${SLUG}-slice-04-fixture`;
 
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: SLUG,
       log: () => {},
@@ -306,9 +306,9 @@ describe("runCleanFailed", () => {
     expect(report.deletedBranches).toEqual([]);
   });
 
-  it("is a no-op with an empty report when there is no state file", () => {
+  it("is a no-op with an empty report when there is no state file", async () => {
     const repo = makeRepo();
-    const report = runCleanFailed({
+    const report = await runCleanFailed({
       repoRoot: repo,
       prdSlug: "neverran",
       log: () => {},

@@ -380,7 +380,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             logger.phase(
               `[afk] Refreshing slice #${id} for lane successor on new base`,
             );
-            git.recreateWorktreeFromBase(
+            await git.recreateWorktreeFromBase(
               repoRoot,
               ctx.branch,
               ctx.worktreeDir,
@@ -415,7 +415,16 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
               });
               return;
             }
-            const msg = err instanceof Error ? err.message : String(err);
+            // A worktree we could not free is an infrastructure condition,
+            // not a verdict on the slice (issue #102). The recorded phase
+            // is still ERROR — the run cannot proceed on a partial tree —
+            // but the message says the work survived and a re-run retries,
+            // so the operator is not sent looking for a code fault.
+            const msg = git.isWorktreeBusyError(err)
+              ? `Retryable infrastructure condition — ${err.message}`
+              : err instanceof Error
+                ? err.message
+                : String(err);
             record(id, { phase: "ERROR", error: msg });
             continueLane(i, "ERROR");
             continue;
@@ -513,9 +522,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           // See ADR 0029 — the check stays here; only the refusal changed
           // from terminal to deferred.
           const attempt = await mergeMutex(() =>
-            Promise.resolve(
-              git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
-            ),
+            git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
           );
           if (attempt.kind === "collision") {
             // Deferred merge, not a conflict: the work is committed on the
@@ -541,8 +548,17 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             logger.phase(`[afk] Warning: ${mergeResult.cleanupWarning}`);
           }
 
-          await mergeMutex(() =>
-            Promise.resolve(git.removeWorktree(repoRoot, ctx.worktreeDir)),
+          // The slice is merged, so PASS is the truth regardless of what
+          // teardown finds; only the git-admin steps are serialised, so
+          // waiting out a straggler here never blocks a sibling's merge.
+          await git.removeWorktreeOrWarn(
+            repoRoot,
+            ctx.worktreeDir,
+            {
+              label: `slice #${id} worktree`,
+              warn: (message) => logger.phase(`[afk] Warning: ${message}`),
+            },
+            { gitAdminMutex: mergeMutex, signal },
           );
 
           record(id, PASS);

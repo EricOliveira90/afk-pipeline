@@ -114,6 +114,13 @@ export type RunEventPayload =
       attempt?: number;
       cached?: boolean;
       verdict: string;
+      /**
+       * Set on a `FAIL` verdict, in the same vocabulary the per-slice base
+       * gates emit: `"CONFIGURATION"` when the phase never really ran
+       * (missing toolchain), `"COMMAND"` when the reviewed tree is red
+       * (#101). A status reader can tell the two apart without parsing prose.
+       */
+      failureKind?: GateFailureKind;
     }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }

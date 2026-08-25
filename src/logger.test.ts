@@ -145,6 +145,45 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
     expect(md).not.toContain("ESCALATE |");
     expect(md).not.toContain("| 3 Err | 🔴 ERROR |");
   });
+
+  // #101: `FAIL (install)` read exactly like a red suite in the artifact an
+  // operator reads. The base-gate vocabulary distinguishes the two.
+  it("renders a sanity environment failure as FAIL (CONFIGURATION), not as a red suite", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-config");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: false,
+      failures: ["install"],
+      failureKind: "CONFIGURATION",
+      detail: "pnpm install --frozen-lockfile failed (exit 1): ERR_PNPM_X",
+    });
+
+    const md = log.writeSummary();
+
+    expect(md).toContain(
+      "Pre-ship sanity gate: FAIL (CONFIGURATION) — install: " +
+        "pnpm install --frozen-lockfile failed (exit 1): ERR_PNPM_X",
+    );
+    expect(log.formatConsoleSummary()).toContain(
+      "FAIL (CONFIGURATION) — install",
+    );
+  });
+
+  it("keeps the plain FAIL rendering for a red suite", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-command");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: false,
+      failures: ["typecheck", "tests"],
+      failureKind: "COMMAND",
+    });
+
+    expect(log.writeSummary()).toContain(
+      "Pre-ship sanity gate: FAIL (typecheck, tests)",
+    );
+  });
 });
 
 

@@ -3,6 +3,7 @@ import {
   collectTree,
   formatTerminationWarning,
   parsePidPpidOutput,
+  terminatePidTree,
   terminateProcessTree,
 } from "./kill-tree.js";
 import { asChildProcess, makeFakeProc } from "./test/fake-proc.js";
@@ -330,5 +331,87 @@ describe("parsePidPpidOutput", () => {
   it("ignores malformed lines", () => {
     const noisy = "header\n100 1\nnot a pid\n200\n300 100 extra\n";
     expect([...parsePidPpidOutput(noisy)]).toEqual([[100, 1]]);
+  });
+});
+
+/**
+ * `terminatePidTree` is the handle-less path worktree teardown needs
+ * (issue #102 / ADR 0035): an invocation has settled, so its
+ * `ChildProcess` is useless, but an orphaned descendant still holds
+ * handles inside the worktree.
+ */
+describe("terminatePidTree", () => {
+  it("kills the orphaned descendants of a root that is already gone", async () => {
+    // Root 100 is dead; 200 and 300 survive it with stale parent PIDs.
+    const state = makeTable([
+      [200, 100],
+      [300, 200],
+      [999, 1],
+    ]);
+    const killTree = vi.fn(async (pid: number) => {
+      expect(pid).toBe(100);
+      state.remove(200, 300);
+    });
+    const killPid = vi.fn(async () => {});
+
+    const report = await terminatePidTree(100, {
+      platform: "win32",
+      listPidPpid: state.listPidPpid,
+      killTree,
+      killPid,
+      ...FAST,
+    });
+
+    expect(killTree).toHaveBeenCalledTimes(1);
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: true });
+    expect(state.table.has(999)).toBe(true);
+  });
+
+  it("is a no-op when nothing of the tree is left", async () => {
+    const state = makeTable([[999, 1]]);
+    const killTree = vi.fn(async () => {});
+
+    const report = await terminatePidTree(100, {
+      platform: "win32",
+      listPidPpid: state.listPidPpid,
+      killTree,
+      killPid: async () => {},
+      ...FAST,
+    });
+
+    expect(killTree).not.toHaveBeenCalled();
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: true });
+  });
+
+  it("reports survivors it could not kill", async () => {
+    const state = makeTable([[200, 100]]);
+
+    const report = await terminatePidTree(100, {
+      platform: "win32",
+      listPidPpid: state.listPidPpid,
+      killTree: async () => {},
+      killPid: async () => {},
+      ...FAST,
+    });
+
+    expect(report.survivors).toEqual([200]);
+    expect(report.verified).toBe(true);
+    expect(formatTerminationWarning(report)).toContain("PIDs 200");
+  });
+
+  it("never claims a confirmed kill when the process table is unavailable", async () => {
+    const report = await terminatePidTree(100, {
+      platform: "win32",
+      listPidPpid: async () => undefined,
+      killTree: async () => {},
+      killPid: async () => {},
+      ...FAST,
+    });
+
+    expect(report).toEqual({
+      rootDead: false,
+      survivors: [],
+      verified: false,
+    });
   });
 });

@@ -129,16 +129,76 @@ async function terminateWin32(
   const table = await o.listPidPpid();
   const snapshot = table ? collectTree(root, table) : [root];
 
-  await o.killTree(root);
-  let report = await confirmGone(proc, root, snapshot, o);
+  return killAndConfirmTree(root, snapshot, () => rootExited(proc), o);
+}
 
-  // Stragglers (e.g. orphans whose parent died between snapshot and
-  // taskkill's own tree walk) get individual force-kills.
+/**
+ * Kill a process tree identified only by its root PID, then verify.
+ *
+ * The handle-less sibling of `terminateProcessTree`, for callers that
+ * hold a PID but no `ChildProcess` — worktree teardown (issue #102)
+ * sweeps the descendants of invocations that have already settled, whose
+ * child handle is long gone but whose orphans can still hold file
+ * handles inside the tree. Windows keeps an orphan's recorded parent PID
+ * after the parent dies, which is what makes that BFS possible (see the
+ * module doc). `rootDead` is reported from the process table alone, so
+ * an unverifiable listing reports `false` rather than guessing.
+ */
+export async function terminatePidTree(
+  root: number,
+  options: TerminateOptions = {},
+): Promise<TerminationReport> {
+  const platform = options.platform ?? process.platform;
+  const o: ResolvedOptions = {
+    graceMs: options.graceMs ?? DEFAULT_GRACE_MS,
+    pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    confirmTimeoutMs: options.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS,
+    listPidPpid: options.listPidPpid ?? (() => listPidPpid(platform)),
+    killTree: options.killTree ?? defaultKillTree,
+    killPid:
+      options.killPid ??
+      (platform === "win32" ? defaultKillPid : defaultKillPidPosix),
+  };
+  try {
+    const table = await o.listPidPpid();
+    if (table !== undefined && !table.has(root)) {
+      // Nothing left of this tree to kill.
+      const orphans = collectTree(root, table);
+      if (orphans.length === 0) {
+        return { rootDead: true, survivors: [], verified: true };
+      }
+    }
+    const snapshot = table ? collectTree(root, table) : [root];
+    if (platform !== "win32") {
+      for (const pid of [...snapshot].reverse()) await o.killPid(pid);
+      return killAndConfirmTree(root, snapshot, () => false, o, false);
+    }
+    return killAndConfirmTree(root, snapshot, () => false, o);
+  } catch {
+    // A kill helper must never throw into a kill path.
+    return { rootDead: false, survivors: [root], verified: false };
+  }
+}
+
+/**
+ * `taskkill /T /F` the root (when asked), confirm the whole tree is
+ * gone, then force-kill and re-confirm any straggler — e.g. an orphan
+ * whose parent died between the snapshot and taskkill's own tree walk.
+ */
+async function killAndConfirmTree(
+  root: number,
+  snapshot: number[],
+  rootExitedFallback: () => boolean,
+  o: ResolvedOptions,
+  killTreeFirst = true,
+): Promise<TerminationReport> {
+  if (killTreeFirst) await o.killTree(root);
+  let report = await confirmGone(rootExitedFallback, root, snapshot, o);
   if (report.verified && report.survivors.length > 0) {
     for (const pid of report.survivors) {
       await o.killPid(pid);
     }
-    report = await confirmGone(proc, root, report.survivors, o);
+    report = await confirmGone(rootExitedFallback, root, report.survivors, o);
   }
   return report;
 }
@@ -167,7 +227,7 @@ async function terminatePosix(
     if (pid !== root) await o.killPid(pid);
   }
   await terminatePosixRoot(proc, o);
-  return confirmGone(proc, root, snapshot, o);
+  return confirmGone(() => rootExited(proc), root, snapshot, o);
 }
 
 async function terminatePosixRoot(
@@ -198,7 +258,7 @@ async function terminatePosixRoot(
  * keep orphan chains navigable on Windows).
  */
 async function confirmGone(
-  proc: ChildProcess,
+  rootExitedFallback: () => boolean,
   root: number,
   snapshot: number[],
   o: ResolvedOptions,
@@ -207,8 +267,9 @@ async function confirmGone(
   for (;;) {
     const table = await o.listPidPpid();
     if (table === undefined) {
-      // Verification is unavailable — report only what Node knows.
-      return { rootDead: rootExited(proc), survivors: [], verified: false };
+      // Verification is unavailable — report only what the caller knows
+      // about the root from outside the process table.
+      return { rootDead: rootExitedFallback(), survivors: [], verified: false };
     }
     const inTree = collectTree(root, table);
     const alive = [
