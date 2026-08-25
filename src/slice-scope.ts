@@ -1,3 +1,4 @@
+import { canonicalSliceNumber } from "./afk-manifest.js";
 import type { Slice } from "./issues-parser.js";
 
 export interface PersistedScopeSlice {
@@ -37,16 +38,11 @@ export interface ResolvedRunScope {
   skipped: SkippedSlice[];
 }
 
-function canonicalNumber(value: string): string {
-  if (!/^\d+$/.test(value)) return value;
-  return String(Number(value));
-}
-
 function indexSlices(slices: Slice[]): Map<string, Slice> {
   const byNumber = new Map<string, Slice>();
   const issues = new Set<string>();
   for (const slice of slices) {
-    const key = canonicalNumber(slice.number);
+    const key = canonicalSliceNumber(slice.number);
     if (byNumber.has(key)) {
       throw new Error(`Duplicate slice number in manifest: ${slice.number}`);
     }
@@ -66,7 +62,7 @@ function resolveRequested(
   const byNumber = indexSlices(slices);
   const requestedKeys = new Set<string>();
   for (const number of requested) {
-    const key = canonicalNumber(number);
+    const key = canonicalSliceNumber(number);
     if (requestedKeys.has(key)) {
       throw new Error(`Slice ${number} was selected more than once`);
     }
@@ -82,7 +78,7 @@ function resolveRequested(
     requestedKeys.add(key);
   }
   return slices.filter((slice) =>
-    requestedKeys.has(canonicalNumber(slice.number)),
+    requestedKeys.has(canonicalSliceNumber(slice.number)),
   );
 }
 
@@ -107,7 +103,7 @@ function restorePersisted(
     ) {
       throw new Error("Run state contains an invalid scoped slice");
     }
-    const slice = byNumber.get(canonicalNumber(saved.number));
+    const slice = byNumber.get(canonicalSliceNumber(saved.number));
     // A scope identity removed from issues.md is historical state, not
     // executable work. Keep it in the persisted scope of record but do
     // not let it wedge this invocation or re-enter through --only-failed.

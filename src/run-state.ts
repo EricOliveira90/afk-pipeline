@@ -49,6 +49,13 @@ export interface RunState {
    * state files that predate the field stay loadable unchanged.
    */
   resume?: Record<string, SliceResumeState>;
+  /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
+  migrations?: MigrationClaimState;
+}
+
+export interface MigrationClaimState {
+  pool: string[];
+  claims: Record<string, string[]>;
 }
 
 /** Resume bookkeeping for one slice — see `RunState.resume`. */
@@ -139,6 +146,55 @@ export function sanitizeResumeMap(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * Structural half of migration-claim validation: the pool is a
+ * duplicate-free string array and claims map issue keys to string
+ * arrays. Shared by load-time sanitising below and by
+ * `validateClaimState` in migration-claims.ts, which layers
+ * pool-membership and single-owner checks on top.
+ */
+export function assertMigrationClaimShape(value: {
+  pool?: unknown;
+  claims?: unknown;
+}): asserts value is MigrationClaimState {
+  if (
+    !Array.isArray(value.pool) ||
+    value.pool.some((prefix) => typeof prefix !== "string") ||
+    new Set(value.pool).size !== value.pool.length
+  ) {
+    throw new Error("Run state contains an invalid migration prefix pool");
+  }
+  if (
+    typeof value.claims !== "object" ||
+    value.claims === null ||
+    Array.isArray(value.claims)
+  ) {
+    throw new Error("Run state contains invalid migration claims");
+  }
+  for (const [issue, prefixes] of Object.entries(value.claims)) {
+    if (
+      !Array.isArray(prefixes) ||
+      prefixes.some((prefix) => typeof prefix !== "string")
+    ) {
+      throw new Error(`Run state contains invalid migration claims for #${issue}`);
+    }
+  }
+}
+
+function sanitizeMigrationClaims(value: unknown): MigrationClaimState | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Run state contains invalid migration claims");
+  }
+  const input = value as { pool?: unknown; claims?: unknown };
+  assertMigrationClaimShape(input);
+  const claims: Record<string, string[]> = {};
+  for (const [issue, prefixes] of Object.entries(input.claims)) {
+    claims[issue] = [...prefixes];
+  }
+  return { pool: [...input.pool], claims };
+}
+
 function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
 }
@@ -167,6 +223,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
     resume?: unknown;
+    migrations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -178,6 +235,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     }
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     const resume = sanitizeResumeMap(r.resume);
+    const migrations = sanitizeMigrationClaims(r.migrations);
     return {
       version: 1,
       prdSlug,
@@ -186,6 +244,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
       ...(resume !== undefined ? { resume } : {}),
+      ...(migrations !== undefined ? { migrations } : {}),
     };
   }
 

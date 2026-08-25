@@ -306,8 +306,8 @@ describe("buildResumeHandoffNote", () => {
 });
 
 /**
- * The rendered resume prompt must carry the tree-wins and
- * migration-prefix rules verbatim (#38), with every placeholder
+ * The rendered resume prompt must carry the exact migration claim rule,
+ * with every placeholder
  * filled — renderPrompt throws on missing AND unused args, so a clean
  * render with exactly this arg set locks full placeholder coverage.
  */
@@ -322,19 +322,15 @@ describe("generator-resume prompt rendering", () => {
       COMMIT_LOG: "abc123 feat: work",
       FEAT_BRANCH: "feat/demo",
       HANDOFF_NOTE: handoffNote,
+      MIGRATION_RESERVATION: "This slice owns exactly: 144.",
     });
   }
 
-  it("contains the tree-wins-over-contract rule verbatim", () => {
+  it("makes AFK's migration claim authoritative", () => {
     const prompt = render();
-    expect(prompt).toContain(
-      "the contract predates merges from other slices",
-    );
-    expect(prompt).toContain("the current tree wins over the contract");
-  });
-
-  it("contains the migration-prefix renumber rule verbatim", () => {
-    expect(render()).toContain("renumber yours to the next free prefix");
+    expect(prompt).toContain("Migration instructions are authoritative");
+    expect(prompt).toContain("This slice owns exactly: 144.");
+    expect(prompt).not.toContain("renumber yours to the next free prefix");
   });
 
   it("splices the handoff note through, or renders cleanly without one", () => {
@@ -406,6 +402,7 @@ describe("generator-resume-stuck prompt rendering", () => {
       BASE_REFRESH_NOTE: overrides.baseNote ?? "The feature branch was merged in.",
       STUCK_NOTE: overrides.stuckNote ?? "",
       HANDOFF_NOTE: overrides.handoffNote ?? "",
+      MIGRATION_RESERVATION: "This slice owns exactly: 144.",
     });
   }
 
@@ -420,11 +417,11 @@ describe("generator-resume-stuck prompt rendering", () => {
     expect(render()).toMatch(/Never delete `.*stuck\.md`/);
   });
 
-  it("carries the tree-wins and migration-prefix rules verbatim", () => {
+  it("carries the exact migration claim rule", () => {
     const prompt = render();
-    expect(prompt).toContain("the contract predates merges from other slices");
-    expect(prompt).toContain("the current tree wins over the contract");
-    expect(prompt).toContain("renumber yours to the next free prefix");
+    expect(prompt).toContain("Migration instructions are authoritative");
+    expect(prompt).toContain("This slice owns exactly: 144.");
+    expect(prompt).not.toContain("renumber yours to the next free prefix");
   });
 
   it("splices the diagnosis and handoff notes through, or renders cleanly without them", () => {

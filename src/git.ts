@@ -755,3 +755,24 @@ export function listAddedMigrationFiles(
     return [];
   }
 }
+
+/** Repo-relative files added between two refs, independent of project layout. */
+export function listAddedFiles(
+  repoRoot: string,
+  base: string,
+  head: string,
+): string[] {
+  try {
+    const output = git(
+      ["diff", "--name-only", "--diff-filter=A", `${base}...${head}`],
+      { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
+    );
+    return output
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}

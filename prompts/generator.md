@@ -9,7 +9,7 @@ but your scope is the contract boundary, no more.
 
 1. **Contract boundary is law.** If a behavior isn't in "In scope," it
    doesn't exist for you. Stray observations go in `handoff.md` under
-   "Gotchas" for the next planner.
+   "Gotchas" for the slices that build on this.
 2. **One behavior, one tracer-bullet.** RED test → GREEN implementation
    → next behavior. Never batch all tests first, then all code.
 3. **Existing behavior survives.** Anything in touched files keeps
@@ -46,6 +46,12 @@ Do this for each behavior BEFORE writing the RED test.
   output is your heartbeat. If a suite is verbose, prefer the runner's
   compact reporter (e.g. `--reporter=dot`) over silencing it.
 - If `contract.md` Status is not `LOCKED`, stop and report immediately.
+- Migration ownership is a machine gate. Use only the exact assignment
+  below and create exactly the migration paths locked in the contract.
+
+# Migration assignment
+
+{{MIGRATION_RESERVATION}}
 
 # Required reading
 
@@ -81,7 +87,7 @@ When all behaviors are green, write `{{SLICE_DIR}}/handoff.md`:
 - <small decisions the contract left open>
 
 ## Gotchas / learnings
-- <anything the next slice's planner should know>
+- <anything the slices that build on this should know>
 
 ## Status
 Tests passing locally. No regressions.

@@ -1574,6 +1574,129 @@ describe("runWave — contract-lock migration prefix gate", () => {
     };
   }
 
+  function buildManifestProvider(
+    slices: Slice[],
+    observedPrompts: string[],
+  ): AgentProvider {
+    const plannerRounds = new Map<string, number>();
+    const assignedPaths = new Map<string, string>();
+
+    return {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const { role, cwd, prompt } = options;
+        const slice = sliceFromCwd(cwd, slices);
+        const ghIssue = slice?.ghIssue ?? "";
+        const dir = slice ? findSliceArtifactDir(cwd, slice.number) : null;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        if (role === "explorer" && dir) {
+          writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+        } else if (role === "planner" && dir) {
+          observedPrompts.push(prompt);
+          const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
+          plannerRounds.set(ghIssue, round);
+          const assigned = /owns exactly:\s*(\d+)/i.exec(prompt)?.[1];
+          const path = assigned
+            ? `supabase/migrations/${assigned}_issue_${ghIssue}.sql`
+            : `supabase/migrations/RESERVED_PREFIX_issue_${ghIssue}.sql`;
+          if (assigned) assignedPaths.set(ghIssue, path);
+          writeFileSync(
+            join(dir, "contract.md"),
+            [
+              "# Slice Contract",
+              "",
+              "**Status:** NEGOTIATING",
+              "",
+              "## Files expected to change",
+              `- ${path}`,
+              "",
+              "## Migration requirements",
+              "- New migration files: 1",
+              "",
+            ].join("\n"),
+            "utf-8",
+          );
+        } else if (role === "evaluator-contract" && dir) {
+          const round = plannerRounds.get(ghIssue) ?? 1;
+          writeFileSync(
+            join(dir, `feedback-r${round}.md`),
+            `## Evaluator feedback - round ${round}\n\n**Verdict:** ACCEPT\n`,
+            "utf-8",
+          );
+        } else if (role === "generator" && dir) {
+          observedPrompts.push(prompt);
+          const path = assignedPaths.get(ghIssue);
+          if (!path) throw new Error(`Generator for #${ghIssue} received no assigned migration`);
+          const abs = join(cwd, path);
+          mkdirSync(join(abs, ".."), { recursive: true });
+          writeFileSync(abs, `-- ${ghIssue}\n`, "utf-8");
+          git(cwd, ["add", "--", path]);
+          git(cwd, ["commit", "-m", `feat: add reserved migration ${ghIssue}`]);
+        } else if (role === "evaluator-qa" && dir) {
+          writeFileSync(
+            join(dir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n",
+            "utf-8",
+          );
+        }
+
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+  }
+
+  it("keeps concurrent PRD runs inside their separate reserved pools", async () => {
+    async function runReservedPrd(slug: string, ghIssue: string, prefix: string) {
+      const repo = makeRepo();
+      const slices: Slice[] = [
+        { number: "01", ghIssue, title: "Reserved migration", type: "AFK", blockedBy: [], userStories: "" },
+      ];
+      const setup = setupWave(repo, slug, slices, new Map<string, SliceFixture>());
+      const prompts: string[] = [];
+      setup.config.provider = buildManifestProvider(slices, prompts);
+      setup.config.manifest = {
+        version: 1,
+        selectedSlices: ["01"],
+        migrationPrefixes: [prefix],
+        protectedIssues: [],
+      };
+
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: [ghIssue],
+        config: setup.config,
+        dag: setup.dag,
+        logger: setup.logger,
+        featBranch: setup.featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      return { ...setup, outcomes, prompts, repo };
+    }
+
+    const [first, second] = await Promise.all([
+      runReservedPrd("reserved-prd-a", "2101", "144"),
+      runReservedPrd("reserved-prd-b", "2201", "200"),
+    ]);
+
+    expect(first.outcomes.get("2101")?.phase).toBe("PASS");
+    expect(second.outcomes.get("2201")?.phase).toBe("PASS");
+    expect(first.prompts[0]).toContain("RESERVED_PREFIX");
+    expect(second.prompts[0]).toContain("RESERVED_PREFIX");
+    expect(first.prompts.some((prompt) => prompt.includes("owns exactly: 144"))).toBe(true);
+    expect(second.prompts.some((prompt) => prompt.includes("owns exactly: 200"))).toBe(true);
+
+    git(first.repo, ["checkout", first.featBranch]);
+    git(second.repo, ["checkout", second.featBranch]);
+    expect(existsSync(join(first.repo, "supabase", "migrations", "144_issue_2101.sql"))).toBe(true);
+    expect(existsSync(join(first.repo, "supabase", "migrations", "200_issue_2101.sql"))).toBe(false);
+    expect(existsSync(join(second.repo, "supabase", "migrations", "200_issue_2201.sql"))).toBe(true);
+    expect(existsSync(join(second.repo, "supabase", "migrations", "144_issue_2201.sql"))).toBe(false);
+  }, 90_000);
+
   it("sends a colliding contract back to the planner with the free prefix, then passes", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [

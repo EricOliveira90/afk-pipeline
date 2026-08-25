@@ -32,6 +32,13 @@ evaluator grades against.
 - "Files expected to change" must use exact repo-relative paths, one
   bullet per file. The lane partitioner parses this section to detect
   file-overlap with sibling slices.
+- Always write `## Migration requirements` with one line:
+  `- New migration files: N`. Follow the AFK reservation below exactly.
+  AFK owns prefix allocation; never calculate a next prefix from the tree.
+
+# Migration reservation
+
+{{MIGRATION_RESERVATION}}
 
 # Required reading
 
@@ -85,9 +92,17 @@ lines), not an accumulated review transcript:
 <!--
   One bullet per file. Exact repo-relative paths.
   You MAY add a short parenthesised note (e.g. `src/cli.py (new file)`).
-  If you genuinely cannot enumerate yet, write `- <unknown>`.
+  This list is the generator's entire write boundary — a fix that needs
+  a file not listed here strands the slice. Include the test-harness
+  and config files that changes in this area typically drag in (see the
+  explorer's context.md). If you cannot enumerate a path yet, resolve
+  the unknown with a targeted read of the cited files before proposing.
+  Never write a placeholder bullet like `<unknown>` or `<rough list>`.
 -->
 - <path>
+
+## Migration requirements
+- New migration files: <count>
 
 ## New patterns / deps / schema (if any)
 - <list anything new, OR write "None — uses existing patterns">
@@ -100,10 +115,14 @@ lines), not an accumulated review transcript:
 - Given <precondition>, when <action>, then <observable outcome>
 
 ## Definition of done
-- [ ] <verifiable statement>
-- [ ] All tests pass locally
-- [ ] No regression in existing suite
-- [ ] Evaluator has signed off via qa-report.md
+<!--
+  Scope-local, verifiable criteria only. Do NOT add whole-repository
+  criteria ("all tests pass", "no regression in existing suite",
+  "evaluator has signed off") — the pipeline enforces those uniformly
+  for every slice, and restating them here turns an out-of-scope
+  failure into this slice's unsolvable finding.
+-->
+- [ ] <verifiable statement about this slice's behavior>
 ```
 
 {{REVISION_NOTE}}

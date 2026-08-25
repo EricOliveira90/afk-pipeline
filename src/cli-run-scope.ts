@@ -1,5 +1,6 @@
 import type { AgentProvider } from "./agent-provider.js";
 import type { Slice } from "./issues-parser.js";
+import { assertWithinManifestScope } from "./afk-manifest.js";
 import { pipelineRunSlug } from "./orchestrator.js";
 import { isSliceComplete, loadRunState } from "./run-state.js";
 import {
@@ -21,6 +22,7 @@ export function resolveCliRunScope(args: {
   provider: AgentProvider;
   slices: Slice[];
   selectedSliceNumbers?: string[];
+  manifestSelectedSliceNumbers?: string[];
   onlyFailed: boolean;
 }): CliRunScope {
   if (args.onlyFailed && args.selectedSliceNumbers) {
@@ -45,6 +47,32 @@ export function resolveCliRunScope(args: {
       fullScope.members,
       (id) => isSliceComplete(state, id),
     );
+  } else if (requestedSliceNumbers === undefined && args.manifestSelectedSliceNumbers) {
+    requestedSliceNumbers = [...args.manifestSelectedSliceNumbers];
+  }
+
+  if (args.manifestSelectedSliceNumbers) {
+    assertWithinManifestScope({
+      selectedSlices: args.manifestSelectedSliceNumbers,
+      candidates: requestedSliceNumbers ?? [],
+      sliceNumberOf: (number) => number,
+      describeConflict: (conflicting) =>
+        `CLI scope conflicts with afk.json: slice${conflicting.length === 1 ? "" : "s"} ` +
+        `${conflicting.join(", ")} ${conflicting.length === 1 ? "is" : "are"} outside selectedSlices`,
+    });
+  }
+
+  const scope = resolveRunScope(args.slices, requestedSliceNumbers, state.scope);
+  if (args.manifestSelectedSliceNumbers) {
+    assertWithinManifestScope({
+      selectedSlices: args.manifestSelectedSliceNumbers,
+      candidates: scope.members,
+      sliceNumberOf: (slice) => slice.number,
+      describeConflict: (conflicting) =>
+        `Persisted run scope conflicts with afk.json: ${conflicting
+          .map((slice) => `${slice.number} (#${slice.ghIssue})`)
+          .join(", ")}`,
+    });
   }
 
   return {
@@ -52,10 +80,6 @@ export function resolveCliRunScope(args: {
     priorCompleted: new Set(
       Object.keys(state.slices).filter((id) => isSliceComplete(state, id)),
     ),
-    scope: resolveRunScope(
-      args.slices,
-      requestedSliceNumbers,
-      state.scope,
-    ),
+    scope,
   };
 }
