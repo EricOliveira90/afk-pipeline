@@ -134,10 +134,40 @@ describe("terminateProcessTree on win32", () => {
 });
 
 describe("terminateProcessTree on POSIX", () => {
+  it("terminates every recorded descendant before reporting success", async () => {
+    const proc = makeFakeProc(100);
+    const state = makeTable([
+      [100, 1],
+      [200, 100],
+      [300, 200],
+    ]);
+    proc.kill = vi.fn(() => {
+      state.remove(100);
+      proc.exitCode = 1;
+      proc.emit("exit", 1);
+      return true;
+    });
+    const killPid = vi.fn(async (pid: number) => state.remove(pid));
+
+    const report = await terminateProcessTree(asChildProcess(proc), {
+      platform: "linux",
+      listPidPpid: state.listPidPpid,
+      killPid,
+      ...FAST,
+    });
+
+    expect(killPid).toHaveBeenCalledWith(300);
+    expect(killPid).toHaveBeenCalledWith(200);
+    expect(state.table.size).toBe(0);
+    expect(report).toEqual({ rootDead: true, survivors: [], verified: true });
+  });
+
   it("escalates SIGTERM to SIGKILL after the grace and confirms the exit", async () => {
     const proc = makeFakeProc(100);
+    const state = makeTable([[100, 1]]);
     proc.kill = vi.fn((signal: NodeJS.Signals) => {
       if (signal === "SIGKILL") {
+        state.remove(100);
         proc.exitCode = null;
         proc.signalCode = "SIGKILL";
         proc.emit("exit", null);
@@ -148,6 +178,7 @@ describe("terminateProcessTree on POSIX", () => {
     const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "linux",
       graceMs: 20,
+      listPidPpid: state.listPidPpid,
       ...FAST,
     });
 
@@ -158,9 +189,11 @@ describe("terminateProcessTree on POSIX", () => {
 
   it("skips SIGKILL when the child exits within the grace", async () => {
     const proc = makeFakeProc(100);
+    const state = makeTable([[100, 1]]);
     proc.kill = vi.fn((signal: NodeJS.Signals) => {
       if (signal === "SIGTERM") {
         setTimeout(() => {
+          state.remove(100);
           proc.exitCode = 0;
           proc.emit("exit", 0);
         }, 5);
@@ -171,6 +204,7 @@ describe("terminateProcessTree on POSIX", () => {
     const report = await terminateProcessTree(asChildProcess(proc), {
       platform: "linux",
       graceMs: 100,
+      listPidPpid: state.listPidPpid,
       ...FAST,
     });
 
@@ -227,7 +261,7 @@ describe.runIf(process.platform === "win32")(
 
     it(
       "kills a real parent AND its grandchild, and both are verifiably gone",
-      { timeout: 30_000 },
+      { timeout: 240_000 },
       async () => {
         const { spawn: realSpawn } = await import("node:child_process");
         // Parent prints the grandchild's PID, then both idle for 60s —

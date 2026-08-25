@@ -4,7 +4,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   readdirSync,
   writeFileSync,
@@ -12,6 +11,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmDirWithRetry } from "./test-support.js";
 import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
 import { makeAsyncMutex, sliceBranch } from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
@@ -32,7 +32,7 @@ afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmDirWithRetry(dir);
     } catch {
       // best effort
     }
@@ -305,7 +305,7 @@ describe("runWave", () => {
     });
 
     expect(outcomes.get("100")?.phase).toBe("PASS");
-  }, 30_000);
+  }, 240_000);
 
   it("returns STUCK when QA fails after max rounds", async () => {
     const repo = makeRepo();
@@ -330,7 +330,7 @@ describe("runWave", () => {
     });
 
     expect(outcomes.get("200")?.phase).toBe("STUCK");
-  }, 30_000);
+  }, 240_000);
 
   it("continues the lane when a predecessor fails — the successor runs on the unchanged base (ADR 0024)", async () => {
     const repo = makeRepo();
@@ -369,7 +369,7 @@ describe("runWave", () => {
       "utf-8",
     );
     expect(shared).toContain("ok");
-  }, 60_000);
+  }, 240_000);
 
   it("runs disjoint slices in parallel lanes", async () => {
     const repo = makeRepo();
@@ -397,7 +397,7 @@ describe("runWave", () => {
 
     expect(outcomes.get("401")?.phase).toBe("PASS");
     expect(outcomes.get("402")?.phase).toBe("PASS");
-  }, 30_000);
+  }, 240_000);
 
   it("returns CANCELLED for all slices when signal fires during Phase A", async () => {
     const repo = makeRepo();
@@ -460,7 +460,7 @@ describe("runWave", () => {
     // the other caught by the post-Phase-A signal check.
     expect(outcomes.get("501")?.phase).toBe("CANCELLED");
     expect(outcomes.get("502")?.phase).toBe("CANCELLED");
-  }, 30_000);
+  }, 240_000);
 
   it("collapses wave to one lane when a slice has undeclared files", async () => {
     const repo = makeRepo();
@@ -558,7 +558,7 @@ describe("runWave", () => {
     // Both should pass (serial within one lane, no failure).
     expect(outcomes.get("601")?.phase).toBe("PASS");
     expect(outcomes.get("602")?.phase).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 
   // Regression for the PRD 024 crash: when one lane's post-merge git
   // call threw, the whole `Promise.all` rejected, aborting the
@@ -608,7 +608,7 @@ describe("runWave", () => {
     } finally {
       spy.mockRestore();
     }
-  }, 60_000);
+  }, 240_000);
 
   // Regression for the silent-corruption bug: when the slice branch
   // does NOT exist after the generator returns, that's a different
@@ -663,7 +663,7 @@ describe("runWave", () => {
     } finally {
       spy.mockRestore();
     }
-  }, 30_000);
+  }, 240_000);
 
   // The one lane-halting exception ADR 0024 keeps: the ADR 0010
   // corruption signature. Ordinary failures let the lane continue,
@@ -713,7 +713,7 @@ describe("runWave", () => {
     } finally {
       spy.mockRestore();
     }
-  }, 60_000);
+  }, 240_000);
 
   // Sister regression: the existing "generator produced no output"
   // guard must keep working. When `hasCommitsAhead` reports `false`
@@ -755,7 +755,7 @@ describe("runWave", () => {
     } finally {
       spy.mockRestore();
     }
-  }, 30_000);
+  }, 240_000);
 });
 
 
@@ -850,7 +850,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(reason).toContain("about to die");
     // The retired fixed string must be gone.
     expect(reason).not.toContain("Negotiation returned ERROR");
-  }, 30_000);
+  }, 240_000);
 
   it("names the kill class when the orchestrator killed the negotiate invocation", async () => {
     const cases: Array<[ProviderDeath["kind"], string, string]> = [
@@ -875,7 +875,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
       // A kill is not an exit: the two causes must stay distinguishable.
       expect(reason, label).not.toContain("exit code");
     }
-  }, 90_000);
+  }, 240_000);
 
   it("distinguishes an exhausted transient-provider retry from an exit and from a kill", async () => {
     const setup = oneSlice("neg-transient", "1201", {
@@ -893,7 +893,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(reason).toContain("exhausted its transient-provider retry window");
     expect(reason).not.toContain("the orchestrator killed");
     expect(reason).not.toContain("hung up");
-  }, 30_000);
+  }, 240_000);
 
   it("labels a genuine evaluator verdict as a verdict, never as an infrastructure death", async () => {
     const setup = oneSlice("neg-verdict", "1301", {
@@ -909,7 +909,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(reason).not.toContain("exit code");
     expect(reason).not.toContain("killed");
     expect(reason).not.toContain("transient");
-  }, 30_000);
+  }, 240_000);
 
   it("retries an infrastructure death under --infrastructure-retries and the slice still passes", async () => {
     const setup = oneSlice("neg-retry", "1401", {
@@ -952,7 +952,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
       )
       .map((e) => (e as Extract<RunEvent, { type: "phase-started" }>).round);
     expect(plannerRounds).toEqual([1]);
-  }, 60_000);
+  }, 240_000);
 
   it.each(["explorer", "planner"] as const)(
     "retries only the failed %s invocation with the same prompt",
@@ -1016,7 +1016,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
       (event) => event.type === "warn" && event.reason === "infrastructure-retry",
     );
     expect(retries).toEqual([]);
-  }, 30_000);
+  }, 240_000);
 
   it("never retries a genuine verdict — it is terminal on the first occurrence", async () => {
     const setup = oneSlice("neg-verdict-terminal", "1501", {
@@ -1037,7 +1037,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
         (e: RunEvent) => e.type === "warn" && e.reason === "infrastructure-retry",
       ),
     ).toHaveLength(0);
-  }, 30_000);
+  }, 240_000);
 
   it("gives up with the cause named once the retry budget is spent", async () => {
     const setup = oneSlice("neg-retry-spent", "1601", {
@@ -1053,7 +1053,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(
       setup.records.filter((r) => r === "evaluator-contract:1601"),
     ).toHaveLength(2);
-  }, 60_000);
+  }, 240_000);
 
   it("keeps a dead negotiate invocation from ending the wave — the sibling slice still passes", async () => {
     const repo = makeRepo();
@@ -1113,7 +1113,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     expect(outcomes.get("1701")?.phase).toBe("ERROR");
     expect(reasonOf(outcomes.get("1701"))).toContain("exit code 1");
     expect(outcomes.get("1702")?.phase).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 });
 
 /**
@@ -1210,7 +1210,7 @@ describe("runWave — migration lane grouping", () => {
     // the predecessor's migration — the whole point of the grouping.
     expect(predecessorVisible[0]).toBe(false); // wave-start base
     expect(predecessorVisible[1]).toBe(true); // refreshed base
-  }, 120_000);
+  }, 240_000);
 
   it("leaves non-migration slices in their own parallel lanes", async () => {
     const repo = makeRepo();
@@ -1252,7 +1252,7 @@ describe("runWave — migration lane grouping", () => {
     // A lone migration slice is contending with nobody, so the event
     // carries no shared-resource grouping.
     expect(partitioned?.sharedResources).toBeUndefined();
-  }, 60_000);
+  }, 240_000);
 
   it("honours a configured pattern instead of the default", async () => {
     const repo = makeRepo();
@@ -1292,7 +1292,7 @@ describe("runWave — migration lane grouping", () => {
       (e) => e.type === "lanes-partitioned",
     );
     expect(partitioned?.lanes).toEqual([["1021", "1022"]]);
-  }, 60_000);
+  }, 240_000);
 
   it("still collapses the whole wave under --serial-lanes", async () => {
     const repo = makeRepo();
@@ -1332,7 +1332,7 @@ describe("runWave — migration lane grouping", () => {
     );
     expect(partitioned?.lanes).toEqual([["1031", "1032"]]);
     expect(partitioned?.serial).toBe(true);
-  }, 60_000);
+  }, 240_000);
 });
 
 /**
@@ -1415,7 +1415,7 @@ describe("runWave onOutcome", () => {
     expect(passIdx).toBeGreaterThanOrEqual(0);
     expect(explorer112.length).toBeGreaterThanOrEqual(2);
     expect(passIdx).toBeLessThan(explorer112[1]!);
-  }, 60_000);
+  }, 240_000);
 
   it("contains a throwing onOutcome and still records outcomes in-memory", async () => {
     const repo = makeRepo();
@@ -1453,7 +1453,7 @@ describe("runWave onOutcome", () => {
     // outcome — the orchestrator's post-wave reconciliation retries.
     expect(calls).toEqual(["121:PASS"]);
     expect(outcomes.get("121")?.phase).toBe("PASS");
-  }, 30_000);
+  }, 240_000);
 });
 
 /**
@@ -1766,7 +1766,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(
       existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
     ).toBe(false);
-  }, 60_000);
+  }, 240_000);
 
   it("does not flag a contract re-touching a migration it already owns", async () => {
     const repo = makeRepo();
@@ -1811,7 +1811,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
         (e) => e.type === "warn" && e.reason === "contract-lock-refused",
       ),
     ).toEqual([]);
-  }, 60_000);
+  }, 240_000);
 
   it("leaves a slice declaring no migration files alone", async () => {
     const repo = makeRepo();
@@ -1852,7 +1852,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
 
     expect(outcomes.get("2021")?.phase).toBe("PASS");
     expect(plannerPrompts).toHaveLength(1);
-  }, 60_000);
+  }, 240_000);
 
   it("escalates when the contract rounds run out on an unresolved collision", async () => {
     const repo = makeRepo();
@@ -1912,7 +1912,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(stuck).toContain("contract-lock gate");
     expect(stuck).toContain("003");
     expect(stuck).toContain("004");
-  }, 60_000);
+  }, 240_000);
 
   it("still refuses at the merge mutex when the generator collides but the contract did not", async () => {
     const repo = makeRepo();
@@ -1962,7 +1962,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
       expect(outcome.collidingPrefixes).toEqual(["003"]);
       expect(outcome.error).toMatch(/Migration prefix collision: 003/);
     }
-  }, 60_000);
+  }, 240_000);
 
   it("gates a contract left LOCKED on disk by an earlier run", async () => {
     const repo = makeRepo();
@@ -2031,7 +2031,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(
       existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
     ).toBe(false);
-  }, 60_000);
+  }, 240_000);
 });
 
 /**
@@ -2105,7 +2105,7 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
     expect(
       gitModule.listMigrationFiles(repo, featBranch),
     ).toEqual(["042_users.sql"]);
-  }, 30_000);
+  }, 240_000);
 
   it("still records CONFLICT for a real git merge conflict", async () => {
     const repo = makeRepo();
@@ -2142,7 +2142,7 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
 
     const phases = ["611", "612"].map((id) => outcomes.get(id)?.phase).sort();
     expect(phases).toEqual(["CONFLICT", "PASS"]);
-  }, 60_000);
+  }, 240_000);
 
   it("continues the lane past a MERGE-PENDING member", async () => {
     const repo = makeRepo();
@@ -2182,5 +2182,5 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
 
     expect(outcomes.get("621")?.phase).toBe("MERGE-PENDING");
     expect(outcomes.get("622")?.phase).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 });

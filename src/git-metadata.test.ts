@@ -2,11 +2,11 @@ import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmDirWithRetry } from "./test-support.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { listAddedMigrationFiles, resolveCommit } from "./git.js";
 
@@ -18,7 +18,7 @@ function git(cwd: string, args: string[]): string {
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
+    rmDirWithRetry(dir);
   }
 });
 

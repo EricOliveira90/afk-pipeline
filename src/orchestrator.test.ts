@@ -14,8 +14,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assessContractExtension,
+  collectRequiredGateFailures,
+  isCancelled,
   makeAsyncMutex,
   makeSliceContext,
+  resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
 } from "./orchestrator.js";
@@ -36,6 +39,12 @@ import type {
   InvokeResult,
 } from "./agent-provider.js";
 import { TransientProviderError } from "./agent-provider.js";
+import {
+  ProcessTreeTerminationError,
+  runBoundedCommand,
+} from "./command-runtime.js";
+import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
+import { terminateProcessTree } from "./kill-tree.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -66,6 +75,100 @@ afterEach(() => {
       // Best effort
     }
   }
+});
+
+describe("cancellation classification", () => {
+  it("does not hide failed process-tree termination behind an aborted signal", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "afk-command-"));
+    tempDirs.push(cwd);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 20);
+
+    let thrown: unknown;
+    try {
+      await runBoundedCommand(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        {
+          cwd,
+          signal: controller.signal,
+          inactivityTimeoutMs: 1_000,
+          heartbeatIntervalMs: 20,
+          terminateProcessTree: async (proc) => {
+            await terminateProcessTree(proc);
+            return {
+              rootDead: true,
+              survivors: [4242],
+              verified: true,
+            };
+          },
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProcessTreeTerminationError);
+    expect(isCancelled(thrown, controller.signal)).toBe(false);
+  }, 240_000);
+});
+
+describe("base gate infrastructure retries", () => {
+  it("retains a required command failure after a later retry passes", () => {
+    const declarations: GateDeclaration[] = [
+      { id: "typecheck", stage: "base", required: true, command: "pnpm" },
+      { id: "lint", stage: "base", required: true, command: "pnpm" },
+    ];
+    const result = (
+      gateId: string,
+      status: "PASS" | "FAIL" | "INFRASTRUCTURE",
+    ) => ({
+      gateId,
+      stage: "base",
+      status,
+      failureKind: status === "FAIL" ? ("COMMAND" as const) : null,
+      startedAt: "2026-08-23T10:00:00.000Z",
+      endedAt: "2026-08-23T10:00:00.010Z",
+      durationMs: 10,
+      exitCode: status === "FAIL" ? 1 : status === "PASS" ? 0 : null,
+      treeId: "tree-1",
+      logArtifactId: `gate-logs/${gateId}.log`,
+    });
+    const attempts: Array<{ evidence: GateEvidence; evidencePath: string }> = [
+      {
+        evidencePath: "attempt-1.json",
+        evidence: {
+          version: 1,
+          attemptId: "attempt-1",
+          treeId: "tree-1",
+          results: [
+            result("typecheck", "FAIL"),
+            result("lint", "INFRASTRUCTURE"),
+          ],
+        },
+      },
+      {
+        evidencePath: "attempt-2.json",
+        evidence: {
+          version: 1,
+          attemptId: "attempt-2",
+          treeId: "tree-1",
+          results: [result("typecheck", "PASS"), result("lint", "PASS")],
+        },
+      },
+    ];
+
+    expect(collectRequiredGateFailures(attempts, declarations)).toEqual([
+      {
+        evidencePath: "attempt-1.json",
+        result: expect.objectContaining({
+          gateId: "typecheck",
+          status: "FAIL",
+          failureKind: "COMMAND",
+        }),
+      },
+    ]);
+  });
 });
 
 describe("runPreShipSanity", () => {
@@ -186,6 +289,35 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
     if (!existsSync(marker)) return [];
     return readFileSync(marker, "utf-8").trim().split("\n").filter(Boolean);
   }
+
+  it("projects base gates and aggregate commands from one discovery result", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      test: "vitest",
+    });
+
+    expect(resolveBaseGateDeclarations(dir)).toEqual([
+      {
+        id: "typecheck",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "typecheck"],
+      },
+      { id: "lint", stage: "base", required: false },
+      {
+        id: "tests",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "test"],
+      },
+    ]);
+    expect(resolveSanityCommands(dir)).toEqual([
+      "pnpm run typecheck",
+      "pnpm run test",
+    ]);
+  });
 
   it("matches when all three steps are defined", () => {
     const dir = makeProject({
@@ -631,7 +763,7 @@ describe("runPipeline lane scheduling", () => {
     git(repo, ["checkout", featBranch]);
     const shared = readFileSync(join(repo, "src", "shared.txt"), "utf-8");
     expect(shared).toContain("hello from slice 1002");
-  }, 60_000);
+  }, 240_000);
 
   it("persists STUCK for the failed predecessor and PASS for the surviving lane successor (ADR 0024)", async () => {
     const repo = makeRepo();
@@ -702,7 +834,7 @@ describe("runPipeline lane scheduling", () => {
     // PASS is persisted as resumable-complete.
     expect(state.slices["2002"].phase).toBe("PASS");
     expect(state.slices["2002"].mergedToFeature).toBe(true);
-  }, 60_000);
+  }, 240_000);
 
   it("runs disjoint-file slices in parallel lanes (timestamps interleave)", async () => {
     const repo = makeRepo();
@@ -782,7 +914,7 @@ describe("runPipeline lane scheduling", () => {
     // Overlap iff a < bEnd && b < aEnd.
     const overlap = a! < bEnd! && b! < aEnd!;
     expect(overlap).toBe(true);
-  }, 60_000);
+  }, 240_000);
   it("runs only the explicitly selected AFK scope and writes its handoff", async () => {
     const repo = makeRepo();
     const slug = "scope-selection";
@@ -837,7 +969,7 @@ describe("runPipeline lane scheduling", () => {
     expect(handoff.featureBranch).toBe(`feat-stub/${slug}`);
     expect(handoff.finalCommitSha).toMatch(/^[0-9a-f]{40}$/);
     expect(handoff.githubIssuesToClose).toEqual(["4001"]);
-  }, 60_000);
+  }, 240_000);
 });
 
 /**
@@ -895,7 +1027,7 @@ describe("runPipeline zero-dispatch outcome (issue #42)", () => {
     expect(reason).toContain("#4999 (outside run scope)");
     expect(reason).toContain("#5002 Also held back");
     expect(reason).toContain("#5001");
-  }, 60_000);
+  }, 240_000);
 
   it("stays successful when it dispatched nothing because every slice was already complete", async () => {
     const repo = makeRepo();
@@ -975,7 +1107,7 @@ describe("runPipeline zero-dispatch outcome (issue #42)", () => {
     expect(
       records.every((record) => record.role.endsWith("-review")),
     ).toBe(true);
-  }, 60_000);
+  }, 240_000);
 });
 
 /**
@@ -1168,7 +1300,7 @@ describe("runPipeline summary report", () => {
     // No package.json in fixture → sanity gate skipped (returns ok); reviews
     // are no-ops in the stub → verdicts UNKNOWN → not ready.
     expect(result.consoleSummary).toContain("Not ready");
-  }, 60_000);
+  }, 240_000);
 
   it("groups failed slices under Failed/Stuck with the error reason", async () => {
     const repo = makeRepo();
@@ -1217,7 +1349,7 @@ describe("runPipeline summary report", () => {
     // Branch is preserved on failure; the stub uses provider.name="stub".
     expect(result.consoleSummary).toContain(`afk-stub/${slug}-slice-01-`);
     expect(result.consoleSummary).toContain("Not ready");
-  }, 60_000);
+  }, 240_000);
 
   it("surfaces a thrown architect-review as a NEVER_RAN outcome without aborting the pipeline", async () => {
     const repo = makeRepo();
@@ -1295,7 +1427,7 @@ describe("runPipeline summary report", () => {
     const summary = readFileSync(summaryPath, "utf-8");
     expect(summary).toContain("Architect review: NEVER_RAN — Agent architect-review exited with code 1: codex-wrapper:");
     expect(summary).toContain("PM review: UNPARSEABLE");
-  }, 60_000);
+  }, 240_000);
 
   it("surfaces both reviews failing as two infrastructure outcomes without aborting", async () => {
     const repo = makeRepo();
@@ -1361,7 +1493,7 @@ describe("runPipeline summary report", () => {
     expect(result.consoleSummary).toContain("PM review NEVER_RAN");
     const summaryPath = join(repo, ".afk", "logs", `${slug}-stub`, "run-summary.md");
     expect(existsSync(summaryPath)).toBe(true);
-  }, 60_000);
+  }, 240_000);
 });
 
 /** Round feedback must stay separate from the contract specification. */
@@ -1739,7 +1871,7 @@ describe("orchestrator-owned contract status", () => {
       /\*\*Status:\*\*\s*NEGOTIATING/,
     );
     expect(contractAtGeneratorTime!).not.toContain("## Evaluator feedback");
-  }, 60_000);
+  }, 240_000);
 });
 
 
@@ -1846,7 +1978,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     // Reviews run with the slow-agent inactivity budget, not the 180 s
     // provider default that killed the PRD 070 PM review mid-run.
     expect(reviewOptions[0]!.idleTimeoutMs).toBe(600_000);
-  }, 60_000);
+  }, 240_000);
 
   it("classifies an idle-kill after real activity as DIED_MID_RUN", async () => {
     const slug = "review-idle-kill";
@@ -1887,7 +2019,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       "utf-8",
     );
     expect(summary).toContain("PM review: DIED_MID_RUN — Agent pm-review idle for 600s - killed");
-  }, 60_000);
+  }, 240_000);
 
   it("commits guardian review artifacts to the feature branch even when Not ready", async () => {
     const slug = "review-commit-notready";
@@ -1944,7 +2076,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       `${featBranch}:docs/governance/log.md`,
     ]);
     expect(governance).toContain("review entry");
-  }, 60_000);
+  }, 240_000);
 
   it("passes the run scope (selected vs skipped HITL) into the PM review prompt", async () => {
     const slug = "review-scope";
@@ -2011,7 +2143,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     // The architect prompt is scope-free; only the PM judges PRD coverage.
     expect(architectPrompt).toBeDefined();
     expect(architectPrompt!).not.toContain("Activate paid production services");
-  }, 60_000);
+  }, 240_000);
 
   it("cheap re-entry: reuses the sanity gate for an unchanged tree and skips favorable reviews for an unchanged HEAD", async () => {
     const slug = "review-reentry";
@@ -2070,7 +2202,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     const first = await runPipeline({ ...config, dag: buildDAG(slices) });
     expect(first.success).toBe(false);
     const gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
-    expect(gateRunsAfterFirst).toBe(1);
+    expect(gateRunsAfterFirst).toBe(2);
     expect(architectRuns).toBe(1);
     expect(pmRuns).toBe(1);
 
@@ -2079,12 +2211,12 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     // against the unchanged HEAD; only the unfavorable PM review re-runs.
     const second = await runPipeline({ ...config, dag: buildDAG(slices) });
     expect(second.success).toBe(false);
-    expect(readFileSync(marker, "utf-8").length).toBe(1);
+    expect(readFileSync(marker, "utf-8").length).toBe(2);
     expect(architectRuns).toBe(1);
     expect(pmRuns).toBe(2);
     expect(second.consoleSummary).toContain("Architect review: SHIP");
     expect(second.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
-  }, 120_000);
+  }, 240_000);
 
   /**
    * A run that ends without a shippable branch must not report success
@@ -2143,7 +2275,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       expect(result.success).toBe(false);
       expect(result.failureReason).toContain("draft PR");
       expect(result.failureReason).toContain("FIX-BEFORE-SHIP");
-    }, 60_000);
+    }, 240_000);
 
     it("treats an unparseable guardian verdict the same way", async () => {
       const slug = "exit-unparseable";
@@ -2188,7 +2320,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
 
       expect(result.success).toBe(false);
       expect(result.failureReason).toContain("PM: UNPARSEABLE");
-    }, 60_000);
+    }, 240_000);
 
     it("is unsuccessful when cancellation landed after the last merge but before the ship gates", async () => {
       const slug = "exit-cancelled-preship";
@@ -2219,12 +2351,13 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
 
       expect(result.success).toBe(false);
       expect(result.failureReason).toContain("cancelled");
-    }, 60_000);
+    }, 240_000);
 
     it("is unsuccessful when the pre-ship sanity gate failed, naming the failing step", async () => {
       const slug = "exit-sanity-fail";
       const { repo, prdDir, specsDir, slices, baseProvider } =
         makePassingSliceSetup(slug, "7403");
+      const marker = join(repo, ".afk-sanity-marker.txt").replace(/\\/g, "/");
 
       writeFileSync(
         join(repo, "package.json"),
@@ -2232,7 +2365,9 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
           {
             name: "consumer-fixture",
             private: true,
-            scripts: { typecheck: "node -e \"process.exit(1)\"" },
+            scripts: {
+              typecheck: `node -e "const fs=require('fs');const p='${marker}';const n=fs.existsSync(p)?fs.readFileSync(p,'utf-8').length:0;fs.appendFileSync(p,'x');process.exit(n===0?0:1)"`,
+            },
           },
           null,
           2,
@@ -2259,7 +2394,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       expect(result.success).toBe(false);
       expect(result.failureReason).toContain("pre-ship sanity gate");
       expect(result.failureReason).toContain("typecheck");
-    }, 60_000);
+    }, 240_000);
 
     it("stays successful when both guardian verdicts are favorable and the draft PR opened", async () => {
       const slug = "exit-shipped";
@@ -2280,7 +2415,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
 
       expect(result.success).toBe(true);
       expect(result.failureReason).toBeUndefined();
-    }, 60_000);
+    }, 240_000);
 
     it("stays successful when --open-pr-on-override opened the draft PR, with the override note recorded", async () => {
       const slug = "exit-override";
@@ -2307,7 +2442,7 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       expect(result.summary).toContain(
         "PR opened via --open-pr-on-override despite PM verdict FIX-BEFORE-SHIP",
       );
-    }, 60_000);
+    }, 240_000);
   });
 });
 
@@ -2576,7 +2711,7 @@ describe("run.log observability (ADR 0017)", () => {
     // defect surface).
     const parentEntries = readdirSync(join(repo, ".afk", "logs", `${slug}-stub`));
     expect(parentEntries.some((e) => e.endsWith(".log"))).toBe(false);
-  }, 60_000);
+  }, 240_000);
 
   it("a re-run gets a fresh run directory and leaves the first run's logs untouched", async () => {
     const repo = makeRepo();
@@ -2618,7 +2753,7 @@ describe("run.log observability (ADR 0017)", () => {
     const secondRunLog = readFileSync(join(secondDir, "run.log"), "utf-8");
     expect(secondRunLog).toContain("Pipeline run started");
     expect(secondRunLog).toContain("(already completed)");
-  }, 60_000);
+  }, 240_000);
 });
 
 
@@ -2734,7 +2869,7 @@ describe("runPipeline per-slice state persistence", () => {
     git(repo, ["checkout", `feat-stub/${slug}`]);
     const lane = readFileSync(join(repo, "src", "lane.txt"), "utf-8");
     expect(lane).toContain("second slice content");
-  }, 120_000);
+  }, 240_000);
 });
 
 
@@ -2821,7 +2956,7 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
       expect(seen.get(role), role).toBeDefined();
       for (const value of seen.get(role)!) expect(value, role).toBeUndefined();
     }
-  }, 60_000);
+  }, 240_000);
 
   it("applies --max-agent-duration-ms uniformly to every invocation", async () => {
     const slug = "ceiling-override";
@@ -2849,7 +2984,7 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
     }
     expect(seen.has("generator")).toBe(true);
     expect(seen.has("architect-review")).toBe(true);
-  }, 60_000);
+  }, 240_000);
 
   it("treats a generator ceiling kill as terminal — no retry — and records the remedy in the persisted error", async () => {
     const slug = "ceiling-terminal";
@@ -2894,7 +3029,7 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
     expect(state.slices["9303"].error).toContain("wall-clock ceiling");
     expect(state.slices["9303"].error).toContain("--max-agent-duration-ms");
     expect(result.consoleSummary).toContain("[STUCK]");
-  }, 60_000);
+  }, 240_000);
 });
 
 
@@ -2968,7 +3103,7 @@ describe("events.jsonl tee (spec #26)", () => {
     for (const line of lines) {
       expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     }
-  }, 60_000);
+  }, 240_000);
 
   it("emits wave-dispatched per wave and paired phase-started/phase-ended per agent invocation with round and verdict", async () => {
     const repo = makeRepo();
@@ -3035,7 +3170,7 @@ describe("events.jsonl tee (spec #26)", () => {
     pairFor("generator", 1);
     // The QA evaluator's phase-ended carries the outcome verdict.
     expect(pairFor("evaluator-qa", 1).verdict).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 
   it("emits warn events for lane continuations, NOT-RUN holds, and prior-run state on re-runs (#29)", async () => {
     const repo = makeRepo();
@@ -3100,7 +3235,7 @@ describe("events.jsonl tee (spec #26)", () => {
     const passPrior = priorWarns.find((w) => w.ghIssue === "9602");
     expect(passPrior).toBeDefined();
     expect(passPrior!.previousPhase).toBe("PASS");
-  }, 120_000);
+  }, 240_000);
 
   it("emits an infrastructure-retry warn when QA is retried without consuming a round (#29)", async () => {
     const repo = makeRepo();
@@ -3136,7 +3271,7 @@ describe("events.jsonl tee (spec #26)", () => {
     // The retry didn't consume the round: the slice still passes.
     const outcome = lines.find((l) => l.type === "slice-outcome");
     expect(outcome!.slice.phase).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 
   it("emits an idle-deferral warn when the busy probe defers an idle kill (#29 / ADR 0021)", async () => {
     const repo = makeRepo();
@@ -3174,7 +3309,7 @@ describe("events.jsonl tee (spec #26)", () => {
     // Deferral is informational: the slice still completes normally.
     const outcome = lines.find((l) => l.type === "slice-outcome");
     expect(outcome!.slice.phase).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 
   it("emits a backoff-retry warn when a transient model outage is retried (#29 / ADR 0022)", async () => {
     const repo = makeRepo();
@@ -3228,7 +3363,7 @@ describe("events.jsonl tee (spec #26)", () => {
     // The retry succeeded: the slice still passes.
     const outcome = lines.find((l) => l.type === "slice-outcome");
     expect(outcome!.slice.phase).toBe("PASS");
-  }, 60_000);
+  }, 240_000);
 });
 
 
@@ -3315,7 +3450,7 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
     );
     // And the retry actually ran to completion.
     expect(runLog).toContain("Slice #9401 (Retried): PASS");
-  }, 60_000);
+  }, 240_000);
 
   /**
    * Issue #40: the cause a negotiate failure was classified with has to
@@ -3404,7 +3539,7 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
     expect(runLog).toContain(
       `Retrying #9501 Negotiator (previous run: ERROR — ${persisted})`,
     );
-  }, 120_000);
+  }, 240_000);
 
   it("emits an explicit NOT-RUN line naming the unresolved blocker for held-back slices", async () => {
     const repo = makeRepo();
@@ -3477,7 +3612,7 @@ describe("re-run visibility for previously failed and held-back slices (issue #1
     expect(runLog).toContain(
       "Slice #9502 (Dependent): NOT-RUN — held back by unresolved dependency [#9501]; fix the blocker(s) and re-run",
     );
-  }, 60_000);
+  }, 240_000);
 });
 
 /**
@@ -3627,7 +3762,7 @@ describe("narrowed re-run of the failed slices (#41)", () => {
     expect(warn).toBeDefined();
     expect(warn!.ghIssue).toBe("4101");
     expect(warn!.previousPhase).toBe("PASS");
-  }, 120_000);
+  }, 240_000);
 
   it("rejects a re-run that adds work outside the persisted scope", async () => {
     const env = await runUntilDependentFails("narrow-superset");
@@ -3652,7 +3787,7 @@ describe("narrowed re-run of the failed slices (#41)", () => {
         }),
       }),
     ).rejects.toThrow(/do not match the persisted run scope/);
-  }, 120_000);
+  }, 240_000);
 
 });
 

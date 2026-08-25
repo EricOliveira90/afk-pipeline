@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -36,9 +37,19 @@ import {
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 
 import {
+  ProcessTreeTerminationError,
   runHeartbeatCommand,
   withCrossProcessLock,
 } from "./command-runtime.js";
+import {
+  createCandidateCheckpoint,
+  runGates,
+  verifyGateEvidence,
+  type GateDeclaration,
+  type GateEvidence,
+  type GateEvidenceArtifact,
+  type GateResult,
+} from "./gate-runner.js";
 import {
   loadRunState,
   saveRunState,
@@ -117,7 +128,35 @@ const SLOW_AGENT_IDLE_TIMEOUT_MS = 600_000;
  * Mirrors the SLOW_AGENT_IDLE_TIMEOUT_MS precedent above. See ADR 0019.
  */
 const SLOW_AGENT_MAX_DURATION_MS = 7_200_000;
+const DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS = 7_200_000;
 
+const BASE_GATE_IDS = ["typecheck", "lint", "tests"] as const;
+
+/** Derive the policy-less base gate set shared by every agent provider. */
+export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
+  const scriptsByGate = new Map(
+    resolveSanityCommands(cwd).map((command) => {
+      const scriptName = command.slice("pnpm run ".length);
+      const gateId =
+        scriptName === "test" || scriptName === "test:run"
+          ? "tests"
+          : scriptName;
+      return [gateId, scriptName];
+    }),
+  );
+
+  return BASE_GATE_IDS.map((id) => {
+    const scriptName = scriptsByGate.get(id);
+    return {
+      id,
+      stage: "base",
+      required: scriptName != null,
+      ...(scriptName
+        ? { command: "pnpm", args: ["run", scriptName] }
+        : {}),
+    };
+  });
+}
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
   verifyMigrationCommand: string;
@@ -352,6 +391,7 @@ function featureBranch(prdSlug: string, provider: AgentProvider): string {
 }
 
 export function isCancelled(err: unknown, signal?: AbortSignal): boolean {
+  if (err instanceof ProcessTreeTerminationError) return false;
   return err instanceof CancelledError || signal?.aborted === true;
 }
 
@@ -1683,12 +1723,58 @@ export async function runQAStage(
   throw new Error(`${stage} QA exhausted without a result`);
 }
 
+function assertGateEvidenceReleasesEvaluation(
+  evidence: GateEvidence,
+  declarations: readonly GateDeclaration[],
+  treeId: string,
+): void {
+  const complete =
+    evidence.treeId === treeId &&
+    evidence.results.length === declarations.length &&
+    evidence.results.every((result, index) => {
+      const declaration = declarations[index];
+      return (
+        declaration != null &&
+        result.gateId === declaration.id &&
+        result.stage === declaration.stage &&
+        result.treeId === treeId &&
+        (!declaration.required || result.status === "PASS")
+      );
+    });
+  if (!complete) {
+    throw new Error(
+      `Gate evidence does not release evaluation for checkpoint ${treeId}`,
+    );
+  }
+}
+
+export function collectRequiredGateFailures(
+  attempts: readonly { evidence: GateEvidence; evidencePath: string }[],
+  declarations: readonly GateDeclaration[],
+): Array<{ evidencePath: string; result: GateResult }> {
+  const requiredGateIds = new Set(
+    declarations
+      .filter((declaration) => declaration.required)
+      .map((declaration) => declaration.id),
+  );
+  return attempts.flatMap(({ evidence, evidencePath }) =>
+    evidence.results
+      .filter(
+        (result) =>
+          requiredGateIds.has(result.gateId) && result.status === "FAIL",
+      )
+      .map((result) => ({ evidencePath, result })),
+  );
+}
+
 export async function runSliceExecute(
   ctx: SliceContext,
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
   const qaReports: string[] = [];
+  const repairReferences: string[] = [];
+  const gateArtifacts: GateEvidenceArtifact[] = [];
 
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
@@ -1742,7 +1828,7 @@ export async function runSliceExecute(
               SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
               TEST_COMMAND: ctx.testCommand,
               RETRY_NOTE: round > 1
-                ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${qaReports.map((path) => `- \`${path}\``).join("\n")}`
+                ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${repairReferences.map((path) => `- \`${path}\``).join("\n")}`
                 : "",
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             });
@@ -1781,74 +1867,262 @@ export async function runSliceExecute(
         }
       }
 
-      logger.phase(
-        `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
-        "error",
-        {
-          type: "phase-started",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "evaluator-qa",
-          round,
-        },
+      const checkpointDir = join(
+        config.repoRoot,
+        ".afk",
+        "checkpoints",
+        `${config.prdSlug}-s${slice.number}-r${round}-${randomUUID()}`,
       );
-      const deterministic = await runQAStage(ctx, round, "deterministic", qaReports);
-      logger.event({
-        type: "phase-ended",
-        ghIssue: slice.ghIssue,
-        sliceNumber: slice.number,
-        agent: "evaluator-qa",
-        round,
-        verdict: deterministic.outcome,
-      });
-      let implementationFailed = deterministic.outcome === "IMPLEMENTATION";
-      qaReports.push(deterministic.report);
-      if (deterministic.outcome !== "IMPLEMENTATION" && config.sharedPreview) {
+      const declarations = resolveBaseGateDeclarations(ctx.worktreeDir);
+      const checkpoint = declarations.some(
+        (declaration) => declaration.command != null,
+      )
+        ? createCandidateCheckpoint(ctx.worktreeDir, checkpointDir)
+        : createCandidateCheckpoint(ctx.worktreeDir, checkpointDir, {
+            materialize: false,
+          });
+      const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
+      const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
+      const infrastructureRetries =
+        config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
+      if (
+        !Number.isSafeInteger(infrastructureRetries) ||
+        infrastructureRetries < 0
+      ) {
+        throw new Error("infrastructureRetries must be a non-negative integer");
+      }
+      const isRequired = (gateId: string) =>
+        declarations.some(
+          (declaration) =>
+            declaration.id === gateId && declaration.required,
+        );
+      let gateEvidence: GateEvidence | undefined;
+      let gateEvidencePath = "";
+      const gateAttempts: Array<{
+        evidence: GateEvidence;
+        evidencePath: string;
+      }> = [];
+      try {
+        for (
+          let gateAttempt = 1;
+          gateAttempt <= infrastructureRetries + 1;
+          gateAttempt++
+        ) {
+          const gateRun = await runGates({
+            treeId: checkpoint.treeId,
+            cwd: gateCwd,
+            evidenceDir,
+            declarations,
+            signal,
+            inactivityTimeoutMs:
+              config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+            wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+            heartbeatIntervalMs:
+              config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+            onOutput: (_gateId, text) => process.stderr.write(text),
+          });
+          gateEvidencePath = gateRun.evidencePath;
+          gateArtifacts.push(gateRun.artifact);
+          gateEvidence = verifyGateEvidence(gateRun.artifact);
+          gateAttempts.push({
+            evidence: gateEvidence,
+            evidencePath: gateEvidencePath,
+          });
+          const evidenceArtifactId = relative(
+            config.repoRoot,
+            gateEvidencePath,
+          ).replace(/\\/g, "/");
+          for (const result of gateEvidence.results) {
+            logger.event({
+              type: "gate-outcome",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              round,
+              attemptId: gateEvidence.attemptId,
+              gateId: result.gateId,
+              stage: result.stage,
+              status: result.status,
+              failureKind: result.failureKind,
+              startedAt: result.startedAt,
+              endedAt: result.endedAt,
+              durationMs: result.durationMs,
+              exitCode: result.exitCode,
+              treeId: result.treeId,
+              evidenceArtifactId,
+              logArtifactId: result.logArtifactId,
+            });
+          }
+          const infrastructureFailure = gateEvidence.results.some(
+            (gate) =>
+              isRequired(gate.gateId) &&
+              gate.status === "INFRASTRUCTURE",
+          );
+          if (!infrastructureFailure || signal?.aborted) break;
+          if (gateAttempt <= infrastructureRetries) {
+            logger.phase(
+              `${ctx.tag}: base gates infrastructure retry ${gateAttempt}/${infrastructureRetries}`,
+              "error",
+              {
+                type: "warn",
+                reason: "infrastructure-retry",
+                ghIssue: slice.ghIssue,
+                message: `base gates infrastructure retry ${gateAttempt}/${infrastructureRetries}`,
+              },
+            );
+          }
+        }
+      } finally {
+        if (checkpoint.worktreeDir) {
+          git.removeWorktree(ctx.worktreeDir, checkpoint.worktreeDir);
+        }
+      }
+
+      if (!gateEvidence) {
+        throw new Error("Base gates produced no evidence");
+      }
+      if (signal?.aborted) {
+        return { phase: "CANCELLED", error: "Cancelled by user" };
+      }
+      const evidenceDisplayPath = gateEvidencePath.replace(/\\/g, "/");
+      const requiredInfrastructure = gateEvidence.results.filter(
+        (gate) =>
+          isRequired(gate.gateId) && gate.status === "INFRASTRUCTURE",
+      );
+      if (requiredInfrastructure.length > 0) {
+        return {
+          phase: "ERROR",
+          error: `Base gate infrastructure failed: ${requiredInfrastructure.map((gate) => gate.gateId).join(", ")} (${evidenceDisplayPath})`,
+        };
+      }
+      const requiredFailures = collectRequiredGateFailures(
+        gateAttempts,
+        declarations,
+      );
+      if (requiredFailures.length > 0) {
+        repairReferences.push(
+          ...new Set(
+            requiredFailures.map(({ evidencePath }) =>
+              evidencePath.replace(/\\/g, "/"),
+            ),
+          ),
+        );
+        repairReferences.push(
+          ...requiredFailures.map(({ result }) =>
+            join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+          ),
+        );
+        if (round < MAX_GENERATOR_ROUNDS) continue;
+      } else {
+        assertGateEvidenceReleasesEvaluation(
+          gateEvidence,
+          declarations,
+          checkpoint.treeId,
+        );
+        for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
         logger.phase(
-          `${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+          `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
           "error",
           {
             type: "phase-started",
             ghIssue: slice.ghIssue,
             sliceNumber: slice.number,
-            agent: "evaluator-uat",
+            agent: "evaluator-qa",
             round,
           },
         );
-        const remote = await runQAStage(ctx, round, "shared-preview", qaReports);
+        const deterministic = await runQAStage(
+          ctx,
+          round,
+          "deterministic",
+          qaReports,
+        );
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
           sliceNumber: slice.number,
-          agent: "evaluator-uat",
+          agent: "evaluator-qa",
           round,
-          verdict: remote.outcome,
+          verdict: deterministic.outcome,
         });
-        qaReports.push(remote.report);
-        if (remote.outcome === "IMPLEMENTATION") {
-          implementationFailed = true;
-        }
-      }
-
-      logger.bumpEvalRound(slice.ghIssue, round);
-      if (!implementationFailed) {
-        if (git.hasUncommittedChanges(ctx.worktreeDir)) {
-          git.commitAll(ctx.worktreeDir, `feat(#${slice.ghIssue}): ${slice.title}`);
-        }
-
-        const migrationMode = config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
-        if (!config.sharedPreview && migrationMode !== "skip" && sliceTouchedMigrations(ctx.worktreeDir, featBranch)) {
-          const migrationCheck = verifyMigrationSync(ctx.worktreeDir, migrationMode);
-          if (!migrationCheck.ok) {
-            return {
-              phase: "STUCK",
-              error: `Migration sync check failed: ${migrationCheck.error}`,
-            };
+        let implementationFailed =
+          deterministic.outcome === "IMPLEMENTATION";
+        qaReports.push(deterministic.report);
+        repairReferences.push(deterministic.report);
+        if (
+          deterministic.outcome !== "IMPLEMENTATION" &&
+          config.sharedPreview
+        ) {
+          logger.phase(
+            `${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+            "error",
+            {
+              type: "phase-started",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              agent: "evaluator-uat",
+              round,
+            },
+          );
+          const remote = await runQAStage(
+            ctx,
+            round,
+            "shared-preview",
+            qaReports,
+          );
+          logger.event({
+            type: "phase-ended",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "evaluator-uat",
+            round,
+            verdict: remote.outcome,
+          });
+          qaReports.push(remote.report);
+          repairReferences.push(remote.report);
+          if (remote.outcome === "IMPLEMENTATION") {
+            implementationFailed = true;
           }
         }
 
-        logger.phase(`${ctx.tag}: deterministic QA and configured UAT pass — committed`);
-        return { phase: "PASS" };
+        logger.bumpEvalRound(slice.ghIssue, round);
+        if (!implementationFailed) {
+          for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+          assertGateEvidenceReleasesEvaluation(
+            verifyGateEvidence(gateArtifacts.at(-1)!),
+            declarations,
+            checkpoint.treeId,
+          );
+          if (git.hasUncommittedChanges(ctx.worktreeDir)) {
+            git.commitAll(
+              ctx.worktreeDir,
+              `feat(#${slice.ghIssue}): ${slice.title}`,
+            );
+          }
+
+          const migrationMode =
+            config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
+          if (
+            !config.sharedPreview &&
+            migrationMode !== "skip" &&
+            sliceTouchedMigrations(ctx.worktreeDir, featBranch)
+          ) {
+            const migrationCheck = verifyMigrationSync(
+              ctx.worktreeDir,
+              migrationMode,
+            );
+            if (!migrationCheck.ok) {
+              return {
+                phase: "STUCK",
+                error: `Migration sync check failed: ${migrationCheck.error}`,
+              };
+            }
+          }
+
+          logger.phase(
+            `${ctx.tag}: deterministic QA and configured UAT pass — committed`,
+          );
+          return { phase: "PASS" };
+        }
       }
 
       if (round === MAX_GENERATOR_ROUNDS) {
@@ -1863,7 +2137,9 @@ export async function runSliceExecute(
           role: "generator-stuck",
           prompt: renderPrompt("generator-stuck", {
             SLICE_DIR: ctx.relSliceDir,
-            QA_REPORTS: qaReports.map((path) => `- \`${path}\``).join("\n"),
+            QA_REPORTS: repairReferences
+              .map((path) => `- \`${path}\``)
+              .join("\n"),
           }),
           cwd: ctx.worktreeDir,
           logStream: stuckLog,
