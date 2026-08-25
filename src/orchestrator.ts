@@ -90,6 +90,7 @@ import {
   migrationClaimFor,
   releaseUnmergedMigrationClaims,
 } from "./migration-claims.js";
+import { loadAcceptanceManifest } from "./acceptance-manifest.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -1283,6 +1284,7 @@ async function negotiateAttempt(
     let allowedContractRounds = maxContractRounds;
     let extensionGranted = false;
     let previousMetrics: artifacts.EvaluatorFeedbackMetrics | null = null;
+    let evaluatorRound = 0;
     let lastRound = 0;
     let lastVerdict: artifacts.EvaluatorVerdict = "UNKNOWN";
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
@@ -1333,10 +1335,10 @@ async function negotiateAttempt(
      * takes the lead: it is a concrete, mechanical correction, and the
      * evaluator feedback it supersedes said ACCEPT.
      */
-    const revisionNote = (round: number, objection: string | null): string => {
+    const revisionNote = (objection: string | null): string => {
       const priorFeedback =
-        round > 1
-          ? `${ctx.relSliceDir}/feedback-r${round - 1}.md`
+        evaluatorRound > 0
+          ? `${ctx.relSliceDir}/feedback-r${evaluatorRound}.md`
           : null;
       if (objection === null) {
         return priorFeedback
@@ -1391,7 +1393,7 @@ async function negotiateAttempt(
               ROUND: round,
               RELEVANT_FILES: relevantFilesBlock,
               SLICE_BODY: sliceBodyNote,
-              REVISION_NOTE: revisionNote(round, pendingObjection),
+              REVISION_NOTE: revisionNote(pendingObjection),
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             }),
             cwd: ctx.worktreeDir,
@@ -1407,6 +1409,58 @@ async function negotiateAttempt(
           round,
         });
 
+        try {
+          loadAcceptanceManifest(ctx.absSliceDir);
+        } catch (error) {
+          const objection =
+            error instanceof Error ? error.message : String(error);
+          gateObjection = objection;
+          contractStatus = artifacts.readContractStatus(contractPath);
+          if (contractStatus === "LOCKED") {
+            artifacts.reopenContract(contractPath);
+            contractStatus = "NEGOTIATING";
+          }
+          lastRound = round;
+          lastVerdict = "UNKNOWN";
+          capDecisions.push(
+            `The acceptance-manifest scope gate refused planner round ${round}: ${objection}`,
+          );
+          logger.phase(
+            `${ctx.tag}: contract lock refused before evaluation — ${objection}`,
+            "error",
+            {
+              type: "warn",
+              reason: "contract-lock-refused",
+              ghIssue: slice.ghIssue,
+              message: objection,
+            },
+          );
+          if (round < allowedContractRounds) continue;
+
+          const reason =
+            "the acceptance-manifest scope gate refused the final planner round";
+          capDecisions.push(`Extension refused: ${reason}.`);
+          logger.phase(
+            `${ctx.tag}: contract round extension refused: ${reason}`,
+          );
+          logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+          preserveContractNegotiationFailure(
+            ctx,
+            "ESCALATE",
+            round,
+            "UNKNOWN",
+            lastFeedbackPath,
+            capDecisions.join(" "),
+          );
+          const cause = negotiateVerdictCause({
+            outcome: "ESCALATE",
+            verdict: "UNKNOWN",
+            round,
+          });
+          return { phase: "ESCALATE", cause };
+        }
+
+        evaluatorRound++;
         logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
           "error",
@@ -1415,27 +1469,35 @@ async function negotiateAttempt(
             ghIssue: slice.ghIssue,
             sliceNumber: slice.number,
             agent: "evaluator-contract",
-            round,
+            round: evaluatorRound,
           },
         );
-        const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
+        const feedbackPath = join(
+          ctx.absSliceDir,
+          `feedback-r${evaluatorRound}.md`,
+        );
         await invokeAgent(
           {
             role: "evaluator-contract",
             prompt: renderPrompt("evaluator-contract", {
               SPECS_DIR: ctx.relSpecsDir,
               SLICE_DIR: ctx.relSliceDir,
-              ROUND: round,
+              ROUND: evaluatorRound,
               RELEVANT_FILES: relevantFilesBlock,
               PREVIOUS_FEEDBACK_NOTE:
-                round > 1
-                  ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
+                evaluatorRound > 1
+                  ? `Read ${ctx.relSliceDir}/feedback-r${evaluatorRound - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
                   : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
-          () => logger.agentLog(slice.number, "evaluator-contract", round),
+          () =>
+            logger.agentLog(
+              slice.number,
+              "evaluator-contract",
+              evaluatorRound,
+            ),
           () => rmSync(feedbackPath, { force: true }),
         );
 
@@ -1456,7 +1518,7 @@ async function negotiateAttempt(
             ghIssue: slice.ghIssue,
             sliceNumber: slice.number,
             agent: "evaluator-contract",
-            round,
+            round: evaluatorRound,
             verdict,
           },
         );

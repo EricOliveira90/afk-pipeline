@@ -679,6 +679,24 @@ function writePrdFixture(repoDir: string, slug: string): { prdDir: string; specs
   return { prdDir, specsDir };
 }
 
+function writeAcceptanceManifest(
+  artifactDir: string,
+  paths: string[] = ["src/example.ts"],
+): void {
+  const migrationCount = paths.filter((path) =>
+    /(^|[\\/])migrations[\\/].*\.sql$/i.test(path),
+  ).length;
+  const fileScope =
+    paths.length > 0
+      ? { kind: "paths", paths }
+      : { kind: "no-repository-changes" };
+  writeFileSync(
+    join(artifactDir, "acceptance-manifest.json"),
+    JSON.stringify({ version: 1, fileScope, migrationCount }),
+    "utf-8",
+  );
+}
+
 /**
  * Extract the slice's gh issue id from a worktree path. Worktrees live
  * at `.afk/worktrees/<prefix>-<prd-slug>-s<NN>/` (truncated form, see
@@ -738,6 +756,7 @@ function buildStubProvider(opts: {
           `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
+        writeAcceptanceManifest(sliceArtifactDir, fixture.files);
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
@@ -1636,6 +1655,139 @@ describe("runPipeline summary report", () => {
 
 /** Round feedback must stay separate from the contract specification. */
 describe("round-scoped contract feedback", () => {
+  it.each([
+    ["missing file", null, /acceptance-manifest\.json is missing/],
+    ["malformed JSON", "{", /not valid JSON/],
+    [
+      "empty paths",
+      { version: 1, fileScope: { kind: "paths", paths: [] }, migrationCount: 0 },
+      /non-empty paths/,
+    ],
+    [
+      "placeholder path",
+      { version: 1, fileScope: { kind: "paths", paths: ["<unknown>"] }, migrationCount: 0 },
+      /placeholder/,
+    ],
+    [
+      "parent traversal",
+      { version: 1, fileScope: { kind: "paths", paths: ["../outside.ts"] }, migrationCount: 0 },
+      /repo-relative/,
+    ],
+    [
+      "absolute path",
+      { version: 1, fileScope: { kind: "paths", paths: ["/outside.ts"] }, migrationCount: 0 },
+      /repo-relative/,
+    ],
+    [
+      "unknown version",
+      { version: 2, fileScope: { kind: "paths", paths: ["src/a.ts"] }, migrationCount: 0 },
+      /version 1/,
+    ],
+    [
+      "negative migration count",
+      { version: 1, fileScope: { kind: "paths", paths: ["src/a.ts"] }, migrationCount: -1 },
+      /non-negative safe integer/,
+    ],
+    [
+      "fractional migration count",
+      { version: 1, fileScope: { kind: "paths", paths: ["src/a.ts"] }, migrationCount: 1.5 },
+      /non-negative safe integer/,
+    ],
+    [
+      "unsafe migration count",
+      {
+        version: 1,
+        fileScope: { kind: "paths", paths: ["src/a.ts"] },
+        migrationCount: 9_007_199_254_740_992,
+      },
+      /non-negative safe integer/,
+    ],
+    [
+      "migration in no-change scope",
+      {
+        version: 1,
+        fileScope: { kind: "no-repository-changes" },
+        migrationCount: 1,
+      },
+      /migrationCount 0/,
+    ],
+  ])(
+    "refuses %s before evaluator invocation",
+    async (_name, manifest, expectedDefect) => {
+      const repo = makeRepo();
+      const slug = "invalid-acceptance-manifest";
+      const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      const slice: Slice = {
+        number: "01",
+        ghIssue: "9000",
+        title: "Manifest refusal",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      };
+      const plannerPrompts: string[] = [];
+      let plannerRounds = 0;
+      let evaluatorRounds = 0;
+      const provider: AgentProvider = {
+        name: "stub",
+        async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+          const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+          if (!artifactDir) throw new Error("slice artifact directory missing");
+          if (opts.role === "explorer") {
+            writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          } else if (opts.role === "planner") {
+            plannerRounds++;
+            plannerPrompts.push(opts.prompt);
+            writeFileSync(
+              join(artifactDir, "contract.md"),
+              "# Contract\n\n**Status:** NEGOTIATING\n",
+              "utf-8",
+            );
+            if (manifest !== null) {
+              writeFileSync(
+                join(artifactDir, "acceptance-manifest.json"),
+                typeof manifest === "string" ? manifest : JSON.stringify(manifest),
+                "utf-8",
+              );
+            }
+          } else if (opts.role === "evaluator-contract") {
+            evaluatorRounds++;
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+      const dag = buildDAG([slice]);
+      const featBranch = `feat-stub/${slug}`;
+      git(repo, ["branch", featBranch]);
+      const logger = new Logger(repo, `${slug}-stub`);
+      const ctx = makeSliceContext(
+        {
+          repoRoot: repo,
+          prdSlug: slug,
+          prdDir,
+          specsDir,
+          dag,
+          provider,
+          maxContractRounds: 2,
+        },
+        slice,
+        logger,
+        featBranch,
+        "- README.md",
+        "pnpm test",
+      );
+
+      const outcome = await runSliceNegotiate(ctx);
+
+      expect(outcome.phase).toBe("ESCALATE");
+      expect(plannerRounds).toBe(2);
+      expect(evaluatorRounds).toBe(0);
+      expect(plannerPrompts[1]).toMatch(expectedDefect);
+      expect(plannerPrompts[1]).not.toContain("feedback-r1.md");
+      expect(existsSync(join(ctx.absSliceDir, "feedback-r1.md"))).toBe(false);
+    },
+  );
+
   it("advances after REVISE using only the previous feedback file", async () => {
     const repo = makeRepo();
     const slug = "feedback-rounds";
@@ -1683,6 +1835,7 @@ describe("round-scoped contract feedback", () => {
             ].join("\n"),
             "utf-8",
           );
+          writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
@@ -1756,6 +1909,7 @@ describe("round-scoped contract feedback", () => {
             "# Contract\n\n**Status:** NEGOTIATING\n",
             "utf-8",
           );
+          writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           const verdict = evaluatorRounds === 3 ? "ACCEPT" : "REVISE";
@@ -1828,6 +1982,7 @@ describe("round-scoped contract feedback", () => {
             "# Contract\n\n**Status:** NEGOTIATING\n",
             "utf-8",
           );
+          writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
           writeFileSync(
             join(artifactDir, "feedback-r1.md"),
@@ -1947,6 +2102,7 @@ describe("orchestrator-owned contract status", () => {
             ].join("\n"),
             "utf-8",
           );
+          writeAcceptanceManifest(sliceArtifactDir, ["src/foo.txt"]);
           records.push({
             role: opts.role,
             cwd: opts.cwd,

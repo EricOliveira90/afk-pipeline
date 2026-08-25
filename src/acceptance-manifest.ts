@@ -58,7 +58,7 @@ function normalizePath(raw: unknown, source: string): string {
 
 export function parseAcceptanceManifest(
   value: string | unknown,
-  source = "acceptance-manifest.json",
+  source = ACCEPTANCE_MANIFEST_FILENAME,
 ): AcceptanceManifest {
   let manifest: unknown;
   try {
@@ -136,3 +136,15 @@ export function parseAcceptanceManifest(
     migrationCount,
   };
 }
+
+export function loadAcceptanceManifest(sliceDir: string): AcceptanceManifest {
+  const path = join(sliceDir, ACCEPTANCE_MANIFEST_FILENAME);
+  if (!existsSync(path)) {
+    throw new Error(`${path} is missing`);
+  }
+  return parseAcceptanceManifest(readFileSync(path, "utf-8"), path);
+}
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export const ACCEPTANCE_MANIFEST_FILENAME = "acceptance-manifest.json";
