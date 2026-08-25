@@ -62,6 +62,7 @@ export function runInvocation(
     idleWarningIntervalMs = DEFAULT_IDLE_WARNING_INTERVAL_MS,
     maxToolCalls,
     maxDurationMs = DEFAULT_MAX_DURATION_MS,
+    deferIdleKillWhenBusy = false,
     signal,
     onIdleWarning,
     onIdleDeferral,
@@ -115,7 +116,12 @@ export function runInvocation(
     let termination: Promise<TerminationReport> | undefined;
     let watcher: IdleWatcher | undefined;
     let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
-    const busyProbe = createBusyProbe(proc.pid);
+    // The busy probe is role-scoped (ADR 0037): only invocations
+    // expected to run long commands opt in. Without it the idle
+    // timeout kills unconditionally.
+    const busyProbe = deferIdleKillWhenBusy
+      ? createBusyProbe(proc.pid)
+      : undefined;
     let busyDescendants = 0;
 
     const settle = (finish: () => void) => {
@@ -189,21 +195,25 @@ export function runInvocation(
         stopProcess();
       },
       onWarning: onIdleWarning,
-      shouldDefer: async () => {
-        busyDescendants = await busyProbe.check();
-        return busyDescendants > 0;
-      },
-      onDefer: () => {
-        logStream?.write(
-          `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
-            `${busyDescendants} spawned process(es) still running — ` +
-            `deferring idle kill (wall-clock ceiling still applies)\n`,
-        );
-        onIdleDeferral?.({
-          silentSeconds: idleTimeoutMs / 1000,
-          busyProcesses: busyDescendants,
-        });
-      },
+      ...(busyProbe
+        ? {
+            shouldDefer: async () => {
+              busyDescendants = await busyProbe.check();
+              return busyDescendants > 0;
+            },
+            onDefer: () => {
+              logStream?.write(
+                `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s but ` +
+                  `${busyDescendants} spawned process(es) still running — ` +
+                  `deferring idle kill (wall-clock ceiling still applies)\n`,
+              );
+              onIdleDeferral?.({
+                silentSeconds: idleTimeoutMs / 1000,
+                busyProcesses: busyDescendants,
+              });
+            },
+          }
+        : {}),
     });
 
     signal?.addEventListener("abort", onAbort, { once: true });

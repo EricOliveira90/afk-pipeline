@@ -1653,6 +1653,9 @@ export async function runQAStage(
         idleTimeoutMs: commandTimeoutMs,
         idleWarningIntervalMs: heartbeatIntervalMs,
         maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
+        // QA legitimately runs the full suite with piped output —
+        // deferral is earned here. See ADR 0037.
+        deferIdleKillWhenBusy: true,
       }).finally(() => closeAgentLog(evalLog));
     };
 
@@ -1843,6 +1846,9 @@ export async function runSliceExecute(
         idleTimeoutMs: timeoutMs,
         idleWarningIntervalMs: heartbeatMs,
         maxDurationMs: config.maxAgentDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
+        // Generators run TDD loops against real test suites — the one
+        // role deferral was built for. See ADR 0021 and ADR 0037.
+        deferIdleKillWhenBusy: true,
       }).finally(() => closeAgentLog(genLog));
       logger.event({
         type: "phase-ended",

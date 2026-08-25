@@ -160,6 +160,7 @@ describe("invocation runtime lifecycle", () => {
     const logged: string[] = [];
     busyCheckMock.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
     const promise = start(proc, {
+      deferIdleKillWhenBusy: true,
       onIdleDeferral,
       logStream: { write: (text: string) => logged.push(text) },
     });
@@ -177,6 +178,25 @@ describe("invocation runtime lifecycle", () => {
     expect(terminateMock).toHaveBeenCalledTimes(1);
     emitExit(proc, null);
     await rejection;
+  });
+
+  it("kills at the idle timeout without deferral when the role has not opted in", async () => {
+    const proc = makeFakeProc();
+    const onIdleDeferral = vi.fn();
+    // Even a busy tree must not defer: the probe is role-scoped
+    // (ADR 0037) and this invocation never opted in.
+    busyCheckMock.mockResolvedValue(5);
+    const promise = start(proc, { onIdleDeferral });
+    const rejection = promise.catch((error: unknown) => error as Error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(terminateMock).toHaveBeenCalledTimes(1);
+    expect(busyCheckMock).not.toHaveBeenCalled();
+    expect(onIdleDeferral).not.toHaveBeenCalled();
+    emitExit(proc, null);
+    await expect(rejection).resolves.toMatchObject({
+      message: "Agent generator idle for 1s — killed",
+    });
   });
 
   it("enforces the wall-clock ceiling despite steady activity", async () => {
@@ -348,7 +368,10 @@ describe("invocation runtime lifecycle", () => {
   it("does not let busy deferral extend the wall-clock ceiling", async () => {
     const proc = makeFakeProc();
     busyCheckMock.mockResolvedValue(3);
-    const promise = start(proc, { maxDurationMs: 1_500 });
+    const promise = start(proc, {
+      deferIdleKillWhenBusy: true,
+      maxDurationMs: 1_500,
+    });
     const rejection = promise.catch((error: unknown) => error as Error);
 
     await vi.advanceTimersByTimeAsync(1_000);

@@ -77,6 +77,17 @@ export interface InvokeOptions {
   /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */
   onIdleWarning?: (minutes: number) => void;
   /**
+   * Allow the busy probe (ADR 0021) to defer idle kills while live
+   * spawned processes are found in the agent's tree. Opt-in per role:
+   * the orchestrator sets it only for roles expected to shell out to
+   * long-running commands (generator, evaluator-qa). Roles that have
+   * no business running a test suite (explorer, planner,
+   * evaluator-contract, guardians) hit the plain idle timeout instead
+   * of being kept alive by their own spawned processes. Default:
+   * false. See ADR 0037.
+   */
+  deferIdleKillWhenBusy?: boolean;
+  /**
    * Called when an idle kill is deferred because the busy probe found
    * live spawned processes in the agent's tree (ADR 0021). The
    * orchestrator tees this into the structured event stream; the

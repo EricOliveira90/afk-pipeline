@@ -118,17 +118,21 @@ automatically; narrowing is an explicit operator choice)
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
 process produces no stdout (default: every 60s). Distinct from the
-**idle timeout** — the 10-minute hard kill. Warnings make long-running
+**idle timeout** — the hard kill. Warnings make long-running
 invocations legible in slice logs and run-summary.md.
 _Avoid_: "heartbeat" (implies the agent emits it), "liveness ping"
 
 **Idle timeout**:
-The hard-kill threshold (default: 10 minutes) for an agent invocation
-producing no stdout. Reached only after many **idle warnings**. For the
-Kiro provider, "producing stdout" means meaningful output — decorative
-terminal animation (spinner frames) is filtered out of the liveness
-signal. See ADR 0016. The kill is deferred while the **busy probe**
-reports a live spawned process. See ADR 0021.
+The hard-kill threshold for an agent invocation producing no stdout.
+Default: 3 minutes; the orchestrator passes 10 minutes (or
+`--command-timeout-ms`) for generator and evaluator-qa, whose test
+suites legitimately go quiet longer. Reached only after several **idle
+warnings**. For the Kiro provider, "producing stdout" means meaningful
+output — decorative terminal animation (spinner frames) is filtered out
+of the liveness signal. See ADR 0016. For generator and evaluator-qa
+only, the kill is deferred while the **busy probe** reports a live
+spawned process; every other role is killed at the timeout regardless.
+See ADR 0021 and ADR 0037.
 
 **Busy probe**:
 A process-level check consulted when the idle timeout fires: it
@@ -136,7 +140,9 @@ compares the agent's live process tree against a baseline snapshot
 taken shortly after spawn. Fresh descendants mean the agent is silently
 running a command (typically a test suite), and the idle kill is
 deferred — the **wall-clock ceiling** still bounds the invocation.
-See ADR 0021.
+Opt-in per invocation (`deferIdleKillWhenBusy`); the orchestrator
+enables it only for generator and evaluator-qa, the roles expected to
+run long commands. See ADR 0021 and ADR 0037.
 _Avoid_: "liveness probe" (liveness is the output-based signal)
 
 **Wall-clock ceiling**:
