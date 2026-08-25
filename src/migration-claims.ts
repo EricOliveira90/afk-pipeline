@@ -1,9 +1,11 @@
-import { readFileSync } from "node:fs";
-import { posix } from "node:path";
+import { dirname, posix } from "node:path";
 import type { AfkManifest } from "./afk-manifest.js";
-import * as artifacts from "./artifacts.js";
 import * as git from "./git.js";
 import { migrationPathsIn, type LaneResourceOptions } from "./lanes.js";
+import {
+  acceptanceManifestPaths,
+  loadAcceptanceManifest,
+} from "./acceptance-manifest.js";
 import {
   loadRunState,
   saveRunState,
@@ -12,35 +14,6 @@ import {
   type MigrationClaimState,
   type RunState,
 } from "./run-state.js";
-
-const MIGRATION_REQUIREMENTS_HEADING = /^##\s+Migration requirements\s*$/im;
-const MIGRATION_COUNT = /^\s*[-*]\s+New migration files:\s*(\d+)\s*$/im;
-
-/**
- * Planner-facing objection for a contract that omits the section the
- * claim flow starts from (ADR 0034 step 1). One string, because two
- * gates raise it: contract-lock (`claimContractMigrations`) when there
- * is no count to claim against, and contract validation
- * (`validateContractMigrationClaim`) when re-checking a locked contract.
- */
-export const MISSING_MIGRATION_REQUIREMENTS_OBJECTION =
-  'Add a "## Migration requirements" section containing exactly ' +
-  '"- New migration files: <count>". Use 0 when this slice creates none.';
-
-export function readContractMigrationCount(
-  contractPath: string,
-): number | null {
-  const content = readFileSync(contractPath, "utf-8");
-  const heading = MIGRATION_REQUIREMENTS_HEADING.exec(content);
-  if (!heading) return null;
-  const rest = content.slice(heading.index + heading[0].length);
-  const nextHeading = rest.search(/^##\s+/m);
-  const section = nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
-  const count = MIGRATION_COUNT.exec(section);
-  if (!count) return null;
-  const parsed = Number(count[1]);
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
 
 export function migrationPrefixOf(path: string): string | null {
   const match = /^(\d+)_/.exec(posix.basename(path.replace(/\\/g, "/")));
@@ -164,8 +137,9 @@ function contractMigrationPaths(
   contractPath: string,
   options?: LaneResourceOptions,
 ): string[] {
+  const manifest = loadAcceptanceManifest(dirname(contractPath));
   return migrationPathsIn(
-    artifacts.readContractFiles(contractPath) ?? [],
+    acceptanceManifestPaths(manifest),
     options,
   );
 }
@@ -175,14 +149,12 @@ export function validateContractMigrationClaim(args: {
   claim: readonly string[];
   options?: LaneResourceOptions;
 }): string | null {
-  const count = readContractMigrationCount(args.contractPath);
-  if (count === null) {
-    return MISSING_MIGRATION_REQUIREMENTS_OBJECTION;
-  }
+  const manifest = loadAcceptanceManifest(dirname(args.contractPath));
+  const count = manifest.migrationCount;
   if (count !== args.claim.length) {
     return (
-      `The contract declares ${count} new migration file(s), but slice ownership is ` +
-      `${args.claim.length}. Keep the declared count at ${args.claim.length}.`
+      `The acceptance manifest declares ${count} new migration file(s), but slice ` +
+      `ownership is ${args.claim.length}. Keep migrationCount at ${args.claim.length}.`
     );
   }
 
@@ -190,7 +162,7 @@ export function validateContractMigrationClaim(args: {
   const prefixes = paths.map(migrationPrefixOf);
   if (paths.length !== count || prefixes.some((prefix) => prefix === null)) {
     return (
-      `List exactly ${count} new migration path(s) under "Files expected to change", ` +
+      `Declare exactly ${count} new migration path(s) in acceptance-manifest.json, ` +
       `using the assigned prefix${args.claim.length === 1 ? "" : "es"} ` +
       `${args.claim.join(", ") || "(none)"}.`
     );
@@ -289,8 +261,8 @@ export function releaseUnmergedMigrationClaims(
 
 /**
  * Contract-lock half of the claim flow (ADR 0034 steps 1–3): read the
- * contract's declared migration count, claim that many prefixes from
- * the reserved pool, and validate the contract against the claim.
+ * acceptance manifest's migration count, claim that many prefixes from
+ * the reserved pool, and validate its paths against the claim.
  * Returns the planner-facing objection, or `null` when the contract
  * satisfies its claim.
  */
@@ -302,8 +274,9 @@ export function claimContractMigrations(args: {
   expectedPool: readonly string[];
   options?: LaneResourceOptions;
 }): string | null {
-  const count = readContractMigrationCount(args.contractPath);
-  if (count === null) return MISSING_MIGRATION_REQUIREMENTS_OBJECTION;
+  const count = loadAcceptanceManifest(
+    dirname(args.contractPath),
+  ).migrationCount;
   const claim = claimMigrationPrefixes({
     repoRoot: args.repoRoot,
     runSlug: args.runSlug,

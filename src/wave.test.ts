@@ -1236,8 +1236,20 @@ describe("runWave — migration lane grouping", () => {
     const first = "supabase/migrations/20240101000000_first.sql";
     const second = "db/migrations/20240202000000_second.sql";
     const fixtures = new Map<string, SliceFixture>([
-      ["1001", { files: [first], qaPasses: true, outputFile: first, outputContent: "-- first" }],
-      ["1002", { files: [second], qaPasses: true, outputFile: second, outputContent: "-- second" }],
+      ["1001", {
+        files: ["src/first-prose.ts"],
+        manifestFiles: [first],
+        qaPasses: true,
+        outputFile: first,
+        outputContent: "-- first",
+      }],
+      ["1002", {
+        files: ["src/second-prose.ts"],
+        manifestFiles: [second],
+        qaPasses: true,
+        outputFile: second,
+        outputContent: "-- second",
+      }],
     ]);
     const { config, dag, logger, featBranch, provider } = setupWave(
       repo,
@@ -1604,14 +1616,22 @@ describe("runWave — contract-lock migration prefix gate", () => {
    */
   function buildPlannerProvider(opts: {
     slices: Slice[];
-    /** Migration path this slice's planner declares on the given round. */
+    /** Prose path this slice's planner declares on the given round. */
     pathForRound: (ghIssue: string, round: number) => string;
+    /** Machine path; defaults to the prose path. */
+    manifestPathForRound?: (ghIssue: string, round: number) => string;
     /** Overrides what the generator writes; defaults to the declared path. */
     generatorPath?: (ghIssue: string) => string;
     /** Every planner prompt, in invocation order. */
     plannerPrompts?: string[];
   }): AgentProvider {
-    const { slices, pathForRound, generatorPath, plannerPrompts } = opts;
+    const {
+      slices,
+      pathForRound,
+      manifestPathForRound,
+      generatorPath,
+      plannerPrompts,
+    } = opts;
     const plannerRounds = new Map<string, number>();
     const declaredNow = new Map<string, string>();
 
@@ -1631,12 +1651,15 @@ describe("runWave — contract-lock migration prefix gate", () => {
           plannerRounds.set(ghIssue, round);
           plannerPrompts?.push(prompt);
           const path = pathForRound(ghIssue, round);
+          const manifestPath =
+            manifestPathForRound?.(ghIssue, round) ?? path;
           declaredNow.set(ghIssue, path);
           writeFileSync(
             join(dir, "contract.md"),
             `# Slice Contract\n\n**Status:** NEGOTIATING\n\n## Files expected to change\n- ${path}\n`,
             "utf-8",
           );
+          writeAcceptanceManifest(dir, [manifestPath]);
         } else if (role === "evaluator-contract" && dir) {
           // Always ACCEPT. The evaluator has no idea what is on the
           // feature branch, which is exactly why the gate has to exist.
@@ -1708,6 +1731,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
             ].join("\n"),
             "utf-8",
           );
+          writeAcceptanceManifest(dir, [path]);
         } else if (role === "evaluator-contract" && dir) {
           const round = plannerRounds.get(ghIssue) ?? 1;
           writeFileSync(
@@ -1857,6 +1881,50 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(
       existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
     ).toBe(false);
+  }, 240_000);
+
+  it("uses acceptance-manifest paths for legacy migration collision checks", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2002", title: "Machine-declared migration", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-manifest-source",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    addMigrationToFeatBranch(
+      repo,
+      featBranch,
+      "db/migrations/003_users.sql",
+    );
+    config.maxContractRounds = 2;
+
+    const plannerPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      pathForRound: () => "src/prose-only.ts",
+      manifestPathForRound: () => "db/migrations/003_orders.sql",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2002"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("2002")?.phase).toBe("ESCALATE");
+    expect(plannerPrompts).toHaveLength(2);
+    expect(plannerPrompts[1]).toContain("003");
+    expect(existsSync(join(repo, "src", "prose-only.ts"))).toBe(false);
   }, 240_000);
 
   it("does not flag a contract re-touching a migration it already owns", async () => {

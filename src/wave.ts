@@ -1,9 +1,8 @@
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import type { AgentProvider } from "./agent-provider.js";
-import * as artifacts from "./artifacts.js";
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import {
   laneResourceGroups,
@@ -86,17 +85,17 @@ export function executionLanes(
 /**
  * The wave's contract-lock migration gate (ADR 0028).
  *
- * A contract names its migration file at lock time, seconds after the
- * planner drafts it. If that filename's numeric prefix already exists on
- * the feature branch under a different name, the merge mutex will refuse
- * the merge — but not until the slice has explored, planned, generated,
- * and passed QA. In the PRD 076 session that was four hours and seven
- * commits, thrown away over a filename.
+ * The acceptance manifest names migration files at lock time. If a
+ * filename's numeric prefix already exists on the feature branch under a
+ * different name, the merge mutex will refuse the merge — but not until
+ * the slice has explored, planned, generated, and passed QA. In the PRD
+ * 076 session that was four hours and seven commits, thrown away over a
+ * filename.
  *
- * So the wave inspects the locked contract's "Files expected to change"
- * list the moment it locks, and refuses a lock that collides. The
- * objection names the colliding prefix and the next free one, so the
- * planner has a mechanical correction to make rather than a puzzle.
+ * So the wave inspects the validated manifest paths the moment the
+ * contract locks, and refuses a lock that collides. The objection names
+ * the colliding prefix and the next free one, so the planner has a
+ * mechanical correction to make rather than a puzzle.
  *
  * This does not replace the merge-mutex check, which is unchanged and
  * remains the authority: only a check atomic with the merge itself can
@@ -132,10 +131,10 @@ function migrationPrefixGate(
       });
     }
 
-    const declared = artifacts.readContractFiles(contractPath);
-    // `undefined` (no such section) and `[]` (nothing usable declared)
-    // both mean the contract names no migration to check.
-    if (declared === undefined || declared.length === 0) return null;
+    const declared = acceptanceManifestPaths(
+      loadAcceptanceManifest(dirname(contractPath)),
+    );
+    if (declared.length === 0) return null;
     const declaredMigrations = migrationPathsIn(declared, laneOptions);
     if (declaredMigrations.length === 0) return null;
 
@@ -158,7 +157,8 @@ function migrationPrefixGate(
       `${subject} on ${featBranch} under a different filename, so this slice's ` +
       `migration(s) cannot be merged. The next free prefix on ${featBranch} is ${free}. ` +
       `Renumber this slice's colliding migration file(s) from ${free} upwards, keeping the ` +
-      `rest of each filename, and list the corrected path(s) under "Files expected to change".`
+      `rest of each filename, declare the corrected path(s) in acceptance-manifest.json, ` +
+      `and keep the contract's human-readable file list in sync.`
     );
   };
 }
