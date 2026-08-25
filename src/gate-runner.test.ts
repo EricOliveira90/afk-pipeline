@@ -34,6 +34,9 @@ function makeCheckpoint(
   const cwd = join(root, "checkpoint");
   mkdirSync(cwd);
   git(cwd, ["init", "--initial-branch=main"]);
+  const hooksDir = join(cwd, ".git", "test-hooks");
+  mkdirSync(hooksDir);
+  git(cwd, ["config", "core.hooksPath", hooksDir]);
   git(cwd, ["config", "user.email", "test@example.com"]);
   git(cwd, ["config", "user.name", "Test"]);
   for (const [name, content] of Object.entries(files)) {

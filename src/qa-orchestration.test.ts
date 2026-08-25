@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -79,6 +80,9 @@ function makeRepo(): string {
   const repo = mkdtempSync(join(tmpdir(), "afk-qa-070-"));
   dirs.push(repo);
   git(repo, ["init", "--initial-branch=main"]);
+  const hooksDir = join(repo, ".git", "test-hooks");
+  mkdirSync(hooksDir);
+  git(repo, ["config", "core.hooksPath", hooksDir]);
   git(repo, ["config", "user.email", "test@example.com"]);
   git(repo, ["config", "user.name", "Test"]);
   writeFileSync(join(repo, "README.md"), "fixture\n", "utf-8");
@@ -138,6 +142,49 @@ function makeContext(
     invoke: (options) => provider.invoke(options),
   };
 }
+
+describe("temporary repository isolation", () => {
+  it("does not run machine-global Git hooks", () => {
+    const hookRoot = mkdtempSync(join(tmpdir(), "afk-global-hook-"));
+    dirs.push(hookRoot);
+    const hooksDir = join(hookRoot, "hooks");
+    const markerPath = join(hookRoot, "hook-ran.txt");
+    const globalConfigPath = join(hookRoot, "gitconfig");
+    mkdirSync(hooksDir);
+    const hookPath = join(hooksDir, "post-commit");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\nprintf hook-ran > "${markerPath.replace(/\\/g, "/")}"\n`,
+      "utf-8",
+    );
+    chmodSync(hookPath, 0o755);
+    execFileSync(
+      "git",
+      [
+        "config",
+        "--file",
+        globalConfigPath,
+        "core.hooksPath",
+        hooksDir,
+      ],
+      { stdio: "ignore" },
+    );
+
+    const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = globalConfigPath;
+    try {
+      makeRepo();
+    } finally {
+      if (previousGlobalConfig == null) {
+        delete process.env.GIT_CONFIG_GLOBAL;
+      } else {
+        process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+      }
+    }
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+});
 
 describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
   it("does not treat the inactivity timeout as the base-gate wall-clock limit", async () => {
