@@ -16,7 +16,7 @@ const TRANSIENT_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM", "EACCES"]);
  * Synchronous on purpose: cleanup hooks in these suites are synchronous, and
  * making them async would reorder fixture teardown between sibling tests.
  */
-export function rmDirWithRetry(dir: string, attempts = 12): void {
+export function rmDirWithRetry(dir: string, attempts = 30): void {
   for (let attempt = 1; ; attempt++) {
     try {
       rmSync(dir, { recursive: true, force: true });

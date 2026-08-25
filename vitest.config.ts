@@ -21,12 +21,12 @@ export default defineConfig({
     // `[vitest-worker]: Timeout calling "onTaskUpdate"` as an unhandled
     // error — exit 1 even when every test passed.
     //
-    // `silent: "passed-only"` is not enough: it suppresses printing but still
-    // ships every line to the main thread so it can be replayed if the test
-    // later fails. Suppress the capture itself, and drop the live summary the
-    // default reporter re-renders on every task update. Tests here assert on
-    // artifacts, events, and run state, not on captured stdout.
-    silent: true,
+    // Neither `silent: "passed-only"` nor `silent: true` removes the RPC
+    // traffic. Both act on printing; the worker still hands every line to the
+    // main thread. Stop the interception itself, so worker output goes straight
+    // to the process stdout and never crosses the RPC. Drop the live summary
+    // too, because the default reporter re-renders it on every task update.
+    disableConsoleIntercept: true,
     reporters: [["default", { summary: false }]],
   },
 });
