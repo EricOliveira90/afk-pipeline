@@ -57,6 +57,21 @@ describe("parsePipelineRuntimeOptions", () => {
     expect(parsePipelineRuntimeOptions([]).maxAgentDurationMs).toBeUndefined();
   });
 
+  it("parses the generator's verification command override", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--test-command", "pnpm test:fast"]),
+    ).toMatchObject({ testCommand: "pnpm test:fast" });
+  });
+
+  it("leaves the test command undefined so the package script is resolved", () => {
+    expect(parsePipelineRuntimeOptions([]).testCommand).toBeUndefined();
+  });
+
+  it("rejects a whitespace-only test command", () => {
+    expect(() => parsePipelineRuntimeOptions(["--test-command", "   "]))
+      .toThrow(/--test-command requires a non-empty command/);
+  });
+
   it("parses the transient retry window, allowing 0 to disable (ADR 0022)", () => {
     expect(
       parsePipelineRuntimeOptions(["--transient-retry-window-ms", "600000"])

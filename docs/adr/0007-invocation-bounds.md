@@ -1,5 +1,11 @@
 # Per-invocation bounds: idle floor + tool-call ceiling
 
+> **Amended by ADR 0036 (2026-08-25).** The tool-call ceiling's
+> 100-call default is retired: `maxToolCalls` is now opt-in with no
+> default, and the wall-clock ceiling (ADR 0016/0019) is the backstop
+> for runaway sessions. The mechanism, kill class, and counting below
+> remain accurate for callers that opt in.
+
 Each provider invocation is bounded by two independent caps:
 
 - **Idle floor.** `idleTimeoutMs` defaults to **180_000** (3 min). No
@@ -25,7 +31,8 @@ session kept emitting bytes — every chunk reset the watcher, so it never
 fired. The slice never reached a verdict; the run hung indefinitely.
 
 The hardcoded test command is fixed separately by the
-`{{TEST_COMMAND}}` placeholder injected from `resolveTestCommand`. This
+`{{TEST_COMMAND}}` placeholder injected from
+`resolveGeneratorTestCommand` (ADR 0038). This
 ADR covers the second failure surface: a wedged session needs a bound
 that doesn't depend on the agent eventually going silent.
 

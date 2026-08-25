@@ -491,6 +491,15 @@ uniformly for all roles. A ceiling kill during slice execution is terminal for
 the slice — rerun with a larger ceiling; committed work is preserved on the
 slice branch.
 
+`--test-command "<cmd>"` sets the command the generator verifies with while it
+iterates, replacing the `package.json` script AFK would otherwise resolve
+(`test:run`, then `test`). Point it at a fast subset — `--test-command "pnpm
+test:fast"` — when the full suite is slow enough that re-running it after every
+edit consumes the generator's ceiling. This does not weaken the gate: the
+pre-ship sanity gate and the QA evaluator keep running the full command set, so
+the whole-suite guarantee applies per checkpoint instead of per edit — see
+ADR 0038.
+
 ## Development
 
 ```bash

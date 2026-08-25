@@ -65,6 +65,23 @@ export function resolveTestCommand(cwd: string): string | undefined {
 }
 
 /**
+ * The command the generator is told to verify with while it iterates —
+ * deliberately a separate decision from `resolveSanityPlan` below, which
+ * owns what the gate executes and what QA is told to run. ADR 0038 has
+ * the reasoning; ADR 0012 has why the gate's answer stays put.
+ *
+ * Precedence: the explicit override, then the project's own test script,
+ * then `pnpm test` — the same forgiving fallback the gate applies when a
+ * project defines no test script at all.
+ */
+export function resolveGeneratorTestCommand(
+  cwd: string,
+  override?: string,
+): string {
+  return override ?? resolveTestCommand(cwd) ?? "pnpm test";
+}
+
+/**
  * Everything the sanity gate executes against a checkout, in order: the
  * dependency install that makes the steps runnable, then the steps
  * themselves.

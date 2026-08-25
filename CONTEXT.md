@@ -118,17 +118,21 @@ automatically; narrowing is an explicit operator choice)
 **Idle warning**:
 A periodic informational log line emitted while the spawned agent
 process produces no stdout (default: every 60s). Distinct from the
-**idle timeout** — the 10-minute hard kill. Warnings make long-running
+**idle timeout** — the hard kill. Warnings make long-running
 invocations legible in slice logs and run-summary.md.
 _Avoid_: "heartbeat" (implies the agent emits it), "liveness ping"
 
 **Idle timeout**:
-The hard-kill threshold (default: 10 minutes) for an agent invocation
-producing no stdout. Reached only after many **idle warnings**. For the
-Kiro provider, "producing stdout" means meaningful output — decorative
-terminal animation (spinner frames) is filtered out of the liveness
-signal. See ADR 0016. The kill is deferred while the **busy probe**
-reports a live spawned process. See ADR 0021.
+The hard-kill threshold for an agent invocation producing no stdout.
+Default: 3 minutes; the orchestrator passes 10 minutes (or
+`--command-timeout-ms`) for generator and evaluator-qa, whose test
+suites legitimately go quiet longer. Reached only after several **idle
+warnings**. For the Kiro provider, "producing stdout" means meaningful
+output — decorative terminal animation (spinner frames) is filtered out
+of the liveness signal. See ADR 0016. For generator and evaluator-qa
+only, the kill is deferred while the **busy probe** reports a live
+spawned process; every other role is killed at the timeout regardless.
+See ADR 0021 and ADR 0037.
 
 **Busy probe**:
 A process-level check consulted when the idle timeout fires: it
@@ -136,7 +140,9 @@ compares the agent's live process tree against a baseline snapshot
 taken shortly after spawn. Fresh descendants mean the agent is silently
 running a command (typically a test suite), and the idle kill is
 deferred — the **wall-clock ceiling** still bounds the invocation.
-See ADR 0021.
+Opt-in per invocation (`deferIdleKillWhenBusy`); the orchestrator
+enables it only for generator and evaluator-qa, the roles expected to
+run long commands. See ADR 0021 and ADR 0037.
 _Avoid_: "liveness probe" (liveness is the output-based signal)
 
 **Wall-clock ceiling**:
@@ -337,6 +343,21 @@ conflict a human must resolve.
 _Avoid_: "retryable conflict", "soft conflict" (it is not a conflict at
 all — nothing needs resolving, only re-attempting)
 
+**Generator test command**:
+The command the generator is told to verify with while it iterates,
+resolved by `resolveGeneratorTestCommand` from `--test-command`, else the
+project's `test:run`/`test` script, else `pnpm test`. Deliberately a
+separate decision from the **sanity command set**, and reaching only the
+generator roles (ADR 0038).
+_Avoid_: "test command" bare (ambiguous with the sanity set), "QA
+command" (the evaluator runs the sanity set, not this)
+
+**Sanity command set**:
+What `resolveSanityPlan` says the **pre-ship sanity gate** executes and
+what the QA evaluator is told to run — one source, so QA cannot be told a
+different command set than the gate runs (ADR 0012). Unaffected by the
+**generator test command**.
+
 **Pre-ship sanity gate**:
 The post-merge check that runs the project's `typecheck`, `lint`, and
 test scripts against the merged feature branch before the guardian
@@ -369,7 +390,9 @@ killed it — carries the **kill class**), `transient-exhausted` (the
 ADR 0022 retry window closed on an unresolved outage), `verdict` (nothing
 died; the agent decided), or `internal-error` (the pipeline itself
 threw). The first three are *infrastructure causes* and are the only ones
-retried under `--infrastructure-retries`. The cause's one-line summary
+retried under `--infrastructure-retries` (except an `orchestrator-kill`
+whose **kill class** is `tool-call-cap` — see that entry). The cause's
+one-line summary
 becomes the slice outcome's reason, so it reaches **run state**, the next
 run's retry announcement, `events.jsonl`, and `afk status` unchanged.
 Currently classified for the negotiate phase. See ADR 0025.
@@ -380,10 +403,13 @@ derived from it), "failure class" (that term belongs to the evaluator's
 **Kill class**:
 Which orchestrator-owned bound killed an **agent invocation**:
 `idle-timeout` (the **idle timeout**), `wall-clock-ceiling` (the
-**wall-clock ceiling**), `tool-call-cap`, or `unspecified` when the
-provider recorded no reason. A component of an **agent failure cause**;
-recovered from the provider's rejection message, which is the only place
-it is recorded.
+**wall-clock ceiling**), `tool-call-cap` (only when a caller opted into
+`maxToolCalls` — there is no default cap; see ADR 0036), or
+`unspecified` when the provider recorded no reason. A component of an
+**agent failure cause**; recovered from the provider's rejection
+message, which is the only place it is recorded. A `tool-call-cap` kill
+is excluded from `--infrastructure-retries`: retrying it verbatim
+would only re-hit the same cap.
 _Avoid_: "kill reason", "termination cause"
 
 **Blocked ship**:
