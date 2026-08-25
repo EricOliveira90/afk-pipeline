@@ -10,7 +10,11 @@ import { CancelledError } from "./agent-provider.js";
 import * as artifacts from "./artifacts.js";
 import * as git from "./git.js";
 import { parseDraftPrNumber } from "./handoff.js";
-import { runPreShipSanity, type PreShipSanityResult } from "./preship.js";
+import {
+  runPreShipSanity,
+  type SanityCommandRunner,
+  type SanityGateResult,
+} from "./preship.js";
 import { renderPrompt } from "./prompt-template.js";
 import type { RunJournal } from "./run-journal.js";
 import {
@@ -193,6 +197,11 @@ export interface RunShipGateArgs {
   signal?: AbortSignal;
   /** Internal command seam used by direct tests for push/gh behavior. */
   runCommand?: ShipCommandRunner;
+  /**
+   * Internal command seam used by direct tests for the pre-ship sanity
+   * subprocesses, so no suite pays a real dependency install.
+   */
+  sanityRunCommand?: SanityCommandRunner;
 }
 
 function blocked(
@@ -252,6 +261,7 @@ export async function runShipGate(
     signal,
   } = args;
   const runCommand = args.runCommand ?? defaultRunCommand;
+  const sanityRunCommand = args.sanityRunCommand;
 
   if (signal?.aborted) {
     return blocked(
@@ -270,36 +280,46 @@ export async function runShipGate(
   const cachedSanity = cachedReviewPhase?.sanity;
   const usesCachedSanity =
     !!treeShaBefore && cachedSanity?.treeSha === treeShaBefore;
-  let sanity: PreShipSanityResult;
+  let sanity: SanityGateResult;
   if (usesCachedSanity) {
     journal.event({
       type: "run-phase-started",
       phase: "sanity",
       cached: true,
     });
-    sanity = { ok: true, failures: [] };
+    sanity = { ok: true, failures: [], failureKind: null };
     journal.phase(
       `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
       "log",
     );
   } else {
     journal.event({ type: "run-phase-started", phase: "sanity" });
-    sanity = runPreShipSanity(reviewDir);
+    sanity = runPreShipSanity(reviewDir, sanityRunCommand);
   }
   journal.event({
     type: "run-phase-ended",
     phase: "sanity",
     cached: usesCachedSanity ? true : undefined,
     verdict: sanity.ok ? "PASS" : "FAIL",
+    failureKind: sanity.ok ? undefined : sanity.failureKind ?? undefined,
   });
   journal.setSanityGate(sanity);
   if (!sanity.ok) {
     const failedSteps = sanity.failures.join(", ");
+    // A CONFIGURATION failure means the commands never really ran, so the
+    // block belongs to the environment, not to the reviewed tree (#101).
+    // Written once, for both the run-log line and the blocker reason.
+    const reason =
+      sanity.failureKind === "CONFIGURATION"
+        ? `sanity gate failed (CONFIGURATION: ${failedSteps}) — ` +
+          "a configuration failure of the environment, not a code failure" +
+          `${sanity.detail ? `: ${sanity.detail}` : ""}`
+        : `sanity gate failed (${failedSteps})`;
     journal.phase(
-      `  ❌ Pre-ship sanity gate failed: ${failedSteps}. Skipping guardian reviews and PR creation.`,
+      `  ❌ Pre-ship ${reason}. Skipping guardian reviews and PR creation.`,
     );
     return blocked(
-      `pre-ship sanity gate failed (${failedSteps}) — guardian reviews and PR creation were skipped`,
+      `pre-ship ${reason} — guardian reviews and PR creation were skipped`,
     );
   }
   journal.phase("  ✅ Pre-ship sanity gate passed.", "log");

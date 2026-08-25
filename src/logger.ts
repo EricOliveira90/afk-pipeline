@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import type { SanityGateResult } from "./preship.js";
 import { readRunEvents } from "./run-events.js";
 import {
   assertNever,
@@ -23,14 +24,21 @@ export interface SliceTotals {
   toolCallCount: number;
 }
 
+export type { SanityGateResult };
+
 /**
- * Verdict from the pre-ship sanity gate (typecheck + lint + test suite run
- * against the merged feature branch, before opening the PR). `failures`
- * lists which steps tripped (e.g. `["lint"]`); empty when `ok` is true.
+ * One-line operator rendering of the sanity gate verdict. A CONFIGURATION
+ * failure is labelled the way the per-slice base gates are (`FAIL
+ * (CONFIGURATION)`, see `gate-outcome` rendering below) so a broken
+ * environment cannot be mistaken for a red suite in the artifact an operator
+ * reads (#101).
  */
-export interface SanityGateResult {
-  ok: boolean;
-  failures: string[];
+function sanityGateLabel(gate: SanityGateResult | undefined): string {
+  if (!gate) return "N/A";
+  if (gate.ok) return "PASS";
+  const steps = gate.failures.join(", ");
+  if (gate.failureKind !== "CONFIGURATION") return `FAIL (${steps})`;
+  return `FAIL (CONFIGURATION) — ${steps}${gate.detail ? `: ${gate.detail}` : ""}`;
 }
 
 export interface RunLog {
@@ -243,13 +251,7 @@ ${rows}
 ${totalsRow}
 ${gateSection}
 
-Pre-ship sanity gate: ${
-      sanityGate
-        ? sanityGate.ok
-          ? "PASS"
-          : `FAIL (${sanityGate.failures.join(", ")})`
-        : "N/A"
-    }
+Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}
 PM review: ${pmVerdict ?? "N/A"}${pmDetail ? ` — ${pmDetail}` : ""}
 ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
@@ -392,12 +394,7 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
     lines.push("");
 
     lines.push("Ready to merge:");
-    const sanityLine = sanityGate
-      ? sanityGate.ok
-        ? "PASS"
-        : `FAIL (${sanityGate.failures.join(", ")})`
-      : "N/A";
-    lines.push(`  Pre-ship sanity gate: ${sanityLine}`);
+    lines.push(`  Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}`);
     lines.push(
       `  Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}`,
     );
@@ -418,7 +415,13 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
       const reasons: string[] = [];
       if (failed.length > 0) reasons.push(`${failed.length} slice(s) failed`);
       if (cancelled.length > 0) reasons.push(`${cancelled.length} cancelled`);
-      if (sanityGate && !sanityGate.ok) reasons.push("sanity gate failed");
+      if (sanityGate && !sanityGate.ok) {
+        reasons.push(
+          sanityGate.failureKind === "CONFIGURATION"
+            ? "sanity gate could not run (CONFIGURATION)"
+            : "sanity gate failed",
+        );
+      }
       if (!sanityGate) reasons.push("sanity gate not run");
       if (sanityGate?.ok) {
         if (!architectVerdict) reasons.push("architect review not run");

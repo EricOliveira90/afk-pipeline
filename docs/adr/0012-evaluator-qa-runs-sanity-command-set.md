@@ -49,9 +49,43 @@ non-zero exit = FAIL", replacing the single `pnpm test` line.
 `resolveSanityCommands` and `runPreShipSanity` walk the same constant
 in the same order with the same fallback rules, so they cannot drift.
 A drift test (`evaluator-qa sanity command set matches the post-merge
-gate`) records the scripts `runPreShipSanity` actually executes for a
+gate`) records the commands `runPreShipSanity` actually executes for a
 given `package.json` and asserts the recorded sequence equals
 `resolveSanityCommands` output.
+
+### Amendment (2026-08-25, #101)
+
+The command set includes the dependency install that makes the steps
+runnable, not only the `pnpm run <script>` steps. A review or slice
+worktree is a fresh `git worktree add` with no `node_modules`, so every
+step failed instantly and the gate read the environment gap as a red
+suite.
+
+The single source is therefore `resolveSanityPlan(cwd)`, which returns
+one ordered plan — an optional `prepare` command followed by the
+`SANITY_STEPS` commands. `resolveSanityCommands` renders that plan,
+`runPreShipSanity` executes it, and `resolveBaseGateDeclarations`
+projects its steps. A step that is not a `package.json` script can no
+longer be invisible to the drift test, because the test records the
+runner's actual invocations rather than script names.
+
+`prepare` is `pnpm install --frozen-lockfile`, present only for a
+project with a checked-in `pnpm-lock.yaml` and at least one sanity
+step. It runs unconditionally rather than guarded on
+`existsSync("node_modules")`: a partial tree from an aborted install
+passes an existence check and reproduces the bug, and
+`--frozen-lockfile` is itself the lockfile-state check — near-free when
+the store is already satisfied. A consumer on another package manager
+gets no install rather than a `pnpm install` that would misinstall.
+
+A failure that means the commands never really ran — the install
+failed, or `pnpm` is absent from PATH — is reported with
+`failureKind: "CONFIGURATION"`, the same `GateFailureKind` vocabulary
+the per-slice base gates emit (`gate-runner.ts`), so an operator can
+tell a broken environment from a red suite. The gate emits no
+`gate-outcome` event: that event is per-slice and carries slice,
+round, and evidence-artifact identity the aggregate phase does not
+have. The `run-phase-ended` event carries the kind instead.
 
 ## Consequences
 

@@ -69,6 +69,7 @@ import {
 } from "./handoff.js";
 import {
   resolveSanityCommands,
+  resolveSanityPlan,
   resolveTestCommand,
 } from "./preship.js";
 import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
@@ -132,28 +133,23 @@ const DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS = 7_200_000;
 
 const BASE_GATE_IDS = ["typecheck", "lint", "tests"] as const;
 
-/** Derive the policy-less base gate set shared by every agent provider. */
+/**
+ * Derive the policy-less base gate set shared by every agent provider. Reads
+ * the same sanity plan the pre-ship gate executes (ADR 0012), so a gate and
+ * the aggregate check cannot disagree about which script backs a step.
+ */
 export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
-  const scriptsByGate = new Map(
-    resolveSanityCommands(cwd).map((command) => {
-      const scriptName = command.slice("pnpm run ".length);
-      const gateId =
-        scriptName === "test" || scriptName === "test:run"
-          ? "tests"
-          : scriptName;
-      return [gateId, scriptName];
-    }),
+  const stepsByGate = new Map(
+    resolveSanityPlan(cwd).steps.map((step) => [step.name, step]),
   );
 
   return BASE_GATE_IDS.map((id) => {
-    const scriptName = scriptsByGate.get(id);
+    const step = stepsByGate.get(id);
     return {
       id,
       stage: "base",
-      required: scriptName != null,
-      ...(scriptName
-        ? { command: "pnpm", args: ["run", scriptName] }
-        : {}),
+      required: step != null,
+      ...(step ? { command: step.command, args: [...step.args] } : {}),
     };
   });
 }
