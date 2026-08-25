@@ -13,14 +13,15 @@
 - Termination failure classification: `src/command-runtime.ts:ProcessTreeTerminationError` and `src/orchestrator.ts:isCancelled` prevent an aborted signal from hiding incomplete process-tree termination behind `CANCELLED`.
 - Skipped-gate checkpoint efficiency: `src/gate-runner.ts:createCandidateCheckpoint` can retain an immutable commit/tree identity without materializing a checkout, and snapshots the source index with four Git processes instead of six; `src/orchestrator.ts:runSliceExecute` uses that mode only when every discovered gate is skipped.
 - Deterministic QA fixture teardown: `src/qa-orchestration.test.ts:terminateFixtureChildren` closes every registered fixture child before its temporary repository is removed.
+- Hermetic Git fixtures: `src/qa-orchestration.test.ts:makeRepo` and `src/gate-runner.test.ts:makeCheckpoint` override machine-global Git hooks with an empty repository-local hooks directory.
 
 ## How the STUCK findings were cleared
-- Full-suite timeout cascades: immutable checkpoint capture now combines commit, tree, and index discovery and copies the source index instead of launching separate `rev-parse` and `read-tree` processes. The Windows regression test bounds unmaterialized capture at four Git processes while proving staged, unstaged, and untracked contents remain exact.
+- Full-suite timeout cascades: temporary repositories no longer invoke machine-global post-commit scanners. This removed the external process and filesystem-handle load from every contract-owned fixture while preserving a regression test that installs a synthetic global hook and proves it cannot run.
 - Loaded provider gate failures: the provider-independence fixture uses a 30-second inactivity budget instead of racing real `pnpm run` startup at five seconds; dedicated gate-runner tests retain tight 100ms and 150ms timeout coverage.
-- Contract-owned `EBUSY` cleanup failures: QA fixtures now own child lifetimes and await child closure before directory removal, so cleanup no longer depends on a child exiting within a fixed retry window.
-- Reporter RPC failure: the merged feature base suppresses console capture and live reporter summaries in `vitest.config.ts`; that path remains outside this slice's locked diff.
+- Contract-owned `EBUSY` cleanup failures: fixture repositories set a local empty `core.hooksPath`, so GitDefender cannot outlive a fixture commit and hold the repository root during teardown. QA fixtures also own and await their explicit child processes.
+- Reporter RPC failure: the merged feature base disables Vitest console interception and live reporter summaries in `vitest.config.ts`, removing the worker-to-reporter `onTaskUpdate` traffic; that path remains outside this slice's locked diff.
 - Tight timeout overrides: the refreshed feature base raises the explicit `git` and `wave` integration-test ceilings to 240 seconds, so they no longer override the generous global ceiling with the 30-second bounds that caused teardown cascades; those paths remain outside this slice's locked diff.
-- Verification: the exact implicated matrix passed all 126 tests across `gate-runner`, `qa-orchestration`, `git`, and `wave` with two workers and no timeout cascade, `EBUSY`, or reporter RPC failure.
+- Verification: the exact implicated matrix passed all 128 tests across `gate-runner`, `qa-orchestration`, `git`, and `wave` with no timeout cascade, `EBUSY`, or reporter RPC failure.
 
 ## Decisions made during implementation
 - Store gate evidence in the orchestrator-owned run directory, outside writable slice artifact trees.
@@ -34,13 +35,15 @@
 - Keep the shared Windows directory-removal helper outside the locked slice diff and consume it from the contract-owned QA test.
 - Terminate and await registered fixture children before applying filesystem cleanup retries.
 - Copy the source Git index into the temporary checkpoint index, then apply `git add -A`; this preserves the source index while reducing process contention.
+- Override ambient Git hooks in each temporary repository instead of changing the operator's Git configuration or production Git behavior.
 
 ## Gotchas / learnings
-- Windows does not permit removal of a repository while a child process still uses it as its working directory; retry-only cleanup remains duration-dependent unless teardown owns that process.
+- A machine-global `core.hooksPath` applies inside newly initialized test repositories. On this host GitDefender's post-commit scanner wrote `refs/code-defender/scans` and retained repository handles long enough to exhaust cleanup retries.
+- Retry-only cleanup cannot make fixtures hermetic. Temporary Git repositories that create commits must override ambient hooks before their first commit.
 - A five-second inactivity budget can classify healthy `pnpm` startup as a command failure under two-worker Git load even when the same fixture passes in isolation.
 - The reporter fix is owned by the feature branch's `vitest.config.ts`; it is intentionally absent from this locked slice diff.
 - The explicit `git` and `wave` timeout raises are also owned by the refreshed feature branch and intentionally absent from this locked slice diff.
 - The full `pnpm test` suite was not rerun in this attempt because the resume instructions reserve it for the normal QA gate.
 
 ## Status
-Tests passing locally. No regressions in the targeted 126-test finding matrix. Typecheck and build pass. Full suite deferred to the normal QA gate as instructed.
+Tests passing locally. No regressions in the targeted 128-test finding matrix. Typecheck and build pass. Full suite deferred to the normal QA gate as instructed.
