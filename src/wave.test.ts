@@ -1866,7 +1866,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     // one — a mechanical correction rather than a puzzle.
     expect(plannerPrompts[1]).toContain("003");
     expect(plannerPrompts[1]).toContain("004");
-    expect(plannerPrompts[1]).toMatch(/REJECTED by the/i);
+    expect(plannerPrompts[1]).toMatch(/pipeline REJECTED/i);
 
     // Observable in the event stream, under one warn reason.
     const refusals = readEvents(logger.runDir).filter(
