@@ -30,6 +30,8 @@ import {
   resolveSanityCommands,
   resolveTestCommand,
   runPreShipSanity,
+  type SanityCommandOutcome,
+  type SanityGateResult,
 } from "./preship.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
@@ -64,6 +66,33 @@ function makeProject(scripts: Record<string, string>): string {
     "utf-8",
   );
   return dir;
+}
+
+/**
+ * Marks a fixture as a pnpm project. The sanity gate's dependency install is
+ * gated on a checked-in lockfile (#101), so only fixtures that opt in pay it.
+ */
+function withLockfile(dir: string): string {
+  writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf-8");
+  return dir;
+}
+
+/**
+ * Records the commands `runPreShipSanity` executes, through the subprocess
+ * seam so no test spawns a real install (ADR 0033; AGENTS.md test loop
+ * discipline). `outcomes` overrides the result for a matching command line.
+ */
+function recordSanityRun(
+  dir: string,
+  outcomes: Record<string, SanityCommandOutcome> = {},
+): { ran: string[]; result: SanityGateResult } {
+  const ran: string[] = [];
+  const result = runPreShipSanity(dir, (command, args) => {
+    const line = [command, ...args].join(" ");
+    ran.push(line);
+    return outcomes[line] ?? { outcome: "EXITED", exitCode: 0 };
+  });
+  return { ran, result };
 }
 
 afterEach(() => {
@@ -172,10 +201,16 @@ describe("base gate infrastructure retries", () => {
 });
 
 describe("runPreShipSanity", () => {
+  const passed: SanityGateResult = {
+    ok: true,
+    failures: [],
+    failureKind: null,
+  };
+
   it("returns ok with no failures when no package.json exists", () => {
     const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
     tempDirs.push(dir);
-    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+    expect(runPreShipSanity(dir)).toEqual(passed);
   });
 
   it("skips steps not defined in package.json (lint absent → not a failure)", () => {
@@ -183,7 +218,7 @@ describe("runPreShipSanity", () => {
       typecheck: "node -e \"process.exit(0)\"",
       "test:run": "node -e \"process.exit(0)\"",
     });
-    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+    expect(runPreShipSanity(dir)).toEqual(passed);
   });
 
   it("passes when all defined scripts succeed", () => {
@@ -192,7 +227,7 @@ describe("runPreShipSanity", () => {
       lint: "node -e \"process.exit(0)\"",
       "test:run": "node -e \"process.exit(0)\"",
     });
-    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+    expect(runPreShipSanity(dir)).toEqual(passed);
   });
 
   it("reports the failing step name when lint exits non-zero", () => {
@@ -204,6 +239,8 @@ describe("runPreShipSanity", () => {
     const result = runPreShipSanity(dir);
     expect(result.ok).toBe(false);
     expect(result.failures).toEqual(["lint"]);
+    // A red script is the tree's fault, in the gate-runner vocabulary.
+    expect(result.failureKind).toBe("COMMAND");
   });
 
   it("falls back to `test` when `test:run` is not defined", () => {
@@ -229,82 +266,97 @@ describe("runPreShipSanity", () => {
   // Regression for #101: the ship gate's scratch review worktree is a fresh
   // `git worktree add` with no node_modules, so every sanity command failed
   // instantly and the gate reported a code failure on a green branch.
-  it("installs missing dependencies before running sanity steps (#101)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
-    tempDirs.push(dir);
-    const markerPkg = join(dir, "marker-pkg");
-    mkdirSync(markerPkg);
-    writeFileSync(
-      join(markerPkg, "package.json"),
-      JSON.stringify({ name: "afk-marker", version: "1.0.0" }),
-      "utf-8",
-    );
-    writeFileSync(
-      join(dir, "package.json"),
-      JSON.stringify({
-        name: "fixture",
-        dependencies: { "afk-marker": "file:./marker-pkg" },
-        scripts: {
-          // Fails exactly the way the incident did — unless the gate
-          // installed dependencies first.
-          typecheck:
-            "node -e \"require('node:fs').accessSync('node_modules/afk-marker')\"",
-        },
+  it("installs dependencies before running the sanity steps (#101)", () => {
+    const dir = withLockfile(
+      makeProject({
+        typecheck: "tsc --noEmit",
+        "test:run": "vitest run",
       }),
-      "utf-8",
     );
 
-    const result = runPreShipSanity(dir);
+    const { ran, result } = recordSanityRun(dir);
 
-    expect(result).toEqual({ ok: true, failures: [] });
-    expect(existsSync(join(dir, "node_modules", "afk-marker"))).toBe(true);
-  }, 180_000);
+    expect(ran).toEqual([
+      "pnpm install --frozen-lockfile",
+      "pnpm run typecheck",
+      "pnpm run test:run",
+    ]);
+    expect(result).toEqual(passed);
+  });
 
-  it("skips the dependency install when node_modules already exists", () => {
-    const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
-    tempDirs.push(dir);
-    // An install would fail (the file: target does not exist) — proving it
-    // was never attempted when the checkout already carries node_modules.
-    writeFileSync(
-      join(dir, "package.json"),
-      JSON.stringify({
-        name: "fixture",
-        dependencies: { "afk-missing": "file:./does-not-exist" },
-        scripts: { typecheck: "node -e \"process.exit(0)\"" },
-      }),
-      "utf-8",
-    );
+  // `existsSync("node_modules")` is not a validity check: a partial tree
+  // from an aborted install passes it and the incident reappears as a code
+  // failure. --frozen-lockfile is the state check, and is near-free when the
+  // store is already satisfied.
+  it("installs even when node_modules already exists, so a stale tree cannot pass as installed (#101)", () => {
+    const dir = withLockfile(makeProject({ typecheck: "tsc --noEmit" }));
     mkdirSync(join(dir, "node_modules"));
 
-    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+    expect(recordSanityRun(dir).ran).toEqual([
+      "pnpm install --frozen-lockfile",
+      "pnpm run typecheck",
+    ]);
   });
 
-  it("skips the dependency install when the project declares no dependencies", () => {
-    // The crafted fixtures above never had node_modules either — a project
-    // with only scripts must not pay (or fail) an install.
-    const dir = makeProject({ typecheck: "node -e \"process.exit(0)\"" });
-    expect(runPreShipSanity(dir)).toEqual({ ok: true, failures: [] });
+  it("leaves a project without a pnpm lockfile alone (no pnpm install for an npm/yarn consumer)", () => {
+    const dir = makeProject({ typecheck: "tsc --noEmit" });
+    expect(recordSanityRun(dir).ran).toEqual(["pnpm run typecheck"]);
   });
 
-  it("classifies a failed dependency install as a configuration failure, not a code failure (#101)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
-    tempDirs.push(dir);
-    writeFileSync(
-      join(dir, "package.json"),
-      JSON.stringify({
-        name: "fixture",
-        dependencies: { "afk-missing": "file:./does-not-exist" },
-        scripts: { typecheck: "node -e \"process.exit(0)\"" },
-      }),
-      "utf-8",
-    );
+  it("skips the install when the project defines no sanity scripts at all", () => {
+    const dir = withLockfile(makeProject({ build: "tsc" }));
+    const { ran, result } = recordSanityRun(dir);
+    expect(ran).toEqual([]);
+    expect(result).toEqual(passed);
+  });
 
-    const result = runPreShipSanity(dir);
+  it("classifies a failed dependency install as CONFIGURATION, not a code failure (#101)", () => {
+    const dir = withLockfile(makeProject({ typecheck: "tsc --noEmit" }));
 
+    const { ran, result } = recordSanityRun(dir, {
+      "pnpm install --frozen-lockfile": {
+        outcome: "EXITED",
+        exitCode: 1,
+        output:
+          "  ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile\n",
+      },
+    });
+
+    // The steps never ran — reporting them as failures is the incident.
+    expect(ran).toEqual(["pnpm install --frozen-lockfile"]);
     expect(result.ok).toBe(false);
     expect(result.failures).toEqual(["install"]);
-    expect(result.configurationFailure).toContain("pnpm install");
-  }, 60_000);
+    expect(result.failureKind).toBe("CONFIGURATION");
+    // The install's own output reaches the operator, not just the step name.
+    expect(result.detail).toContain("pnpm install --frozen-lockfile failed");
+    expect(result.detail).toContain("ERR_PNPM_OUTDATED_LOCKFILE");
+  });
+
+  // The general "commands never really ran" class, not just node_modules:
+  // pnpm absent from PATH is the same environmental failure, and the
+  // gate-runner already maps a spawn ENOENT to FAIL/CONFIGURATION.
+  it("classifies a step that cannot be spawned as CONFIGURATION (#101)", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      "test:run": "vitest run",
+    });
+
+    const { ran, result } = recordSanityRun(dir, {
+      "pnpm run typecheck": {
+        outcome: "SPAWN_ERROR",
+        exitCode: null,
+        output: "spawnSync pnpm ENOENT",
+      },
+    });
+
+    // No point running the rest: they fail for the same reason.
+    expect(ran).toEqual(["pnpm run typecheck"]);
+    expect(result.ok).toBe(false);
+    expect(result.failures).toEqual(["typecheck"]);
+    expect(result.failureKind).toBe("CONFIGURATION");
+    expect(result.detail).toContain("could not be spawned");
+    expect(result.detail).toContain("ENOENT");
+  });
 });
 
 /**
@@ -344,30 +396,17 @@ describe("resolveTestCommand", () => {
  * slice can pass QA on code the gate then rejects (the failure mode that
  * motivated this fix: typecheck/lint violations passing through QA
  * because QA only ran tests). Walks several package.json shapes; for
- * each, the scripts `runPreShipSanity` attempts via `execFileSync` must
- * exactly match — same scripts, same order — what `resolveSanityCommands`
- * reports.
+ * each, the commands `runPreShipSanity` attempts must exactly match — same
+ * commands, same order, dependency install included — what
+ * `resolveSanityCommands` reports.
  */
 describe("evaluator-qa sanity command set matches the post-merge gate", () => {
+  // Records the real invocation sequence through the subprocess seam, so the
+  // comparison covers every command the gate runs — including the install
+  // prep, which is not a `pnpm run` script and would otherwise be invisible
+  // to this test (#101).
   function recordedRuns(dir: string): string[] {
-    // Use scripts that record their own name to a marker file as they
-    // run, so we can read back the exact sequence runPreShipSanity
-    // executed against this fixture without mocking execFileSync.
-    const marker = join(dir, "ran.log");
-    const scripts = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")).scripts as Record<string, string>;
-    const rewritten: Record<string, string> = {};
-    for (const [name, body] of Object.entries(scripts)) {
-      const exit = body.includes("process.exit(1)") ? 1 : 0;
-      rewritten[name] = `node -e "require('fs').appendFileSync('${marker.replace(/\\/g, "\\\\")}', '${name}\\n'); process.exit(${exit})"`;
-    }
-    writeFileSync(
-      join(dir, "package.json"),
-      JSON.stringify({ name: "fixture", scripts: rewritten }),
-      "utf-8",
-    );
-    runPreShipSanity(dir);
-    if (!existsSync(marker)) return [];
-    return readFileSync(marker, "utf-8").trim().split("\n").filter(Boolean);
+    return recordSanityRun(dir).ran;
   }
 
   it("projects base gates and aggregate commands from one discovery result", () => {
@@ -407,8 +446,27 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
     });
     const reported = resolveSanityCommands(dir);
     const ran = recordedRuns(dir);
-    expect(reported).toEqual(ran.map((s) => `pnpm run ${s}`));
+    expect(reported).toEqual(ran);
     expect(reported).toEqual(["pnpm run typecheck", "pnpm run lint", "pnpm run test:run"]);
+  });
+
+  // The install prep is part of the command set, so QA is told to run it too
+  // — otherwise QA and the gate diverge on the one step that decides whether
+  // any of the others can run at all (#101).
+  it("matches including the dependency install in a pnpm project", () => {
+    const dir = withLockfile(
+      makeProject({
+        typecheck: "node -e \"process.exit(0)\"",
+        "test:run": "node -e \"process.exit(0)\"",
+      }),
+    );
+    const reported = resolveSanityCommands(dir);
+    expect(reported).toEqual(recordedRuns(dir));
+    expect(reported).toEqual([
+      "pnpm install --frozen-lockfile",
+      "pnpm run typecheck",
+      "pnpm run test:run",
+    ]);
   });
 
   it("matches when lint is absent (skipped step is reported in neither)", () => {
@@ -418,7 +476,7 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
     });
     const reported = resolveSanityCommands(dir);
     const ran = recordedRuns(dir);
-    expect(reported).toEqual(ran.map((s) => `pnpm run ${s}`));
+    expect(reported).toEqual(ran);
     expect(reported).toEqual(["pnpm run typecheck", "pnpm run test:run"]);
   });
 
@@ -426,7 +484,7 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
     const dir = makeProject({ test: "node -e \"process.exit(0)\"" });
     const reported = resolveSanityCommands(dir);
     const ran = recordedRuns(dir);
-    expect(reported).toEqual(ran.map((s) => `pnpm run ${s}`));
+    expect(reported).toEqual(ran);
     expect(reported).toEqual(["pnpm run test"]);
   });
 
