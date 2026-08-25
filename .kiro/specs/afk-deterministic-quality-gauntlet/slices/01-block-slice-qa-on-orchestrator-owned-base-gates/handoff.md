@@ -19,9 +19,9 @@
 - Full-suite timeout cascades: temporary repositories no longer invoke machine-global post-commit scanners. This removed the external process and filesystem-handle load from every contract-owned fixture while preserving a regression test that installs a synthetic global hook and proves it cannot run.
 - Loaded provider gate failures: the provider-independence fixture uses a 30-second inactivity budget instead of racing real `pnpm run` startup at five seconds; dedicated gate-runner tests retain tight 100ms and 150ms timeout coverage.
 - Contract-owned `EBUSY` cleanup failures: fixture repositories set a local empty `core.hooksPath`, so GitDefender cannot outlive a fixture commit and hold the repository root during teardown. QA fixtures also own and await their explicit child processes.
-- Reporter RPC failure: the merged feature base disables Vitest console interception and live reporter summaries in `vitest.config.ts`, removing the worker-to-reporter `onTaskUpdate` traffic; that path remains outside this slice's locked diff.
+- Reporter RPC failure: the merged feature base disables Vitest console interception and stops treating the worker's reporter-RPC bookkeeping timeout as a test failure in `vitest.config.ts`; that path remains outside this slice's locked diff.
 - Tight timeout overrides: the refreshed feature base raises the explicit `git` and `wave` integration-test ceilings to 240 seconds, so they no longer override the generous global ceiling with the 30-second bounds that caused teardown cascades; those paths remain outside this slice's locked diff.
-- Verification: the exact implicated matrix passed all 128 tests across `gate-runner`, `qa-orchestration`, `git`, and `wave` with no timeout cascade, `EBUSY`, or reporter RPC failure.
+- Verification: the exact implicated matrix passed all 141 tests across `gate-runner`, `qa-orchestration`, `git`, `wave`, and `resume-integration` with no timeout cascade, `EBUSY`, or reporter RPC failure.
 
 ## Decisions made during implementation
 - Store gate evidence in the orchestrator-owned run directory, outside writable slice artifact trees.
@@ -46,4 +46,4 @@
 - The full `pnpm test` suite was not rerun in this attempt because the resume instructions reserve it for the normal QA gate.
 
 ## Status
-Tests passing locally. No regressions in the targeted 128-test finding matrix. Typecheck and build pass. Full suite deferred to the normal QA gate as instructed.
+Tests passing locally. No regressions in the targeted 141-test finding matrix. Typecheck and build pass. Full suite deferred to the normal QA gate as instructed.
