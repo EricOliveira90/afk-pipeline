@@ -369,7 +369,9 @@ killed it — carries the **kill class**), `transient-exhausted` (the
 ADR 0022 retry window closed on an unresolved outage), `verdict` (nothing
 died; the agent decided), or `internal-error` (the pipeline itself
 threw). The first three are *infrastructure causes* and are the only ones
-retried under `--infrastructure-retries`. The cause's one-line summary
+retried under `--infrastructure-retries` (except an `orchestrator-kill`
+whose **kill class** is `tool-call-cap` — see that entry). The cause's
+one-line summary
 becomes the slice outcome's reason, so it reaches **run state**, the next
 run's retry announcement, `events.jsonl`, and `afk status` unchanged.
 Currently classified for the negotiate phase. See ADR 0025.
@@ -380,10 +382,13 @@ derived from it), "failure class" (that term belongs to the evaluator's
 **Kill class**:
 Which orchestrator-owned bound killed an **agent invocation**:
 `idle-timeout` (the **idle timeout**), `wall-clock-ceiling` (the
-**wall-clock ceiling**), `tool-call-cap`, or `unspecified` when the
-provider recorded no reason. A component of an **agent failure cause**;
-recovered from the provider's rejection message, which is the only place
-it is recorded.
+**wall-clock ceiling**), `tool-call-cap` (only when a caller opted into
+`maxToolCalls` — there is no default cap; see ADR 0036), or
+`unspecified` when the provider recorded no reason. A component of an
+**agent failure cause**; recovered from the provider's rejection
+message, which is the only place it is recorded. A `tool-call-cap` kill
+is excluded from `--infrastructure-retries`: retrying it verbatim
+would only re-hit the same cap.
 _Avoid_: "kill reason", "termination cause"
 
 **Blocked ship**:

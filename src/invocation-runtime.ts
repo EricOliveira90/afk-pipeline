@@ -17,7 +17,6 @@ import { registerWorktreeProcess } from "./worktree-processes.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_IDLE_WARNING_INTERVAL_MS = 60_000;
-const DEFAULT_MAX_TOOL_CALLS = 100;
 const DEFAULT_MAX_DURATION_MS = 3_600_000;
 
 export type InvocationStream = "stdout" | "stderr";
@@ -61,7 +60,7 @@ export function runInvocation(
     logStream,
     idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
     idleWarningIntervalMs = DEFAULT_IDLE_WARNING_INTERVAL_MS,
-    maxToolCalls = DEFAULT_MAX_TOOL_CALLS,
+    maxToolCalls,
     maxDurationMs = DEFAULT_MAX_DURATION_MS,
     signal,
     onIdleWarning,
@@ -224,7 +223,14 @@ export function runInvocation(
           if (event.type === "tool_call") {
             watcher!.reset();
             toolCallCount++;
-            if (toolCallCount > maxToolCalls && !toolCapExceeded) {
+            // Kill only when a caller opted into a cap (no default —
+            // the wall-clock ceiling is the backstop; ADR 0036). The
+            // count itself always feeds InvocationStats.
+            if (
+              maxToolCalls !== undefined &&
+              toolCallCount > maxToolCalls &&
+              !toolCapExceeded
+            ) {
               toolCapExceeded = true;
             }
           }

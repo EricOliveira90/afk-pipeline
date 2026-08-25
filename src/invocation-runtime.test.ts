@@ -289,7 +289,7 @@ describe("invocation runtime lifecycle", () => {
     expect(proc.unref).toHaveBeenCalledOnce();
   });
 
-  it("counts tool calls and kills only after the configured cap", async () => {
+  it("counts tool calls and kills only after the opt-in cap", async () => {
     const proc = makeFakeProc();
     const promise = start(
       proc,
@@ -309,6 +309,26 @@ describe("invocation runtime lifecycle", () => {
     emitExit(proc, null);
     await expect(rejection).resolves.toMatchObject({
       message: "Agent generator exceeded 2 tool calls — killed",
+    });
+  });
+
+  it("never kills on tool-call volume by default, but still counts", async () => {
+    const proc = makeFakeProc();
+    // No maxToolCalls: the wall-clock ceiling is the backstop
+    // (ADR 0036). 150 calls comfortably exceeds the retired 100 default.
+    const promise = start(proc, {}, {
+      parseStreamLine: () => [
+        { type: "tool_call", name: "shell", args: "command" },
+      ],
+    });
+
+    for (let i = 0; i < 150; i++) {
+      proc.stdout.emit("data", Buffer.from(`call ${i}\n`));
+    }
+    expect(terminateMock).not.toHaveBeenCalled();
+    emitExit(proc, 0);
+    await expect(promise).resolves.toMatchObject({
+      stats: { toolCallCount: 150 },
     });
   });
 

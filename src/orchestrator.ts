@@ -778,8 +778,15 @@ export type NegotiateOutcome =
  * never is — retrying it would just re-run agents against a contract
  * the evaluator already judged — and neither is a pipeline-internal
  * throw, whose blast radius this change deliberately leaves unchanged.
+ *
+ * A `tool-call-cap` kill is excluded even though it is an
+ * orchestrator kill: the cap only exists when a caller opted in
+ * (ADR 0036), so tripping it is the configured bound doing its job,
+ * not infrastructure flaking. Retrying the invocation verbatim would
+ * spend another full budget re-hitting the same cap.
  */
 function isInfrastructureCause(cause: NegotiateFailureCause): boolean {
+  if (cause.killClass === "tool-call-cap") return false;
   return (
     cause.kind === "provider-exit" ||
     cause.kind === "orchestrator-kill" ||
