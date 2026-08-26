@@ -47,7 +47,9 @@ For deterministic slice QA, run every sanity command below in order:
 
 {{SANITY_COMMANDS}}
 
-`{{TEST_COMMAND}}` is informational; do not run the project tests twice.
+That list is the complete command set for this pass — it already includes
+the project's tests. Do not run the project tests twice, and do not
+substitute a command the list does not name.
 For shared-preview UAT, skip the sanity list and run only remote scenarios from
 the contract.
 

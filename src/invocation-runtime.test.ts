@@ -160,6 +160,7 @@ describe("invocation runtime lifecycle", () => {
     const logged: string[] = [];
     busyCheckMock.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
     const promise = start(proc, {
+      deferIdleKillWhenBusy: true,
       onIdleDeferral,
       logStream: { write: (text: string) => logged.push(text) },
     });
@@ -177,6 +178,25 @@ describe("invocation runtime lifecycle", () => {
     expect(terminateMock).toHaveBeenCalledTimes(1);
     emitExit(proc, null);
     await rejection;
+  });
+
+  it("kills at the idle timeout without deferral when the role has not opted in", async () => {
+    const proc = makeFakeProc();
+    const onIdleDeferral = vi.fn();
+    // Even a busy tree must not defer: the probe is role-scoped
+    // (ADR 0037) and this invocation never opted in.
+    busyCheckMock.mockResolvedValue(5);
+    const promise = start(proc, { onIdleDeferral });
+    const rejection = promise.catch((error: unknown) => error as Error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(terminateMock).toHaveBeenCalledTimes(1);
+    expect(busyCheckMock).not.toHaveBeenCalled();
+    expect(onIdleDeferral).not.toHaveBeenCalled();
+    emitExit(proc, null);
+    await expect(rejection).resolves.toMatchObject({
+      message: "Agent generator idle for 1s — killed",
+    });
   });
 
   it("enforces the wall-clock ceiling despite steady activity", async () => {
@@ -289,7 +309,7 @@ describe("invocation runtime lifecycle", () => {
     expect(proc.unref).toHaveBeenCalledOnce();
   });
 
-  it("counts tool calls and kills only after the configured cap", async () => {
+  it("counts tool calls and kills only after the opt-in cap", async () => {
     const proc = makeFakeProc();
     const promise = start(
       proc,
@@ -312,6 +332,26 @@ describe("invocation runtime lifecycle", () => {
     });
   });
 
+  it("never kills on tool-call volume by default, but still counts", async () => {
+    const proc = makeFakeProc();
+    // No maxToolCalls: the wall-clock ceiling is the backstop
+    // (ADR 0036). 150 calls comfortably exceeds the retired 100 default.
+    const promise = start(proc, {}, {
+      parseStreamLine: () => [
+        { type: "tool_call", name: "shell", args: "command" },
+      ],
+    });
+
+    for (let i = 0; i < 150; i++) {
+      proc.stdout.emit("data", Buffer.from(`call ${i}\n`));
+    }
+    expect(terminateMock).not.toHaveBeenCalled();
+    emitExit(proc, 0);
+    await expect(promise).resolves.toMatchObject({
+      stats: { toolCallCount: 150 },
+    });
+  });
+
   it("places provider hook errors above standard kill reasons", async () => {
     const proc = makeFakeProc();
     const providerError = new Error("provider stream failed");
@@ -328,7 +368,10 @@ describe("invocation runtime lifecycle", () => {
   it("does not let busy deferral extend the wall-clock ceiling", async () => {
     const proc = makeFakeProc();
     busyCheckMock.mockResolvedValue(3);
-    const promise = start(proc, { maxDurationMs: 1_500 });
+    const promise = start(proc, {
+      deferIdleKillWhenBusy: true,
+      maxDurationMs: 1_500,
+    });
     const rejection = promise.catch((error: unknown) => error as Error);
 
     await vi.advanceTimersByTimeAsync(1_000);

@@ -46,7 +46,6 @@ describe("renderPrompt", () => {
       renderPrompt("evaluator-qa", {
         SLICE_DIR: "x",
         RELEVANT_FILES: "",
-        TEST_COMMAND: "pnpm test",
         SANITY_COMMANDS: "",
         SIBLING_HANDOFFS: "(none)",
         QA_SCOPE: "deterministic",
@@ -57,6 +56,30 @@ describe("renderPrompt", () => {
         EXTRA: "y",
       }),
     ).toThrow(/EXTRA/);
+  });
+
+  /**
+   * The QA evaluator is told the sanity command set and nothing else, so
+   * a narrowed `--test-command` cannot reach it (ADR 0038). The template
+   * is what enforces that: re-adding `{{TEST_COMMAND}}` to the QA prompt
+   * makes the orchestrator's own render call — which passes no such arg —
+   * throw at run time, and this case fails first.
+   */
+  it("refuses to hand the QA prompt the generator's test command", () => {
+    expect(() =>
+      renderPrompt("evaluator-qa", {
+        SLICE_DIR: "x",
+        RELEVANT_FILES: "",
+        SANITY_COMMANDS: "pnpm run typecheck",
+        SIBLING_HANDOFFS: "(none)",
+        QA_SCOPE: "deterministic",
+        REPORT_PATH: "d/qa-report.md",
+        PREVIOUS_QA_REPORTS: "(none)",
+        COMMAND_TIMEOUT_SECONDS: 600,
+        HEARTBEAT_SECONDS: 30,
+        TEST_COMMAND: "pnpm test:fast",
+      }),
+    ).toThrow(/TEST_COMMAND/);
   });
 
   it("loads all eight pipeline templates", () => {
@@ -77,7 +100,7 @@ describe("renderPrompt", () => {
       renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "", PREVIOUS_FEEDBACK_NOTE: "No previous round." }),
     ).toBeTruthy();
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", PREVIOUS_QA_REPORTS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", PREVIOUS_QA_REPORTS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();

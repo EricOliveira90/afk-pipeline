@@ -33,11 +33,13 @@ export interface InvokeOptions {
   /** Idle-warning interval in ms. Default: 60_000 (1 min). See CONTEXT.md "Idle warning". */
   idleWarningIntervalMs?: number;
   /**
-   * Hard cap on tool calls per invocation — kills the session when
-   * exceeded. Catches "talky" loops where the agent keeps emitting
-   * tool calls without making progress (which never trips the idle
-   * watcher). Default: 100. Only enforced by providers that parse
-   * a structured stream. See ADR 0007.
+   * Opt-in hard cap on tool calls per invocation — kills the session
+   * when exceeded. No default: unset means no tool-call kill, and the
+   * wall-clock ceiling (`maxDurationMs`) is the backstop for runaway
+   * sessions. Tool calls are always counted for `InvocationStats`
+   * either way. Only enforced by providers that parse a structured
+   * stream. Rationale for retiring the former 100-call default:
+   * ADR 0036 (see also ADR 0007).
    */
   maxToolCalls?: number;
   /**
@@ -73,6 +75,17 @@ export interface InvokeOptions {
   bare?: boolean;
   /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */
   onIdleWarning?: (minutes: number) => void;
+  /**
+   * Allow the busy probe (ADR 0021) to defer idle kills while live
+   * spawned processes are found in the agent's tree. Opt-in per role:
+   * the orchestrator sets it only for roles expected to shell out to
+   * long-running commands (generator, evaluator-qa). Roles that have
+   * no business running a test suite (explorer, planner,
+   * evaluator-contract, guardians) hit the plain idle timeout instead
+   * of being kept alive by their own spawned processes. Default:
+   * false. See ADR 0037.
+   */
+  deferIdleKillWhenBusy?: boolean;
   /**
    * Called when an idle kill is deferred because the busy probe found
    * live spawned processes in the agent's tree (ADR 0021). The

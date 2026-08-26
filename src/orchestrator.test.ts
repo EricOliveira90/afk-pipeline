@@ -27,6 +27,7 @@ import {
   buildReviewScopeBlock,
 } from "./ship-gate.js";
 import {
+  resolveGeneratorTestCommand,
   resolveSanityCommands,
   resolveTestCommand,
   runPreShipSanity,
@@ -387,6 +388,45 @@ describe("resolveTestCommand", () => {
     const dir = mkdtempSync(join(tmpdir(), "afk-resolve-"));
     tempDirs.push(dir);
     expect(resolveTestCommand(dir)).toBeUndefined();
+  });
+});
+
+/**
+ * The generator's verification command is a separate decision from the
+ * gate's command set: an operator may hand the generator a fast subset so
+ * whole-suite runs stay out of every edit cycle (ADR 0038). These cases
+ * pin the precedence only. That an override cannot reach the gate or the
+ * QA evaluator is pinned where it can actually fail — through
+ * `runPipeline`, in "generator verification command (ADR 0038)" below.
+ */
+describe("resolveGeneratorTestCommand", () => {
+  it("prefers an explicit override over the project's test script", () => {
+    const dir = makeProject({ "test:run": "vitest run" });
+    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
+      "pnpm test:fast",
+    );
+  });
+
+  it("resolves the project's test script when no override is given", () => {
+    const dir = makeProject({ "test:run": "vitest run" });
+    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test:run");
+  });
+
+  it("falls back to `pnpm test` when the project defines no test script", () => {
+    const dir = makeProject({ build: "tsc" });
+    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test");
+  });
+
+  it("resolves independently of the sanity gate's command set", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      "test:run": "vitest run",
+    });
+    // The two answers can differ, and the gate keeps the full one.
+    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
+      "pnpm test:fast",
+    );
+    expect(resolveSanityCommands(dir).join(" ")).toContain("pnpm run test:run");
   });
 });
 
@@ -3396,6 +3436,138 @@ describe("wall-clock ceiling configuration (ADR 0019)", () => {
   }, 240_000);
 });
 
+/**
+ * Generator verification command (ADR 0038). An operator narrows what the
+ * generator runs between edits; nothing else may narrow with it. The risk
+ * this pins is a run-time one — `config.testCommand` leaking into the
+ * block QA is handed or into what the gate executes — so it is asserted
+ * through `runPipeline` against a real repo, reading the prompts the
+ * provider actually received.
+ */
+describe("generator verification command (ADR 0038)", () => {
+  /** Repo whose own test script differs from the override below. */
+  function makeSetup(slug: string, ghIssue: string) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify(
+        {
+          name: "consumer-fixture",
+          private: true,
+          scripts: { "test:run": `node -e "0"` },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add test script"]);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue,
+        title: "Verification slice",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        ghIssue,
+        {
+          files: ["src/verify.txt"],
+          qaPasses: true,
+          outputFile: "src/verify.txt",
+          outputContent: "verify",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    return {
+      repo,
+      prdDir,
+      specsDir,
+      slices,
+      baseProvider: buildStubProvider({ fixtures, slices, records }),
+    };
+  }
+
+  /** Wrap the stub to keep the prompt text each role received. */
+  function promptCapturingProvider(
+    baseProvider: AgentProvider,
+    prompts: Map<string, string[]>,
+  ): AgentProvider {
+    return {
+      name: baseProvider.name,
+      async invoke(options) {
+        const list = prompts.get(options.role) ?? [];
+        list.push(options.prompt);
+        prompts.set(options.role, list);
+        return baseProvider.invoke(options);
+      },
+    };
+  }
+
+  it("hands the override to the generator and the full sanity set to QA", async () => {
+    const slug = "generator-test-command";
+    const { repo, prdDir, specsDir, slices, baseProvider } = makeSetup(
+      slug,
+      "9501",
+    );
+    const prompts = new Map<string, string[]>();
+
+    // The stub's no-op guardian reviews block shipping (issue #43); the
+    // slice ran to completion, which is what the prompts below describe.
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: promptCapturingProvider(baseProvider, prompts),
+      testCommand: "pnpm test:fast",
+    });
+    expect(result.success).toBe(false);
+
+    const generatorPrompt = prompts.get("generator")?.[0];
+    expect(generatorPrompt).toBeDefined();
+    expect(generatorPrompt!).toContain("pnpm test:fast");
+
+    // QA is told the gate's command set and is never shown the override.
+    const qaPrompt = prompts.get("evaluator-qa")?.[0];
+    expect(qaPrompt).toBeDefined();
+    expect(qaPrompt!).toContain("pnpm run test:run");
+    expect(qaPrompt!).not.toContain("test:fast");
+  }, 240_000);
+
+  it("leaves the generator on the project's test script when no override is given", async () => {
+    const slug = "generator-test-command-default";
+    const { repo, prdDir, specsDir, slices, baseProvider } = makeSetup(
+      slug,
+      "9502",
+    );
+    const prompts = new Map<string, string[]>();
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: promptCapturingProvider(baseProvider, prompts),
+    });
+    expect(result.success).toBe(false);
+
+    const generatorPrompt = prompts.get("generator")?.[0];
+    expect(generatorPrompt).toBeDefined();
+    expect(generatorPrompt!).toContain("pnpm test:run");
+  }, 240_000);
+});
+
 
 /**
  * Structured events tee (spec #26, slice #27): a pipeline run leaves
@@ -4546,4 +4718,138 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
       "nothing to recover; dispatching normally",
     );
   }, 180_000);
+});
+
+
+/**
+ * Launch guard: the feature branch must contain the host worktree's
+ * HEAD before any slice worktree branches from it (recovery plan
+ * Phase A step 2). Slice worktrees branch from the feature branch
+ * while prompts and dist/ resolve from the host checkout, so a stale
+ * feature branch hands agents source files older than the code
+ * orchestrating them. The guard keys on host HEAD, not main — hosts
+ * legitimately run from prep branches ahead of main.
+ */
+describe("feature-branch launch guard", () => {
+  function runDirsOf(repo: string, slug: string): string[] {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    return readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .map((d) => join(parent, d));
+  }
+
+  function readEventLines(repo: string, slug: string): Array<Record<string, unknown>> {
+    const [runDir] = runDirsOf(repo, slug);
+    return readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+  }
+
+  const singleSlice = (ghIssue: string): Slice[] => [
+    {
+      number: "01",
+      ghIssue,
+      title: "Guarded",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    },
+  ];
+
+  it("fast-forwards a stale feature branch that is a plain ancestor of the host HEAD", async () => {
+    const repo = makeRepo();
+    const slug = "guard-ff";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const featBranch = `feat-stub/${slug}`;
+
+    // Feature branch left behind by a previous run, then the host
+    // moved ahead (e.g. a prep-chain PR landed).
+    git(repo, ["branch", featBranch]);
+    const staleTip = git(repo, ["rev-parse", featBranch]);
+    writeFileSync(join(repo, "HOST.md"), "host moved ahead\n", "utf-8");
+    git(repo, ["add", "HOST.md"]);
+    git(repo, ["commit", "-m", "host: prep commit after feature branch fork"]);
+    const hostHead = git(repo, ["rev-parse", "HEAD"]);
+
+    const slices = singleSlice("8801");
+    const fixtures = new Map<string, SliceFixture>([
+      ["8801", { files: ["src/g.txt"], qaPasses: true, outputFile: "src/g.txt", outputContent: "g" }],
+    ]);
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    // The slice ran to PASS on the refreshed base. (`result.success`
+    // stays false here only because the stub's no-op reviews leave no
+    // verdict to ship on — issue #43.)
+    const events = readEventLines(repo, slug);
+    const outcome = events.find((l) => l.type === "slice-outcome") as
+      | { slice: { phase: string } }
+      | undefined;
+    expect(outcome?.slice.phase).toBe("PASS");
+    expect(result.failureReason ?? "").not.toContain("Refusing to launch");
+    // The branch was fast-forwarded before any worktree branched from
+    // it: the host's prep commit is part of the shipped feature branch.
+    expect(git(repo, ["merge-base", "--is-ancestor", hostHead, featBranch])).toBe("");
+    expect(git(repo, ["show", `${featBranch}:HOST.md`])).toContain("host moved ahead");
+
+    const warn = readEventLines(repo, slug).find(
+      (l) => l.type === "warn" && l.reason === "feature-branch-fast-forward",
+    ) as { message: string } | undefined;
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain(staleTip);
+    expect(warn!.message).toContain(hostHead);
+  }, 240_000);
+
+  it("refuses to launch when the feature branch and the host HEAD have diverged", async () => {
+    const repo = makeRepo();
+    const slug = "guard-diverge";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const featBranch = `feat-stub/${slug}`;
+
+    // Feature branch with its own commit, host with a different one:
+    // neither contains the other.
+    git(repo, ["checkout", "-b", featBranch]);
+    writeFileSync(join(repo, "FEAT.md"), "feature-only work\n", "utf-8");
+    git(repo, ["add", "FEAT.md"]);
+    git(repo, ["commit", "-m", "feat: feature-only commit"]);
+    const featureTip = git(repo, ["rev-parse", featBranch]);
+    git(repo, ["checkout", "main"]);
+    writeFileSync(join(repo, "HOST.md"), "host-only work\n", "utf-8");
+    git(repo, ["add", "HOST.md"]);
+    git(repo, ["commit", "-m", "host: host-only commit"]);
+    const hostHead = git(repo, ["rev-parse", "HEAD"]);
+
+    const slices = singleSlice("8802");
+    const fixtures = new Map<string, SliceFixture>([
+      ["8802", { files: ["src/g.txt"], qaPasses: true, outputFile: "src/g.txt", outputContent: "g" }],
+    ]);
+    const records: InvocationRecord[] = [];
+
+    await expect(
+      runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: buildStubProvider({ fixtures, slices, records }),
+      }),
+    ).rejects.toThrow(
+      new RegExp(`Refusing to launch.*${featureTip}.*${hostHead}`, "s"),
+    );
+
+    // Refusal happened before any agent was dispatched, and mutated
+    // neither branch.
+    expect(records).toHaveLength(0);
+    expect(git(repo, ["rev-parse", featBranch])).toBe(featureTip);
+    expect(git(repo, ["rev-parse", "main"])).toBe(hostHead);
+  }, 240_000);
 });
