@@ -1788,6 +1788,76 @@ describe("round-scoped contract feedback", () => {
     },
   );
 
+  it("does not reuse a valid manifest from an earlier planner round", async () => {
+    const repo = makeRepo();
+    const slug = "stale-acceptance-manifest";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9004",
+      title: "Manifest freshness",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          if (plannerRounds === 1) writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
+          writeFileSync(
+            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
+            `VERDICT: ${verdict}\n`,
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+    expect(plannerRounds).toBe(2);
+    expect(evaluatorRounds).toBe(1);
+    expect(
+      existsSync(join(ctx.absSliceDir, "acceptance-manifest.json")),
+    ).toBe(false);
+  });
+
   it("advances after REVISE using only the previous feedback file", async () => {
     const repo = makeRepo();
     const slug = "feedback-rounds";

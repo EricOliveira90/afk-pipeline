@@ -90,7 +90,10 @@ import {
   migrationClaimFor,
   releaseUnmergedMigrationClaims,
 } from "./migration-claims.js";
-import { loadAcceptanceManifest } from "./acceptance-manifest.js";
+import {
+  ACCEPTANCE_MANIFEST_FILENAME,
+  loadAcceptanceManifest,
+} from "./acceptance-manifest.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -1421,6 +1424,9 @@ async function negotiateAttempt(
             round,
           },
         );
+        rmSync(join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME), {
+          force: true,
+        });
         await invokeAgent(
           {
             role: "planner",
