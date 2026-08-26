@@ -136,8 +136,10 @@ export type RunEventPayload =
        * invocation (issue #41), NOT-RUN dependency holds, idle-kill
        * deferrals from the busy probe (ADR 0021), operator-granted
        * resumes of a STUCK slice's preserved tree (`--resume-stuck`,
-       * #49), and a locked contract
-       * sent back to the planner by the contract-lock gate (ADR 0028).
+       * #49), a locked contract
+       * sent back to the planner by the contract-lock gate (ADR 0028),
+       * and the launch guard fast-forwarding a stale feature branch to
+       * the host worktree's HEAD before any wave dispatches.
        */
       reason:
         | "lane-continuation"
@@ -148,7 +150,8 @@ export type RunEventPayload =
         | "not-run-hold"
         | "idle-deferral"
         | "resume-stuck"
-        | "contract-lock-refused";
+        | "contract-lock-refused"
+        | "feature-branch-fast-forward";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

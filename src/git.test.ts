@@ -15,6 +15,9 @@ import {
   branchExists,
   countCommitsAhead,
   createWorktree,
+  ensureFeatureBranchContainsHostHead,
+  fastForwardBranch,
+  isAncestor,
   isWorktreeRegistered,
   lastCommitEpochSeconds,
   logCommitsWithStat,
@@ -1094,5 +1097,133 @@ describe("git.mergeBranchIntoWorktree", () => {
     expect(readFileSync(join(wt, "shared.txt"), "utf-8").replace(/\r\n/g, "\n")).toBe(
       "slice version\n",
     );
+  });
+});
+
+
+/**
+ * Launch-guard primitives (recovery plan Phase A step 2): the feature
+ * branch must contain the host worktree's HEAD before slice worktrees
+ * branch from it — otherwise agents read files older than the code
+ * orchestrating them. The guard is keyed on host HEAD, not main, so
+ * hosts running from prep branches ahead of main stay legitimate.
+ */
+describe("feature-branch launch guard", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-guard-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    git(repoDir, ["config", "user.email", "test@example.com"]);
+    git(repoDir, ["config", "user.name", "Test"]);
+    git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
+  });
+
+  afterEach(() => {
+    rmDirWithRetry(repoDir);
+  });
+
+  function commitFile(cwd: string, name: string, content: string, msg: string) {
+    writeFileSync(join(cwd, name), content, "utf-8");
+    git(cwd, ["add", name]);
+    git(cwd, ["commit", "-m", msg]);
+  }
+
+  describe("isAncestor", () => {
+    it("is true for a commit contained in the descendant, including equality", () => {
+      const root = git(repoDir, ["rev-parse", "HEAD"]);
+      commitFile(repoDir, "a.txt", "a\n", "second");
+      const tip = git(repoDir, ["rev-parse", "HEAD"]);
+
+      expect(isAncestor(repoDir, root, tip)).toBe(true);
+      expect(isAncestor(repoDir, tip, tip)).toBe(true);
+    });
+
+    it("is false for a descendant asked as ancestor, and for missing refs", () => {
+      const root = git(repoDir, ["rev-parse", "HEAD"]);
+      commitFile(repoDir, "a.txt", "a\n", "second");
+      const tip = git(repoDir, ["rev-parse", "HEAD"]);
+
+      expect(isAncestor(repoDir, tip, root)).toBe(false);
+      expect(isAncestor(repoDir, "no-such-ref", tip)).toBe(false);
+    });
+  });
+
+  describe("fastForwardBranch", () => {
+    it("moves a branch that is not checked out anywhere", () => {
+      git(repoDir, ["branch", "feature"]);
+      commitFile(repoDir, "a.txt", "a\n", "advance main");
+      const mainTip = git(repoDir, ["rev-parse", "main"]);
+
+      fastForwardBranch(repoDir, "feature", mainTip);
+
+      expect(git(repoDir, ["rev-parse", "feature"])).toBe(mainTip);
+    });
+
+    it("fast-forwards a branch checked out in a worktree, updating its files", () => {
+      git(repoDir, ["branch", "feature"]);
+      const wt = join(repoDir, ".wt-feature");
+      git(repoDir, ["worktree", "add", wt, "feature"]);
+      commitFile(repoDir, "a.txt", "from main\n", "advance main");
+      const mainTip = git(repoDir, ["rev-parse", "main"]);
+
+      fastForwardBranch(repoDir, "feature", mainTip);
+
+      expect(git(repoDir, ["rev-parse", "feature"])).toBe(mainTip);
+      // The checked-out worktree's files moved with the ref.
+      expect(
+        readFileSync(join(wt, "a.txt"), "utf-8").replace(/\r\n/g, "\n"),
+      ).toBe("from main\n");
+    });
+  });
+
+  describe("ensureFeatureBranchContainsHostHead", () => {
+    it("reports current when the feature branch already contains host HEAD", () => {
+      const hostHead = git(repoDir, ["rev-parse", "HEAD"]);
+      // Feature branch strictly ahead of host HEAD — still "current".
+      git(repoDir, ["checkout", "-b", "feat/x"]);
+      commitFile(repoDir, "f.txt", "f\n", "feature work");
+      const featureTip = git(repoDir, ["rev-parse", "HEAD"]);
+      git(repoDir, ["checkout", "main"]);
+
+      const result = ensureFeatureBranchContainsHostHead(repoDir, "feat/x");
+
+      expect(result).toEqual({ kind: "current", hostHead, featureTip });
+      expect(git(repoDir, ["rev-parse", "feat/x"])).toBe(featureTip);
+    });
+
+    it("fast-forwards a feature branch that is a plain ancestor of host HEAD", () => {
+      git(repoDir, ["branch", "feat/x"]);
+      const previousTip = git(repoDir, ["rev-parse", "feat/x"]);
+      commitFile(repoDir, "host.txt", "h\n", "host moved ahead");
+      const hostHead = git(repoDir, ["rev-parse", "HEAD"]);
+
+      const result = ensureFeatureBranchContainsHostHead(repoDir, "feat/x");
+
+      expect(result).toEqual({ kind: "fast-forwarded", hostHead, previousTip });
+      expect(git(repoDir, ["rev-parse", "feat/x"])).toBe(hostHead);
+    });
+
+    it("reports divergence without mutating either branch", () => {
+      git(repoDir, ["checkout", "-b", "feat/x"]);
+      commitFile(repoDir, "f.txt", "f\n", "feature-only work");
+      const featureTip = git(repoDir, ["rev-parse", "HEAD"]);
+      git(repoDir, ["checkout", "main"]);
+      commitFile(repoDir, "host.txt", "h\n", "host-only work");
+      const hostHead = git(repoDir, ["rev-parse", "HEAD"]);
+
+      const result = ensureFeatureBranchContainsHostHead(repoDir, "feat/x");
+
+      expect(result).toEqual({ kind: "diverged", hostHead, featureTip });
+      // Refusal is read-only: both tips are where they were.
+      expect(git(repoDir, ["rev-parse", "feat/x"])).toBe(featureTip);
+      expect(git(repoDir, ["rev-parse", "main"])).toBe(hostHead);
+    });
+
+    it("throws when the feature branch does not exist", () => {
+      expect(() =>
+        ensureFeatureBranchContainsHostHead(repoDir, "feat/missing"),
+      ).toThrow(/does not exist/);
+    });
   });
 });
