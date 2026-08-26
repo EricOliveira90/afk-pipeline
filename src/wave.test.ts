@@ -47,8 +47,6 @@ function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-wave-"));
   tempDirs.push(dir);
   git(dir, ["init", "--initial-branch=main"]);
-  git(dir, ["config", "user.email", "test@example.com"]);
-  git(dir, ["config", "user.name", "Test"]);
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
   git(dir, ["add", "README.md"]);
   git(dir, ["commit", "-m", "root"]);

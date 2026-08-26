@@ -62,8 +62,6 @@ describe("git.branchExists", () => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     // Init a throwaway repo with a single commit so we can create branches.
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -117,8 +115,6 @@ describe("git.getDefaultBranch", () => {
     const seedDir = mkdtempSync(join(tmpdir(), "afk-default-seed-"));
     try {
       git(seedDir, ["clone", originDir, "."]);
-      git(seedDir, ["config", "user.email", "test@example.com"]);
-      git(seedDir, ["config", "user.name", "Test"]);
       git(seedDir, ["checkout", "-b", branch]);
       git(seedDir, ["commit", "--allow-empty", "-m", "root"]);
       git(seedDir, ["push", "-u", "origin", branch]);
@@ -143,16 +139,12 @@ describe("git.getDefaultBranch", () => {
 
   it("falls back to local master when origin/HEAD is unset", () => {
     git(repoDir, ["init", "--initial-branch=master"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     expect(getDefaultBranch(repoDir)).toBe("master");
   });
 
   it("prefers local main over master when both exist and no origin", () => {
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     git(repoDir, ["branch", "master"]);
     expect(getDefaultBranch(repoDir)).toBe("main");
@@ -160,8 +152,6 @@ describe("git.getDefaultBranch", () => {
 
   it("throws when no canonical default branch can be found", () => {
     git(repoDir, ["init", "--initial-branch=develop"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     expect(() => getDefaultBranch(repoDir)).toThrow(
       /Could not determine default branch/,
@@ -175,8 +165,6 @@ describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-wt-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -220,8 +208,6 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-rm-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -305,8 +291,6 @@ describe.runIf(process.platform === "win32")(
       resetWorktreeProcessRegistry();
       repoDir = mkdtempSync(join(tmpdir(), "afk-rm102-"));
       git(repoDir, ["init", "--initial-branch=main"]);
-      git(repoDir, ["config", "user.email", "test@example.com"]);
-      git(repoDir, ["config", "user.name", "Test"]);
       git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     });
 
@@ -452,8 +436,6 @@ describe("git.mergeSliceBranch — MergeResult", { timeout: 240_000 }, () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-merge-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     writeFileSync(join(repoDir, "file.txt"), "base content\n");
     git(repoDir, ["add", "."]);
     git(repoDir, ["commit", "-m", "root"]);
@@ -519,8 +501,6 @@ describe("git.hasCommitsAhead", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-ahead-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -578,8 +558,6 @@ describe("git.createWorktree", { timeout: 240_000 }, () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-cw-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -653,8 +631,6 @@ describe("git.assertWorktreeRegistered", { timeout: 240_000 }, () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-assert-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -777,8 +753,6 @@ describe("git.listFilesOnRef", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -813,8 +787,6 @@ describe("git.listMigrationFiles / migrationPrefixCollisions", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -877,8 +849,6 @@ describe("resume git primitives", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-resume-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     writeFileSync(join(repoDir, "base.txt"), "base\n", "utf-8");
     git(repoDir, ["add", "base.txt"]);
     git(repoDir, ["commit", "-m", "root"]);
@@ -1033,8 +1003,6 @@ describe("git.mergeBranchIntoWorktree", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-refresh-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     writeFileSync(join(repoDir, "shared.txt"), "line1\nline2\nline3\n", "utf-8");
     git(repoDir, ["add", "shared.txt"]);
     git(repoDir, ["commit", "-m", "root"]);
@@ -1114,8 +1082,6 @@ describe("feature-branch launch guard", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-guard-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 

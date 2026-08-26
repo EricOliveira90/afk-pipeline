@@ -703,8 +703,6 @@ function makeRepo(opts: { lifetime?: "test" | "describe" } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-orch-"));
   if (opts.lifetime !== "describe") integrationTempDirs.push(dir);
   git(dir, ["init", "--initial-branch=main"]);
-  git(dir, ["config", "user.email", "test@example.com"]);
-  git(dir, ["config", "user.name", "Test"]);
   // Need at least one commit before we can branch.
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
   git(dir, ["add", "README.md"]);
