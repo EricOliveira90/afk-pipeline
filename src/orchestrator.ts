@@ -188,6 +188,17 @@ export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
     };
   });
 }
+
+function formatBaseGateCatalog(catalog: readonly GateDeclaration[]): string {
+  return catalog
+    .map((gate) => {
+      const command = gate.command
+        ? [gate.command, ...(gate.args ?? [])].join(" ")
+        : "(not executable)";
+      return `- ${gate.id}: ${command}`;
+    })
+    .join("\n");
+}
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
   verifyMigrationCommand: string;
@@ -1427,18 +1438,16 @@ async function negotiateAttempt(
       );
     };
 
-    const loadBehaviorLockedManifest = () => {
+    const loadBehaviorLockArtifacts = () => {
       const manifest = loadAcceptanceManifest(ctx.absSliceDir);
       validateAcceptanceManifestCoverage(
         readFileSync(contractPath, "utf-8"),
         manifest,
         contractPath,
       );
-      validateAcceptanceManifestBindings(
-        manifest,
-        resolveBaseGateDeclarations(ctx.worktreeDir),
-      );
-      return manifest;
+      const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
+      validateAcceptanceManifestBindings(manifest, gateCatalog);
+      return { manifest, gateCatalog };
     };
 
     // A contract left LOCKED on disk by an earlier run has never been
@@ -1448,7 +1457,7 @@ async function negotiateAttempt(
     if (contractStatus === "LOCKED") {
       let manifestObjection: string | null = null;
       try {
-        loadBehaviorLockedManifest();
+        loadBehaviorLockArtifacts();
       } catch (error) {
         manifestObjection =
           error instanceof Error ? error.message : String(error);
@@ -1512,8 +1521,18 @@ async function negotiateAttempt(
           round,
         });
 
+        let acceptanceManifestBlock = "";
+        let baseGateCatalogBlock = "";
         try {
-          loadBehaviorLockedManifest();
+          const lockArtifacts = loadBehaviorLockArtifacts();
+          acceptanceManifestBlock = JSON.stringify(
+            lockArtifacts.manifest,
+            null,
+            2,
+          );
+          baseGateCatalogBlock = formatBaseGateCatalog(
+            lockArtifacts.gateCatalog,
+          );
         } catch (error) {
           const objection =
             error instanceof Error ? error.message : String(error);
@@ -1573,6 +1592,8 @@ async function negotiateAttempt(
                 evaluatorRound > 1
                   ? `Read ${ctx.relSliceDir}/feedback-r${evaluatorRound - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
                   : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
+              ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
+              BASE_GATE_CATALOG: baseGateCatalogBlock,
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,

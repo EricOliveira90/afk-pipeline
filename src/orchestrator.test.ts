@@ -2119,6 +2119,7 @@ describe("round-scoped contract feedback", () => {
     let plannerRounds = 0;
     let evaluatorRounds = 0;
     const plannerPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -2146,6 +2147,7 @@ describe("round-scoped contract feedback", () => {
           writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
+          evaluatorPrompts.push(opts.prompt);
           const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
           writeFileSync(
             join(artifactDir, `feedback-r${evaluatorRounds}.md`),
@@ -2177,6 +2179,8 @@ describe("round-scoped contract feedback", () => {
     expect(plannerPrompts[0]).not.toContain("gh issue view 9001");
     expect(plannerPrompts[1]).toContain("feedback-r1.md");
     expect(plannerPrompts[1]).not.toContain("feedback-r2.md");
+    expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
+    expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
 
     const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
     expect(contract).toMatch(/^\*\*Status:\*\*\s*LOCKED\s*$/m);

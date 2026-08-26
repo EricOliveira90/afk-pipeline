@@ -18,6 +18,10 @@ verified, executed, and delivered in a single agent session.
    or requires multiple sequential integrations, it's too large.
 4. **Boundary explicitness.** At least one non-goal is named. New
    patterns or dependencies are either justified or "None."
+5. **Scenario honesty.** Each manifest Given/When/Then and observable
+   result faithfully represents its same-ID contract obligation.
+6. **Binding aptness.** Each behavior's gate IDs name catalog commands
+   capable of producing relevant evidence for that scenario.
 
 # Invariants
 
@@ -38,9 +42,24 @@ Also read:
 - {{PREVIOUS_FEEDBACK_NOTE}}
 - Every ADR cited by the PRD or contract (grep for `docs/adr/`)
 
+# Machine-validated review context
+
+Acceptance manifest:
+
+```json
+{{ACCEPTANCE_MANIFEST}}
+```
+
+Derived baseline gate catalog:
+
+```text
+{{BASE_GATE_CATALOG}}
+```
+
 # Task
 
-Read `{{SLICE_DIR}}/contract.md` and write the following to
+Read `{{SLICE_DIR}}/contract.md`, judge the manifest's scenario honesty
+and binding aptness against the catalog, and write the following to
 `{{SLICE_DIR}}/feedback-r{{ROUND}}.md`:
 
 ```
