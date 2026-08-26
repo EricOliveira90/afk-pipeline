@@ -39,6 +39,7 @@ describe("acceptance-manifest.json", () => {
     [{ version: 1, fileScope: { kind: "paths", paths: ["/outside.ts"] }, migrationCount: 0 }, /repo-relative/],
     [{ version: 1, fileScope: { kind: "paths", paths: ["C:\\outside.ts"] }, migrationCount: 0 }, /repo-relative/],
     [{ version: 1, fileScope: { kind: "paths", paths: ["C:outside.ts"] }, migrationCount: 0 }, /repo-relative/],
+    [{ version: 1, fileScope: { kind: "paths", paths: ["src//a.ts"] }, migrationCount: 0 }, /repo-relative/],
     [{ version: 1, fileScope: { kind: "paths", paths: ["src/"] }, migrationCount: 0 }, /file path/],
     [{ version: 1, fileScope: { kind: "paths", paths: ["./SRC/a.ts", "src/a.ts"] }, migrationCount: 0 }, /unique/],
     [{ version: 1, fileScope: { kind: "paths", paths: ["src/a.ts"] }, migrationCount: -1 }, /non-negative safe integer/],

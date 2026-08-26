@@ -44,6 +44,7 @@ function normalizePath(raw: unknown, source: string): string {
     path.startsWith("/") ||
     /^[a-z]:/i.test(path) ||
     path.startsWith("//") ||
+    path.includes("//") ||
     path.split("/").some((segment) => segment === "." || segment === "..")
   ) {
     throw new Error(
