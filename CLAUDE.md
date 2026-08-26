@@ -49,3 +49,14 @@ on three full-suite runs inside a single writing round. This is safe
 because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
+
+## Where a new assertion goes
+
+A test that spawns a pipeline costs seconds on every run from now on, so a
+new spawned scenario is the last resort, not the default. Prefer, in
+order: a unit test → an `it` on an existing spawned scenario's shared
+result → another slice in a fixture that already runs a wave → a new
+spawn, with a comment saying why. `pnpm test` ends with
+`pnpm test:budgets`, a per-file wall-clock budget; when it goes red, move
+the assertion up that list rather than raising the number. The full
+reasoning is in AGENTS.md.

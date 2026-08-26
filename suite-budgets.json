@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Wall-clock budgets in seconds per `test:*` suite, checked by",
+    "scripts/check-suite-budgets.mjs at the end of `pnpm test`.",
+    "Measured on the dev machine of record (Windows 11, idle) on",
+    "2026-08-26 and set ~30% above the measurement, because a busy",
+    "machine swings these numbers by about 10%. The total is deliberately",
+    "below the sum of the per-suite budgets, so broad drift trips it even",
+    "while every suite stays individually green.",
+    "Raise a number only with a recorded measurement in the commit",
+    "message — this file is the ratchet that keeps a twenty-minute suite",
+    "from growing back one reasonable-looking test at a time. AGENTS.md",
+    "has the cheaper places to put a new assertion."
+  ],
+  "_measured2026_08_26": {
+    "fast": 114.8,
+    "orchestrator": 242.3,
+    "wave": 153.6,
+    "resume-integration": 61.5,
+    "qa-orchestration": 38.2,
+    "clean-failed": 14.1,
+    "_total": "624.5s of suite time, 10m30s of `pnpm test`, 765 tests"
+  },
+  "suites": {
+    "fast": 175,
+    "orchestrator": 320,
+    "wave": 205,
+    "resume-integration": 85,
+    "qa-orchestration": 55,
+    "clean-failed": 20
+  },
+  "totalSeconds": 820
+}

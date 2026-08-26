@@ -48,3 +48,35 @@ on three full-suite runs inside a single writing round. This is safe
 because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
+
+## Where a new assertion goes (read this before adding a test)
+
+A test that spawns a pipeline or a wave costs seconds of wall clock on
+every run from now on. The suite reached twenty minutes one
+reasonable-looking test at a time, so the default is no longer a new
+spawned scenario. In order:
+
+1. **A unit test.** If the claim is about a pure function — a parser, a
+   verdict rule, a plan builder — assert it there. No git, no agents.
+2. **An existing spawned scenario.** Find the `describe` whose fixture
+   already reaches the state you want to assert and add an `it` that
+   inspects its result. These blocks spawn once in `beforeAll` and split
+   the assertions across cases for exactly this reason.
+3. **A slice added to an existing wave.** A new outcome usually only
+   needs another slice in a fixture that already runs a wave, not another
+   wave.
+4. **A new spawned scenario** — only when the fixture state genuinely
+   differs and no existing one can reach it. Say so in a comment, so the
+   next reader knows the cost was deliberate.
+
+`pnpm test` ends with `pnpm test:budgets`, a per-file wall-clock budget
+(`suite-budgets.json`). If it goes red, the fix is normally to move the
+assertion up this list — not to raise the number. Raising one is fine
+when the cost is genuinely necessary, but record the measurement in the
+commit message.
+
+Merging scenarios pays off when it removes whole *pipeline* runs — the
+fixed cost of a run is feature-branch setup, the review phase and the
+sanity gate. Packing more slices into one *wave* was measured on
+2026-08-26 and did not help: that cost is per-slice git work, and running
+the lanes concurrently does not recover it on Windows.
