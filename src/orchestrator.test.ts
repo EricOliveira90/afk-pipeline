@@ -4135,8 +4135,11 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
     return readFileSync(join(parent, latest, "run.log"), "utf-8");
   }
 
-  async function createDeferredRun(slug: string) {
-    const repo = makeRepo();
+  async function createDeferredRun(
+    slug: string,
+    repoOpts: { lifetime?: "test" | "describe" } = {},
+  ) {
+    const repo = makeRepo(repoOpts);
     seedMigrationOnMain(repo, "042_users.sql");
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
     const slices = slicesWithDependent();
@@ -4154,153 +4157,147 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
     return { repo, slug, slices, config, featBranch: `feat-stub/${slug}` };
   }
 
-  it("recovers an excluded member before dispatching the narrowed dependent", async () => {
-    const env = await createDeferredRun("merge-pending-narrow-recover");
-    git(env.repo, ["checkout", env.featBranch]);
-    git(env.repo, [
-      "mv",
-      "supabase/migrations/042_users.sql",
-      "supabase/migrations/041_users.sql",
-    ]);
-    git(env.repo, ["commit", "-m", "free migration prefix 042"]);
-    git(env.repo, ["checkout", "main"]);
+  /**
+   * One deferred slice, four successive runs, one fixture. The collision
+   * is refused (run 1), survives a narrowed re-entry (run 2) and an
+   * ordinary one (run 3), and finally merges once the operator frees the
+   * prefix (run 4). Each of these cases used to re-pay for its own run 1,
+   * which is the expensive part; and since what is under test is a state
+   * machine, re-entering one fixture repeatedly is also closer to what an
+   * operator actually does than four independent first runs.
+   */
+  describe("a deferred slice across successive runs", () => {
+    const slug = "merge-pending-reentry";
+    let repo: string;
+    let featBranch: string;
+    let worktree: string;
+    /** Snapshots taken between runs, before the next one overwrote state. */
+    let afterRefusedMerge: StateSlice;
+    let dependentAfterRefusedMerge: StateSlice | undefined;
+    let branchName: string;
+    let worktreeAfterRefusedMerge = false;
+    let narrowedRecheck: { state: Record<string, StateSlice>; records: InvocationRecord[] };
+    let ordinaryRecheck: { state: Record<string, StateSlice>; records: InvocationRecord[] };
+    let recovered: { state: Record<string, StateSlice>; records: InvocationRecord[] };
+    let worktreeAfterRecovery = true;
+    let featureTreeAfterRecovery = "";
 
-    const records: InvocationRecord[] = [];
-    await runPipeline({
-      ...env.config,
-      dag: buildDAG(env.slices),
-      selectedSliceNumbers: ["02"],
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices: env.slices,
-        records,
-      }),
+    /** Re-enter the same fixture; returns what that run did. */
+    async function reenter(
+      env: Awaited<ReturnType<typeof createDeferredRun>>,
+      selectedSliceNumbers?: string[],
+    ) {
+      const records: InvocationRecord[] = [];
+      await runPipeline({
+        ...env.config,
+        dag: buildDAG(env.slices),
+        ...(selectedSliceNumbers ? { selectedSliceNumbers } : {}),
+        provider: buildStubProvider({
+          fixtures: fixturesWithDependent(),
+          slices: env.slices,
+          records,
+        }),
+      });
+      return { state: stateOf(env.repo, env.slug), records };
+    }
+
+    beforeAll(async () => {
+      // --- Run 1: the merge is refused; nothing is discarded. ---
+      const env = await createDeferredRun(slug, { lifetime: "describe" });
+      repo = env.repo;
+      featBranch = env.featBranch;
+      worktree = join(repo, ".afk", "worktrees", `afk-stub-${slug}-s01`);
+      afterRefusedMerge = stateOf(repo, slug)[BLOCKED]!;
+      branchName = afterRefusedMerge.branch!;
+      worktreeAfterRefusedMerge = existsSync(worktree);
+      dependentAfterRefusedMerge = stateOf(repo, slug)[DEPENDENT];
+
+      // --- Runs 2 and 3: nothing changed, so the collision is still
+      // there — first for a re-run narrowed to the dependent, then for an
+      // ordinary one.
+      narrowedRecheck = await reenter(env, ["02"]);
+      ordinaryRecheck = await reenter(env);
+
+      // --- Mutate: free prefix 042 on the feature branch. ---
+      git(repo, ["checkout", featBranch]);
+      git(repo, [
+        "mv",
+        "supabase/migrations/042_users.sql",
+        "supabase/migrations/041_users.sql",
+      ]);
+      git(repo, ["commit", "-m", "renumber users migration to 041"]);
+      git(repo, ["checkout", "main"]);
+
+      // --- Run 4: recovery merges before any agent is dispatched, and
+      // the excluded member is recovered even though the invocation was
+      // narrowed to its dependent.
+      recovered = await reenter(env, ["02"]);
+      worktreeAfterRecovery = existsSync(worktree);
+      featureTreeAfterRecovery = git(repo, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        featBranch,
+      ]);
+    }, 240_000);
+
+    afterAll(() => {
+      try {
+        rmSync(repo, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
     });
 
-    expect(stateOf(env.repo, env.slug)[BLOCKED]!.phase).toBe("PASS");
-    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
-    expect(records.some((record) => record.ghIssue === DEPENDENT)).toBe(true);
-  }, 180_000);
-
-  it("rechecks an excluded member whose collision persists without dispatching it", async () => {
-    const env = await createDeferredRun("merge-pending-narrow-sticky");
-    const records: InvocationRecord[] = [];
-
-    await runPipeline({
-      ...env.config,
-      dag: buildDAG(env.slices),
-      selectedSliceNumbers: ["02"],
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices: env.slices,
-        records,
-      }),
+    it("refuses the merge without discarding the slice's work", () => {
+      expect(afterRefusedMerge.phase).toBe("MERGE-PENDING");
+      expect(afterRefusedMerge.collidingPrefixes).toEqual(["042"]);
+      expect(afterRefusedMerge.error).toContain("retries the merge");
+      expect(git(repo, ["rev-parse", "--verify", branchName])).toMatch(/\w/);
+      expect(worktreeAfterRefusedMerge).toBe(true);
     });
 
-    expect(stateOf(env.repo, env.slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
-    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
-    expect(records.some((record) => record.ghIssue === DEPENDENT)).toBe(false);
-  }, 180_000);
-
-  it("checks an excluded member with a missing branch but does not dispatch it", async () => {
-    const env = await createDeferredRun("merge-pending-narrow-missing");
-    const branch = stateOf(env.repo, env.slug)[BLOCKED]!.branch!;
-    const worktree = join(
-      env.repo,
-      ".afk",
-      "worktrees",
-      `afk-stub-${env.slug}-s01`,
-    );
-    git(env.repo, ["worktree", "remove", worktree, "--force"]);
-    git(env.repo, ["branch", "-D", branch]);
-    const records: InvocationRecord[] = [];
-
-    await runPipeline({
-      ...env.config,
-      dag: buildDAG(env.slices),
-      selectedSliceNumbers: ["02"],
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices: env.slices,
-        records,
-      }),
+    it("holds the dependent back — MERGE-PENDING unblocks nothing", () => {
+      expect(dependentAfterRefusedMerge).toBeUndefined();
     });
 
-    expect(records.some((record) => record.ghIssue === BLOCKED)).toBe(false);
-    expect(latestRunLog(env.repo, env.slug)).toContain(
-      "slice is outside this invocation's dispatch set",
-    );
-  }, 180_000);
-
-  it("merges the deferred slice on the next run with no agent, unblocking its dependent", async () => {
-    const repo = makeRepo();
-    const slug = "merge-pending-recover";
-    seedMigrationOnMain(repo, "042_users.sql");
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-    const slices = slicesWithDependent();
-    const featBranch = `feat-stub/${slug}`;
-    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
-
-    // --- Run 1: the merge is refused; nothing is discarded. ---
-    await runPipeline({
-      ...config,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices,
-        records: [],
-      }),
+    it("rechecks the excluded member on a narrowed re-run without dispatching it", () => {
+      expect(narrowedRecheck.state[BLOCKED]!.phase).toBe("MERGE-PENDING");
+      expect(narrowedRecheck.records.some((r) => r.ghIssue === BLOCKED)).toBe(false);
+      // Its dependent is still blocked, so the narrowed run has no work.
+      expect(narrowedRecheck.records.some((r) => r.ghIssue === DEPENDENT)).toBe(false);
     });
 
-    const afterFirst = stateOf(repo, slug)[BLOCKED]!;
-    expect(afterFirst.phase).toBe("MERGE-PENDING");
-    expect(afterFirst.collidingPrefixes).toEqual(["042"]);
-    expect(afterFirst.error).toContain("retries the merge");
-    const sliceBranchName = afterFirst.branch!;
-    expect(git(repo, ["rev-parse", "--verify", sliceBranchName])).toMatch(/\w/);
-    const worktree = join(repo, ".afk", "worktrees", `afk-stub-${slug}-s01`);
-    expect(existsSync(worktree)).toBe(true);
-    // The dependent was held back — MERGE-PENDING unblocks nothing.
-    expect(stateOf(repo, slug)[DEPENDENT]).toBeUndefined();
-
-    // --- Mutate: free prefix 042 on the feature branch. ---
-    git(repo, ["checkout", featBranch]);
-    git(repo, [
-      "mv",
-      "supabase/migrations/042_users.sql",
-      "supabase/migrations/041_users.sql",
-    ]);
-    git(repo, ["commit", "-m", "renumber users migration to 041"]);
-    git(repo, ["checkout", "main"]);
-
-    // --- Run 2: recovery merges before any agent is dispatched. ---
-    const records2: InvocationRecord[] = [];
-    await runPipeline({
-      ...config,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices,
-        records: records2,
-      }),
+    it("keeps a still-colliding slice MERGE-PENDING with a refreshed reason", () => {
+      const after = ordinaryRecheck.state[BLOCKED]!;
+      expect(after.phase).toBe("MERGE-PENDING");
+      expect(after.collidingPrefixes).toEqual(["042"]);
+      expect(after.error).toContain("042");
+      // A repeated retry must not escalate into a regeneration nobody
+      // asked for: no agent ran against the slice in that run at all.
+      expect(ordinaryRecheck.records.filter((r) => r.ghIssue === BLOCKED)).toEqual([]);
+      // Its branch is still there, ready for the run after this one.
+      expect(git(repo, ["rev-parse", "--verify", after.branch!])).toMatch(/\w/);
     });
 
-    const afterSecond = stateOf(repo, slug);
-    expect(afterSecond[BLOCKED]!.phase).toBe("PASS");
-    expect(afterSecond[BLOCKED]!.mergedToFeature).toBe(true);
-    // Not one agent invocation was spent on the recovered slice.
-    expect(records2.filter((r) => r.ghIssue === BLOCKED)).toEqual([]);
-    // Its worktree is gone, as it would be after any successful merge.
-    expect(existsSync(worktree)).toBe(false);
-    // The work actually landed on the feature branch.
-    git(repo, ["checkout", featBranch]);
-    expect(
-      existsSync(join(repo, "supabase", "migrations", "042_orders.sql")),
-    ).toBe(true);
-    // And the dependent, held back through all of run 1, ran and passed.
-    expect(afterSecond[DEPENDENT]!.phase).toBe("PASS");
-    expect(records2.some((r) => r.ghIssue === DEPENDENT)).toBe(true);
-  }, 180_000);
+    it("merges the freed slice with no agent, even outside the dispatch set", () => {
+      expect(recovered.state[BLOCKED]!.phase).toBe("PASS");
+      expect(recovered.state[BLOCKED]!.mergedToFeature).toBe(true);
+      // Not one agent invocation was spent on the recovered slice.
+      expect(recovered.records.filter((r) => r.ghIssue === BLOCKED)).toEqual([]);
+      // Its worktree is gone, as it would be after any successful merge.
+      expect(worktreeAfterRecovery).toBe(false);
+      // The work actually landed on the feature branch.
+      expect(featureTreeAfterRecovery).toContain(
+        "supabase/migrations/042_orders.sql",
+      );
+    });
+
+    it("unblocks the dependent it had held back for three runs", () => {
+      expect(recovered.state[DEPENDENT]!.phase).toBe("PASS");
+      expect(recovered.records.some((r) => r.ghIssue === DEPENDENT)).toBe(true);
+    });
+  });
 
   it("does not report zero dispatch when merge-only recovery is the only slice work", async () => {
     const repo = makeRepo();
@@ -4368,90 +4365,70 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
     expect(records.every((record) => record.role.endsWith("-review"))).toBe(true);
   }, 180_000);
 
-  it("keeps a still-colliding slice MERGE-PENDING with a refreshed reason and never regenerates it", async () => {
-    const repo = makeRepo();
-    const slug = "merge-pending-sticky";
-    seedMigrationOnMain(repo, "042_users.sql");
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-    const slices = slicesWithDependent();
-    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
-
-    await runPipeline({
-      ...config,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices,
-        records: [],
-      }),
-    });
-    expect(stateOf(repo, slug)[BLOCKED]!.phase).toBe("MERGE-PENDING");
-
-    // --- Run 2: nothing changed, so the collision is still there. ---
-    const records2: InvocationRecord[] = [];
-    await runPipeline({
-      ...config,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices,
-        records: records2,
-      }),
-    });
-
-    const after = stateOf(repo, slug)[BLOCKED]!;
-    expect(after.phase).toBe("MERGE-PENDING");
-    expect(after.collidingPrefixes).toEqual(["042"]);
-    expect(after.error).toContain("042");
-    // A repeated retry must not escalate into a regeneration nobody asked
-    // for: no agent ran against the slice in run 2 at all.
-    expect(records2.filter((r) => r.ghIssue === BLOCKED)).toEqual([]);
-    // Its branch is still there, ready for the run after this one.
-    expect(git(repo, ["rev-parse", "--verify", after.branch!])).toMatch(/\w/);
-  }, 180_000);
-
-  it("falls through to ordinary dispatch when the slice branch is gone", async () => {
-    const repo = makeRepo();
+  /**
+   * The same deferred slice after its branch is destroyed, re-entered
+   * twice: once narrowed away from it, once dispatching it. Both re-runs
+   * read the same broken claim, so they share the run that created it.
+   */
+  describe("a deferred slice whose branch is gone", () => {
     const slug = "merge-pending-lost-branch";
-    seedMigrationOnMain(repo, "042_users.sql");
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-    const slices = slicesWithDependent();
-    const config = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
+    let repo: string;
+    let narrowed: { records: InvocationRecord[]; log: string; state: Record<string, StateSlice> };
+    let dispatched: { records: InvocationRecord[]; log: string };
 
-    await runPipeline({
-      ...config,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices,
-        records: [],
-      }),
+    beforeAll(async () => {
+      const env = await createDeferredRun(slug, { lifetime: "describe" });
+      repo = env.repo;
+
+      // --- Mutate: destroy the recoverable claim. ---
+      const worktree = join(repo, ".afk", "worktrees", `afk-stub-${slug}-s01`);
+      const branch = stateOf(repo, slug)[BLOCKED]!.branch!;
+      git(repo, ["worktree", "remove", worktree, "--force"]);
+      git(repo, ["branch", "-D", branch]);
+
+      const run = async (selectedSliceNumbers?: string[]) => {
+        const records: InvocationRecord[] = [];
+        await runPipeline({
+          ...env.config,
+          dag: buildDAG(env.slices),
+          ...(selectedSliceNumbers ? { selectedSliceNumbers } : {}),
+          provider: buildStubProvider({
+            fixtures: fixturesWithDependent(),
+            slices: env.slices,
+            records,
+          }),
+        });
+        return { records, log: latestRunLog(repo, slug), state: stateOf(repo, slug) };
+      };
+
+      narrowed = await run(["02"]);
+      dispatched = await run();
+    }, 240_000);
+
+    afterAll(() => {
+      try {
+        rmSync(repo, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
     });
-    const branch = stateOf(repo, slug)[BLOCKED]!.branch!;
 
-    // --- Mutate: destroy the recoverable claim. ---
-    const worktree = join(repo, ".afk", "worktrees", `afk-stub-${slug}-s01`);
-    git(repo, ["worktree", "remove", worktree, "--force"]);
-    git(repo, ["branch", "-D", branch]);
-
-    const records2: InvocationRecord[] = [];
-    await runPipeline({
-      ...config,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({
-        fixtures: fixturesWithDependent(),
-        slices,
-        records: records2,
-      }),
+    it("checks the excluded member but does not dispatch it", () => {
+      expect(narrowed.records.some((r) => r.ghIssue === BLOCKED)).toBe(false);
+      expect(narrowed.log).toContain(
+        "slice is outside this invocation's dispatch set",
+      );
+      // Still pending: a narrowed run cannot resolve it either way.
+      expect(narrowed.state[BLOCKED]!.phase).toBe("MERGE-PENDING");
     });
 
-    // Nothing to merge, so the slice is dispatched like any other —
-    // recovery does not invent an outcome from a claim that is false.
-    expect(records2.some((r) => r.ghIssue === BLOCKED)).toBe(true);
-    expect(latestRunLog(repo, slug)).toContain(
-      "nothing to recover; dispatching normally",
-    );
-  }, 180_000);
+    it("falls through to ordinary dispatch once the slice is in scope", () => {
+      // Nothing to merge, so the slice is dispatched like any other —
+      // recovery does not invent an outcome from a claim that is false.
+      expect(dispatched.records.some((r) => r.ghIssue === BLOCKED)).toBe(true);
+      expect(dispatched.log).toContain("nothing to recover; dispatching normally");
+    });
+  });
 });
 
 
