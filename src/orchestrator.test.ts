@@ -3319,321 +3319,245 @@ describe("events.jsonl tee (spec #26)", () => {
       .map((d) => join(parent, d));
   }
 
-  it("writes header, run-started, and one slice-outcome per terminal outcome", async () => {
-    const repo = makeRepo();
+  /** The run's event stream, one parsed object per line. */
+  function eventsOf(runDir: string): any[] {
+    return readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+  }
+
+  /**
+   * Every event type the tee emits, from one wave. The stream is a
+   * projection of a run, so one run with the right shape carries all of
+   * it: a lane whose lead fails and whose mate continues (ADR 0024), a
+   * DAG-held slice that never runs, and a slice carrying all three
+   * retry/deferral injections at once. Only the prior-run-state warn
+   * needs a second run, because it reports what the first one left.
+   *
+   * A new event type belongs here, on this fixture, before it earns a
+   * spawn of its own (AGENTS.md).
+   */
+  describe("one wave's event stream", () => {
     const slug = "events";
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const LEAD = "9601";
+    const MATE = "9602";
+    const HELD = "9603";
+    const RETRIED = "9701";
+    let repo: string;
+    let lines: any[];
+    let warns: any[];
+    let priorWarns: any[];
 
-    const slices: Slice[] = [
-      { number: "01", ghIssue: "9401", title: "Passer", type: "AFK", blockedBy: [], userStories: "" },
-      { number: "02", ghIssue: "9402", title: "Failer", type: "AFK", blockedBy: [], userStories: "" },
-    ];
-    // Disjoint files → two lanes; one passes, one fails QA every round
-    // and lands STUCK, so the tee carries a real failure reason.
-    const fixtures = new Map<string, SliceFixture>([
-      ["9401", { files: ["src/a.txt"], qaPasses: true, outputFile: "src/a.txt", outputContent: "a" }],
-      ["9402", { files: ["src/b.txt"], qaPasses: false, outputFile: "src/b.txt", outputContent: "b" }],
-    ]);
+    beforeAll(async () => {
+      repo = makeRepo({ lifetime: "describe" });
+      const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      const slices: Slice[] = [
+        { number: "01", ghIssue: LEAD, title: "LaneLead", type: "AFK", blockedBy: [], userStories: "" },
+        { number: "02", ghIssue: MATE, title: "LaneMate", type: "AFK", blockedBy: [], userStories: "" },
+        { number: "03", ghIssue: HELD, title: "Dependent", type: "AFK", blockedBy: [LEAD], userStories: "" },
+        { number: "04", ghIssue: RETRIED, title: "Retried", type: "AFK", blockedBy: [], userStories: "" },
+      ];
+      // The lead fails QA every round and lands STUCK, so the tee carries
+      // a real failure reason; the mate shares its file (same lane) and
+      // passes; the dependent is DAG-blocked by the lead and never runs.
+      // The fourth slice is deliberately loaded with every recoverable
+      // interruption at once — an infrastructure QA verdict, an idle
+      // deferral, and a transient outage — and still passes.
+      const fixtures = new Map<string, SliceFixture>([
+        [LEAD, { files: ["src/shared.txt"], qaPasses: false, outputFile: "src/shared.txt", outputContent: "lead" }],
+        [MATE, { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "mate" }],
+        [HELD, { files: ["src/dep.txt"], qaPasses: true, outputFile: "src/dep.txt", outputContent: "dep" }],
+        [RETRIED, {
+          files: ["src/retried.txt"],
+          qaPasses: true,
+          qaInfraAttempts: 1,
+          simulateIdleDeferral: true,
+          outputFile: "src/retried.txt",
+          outputContent: "retried",
+        }],
+      ]);
+      const stub = buildStubProvider({ fixtures, slices, records: [] });
+      // The retried slice's first generator invocation dies with a
+      // provider-classified transient outage; the orchestrator retries
+      // with backoff.
+      let outageThrown = false;
+      const provider: AgentProvider = {
+        name: stub.name,
+        async invoke(options) {
+          if (
+            options.role === "generator" &&
+            !outageThrown &&
+            /-s04$/.test(options.cwd.replace(/\\/g, "/"))
+          ) {
+            outageThrown = true;
+            throw new TransientProviderError("model temporarily unavailable");
+          }
+          return stub.invoke(options);
+        },
+      };
+      const config = {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        provider,
+        // Test seam: skip the real 30s backoff sleep.
+        transientRetrySleep: async () => {},
+      };
 
-    await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({ fixtures, slices, records: [] }),
-    });
+      await runPipeline({ ...config, dag: buildDAG(slices) });
+      const [firstDir] = runDirsOf(repo, slug);
+      lines = eventsOf(firstDir!);
+      warns = lines.filter((l) => l.type === "warn");
 
-    const [runDir] = runDirsOf(repo, slug);
-    // events.jsonl sits beside run.log in the run directory.
-    expect(existsSync(join(runDir!, "run.log"))).toBe(true);
-    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
-
-    // Header first (version gate), then run-started.
-    expect(lines[0]).toMatchObject({ type: "header", version: 1 });
-    expect(lines[1]).toMatchObject({ type: "run-started", provider: "stub" });
-
-    // One slice-outcome per terminal outcome, serializing the lifecycle.
-    const outcomes = lines.filter((l) => l.type === "slice-outcome");
-    expect(outcomes).toHaveLength(2);
-    const pass = outcomes.find((o) => o.slice.ghIssue === "9401");
-    const stuck = outcomes.find((o) => o.slice.ghIssue === "9402");
-    expect(pass!.slice).toMatchObject({
-      phase: "PASS",
-      title: "Passer",
-      mergedToFeature: true,
-    });
-    expect(stuck!.slice.phase).toBe("STUCK");
-    expect(stuck!.slice.error).toBeTruthy();
-
-    // Every event is timestamped.
-    for (const line of lines) {
-      expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-    }
-  }, 240_000);
-
-  it("emits wave-dispatched per wave and paired phase-started/phase-ended per agent invocation with round and verdict", async () => {
-    const repo = makeRepo();
-    const slug = "events-phases";
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-
-    const slices: Slice[] = [
-      { number: "01", ghIssue: "9501", title: "Only", type: "AFK", blockedBy: [], userStories: "" },
-    ];
-    const fixtures = new Map<string, SliceFixture>([
-      ["9501", { files: ["src/only.txt"], qaPasses: true, outputFile: "src/only.txt", outputContent: "only" }],
-    ]);
-
-    await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({ fixtures, slices, records: [] }),
-    });
-
-    const [runDir] = runDirsOf(repo, slug);
-    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
-
-    // Wave dispatch is a typed event carrying the wave number and slices.
-    const waves = lines.filter((l) => l.type === "wave-dispatched");
-    expect(waves).toHaveLength(1);
-    expect(waves[0]).toMatchObject({ wave: 1, slices: ["9501"] });
-
-    // Lane composition is a typed event too (#30: wave/lane order).
-    const lanes = lines.filter((l) => l.type === "lanes-partitioned");
-    expect(lanes).toHaveLength(1);
-    expect(lanes[0]).toMatchObject({ wave: 1, lanes: [["9501"]] });
-
-    // Each agent invocation produces a started/ended pair, in order.
-    const pairFor = (agent: string, round?: number) => {
-      const started = lines.findIndex(
-        (l) =>
-          l.type === "phase-started" &&
-          l.ghIssue === "9501" &&
-          l.agent === agent &&
-          l.round === round,
+      // A second run, for the one event that reports the previous run.
+      await runPipeline({ ...config, dag: buildDAG(slices) });
+      const secondDir = runDirsOf(repo, slug).find((d) => d !== firstDir)!;
+      priorWarns = eventsOf(secondDir).filter(
+        (l) => l.type === "warn" && l.reason === "prior-run-state",
       );
-      const ended = lines.findIndex(
-        (l) =>
-          l.type === "phase-ended" &&
-          l.ghIssue === "9501" &&
-          l.agent === agent &&
-          l.round === round,
+    }, 240_000);
+
+    afterAll(() => {
+      try {
+        rmSync(repo, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    });
+
+    it("opens with the header and run-started, beside run.log", () => {
+      // events.jsonl sits beside run.log in the run directory.
+      expect(existsSync(join(runDirsOf(repo, slug)[0]!, "run.log"))).toBe(true);
+      // Header first (version gate), then run-started.
+      expect(lines[0]).toMatchObject({ type: "header", version: 1 });
+      expect(lines[1]).toMatchObject({ type: "run-started", provider: "stub" });
+    });
+
+    it("timestamps every event", () => {
+      for (const line of lines) {
+        expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      }
+    });
+
+    it("writes one slice-outcome per terminal outcome, and none for a held slice", () => {
+      const outcomes = lines.filter((l) => l.type === "slice-outcome");
+      expect(outcomes.map((o) => o.slice.ghIssue).sort()).toEqual([
+        LEAD, MATE, RETRIED,
+      ]);
+      expect(outcomes.find((o) => o.slice.ghIssue === MATE)!.slice).toMatchObject({
+        phase: "PASS",
+        title: "LaneMate",
+        mergedToFeature: true,
+      });
+      const stuck = outcomes.find((o) => o.slice.ghIssue === LEAD)!;
+      expect(stuck.slice.phase).toBe("STUCK");
+      expect(stuck.slice.error).toBeTruthy();
+    });
+
+    it("emits wave-dispatched and lanes-partitioned per wave (#30)", () => {
+      const waves = lines.filter((l) => l.type === "wave-dispatched");
+      expect(waves).toHaveLength(1);
+      expect(waves[0]!.wave).toBe(1);
+      // The DAG-held slice is not in the dispatched wave.
+      expect(waves[0]!.slices.sort()).toEqual([LEAD, MATE, RETRIED]);
+
+      const lanes = lines.filter((l) => l.type === "lanes-partitioned");
+      expect(lanes).toHaveLength(1);
+      expect(lanes[0]!.wave).toBe(1);
+      // The shared file put the lead and its mate in one lane; the
+      // retried slice declares its own file, so it gets its own.
+      expect(lanes[0]!.lanes).toEqual(
+        expect.arrayContaining([[LEAD, MATE], [RETRIED]]),
       );
-      expect(started, `${agent} phase-started`).toBeGreaterThan(-1);
-      expect(ended, `${agent} phase-ended`).toBeGreaterThan(started);
-      return lines[ended]!;
-    };
-
-    pairFor("explorer", undefined);
-    pairFor("planner", 1);
-    // The contract evaluator's phase-ended carries the verdict.
-    expect(pairFor("evaluator-contract", 1).verdict).toBe("ACCEPT");
-    pairFor("generator", 1);
-    // The QA evaluator's phase-ended carries the outcome verdict.
-    expect(pairFor("evaluator-qa", 1).verdict).toBe("PASS");
-  }, 240_000);
-
-  it("emits warn events for lane continuations, NOT-RUN holds, and prior-run state on re-runs (#29)", async () => {
-    const repo = makeRepo();
-    const slug = "events-warns";
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-
-    // A fails (STUCK); B shares a file with A → same lane, continues
-    // after A's failure (ADR 0024); C is DAG-blocked by A → never runs.
-    const slices: Slice[] = [
-      { number: "01", ghIssue: "9601", title: "LaneLead", type: "AFK", blockedBy: [], userStories: "" },
-      { number: "02", ghIssue: "9602", title: "LaneMate", type: "AFK", blockedBy: [], userStories: "" },
-      { number: "03", ghIssue: "9603", title: "Dependent", type: "AFK", blockedBy: ["9601"], userStories: "" },
-    ];
-    const fixtures = new Map<string, SliceFixture>([
-      ["9601", { files: ["src/shared.txt"], qaPasses: false, outputFile: "src/shared.txt", outputContent: "lead" }],
-      ["9602", { files: ["src/shared.txt"], qaPasses: true, outputFile: "src/shared.txt", outputContent: "mate" }],
-      ["9603", { files: ["src/dep.txt"], qaPasses: true, outputFile: "src/dep.txt", outputContent: "dep" }],
-    ]);
-    const config = {
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      provider: buildStubProvider({ fixtures, slices, records: [] }),
-    };
-
-    await runPipeline({ ...config, dag: buildDAG(slices) });
-
-    const eventsOf = (runDir: string) =>
-      readFileSync(join(runDir, "events.jsonl"), "utf-8")
-        .trim()
-        .split("\n")
-        .map((l) => JSON.parse(l));
-
-    const [firstDir] = runDirsOf(repo, slug);
-    const firstEvents = eventsOf(firstDir!);
-    const warns = firstEvents.filter((l) => l.type === "warn");
-
-    // Lane continuation is a typed warn with its reason (ADR 0024).
-    const laneWarn = warns.find((w) => w.reason === "lane-continuation");
-    expect(laneWarn).toBeDefined();
-    expect(laneWarn!.ghIssue).toBe("9601");
-    expect(laneWarn!.message).toContain("9602");
-
-    // The DAG-held slice surfaces as a NOT-RUN hold naming its blocker.
-    const holdWarn = warns.find((w) => w.reason === "not-run-hold");
-    expect(holdWarn).toBeDefined();
-    expect(holdWarn!.ghIssue).toBe("9603");
-    expect(holdWarn!.blockedBy).toContain("9601");
-
-    // Re-run: per-slice prior-run state (previous phase + failure
-    // reason) is emitted at run start.
-    await runPipeline({ ...config, dag: buildDAG(slices) });
-    const secondDir = runDirsOf(repo, slug).find((d) => d !== firstDir)!;
-    const priorWarns = eventsOf(secondDir).filter(
-      (l) => l.type === "warn" && l.reason === "prior-run-state",
-    );
-    const stuckPrior = priorWarns.find((w) => w.ghIssue === "9601");
-    expect(stuckPrior).toBeDefined();
-    expect(stuckPrior!.previousPhase).toBe("STUCK");
-    expect(stuckPrior!.previousError).toContain("QA failed");
-    const passPrior = priorWarns.find((w) => w.ghIssue === "9602");
-    expect(passPrior).toBeDefined();
-    expect(passPrior!.previousPhase).toBe("PASS");
-  }, 240_000);
-
-  it("emits an infrastructure-retry warn when QA is retried without consuming a round (#29)", async () => {
-    const repo = makeRepo();
-    const slug = "events-infra";
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-
-    const slices: Slice[] = [
-      { number: "01", ghIssue: "9701", title: "Flaky", type: "AFK", blockedBy: [], userStories: "" },
-    ];
-    const fixtures = new Map<string, SliceFixture>([
-      ["9701", { files: ["src/f.txt"], qaPasses: true, qaInfraAttempts: 1, outputFile: "src/f.txt", outputContent: "f" }],
-    ]);
-
-    await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({ fixtures, slices, records: [] }),
     });
 
-    const [runDir] = runDirsOf(repo, slug);
-    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
-    const infraWarn = lines.find(
-      (l) => l.type === "warn" && l.reason === "infrastructure-retry",
-    );
-    expect(infraWarn).toBeDefined();
-    expect(infraWarn!.ghIssue).toBe("9701");
-    // The retry didn't consume the round: the slice still passes.
-    const outcome = lines.find((l) => l.type === "slice-outcome");
-    expect(outcome!.slice.phase).toBe("PASS");
-  }, 240_000);
+    it("pairs phase-started with phase-ended per invocation, with round and verdict", () => {
+      const pairFor = (agent: string, round?: number) => {
+        const started = lines.findIndex(
+          (l) =>
+            l.type === "phase-started" &&
+            l.ghIssue === MATE &&
+            l.agent === agent &&
+            l.round === round,
+        );
+        const ended = lines.findIndex(
+          (l) =>
+            l.type === "phase-ended" &&
+            l.ghIssue === MATE &&
+            l.agent === agent &&
+            l.round === round,
+        );
+        expect(started, `${agent} phase-started`).toBeGreaterThan(-1);
+        expect(ended, `${agent} phase-ended`).toBeGreaterThan(started);
+        return lines[ended]!;
+      };
 
-  it("emits an idle-deferral warn when the busy probe defers an idle kill (#29 / ADR 0021)", async () => {
-    const repo = makeRepo();
-    const slug = "events-idle";
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-
-    const slices: Slice[] = [
-      { number: "01", ghIssue: "9801", title: "Busy", type: "AFK", blockedBy: [], userStories: "" },
-    ];
-    const fixtures = new Map<string, SliceFixture>([
-      ["9801", { files: ["src/busy.txt"], qaPasses: true, simulateIdleDeferral: true, outputFile: "src/busy.txt", outputContent: "busy" }],
-    ]);
-
-    await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider: buildStubProvider({ fixtures, slices, records: [] }),
+      pairFor("explorer", undefined);
+      pairFor("planner", 1);
+      // The contract evaluator's phase-ended carries the verdict.
+      expect(pairFor("evaluator-contract", 1).verdict).toBe("ACCEPT");
+      pairFor("generator", 1);
+      // The QA evaluator's phase-ended carries the outcome verdict.
+      expect(pairFor("evaluator-qa", 1).verdict).toBe("PASS");
     });
 
-    const [runDir] = runDirsOf(repo, slug);
-    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
-    const deferral = lines.find(
-      (l) => l.type === "warn" && l.reason === "idle-deferral",
-    );
-    expect(deferral).toBeDefined();
-    expect(deferral!.ghIssue).toBe("9801");
-    expect(deferral!.message).toContain("deferring idle kill");
-    expect(deferral!.message).toContain("2 spawned process(es)");
-    // Deferral is informational: the slice still completes normally.
-    const outcome = lines.find((l) => l.type === "slice-outcome");
-    expect(outcome!.slice.phase).toBe("PASS");
-  }, 240_000);
+    it("warns on a lane continuation and on a NOT-RUN hold (#29)", () => {
+      // Lane continuation is a typed warn with its reason (ADR 0024).
+      const laneWarn = warns.find((w) => w.reason === "lane-continuation");
+      expect(laneWarn).toBeDefined();
+      expect(laneWarn!.ghIssue).toBe(LEAD);
+      expect(laneWarn!.message).toContain(MATE);
 
-  it("emits a backoff-retry warn when a transient model outage is retried (#29 / ADR 0022)", async () => {
-    const repo = makeRepo();
-    const slug = "events-backoff";
-    const { prdDir, specsDir } = writePrdFixture(repo, slug);
-
-    const slices: Slice[] = [
-      { number: "01", ghIssue: "9901", title: "Outage", type: "AFK", blockedBy: [], userStories: "" },
-    ];
-    const fixtures = new Map<string, SliceFixture>([
-      ["9901", { files: ["src/o.txt"], qaPasses: true, outputFile: "src/o.txt", outputContent: "o" }],
-    ]);
-    const stub = buildStubProvider({ fixtures, slices, records: [] });
-    // First generator invocation dies with a provider-classified
-    // transient outage; the orchestrator retries with backoff.
-    let outageThrown = false;
-    const provider: AgentProvider = {
-      name: stub.name,
-      async invoke(options) {
-        if (options.role === "generator" && !outageThrown) {
-          outageThrown = true;
-          throw new TransientProviderError("model temporarily unavailable");
-        }
-        return stub.invoke(options);
-      },
-    };
-
-    await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider,
-      // Test seam: skip the real 30s backoff sleep.
-      transientRetrySleep: async () => {},
+      // The DAG-held slice surfaces as a NOT-RUN hold naming its blocker.
+      const holdWarn = warns.find((w) => w.reason === "not-run-hold");
+      expect(holdWarn).toBeDefined();
+      expect(holdWarn!.ghIssue).toBe(HELD);
+      expect(holdWarn!.blockedBy).toContain(LEAD);
     });
 
-    const [runDir] = runDirsOf(repo, slug);
-    const lines = readFileSync(join(runDir!, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
-    const backoff = lines.find(
-      (l) => l.type === "warn" && l.reason === "backoff-retry",
-    );
-    expect(backoff).toBeDefined();
-    expect(backoff!.ghIssue).toBe("9901");
-    expect(backoff!.message).toContain("transient model outage");
-    expect(backoff!.message).toContain("retry 1");
-    // The retry succeeded: the slice still passes.
-    const outcome = lines.find((l) => l.type === "slice-outcome");
-    expect(outcome!.slice.phase).toBe("PASS");
-  }, 240_000);
+    it("warns on an infrastructure QA retry that consumed no round (#29)", () => {
+      const infraWarn = warns.find((w) => w.reason === "infrastructure-retry");
+      expect(infraWarn).toBeDefined();
+      expect(infraWarn!.ghIssue).toBe(RETRIED);
+    });
+
+    it("warns when the busy probe defers an idle kill (#29 / ADR 0021)", () => {
+      const deferral = warns.find((w) => w.reason === "idle-deferral");
+      expect(deferral).toBeDefined();
+      expect(deferral!.ghIssue).toBe(RETRIED);
+      expect(deferral!.message).toContain("deferring idle kill");
+      expect(deferral!.message).toContain("2 spawned process(es)");
+    });
+
+    it("warns when a transient model outage is retried with backoff (#29 / ADR 0022)", () => {
+      const backoff = warns.find((w) => w.reason === "backoff-retry");
+      expect(backoff).toBeDefined();
+      expect(backoff!.ghIssue).toBe(RETRIED);
+      expect(backoff!.message).toContain("transient model outage");
+      expect(backoff!.message).toContain("retry 1");
+    });
+
+    it("leaves the thrice-interrupted slice passing anyway", () => {
+      // Every one of those three is recoverable, so none of them may
+      // change the outcome.
+      const outcome = lines.find(
+        (l) => l.type === "slice-outcome" && l.slice.ghIssue === RETRIED,
+      );
+      expect(outcome!.slice.phase).toBe("PASS");
+    });
+
+    it("reports each slice's prior-run state on the next run (#29)", () => {
+      const stuckPrior = priorWarns.find((w) => w.ghIssue === LEAD);
+      expect(stuckPrior).toBeDefined();
+      expect(stuckPrior!.previousPhase).toBe("STUCK");
+      expect(stuckPrior!.previousError).toContain("QA failed");
+      const passPrior = priorWarns.find((w) => w.ghIssue === MATE);
+      expect(passPrior).toBeDefined();
+      expect(passPrior!.previousPhase).toBe("PASS");
+    });
+  });
 });
 
 
