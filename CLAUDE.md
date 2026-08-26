@@ -30,3 +30,22 @@ integration suites (`orchestrator`, `wave`, `resume-integration`,
   the merged feature branch. A third run costs 20 minutes and proves
   nothing the other two do not.
 - Never loop on the full suite to debug a single failure.
+
+## Self-run launch command (AFK running on this repo)
+
+Every self-run launch — babysit prompts included — passes the
+generator's verification command explicitly:
+
+```bash
+afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm test:fast"
+```
+
+(Substitute `afk`/`afk-claude` for other backends; keep the flag.)
+
+Why: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
+shipped `--test-command`, but the flag only helps if the launch uses
+it. The PRD 1 run didn't, and its generator round 2 spent ~35 minutes
+on three full-suite runs inside a single writing round. This is safe
+because the flag narrows only the generator's iteration loop: the
+pre-ship sanity gate and the QA evaluator still run the full suite, so
+nothing ships verified only on the fast subset.

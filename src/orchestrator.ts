@@ -2426,6 +2426,48 @@ export async function runPipeline(
     : defaultBranch;
   git.createBranch(repoRoot, featBranch, baseBranch);
 
+  // Launch guard: the feature branch must contain the host worktree's
+  // HEAD before any slice worktree is created from it. Slice worktrees
+  // branch from the feature branch, while prompts and dist/ resolve
+  // from the host checkout (src/prompt-template.ts) — a stale feature
+  // branch hands agents source files older than the code orchestrating
+  // them. Keyed on the host HEAD, NOT the default branch: hosts
+  // legitimately run from prep branches ahead of main, and a
+  // behind-main check would re-create the staleness on every prep
+  // cycle. A plain-ancestor branch is fast-forwarded; divergence is a
+  // refusal — the operator must reconcile the branches, the guard
+  // mutates nothing.
+  const freshness = git.ensureFeatureBranchContainsHostHead(
+    repoRoot,
+    featBranch,
+  );
+  if (freshness.kind === "diverged") {
+    const refusal =
+      `Refusing to launch: feature branch ${featBranch} (${freshness.featureTip}) ` +
+      `and the host worktree HEAD (${freshness.hostHead}) have diverged — ` +
+      `neither contains the other. Slice worktrees would branch from a tree ` +
+      `that does not include the code this host is running. Reconcile the ` +
+      `branches (merge or rebase ${featBranch} onto ${freshness.hostHead}, ` +
+      `or move the host) and re-run.`;
+    logger.phase(`[afk] ${refusal}`);
+    throw new Error(refusal);
+  }
+  if (freshness.kind === "fast-forwarded") {
+    logger.phase(
+      `[afk] Fast-forwarded ${featBranch} (${freshness.previousTip} → ` +
+        `${freshness.hostHead}) — the branch was a plain ancestor of the ` +
+        `host worktree HEAD`,
+      "error",
+      {
+        type: "warn",
+        reason: "feature-branch-fast-forward",
+        message:
+          `${featBranch} fast-forwarded from ${freshness.previousTip} to ` +
+          `host HEAD ${freshness.hostHead}`,
+      },
+    );
+  }
+
   // Mark manifest HITL slices as skipped for the human-readable summary.
   for (const [id, slice] of manifestDag.slices) {
     if (slice.type === "HITL") {

@@ -60,9 +60,13 @@ export interface RunGatesOptions {
    * tracked files only and never `node_modules` — without this every
    * `pnpm run` exits instantly and the gate reads a missing toolchain as a
    * red suite (#101, and the same bug on the per-round path). Runs once
-   * before the gates and outside the evidence declarations: it describes the
-   * environment, not the candidate. Its failure is INFRASTRUCTURE, so the
-   * orchestrator's retry applies instead of blaming the generator.
+   * before the gates and outside the evidence declarations. Its failure is
+   * classified by who can fix it: a lockfile that no longer matches the
+   * candidate's `package.json` fails the install deterministically and is
+   * recorded as FAIL/CONFIGURATION against every declaration for the
+   * generator to repair, while environment faults (`pnpm` absent, network,
+   * timeout) are INFRASTRUCTURE, so the orchestrator's retry applies
+   * instead of blaming the generator.
    */
   prepare?: GateDeclaration;
   signal?: AbortSignal;
@@ -188,10 +192,35 @@ export function createCandidateCheckpoint(
   return { commitSha, treeId, worktreeDir };
 }
 
+/**
+ * pnpm's marker for a lockfile that no longer matches `package.json` under
+ * `--frozen-lockfile`. For a given tree the failure is deterministic — the
+ * candidate itself is what is broken — so it is routed to the generator as a
+ * gate FAIL rather than to the infrastructure retry, which would re-run the
+ * identical install against the identical tree forever (ADR 0036).
+ */
+const LOCKFILE_DRIFT_MARKER = /ERR_PNPM_OUTDATED_LOCKFILE/;
+
+/**
+ * How much prepare output is retained for classification and the failure
+ * detail. A tail window bounds memory on chatty installs while keeping the
+ * error block, which pnpm prints last.
+ */
+const PREPARE_OUTPUT_WINDOW = 65_536;
+
+/** Last few non-empty output lines, flattened onto one line. */
+function outputTail(output: string, maxLines = 5, maxChars = 500): string {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tail = lines.slice(-maxLines).join(" | ");
+  return tail.length > maxChars ? `${tail.slice(0, maxChars)}…` : tail;
+}
+
 export async function runGates(
   options: RunGatesOptions,
-): Promise<RunGatesResult> {
-  const attemptId = randomUUID();
+): Promise<RunGatesResult> {  const attemptId = randomUUID();
   const attemptKey = attemptId.replace(/-/g, "").slice(0, 12);
   mkdirSync(options.evidenceDir, { recursive: true });
   const logsDir = join(options.evidenceDir, "gate-logs");
@@ -212,11 +241,18 @@ export async function runGates(
   }
 
   // Prepare the environment inside the checkpoint before any gate runs. A
-  // failure here is recorded against the first declaration by the
-  // `checkpointError` path below, which keeps the evidence's
-  // declaration-to-result binding intact while still reporting
-  // INFRASTRUCTURE.
+  // failure here is classified by who can fix it. A candidate whose
+  // `pnpm-lock.yaml` no longer matches its `package.json` fails the install
+  // deterministically — an infrastructure retry re-runs the identical
+  // install against the identical tree and can never succeed (the ADR 0036
+  // anti-pattern) — so it becomes `prepareFailure` and the loop below
+  // records it as FAIL/CONFIGURATION against every declaration, routing the
+  // repair to the generator. Anything else (`pnpm` absent, network,
+  // timeout) is an environment fault: it joins `checkpointError`, which the
+  // loop below records as INFRASTRUCTURE against the first declaration it
+  // reaches and then stops, leaving the orchestrator's retry to apply.
   const prepareCommand = options.prepare?.command;
+  let prepareFailure: string | undefined;
   if (options.prepare && prepareCommand && restoreCheckpoint && !checkpointError) {
     const prepare = options.prepare;
     const logPath = join(
@@ -225,7 +261,9 @@ export async function runGates(
         prepare.id.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 24) || "prepare"
       }.log`,
     );
+    let captured = "";
     const emit = (text: string) => {
+      captured = (captured + text).slice(-PREPARE_OUTPUT_WINDOW);
       appendFileSync(logPath, text);
       options.onOutput?.(prepare.id, text);
     };
@@ -248,14 +286,30 @@ export async function runGates(
         execution.outcome !== "CANCELLED" &&
         (execution.outcome !== "EXITED" || execution.exitCode !== 0)
       ) {
-        checkpointError =
+        const summary =
           `Gate environment preparation failed: ` +
           `${[prepare.command, ...(prepare.args ?? [])].join(" ")} ` +
           `(${execution.outcome}, exit ${String(execution.exitCode)})`;
+        if (
+          execution.outcome === "EXITED" &&
+          LOCKFILE_DRIFT_MARKER.test(captured)
+        ) {
+          const tail = outputTail(captured);
+          prepareFailure =
+            `${summary}: the candidate's pnpm-lock.yaml does not match its ` +
+            `package.json (ERR_PNPM_OUTDATED_LOCKFILE)` +
+            (tail ? ` — ${tail}` : "");
+        } else {
+          checkpointError = summary;
+        }
       }
       emit(
         `[gate:${prepare.id}] ${
-          checkpointError ? "INFRASTRUCTURE" : "PASS"
+          checkpointError
+            ? "INFRASTRUCTURE"
+            : prepareFailure
+              ? "FAIL"
+              : "PASS"
         } (${execution.durationMs}ms)\n`,
       );
     } catch (error) {
@@ -326,6 +380,31 @@ export async function runGates(
       emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
       results.push(result);
       break;
+    }
+
+    if (prepareFailure) {
+      // The candidate itself made the toolchain unpreparable, so no declared
+      // gate can pass and none is allowed to run. Recording the same
+      // FAIL/CONFIGURATION against every declaration keeps the evidence's
+      // declaration-to-result binding intact and lets
+      // `collectRequiredGateFailures` hand the repair to the generator.
+      const now = new Date().toISOString();
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "FAIL",
+        failureKind: "CONFIGURATION",
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        detail: prepareFailure,
+      };
+      emit(`[gate:${declaration.id}] FAIL (0ms)\n`);
+      results.push(result);
+      continue;
     }
 
     if (checkpointError || !restoreCheckpoint) {

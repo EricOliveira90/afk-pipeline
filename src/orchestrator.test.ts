@@ -4493,3 +4493,137 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
     );
   }, 180_000);
 });
+
+
+/**
+ * Launch guard: the feature branch must contain the host worktree's
+ * HEAD before any slice worktree branches from it (recovery plan
+ * Phase A step 2). Slice worktrees branch from the feature branch
+ * while prompts and dist/ resolve from the host checkout, so a stale
+ * feature branch hands agents source files older than the code
+ * orchestrating them. The guard keys on host HEAD, not main — hosts
+ * legitimately run from prep branches ahead of main.
+ */
+describe("feature-branch launch guard", () => {
+  function runDirsOf(repo: string, slug: string): string[] {
+    const parent = join(repo, ".afk", "logs", `${slug}-stub`);
+    return readdirSync(parent)
+      .filter((d) => /^run-\d{8}-\d{6}/.test(d))
+      .map((d) => join(parent, d));
+  }
+
+  function readEventLines(repo: string, slug: string): Array<Record<string, unknown>> {
+    const [runDir] = runDirsOf(repo, slug);
+    return readFileSync(join(runDir!, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+  }
+
+  const singleSlice = (ghIssue: string): Slice[] => [
+    {
+      number: "01",
+      ghIssue,
+      title: "Guarded",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    },
+  ];
+
+  it("fast-forwards a stale feature branch that is a plain ancestor of the host HEAD", async () => {
+    const repo = makeRepo();
+    const slug = "guard-ff";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const featBranch = `feat-stub/${slug}`;
+
+    // Feature branch left behind by a previous run, then the host
+    // moved ahead (e.g. a prep-chain PR landed).
+    git(repo, ["branch", featBranch]);
+    const staleTip = git(repo, ["rev-parse", featBranch]);
+    writeFileSync(join(repo, "HOST.md"), "host moved ahead\n", "utf-8");
+    git(repo, ["add", "HOST.md"]);
+    git(repo, ["commit", "-m", "host: prep commit after feature branch fork"]);
+    const hostHead = git(repo, ["rev-parse", "HEAD"]);
+
+    const slices = singleSlice("8801");
+    const fixtures = new Map<string, SliceFixture>([
+      ["8801", { files: ["src/g.txt"], qaPasses: true, outputFile: "src/g.txt", outputContent: "g" }],
+    ]);
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider: buildStubProvider({ fixtures, slices, records: [] }),
+    });
+
+    // The slice ran to PASS on the refreshed base. (`result.success`
+    // stays false here only because the stub's no-op reviews leave no
+    // verdict to ship on — issue #43.)
+    const events = readEventLines(repo, slug);
+    const outcome = events.find((l) => l.type === "slice-outcome") as
+      | { slice: { phase: string } }
+      | undefined;
+    expect(outcome?.slice.phase).toBe("PASS");
+    expect(result.failureReason ?? "").not.toContain("Refusing to launch");
+    // The branch was fast-forwarded before any worktree branched from
+    // it: the host's prep commit is part of the shipped feature branch.
+    expect(git(repo, ["merge-base", "--is-ancestor", hostHead, featBranch])).toBe("");
+    expect(git(repo, ["show", `${featBranch}:HOST.md`])).toContain("host moved ahead");
+
+    const warn = readEventLines(repo, slug).find(
+      (l) => l.type === "warn" && l.reason === "feature-branch-fast-forward",
+    ) as { message: string } | undefined;
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain(staleTip);
+    expect(warn!.message).toContain(hostHead);
+  }, 240_000);
+
+  it("refuses to launch when the feature branch and the host HEAD have diverged", async () => {
+    const repo = makeRepo();
+    const slug = "guard-diverge";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const featBranch = `feat-stub/${slug}`;
+
+    // Feature branch with its own commit, host with a different one:
+    // neither contains the other.
+    git(repo, ["checkout", "-b", featBranch]);
+    writeFileSync(join(repo, "FEAT.md"), "feature-only work\n", "utf-8");
+    git(repo, ["add", "FEAT.md"]);
+    git(repo, ["commit", "-m", "feat: feature-only commit"]);
+    const featureTip = git(repo, ["rev-parse", featBranch]);
+    git(repo, ["checkout", "main"]);
+    writeFileSync(join(repo, "HOST.md"), "host-only work\n", "utf-8");
+    git(repo, ["add", "HOST.md"]);
+    git(repo, ["commit", "-m", "host: host-only commit"]);
+    const hostHead = git(repo, ["rev-parse", "HEAD"]);
+
+    const slices = singleSlice("8802");
+    const fixtures = new Map<string, SliceFixture>([
+      ["8802", { files: ["src/g.txt"], qaPasses: true, outputFile: "src/g.txt", outputContent: "g" }],
+    ]);
+    const records: InvocationRecord[] = [];
+
+    await expect(
+      runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: buildStubProvider({ fixtures, slices, records }),
+      }),
+    ).rejects.toThrow(
+      new RegExp(`Refusing to launch.*${featureTip}.*${hostHead}`, "s"),
+    );
+
+    // Refusal happened before any agent was dispatched, and mutated
+    // neither branch.
+    expect(records).toHaveLength(0);
+    expect(git(repo, ["rev-parse", featBranch])).toBe(featureTip);
+    expect(git(repo, ["rev-parse", "main"])).toBe(hostHead);
+  }, 240_000);
+});
