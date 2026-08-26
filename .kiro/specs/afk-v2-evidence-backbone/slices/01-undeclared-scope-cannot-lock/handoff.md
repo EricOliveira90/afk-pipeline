@@ -14,7 +14,7 @@
 
 ## Gotchas / learnings
 - `contract.md` file and migration sections remain required human-readable views, but no longer drive lanes, claims, or collision checks.
-- On Windows, Vitest can log its configured ignored worker RPC timeout after green test counts; the completed full `pnpm test` run exited 0.
+- Planner fixtures for unrelated integration scenarios must write a valid acceptance manifest or the fail-closed gate correctly prevents those scenarios from reaching generation.
 
 ## Status
 Tests passing locally. No regressions.
