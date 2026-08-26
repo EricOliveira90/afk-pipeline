@@ -1,10 +1,31 @@
-export interface AcceptanceManifest {
-  version: 1;
+export interface AcceptanceBehavior {
+  id: string;
+  source: string;
+  given: string;
+  when: string;
+  then: string;
+  observableResult: string;
+  preservation: boolean;
+  gateIds: string[];
+}
+
+interface AcceptanceManifestBase {
   fileScope:
     | { kind: "paths"; paths: string[] }
     | { kind: "no-repository-changes" };
   migrationCount: number;
 }
+
+export interface AcceptanceManifestV1 extends AcceptanceManifestBase {
+  version: 1;
+}
+
+export interface AcceptanceManifestV2 extends AcceptanceManifestBase {
+  version: 2;
+  behaviors: AcceptanceBehavior[];
+}
+
+export type AcceptanceManifest = AcceptanceManifestV1 | AcceptanceManifestV2;
 
 function requireExactKeys(
   value: Record<string, unknown>,
@@ -57,6 +78,108 @@ function normalizePath(raw: unknown, source: string): string {
   return path;
 }
 
+function requireNonBlankString(
+  value: unknown,
+  field: string,
+  source: string,
+): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${source} ${field} must be a non-blank string`);
+  }
+  return value;
+}
+
+function parseBehaviors(
+  value: unknown,
+  source: string,
+): AcceptanceBehavior[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${source} behaviors must be an array`);
+  }
+  if (value.length === 0) {
+    throw new Error(`${source} behaviors must be a non-empty array`);
+  }
+
+  const behaviors = value.map((raw, index) => {
+    const field = `behaviors[${index}] behavior`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`${source} ${field} must be an object`);
+    }
+    const behavior = raw as Record<string, unknown>;
+    requireExactKeys(
+      behavior,
+      [
+        "id",
+        "source",
+        "given",
+        "when",
+        "then",
+        "observableResult",
+        "preservation",
+        "gateIds",
+      ],
+      field,
+      source,
+    );
+
+    if (typeof behavior.preservation !== "boolean") {
+      throw new Error(`${source} ${field} preservation must be a boolean`);
+    }
+    if (!Array.isArray(behavior.gateIds)) {
+      throw new Error(`${source} ${field} gateIds must be an array`);
+    }
+    if (behavior.gateIds.length === 0) {
+      throw new Error(`${source} ${field} gateIds must be a non-empty array`);
+    }
+    if (behavior.gateIds.some((gateId) => typeof gateId !== "string")) {
+      throw new Error(`${source} ${field} gateIds must contain only strings`);
+    }
+    const gateIds = behavior.gateIds as string[];
+    if (gateIds.some((gateId) => gateId.trim() === "")) {
+      throw new Error(
+        `${source} ${field} gateIds must contain only non-blank strings`,
+      );
+    }
+    const duplicateGateId = gateIds.find(
+      (gateId, gateIndex) => gateIds.indexOf(gateId) !== gateIndex,
+    );
+    if (duplicateGateId !== undefined) {
+      throw new Error(
+        `${source} ${field} gateIds must be unique; duplicate "${duplicateGateId}"`,
+      );
+    }
+
+    return {
+      id: requireNonBlankString(behavior.id, `${field} id`, source),
+      source: requireNonBlankString(
+        behavior.source,
+        `${field} source`,
+        source,
+      ),
+      given: requireNonBlankString(behavior.given, `${field} given`, source),
+      when: requireNonBlankString(behavior.when, `${field} when`, source),
+      then: requireNonBlankString(behavior.then, `${field} then`, source),
+      observableResult: requireNonBlankString(
+        behavior.observableResult,
+        `${field} observableResult`,
+        source,
+      ),
+      preservation: behavior.preservation,
+      gateIds: [...gateIds],
+    };
+  });
+
+  const duplicateBehaviorId = behaviors
+    .map((behavior) => behavior.id)
+    .find((id, index, ids) => ids.indexOf(id) !== index);
+  if (duplicateBehaviorId !== undefined) {
+    throw new Error(
+      `${source} behavior IDs must be unique; duplicate "${duplicateBehaviorId}"`,
+    );
+  }
+  return behaviors;
+}
+
 export function parseAcceptanceManifest(
   value: string | unknown,
   source = ACCEPTANCE_MANIFEST_FILENAME,
@@ -74,15 +197,17 @@ export function parseAcceptanceManifest(
     throw new Error(`${source} must contain a JSON object`);
   }
   const input = manifest as Record<string, unknown>;
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error(`${source} must declare version 1 or 2`);
+  }
   requireExactKeys(
     input,
-    ["version", "fileScope", "migrationCount"],
+    input.version === 2
+      ? ["version", "fileScope", "migrationCount", "behaviors"]
+      : ["version", "fileScope", "migrationCount"],
     "root object",
     source,
   );
-  if (input.version !== 1) {
-    throw new Error(`${source} must declare version 1`);
-  }
   if (
     !Number.isSafeInteger(input.migrationCount) ||
     (input.migrationCount as number) < 0
@@ -101,6 +226,7 @@ export function parseAcceptanceManifest(
     throw new Error(`${source} fileScope must be an object`);
   }
   const fileScope = input.fileScope as Record<string, unknown>;
+  let parsedFileScope: AcceptanceManifest["fileScope"];
   if (fileScope.kind === "no-repository-changes") {
     requireExactKeys(fileScope, ["kind"], "fileScope", source);
     if (migrationCount !== 0) {
@@ -108,32 +234,37 @@ export function parseAcceptanceManifest(
         `${source} no-repository-changes requires migrationCount 0`,
       );
     }
+    parsedFileScope = { kind: "no-repository-changes" };
+  } else {
+    if (fileScope.kind !== "paths") {
+      throw new Error(
+        `${source} fileScope kind must be "paths" or "no-repository-changes"`,
+      );
+    }
+    requireExactKeys(fileScope, ["kind", "paths"], "fileScope", source);
+    if (!Array.isArray(fileScope.paths) || fileScope.paths.length === 0) {
+      throw new Error(
+        `${source} paths fileScope requires a non-empty paths array`,
+      );
+    }
+    const paths = fileScope.paths.map((path) => normalizePath(path, source));
+    if (new Set(paths).size !== paths.length) {
+      throw new Error(`${source} normalized fileScope paths must be unique`);
+    }
+    parsedFileScope = { kind: "paths", paths };
+  }
+
+  if (input.version === 2) {
     return {
-      version: 1,
-      fileScope: { kind: "no-repository-changes" },
+      version: 2,
+      fileScope: parsedFileScope,
       migrationCount,
+      behaviors: parseBehaviors(input.behaviors, source),
     };
   }
-
-  if (fileScope.kind !== "paths") {
-    throw new Error(
-      `${source} fileScope kind must be "paths" or "no-repository-changes"`,
-    );
-  }
-  requireExactKeys(fileScope, ["kind", "paths"], "fileScope", source);
-  if (!Array.isArray(fileScope.paths) || fileScope.paths.length === 0) {
-    throw new Error(
-      `${source} paths fileScope requires a non-empty paths array`,
-    );
-  }
-  const paths = fileScope.paths.map((path) => normalizePath(path, source));
-  if (new Set(paths).size !== paths.length) {
-    throw new Error(`${source} normalized fileScope paths must be unique`);
-  }
-
   return {
     version: 1,
-    fileScope: { kind: "paths", paths },
+    fileScope: parsedFileScope,
     migrationCount,
   };
 }
