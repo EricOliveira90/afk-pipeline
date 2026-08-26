@@ -284,6 +284,60 @@ export function acceptanceManifestPaths(
     ? [...manifest.fileScope.paths]
     : [];
 }
+
+const CONTROLLED_BEHAVIOR_SECTIONS = new Set([
+  "### In scope",
+  "### Existing behavior to preserve",
+]);
+const BEHAVIOR_ANCHOR = /^- \[behavior:([A-Z][A-Z0-9-]*)\] .+$/;
+
+export function validateAcceptanceManifestCoverage(
+  contract: string,
+  manifest: AcceptanceManifest,
+  source = "contract.md",
+): void {
+  if (manifest.version !== 2) {
+    throw new Error(
+      `${source} behavior lock requires acceptance-manifest.json version 2`,
+    );
+  }
+
+  const anchorCounts = new Map<string, number>();
+  let inControlledSection = false;
+  for (const line of contract.split(/\r?\n/)) {
+    if (CONTROLLED_BEHAVIOR_SECTIONS.has(line)) {
+      inControlledSection = true;
+      continue;
+    }
+    if (/^#{1,6}(?:\s|$)/.test(line)) {
+      inControlledSection = false;
+      continue;
+    }
+    if (!inControlledSection) continue;
+
+    const match = BEHAVIOR_ANCHOR.exec(line);
+    if (match) {
+      const id = match[1]!;
+      anchorCounts.set(id, (anchorCounts.get(id) ?? 0) + 1);
+    }
+  }
+
+  const manifestIds = new Set(manifest.behaviors.map((behavior) => behavior.id));
+  const missing = [...anchorCounts.keys()]
+    .filter((id) => !manifestIds.has(id))
+    .sort();
+  const duplicates = [...anchorCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([id]) => id)
+    .sort();
+  if (missing.length === 0 && duplicates.length === 0) return;
+
+  throw new Error(
+    `${source} behavior coverage refused: ` +
+      `missing behavior anchors: ${missing.join(", ") || "none"}; ` +
+      `duplicate behavior anchors: ${duplicates.join(", ") || "none"}`,
+  );
+}
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 

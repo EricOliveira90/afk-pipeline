@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   rmSync,
   statSync,
@@ -93,6 +94,7 @@ import {
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
   loadAcceptanceManifest,
+  validateAcceptanceManifestCoverage,
 } from "./acceptance-manifest.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
@@ -1424,6 +1426,16 @@ async function negotiateAttempt(
       );
     };
 
+    const loadBehaviorLockedManifest = () => {
+      const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+      validateAcceptanceManifestCoverage(
+        readFileSync(contractPath, "utf-8"),
+        manifest,
+        contractPath,
+      );
+      return manifest;
+    };
+
     // A contract left LOCKED on disk by an earlier run has never been
     // past the gate against *this* run's feature-branch tip. Consult it
     // before skipping negotiation altogether; a refusal reopens the
@@ -1431,7 +1443,7 @@ async function negotiateAttempt(
     if (contractStatus === "LOCKED") {
       let manifestObjection: string | null = null;
       try {
-        loadAcceptanceManifest(ctx.absSliceDir);
+        loadBehaviorLockedManifest();
       } catch (error) {
         manifestObjection =
           error instanceof Error ? error.message : String(error);
@@ -1496,7 +1508,7 @@ async function negotiateAttempt(
         });
 
         try {
-          loadAcceptanceManifest(ctx.absSliceDir);
+          loadBehaviorLockedManifest();
         } catch (error) {
           const objection =
             error instanceof Error ? error.message : String(error);

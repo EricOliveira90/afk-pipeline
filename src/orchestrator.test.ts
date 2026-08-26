@@ -722,6 +722,18 @@ function writePrdFixture(repoDir: string, slug: string): { prdDir: string; specs
 function writeAcceptanceManifest(
   artifactDir: string,
   paths: string[] = ["src/example.ts"],
+  behaviors = [
+    {
+      id: "B-01",
+      source: "test fixture",
+      given: "a contract",
+      when: "it is negotiated",
+      then: "it reaches review",
+      observableResult: "the evaluator receives the contract",
+      preservation: false,
+      gateIds: ["tests"],
+    },
+  ],
 ): void {
   const migrationCount = paths.filter((path) =>
     /(^|[\\/])migrations[\\/].*\.sql$/i.test(path),
@@ -732,7 +744,7 @@ function writeAcceptanceManifest(
       : { kind: "no-repository-changes" };
   writeFileSync(
     join(artifactDir, "acceptance-manifest.json"),
-    JSON.stringify({ version: 1, fileScope, migrationCount }),
+    JSON.stringify({ version: 2, fileScope, migrationCount, behaviors }),
     "utf-8",
   );
 }
@@ -1695,6 +1707,78 @@ describe("runPipeline summary report", () => {
 
 /** Round feedback must stay separate from the contract specification. */
 describe("round-scoped contract feedback", () => {
+  it("refuses a manifest missing an anchored preservation behavior", async () => {
+    const repo = makeRepo();
+    const slug = "missing-preservation-behavior";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9005",
+      title: "Behavior coverage",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const plannerPrompts: string[] = [];
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerPrompts.push(opts.prompt);
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            [
+              "# Contract",
+              "",
+              "**Status:** NEGOTIATING",
+              "",
+              "### In scope",
+              "- [behavior:B-01] Covered behavior.",
+              "",
+              "### Existing behavior to preserve",
+              "- [behavior:P-03] Missing preserved behavior.",
+            ].join("\n"),
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+    expect(plannerPrompts).toHaveLength(2);
+    expect(plannerPrompts[1]).toContain("P-03");
+    expect(evaluatorRounds).toBe(0);
+  });
+
   it.each([
     ["missing file", null, /acceptance-manifest\.json is missing/],
     ["malformed JSON", "{", /not valid JSON/],

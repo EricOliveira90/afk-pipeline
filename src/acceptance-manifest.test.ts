@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseAcceptanceManifest } from "./acceptance-manifest.js";
+import {
+  parseAcceptanceManifest,
+  validateAcceptanceManifestCoverage,
+} from "./acceptance-manifest.js";
 
 const validBehavior = {
   id: "B-01",
@@ -170,6 +173,35 @@ describe("acceptance-manifest.json", () => {
       expect(() => parseAcceptanceManifest(value)).toThrow(defect);
     },
   );
+
+  it("reports every missing and duplicate controlled behavior anchor", () => {
+    const contract = [
+      "### In scope",
+      "- [behavior:B-01] First controlled behavior.",
+      "- [behavior:B-02] Second controlled behavior.",
+      "- [behavior:B-03] Duplicate controlled behavior.",
+      "- [behavior:B-03] Duplicate controlled behavior again.",
+      "Ordinary prose mentions [behavior:B-DECOY] but is not an anchor.",
+      "### Existing behavior to preserve",
+      "- [behavior:P-01] First preserved behavior.",
+      "- [behavior:P-02] Second preserved behavior.",
+      "### Test plan",
+      "- [behavior:B-DECOY] An anchor-shaped line outside controlled sections.",
+    ].join("\n");
+    const manifest = parseAcceptanceManifest(
+      version2Manifest([
+        validBehavior,
+        { ...validBehavior, id: "B-03" },
+        { ...validBehavior, id: "P-01", preservation: true },
+      ]),
+    );
+
+    expect(() =>
+      validateAcceptanceManifestCoverage(contract, manifest),
+    ).toThrow(
+      /missing behavior anchors: B-02, P-02; duplicate behavior anchors: B-03/,
+    );
+  });
 
   it("requires the planner to write the machine declaration beside the contract", () => {
     const prompt = readFileSync(
