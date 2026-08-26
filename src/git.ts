@@ -1020,3 +1020,113 @@ export function listAddedFiles(
     return [];
   }
 }
+
+
+/**
+ * True iff `ancestor` is an ancestor of (or equal to) `descendant`.
+ * `git merge-base --is-ancestor` answers via exit code; any failure
+ * (missing ref, not a repo) reads as "not an ancestor" — callers treat
+ * that as the conservative answer and refuse rather than proceed.
+ */
+export function isAncestor(
+  repoRoot: string,
+  ancestor: string,
+  descendant: string,
+): boolean {
+  try {
+    git(["merge-base", "--is-ancestor", ancestor, descendant], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Move `branch` to `toRef`. The caller must have already established
+ * that the move is a fast-forward (see `isAncestor`) — this helper
+ * does not re-check.
+ *
+ * `git branch -f` refuses to move a branch that is checked out in any
+ * worktree, so when one has it checked out we run `git merge --ff-only`
+ * inside that worktree instead, which advances the ref *and* updates
+ * that worktree's files. Uncommitted changes there make the merge fail;
+ * the error propagates — silently ignoring them would leave the ref
+ * and the tree disagreeing.
+ */
+export function fastForwardBranch(
+  repoRoot: string,
+  branch: string,
+  toRef: string,
+): void {
+  const checkoutDir = findWorktreeForBranch(repoRoot, branch);
+  if (checkoutDir) {
+    git(["merge", "--ff-only", toRef], { cwd: checkoutDir });
+  } else {
+    git(["branch", "-f", branch, toRef], { cwd: repoRoot });
+  }
+}
+
+/**
+ * Outcome of the feature-branch freshness guard. Every variant carries
+ * the commits involved so log lines and refusal messages can name them.
+ */
+export type FeatureBranchFreshness =
+  | { kind: "current"; hostHead: string; featureTip: string }
+  | { kind: "fast-forwarded"; hostHead: string; previousTip: string }
+  | { kind: "diverged"; hostHead: string; featureTip: string };
+
+/**
+ * Launch guard: the feature branch must contain the host worktree's
+ * HEAD before any slice worktree is created from it.
+ *
+ * Slice worktrees branch from the feature branch, while prompts and
+ * `dist/` resolve from the host checkout (see `src/prompt-template.ts`)
+ * — so a feature branch behind the host HEAD hands agents source files
+ * older than the code orchestrating them (the staleness class behind
+ * the `feat-codex/afk-v2-evidence-backbone` incident, where slices read
+ * files three PRs older than the orchestrator).
+ *
+ * Deliberately keyed on the HOST HEAD, not the default branch: hosts
+ * legitimately run from prep branches ahead of `main`, and a
+ * behind-main check would re-create the staleness bug on every prep
+ * cycle.
+ *
+ * Three outcomes:
+ *  - the feature branch already contains host HEAD → `current`;
+ *  - the feature branch is a plain ancestor of host HEAD → it is
+ *    fast-forwarded to host HEAD → `fast-forwarded`;
+ *  - neither contains the other → `diverged`; the caller must refuse
+ *    to launch (nothing is mutated).
+ *
+ * Throws when HEAD or the feature branch cannot be resolved — the
+ * caller creates the branch before invoking the guard, so a missing
+ * ref is an invariant violation, not a guard verdict.
+ */
+export function ensureFeatureBranchContainsHostHead(
+  repoRoot: string,
+  featureBranch: string,
+): FeatureBranchFreshness {
+  const hostHead = resolveCommit(repoRoot, "HEAD");
+  if (!hostHead) {
+    throw new Error(
+      `Cannot resolve the host worktree's HEAD in ${repoRoot} — the launch guard needs a commit to key on.`,
+    );
+  }
+  const featureTip = resolveCommit(repoRoot, featureBranch);
+  if (!featureTip) {
+    throw new Error(
+      `Feature branch ${featureBranch} does not exist — create it before running the launch guard.`,
+    );
+  }
+  if (isAncestor(repoRoot, hostHead, featureTip)) {
+    return { kind: "current", hostHead, featureTip };
+  }
+  if (isAncestor(repoRoot, featureTip, hostHead)) {
+    fastForwardBranch(repoRoot, featureBranch, hostHead);
+    return { kind: "fast-forwarded", hostHead, previousTip: featureTip };
+  }
+  return { kind: "diverged", hostHead, featureTip };
+}
