@@ -31,10 +31,23 @@ if (!existsSync(reportsDir)) {
 
 const budgets = JSON.parse(readFileSync(budgetsPath, "utf-8"));
 const measured = new Map();
+const finishedAt = [];
 for (const entry of readdirSync(reportsDir)) {
   if (!entry.endsWith(".json")) continue;
   const report = JSON.parse(readFileSync(join(reportsDir, entry), "utf-8"));
   measured.set(report.suite, report.seconds);
+  if (typeof report.finishedAt === "number") finishedAt.push(report.finishedAt);
+}
+
+// A total assembled from timings hours apart is not a total. `pnpm test`
+// clears the directory first; this catches the ad-hoc case.
+const STALE_MS = 3 * 60 * 60 * 1000;
+if (finishedAt.length > 1 && Math.max(...finishedAt) - Math.min(...finishedAt) > STALE_MS) {
+  console.error(
+    `The timings in ${reportsDir}/ span more than 3 hours, so they are not ` +
+      `one run. Re-run \`pnpm test\` (it clears them first).`,
+  );
+  process.exit(1);
 }
 
 const failures = [];

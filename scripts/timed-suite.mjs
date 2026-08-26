@@ -37,7 +37,18 @@ const dir = ".vitest-reports";
 mkdirSync(dir, { recursive: true });
 writeFileSync(
   join(dir, `${suite}.json`),
-  `${JSON.stringify({ suite, seconds, exitCode: result.status ?? 1 }, null, 2)}\n`,
+  `${JSON.stringify(
+    {
+      suite,
+      seconds,
+      exitCode: result.status ?? 1,
+      // So the check can tell one `pnpm test` from timings left over
+      // across several ad-hoc runs.
+      finishedAt: Date.now(),
+    },
+    null,
+    2,
+  )}\n`,
   "utf-8",
 );
 
