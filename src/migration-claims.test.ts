@@ -201,6 +201,39 @@ describe("migration claims", () => {
     ]);
   });
 
+  it("returns an objection when a manifest changes a persisted claim count", () => {
+    const setup = stateRoot("manifest-count-change", ["144", "145"]);
+    const contract = join(setup.root, "contract.md");
+    writeFileSync(contract, "# Slice Contract\n");
+    writeAcceptanceManifest(
+      setup.root,
+      ["supabase/migrations/144_first.sql"],
+      1,
+    );
+    const input = {
+      repoRoot: setup.root,
+      runSlug: setup.slug,
+      ghIssue: "1001",
+      contractPath: contract,
+      expectedPool: setup.pool,
+    };
+    expect(claimContractMigrations(input)).toBeNull();
+
+    writeAcceptanceManifest(
+      setup.root,
+      [
+        "supabase/migrations/144_first.sql",
+        "supabase/migrations/145_second.sql",
+      ],
+      2,
+    );
+
+    expect(claimContractMigrations(input)).toMatch(
+      /declares 2 new migration file\(s\), but slice ownership is 1/,
+    );
+    expect(migrationClaimFor(setup.root, setup.slug, "1001")).toEqual(["144"]);
+  });
+
   it("rejects an acceptance manifest that substitutes another prefix", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-contract-"));
     roots.push(root);

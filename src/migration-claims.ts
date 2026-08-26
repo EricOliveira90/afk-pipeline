@@ -274,14 +274,28 @@ export function claimContractMigrations(args: {
   expectedPool: readonly string[];
   options?: LaneResourceOptions;
 }): string | null {
-  const count = loadAcceptanceManifest(
-    dirname(args.contractPath),
-  ).migrationCount;
+  const manifest = loadAcceptanceManifest(dirname(args.contractPath));
+  const existingClaim = migrationClaimFor(
+    args.repoRoot,
+    args.runSlug,
+    args.ghIssue,
+  );
+  if (
+    existingClaim &&
+    existingClaim.length !== manifest.migrationCount
+  ) {
+    return validateContractMigrationClaim({
+      contractPath: args.contractPath,
+      claim: existingClaim,
+      options: args.options,
+    });
+  }
+
   const claim = claimMigrationPrefixes({
     repoRoot: args.repoRoot,
     runSlug: args.runSlug,
     ghIssue: args.ghIssue,
-    count,
+    count: manifest.migrationCount,
     expectedPool: args.expectedPool,
   });
   return validateContractMigrationClaim({
