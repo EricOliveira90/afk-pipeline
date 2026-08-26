@@ -94,6 +94,7 @@ import {
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
   loadAcceptanceManifest,
+  validateAcceptanceManifestBindings,
   validateAcceptanceManifestCoverage,
 } from "./acceptance-manifest.js";
 
@@ -1432,6 +1433,10 @@ async function negotiateAttempt(
         readFileSync(contractPath, "utf-8"),
         manifest,
         contractPath,
+      );
+      validateAcceptanceManifestBindings(
+        manifest,
+        resolveBaseGateDeclarations(ctx.worktreeDir),
       );
       return manifest;
     };

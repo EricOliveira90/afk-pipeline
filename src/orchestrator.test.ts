@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   assessContractExtension,
   collectRequiredGateFailures,
@@ -701,7 +701,16 @@ function makeRepo(): string {
   git(dir, ["config", "user.name", "Test"]);
   // Need at least one commit before we can branch.
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "consumer-fixture",
+      private: true,
+      scripts: { "test:run": "node -e \"process.exit(0)\"" },
+    }),
+    "utf-8",
+  );
+  git(dir, ["add", "README.md", "package.json"]);
   git(dir, ["commit", "-m", "root"]);
   return dir;
 }
@@ -722,18 +731,16 @@ function writePrdFixture(repoDir: string, slug: string): { prdDir: string; specs
 function writeAcceptanceManifest(
   artifactDir: string,
   paths: string[] = ["src/example.ts"],
-  behaviors = [
-    {
-      id: "B-01",
-      source: "test fixture",
-      given: "a contract",
-      when: "it is negotiated",
-      then: "it reaches review",
-      observableResult: "the evaluator receives the contract",
-      preservation: false,
-      gateIds: ["tests"],
-    },
-  ],
+  behaviors?: Array<{
+    id: string;
+    source: string;
+    given: string;
+    when: string;
+    then: string;
+    observableResult: string;
+    preservation: boolean;
+    gateIds: string[];
+  }>,
 ): void {
   const migrationCount = paths.filter((path) =>
     /(^|[\\/])migrations[\\/].*\.sql$/i.test(path),
@@ -742,9 +749,35 @@ function writeAcceptanceManifest(
     paths.length > 0
       ? { kind: "paths", paths }
       : { kind: "no-repository-changes" };
+  let repoRoot = artifactDir;
+  while (!existsSync(join(repoRoot, ".git"))) {
+    const parent = dirname(repoRoot);
+    if (parent === repoRoot) throw new Error("fixture repository root missing");
+    repoRoot = parent;
+  }
+  const gateId =
+    resolveBaseGateDeclarations(repoRoot).find((gate) => gate.command)?.id ??
+    "tests";
+  const behaviorDeclarations = behaviors ?? [
+    {
+      id: "B-01",
+      source: "test fixture",
+      given: "a contract",
+      when: "it is negotiated",
+      then: "it reaches review",
+      observableResult: "the evaluator receives the contract",
+      preservation: false,
+      gateIds: [gateId],
+    },
+  ];
   writeFileSync(
     join(artifactDir, "acceptance-manifest.json"),
-    JSON.stringify({ version: 2, fileScope, migrationCount, behaviors }),
+    JSON.stringify({
+      version: 2,
+      fileScope,
+      migrationCount,
+      behaviors: behaviorDeclarations,
+    }),
     "utf-8",
   );
 }
@@ -1506,8 +1539,8 @@ describe("runPipeline summary report", () => {
     expect(result.consoleSummary).toContain("#5001 Only");
     expect(result.consoleSummary).toContain(`merged into feat-stub/${slug}`);
     expect(result.consoleSummary).toMatch(/Failed \/ Stuck \(0\)/);
-    // No package.json in fixture → sanity gate skipped (returns ok); reviews
-    // are no-ops in the stub → verdicts UNKNOWN → not ready.
+    // The fixture's sanity command passes; reviews are no-ops in the stub,
+    // so their verdicts are UNKNOWN and the run remains not ready.
     expect(result.consoleSummary).toContain("Not ready");
   }, 240_000);
 
@@ -1707,6 +1740,87 @@ describe("runPipeline summary report", () => {
 
 /** Round feedback must stay separate from the contract specification. */
 describe("round-scoped contract feedback", () => {
+  it("reports every unknown and non-executable behavior gate binding", async () => {
+    const repo = makeRepo();
+    const slug = "invalid-behavior-bindings";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9006",
+      title: "Behavior bindings",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const plannerPrompts: string[] = [];
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerPrompts.push(opts.prompt);
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            [
+              "# Contract",
+              "",
+              "**Status:** NEGOTIATING",
+              "",
+              "### In scope",
+              "- [behavior:B-01] Behavior with invalid bindings.",
+            ].join("\n"),
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir, ["src/example.ts"], [
+            {
+              id: "B-01",
+              source: "test fixture",
+              given: "a contract",
+              when: "it is negotiated",
+              then: "invalid bindings are refused",
+              observableResult: "the planner receives every invalid ID",
+              preservation: false,
+              gateIds: ["missing-gate", "lint"],
+            },
+          ]);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+    expect(plannerPrompts).toHaveLength(2);
+    expect(plannerPrompts[1]).toContain("unknown gate IDs: missing-gate");
+    expect(plannerPrompts[1]).toContain("non-executable gate IDs: lint");
+    expect(evaluatorRounds).toBe(0);
+  });
+
   it("refuses a manifest missing an anchored preservation behavior", async () => {
     const repo = makeRepo();
     const slug = "missing-preservation-behavior";

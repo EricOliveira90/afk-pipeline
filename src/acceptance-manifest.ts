@@ -338,6 +338,40 @@ export function validateAcceptanceManifestCoverage(
       `duplicate behavior anchors: ${duplicates.join(", ") || "none"}`,
   );
 }
+
+export function validateAcceptanceManifestBindings(
+  manifest: AcceptanceManifest,
+  catalog: readonly { id: string; command?: string }[],
+  source = ACCEPTANCE_MANIFEST_FILENAME,
+): void {
+  if (manifest.version !== 2) {
+    throw new Error(`${source} behavior bindings require version 2`);
+  }
+
+  const catalogById = new Map(catalog.map((gate) => [gate.id, gate]));
+  const unknown = new Set<string>();
+  const nonExecutable = new Set<string>();
+  for (const behavior of manifest.behaviors) {
+    for (const gateId of behavior.gateIds) {
+      const gate = catalogById.get(gateId);
+      if (!gate) {
+        unknown.add(gateId);
+      } else if (
+        typeof gate.command !== "string" ||
+        gate.command.trim() === ""
+      ) {
+        nonExecutable.add(gateId);
+      }
+    }
+  }
+  if (unknown.size === 0 && nonExecutable.size === 0) return;
+
+  throw new Error(
+    `${source} behavior binding refused: ` +
+      `unknown gate IDs: ${[...unknown].sort().join(", ") || "none"}; ` +
+      `non-executable gate IDs: ${[...nonExecutable].sort().join(", ") || "none"}`,
+  );
+}
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
