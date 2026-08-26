@@ -1740,6 +1740,114 @@ describe("runPipeline summary report", () => {
 
 /** Round feedback must stay separate from the contract specification. */
 describe("round-scoped contract feedback", () => {
+  it("spends planner rounds only for consecutive mechanical refusals", async () => {
+    const repo = makeRepo();
+    const slug = "mechanical-refusal-rounds";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9007",
+      title: "Mechanical refusal rounds",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const plannerPrompts: string[] = [];
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerPrompts.push(opts.prompt);
+          const round = plannerPrompts.length;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            [
+              "# Contract",
+              "",
+              "**Status:** NEGOTIATING",
+              "",
+              "### In scope",
+              "- [behavior:B-01] Controlled behavior.",
+              ...(round === 2
+                ? [
+                    "",
+                    "### Existing behavior to preserve",
+                    "- [behavior:P-01] Missing preservation behavior.",
+                  ]
+                : []),
+            ].join("\n"),
+            "utf-8",
+          );
+          if (round === 1) {
+            writeFileSync(
+              join(artifactDir, "acceptance-manifest.json"),
+              JSON.stringify({
+                version: 2,
+                fileScope: { kind: "paths", paths: ["src/example.ts"] },
+                migrationCount: 0,
+              }),
+              "utf-8",
+            );
+          } else if (round === 2) {
+            writeAcceptanceManifest(artifactDir);
+          } else {
+            writeAcceptanceManifest(artifactDir, ["src/example.ts"], [
+              {
+                id: "B-01",
+                source: "test fixture",
+                given: "a contract",
+                when: "it is negotiated",
+                then: "invalid bindings are refused",
+                observableResult: "the planner receives the objection",
+                preservation: false,
+                gateIds: ["missing-gate"],
+              },
+            ]);
+          }
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 3,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+    expect(plannerPrompts).toHaveLength(3);
+    expect(plannerPrompts[1]).toContain("behaviors");
+    expect(plannerPrompts[2]).toContain("P-01");
+    expect(evaluatorRounds).toBe(0);
+    expect(
+      readdirSync(ctx.absSliceDir).filter((name) =>
+        /^feedback-r\d+\.md$/.test(name),
+      ),
+    ).toEqual([]);
+  });
+
   it("reports every unknown and non-executable behavior gate binding", async () => {
     const repo = makeRepo();
     const slug = "invalid-behavior-bindings";
