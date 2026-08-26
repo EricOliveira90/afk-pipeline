@@ -1918,6 +1918,16 @@ export async function runSliceExecute(
         "checkpoints",
         `${config.prdSlug}-s${slice.number}-r${round}-${randomUUID()}`,
       );
+      const basePlan = resolveSanityPlan(ctx.worktreeDir);
+      const gatePrepare: GateDeclaration | undefined = basePlan.prepare
+        ? {
+            id: basePlan.prepare.name,
+            stage: "base",
+            required: true,
+            command: basePlan.prepare.command,
+            args: [...basePlan.prepare.args],
+          }
+        : undefined;
       const declarations = resolveBaseGateDeclarations(ctx.worktreeDir);
       const checkpoint = declarations.some(
         (declaration) => declaration.command != null,
@@ -1958,6 +1968,7 @@ export async function runSliceExecute(
             cwd: gateCwd,
             evidenceDir,
             declarations,
+            ...(gatePrepare ? { prepare: gatePrepare } : {}),
             signal,
             inactivityTimeoutMs:
               config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
