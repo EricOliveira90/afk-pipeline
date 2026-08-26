@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -693,9 +693,15 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
 }
 
-function makeRepo(): string {
+/**
+ * A throwaway git repo. By default the per-test `afterEach` removes it;
+ * pass `{ lifetime: "describe" }` when a block spawns its pipelines once
+ * in `beforeAll` and splits the assertions across `it` cases — those
+ * cases still read the repo, so the caller owns cleanup in `afterAll`.
+ */
+function makeRepo(opts: { lifetime?: "test" | "describe" } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-orch-"));
-  integrationTempDirs.push(dir);
+  if (opts.lifetime !== "describe") integrationTempDirs.push(dir);
   git(dir, ["init", "--initial-branch=main"]);
   git(dir, ["config", "user.email", "test@example.com"]);
   git(dir, ["config", "user.name", "Test"]);
@@ -2075,8 +2081,12 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     );
   }
 
-  function makePassingSliceSetup(slug: string, ghIssue: string) {
-    const repo = makeRepo();
+  function makePassingSliceSetup(
+    slug: string,
+    ghIssue: string,
+    repoOpts: { lifetime?: "test" | "describe" } = {},
+  ) {
+    const repo = makeRepo(repoOpts);
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
     const slices: Slice[] = [
       {
@@ -2104,59 +2114,159 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     return { repo, prdDir, specsDir, slices, records, baseProvider };
   }
 
-  it("retries an infrastructure-failed review within the run and records the recovered verdict", async () => {
-    const slug = "review-retry";
-    const { repo, prdDir, specsDir, slices, baseProvider } =
-      makePassingSliceSetup(slug, "7101");
-
+  /**
+   * Everything a blocked-by-the-PM run must do, on one fixture. These
+   * cases all end in the same terminal state — architect favorable, PM
+   * FIX-BEFORE-SHIP, no override, so no PR opens — and each used to pay
+   * for its own pipeline. They now share two runs: the first recovers an
+   * infrastructure-failed architect review and lands Not ready, the
+   * second re-enters an unchanged tree. Per AGENTS.md, a new assertion
+   * about this state belongs here rather than in a fourth spawn.
+   */
+  describe("a run the PM blocked, and its re-entry", () => {
+    const slug = "review-notready";
+    /** Counts sanity-gate executions, so the re-entry cache is observable. */
+    let marker: string;
+    let repo: string;
+    let first: Awaited<ReturnType<typeof runPipeline>>;
+    let second: Awaited<ReturnType<typeof runPipeline>>;
     let architectAttempts = 0;
+    let pmRuns = 0;
+    let gateRunsAfterFirst = 0;
+    let gateRunsAfterSecond = 0;
     const reviewOptions: InvokeOptions[] = [];
-    const provider: AgentProvider = {
-      name: baseProvider.name,
-      async invoke(options) {
-        if (options.role === "architect-review") {
-          reviewOptions.push(options);
-          architectAttempts++;
-          if (architectAttempts === 1) {
-            // Spawn-style wrapper failure: no output produced.
-            throw new Error(
-              "Agent architect-review exited with code 1: codex-wrapper: error: failed to persist AWS config file",
-            );
-          }
-          writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
-          return { exitCode: 0, stdout: "", stats: {} };
-        }
-        if (options.role === "pm-review") {
-          // Unfavorable real verdict so no PR/push path is exercised.
-          writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
-          return { exitCode: 0, stdout: "", stats: {} };
-        }
-        return baseProvider.invoke(options);
-      },
-    };
+    const featBranch = `feat-stub/${slug}`;
 
-    const result = await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider,
-      infrastructureRetries: 1,
+    beforeAll(async () => {
+      const setup = makePassingSliceSetup(slug, "7101", { lifetime: "describe" });
+      repo = setup.repo;
+
+      // A sanity `test:run` step that counts its executions via a marker file.
+      marker = join(repo, ".afk-sanity-marker.txt").replace(/\\/g, "/");
+      writeFileSync(
+        join(repo, "package.json"),
+        JSON.stringify(
+          {
+            name: "consumer-fixture",
+            private: true,
+            scripts: {
+              "test:run": `node -e "require('fs').appendFileSync('${marker}','x')"`,
+            },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+      git(repo, ["add", "package.json"]);
+      git(repo, ["commit", "-m", "add sanity script"]);
+
+      const provider: AgentProvider = {
+        name: setup.baseProvider.name,
+        async invoke(options) {
+          if (options.role === "architect-review") {
+            reviewOptions.push(options);
+            architectAttempts++;
+            if (architectAttempts === 1) {
+              // Spawn-style wrapper failure: no output produced.
+              throw new Error(
+                "Agent architect-review exited with code 1: codex-wrapper: error: failed to persist AWS config file",
+              );
+            }
+            writeReviewFile(
+              options.cwd,
+              slug,
+              "review-architect.md",
+              "ACCEPT-WITH-NOTES",
+            );
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          if (options.role === "pm-review") {
+            pmRuns++;
+            // Unfavorable real verdict, so no PR/push path is exercised.
+            writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
+            // Guardians also append to a governance log in consumer repos.
+            const govDir = join(options.cwd, "docs", "governance");
+            mkdirSync(govDir, { recursive: true });
+            writeFileSync(join(govDir, "log.md"), "review entry\n", "utf-8");
+            return { exitCode: 0, stdout: "", stats: {} };
+          }
+          return setup.baseProvider.invoke(options);
+        },
+      };
+
+      const config = {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir: setup.prdDir,
+        specsDir: setup.specsDir,
+        provider,
+        infrastructureRetries: 1,
+      };
+      first = await runPipeline({ ...config, dag: buildDAG(setup.slices) });
+      gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
+      // Re-entry with nothing changed.
+      second = await runPipeline({ ...config, dag: buildDAG(setup.slices) });
+      gateRunsAfterSecond = readFileSync(marker, "utf-8").length;
+    }, 240_000);
+
+    afterAll(() => {
+      try {
+        rmSync(repo, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
     });
 
-    // The PM blocked, so the run is unsuccessful (issue #43) — but that is
-    // a verdict, not the infrastructure failure this test is about.
-    expect(result.success).toBe(false);
-    // The first failure did not become terminal: the retry recovered SHIP.
-    expect(architectAttempts).toBe(2);
-    expect(result.consoleSummary).toContain("Architect review: SHIP");
-    expect(result.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
-    expect(result.consoleSummary).toContain("Not ready");
-    // Reviews run with the slow-agent inactivity budget, not the 180 s
-    // provider default that killed the PRD 070 PM review mid-run.
-    expect(reviewOptions[0]!.idleTimeoutMs).toBe(600_000);
-  }, 240_000);
+    it("recovers an infrastructure-failed architect review inside the run", () => {
+      // The first failure did not become terminal: the retry recovered a
+      // real verdict, and only the PM kept the run from shipping.
+      expect(architectAttempts).toBe(2);
+      expect(first.consoleSummary).toContain("Architect review: ACCEPT-WITH-NOTES");
+    });
+
+    it("gives the reviews the slow-agent inactivity budget", () => {
+      // Not the 180 s provider default that killed the PRD 070 PM review
+      // mid-run.
+      expect(reviewOptions[0]!.idleTimeoutMs).toBe(600_000);
+    });
+
+    it("reports Not ready and fails the run on the unfavorable PM verdict (#43)", () => {
+      // The slice itself passed and merged — the run is unsuccessful anyway.
+      expect(first.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
+      expect(first.consoleSummary).toContain("Not ready");
+      expect(first.success).toBe(false);
+      expect(first.failureReason).toContain("draft PR");
+      expect(first.failureReason).toContain("FIX-BEFORE-SHIP");
+    });
+
+    it("commits the guardian review artifacts even when Not ready", () => {
+      // The Not-ready outcome must still leave the evidence committed on
+      // the feature branch — nothing dirty in the (removed) review worktree.
+      const log = git(repo, ["log", "--format=%s", featBranch]);
+      expect(log).toContain(`docs(${slug}): add post-impl guardian reviews`);
+      const show = (path: string) => git(repo, ["show", `${featBranch}:${path}`]);
+      expect(show(`.kiro/specs/${slug}/review-pm.md`)).toContain("FIX-BEFORE-SHIP");
+      expect(show(`.kiro/specs/${slug}/review-architect.md`)).toContain(
+        "ACCEPT-WITH-NOTES",
+      );
+      expect(show("docs/governance/log.md")).toContain("review entry");
+    });
+
+    it("reuses the sanity gate result for an unchanged tree", () => {
+      // The gate result is cached against the post-review-commit tree.
+      expect(gateRunsAfterFirst).toBe(2);
+      expect(gateRunsAfterSecond).toBe(2);
+    });
+
+    it("skips the favorable review for an unchanged HEAD and re-runs the blocking one", () => {
+      expect(architectAttempts).toBe(2); // one failure + one success, in run 1
+      expect(pmRuns).toBe(2);
+      expect(second.success).toBe(false);
+      expect(second.consoleSummary).toContain("Architect review: ACCEPT-WITH-NOTES");
+      expect(second.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
+    });
+  });
 
   it("classifies an idle-kill after real activity as DIED_MID_RUN", async () => {
     const slug = "review-idle-kill";
@@ -2197,63 +2307,6 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       "utf-8",
     );
     expect(summary).toContain("PM review: DIED_MID_RUN — Agent pm-review idle for 600s - killed");
-  }, 240_000);
-
-  it("commits guardian review artifacts to the feature branch even when Not ready", async () => {
-    const slug = "review-commit-notready";
-    const { repo, prdDir, specsDir, slices, baseProvider } =
-      makePassingSliceSetup(slug, "7103");
-
-    const provider: AgentProvider = {
-      name: baseProvider.name,
-      async invoke(options) {
-        if (options.role === "architect-review") {
-          writeReviewFile(options.cwd, slug, "review-architect.md", "ACCEPT-WITH-NOTES");
-          return { exitCode: 0, stdout: "", stats: {} };
-        }
-        if (options.role === "pm-review") {
-          writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
-          // Guardians also append to a governance log in consumer repos.
-          const govDir = join(options.cwd, "docs", "governance");
-          mkdirSync(govDir, { recursive: true });
-          writeFileSync(join(govDir, "log.md"), "review entry\n", "utf-8");
-          return { exitCode: 0, stdout: "", stats: {} };
-        }
-        return baseProvider.invoke(options);
-      },
-    };
-
-    const result = await runPipeline({
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      dag: buildDAG(slices),
-      provider,
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.consoleSummary).toContain("Not ready");
-    // The Not-ready outcome must still leave the evidence committed on
-    // the feature branch — nothing dirty in the (removed) review worktree.
-    const featBranch = `feat-stub/${slug}`;
-    const log = git(repo, ["log", "--format=%s", featBranch]);
-    expect(log).toContain(`docs(${slug}): add post-impl guardian reviews`);
-    const pmReview = git(repo, [
-      "show",
-      `${featBranch}:.kiro/specs/${slug}/review-pm.md`,
-    ]);
-    expect(pmReview).toContain("FIX-BEFORE-SHIP");
-    const archReview = git(repo, [
-      "show",
-      `${featBranch}:.kiro/specs/${slug}/review-architect.md`,
-    ]);
-    expect(archReview).toContain("ACCEPT-WITH-NOTES");
-    const governance = git(repo, [
-      "show",
-      `${featBranch}:docs/governance/log.md`,
-    ]);
-    expect(governance).toContain("review entry");
   }, 240_000);
 
   it("passes the run scope (selected vs skipped HITL) into the PM review prompt", async () => {
@@ -2323,79 +2376,6 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     expect(architectPrompt!).not.toContain("Activate paid production services");
   }, 240_000);
 
-  it("cheap re-entry: reuses the sanity gate for an unchanged tree and skips favorable reviews for an unchanged HEAD", async () => {
-    const slug = "review-reentry";
-    const { repo, prdDir, specsDir, slices, baseProvider } =
-      makePassingSliceSetup(slug, "7301");
-
-    // A sanity `tests` step that counts its executions via a marker file.
-    const marker = join(repo, ".afk-sanity-marker.txt").replace(/\\/g, "/");
-    writeFileSync(
-      join(repo, "package.json"),
-      JSON.stringify(
-        {
-          name: "consumer-fixture",
-          private: true,
-          scripts: {
-            "test:run": `node -e "require('fs').appendFileSync('${marker}','x')"`,
-          },
-        },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
-    git(repo, ["add", "package.json"]);
-    git(repo, ["commit", "-m", "add sanity script"]);
-
-    let architectRuns = 0;
-    let pmRuns = 0;
-    const provider: AgentProvider = {
-      name: baseProvider.name,
-      async invoke(options) {
-        if (options.role === "architect-review") {
-          architectRuns++;
-          writeReviewFile(options.cwd, slug, "review-architect.md", "SHIP");
-          return { exitCode: 0, stdout: "", stats: {} };
-        }
-        if (options.role === "pm-review") {
-          pmRuns++;
-          writeReviewFile(options.cwd, slug, "review-pm.md", "FIX-BEFORE-SHIP");
-          return { exitCode: 0, stdout: "", stats: {} };
-        }
-        return baseProvider.invoke(options);
-      },
-    };
-
-    const config = {
-      repoRoot: repo,
-      prdSlug: slug,
-      prdDir,
-      specsDir,
-      provider,
-    };
-
-    // Both runs end on the unfavorable PM verdict, so neither ships
-    // (issue #43); what this test asserts is the re-entry cost.
-    const first = await runPipeline({ ...config, dag: buildDAG(slices) });
-    expect(first.success).toBe(false);
-    const gateRunsAfterFirst = readFileSync(marker, "utf-8").length;
-    expect(gateRunsAfterFirst).toBe(2);
-    expect(architectRuns).toBe(1);
-    expect(pmRuns).toBe(1);
-
-    // Re-entry with nothing changed: the gate result is cached against
-    // the (post-review-commit) tree and the favorable architect verdict
-    // against the unchanged HEAD; only the unfavorable PM review re-runs.
-    const second = await runPipeline({ ...config, dag: buildDAG(slices) });
-    expect(second.success).toBe(false);
-    expect(readFileSync(marker, "utf-8").length).toBe(2);
-    expect(architectRuns).toBe(1);
-    expect(pmRuns).toBe(2);
-    expect(second.consoleSummary).toContain("Architect review: SHIP");
-    expect(second.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
-  }, 240_000);
-
   /**
    * A run that ends without a shippable branch must not report success
    * (issue #43). `PipelineResult.success` used to be computed purely from
@@ -2431,29 +2411,9 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       };
     }
 
-    it("is unsuccessful when every slice passed but an unfavorable PM verdict kept the draft PR closed", async () => {
-      const slug = "exit-blocked-pm";
-      const { repo, prdDir, specsDir, slices, baseProvider } =
-        makePassingSliceSetup(slug, "7401");
-
-      const result = await runPipeline({
-        repoRoot: repo,
-        prdSlug: slug,
-        prdDir,
-        specsDir,
-        dag: buildDAG(slices),
-        provider: withVerdicts(slug, baseProvider, {
-          architect: "SHIP",
-          pm: "FIX-BEFORE-SHIP",
-        }),
-      });
-
-      // The slice itself passed and merged — the run is unsuccessful anyway.
-      expect(result.consoleSummary).toContain("PM review: FIX-BEFORE-SHIP");
-      expect(result.success).toBe(false);
-      expect(result.failureReason).toContain("draft PR");
-      expect(result.failureReason).toContain("FIX-BEFORE-SHIP");
-    }, 240_000);
+    // The plain "unfavorable PM verdict keeps the PR closed" case lives
+    // in "a run the PM blocked, and its re-entry" above, on the fixture
+    // that already reaches that state.
 
     it("treats an unparseable guardian verdict the same way", async () => {
       const slug = "exit-unparseable";
