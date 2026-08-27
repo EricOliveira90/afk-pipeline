@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "Wall-clock budgets in seconds per `test:*` suite, checked by",
+    "scripts/check-suite-budgets.mjs at the end of `pnpm test`.",
+    "Raise a number only with a recorded measurement in the commit",
+    "message — this file is the ratchet that keeps a twenty-minute suite",
+    "from growing back one reasonable-looking test at a time. AGENTS.md",
+    "has the cheaper places to put a new assertion.",
+    "",
+    "Budgets are ~30% above the slowest observed IN-CHAIN run, not above",
+    "the suite measured alone. The distinction matters and cost round 2 a",
+    "red gate: run on its own, qa-orchestration is 35.3 / 35.8 / 35.8s,",
+    "but inside `pnpm test` the same suite measured 35.4s and then 51.8s.",
+    "A suite measured alone is stable to about 2%; the same suite inside",
+    "the chain can land 45% higher. `scripts/timed-suite.mjs` reads the",
+    "in-chain number, so that is what a budget has to cover — a gate that",
+    "trips on ordinary variance just teaches people to raise it.",
+    "",
+    "NOTE on the 2026-08-26 round-2 drop: most of it came from making",
+    "fixture repos ignore the host git configuration (see the comment in",
+    "vitest.config.ts). A machine-wide `core.hooksPath` was running a",
+    "third-party hook on every fixture commit, checkout and merge. These",
+    "budgets therefore assume no such hook runs. On a host that never had",
+    "one the numbers were always lower, and the budgets are still met."
+  ],
+  "_measured2026_08_26_round1": {
+    "fast": 114.8,
+    "orchestrator": 242.3,
+    "wave": 153.6,
+    "resume-integration": 61.5,
+    "qa-orchestration": 38.2,
+    "clean-failed": 14.1,
+    "_total": "624.5s of suite time, 10m30s of `pnpm test`, 765 tests"
+  },
+  "_measured2026_08_26_round2": {
+    "_note": "Two full-chain runs; each entry is the slower of the two.",
+    "fast": 60.7,
+    "orchestrator": 170.3,
+    "wave": 99.0,
+    "resume-integration": 48.2,
+    "qa-orchestration": 51.8,
+    "clean-failed": 9.0,
+    "_total": "410.5s then 437.2s of suite time; 6m56s and 7m23s of `pnpm test`, 765 tests",
+    "_alone": "Measured alone, same machine: wave 96.4-99.0, git (inside fast) 49.0, qa 35.3-35.8, resume 40.8-43.1"
+  },
+  "_measured2026_08_26_round3": {
+    "_note": [
+      "Round 3: orchestrator, wave and resume-integration each split into",
+      "two test files balanced by measured describe-block time, so one",
+      "`test:heavy:<name>` invocation schedules both across the two",
+      "workers. Full chain, same day but with an agent session resident",
+      "(alone-runs that day were ~40% above the round-2 record, so these",
+      "in-chain numbers are conservative). Paired alone-runs, idle-ish:",
+      "orchestrator 244.0 -> 156.7, wave 131.8 -> 82.2, resume 58.2 -> 46.7."
+    ],
+    "fast": 71.9,
+    "orchestrator": 152.9,
+    "wave": 84.1,
+    "resume-integration": 48.0,
+    "qa-orchestration": 42.4,
+    "clean-failed": 12.6,
+    "_total": "411.9s of suite time, 6m56s of `pnpm test`, 765 tests"
+  },
+  "suites": {
+    "fast": 79,
+    "orchestrator": 205,
+    "wave": 110,
+    "resume-integration": 63,
+    "qa-orchestration": 68,
+    "clean-failed": 13
+  },
+  "totalSeconds": 538
+}

@@ -27,8 +27,6 @@ describe("terminal Git metadata", () => {
     const repo = mkdtempSync(join(tmpdir(), "afk-git-metadata-"));
     tempDirs.push(repo);
     git(repo, ["init", "--initial-branch=main"]);
-    git(repo, ["config", "user.email", "test@example.com"]);
-    git(repo, ["config", "user.name", "Test"]);
 
     const migrations = join(repo, "supabase", "migrations");
     mkdirSync(migrations, { recursive: true });

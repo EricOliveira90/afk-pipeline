@@ -35,8 +35,6 @@ function makeRepo(): string {
   const repo = mkdtempSync(join(tmpdir(), "afk-ship-gate-"));
   tempDirs.push(repo);
   git(repo, ["init", "-b", "main"]);
-  git(repo, ["config", "user.email", "afk@example.com"]);
-  git(repo, ["config", "user.name", "AFK Test"]);
   writeFileSync(join(repo, ".gitignore"), ".afk/\n", "utf-8");
   writeFileSync(join(repo, "README.md"), "fixture\n", "utf-8");
   git(repo, ["add", "."]);
