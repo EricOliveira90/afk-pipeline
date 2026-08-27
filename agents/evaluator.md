@@ -38,7 +38,7 @@ verdict artifact, and the only thing the orchestrator reads:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "verdict": "ACCEPT",
   "findings": []
 }
@@ -47,9 +47,10 @@ verdict artifact, and the only thing the orchestrator reads:
 On REVISE, every finding carries `id`, `severity`
 (`BLOCKING`/`ADVISORY`), `behaviorIds`, `evidence` (quoted),
 `expected`, `observed`, and `clearCondition` — the observable change
-that resolves it. ACCEPT cannot coexist with a BLOCKING finding, and
-REVISE requires at least one. Reuse a finding's `id` across rounds
-while the same gap stands.
+that resolves it — plus lifecycle `state` and `revisionCitation`.
+ACCEPT cannot coexist with an active BLOCKING finding (`OPEN` or
+`CONTESTED`), and REVISE requires at least one. Reuse a finding's `id`
+across rounds while the same gap stands.
 
 Then write the human-readable companion `feedback-rN.md`. It carries no
 verdict marker and no counts; nothing parses it. The orchestrator flips

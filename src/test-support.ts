@@ -6,6 +6,12 @@ import {
   type ContractReviewVerdict,
 } from "./contract-review.js";
 
+type ContractReviewFindingInput = Omit<
+  ContractReviewFinding,
+  "state" | "revisionCitation"
+> &
+  Partial<Pick<ContractReviewFinding, "state" | "revisionCitation">>;
+
 /**
  * Write a schema-valid contract review artifact into a slice directory —
  * what a stub `evaluator-contract` produces. Every fixture that drives a
@@ -18,9 +24,9 @@ import {
 export function writeContractReview(
   sliceDir: string,
   verdict: ContractReviewVerdict,
-  findings?: readonly ContractReviewFinding[],
+  findings?: readonly ContractReviewFindingInput[],
 ): void {
-  const resolved =
+  const inputs =
     findings ??
     (verdict === "REVISE"
       ? [
@@ -35,9 +41,14 @@ export function writeContractReview(
           },
         ]
       : []);
+  const resolved: ContractReviewFinding[] = inputs.map((finding) => ({
+    ...finding,
+    state: finding.state ?? "OPEN",
+    revisionCitation: finding.revisionCitation ?? null,
+  }));
   writeFileSync(
     join(sliceDir, CONTRACT_REVIEW_FILENAME),
-    JSON.stringify({ version: 1, verdict, findings: resolved }, null, 2),
+    JSON.stringify({ version: 2, verdict, findings: resolved }, null, 2),
     "utf-8",
   );
 }

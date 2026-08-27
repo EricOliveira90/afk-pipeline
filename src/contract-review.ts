@@ -24,6 +24,17 @@ export type RecordedContractVerdict = ContractReviewVerdict | "NONE";
  * routed to the planner but do not by themselves force a REVISE.
  */
 export type ContractFindingSeverity = "BLOCKING" | "ADVISORY";
+export type ContractFindingState =
+  | "OPEN"
+  | "RESOLVED"
+  | "CONTESTED"
+  | "WITHDRAWN";
+
+export interface ContractRevisionCitation {
+  artifact: "contract.md" | "acceptance-manifest.json";
+  before: string;
+  after: string;
+}
 
 export interface ContractReviewFinding {
   /**
@@ -49,10 +60,17 @@ export interface ContractReviewFinding {
   observed: string;
   /** The observable change that resolves the finding. */
   clearCondition: string;
+  state: ContractFindingState;
+  /**
+   * Only fresh round-2 findings carry a citation. Familiar IDs use null;
+   * the round validator checks fresh citations against the actual
+   * previous and current artifacts.
+   */
+  revisionCitation: ContractRevisionCitation | null;
 }
 
 export interface ContractReview {
-  version: 1;
+  version: 2;
   verdict: ContractReviewVerdict;
   findings: ContractReviewFinding[];
 }
@@ -69,6 +87,8 @@ const FINDING_KEYS = [
   "expected",
   "observed",
   "clearCondition",
+  "state",
+  "revisionCitation",
 ] as const;
 
 /**
@@ -86,6 +106,17 @@ const FINDING_STRING_FIELDS = [
 
 const VERDICTS: readonly string[] = ["ACCEPT", "REVISE"];
 const SEVERITIES: readonly string[] = ["BLOCKING", "ADVISORY"];
+const STATES: readonly string[] = [
+  "OPEN",
+  "RESOLVED",
+  "CONTESTED",
+  "WITHDRAWN",
+];
+const CITATION_ARTIFACTS: readonly string[] = [
+  "contract.md",
+  "acceptance-manifest.json",
+];
+const CITATION_KEYS = ["artifact", "before", "after"] as const;
 
 function requireExactKeys(
   value: Record<string, unknown>,
@@ -215,6 +246,14 @@ function parseFindings(
         `${source} ${field} severity must be ${SEVERITIES.join(" or ")}`,
       );
     }
+    if (
+      typeof finding.state !== "string" ||
+      !STATES.includes(finding.state)
+    ) {
+      throw new Error(
+        `${source} ${field} state must be ${STATES.join(", ")}`,
+      );
+    }
     if (!Array.isArray(finding.behaviorIds)) {
       throw new Error(`${source} ${field} behaviorIds must be an array`);
     }
@@ -247,6 +286,47 @@ function parseFindings(
       );
     }
 
+    let revisionCitation: ContractRevisionCitation | null = null;
+    if (finding.revisionCitation !== null) {
+      if (
+        !finding.revisionCitation ||
+        typeof finding.revisionCitation !== "object" ||
+        Array.isArray(finding.revisionCitation)
+      ) {
+        throw new Error(
+          `${source} ${field} revisionCitation must be null or an object`,
+        );
+      }
+      const citation = finding.revisionCitation as Record<string, unknown>;
+      requireExactKeys(
+        citation,
+        CITATION_KEYS,
+        `${field} revisionCitation`,
+        source,
+      );
+      if (
+        typeof citation.artifact !== "string" ||
+        !CITATION_ARTIFACTS.includes(citation.artifact)
+      ) {
+        throw new Error(
+          `${source} ${field} revisionCitation artifact must be ${CITATION_ARTIFACTS.join(" or ")}`,
+        );
+      }
+      revisionCitation = {
+        artifact: citation.artifact as ContractRevisionCitation["artifact"],
+        before: requireNonBlankString(
+          citation.before,
+          `${field} revisionCitation before`,
+          source,
+        ),
+        after: requireNonBlankString(
+          citation.after,
+          `${field} revisionCitation after`,
+          source,
+        ),
+      };
+    }
+
     return {
       id: strings.id!,
       severity: finding.severity as ContractFindingSeverity,
@@ -255,6 +335,8 @@ function parseFindings(
       expected: strings.expected!,
       observed: strings.observed!,
       clearCondition: strings.clearCondition!,
+      state: finding.state as ContractFindingState,
+      revisionCitation,
     };
   });
 
@@ -302,8 +384,8 @@ export function parseContractReview(
     throw new Error(`${source} must contain a JSON object`);
   }
   const input = parsed as Record<string, unknown>;
-  if (input.version !== 1) {
-    throw new Error(`${source} must declare version 1`);
+  if (input.version !== 2) {
+    throw new Error(`${source} must declare version 2`);
   }
   requireExactKeys(input, REVIEW_KEYS, "root object", source);
 
@@ -314,7 +396,9 @@ export function parseContractReview(
   const findings = parseFindings(input.findings, source);
 
   const blocking = findings.filter(
-    (finding) => finding.severity === "BLOCKING",
+    (finding) =>
+      finding.severity === "BLOCKING" &&
+      (finding.state === "OPEN" || finding.state === "CONTESTED"),
   );
   if (verdict === "ACCEPT" && blocking.length > 0) {
     throw new Error(
@@ -328,7 +412,7 @@ export function parseContractReview(
     );
   }
 
-  return { version: 1, verdict, findings };
+  return { version: 2, verdict, findings };
 }
 
 export function contractReviewPath(sliceDir: string): string {
@@ -373,7 +457,11 @@ export function contractReviewGapMetrics(
 ): ContractReviewGapMetrics {
   const blockingIds = (review: ContractReview): string[] =>
     review.findings
-      .filter((finding) => finding.severity === "BLOCKING")
+      .filter(
+        (finding) =>
+          finding.severity === "BLOCKING" &&
+          (finding.state === "OPEN" || finding.state === "CONTESTED"),
+      )
       .map((finding) => finding.id);
   const currentIds = blockingIds(current);
   if (previous === null) {
@@ -399,7 +487,7 @@ export function formatContractReviewFindings(
   return findings
     .map((finding) =>
       [
-        `- [${finding.id}] ${finding.severity}` +
+        `- [${finding.id}] ${finding.severity} ${finding.state}` +
           (finding.behaviorIds.length > 0
             ? ` — behaviors: ${finding.behaviorIds.join(", ")}`
             : " — no single behavior"),
@@ -410,4 +498,11 @@ export function formatContractReviewFindings(
       ].join("\n"),
     )
     .join("\n");
+}
+
+/** Findings the next planner round may act on, in evaluator order. */
+export function openContractReviewFindings(
+  findings: readonly ContractReviewFinding[],
+): ContractReviewFinding[] {
+  return findings.filter((finding) => finding.state === "OPEN");
 }

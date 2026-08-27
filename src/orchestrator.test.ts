@@ -2049,7 +2049,7 @@ describe("round-scoped contract feedback", () => {
     ).toBe(false);
   });
 
-  it("advances after REVISE using only the previous feedback file", async () => {
+  it("routes round 1 OPEN findings without prior feedback prose", async () => {
     const repo = makeRepo();
     const slug = "feedback-rounds";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2148,11 +2148,11 @@ describe("round-scoped contract feedback", () => {
     expect(evaluatorRounds).toBe(2);
     expect(plannerPrompts[0]).toContain("Local issue details");
     expect(plannerPrompts[0]).not.toContain("gh issue view 9001");
-    expect(plannerPrompts[1]).toContain("feedback-r1.md");
+    expect(plannerPrompts[1]).not.toContain("feedback-r1.md");
     expect(plannerPrompts[1]).not.toContain("feedback-r2.md");
     // Round 1's REVISE reaches the planner as structured findings with
     // their clear-conditions, not as a pointer to prose.
-    expect(plannerPrompts[1]).toContain("[F-01] BLOCKING");
+    expect(plannerPrompts[1]).toContain("[F-01] BLOCKING OPEN");
     expect(plannerPrompts[1]).toContain(
       "Clear when: B-01 names a command that fails when the header is absent",
     );
@@ -2348,11 +2348,13 @@ describe("contract review fails closed", () => {
     expected: "a falsifiable observable result",
     observed: "an unfalsifiable one",
     clearCondition: "the entry names a command that can fail",
+    state: "OPEN",
+    revisionCitation: null,
   };
 
   function reviewText(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
-      version: 1,
+      version: 2,
       verdict: "REVISE",
       findings: [FINDING],
       ...overrides,
@@ -2492,8 +2494,8 @@ describe("contract review fails closed", () => {
     ["a JSON array at the root", "[]", /must contain a JSON object/],
     [
       "an unknown version",
-      reviewText({ version: 2 }),
-      /must declare version 1/,
+      reviewText({ version: 1 }),
+      /must declare version 2/,
     ],
     [
       "an extra root key",

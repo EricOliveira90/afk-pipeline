@@ -105,6 +105,7 @@ import {
   contractReviewGapMetrics,
   formatContractReviewFindings,
   loadContractReview,
+  openContractReviewFindings,
   type ContractReview,
   type ContractReviewFinding,
   type RecordedContractVerdict,
@@ -1635,24 +1636,15 @@ async function negotiateAttempt(
      * carrier of the gaps.
      */
     const revisionNote = (objection: string | null): string => {
-      const priorFeedback =
-        evaluatorRound > 0
-          ? `${ctx.relSliceDir}/feedback-r${evaluatorRound}.md`
-          : null;
+      const openFindings = openContractReviewFindings(lastFindings);
       const priorFindings =
-        lastFindings.length > 0
+        openFindings.length > 0
           ? `The contract review returned REVISE with these findings. ` +
-            `Clear every BLOCKING one:\n\n` +
-            `${formatContractReviewFindings(lastFindings)}\n` +
-            (priorFeedback
-              ? `\nThe reviewer's prose companion is ${priorFeedback}.`
-              : "")
+            `Respond to each clear-condition:\n\n` +
+            `${formatContractReviewFindings(openFindings)}`
           : null;
       if (objection === null) {
-        if (priorFindings) return priorFindings;
-        return priorFeedback
-          ? `Revise based only on evaluator feedback in ${priorFeedback}.`
-          : "";
+        return priorFindings ?? "";
       }
       return (
         `The pipeline REJECTED the previous contract before any code was generated:\n\n` +
@@ -1660,9 +1652,7 @@ async function negotiateAttempt(
         `Resolve exactly that in this revision.` +
         (priorFindings
           ? `\n\nKeep the previous review's findings satisfied too.\n\n${priorFindings}`
-          : priorFeedback
-            ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
-            : "")
+          : "")
       );
     };
 

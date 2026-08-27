@@ -14,6 +14,7 @@ import {
   contractReviewGapMetrics,
   formatContractReviewFindings,
   loadContractReview,
+  openContractReviewFindings,
   parseContractReview,
   type ContractReview,
   type ContractReviewFinding,
@@ -36,11 +37,13 @@ const FINDING: ContractReviewFinding = {
   expected: "a test plan entry that can fail",
   observed: "no entry names a command",
   clearCondition: "the B-01 entry names a command that exits non-zero",
+  state: "OPEN",
+  revisionCitation: null,
 };
 
 function review(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
-    version: 1,
+    version: 2,
     verdict: "ACCEPT",
     findings: [],
     ...overrides,
@@ -58,7 +61,7 @@ function withFinding(overrides: Record<string, unknown>): string {
 describe("parseContractReview accepts the canonical artifact", () => {
   it("parses an ACCEPT with no findings", () => {
     expect(parseContractReview(review())).toEqual({
-      version: 1,
+      version: 2,
       verdict: "ACCEPT",
       findings: [],
     });
@@ -74,7 +77,7 @@ describe("parseContractReview accepts the canonical artifact", () => {
 
   it("parses a REVISE with a full blocking finding", () => {
     expect(parseContractReview(withFinding({}))).toEqual({
-      version: 1,
+      version: 2,
       verdict: "REVISE",
       findings: [FINDING],
     });
@@ -215,18 +218,18 @@ describe("parseContractReview refuses a malformed or missing artifact", () => {
   it("refuses a missing version", () => {
     expect(() =>
       parseContractReview('{"verdict":"ACCEPT","findings":[]}'),
-    ).toThrow(/must declare version 1/);
+    ).toThrow(/must declare version 2/);
   });
 
   it("refuses an unknown version", () => {
-    expect(() => parseContractReview(review({ version: 2 }))).toThrow(
-      /must declare version 1/,
+    expect(() => parseContractReview(review({ version: 1 }))).toThrow(
+      /must declare version 2/,
     );
   });
 
   it("refuses a version given as a string", () => {
     expect(() => parseContractReview(review({ version: "1" }))).toThrow(
-      /must declare version 1/,
+      /must declare version 2/,
     );
   });
 
@@ -238,13 +241,13 @@ describe("parseContractReview refuses a malformed or missing artifact", () => {
 
   it("refuses a missing verdict", () => {
     expect(() =>
-      parseContractReview('{"version":1,"findings":[]}'),
+      parseContractReview('{"version":2,"findings":[]}'),
     ).toThrow(/root object must contain exactly version, verdict, findings/);
   });
 
   it("refuses a missing findings array", () => {
     expect(() =>
-      parseContractReview('{"version":1,"verdict":"ACCEPT"}'),
+      parseContractReview('{"version":2,"verdict":"ACCEPT"}'),
     ).toThrow(/root object must contain exactly version, verdict, findings/);
   });
 
@@ -451,7 +454,7 @@ describe("loadContractReview", () => {
 
 describe("contractReviewGapMetrics", () => {
   function parsed(verdict: "ACCEPT" | "REVISE", findings: ContractReviewFinding[]): ContractReview {
-    return { version: 1, verdict, findings };
+    return { version: 2, verdict, findings };
   }
 
   it("counts blocking findings and ignores advisory ones", () => {
@@ -504,7 +507,7 @@ describe("contractReviewGapMetrics", () => {
 describe("formatContractReviewFindings", () => {
   it("renders each finding's clear-condition", () => {
     const rendered = formatContractReviewFindings([FINDING]);
-    expect(rendered).toContain("[F-01] BLOCKING — behaviors: B-01");
+    expect(rendered).toContain("[F-01] BLOCKING OPEN — behaviors: B-01");
     expect(rendered).toContain(
       "Clear when: the B-01 entry names a command that exits non-zero",
     );
@@ -516,11 +519,28 @@ describe("formatContractReviewFindings", () => {
   it("says so when a finding names no behavior", () => {
     expect(
       formatContractReviewFindings([{ ...FINDING, behaviorIds: [] }]),
-    ).toContain("[F-01] BLOCKING — no single behavior");
+    ).toContain("[F-01] BLOCKING OPEN — no single behavior");
   });
 
   it("renders a placeholder for an empty finding list", () => {
     expect(formatContractReviewFindings([])).toBe("(no findings were recorded)");
+  });
+});
+
+describe("openContractReviewFindings", () => {
+  it("routes only OPEN findings in review order", () => {
+    const findings = [
+      { ...FINDING, id: "F-OPEN-1", state: "OPEN" },
+      { ...FINDING, id: "F-RESOLVED", state: "RESOLVED" },
+      { ...FINDING, id: "F-OPEN-2", state: "OPEN" },
+      { ...FINDING, id: "F-WITHDRAWN", state: "WITHDRAWN" },
+      { ...FINDING, id: "F-CONTESTED", state: "CONTESTED" },
+    ] as const;
+
+    expect(openContractReviewFindings(findings).map(({ id }) => id)).toEqual([
+      "F-OPEN-1",
+      "F-OPEN-2",
+    ]);
   });
 });
 

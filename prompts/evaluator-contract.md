@@ -76,7 +76,7 @@ non-blank:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "verdict": "REVISE",
   "findings": [
     {
@@ -86,7 +86,9 @@ non-blank:
       "evidence": "\"Given the header is absent, then the request is rejected\"",
       "expected": "a test plan entry naming the command whose failure proves the rejection",
       "observed": "the entry names no command, so nothing can fail",
-      "clearCondition": "the B-02 test plan entry names a gate command that exits non-zero when the header is absent"
+      "clearCondition": "the B-02 test plan entry names a gate command that exits non-zero when the header is absent",
+      "state": "OPEN",
+      "revisionCitation": null
     }
   ]
 }
@@ -94,7 +96,7 @@ non-blank:
 
 Field rules:
 
-- `version` — the integer `1`.
+- `version` — the integer `2`.
 - `verdict` — `"ACCEPT"` or `"REVISE"`, once.
 - `findings` — an array; `[]` on an ACCEPT with nothing to note.
 - `id` — stable across rounds. Reuse the exact ID when the same gap
@@ -106,6 +108,11 @@ Field rules:
 - `expected` / `observed` — what the contract must say, and what it says
   instead.
 - `clearCondition` — the observable change that resolves the finding.
+- `state` — `"OPEN"`, `"RESOLVED"`, `"CONTESTED"`, or `"WITHDRAWN"`.
+  Every round-1 finding is `"OPEN"`.
+- `revisionCitation` — `null` for a familiar finding ID. Fresh round-2
+  findings cite changed contract or acceptance-manifest text; round-2
+  rules are supplied in the machine-validated review context.
 
 Types are checked strictly: a number where a string belongs — including
 inside `behaviorIds` — makes the artifact malformed and fails the slice.
