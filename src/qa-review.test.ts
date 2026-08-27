@@ -10,7 +10,7 @@ import {
 const FINDING = {
   id: "QA-01",
   severity: "BLOCKING",
-  behaviorIds: ["B-01"],
+  behaviorIds: ["B-01"] as string[],
   summary: "Canonical verdict is ignored",
   evidence: "The Markdown marker controls the result",
   expected: "The JSON artifact controls the result",

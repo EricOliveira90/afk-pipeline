@@ -158,6 +158,7 @@ export type RunEventPayload =
         | "resume-stuck"
         | "contract-lock-refused"
         | "contract-review-archive-failed"
+        | "qa-review-archive-failed"
         | "feature-branch-fast-forward"
         | "restart-refused";
       ghIssue?: string;
