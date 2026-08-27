@@ -6,8 +6,10 @@ import {
   buildResumeHandoffNote,
   buildStuckDiagnosisNote,
   decideResume,
+  formatRestartRefusal,
   isForceRestarted,
   isResumeStuckRequested,
+  restartOrRefuse,
   type ResumeFacts,
 } from "./resume.js";
 import { renderPrompt } from "./prompt-template.js";
@@ -62,9 +64,11 @@ describe("decideResume", () => {
     ).toEqual({ action: "restart", reason: "slice branch missing" });
   });
 
-  it("restarts from base when the worktree is missing or unregistered (ADR 0010)", () => {
+  it("restarts from base when the worktree is missing and nothing is committed (ADR 0010)", () => {
     expect(
-      decideResume(resumableFacts({ worktreeRegistered: false })),
+      decideResume(
+        resumableFacts({ worktreeRegistered: false, commitsAheadOfBase: 0 }),
+      ),
     ).toEqual({
       action: "restart",
       reason: "worktree missing or unregistered",
@@ -79,19 +83,27 @@ describe("decideResume", () => {
   });
 
   it("never resumes a slice that went STUCK with a stuck.md (#36)", () => {
-    // Terminal diagnoses keep their meaning — even a branch with
-    // commits ahead restarts when the stuck marker is present.
-    expect(decideResume(resumableFacts({ stuckFilePresent: true }))).toEqual({
+    // Terminal diagnoses keep their meaning — the tree is not resumed.
+    // With nothing committed the restart is free; with commits it refuses
+    // instead (see the #113 block below).
+    expect(
+      decideResume(
+        resumableFacts({ stuckFilePresent: true, commitsAheadOfBase: 0 }),
+      ),
+    ).toEqual({
       action: "restart",
       reason: "stuck.md present (terminal diagnosis)",
     });
   });
 
-  it("restarts once the resume-attempt cap of 2 is reached (#36)", () => {
-    // Repeated death on the same tree is evidence of poison.
+  it("stops resuming once the resume-attempt cap of 2 is reached (#36)", () => {
+    // Repeated death on the same tree is evidence of poison — but the cap
+    // only ever fires with commits on the branch (the zero-commits guard
+    // runs first), so what it does is refuse, not restart (#113).
     expect(decideResume(resumableFacts({ resumeAttempts: 2 }))).toEqual({
-      action: "restart",
+      action: "refuse",
       reason: "resume attempt cap (2) reached",
+      commitsAhead: 3,
     });
   });
 
@@ -140,11 +152,13 @@ describe("decideResume with --resume-stuck (#49)", () => {
     });
   });
 
-  it("still restarts a STUCK slice the operator did NOT name", () => {
-    // The default must be byte-identical to pre-#49 behavior, reason included.
+  it("still declines to resume a STUCK slice the operator did NOT name", () => {
+    // The reason is byte-identical to pre-#49 behavior; since #113 a
+    // stuck branch holding commits refuses rather than restarting.
     expect(decideResume(stuck({ resumeStuck: false }))).toEqual({
-      action: "restart",
+      action: "refuse",
       reason: "stuck.md present (terminal diagnosis)",
+      commitsAhead: 3,
     });
   });
 
@@ -155,7 +169,9 @@ describe("decideResume with --resume-stuck (#49)", () => {
   });
 
   it("requires a registered worktree (ADR 0010)", () => {
-    expect(decideResume(stuck({ worktreeRegistered: false }))).toEqual({
+    expect(
+      decideResume(stuck({ worktreeRegistered: false, commitsAheadOfBase: 0 })),
+    ).toEqual({
       action: "restart",
       reason: "worktree missing or unregistered",
     });
@@ -166,6 +182,15 @@ describe("decideResume with --resume-stuck (#49)", () => {
     expect(decideResume(stuck({ commitsAheadOfBase: 0 }))).toEqual({
       action: "restart",
       reason: "--resume-stuck named this slice but it has no commits beyond base",
+    });
+  });
+
+  it("refuses rather than restarts when its worktree vanished but commits survive (#113)", () => {
+    // The branch still holds the work; only the checkout is gone.
+    expect(decideResume(stuck({ worktreeRegistered: false }))).toEqual({
+      action: "refuse",
+      reason: "worktree missing or unregistered",
+      commitsAhead: 3,
     });
   });
 
@@ -206,6 +231,103 @@ describe("decideResume with --resume-stuck (#49)", () => {
   });
 });
 
+
+/**
+ * The #113 invariant: a from-base restart force-resets the branch and
+ * recreates the worktree, so it must never run on a branch that still
+ * holds unmerged commits unless the operator named the slice in
+ * `--force-restart`. The incident: a resume-attempt cap converted into a
+ * restart, destroying 11 commits and a LOCKED contract.
+ */
+describe("decideResume never destroys unmerged commits (#113)", () => {
+  const cases: Array<[string, Partial<ResumeFacts>, string]> = [
+    ["the resume-attempt cap", { resumeAttempts: 2 }, "resume attempt cap (2) reached"],
+    [
+      "a vanished worktree",
+      { worktreeRegistered: false },
+      "worktree missing or unregistered",
+    ],
+    [
+      "a terminal stuck.md",
+      { stuckFilePresent: true },
+      "stuck.md present (terminal diagnosis)",
+    ],
+  ];
+
+  for (const [label, overrides, reason] of cases) {
+    it(`refuses on ${label}, keeping the reason it would have restarted with`, () => {
+      expect(decideResume(resumableFacts(overrides))).toEqual({
+        action: "refuse",
+        reason,
+        commitsAhead: 3,
+      });
+    });
+
+    it(`still restarts plainly on ${label} when the branch is at base`, () => {
+      // The cap's purpose survives: nothing is resumed. There is simply
+      // nothing to lose, so the restart needs no operator decision.
+      expect(
+        decideResume(resumableFacts({ ...overrides, commitsAheadOfBase: 0 })),
+      ).toMatchObject({ action: "restart" });
+    });
+  }
+
+  it("lets --force-restart through, commits and all — the operator asked", () => {
+    expect(
+      decideResume(resumableFacts({ resumeAttempts: 2, forceRestart: true })),
+    ).toEqual({ action: "restart", reason: "--force-restart" });
+  });
+
+  it("restartOrRefuse is the single place the invariant lives", () => {
+    expect(restartOrRefuse("any reason", 0)).toEqual({
+      action: "restart",
+      reason: "any reason",
+    });
+    expect(restartOrRefuse("any reason", 1)).toEqual({
+      action: "refuse",
+      reason: "any reason",
+      commitsAhead: 1,
+    });
+  });
+});
+
+/**
+ * The refusal is only useful if the operator can act on it, so the
+ * message must name the count, the branch, and the flag that resolves it.
+ */
+describe("formatRestartRefusal (#113)", () => {
+  const base = {
+    reason: "resume attempt cap (2) reached",
+    commitsAhead: 11,
+    branch: "afk/prd-1-slice-05-thing",
+    selector: "75",
+  };
+
+  it("names the commits at risk, the branch, and --force-restart", () => {
+    const message = formatRestartRefusal(base);
+    expect(message).toContain("11 unmerged commit(s)");
+    expect(message).toContain("afk/prd-1-slice-05-thing");
+    expect(message).toContain("--force-restart 75");
+    expect(message).toContain("resume attempt cap (2) reached");
+  });
+
+  it("points a stuck slice at --resume-stuck as well", () => {
+    const message = formatRestartRefusal({
+      ...base,
+      reason: "stuck.md present (terminal diagnosis)",
+    });
+    expect(message).toContain("--resume-stuck 75");
+    // The cap refusal has no preserved diagnosis to offer, so it must not
+    // suggest a flag that would be rejected.
+    expect(formatRestartRefusal(base)).not.toContain("--resume-stuck");
+  });
+
+  it("names the archive location when artifacts were copied out", () => {
+    expect(
+      formatRestartRefusal({ ...base, archiveDir: ".afk/artifacts/x/slice-05" }),
+    ).toContain(".afk/artifacts/x/slice-05");
+  });
+});
 
 describe("isForceRestarted", () => {
   const slice = { number: "05", ghIssue: "4001" };

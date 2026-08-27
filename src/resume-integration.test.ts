@@ -53,8 +53,8 @@ describe("retried slice resume (spec #33)", () => {
    * One death, four verdicts. Every slice here dies mid-run with the
    * launcher seeing ERROR; what separates them is what the retry is
    * allowed to keep — a clean resume (#33/#35/#38), the conflict
-   * fallback (#35), the operator's `--force-restart` (#37), and a branch
-   * with nothing on it. They share the fixture and the pair of runs
+   * refusal (#35 + #113), the operator's `--force-restart` (#37), and a
+   * branch with nothing on it. They share the fixture and the pair of runs
    * because the *decision* is per slice: one invocation makes four
    * different calls, which is what the retry logic claims to do.
    */
@@ -63,7 +63,7 @@ describe("retried slice resume (spec #33)", () => {
     const slice = (number: string, ghIssue: string, title: string): Slice => ({
       number, ghIssue, title, type: "AFK", blockedBy: [], userStories: "",
     });
-    /** 01 resumes, 02 hits the conflict fallback, 03 is forced, 04 has no commits. */
+    /** 01 resumes, 02 hits the conflict refusal, 03 is forced, 04 has no commits. */
     const slices = [
       slice("01", "4001", "Resumable"),
       slice("02", "4002", "Conflicting"),
@@ -218,9 +218,15 @@ describe("retried slice resume (spec #33)", () => {
       });
     });
 
-    it("every retried slice reaches PASS", () => {
+    it("every retried slice reaches PASS, except the one the retry refuses", () => {
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
-      for (const s of slices) expect(state.slices[s.ghIssue].phase).toBe("PASS");
+      for (const s of slices) {
+        // Slice 02's commits conflict with the advanced feature branch, so
+        // the retry refuses it rather than restarting over them (#113).
+        expect(state.slices[s.ghIssue].phase).toBe(
+          s.ghIssue === "4002" ? "ERROR" : "PASS",
+        );
+      }
     });
 
     it("resumes slice 01 from its surviving tip without renegotiating", () => {
@@ -265,12 +271,20 @@ describe("retried slice resume (spec #33)", () => {
       expect(prompt).toContain("renumber yours to the next free prefix");
     });
 
-    it("falls back to a restart when slice 02's feature merge conflicts (#35)", () => {
-      // No agent resolves merges it has no context for.
-      expect(rolesFor("02")).toContain("explorer");
-      expect(rolesFor("02")).toContain("planner");
-      expect(generatorRecord("02").prompt).toContain("Implement the locked contract");
-      expect(logFor("4002")).toMatch(/restarting from base \(feature merge conflict\)/);
+    it("refuses slice 02 when its feature merge conflicts, keeping the commits (#35, #113)", () => {
+      // No agent resolves merges it has no context for — and the old
+      // fallback's from-base restart threw away exactly the commits that
+      // conflicted. The slice never starts, and its branch is untouched.
+      expect(rolesFor("02")).toEqual([]);
+      expect(logFor("4002")).toMatch(/refusing to restart .* \(feature merge conflict\)/);
+      expect(logFor("4002")).toMatch(/1 unmerged commit\(s\)/);
+      expect(git(repo, ["log", "-1", "--format=%s", `afk-stub/${slug}-slice-02-conflicting`]))
+        .toBe("feat(#4002): slice edit");
+      // The refusal, not a generic internal error, is what the next
+      // operator reads as the slice's outcome.
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.slices["4002"].error).toMatch(/refusing to restart/);
+      expect(state.slices["4002"].error).toMatch(/--force-restart 4002/);
     });
 
     it("restarts slice 03 because the operator named it in --force-restart (#37)", () => {
@@ -304,8 +318,10 @@ describe("retried slice resume (spec #33)", () => {
   /**
    * STUCK re-entry, both halves of it. `--resume-stuck` is a per-slice
    * opt-in (#49) and its absence is the #36 rule: a stuck.md is a
-   * terminal diagnosis that restarts from base however many commits sit
-   * ahead. The two outcomes differ only by whether the operator named
+   * terminal diagnosis, so the slice is not resumed. Terminal does not
+   * mean destroyed — with commits ahead the unnamed slice refuses rather
+   * than restarting over them (#113). The two outcomes differ only by
+   * whether the operator named
    * the slice, so one pair of runs carries both — two slices go STUCK,
    * then the retry names slice 01 and leaves slice 02 out. That the flag
    * discriminates *within a single invocation* is stronger evidence than
@@ -410,15 +426,10 @@ describe("retried slice resume (spec #33)", () => {
               git(cwd, ["commit", "-m", "feat(#4001): cleared the stuck findings"]);
               return;
             }
-            // Restarted from base: nothing from the STUCK life is here.
-            mkdirSync(join(cwd, "src"), { recursive: true });
-            writeFileSync(
-              join(cwd, "src", "fresh.ts"),
-              "export const fresh = 1;\n",
-              "utf-8",
-            );
-            git(cwd, ["add", "-A"]);
-            git(cwd, ["commit", "-m", "feat(#4002): fresh after stuck"]);
+            // The unnamed slice must never get here: its branch holds
+            // three STUCK-life commits, so worktree preparation refuses
+            // before any agent is dispatched (#113).
+            throw new Error("slice 02 reached the generator — the refusal did not hold");
           },
         }),
       });
@@ -475,29 +486,46 @@ describe("retried slice resume (spec #33)", () => {
       expect(logs).not.toMatch(/restarting from base \(stuck\.md present/);
     });
 
-    it("restarts the unnamed slice from base on its terminal diagnosis", () => {
+    it("refuses the unnamed slice rather than discarding its STUCK-life commits (#113)", () => {
+      // Terminal still means "not resumed" — no agent ran for it at all.
       const roles = records.filter((r) => r.sliceNumber === "02").map((r) => r.role);
-      expect(roles).toContain("explorer");
-      expect(roles).toContain("planner");
-      expect(sliceLogLines(repo, `${slug}-stub`, "4002")).toMatch(
-        /restarting from base \(stuck\.md present \(terminal diagnosis\)\)/,
+      expect(roles).toEqual([]);
+      const logs = sliceLogLines(repo, `${slug}-stub`, "4002");
+      expect(logs).toMatch(
+        /refusing to restart .* \(stuck\.md present \(terminal diagnosis\)\)/,
       );
+      // Both ways out are named, and the branch still holds its 3 commits.
+      expect(logs).toMatch(/--force-restart 4002/);
+      expect(logs).toMatch(/--resume-stuck 4002/);
+      expect(git(repo, ["rev-list", "--count", `feat-stub/${slug}..afk-stub/${slug}-slice-02-unnamed`]))
+        .toBe("3");
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
-      expect(state.slices["4002"].phase).toBe("PASS");
+      expect(state.slices["4002"].phase).toBe("ERROR");
     });
 
-    it("lands both slices' surviving work on the feature branch", () => {
+    it("lands the named slice's surviving work, and nothing from the refused one", () => {
       const tracked = git(repo, ["ls-tree", "-r", "--name-only", `feat-stub/${slug}`]);
       // The named slice kept its STUCK-life commits and the finished edit.
       for (const file of ["round-1.ts", "round-3.ts", "cleared.ts", "in-flight.ts"]) {
         expect(tracked).toContain(`src/${file}`);
       }
-      // The unnamed slice contributed only its post-restart work.
-      expect(tracked).toContain("src/fresh.ts");
+      // The refused slice never merged — its work sits on its own branch,
+      // waiting for the operator's decision rather than being gone.
+      expect(tracked).not.toContain("src/fresh.ts");
     });
   });
 
-  it("caps resumes at 2: die-resume-die-resume-die-restart (#36)", async () => {
+  /**
+   * The cap at the outermost seam, and the way out of it. Run 4 is the
+   * PRD 1 incident in miniature: three deaths, three commits on the
+   * branch, a locked contract in the worktree, and a cap that used to
+   * convert into a from-base restart. It must refuse instead — and the
+   * refusal has to be an impasse the operator can clear, which is what
+   * run 5 proves. Run 5 is a fifth spawned `runPipeline` in one test
+   * (~3s): worth it because a refusal with no verified exit would be a
+   * worse defect than the one being fixed (#113).
+   */
+  it("caps resumes at 2: die-resume-die-resume-die-refuse, then --force-restart (#36, #113)", async () => {
     const repo = makeRepo();
     const slug = "resume-cap";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -529,8 +557,10 @@ describe("retried slice resume (spec #33)", () => {
     await runPipeline({ ...runConfig, dag: buildDAG([slice]), provider: dyingProvider });
     expect(JSON.parse(readFileSync(statePath, "utf-8")).resume["4001"].attempts).toBe(2);
 
-    // Run 4: cap reached — deliberate restart from base (counter resets
-    // for the fresh tree), full renegotiation, then PASS.
+    // Run 4: cap reached. The three deaths each committed, so the branch
+    // holds work the old from-base restart would have force-reset away.
+    const branch = `afk-stub/${slug}-slice-01-resumable`;
+    const tipAtCap = git(repo, ["rev-parse", branch]);
     const records: PromptRecord[] = [];
     const succeedingProvider = buildProvider({
       records,
@@ -543,13 +573,40 @@ describe("retried slice resume (spec #33)", () => {
     });
     await runPipeline({ ...runConfig, dag: buildDAG([slice]), provider: succeedingProvider });
 
+    // Refused, not restarted: no agent ran, the tip is where it was, and
+    // the counter stays spent so the next unattended run refuses again.
+    expect(records).toEqual([]);
+    expect(allRunLogs(repo, `${slug}-stub`)).toMatch(
+      /refusing to restart .* \(resume attempt cap \(2\) reached\)/,
+    );
+    expect(git(repo, ["rev-parse", branch])).toBe(tipAtCap);
+    const cappedState = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(cappedState.slices["4001"].phase).toBe("ERROR");
+    expect(cappedState.resume["4001"].attempts).toBe(2);
+
+    // Run 5: the operator inspects the branch, judges it disposable, and
+    // says so. The restart is deliberate — and the slice's untracked
+    // artifacts are archived on the way out rather than vanishing.
+    await runPipeline({
+      ...runConfig,
+      dag: buildDAG([slice]),
+      forceRestart: ["4001"],
+      provider: succeedingProvider,
+    });
+
     expect(records.map((r) => r.role)).toContain("explorer");
     expect(allRunLogs(repo, `${slug}-stub`)).toMatch(
-      /restarting from base \(resume attempt cap \(2\) reached\)/,
+      /restarting from base \(--force-restart\)/,
     );
     const finalState = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(finalState.slices["4001"].phase).toBe("PASS");
     expect(finalState.resume["4001"].attempts).toBe(0);
+    expect(
+      readFileSync(
+        join(repo, ".afk", "artifacts", `${slug}-stub`, "slice-01", "pre-restart-1", "contract.md"),
+        "utf-8",
+      ),
+    ).toContain("**Status:** LOCKED");
   }, 240_000);
 
 });
