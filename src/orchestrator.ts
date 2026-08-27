@@ -120,6 +120,16 @@ import {
   validateRound1ContractReview,
   validateRound2ContractReview,
 } from "./contract-review.js";
+import {
+  advanceQAReviewHistory,
+  buildQAReviewAttemptRecord,
+  loadQAReview,
+  qaReviewFilename,
+  type QAReview,
+  type QAReviewAttemptFinding,
+  type QAReviewFinding,
+  type QAReviewStage,
+} from "./qa-review.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -2114,14 +2124,24 @@ async function negotiateAttempt(
  * branch — that's the orchestrator's job, under a mutex.
  */
 export type QAStageResult =
-  | { outcome: "PASS"; report: string }
-  | { outcome: "IMPLEMENTATION"; report: string };
+  | {
+      outcome: "PASS";
+      report: string;
+      history: readonly QAReviewFinding[];
+      unresolved: QAReviewAttemptFinding[];
+    }
+  | {
+      outcome: "IMPLEMENTATION";
+      report: string;
+      history: readonly QAReviewFinding[];
+      unresolved: QAReviewAttemptFinding[];
+    };
 
 export async function runQAStage(
   ctx: SliceContext,
   round: number,
-  stage: "deterministic" | "shared-preview",
-  previousReports: readonly string[],
+  stage: QAReviewStage,
+  history: readonly QAReviewFinding[],
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -2133,6 +2153,13 @@ export async function runQAStage(
   const reportName = stage === "deterministic" ? "qa-report.md" : "uat-report.md";
   const reportPath = join(ctx.absSliceDir, reportName);
   const reportDisplayPath = `${ctx.relSliceDir}/${reportName}`;
+  const reviewName = qaReviewFilename(stage);
+  const reviewPath = join(ctx.absSliceDir, reviewName);
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
   const scope = stage === "deterministic"
     ? "Deterministic slice QA only. Do not access a shared preview database or run remote UAT."
     : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
@@ -2140,6 +2167,7 @@ export async function runQAStage(
   for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
     const invokeEvaluator = async () => {
       rmSync(reportPath, { force: true });
+      rmSync(reviewPath, { force: true });
       if (stage === "shared-preview") {
         const preview = config.sharedPreview!;
         const commandOptions = {
@@ -2168,9 +2196,7 @@ export async function runQAStage(
           SANITY_COMMANDS: ctx.sanityCommandsBlock,
           QA_SCOPE: scope,
           REPORT_PATH: reportDisplayPath,
-          PREVIOUS_QA_REPORTS: previousReports.length > 0
-            ? previousReports.map((path) => `- \`${path}\``).join("\n")
-            : "(none)",
+          PREVIOUS_QA_REPORTS: "(none)",
           COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
           HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
         }),
@@ -2225,14 +2251,110 @@ export async function runQAStage(
       ? `qa-report-r${round}-a${attempt}.md`
       : `uat-report-r${round}-a${attempt}.md`;
     const archivePath = join(ctx.absSliceDir, archiveName);
+    let rawArchiveName: string | null = null;
+    try {
+      rawArchiveName = artifacts.archiveQAReviewAttempt({
+        sliceDir: ctx.absSliceDir,
+        archiveDir: reviewArchiveDir,
+        stage,
+        round,
+        attempt,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.phase(
+        `${ctx.tag}: Warning: failed to archive ${stage} review round ${round} ` +
+          `attempt ${attempt} to ${reviewArchiveDir}: ${message}`,
+        "error",
+        {
+          type: "warn",
+          reason: "qa-review-archive-failed",
+          ghIssue: slice.ghIssue,
+          message,
+        },
+      );
+    }
     if (!artifacts.archiveQAReport(reportPath, archivePath)) {
       if (attempt <= infrastructureRetries) continue;
       throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
     }
     const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
-    const verdict = artifacts.readQAVerdict(reportPath);
-    if (verdict === "PASS") return { outcome: "PASS", report: archiveDisplayPath };
-    if (artifacts.readQAFailureClass(reportPath) === "INFRASTRUCTURE") {
+    let review: QAReview;
+    let nextHistory: readonly QAReviewFinding[];
+    try {
+      review = loadQAReview(ctx.absSliceDir, stage);
+      nextHistory = advanceQAReviewHistory(history, review);
+    } catch (error) {
+      const evidence = error instanceof Error ? error.message : String(error);
+      try {
+        artifacts.archiveQAReviewValidation({
+          archiveDir: reviewArchiveDir,
+          stage,
+          round,
+          attempt,
+          evidence,
+        });
+      } catch (archiveError) {
+        const message =
+          archiveError instanceof Error
+            ? archiveError.message
+            : String(archiveError);
+        logger.phase(
+          `${ctx.tag}: Warning: failed to archive ${stage} validation evidence ` +
+            `for round ${round} attempt ${attempt}: ${message}`,
+          "error",
+          {
+            type: "warn",
+            reason: "qa-review-archive-failed",
+            ghIssue: slice.ghIssue,
+            message,
+          },
+        );
+      }
+      throw new Error(`${stage} review artifact ERROR: ${evidence}`);
+    }
+
+    const expectedRawArchiveName =
+      `${stage === "deterministic" ? "qa" : "uat"}-review-r${round}-a${attempt}.json`;
+    const canonicalArchivePath = relative(
+      config.repoRoot,
+      join(reviewArchiveDir, rawArchiveName ?? expectedRawArchiveName),
+    ).replace(/\\/g, "/");
+    const record = buildQAReviewAttemptRecord({
+      stage,
+      round,
+      attempt,
+      review,
+      canonicalArchivePath,
+      markdownArchivePath: archiveDisplayPath,
+    });
+    try {
+      artifacts.archiveQAReviewRecord({ archiveDir: reviewArchiveDir, record });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.phase(
+        `${ctx.tag}: Warning: failed to archive ${stage} lifecycle record ` +
+          `for round ${round} attempt ${attempt}: ${message}`,
+        "error",
+        {
+          type: "warn",
+          reason: "qa-review-archive-failed",
+          ghIssue: slice.ghIssue,
+          message,
+        },
+      );
+    }
+    const unresolved = record.findings.filter((finding) => finding.unresolved);
+
+    if (review.verdict === "PASS") {
+      return {
+        outcome: "PASS",
+        report: archiveDisplayPath,
+        history: nextHistory,
+        unresolved,
+      };
+    }
+    if (review.failureClass === "INFRASTRUCTURE") {
       if (attempt <= infrastructureRetries) {
         logger.phase(
           `${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`,
@@ -2248,7 +2370,12 @@ export async function runQAStage(
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
     }
-    return { outcome: "IMPLEMENTATION", report: archiveDisplayPath };
+    return {
+      outcome: "IMPLEMENTATION",
+      report: archiveDisplayPath,
+      history: nextHistory,
+      unresolved,
+    };
   }
 
   throw new Error(`${stage} QA exhausted without a result`);
@@ -2306,6 +2433,8 @@ export async function runSliceExecute(
   const qaReports: string[] = [];
   const repairReferences: string[] = [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
+  let deterministicHistory: readonly QAReviewFinding[] = [];
+  let sharedPreviewHistory: readonly QAReviewFinding[] = [];
 
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
@@ -2586,8 +2715,9 @@ export async function runSliceExecute(
           ctx,
           round,
           "deterministic",
-          qaReports,
+          deterministicHistory,
         );
+        deterministicHistory = deterministic.history;
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
@@ -2619,8 +2749,9 @@ export async function runSliceExecute(
             ctx,
             round,
             "shared-preview",
-            qaReports,
+            sharedPreviewHistory,
           );
+          sharedPreviewHistory = remote.history;
           logger.event({
             type: "phase-ended",
             ghIssue: slice.ghIssue,

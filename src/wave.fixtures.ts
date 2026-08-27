@@ -20,7 +20,11 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { rmDirWithRetry, writeContractReview } from "./test-support.js";
+import {
+  rmDirWithRetry,
+  writeContractReview,
+  writeQAReview,
+} from "./test-support.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import type {
@@ -297,6 +301,7 @@ export function buildStubProvider(opts: {
           `# QA Report\n\n**Verdict:** ${verdict}\n`,
           "utf-8",
         );
+        writeQAReview(sliceArtifactDir, "deterministic", { verdict });
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "stuck.md"),

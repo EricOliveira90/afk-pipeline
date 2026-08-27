@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Slice } from "./issues-parser.js";
-import { writeContractReview } from "./test-support.js";
+import { writeContractReview, writeQAReview } from "./test-support.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 
 const tempDirs: string[] = [];
@@ -222,6 +222,9 @@ export function buildProvider(opts: {
           `# QA Report\n\n**Verdict:** ${opts.qaVerdict ?? "PASS"}\n`,
           "utf-8",
         );
+        writeQAReview(artifactDir, "deterministic", {
+          verdict: opts.qaVerdict ?? "PASS",
+        });
       } else if (role === "generator-stuck" && artifactDir) {
         writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");
       }

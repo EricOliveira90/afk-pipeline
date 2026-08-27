@@ -52,6 +52,7 @@ import {
 import {
   writeContractResponse,
   writeContractReview,
+  writeQAReview,
 } from "./test-support.js";
 
 afterEach(() => {
@@ -428,6 +429,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
             "# QA Report\n\n**Verdict:** PASS\n",
             "utf-8",
           );
+          writeQAReview(dir, "deterministic");
         }
 
         return { exitCode: 0, stdout: "", stats: {} };
@@ -505,6 +507,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
             "# QA Report\n\n**Verdict:** PASS\n",
             "utf-8",
           );
+          writeQAReview(dir, "deterministic");
         }
 
         return { exitCode: 0, stdout: "", stats: {} };

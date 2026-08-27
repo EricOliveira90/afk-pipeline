@@ -7,6 +7,13 @@ import {
   type ContractReviewFinding,
   type ContractReviewVerdict,
 } from "./contract-review.js";
+import {
+  qaReviewFilename,
+  type QAReviewFailureClass,
+  type QAReviewFinding,
+  type QAReviewStage,
+  type QAReviewVerdict,
+} from "./qa-review.js";
 
 type ContractReviewFindingInput = Omit<
   ContractReviewFinding,
@@ -73,6 +80,64 @@ export function writeContractResponse(
             position === "UNRESOLVED"
               ? ""
               : `planner evidence for ${findingId}`,
+        })),
+      },
+      null,
+      2,
+    ),
+    "utf-8",
+  );
+}
+
+type QAReviewFindingInput = Omit<QAReviewFinding, "state"> &
+  Partial<Pick<QAReviewFinding, "state">>;
+
+/** Write a schema-valid canonical QA/UAT artifact from a stub evaluator. */
+export function writeQAReview(
+  sliceDir: string,
+  stage: QAReviewStage,
+  options: {
+    verdict?: QAReviewVerdict;
+    failureClass?: QAReviewFailureClass;
+    infrastructureEvidence?: string | null;
+    findings?: readonly QAReviewFindingInput[];
+  } = {},
+): void {
+  const verdict = options.verdict ?? "PASS";
+  const failureClass =
+    options.failureClass ?? (verdict === "PASS" ? "NONE" : "IMPLEMENTATION");
+  const defaultId = stage === "deterministic" ? "QA-01" : "UAT-01";
+  const findings =
+    options.findings ??
+    (failureClass === "IMPLEMENTATION"
+      ? [
+          {
+            id: defaultId,
+            severity: "BLOCKING" as const,
+            behaviorIds: [],
+            summary: "Fixture implementation finding",
+            evidence: "The fixture evaluator observed a failing behavior",
+            expected: "The behavior passes",
+            observed: "The behavior fails",
+            clearCondition: "The fixture evaluator observes the behavior passing",
+          },
+        ]
+      : []);
+  writeFileSync(
+    join(sliceDir, qaReviewFilename(stage)),
+    JSON.stringify(
+      {
+        version: 1,
+        verdict,
+        failureClass,
+        infrastructureEvidence:
+          options.infrastructureEvidence ??
+          (failureClass === "INFRASTRUCTURE"
+            ? "Fixture infrastructure failure"
+            : null),
+        findings: findings.map((finding) => ({
+          ...finding,
+          state: finding.state ?? "OPEN",
         })),
       },
       null,

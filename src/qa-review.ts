@@ -4,6 +4,8 @@ import {
   requireNonBlankString,
   type ContractFindingSeverity,
 } from "./contract-review.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 export const QA_REVIEW_FILENAME = "qa-review.json";
 export const UAT_REVIEW_FILENAME = "uat-review.json";
@@ -260,6 +262,24 @@ export function parseQAReview(
     infrastructureEvidence,
     findings,
   };
+}
+
+export function qaReviewFilename(stage: QAReviewStage): string {
+  return stage === "deterministic"
+    ? QA_REVIEW_FILENAME
+    : UAT_REVIEW_FILENAME;
+}
+
+export function loadQAReview(
+  sliceDir: string,
+  stage: QAReviewStage,
+): QAReview {
+  const filename = qaReviewFilename(stage);
+  const path = join(sliceDir, filename);
+  if (!existsSync(path)) {
+    throw new Error(`${filename} is missing`);
+  }
+  return parseQAReview(readFileSync(path, "utf-8"), filename);
 }
 
 export function advanceQAReviewHistory(

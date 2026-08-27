@@ -24,8 +24,6 @@ import {
 } from "./qa-review.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
-export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
-export type QAFailureClass = "NONE" | "IMPLEMENTATION" | "INFRASTRUCTURE";
 /**
  * Verdict parsed from a guardian review file. `UNPARSEABLE` means the
  * agent finished but the review file is missing or carries no
@@ -117,33 +115,6 @@ export function readContractStatus(contractPath: string): ContractStatus {
   if (upper === "LOCKED") return "LOCKED";
   if (upper === "DRAFT") return "DRAFT";
   return "NEGOTIATING";
-}
-
-export function readQAVerdict(qaReportPath: string): QAVerdict {
-  const content = readIfExists(qaReportPath);
-  if (!content) return "UNKNOWN";
-  // Find all Verdict fields and use the last one (evaluator may write
-  // intermediate verdicts in summary tables before the final one).
-  const matches = content.match(/\*\*Verdict:\*\*\s*(\S+)/gi);
-  if (!matches || matches.length === 0) return "UNKNOWN";
-  const last = matches[matches.length - 1]!;
-  const v = last.match(/\*\*Verdict:\*\*\s*(\S+)/i)?.[1]?.toUpperCase();
-  if (v === "PASS") return "PASS";
-  if (v === "FAIL") return "FAIL";
-  return "UNKNOWN";
-}
-
-export function readQAFailureClass(qaReportPath: string): QAFailureClass {
-  const content = readIfExists(qaReportPath);
-  if (!content) return "IMPLEMENTATION";
-  const value = matchField(
-    content,
-    /\*\*Failure class:\*\*\s*(NONE|IMPLEMENTATION|INFRASTRUCTURE)/i,
-  )?.toUpperCase();
-  if (value === "NONE" || value === "INFRASTRUCTURE") return value;
-  // Backwards-compatible and fail-closed: an unclassified FAIL remains an
-  // implementation failure and still consumes one of the three QA rounds.
-  return "IMPLEMENTATION";
 }
 
 export function archiveQAReport(
@@ -639,10 +610,6 @@ export function preserveNegotiationFailure(
 
 export function hasStuckFile(sliceDir: string): boolean {
   return existsSync(`${sliceDir}/stuck.md`);
-}
-
-export function hasPassingQA(sliceDir: string): boolean {
-  return readQAVerdict(`${sliceDir}/qa-report.md`) === "PASS";
 }
 
 /**

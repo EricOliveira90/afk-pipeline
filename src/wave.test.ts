@@ -47,7 +47,7 @@ import {
   type ProviderDeath,
   type SliceFixture,
 } from "./wave.fixtures.js";
-import { writeContractReview } from "./test-support.js";
+import { writeContractReview, writeQAReview } from "./test-support.js";
 
 afterEach(() => {
   cleanupWaveTempDirs();
@@ -361,6 +361,7 @@ describe("runWave", () => {
             "# QA Report\n\n**Verdict:** PASS\n",
             "utf-8",
           );
+          writeQAReview(sliceArtifactDir, "deterministic");
         }
 
         return { exitCode: 0, stdout: "", stats: {} };

@@ -27,7 +27,7 @@ import {
   type SliceContext,
 } from "./orchestrator.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
-import { rmDirWithRetry } from "./test-support.js";
+import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
 const dirs: string[] = [];
 const fixtureChildren = new Set<ChildProcess>();
@@ -185,6 +185,150 @@ describe("temporary repository isolation", () => {
 });
 
 describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
+  it("fails closed when Markdown passes without canonical QA JSON", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing/,
+    );
+    expect(existsSync(join(artifactDir, "qa-report-r1-a1.md"))).toBe(true);
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toMatch(/qa-review\.json is missing/);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("uses canonical PASS even when the Markdown companion says FAIL", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n",
+          "utf-8",
+        );
+        writeFileSync(
+          join(artifactDir, "qa-review.json"),
+          JSON.stringify({
+            version: 1,
+            verdict: "PASS",
+            failureClass: "NONE",
+            infrastructureEvidence: null,
+            findings: [],
+          }),
+          "utf-8",
+        );
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      {
+        outcome: "PASS",
+        report: "specs/slices/01-prd-070-regression/qa-report-r1-a1.md",
+        history: [],
+        unresolved: [],
+      },
+    );
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1.json"))).toBe(true);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      true,
+    );
+  });
+
+  it("deletes stale canonical JSON before an infrastructure retry", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        attempts++;
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          `# QA Report\n\n**Verdict:** ${attempts === 1 ? "FAIL" : "PASS"}\n`,
+          "utf-8",
+        );
+        if (attempts === 1) {
+          writeFileSync(
+            join(artifactDir, "qa-review.json"),
+            JSON.stringify({
+              version: 1,
+              verdict: "FAIL",
+              failureClass: "INFRASTRUCTURE",
+              infrastructureEvidence: "Registry unavailable",
+              findings: [],
+            }),
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing/,
+    );
+    expect(attempts).toBe(2);
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1.json"))).toBe(true);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      true,
+    );
+    expect(
+      existsSync(join(reviewDir, "qa-review-r1-a2-validation.txt")),
+    ).toBe(true);
+    expect(existsSync(join(artifactDir, "qa-report-r1-a2.md"))).toBe(true);
+  });
+
   it("does not treat the inactivity timeout as the base-gate wall-clock limit", async () => {
     const repo = makeRepo();
     writeFileSync(
@@ -212,6 +356,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic");
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -263,6 +408,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic");
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -337,6 +483,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             `# QA Report\n\n**Verdict:** ${failure ? "FAIL" : "PASS"}\n**Failure class:** ${failure ? "INFRASTRUCTURE" : "NONE"}\n`,
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic", failure
+            ? { verdict: "FAIL", failureClass: "INFRASTRUCTURE" }
+            : {});
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -368,6 +517,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             `# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n\n## Findings\nFinding ${generatorPrompts.length}\n`,
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic", {
+            verdict: "FAIL",
+          });
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -512,6 +664,7 @@ describe("provider-independent policy-less base gates", () => {
               "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
               "utf-8",
             );
+            writeQAReview(artifactDir, "deterministic");
           }
           return { exitCode: 0, stdout: "", stats: {} };
         },
@@ -655,6 +808,17 @@ describe("shared-preview QA", () => {
           "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
           "utf-8",
         );
+        writeFileSync(
+          join(artifactDir, "uat-review.json"),
+          JSON.stringify({
+            version: 1,
+            verdict: "PASS",
+            failureClass: "NONE",
+            infrastructureEvidence: null,
+            findings: [],
+          }),
+          "utf-8",
+        );
         return { exitCode: 0, stdout: "", stats: {} };
       },
     };
@@ -668,11 +832,28 @@ describe("shared-preview QA", () => {
     });
     artifactDir = ctx.absSliceDir;
 
-    await expect(runQAStage(ctx, 1, "shared-preview", [])).resolves.toEqual({
+    await expect(
+      runQAStage(ctx, 1, "shared-preview", []),
+    ).resolves.toMatchObject({
       outcome: "PASS",
       report: "specs/slices/01-prd-070-regression/uat-report-r1-a1.md",
+      history: [],
+      unresolved: [],
     });
     expect(existsSync(join(artifactDir, "uat-report-r1-a1.md"))).toBe(true);
+    expect(
+      existsSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "reviews",
+          "uat-review-r1-a1-record.json",
+        ),
+      ),
+    ).toBe(true);
   });
 });
 

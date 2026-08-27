@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Slice } from "./issues-parser.js";
 import { resolveBaseGateDeclarations } from "./orchestrator.js";
-import { writeContractReview } from "./test-support.js";
+import { writeContractReview, writeQAReview } from "./test-support.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -287,6 +287,10 @@ export function buildStubProvider(opts: {
             "# QA Report\n\n**Verdict:** FAIL\n\n**Failure class:** INFRASTRUCTURE\n",
             "utf-8",
           );
+          writeQAReview(sliceArtifactDir, "deterministic", {
+            verdict: "FAIL",
+            failureClass: "INFRASTRUCTURE",
+          });
         } else {
           const verdict = fixture.qaPasses ? "PASS" : "FAIL";
           writeFileSync(
@@ -294,6 +298,7 @@ export function buildStubProvider(opts: {
             `# QA Report\n\n**Verdict:** ${verdict}\n`,
             "utf-8",
           );
+          writeQAReview(sliceArtifactDir, "deterministic", { verdict });
         }
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(
