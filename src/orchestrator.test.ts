@@ -2743,7 +2743,9 @@ describe("contract review fails closed", () => {
       "reviews",
     );
     expect(readdirSync(reviews).sort()).toEqual([
+      "contract-review-r1-a1-record.json",
       "contract-review-r1-a1.json",
+      "contract-review-r2-a1-record.json",
       "contract-review-r2-a1.json",
       "feedback-r1-a1.md",
       "feedback-r2-a1.md",
@@ -2756,9 +2758,33 @@ describe("contract review fails closed", () => {
     expect(
       readFileSync(join(reviews, "contract-review-r2-a1.json"), "utf-8"),
     ).toContain('"verdict": "ACCEPT"');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(reviews, "contract-review-r2-a1-record.json"),
+          "utf-8",
+        ),
+      ),
+    ).toMatchObject({
+      version: 1,
+      round: 2,
+      attempt: 1,
+      verdict: "ACCEPT",
+      findings: [
+        {
+          id: "F-01",
+          state: "RESOLVED",
+          unresolved: false,
+          plannerPosition: "CONDITION_MET",
+          plannerEvidence: "planner evidence for F-01",
+          evaluatorEvidence:
+            '"the contract as written"',
+        },
+      ],
+    });
   });
 
-  it("archives a died attempt's artifact alongside the retry's", async () => {
+  it("archives raw died attempts and records lifecycle-valid ones", async () => {
     const repo = makeRepo();
     const slug = "review-archive-attempts";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2799,6 +2825,10 @@ describe("contract review fails closed", () => {
             throw new Error("Agent evaluator-contract exited with code 1");
           }
           writeContractReview(artifactDir, "ACCEPT");
+          if (evaluatorAttempts === 2) {
+            opts.logStream?.write("stub evaluator output\n");
+            throw new Error("Agent evaluator-contract exited with code 1");
+          }
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -2815,7 +2845,7 @@ describe("contract review fails closed", () => {
         specsDir,
         dag,
         provider,
-        infrastructureRetries: 1,
+        infrastructureRetries: 2,
       },
       slice,
       logger,
@@ -2825,7 +2855,7 @@ describe("contract review fails closed", () => {
     );
 
     expect((await runSliceNegotiate(ctx)).phase).toBe("LOCKED");
-    expect(evaluatorAttempts).toBe(2);
+    expect(evaluatorAttempts).toBe(3);
     const reviews = join(
       repo,
       ".afk",
@@ -2834,11 +2864,14 @@ describe("contract review fails closed", () => {
       "slice-01",
       "reviews",
     );
-    // Neither attempt wrote a markdown companion, so only the JSON
-    // artifacts appear — one per attempt, the dead one included.
+    // The malformed first attempt has no invented lifecycle record. The
+    // valid died attempt and final retry each preserve a derived record.
     expect(readdirSync(reviews).sort()).toEqual([
       "contract-review-r1-a1.json",
+      "contract-review-r1-a2-record.json",
       "contract-review-r1-a2.json",
+      "contract-review-r1-a3-record.json",
+      "contract-review-r1-a3.json",
     ]);
     expect(
       readFileSync(join(reviews, "contract-review-r1-a1.json"), "utf-8"),
@@ -2846,6 +2879,20 @@ describe("contract review fails closed", () => {
     expect(
       readFileSync(join(reviews, "contract-review-r1-a2.json"), "utf-8"),
     ).toContain('"verdict": "ACCEPT"');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(reviews, "contract-review-r1-a2-record.json"),
+          "utf-8",
+        ),
+      ),
+    ).toEqual({
+      version: 1,
+      round: 1,
+      attempt: 2,
+      verdict: "ACCEPT",
+      findings: [],
+    });
   });
 
   it("does not read a previous round's review when an attempt writes none", async () => {

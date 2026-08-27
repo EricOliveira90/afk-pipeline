@@ -10,6 +10,7 @@ import { join, relative } from "node:path";
 import {
   CONTRACT_REVIEW_FILENAME,
   formatContractReviewFindings,
+  type ContractReviewAttemptRecord,
   type ContractReviewFinding,
   type RecordedContractVerdict,
 } from "./contract-review.js";
@@ -333,6 +334,22 @@ export function archiveContractReviewAttempt(details: {
     archived.push(targetName);
   }
   return archived;
+}
+
+/** Archive the code-derived lifecycle record beside its raw attempt. */
+export function archiveContractReviewRecord(details: {
+  archiveDir: string;
+  record: ContractReviewAttemptRecord;
+}): string {
+  const { archiveDir, record } = details;
+  const name =
+    `contract-review-r${record.round}-a${record.attempt}-record.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
 }
 
 /**

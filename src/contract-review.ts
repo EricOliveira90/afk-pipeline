@@ -98,6 +98,24 @@ export interface ContractResponse {
   responses: ContractResponseEntry[];
 }
 
+export interface ContractReviewAttemptFinding {
+  id: string;
+  severity: ContractFindingSeverity;
+  state: ContractFindingState;
+  unresolved: boolean;
+  plannerPosition: ContractResponsePosition | null;
+  plannerEvidence: string | null;
+  evaluatorEvidence: string;
+}
+
+export interface ContractReviewAttemptRecord {
+  version: 1;
+  round: number;
+  attempt: number;
+  verdict: ContractReviewVerdict;
+  findings: ContractReviewAttemptFinding[];
+}
+
 /** Root keys the artifact must carry, and nothing else. */
 const REVIEW_KEYS = ["version", "verdict", "findings"] as const;
 
@@ -654,6 +672,37 @@ export function openContractReviewFindings(
   findings: readonly ContractReviewFinding[],
 ): ContractReviewFinding[] {
   return findings.filter((finding) => finding.state === "OPEN");
+}
+
+/** Build the code-derived audit record for one valid evaluator attempt. */
+export function buildContractReviewAttemptRecord(
+  round: number,
+  attempt: number,
+  review: ContractReview,
+  response: ContractResponse | null,
+): ContractReviewAttemptRecord {
+  const plannerByFindingId = new Map(
+    response?.responses.map((entry) => [entry.findingId, entry]),
+  );
+  return {
+    version: 1,
+    round,
+    attempt,
+    verdict: review.verdict,
+    findings: review.findings.map((finding) => {
+      const planner = plannerByFindingId.get(finding.id);
+      return {
+        id: finding.id,
+        severity: finding.severity,
+        state: finding.state,
+        unresolved:
+          finding.state === "OPEN" || finding.state === "CONTESTED",
+        plannerPosition: planner?.position ?? null,
+        plannerEvidence: planner?.evidence ?? null,
+        evaluatorEvidence: finding.evidence,
+      };
+    }),
+  };
 }
 
 /** Round 1 establishes finding identity; no finding is terminal yet. */

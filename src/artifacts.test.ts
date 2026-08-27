@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  archiveContractReviewRecord,
   archiveArtifactsBeforeRestart,
   classifyReviewFailure,
   hasStuckFile,
@@ -22,6 +23,7 @@ import {
   preserveNegotiationFailure,
   readReviewVerdict,
 } from "./artifacts.js";
+import type { ContractReviewAttemptRecord } from "./contract-review.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -42,6 +44,44 @@ function withTempFile(content: string, fn: (path: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe("archiveContractReviewRecord", () => {
+  it("writes a round-and-attempt-stamped lifecycle record", () => {
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-review-record-"));
+    const record: ContractReviewAttemptRecord = {
+      version: 1,
+      round: 2,
+      attempt: 3,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-01",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the existing gate is sufficient",
+          evaluatorEvidence: "the gate misses the negative path",
+        },
+      ],
+    };
+    try {
+      expect(
+        archiveContractReviewRecord({ archiveDir, record }),
+      ).toBe("contract-review-r2-a3-record.json");
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(archiveDir, "contract-review-r2-a3-record.json"),
+            "utf-8",
+          ),
+        ),
+      ).toEqual(record);
+    } finally {
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+});
 
 
 /**

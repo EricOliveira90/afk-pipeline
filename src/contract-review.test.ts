@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import * as artifacts from "./artifacts.js";
 import {
+  buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
   formatContractReviewFindings,
   loadContractReview,
@@ -884,6 +885,76 @@ describe("validateRound2ContractReview", () => {
         },
       ),
     ).toThrow(/familiar finding F-01 must use revisionCitation null/);
+  });
+});
+
+describe("buildContractReviewAttemptRecord", () => {
+  it("derives unresolved identity and preserves both parties' evidence", () => {
+    const response = parseContractResponse(
+      JSON.stringify({
+        version: 1,
+        round: 2,
+        responses: [
+          {
+            findingId: "F-01",
+            position: "CONTESTED",
+            evidence: "planner says the existing gate is sufficient",
+          },
+          {
+            findingId: "F-02",
+            position: "CONDITION_MET",
+            evidence: "planner points to the new failing command",
+          },
+        ],
+      }),
+      ["F-01", "F-02"],
+    );
+    const review: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          ...FINDING,
+          state: "CONTESTED",
+          evidence: "evaluator observes the gate misses the negative path",
+        },
+        {
+          ...FINDING,
+          id: "F-02",
+          state: "RESOLVED",
+          evidence: "evaluator observes the command fail as required",
+        },
+      ],
+    };
+
+    expect(buildContractReviewAttemptRecord(2, 3, review, response)).toEqual({
+      version: 1,
+      round: 2,
+      attempt: 3,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-01",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "planner says the existing gate is sufficient",
+          evaluatorEvidence:
+            "evaluator observes the gate misses the negative path",
+        },
+        {
+          id: "F-02",
+          severity: "BLOCKING",
+          state: "RESOLVED",
+          unresolved: false,
+          plannerPosition: "CONDITION_MET",
+          plannerEvidence: "planner points to the new failing command",
+          evaluatorEvidence:
+            "evaluator observes the command fail as required",
+        },
+      ],
+    });
   });
 });
 

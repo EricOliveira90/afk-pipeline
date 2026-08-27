@@ -103,6 +103,7 @@ import {
 import {
   CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
+  buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
   formatContractReviewFindings,
   loadContractResponse,
@@ -814,6 +815,9 @@ function archiveContractReviewAttempt(
   archiveDir: string,
   round: number,
   attempt: number,
+  previousReview: ContractReview | null,
+  plannerResponse: ContractResponse | null,
+  revisions: ContractRevisionArtifacts | null,
 ): void {
   try {
     const archived = artifacts.archiveContractReviewAttempt({
@@ -833,6 +837,51 @@ function archiveContractReviewAttempt(
     ctx.logger.phase(
       `${ctx.tag}: Warning: failed to archive contract review round ${round} ` +
         `attempt ${attempt} to ${archiveDir}: ${message}`,
+      "error",
+      {
+        type: "warn",
+        reason: "contract-review-archive-failed",
+        ghIssue: ctx.slice.ghIssue,
+        message,
+      },
+    );
+  }
+
+  let review: ContractReview;
+  try {
+    review = loadContractReview(ctx.absSliceDir);
+    if (round === 1) {
+      validateRound1ContractReview(review);
+    } else if (previousReview && plannerResponse) {
+      validateRound2ContractReview(
+        previousReview,
+        plannerResponse,
+        review,
+        revisions ?? undefined,
+      );
+    }
+  } catch {
+    return;
+  }
+
+  try {
+    const archived = artifacts.archiveContractReviewRecord({
+      archiveDir,
+      record: buildContractReviewAttemptRecord(
+        round,
+        attempt,
+        review,
+        plannerResponse,
+      ),
+    });
+    ctx.logger.phase(
+      `${ctx.tag}: archived contract review lifecycle record ${archived} to ${archiveDir}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.phase(
+      `${ctx.tag}: Warning: failed to archive contract review lifecycle record ` +
+        `for round ${round} attempt ${attempt} to ${archiveDir}: ${message}`,
       "error",
       {
         type: "warn",
@@ -1951,6 +2000,9 @@ async function negotiateAttempt(
               reviewArchiveDir,
               evaluatorRound,
               attempt,
+              previousReview,
+              plannerResponse,
+              revisionArtifacts,
             ),
         );
 
