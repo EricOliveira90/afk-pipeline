@@ -863,6 +863,34 @@ describe("validateRound2ContractReview", () => {
         label,
       ).toThrow(expected);
     }
+
+    expect(() =>
+      validateRound2ContractReview(
+        previous,
+        response,
+        {
+          version: 2,
+          verdict: "REVISE",
+          findings: [
+            {
+              ...fresh,
+              revisionCitation: {
+                artifact: "contract.md",
+                before: "alpha",
+                after: "beta",
+              },
+            },
+          ],
+        },
+        {
+          ...revisions,
+          "contract.md": {
+            before: "alpha beta",
+            after: "alpha beta",
+          },
+        },
+      ),
+    ).toThrow(/does not identify changed contract\.md text/);
   });
 
   it("requires familiar IDs to carry a null revision citation", () => {

@@ -846,5 +846,13 @@ export function validateRound2ContractReview(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation after does not match current ${citation.artifact}`,
       );
     }
+    if (
+      artifact.after.includes(citation.before) ||
+      artifact.before.includes(citation.after)
+    ) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation does not identify changed ${citation.artifact} text`,
+      );
+    }
   }
 }
