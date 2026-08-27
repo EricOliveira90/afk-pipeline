@@ -2115,9 +2115,14 @@ describe("round-scoped contract feedback", () => {
       /repo-relative/,
     ],
     [
+      // Version 2 is a real version now, so the unknown-version case
+      // has to name one that is not. It also must not match anything the
+      // planner template happens to say about the shape it writes —
+      // this case read as passing for a while on the template's own
+      // `"version": 1` text rather than on the objection.
       "unknown version",
-      { version: 2, fileScope: { kind: "paths", paths: ["src/a.ts"] }, migrationCount: 0 },
-      /version 1/,
+      { version: 3, fileScope: { kind: "paths", paths: ["src/a.ts"] }, migrationCount: 0 },
+      /must declare version 1 or 2/,
     ],
     [
       "negative migration count",
