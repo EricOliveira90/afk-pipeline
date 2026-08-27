@@ -49,7 +49,10 @@ import {
   type ProviderDeath,
   type SliceFixture,
 } from "./wave.fixtures.js";
-import { writeContractReview } from "./test-support.js";
+import {
+  writeContractResponse,
+  writeContractReview,
+} from "./test-support.js";
 
 afterEach(() => {
   cleanupWaveTempDirs();
@@ -351,6 +354,12 @@ describe("runWave — contract-lock migration prefix gate", () => {
     generatorPath?: (ghIssue: string) => string;
     /** Every planner prompt, in invocation order. */
     plannerPrompts?: string[];
+    /** Skip the fresh round-2 response to exercise fail-closed handling. */
+    writeRound2Response?: boolean;
+    /** Leave a round-1 response behind to prove round-2 freshness. */
+    writeStaleResponseAfterRound1?: boolean;
+    /** Every evaluator prompt, in invocation order. */
+    evaluatorPrompts?: string[];
   }): AgentProvider {
     const {
       slices,
@@ -358,6 +367,9 @@ describe("runWave — contract-lock migration prefix gate", () => {
       manifestPathForRound,
       generatorPath,
       plannerPrompts,
+      writeRound2Response = true,
+      writeStaleResponseAfterRound1 = false,
+      evaluatorPrompts,
     } = opts;
     const plannerRounds = new Map<string, number>();
     const declaredNow = new Map<string, string>();
@@ -387,16 +399,23 @@ describe("runWave — contract-lock migration prefix gate", () => {
             "utf-8",
           );
           writeAcceptanceManifest(dir, [manifestPath]);
+          if (round === 2 && writeRound2Response) {
+            writeContractResponse(dir, []);
+          }
         } else if (role === "evaluator-contract" && dir) {
           // Always ACCEPT. The evaluator has no idea what is on the
           // feature branch, which is exactly why the gate has to exist.
           const round = plannerRounds.get(ghIssue) ?? 1;
+          evaluatorPrompts?.push(prompt);
           writeFileSync(
             join(dir, `feedback-r${round}.md`),
             `## Evaluator feedback — round ${round}\n\nThe contract is testable.\n`,
             "utf-8",
           );
           writeContractReview(dir, "ACCEPT");
+          if (round === 1 && writeStaleResponseAfterRound1) {
+            writeContractResponse(dir, []);
+          }
         } else if (role === "generator" && dir) {
           const path =
             generatorPath?.(ghIssue) ?? declaredNow.get(ghIssue) ?? "src/x.txt";
@@ -460,6 +479,9 @@ describe("runWave — contract-lock migration prefix gate", () => {
             "utf-8",
           );
           writeAcceptanceManifest(dir, [path]);
+          if (round === 2) {
+            writeContractResponse(dir, []);
+          }
         } else if (role === "evaluator-contract" && dir) {
           const round = plannerRounds.get(ghIssue) ?? 1;
           writeFileSync(
@@ -612,7 +634,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     ).toBe(false);
   }, 240_000);
 
-  it("uses acceptance-manifest paths for legacy migration collision checks", async () => {
+  it("requires a fresh planner response after an acceptance-manifest lock refusal", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
       { number: "01", ghIssue: "2002", title: "Machine-declared migration", type: "AFK", blockedBy: [], userStories: "" },
@@ -631,9 +653,13 @@ describe("runWave — contract-lock migration prefix gate", () => {
     config.maxContractRounds = 2;
 
     const plannerPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
     config.provider = buildPlannerProvider({
       slices,
       plannerPrompts,
+      evaluatorPrompts,
+      writeRound2Response: false,
+      writeStaleResponseAfterRound1: true,
       pathForRound: () => "src/prose-only.ts",
       manifestPathForRound: () => "db/migrations/003_orders.sql",
     });
@@ -650,9 +676,13 @@ describe("runWave — contract-lock migration prefix gate", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    expect(outcomes.get("2002")?.phase).toBe("ESCALATE");
+    expect(outcomes.get("2002")?.phase).toBe("ERROR");
+    expect(outcomes.get("2002")?.error).toMatch(
+      /contract-response\.json is missing/,
+    );
     expect(plannerPrompts).toHaveLength(2);
     expect(plannerPrompts[1]).toContain("003");
+    expect(evaluatorPrompts).toHaveLength(1);
     expect(existsSync(join(repo, "src", "prose-only.ts"))).toBe(false);
   }, 240_000);
 

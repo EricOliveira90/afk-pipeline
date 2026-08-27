@@ -1732,8 +1732,7 @@ async function negotiateAttempt(
         gateObjection = null;
         const routedFindings =
           round === 2 ? openContractReviewFindings(lastFindings) : [];
-        const requiresPlannerResponse =
-          round === 2 && lastVerdict === "REVISE";
+        const requiresPlannerResponse = round === 2 && previousReview !== null;
         const previousArtifactText = requiresPlannerResponse
           ? {
               contract: readFileSync(contractPath, "utf-8"),
