@@ -10,9 +10,16 @@
     "Raise a number only with a recorded measurement in the commit",
     "message — this file is the ratchet that keeps a twenty-minute suite",
     "from growing back one reasonable-looking test at a time. AGENTS.md",
-    "has the cheaper places to put a new assertion."
+    "has the cheaper places to put a new assertion.",
+    "",
+    "NOTE on the 2026-08-26 round-2 drop: most of it came from making",
+    "fixture repos ignore the host git configuration (see the comment in",
+    "vitest.config.ts). A machine-wide `core.hooksPath` was running a",
+    "third-party hook on every fixture commit, checkout and merge. These",
+    "budgets therefore assume no such hook runs. On a host that never had",
+    "one the numbers were always lower, and the budgets are still met."
   ],
-  "_measured2026_08_26": {
+  "_measured2026_08_26_round1": {
     "fast": 114.8,
     "orchestrator": 242.3,
     "wave": 153.6,
@@ -21,13 +28,22 @@
     "clean-failed": 14.1,
     "_total": "624.5s of suite time, 10m30s of `pnpm test`, 765 tests"
   },
-  "suites": {
-    "fast": 175,
-    "orchestrator": 320,
-    "wave": 205,
-    "resume-integration": 85,
-    "qa-orchestration": 55,
-    "clean-failed": 20
+  "_measured2026_08_26_round2": {
+    "fast": 60.7,
+    "orchestrator": 168.8,
+    "wave": 97.0,
+    "resume-integration": 39.8,
+    "qa-orchestration": 35.4,
+    "clean-failed": 8.8,
+    "_total": "410.5s of suite time, 6m56s of `pnpm test`, 765 tests"
   },
-  "totalSeconds": 820
+  "suites": {
+    "fast": 79,
+    "orchestrator": 220,
+    "wave": 126,
+    "resume-integration": 52,
+    "qa-orchestration": 46,
+    "clean-failed": 13
+  },
+  "totalSeconds": 535
 }
