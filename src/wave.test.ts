@@ -10,10 +10,14 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { rmDirWithRetry } from "./test-support.js";
 import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
-import { makeAsyncMutex, sliceBranch } from "./orchestrator.js";
+import {
+  makeAsyncMutex,
+  resolveBaseGateDeclarations,
+  sliceBranch,
+} from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import * as gitModule from "./git.js";
@@ -50,7 +54,20 @@ function makeRepo(): string {
   git(dir, ["config", "user.email", "test@example.com"]);
   git(dir, ["config", "user.name", "Test"]);
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
+  // A behavior's gate IDs must name a baseline gate backed by a
+  // discovered command, so the fixture repo needs the one sanity script
+  // the derived catalog reads (`resolveSanityPlan`). Without it no
+  // manifest could bind, and every negotiation here would refuse.
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "wave-fixture",
+      private: true,
+      scripts: { "test:run": "node -e \"process.exit(0)\"" },
+    }),
+    "utf-8",
+  );
+  git(dir, ["add", "README.md", "package.json"]);
   git(dir, ["commit", "-m", "root"]);
   return dir;
 }
@@ -82,9 +99,34 @@ function writeAcceptanceManifest(
     paths === null
       ? { kind: "no-repository-changes" }
       : { kind: "paths", paths };
+  let repoRoot = artifactDir;
+  while (!existsSync(join(repoRoot, ".git"))) {
+    const parent = dirname(repoRoot);
+    if (parent === repoRoot) throw new Error("fixture repository root missing");
+    repoRoot = parent;
+  }
+  const gateId =
+    resolveBaseGateDeclarations(repoRoot).find((gate) => gate.command)?.id ??
+    "tests";
   writeFileSync(
     join(artifactDir, "acceptance-manifest.json"),
-    JSON.stringify({ version: 1, fileScope, migrationCount }),
+    JSON.stringify({
+      version: 2,
+      fileScope,
+      migrationCount,
+      behaviors: [
+        {
+          id: "B-01",
+          source: "wave fixture",
+          given: "a wave fixture slice",
+          when: "its contract is negotiated",
+          then: "the behavior lock passes",
+          observableResult: "the slice reaches its own assertions",
+          preservation: false,
+          gateIds: [gateId],
+        },
+      ],
+    }),
     "utf-8",
   );
 }
@@ -2180,12 +2222,24 @@ describe("runWave — contract-lock migration prefix gate", () => {
       [`${sliceDir}/contract.md`]:
         "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- supabase/migrations/003_orders.sql\n",
       [`${sliceDir}/acceptance-manifest.json`]: JSON.stringify({
-        version: 1,
+        version: 2,
         fileScope: {
           kind: "paths",
           paths: ["supabase/migrations/003_orders.sql"],
         },
         migrationCount: 1,
+        behaviors: [
+          {
+            id: "B-01",
+            source: "wave fixture",
+            given: "a contract left LOCKED by an earlier run",
+            when: "this run negotiates the slice",
+            then: "the prefix gate, not the behavior lock, decides",
+            observableResult: "negotiation reopens on the collision",
+            preservation: false,
+            gateIds: ["tests"],
+          },
+        ],
       }),
     });
 

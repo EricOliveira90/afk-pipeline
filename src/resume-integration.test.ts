@@ -49,7 +49,20 @@ function makeRepo(): string {
   git(dir, ["config", "user.email", "test@example.com"]);
   git(dir, ["config", "user.name", "Test"]);
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
+  // A behavior's gate IDs must name a baseline gate backed by a
+  // discovered command, so the fixture repo needs the one sanity script
+  // the derived catalog reads (`resolveSanityPlan`). Without it no
+  // manifest could bind, and every negotiation here would refuse.
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "resume-fixture",
+      private: true,
+      scripts: { "test:run": "node -e \"process.exit(0)\"" },
+    }),
+    "utf-8",
+  );
+  git(dir, ["add", "README.md", "package.json"]);
   git(dir, ["commit", "-m", "root"]);
   return dir;
 }
@@ -146,9 +159,21 @@ function buildProvider(opts: {
         writeFileSync(
           join(artifactDir, "acceptance-manifest.json"),
           JSON.stringify({
-            version: 1,
+            version: 2,
             fileScope: { kind: "paths", paths: ["src/work.ts"] },
             migrationCount: 0,
+            behaviors: [
+              {
+                id: "B-01",
+                source: "resume fixture",
+                given: "a resumable slice",
+                when: "its contract is negotiated",
+                then: "the behavior lock passes",
+                observableResult: "the slice reaches its own assertions",
+                preservation: false,
+                gateIds: ["tests"],
+              },
+            ],
           }),
           "utf-8",
         );
