@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  afterEach,
+} from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
@@ -55,17 +63,28 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
 }
 
+/**
+ * One repo for the whole block. Building a one-commit repo costs two git
+ * processes and around half a second here, so a fixture per `it` is the
+ * dominant cost of a suite like this one — see the note above
+ * `git.hasCommitsAhead` for the rule these shared blocks follow.
+ *
+ * Safe to share because every test here is additive: the branches they
+ * create have distinct names and nobody reads a branch another test
+ * makes. A test that needs to move `main`, or to observe the *absence*
+ * of a branch a sibling creates, needs its own repo.
+ */
 describe("git.branchExists", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     // Init a throwaway repo with a single commit so we can create branches.
     git(repoDir, ["init", "--initial-branch=main"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -159,16 +178,18 @@ describe("git.getDefaultBranch", () => {
   });
 });
 
+// Shared repo: additive, distinctly-named branches only (see
+// `git.branchExists`).
 describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-wt-"));
     git(repoDir, ["init", "--initial-branch=main"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -202,16 +223,18 @@ describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
   });
 });
 
+// Shared repo: each test adds and removes its own uniquely-named branch
+// and worktree (see `git.branchExists`).
 describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-rm-"));
     git(repoDir, ["init", "--initial-branch=main"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -552,16 +575,18 @@ describe("git.hasCommitsAhead", () => {
  * The fix: refuse to reuse a path unless git agrees it is the worktree
  * for the requested branch.
  */
+// Shared repo: each test works on its own `wt-*` path and `feat/*`
+// branch (see `git.branchExists`).
 describe("git.createWorktree", { timeout: 240_000 }, () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-cw-"));
     git(repoDir, ["init", "--initial-branch=main"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -625,16 +650,18 @@ describe("git.createWorktree", { timeout: 240_000 }, () => {
  * adds a removeWorktree → deleteBranch → createWorktree sequence that
  * leaves more windows for filesystem races).
  */
+// Shared repo: each test works on its own `wt-*` path and `feat/*`
+// branch (see `git.branchExists`).
 describe("git.assertWorktreeRegistered", { timeout: 240_000 }, () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-assert-"));
     git(repoDir, ["init", "--initial-branch=main"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -747,16 +774,18 @@ describe("nextFreeMigrationPrefix (pure)", () => {
   });
 });
 
+// Shared repo: the missing-ref case reads nothing the other test writes
+// (see `git.branchExists`).
 describe("git.listFilesOnRef", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
