@@ -239,3 +239,51 @@ export function parseQAReview(
     findings,
   };
 }
+
+export function advanceQAReviewHistory(
+  history: readonly QAReviewFinding[],
+  review: QAReview,
+): readonly QAReviewFinding[] {
+  if (review.failureClass === "INFRASTRUCTURE") return history;
+
+  const previousById = new Map(history.map((finding) => [finding.id, finding]));
+  const currentCounts = new Map<string, number>();
+  for (const finding of review.findings) {
+    currentCounts.set(finding.id, (currentCounts.get(finding.id) ?? 0) + 1);
+  }
+
+  for (const previous of history) {
+    if (previous.state !== "OPEN") continue;
+    const count = currentCounts.get(previous.id) ?? 0;
+    if (count !== 1) {
+      throw new Error(
+        `QA review must repeat open finding ${previous.id} exactly once; received ${count}`,
+      );
+    }
+  }
+
+  for (const finding of review.findings) {
+    const previous = previousById.get(finding.id);
+    if (previous?.state === "RESOLVED") {
+      throw new Error(`QA review resolved finding ${finding.id} cannot return`);
+    }
+    if (!previous && finding.state !== "OPEN") {
+      throw new Error(
+        history.length === 0
+          ? `QA review first non-infrastructure attempt must start finding ${finding.id} as OPEN`
+          : `QA review fresh finding ${finding.id} must start as OPEN`,
+      );
+    }
+  }
+
+  return [
+    ...history.filter((finding) => finding.state === "RESOLVED"),
+    ...review.findings,
+  ];
+}
+
+export function openQAReviewFindings(
+  findings: readonly QAReviewFinding[],
+): QAReviewFinding[] {
+  return findings.filter((finding) => finding.state === "OPEN");
+}

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseQAReview } from "./qa-review.js";
+import {
+  advanceQAReviewHistory,
+  openQAReviewFindings,
+  parseQAReview,
+  type QAReview,
+} from "./qa-review.js";
 
 const FINDING = {
   id: "QA-01",
@@ -204,5 +209,160 @@ describe("parseQAReview refuses contradictory combinations", () => {
     expect(() => parseQAReview(review(overrides))).toThrow(
       /must be one of PASS\/NONE, FAIL\/IMPLEMENTATION, or FAIL\/INFRASTRUCTURE/,
     );
+  });
+});
+
+describe("advanceQAReviewHistory enforces the QA lifecycle", () => {
+  function parsedImplementation(
+    findings: Array<Record<string, unknown>> = [FINDING],
+  ): QAReview {
+    return parseQAReview(
+      review({
+        verdict: "FAIL",
+        failureClass: "IMPLEMENTATION",
+        findings,
+      }),
+    );
+  }
+
+  it("requires every finding in the first non-infrastructure attempt to open", () => {
+    const passingWithResolved = parseQAReview(
+      review({ findings: [{ ...FINDING, state: "RESOLVED" }] }),
+    );
+
+    expect(() => advanceQAReviewHistory([], passingWithResolved)).toThrow(
+      /first non-infrastructure attempt must start finding QA-01 as OPEN/,
+    );
+  });
+
+  it("repeats open IDs, resolves one, and adds a fresh open ID", () => {
+    const previous = advanceQAReviewHistory(
+      [],
+      parsedImplementation([
+        FINDING,
+        { ...FINDING, id: "QA-02", severity: "ADVISORY" },
+      ]),
+    );
+    const current = parseQAReview(
+      review({
+        findings: [
+          { ...FINDING, state: "RESOLVED" },
+          {
+            ...FINDING,
+            id: "QA-02",
+            severity: "ADVISORY",
+            state: "OPEN",
+          },
+          {
+            ...FINDING,
+            id: "QA-03",
+            severity: "ADVISORY",
+            state: "OPEN",
+          },
+        ],
+      }),
+    );
+
+    expect(
+      advanceQAReviewHistory(previous, current).map(({ id, state }) => ({
+        id,
+        state,
+      })),
+    ).toEqual([
+      { id: "QA-01", state: "RESOLVED" },
+      { id: "QA-02", state: "OPEN" },
+      { id: "QA-03", state: "OPEN" },
+    ]);
+  });
+
+  it("refuses omission of a currently open ID", () => {
+    const previous = advanceQAReviewHistory([], parsedImplementation());
+    expect(() =>
+      advanceQAReviewHistory(previous, parseQAReview(review())),
+    ).toThrow(/must repeat open finding QA-01 exactly once; received 0/);
+  });
+
+  it("refuses a duplicate currently open ID", () => {
+    const previous = advanceQAReviewHistory([], parsedImplementation());
+    const duplicate = parsedImplementation();
+    duplicate.findings.push({ ...duplicate.findings[0]! });
+
+    expect(() => advanceQAReviewHistory(previous, duplicate)).toThrow(
+      /must repeat open finding QA-01 exactly once; received 2/,
+    );
+  });
+
+  it("refuses a fresh finding that starts resolved", () => {
+    const previous = advanceQAReviewHistory([], parsedImplementation());
+    const current = parsedImplementation([
+      FINDING,
+      { ...FINDING, id: "QA-02", state: "RESOLVED" },
+    ]);
+
+    expect(() => advanceQAReviewHistory(previous, current)).toThrow(
+      /fresh finding QA-02 must start as OPEN/,
+    );
+  });
+
+  it("refuses a resolved ID returning in a later attempt", () => {
+    const opened = advanceQAReviewHistory([], parsedImplementation());
+    const resolved = advanceQAReviewHistory(
+      opened,
+      parseQAReview(
+        review({ findings: [{ ...FINDING, state: "RESOLVED" }] }),
+      ),
+    );
+
+    expect(() =>
+      advanceQAReviewHistory(
+        resolved,
+        parsedImplementation([{ ...FINDING, state: "OPEN" }]),
+      ),
+    ).toThrow(/resolved finding QA-01 cannot return/);
+  });
+
+  it("leaves history unchanged for an infrastructure attempt", () => {
+    const previous = advanceQAReviewHistory([], parsedImplementation());
+    const infrastructure = parseQAReview(
+      review({
+        verdict: "FAIL",
+        failureClass: "INFRASTRUCTURE",
+        infrastructureEvidence: "Preview database unavailable",
+      }),
+    );
+
+    expect(advanceQAReviewHistory(previous, infrastructure)).toBe(previous);
+  });
+
+  it("keeps deterministic and shared-preview histories independent", () => {
+    const deterministic = advanceQAReviewHistory(
+      [],
+      parsedImplementation([FINDING]),
+    );
+    const sharedPreview = advanceQAReviewHistory(
+      [],
+      parsedImplementation([{ ...FINDING, id: "UAT-01" }]),
+    );
+
+    expect(deterministic.map(({ id }) => id)).toEqual(["QA-01"]);
+    expect(sharedPreview.map(({ id }) => id)).toEqual(["UAT-01"]);
+  });
+});
+
+describe("openQAReviewFindings", () => {
+  it("treats every open finding as unresolved, including advisory findings", () => {
+    const findings = [
+      { ...FINDING, state: "RESOLVED" as const },
+      {
+        ...FINDING,
+        id: "QA-02",
+        severity: "ADVISORY" as const,
+        state: "OPEN" as const,
+      },
+    ];
+
+    expect(openQAReviewFindings(findings).map(({ id }) => id)).toEqual([
+      "QA-02",
+    ]);
   });
 });
