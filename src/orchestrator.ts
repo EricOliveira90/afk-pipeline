@@ -99,6 +99,15 @@ import {
   validateAcceptanceManifestCoverage,
   validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
+import {
+  CONTRACT_REVIEW_FILENAME,
+  contractReviewGapMetrics,
+  formatContractReviewFindings,
+  loadContractReview,
+  type ContractReview,
+  type ContractReviewFinding,
+  type RecordedContractVerdict,
+} from "./contract-review.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -692,9 +701,15 @@ function migrationReservationBlock(
   );
 }
 
+/**
+ * Round-cap evidence, all of it derived from the review artifacts by
+ * `contractReviewGapMetrics` — never reported by the evaluator itself.
+ * `previousGapCount` and `reRaisedGapCount` are null on the first
+ * reviewed round, where there is nothing to compare against.
+ */
 export interface ContractExtensionEvidence {
   previousGapCount: number | null;
-  currentGapCount: number | null;
+  currentGapCount: number;
   reRaisedGapCount: number | null;
   extensionAlreadyGranted: boolean;
 }
@@ -715,12 +730,11 @@ export function assessContractExtension(
   if (extensionAlreadyGranted) {
     return { grant: false, reason: "the one-round extension was already used" };
   }
-  if (
-    previousGapCount === null ||
-    currentGapCount === null ||
-    reRaisedGapCount === null
-  ) {
-    return { grant: false, reason: "gap metrics are missing or malformed" };
+  if (previousGapCount === null || reRaisedGapCount === null) {
+    return {
+      grant: false,
+      reason: "there is no previous reviewed round to measure progress against",
+    };
   }
   if (reRaisedGapCount > 0) {
     return {
@@ -745,9 +759,10 @@ function preserveContractNegotiationFailure(
   ctx: SliceContext,
   outcome: "ESCALATE" | "STUCK",
   round: number,
-  verdict: artifacts.EvaluatorVerdict,
+  verdict: RecordedContractVerdict,
   feedbackPath: string,
   capDecision: string,
+  findings?: readonly ContractReviewFinding[],
 ): void {
   const provider = ctx.config.provider ?? kiroProvider;
   const result = artifacts.preserveNegotiationFailure({
@@ -764,10 +779,52 @@ function preserveContractNegotiationFailure(
     contractPath: join(ctx.absSliceDir, "contract.md"),
     contextPath: join(ctx.absSliceDir, "context.md"),
     capDecision,
+    findings,
   });
   if (result.archived) {
     ctx.logger.phase(
       `${ctx.tag}: archived negotiation artifacts to ${result.archiveDir}`,
+    );
+  }
+}
+
+/**
+ * Keep one contract review attempt's artifacts. Best-effort: an audit
+ * copy that cannot be written is a warning, never the thing that fails a
+ * negotiation. The warning names the attempt so a gap in the archive is
+ * traceable rather than invisible.
+ */
+function archiveContractReviewAttempt(
+  ctx: SliceContext,
+  archiveDir: string,
+  round: number,
+  attempt: number,
+): void {
+  try {
+    const archived = artifacts.archiveContractReviewAttempt({
+      sliceDir: ctx.absSliceDir,
+      archiveDir,
+      round,
+      attempt,
+    });
+    if (archived.length > 0) {
+      ctx.logger.phase(
+        `${ctx.tag}: archived contract review round ${round} attempt ${attempt} ` +
+          `(${archived.join(", ")}) to ${archiveDir}`,
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.phase(
+      `${ctx.tag}: Warning: failed to archive contract review round ${round} ` +
+        `attempt ${attempt} to ${archiveDir}: ${message}`,
+      "error",
+      {
+        type: "warn",
+        reason: "contract-review-archive-failed",
+        ghIssue: ctx.slice.ghIssue,
+        message,
+      },
     );
   }
 }
@@ -790,6 +847,10 @@ type AgentKillClass =
  * - `transient-exhausted` — the transient-provider retry window closed
  *   without the outage clearing (ADR 0022).
  * - `verdict` — nothing died; the evaluator wrote a real verdict.
+ * - `review-artifact` — the evaluator finished but its contract review
+ *   artifact was missing, malformed, or self-contradictory. Terminal for
+ *   the slice: there is no verdict to act on, and inventing a default
+ *   would be the silent ACCEPT this failure mode exists to prevent.
  * - `internal-error` — the pipeline itself threw (git, filesystem).
  *
  * The first three are *infrastructure* causes and are the only ones the
@@ -800,6 +861,7 @@ type NegotiateFailureKind =
   | "orchestrator-kill"
   | "transient-exhausted"
   | "verdict"
+  | "review-artifact"
   | "internal-error";
 
 interface NegotiateFailureCause {
@@ -818,7 +880,7 @@ interface NegotiateFailureCause {
   /** `orchestrator-kill` only — which bound tripped. */
   killClass?: AgentKillClass;
   /** `verdict` only — what the evaluator actually wrote. */
-  verdict?: artifacts.EvaluatorVerdict;
+  verdict?: RecordedContractVerdict;
   /** Tail of the dead invocation's output. Absent for `verdict`. */
   outputTail?: string;
 }
@@ -979,7 +1041,7 @@ function classifyNegotiateFailure(args: {
  */
 function negotiateVerdictCause(args: {
   outcome: "ESCALATE" | "STUCK";
-  verdict: artifacts.EvaluatorVerdict;
+  verdict: RecordedContractVerdict;
   round: number;
 }): NegotiateFailureCause {
   const { outcome, verdict, round } = args;
@@ -992,6 +1054,22 @@ function negotiateVerdictCause(args: {
           `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
         : `negotiate: contract not locked after negotiation — last evaluator ` +
           `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+/**
+ * The evaluator finished and its review artifact was refused. Distinct
+ * from a `verdict` cause: nothing was decided about the contract, so the
+ * summary names the artifact and the defect instead of a verdict, and the
+ * slice stops where it is.
+ */
+function reviewArtifactCause(defect: string): NegotiateFailureCause {
+  return {
+    kind: "review-artifact",
+    role: "evaluator-contract",
+    summary:
+      `negotiate: the contract review artifact was refused, so no verdict ` +
+      `was reached — ${defect}`,
   };
 }
 
@@ -1251,40 +1329,52 @@ async function negotiateAttempt(
    * Run one negotiate invocation, closing its log before classifying a
    * failure — `closeAgentLog` awaits the stream's flush, so the output
    * tail read afterwards is complete.
+   *
+   * `afterAttempt` runs once per attempt whatever the attempt did —
+   * succeeded, died, or was cancelled — because an attempt that died can
+   * still have written the artifact an operator needs to see. It runs
+   * before the failure is classified so the archive is taken while the
+   * working artifact is still on disk.
    */
   const invokeAgent = async (
     opts: Omit<Parameters<SliceContext["invoke"]>[0], "logStream">,
     createLogStream: () => WriteStream,
     beforeAttempt?: () => void,
+    afterAttempt?: (attempt: number) => void,
   ): Promise<void> => {
     for (let attempt = 1; ; attempt++) {
       beforeAttempt?.();
       const logStream = createLogStream();
+      let failure: { error: unknown } | null = null;
       try {
         await invoke({ ...opts, logStream }).finally(() =>
           closeAgentLog(logStream),
         );
-        return;
       } catch (err) {
-        if (isCancelled(err, signal)) throw err;
-        const cause = classifyNegotiateFailure({
-          role: opts.role,
-          error: err,
-          outputTail: readInvocationOutputTail(agentLogPath(logStream)),
-        });
-        if (!isInfrastructureCause(cause) || attempt > infrastructureRetries) {
-          throw new NegotiateInvocationError(cause);
-        }
-        const message =
-          `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
-          cause.summary;
-        logger.phase(`${ctx.tag}: ${message}`, "error", {
-          type: "warn",
-          reason: "infrastructure-retry",
-          ghIssue: slice.ghIssue,
-          message,
-        });
+        failure = { error: err };
       }
+      afterAttempt?.(attempt);
+      if (failure === null) return;
+
+      const { error } = failure;
+      if (isCancelled(error, signal)) throw error;
+      const cause = classifyNegotiateFailure({
+        role: opts.role,
+        error,
+        outputTail: readInvocationOutputTail(agentLogPath(logStream)),
+      });
+      if (!isInfrastructureCause(cause) || attempt > infrastructureRetries) {
+        throw new NegotiateInvocationError(cause);
+      }
+      const message =
+        `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
+        cause.summary;
+      logger.phase(`${ctx.tag}: ${message}`, "error", {
+        type: "warn",
+        reason: "infrastructure-retry",
+        ghIssue: slice.ghIssue,
+        message,
+      });
     }
   };
 
@@ -1344,12 +1434,23 @@ async function negotiateAttempt(
     }
     let allowedContractRounds = maxContractRounds;
     let extensionGranted = false;
-    let previousMetrics: artifacts.EvaluatorFeedbackMetrics | null = null;
     let evaluatorRound = 0;
     let lastRound = 0;
-    let lastVerdict: artifacts.EvaluatorVerdict = "UNKNOWN";
+    let lastVerdict: RecordedContractVerdict = "NONE";
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
     const capDecisions: string[] = [];
+    /**
+     * The previous round's review, kept so this round's re-raised-gap
+     * count can be derived from finding IDs rather than taken from the
+     * evaluator's word.
+     */
+    let previousReview: ContractReview | null = null;
+    let lastFindings: readonly ContractReviewFinding[] = [];
+    const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+      config.repoRoot,
+      pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+      slice.number,
+    );
 
     /**
      * Objection raised by `ctx.onContractLocked` and not yet handed to a
@@ -1419,14 +1520,30 @@ async function negotiateAttempt(
     /**
      * The planner's REVISION_NOTE for `round`. A pending gate objection
      * takes the lead: it is a concrete, mechanical correction, and the
-     * evaluator feedback it supersedes said ACCEPT.
+     * review it supersedes said ACCEPT.
+     *
+     * A REVISE reaches the planner as the review's structured findings,
+     * each with its clear-condition, rather than as a pointer to prose:
+     * the planner is told the observable change that resolves every gap.
+     * The markdown companion is named as further reading, not as the
+     * carrier of the gaps.
      */
     const revisionNote = (objection: string | null): string => {
       const priorFeedback =
         evaluatorRound > 0
           ? `${ctx.relSliceDir}/feedback-r${evaluatorRound}.md`
           : null;
+      const priorFindings =
+        lastFindings.length > 0
+          ? `The contract review returned REVISE with these findings. ` +
+            `Clear every BLOCKING one:\n\n` +
+            `${formatContractReviewFindings(lastFindings)}\n` +
+            (priorFeedback
+              ? `\nThe reviewer's prose companion is ${priorFeedback}.`
+              : "")
+          : null;
       if (objection === null) {
+        if (priorFindings) return priorFindings;
         return priorFeedback
           ? `Revise based only on evaluator feedback in ${priorFeedback}.`
           : "";
@@ -1435,9 +1552,11 @@ async function negotiateAttempt(
         `The pipeline REJECTED the previous contract before any code was generated:\n\n` +
         `${objection}\n\n` +
         `Resolve exactly that in this revision.` +
-        (priorFeedback
-          ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
-          : "")
+        (priorFindings
+          ? `\n\nKeep the previous review's findings satisfied too.\n\n${priorFindings}`
+          : priorFeedback
+            ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
+            : "")
       );
     };
 
@@ -1555,7 +1674,7 @@ async function negotiateAttempt(
             error instanceof Error ? error.message : String(error);
           refuseInvalidManifest(objection, `planner round ${round}`);
           lastRound = round;
-          lastVerdict = "UNKNOWN";
+          lastVerdict = "NONE";
           if (round < allowedContractRounds) continue;
 
           const reason =
@@ -1569,13 +1688,13 @@ async function negotiateAttempt(
             ctx,
             "ESCALATE",
             round,
-            "UNKNOWN",
+            "NONE",
             lastFeedbackPath,
             capDecisions.join(" "),
           );
           const cause = negotiateVerdictCause({
             outcome: "ESCALATE",
-            verdict: "UNKNOWN",
+            verdict: "NONE",
             round,
           });
           return { phase: "ESCALATE", cause };
@@ -1597,6 +1716,7 @@ async function negotiateAttempt(
           ctx.absSliceDir,
           `feedback-r${evaluatorRound}.md`,
         );
+        const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
         await invokeAgent(
           {
             role: "evaluator-contract",
@@ -1605,12 +1725,16 @@ async function negotiateAttempt(
               SLICE_DIR: ctx.relSliceDir,
               ROUND: evaluatorRound,
               RELEVANT_FILES: relevantFilesBlock,
-              PREVIOUS_FEEDBACK_NOTE:
+              PREVIOUS_REVIEW_NOTE:
                 evaluatorRound > 1
-                  ? `Read ${ctx.relSliceDir}/feedback-r${evaluatorRound - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
-                  : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
+                  ? `A previous round's findings were handed to the planner. ` +
+                    `Its prose companion is ${ctx.relSliceDir}/feedback-r${evaluatorRound - 1}.md. ` +
+                    `Reuse a finding's exact \`id\` when the same gap still stands — ` +
+                    `the orchestrator measures repeated gaps by ID.`
+                  : "This is the first review round; every finding ID is new.",
               ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
               BASE_GATE_CATALOG: baseGateCatalogBlock,
+              CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
@@ -1621,20 +1745,53 @@ async function negotiateAttempt(
               "evaluator-contract",
               evaluatorRound,
             ),
-          () => rmSync(feedbackPath, { force: true }),
+          // Both artifacts are deleted before every attempt, so a stale
+          // review from an earlier attempt or round can never be read as
+          // this attempt's verdict.
+          () => {
+            rmSync(feedbackPath, { force: true });
+            rmSync(reviewPath, { force: true });
+          },
+          (attempt) =>
+            archiveContractReviewAttempt(
+              ctx,
+              reviewArchiveDir,
+              evaluatorRound,
+              attempt,
+            ),
         );
 
-        const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
-        const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
-        // An UNKNOWN verdict means the evaluator exited without writing
-        // a parseable verdict — surface it instead of silently looping,
-        // so an operator can tell a dropped negotiation from a pending
-        // one. See ADR 0017.
+        lastRound = round;
+        lastFeedbackPath = feedbackPath;
+
+        let review: ContractReview;
+        try {
+          review = loadContractReview(ctx.absSliceDir);
+        } catch (error) {
+          // The evaluator finished but said nothing the orchestrator can
+          // act on. There is no default verdict and no extra round: a
+          // malformed, missing, or self-contradictory review artifact is
+          // terminal, and the operator gets the artifact named. See
+          // ADR 0017 for the earlier, weaker version of this rule.
+          const defect = error instanceof Error ? error.message : String(error);
+          const cause = reviewArtifactCause(defect);
+          logger.phase(`${ctx.tag}: ${cause.summary}`, "error", {
+            type: "phase-ended",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "evaluator-contract",
+            round: evaluatorRound,
+            verdict: "NONE",
+          });
+          logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
+          return { phase: "ERROR", cause };
+        }
+
+        const verdict = review.verdict;
+        const metrics = contractReviewGapMetrics(review, previousReview);
         logger.phase(
           `${ctx.tag}: contract verdict ${verdict} (round ${round}/${allowedContractRounds})` +
-            (verdict === "UNKNOWN"
-              ? " — evaluator produced no parseable verdict"
-              : ""),
+            ` — ${metrics.gapCount} blocking finding(s)`,
           "error",
           {
             type: "phase-ended",
@@ -1645,9 +1802,8 @@ async function negotiateAttempt(
             verdict,
           },
         );
-        lastRound = round;
         lastVerdict = verdict;
-        lastFeedbackPath = feedbackPath;
+        lastFindings = review.findings;
         if (verdict === "ACCEPT") {
           artifacts.lockContract(contractPath);
           contractStatus = "LOCKED";
@@ -1659,34 +1815,30 @@ async function negotiateAttempt(
         if (contractStatus === "LOCKED" && !lockRefusedByGate(`round ${round}`))
           break;
 
-        if (verdict === "ESCALATE") {
-          capDecisions.push(
-            "Evaluator explicitly escalated; no cap extension was considered.",
-          );
-          logger.phase(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
-        } else if (round === allowedContractRounds) {
+        if (round === allowedContractRounds) {
           // A gate refusal earns no extension. The extension exists for
-          // a planner making measurable progress on evaluator gaps; a
+          // a planner making measurable progress on review findings; a
           // gate objection is a concrete mechanical correction the
           // planner already had every round to make, so failing it is
           // the escalation the operator should see.
+          //
+          // Any other way of reaching here is a REVISE: an ACCEPT either
+          // broke out of the loop or set `gateObjection` on its way past
+          // the lock gate.
           const assessment = gateObjection
             ? {
                 grant: false as const,
                 reason:
                   "the contract-lock gate refused the final round's contract",
               }
-            : verdict === "REVISE"
-              ? assessContractExtension({
-                  previousGapCount: previousMetrics?.gapCount ?? null,
-                  currentGapCount: metrics.gapCount,
-                  reRaisedGapCount: metrics.reRaisedGapCount,
-                  extensionAlreadyGranted: extensionGranted,
-                })
-              : {
-                  grant: false as const,
-                  reason: `verdict was ${verdict}, not REVISE`,
-                };
+            : assessContractExtension({
+                previousGapCount: previousReview
+                  ? contractReviewGapMetrics(previousReview, null).gapCount
+                  : null,
+                currentGapCount: metrics.gapCount,
+                reRaisedGapCount: metrics.reRaisedGapCount,
+                extensionAlreadyGranted: extensionGranted,
+              });
           if (assessment.grant) {
             extensionGranted = true;
             allowedContractRounds = maxContractRounds + 1;
@@ -1696,7 +1848,7 @@ async function negotiateAttempt(
             logger.phase(
               `${ctx.tag}: granting contract round ${allowedContractRounds}: ${assessment.reason}`,
             );
-            previousMetrics = metrics;
+            previousReview = review;
             continue;
           }
           capDecisions.push(`Extension refused: ${assessment.reason}.`);
@@ -1704,7 +1856,7 @@ async function negotiateAttempt(
             `${ctx.tag}: contract round extension refused: ${assessment.reason}`,
           );
         } else {
-          previousMetrics = metrics;
+          previousReview = review;
           continue;
         }
 
@@ -1716,6 +1868,7 @@ async function negotiateAttempt(
           verdict,
           feedbackPath,
           capDecisions.join(" "),
+          review.findings,
         );
         logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
         const cause = negotiateVerdictCause({
@@ -1738,6 +1891,7 @@ async function negotiateAttempt(
         capDecisions.length > 0
           ? capDecisions.join(" ")
           : "The configured round cap was not reached.",
+        lastFindings,
       );
       const cause = negotiateVerdictCause({
         outcome: "STUCK",

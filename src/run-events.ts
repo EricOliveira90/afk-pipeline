@@ -138,8 +138,9 @@ export type RunEventPayload =
        * resumes of a STUCK slice's preserved tree (`--resume-stuck`,
        * #49), a locked contract
        * sent back to the planner by the contract-lock gate (ADR 0028),
-       * and the launch guard fast-forwarding a stale feature branch to
-       * the host worktree's HEAD before any wave dispatches.
+       * the launch guard fast-forwarding a stale feature branch to
+       * the host worktree's HEAD before any wave dispatches, and a
+       * contract review attempt whose audit copy could not be written.
        */
       reason:
         | "lane-continuation"
@@ -151,6 +152,7 @@ export type RunEventPayload =
         | "idle-deferral"
         | "resume-stuck"
         | "contract-lock-refused"
+        | "contract-review-archive-failed"
         | "feature-branch-fast-forward";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */

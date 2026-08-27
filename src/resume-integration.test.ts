@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestrator.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
+import { writeContractReview } from "./test-support.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 
 /**
@@ -180,9 +181,10 @@ function buildProvider(opts: {
       } else if (role === "evaluator-contract" && artifactDir) {
         writeFileSync(
           join(artifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+          "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
           "utf-8",
         );
+        writeContractReview(artifactDir, "ACCEPT");
       } else if (role === "generator") {
         await opts.generator(cwd, options);
       } else if (role === "evaluator-qa" && artifactDir) {

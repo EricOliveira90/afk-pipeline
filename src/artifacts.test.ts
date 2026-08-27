@@ -19,8 +19,6 @@ import {
   readContractFiles,
   readContractStatus,
   preserveNegotiationFailure,
-  readEvaluatorFeedbackMetrics,
-  readEvaluatorVerdict,
   readReviewVerdict,
 } from "./artifacts.js";
 
@@ -43,39 +41,6 @@ function withTempFile(content: string, fn: (path: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
-
-describe("readEvaluatorVerdict", () => {
-  it("parses both bold-colon spellings from a feedback file", () => {
-    withTempFile("Review prose\n\n**Verdict:** ACCEPT\n", (p) =>
-      expect(readEvaluatorVerdict(p)).toBe("ACCEPT"),
-    );
-    withTempFile("**Verdict: REVISE**\n", (p) =>
-      expect(readEvaluatorVerdict(p)).toBe("REVISE"),
-    );
-  });
-
-  it("parses explicit gap and re-raised-gap counts", () => {
-    withTempFile("VERDICT: REVISE\nGAPS: 3\nRE_RAISED_GAPS: 1\n", (p) => {
-      expect(readEvaluatorFeedbackMetrics(p)).toEqual({
-        gapCount: 3,
-        reRaisedGapCount: 1,
-      });
-    });
-    withTempFile("VERDICT: REVISE\n", (p) => {
-      expect(readEvaluatorFeedbackMetrics(p)).toEqual({
-        gapCount: null,
-        reRaisedGapCount: null,
-      });
-    });
-  });
-
-  it("returns UNKNOWN for missing or garbled feedback without throwing", () => {
-    expect(readEvaluatorVerdict("/nonexistent/feedback-r1.md")).toBe("UNKNOWN");
-    withTempFile("Verdict: looks good\n", (p) =>
-      expect(readEvaluatorVerdict(p)).toBe("UNKNOWN"),
-    );
-  });
-});
 
 describe("preserveNegotiationFailure", () => {
   function makeFailureFixture() {
@@ -153,7 +118,7 @@ describe("preserveNegotiationFailure", () => {
           title: "Notification foundation",
           round: 2,
           outcome: "STUCK",
-          verdict: "UNKNOWN",
+          verdict: "NONE",
           feedbackPath: join(sliceDir, "feedback-r2.md"),
           contractPath: join(sliceDir, "contract.md"),
           contextPath: join(sliceDir, "context.md"),

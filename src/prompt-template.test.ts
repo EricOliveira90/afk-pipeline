@@ -104,9 +104,10 @@ describe("renderPrompt", () => {
         SLICE_DIR: "d",
         ROUND: 1,
         RELEVANT_FILES: "",
-        PREVIOUS_FEEDBACK_NOTE: "No previous round.",
+        PREVIOUS_REVIEW_NOTE: "No previous round.",
         ACCEPTANCE_MANIFEST: '{"version":2}',
         BASE_GATE_CATALOG: "- tests: pnpm run test",
+        CONTRACT_REVIEW_FILE: "contract-review.json",
       }),
     ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();

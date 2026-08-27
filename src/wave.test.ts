@@ -11,7 +11,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { rmDirWithRetry } from "./test-support.js";
+import { rmDirWithRetry, writeContractReview } from "./test-support.js";
 import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
 import {
   makeAsyncMutex,
@@ -80,11 +80,12 @@ interface SliceFixture {
   outputFile: string;
   outputContent: string;
   /**
-   * Verdict the contract evaluator writes. Defaults to ACCEPT; ESCALATE
-   * drives the "genuine verdict" negotiate failure — the evaluator lived
-   * and decided, so nothing about it is an infrastructure death.
+   * Verdict the contract evaluator writes. Defaults to ACCEPT; REVISE
+   * against a one-round cap drives the "genuine verdict" negotiate
+   * failure — the evaluator lived and decided, so nothing about it is an
+   * infrastructure death.
    */
-  contractVerdict?: "ACCEPT" | "ESCALATE";
+  contractVerdict?: "ACCEPT" | "REVISE";
 }
 
 function writeAcceptanceManifest(
@@ -264,9 +265,10 @@ function buildStubProvider(opts: {
         const verdict = fixture?.contractVerdict ?? "ACCEPT";
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
-          `## Evaluator feedback — round 1\n\n**Verdict:** ${verdict}\n`,
+          `## Evaluator feedback — round 1\n\nProse for ${verdict}.\n`,
           "utf-8",
         );
+        writeContractReview(sliceArtifactDir, verdict);
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         const round = (generatorRounds.get(ghIssue) ?? 0) + 1;
         generatorRounds.set(ghIssue, round);
@@ -636,9 +638,10 @@ describe("runWave", () => {
         } else if (role === "evaluator-contract" && sliceArtifactDir) {
           writeFileSync(
             join(sliceArtifactDir, "feedback-r1.md"),
-            "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+            "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
             "utf-8",
           );
+          writeContractReview(sliceArtifactDir, "ACCEPT");
         } else if (role === "generator" && sliceArtifactDir) {
           const outFile = ghIssue === "601" ? "src/a.txt" : "src/b.txt";
           const outPath = join(cwd, outFile);
@@ -914,7 +917,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
   function oneSlice(
     slug: string,
     ghIssue: string,
-    opts?: { deaths?: ProviderDeath[]; contractVerdict?: "ACCEPT" | "ESCALATE" },
+    opts?: { deaths?: ProviderDeath[]; contractVerdict?: "ACCEPT" | "REVISE" },
   ) {
     const repo = makeRepo();
     const slices: Slice[] = [
@@ -944,6 +947,10 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     const setup = setupWave(repo, slug, slices, fixtures, {
       ...(opts?.deaths ? { deaths: opts.deaths } : {}),
     });
+    // A REVISE fixture never converges, so cap negotiation at one round:
+    // the first REVISE is also the last, and the wave sees the genuine
+    // verdict rather than three identical rounds of it.
+    if (opts?.contractVerdict === "REVISE") setup.config.maxContractRounds = 1;
     return { repo, slices, ...setup };
   }
 
@@ -1033,14 +1040,14 @@ describe("runWave negotiate failure causes (issue #40)", () => {
 
   it("labels a genuine evaluator verdict as a verdict, never as an infrastructure death", async () => {
     const setup = oneSlice("neg-verdict", "1301", {
-      contractVerdict: "ESCALATE",
+      contractVerdict: "REVISE",
     });
 
     const outcomes = await dispatch(setup, ["1301"]);
 
     expect(outcomes.get("1301")?.phase).toBe("ESCALATE");
     const reason = reasonOf(outcomes.get("1301"));
-    expect(reason).toContain("evaluator verdict ESCALATE");
+    expect(reason).toContain("evaluator verdict REVISE");
     expect(reason).toContain("not an infrastructure death");
     expect(reason).not.toContain("exit code");
     expect(reason).not.toContain("killed");
@@ -1186,7 +1193,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
 
   it("never retries a genuine verdict — it is terminal on the first occurrence", async () => {
     const setup = oneSlice("neg-verdict-terminal", "1501", {
-      contractVerdict: "ESCALATE",
+      contractVerdict: "REVISE",
     });
     setup.config.infrastructureRetries = 2;
 
@@ -1741,9 +1748,10 @@ describe("runWave — contract-lock migration prefix gate", () => {
           const round = plannerRounds.get(ghIssue) ?? 1;
           writeFileSync(
             join(dir, `feedback-r${round}.md`),
-            `## Evaluator feedback — round ${round}\n\n**Verdict:** ACCEPT\n\nGAPS: 0\nRE_RAISED_GAPS: 0\n`,
+            `## Evaluator feedback — round ${round}\n\nThe contract is testable.\n`,
             "utf-8",
           );
+          writeContractReview(dir, "ACCEPT");
         } else if (role === "generator" && dir) {
           const path =
             generatorPath?.(ghIssue) ?? declaredNow.get(ghIssue) ?? "src/x.txt";
@@ -1811,9 +1819,10 @@ describe("runWave — contract-lock migration prefix gate", () => {
           const round = plannerRounds.get(ghIssue) ?? 1;
           writeFileSync(
             join(dir, `feedback-r${round}.md`),
-            `## Evaluator feedback - round ${round}\n\n**Verdict:** ACCEPT\n`,
+            `## Evaluator feedback - round ${round}\n\nThe contract is testable.\n`,
             "utf-8",
           );
+          writeContractReview(dir, "ACCEPT");
         } else if (role === "generator" && dir) {
           observedPrompts.push(prompt);
           const path = assignedPaths.get(ghIssue);

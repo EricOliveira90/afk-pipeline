@@ -1,7 +1,15 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import * as artifacts from "./artifacts.js";
 import {
   contractReviewGapMetrics,
   formatContractReviewFindings,
@@ -513,5 +521,56 @@ describe("formatContractReviewFindings", () => {
 
   it("renders a placeholder for an empty finding list", () => {
     expect(formatContractReviewFindings([])).toBe("(no findings were recorded)");
+  });
+});
+
+/**
+ * The marker vocabulary has to be gone, not merely unused: a surviving
+ * `readEvaluatorVerdict` or a stray `GAPS:` regex is a second, weaker
+ * path to a verdict, and the whole point of the artifact is that there
+ * is only one. Asserted against the source rather than through behaviour
+ * because "no other path exists" is not observable from any one run.
+ */
+describe("the negotiate control flow keeps no marker parsing", () => {
+  /**
+   * A module's code with comments removed. Prose *about* the markers is
+   * legitimate — the module that replaced them says what it replaced —
+   * so the guard has to look at code, not at documentation.
+   */
+  function source(name: string): string {
+    return readFileSync(
+      fileURLToPath(new URL(`./${name}`, import.meta.url)),
+      "utf-8",
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^[ \t]*\/\/.*$/gm, "");
+  }
+
+  it("no longer exports the marker readers", () => {
+    expect(Object.keys(artifacts)).not.toContain("readEvaluatorVerdict");
+    expect(Object.keys(artifacts)).not.toContain("readEvaluatorFeedbackMetrics");
+  });
+
+  it("parses no VERDICT: marker in the orchestrator", () => {
+    expect(source("orchestrator.ts")).not.toMatch(/VERDICT/);
+  });
+
+  it("parses no GAPS: self-count anywhere in the negotiate path", () => {
+    for (const name of ["orchestrator.ts", "artifacts.ts", "contract-review.ts"]) {
+      expect(source(name)).not.toMatch(/\bGAPS\b/);
+      expect(source(name)).not.toMatch(/RE_RAISED_GAPS/);
+    }
+  });
+
+  it("asks the evaluator prompt for neither counts nor a verdict marker", () => {
+    const prompt = readFileSync(
+      fileURLToPath(new URL("../prompts/evaluator-contract.md", import.meta.url)),
+      "utf-8",
+    );
+    expect(prompt).not.toMatch(/\bGAPS\b/);
+    expect(prompt).not.toMatch(/RE_RAISED_GAPS/);
+    expect(prompt).not.toMatch(/VERDICT:/);
+    expect(prompt).toContain("{{CONTRACT_REVIEW_FILE}}");
+    expect(prompt).toContain("clearCondition");
   });
 });

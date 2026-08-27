@@ -7,9 +7,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
+import {
+  CONTRACT_REVIEW_FILENAME,
+  formatContractReviewFindings,
+  type ContractReviewFinding,
+  type RecordedContractVerdict,
+} from "./contract-review.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
-export type EvaluatorVerdict = "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
 export type QAFailureClass = "NONE" | "IMPLEMENTATION" | "INFRASTRUCTURE";
 /**
@@ -103,43 +108,6 @@ export function readContractStatus(contractPath: string): ContractStatus {
   if (upper === "LOCKED") return "LOCKED";
   if (upper === "DRAFT") return "DRAFT";
   return "NEGOTIATING";
-}
-
-export function readEvaluatorVerdict(
-  feedbackPath: string,
-): EvaluatorVerdict {
-  const content = readIfExists(feedbackPath);
-  if (!content) return "UNKNOWN";
-  const match = content.match(
-    /\bVERDICT(?:\s*:\s*|\s+)\*{0,2}\s*(ACCEPT|REVISE|ESCALATE)\b/i,
-  );
-  const v = match?.[1]?.toUpperCase();
-  if (v === "ACCEPT") return "ACCEPT";
-  if (v === "REVISE") return "REVISE";
-  if (v === "ESCALATE") return "ESCALATE";
-  return "UNKNOWN";
-}
-
-export interface EvaluatorFeedbackMetrics {
-  gapCount: number | null;
-  reRaisedGapCount: number | null;
-}
-
-export function readEvaluatorFeedbackMetrics(
-  feedbackPath: string,
-): EvaluatorFeedbackMetrics {
-  const content = readIfExists(feedbackPath);
-  if (!content) return { gapCount: null, reRaisedGapCount: null };
-  const gap = content.match(
-    /^\s*\*{0,2}GAPS\s*:\s*\*{0,2}\s*(\d+)\b/im,
-  )?.[1];
-  const reRaised = content.match(
-    /^\s*\*{0,2}RE_RAISED_GAPS\s*:\s*\*{0,2}\s*(\d+)\b/im,
-  )?.[1];
-  return {
-    gapCount: gap === undefined ? null : Number(gap),
-    reRaisedGapCount: reRaised === undefined ? null : Number(reRaised),
-  };
 }
 
 export function readQAVerdict(qaReportPath: string): QAVerdict {
@@ -285,11 +253,18 @@ export interface NegotiationFailureDetails {
   title: string;
   round: number;
   outcome: "ESCALATE" | "STUCK";
-  verdict: EvaluatorVerdict;
+  verdict: RecordedContractVerdict;
   feedbackPath: string;
   contractPath: string;
   contextPath: string;
   capDecision?: string;
+  /**
+   * Findings from the last review artifact that parsed. Rendered into
+   * `stuck.md` verbatim so the operator reads the same structured gaps
+   * the planner was given, rather than a scrape of the markdown
+   * companion.
+   */
+  findings?: readonly ContractReviewFinding[];
 }
 
 export interface NegotiationArchiveResult {
@@ -304,6 +279,60 @@ export function negotiationArchiveDir(
   sliceNumber: string,
 ): string {
   return join(repoRoot, ".afk", "artifacts", runSlug, `slice-${sliceNumber}`);
+}
+
+/**
+ * Where every contract review attempt is kept. Under the repo root, not
+ * the slice worktree: the worktree is torn down, and the audit trail of
+ * what each evaluator attempt actually wrote has to outlive it.
+ */
+export function contractReviewArchiveDir(
+  repoRoot: string,
+  runSlug: string,
+  sliceNumber: string,
+): string {
+  return join(
+    negotiationArchiveDir(repoRoot, runSlug, sliceNumber),
+    "reviews",
+  );
+}
+
+/**
+ * Archive one contract review attempt — the canonical JSON artifact and
+ * its markdown companion — under names stamped with both the round and
+ * the attempt within that round.
+ *
+ * Every attempt is kept, including the ones that produced a malformed or
+ * missing artifact: those are precisely the attempts an operator needs to
+ * read. Because the working artifact has a fixed name and is deleted
+ * before each attempt, the archive is the only record of an earlier
+ * attempt, so the copy refuses to overwrite an existing file rather than
+ * losing one silently.
+ *
+ * Returns the archived file names. Best-effort by contract: callers warn
+ * on failure rather than failing a negotiation over an audit copy.
+ */
+export function archiveContractReviewAttempt(details: {
+  sliceDir: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+}): string[] {
+  const { sliceDir, archiveDir, round, attempt } = details;
+  const suffix = `r${round}-a${attempt}`;
+  const copies: Array<[source: string, target: string]> = [
+    [CONTRACT_REVIEW_FILENAME, `contract-review-${suffix}.json`],
+    [`feedback-r${round}.md`, `feedback-${suffix}.md`],
+  ];
+  const archived: string[] = [];
+  for (const [sourceName, targetName] of copies) {
+    const source = join(sliceDir, sourceName);
+    if (!existsSync(source)) continue;
+    mkdirSync(archiveDir, { recursive: true });
+    cpSync(source, join(archiveDir, targetName), { errorOnExist: true, force: false });
+    archived.push(targetName);
+  }
+  return archived;
 }
 
 export function archiveNegotiationArtifacts(
@@ -327,14 +356,23 @@ function displayPath(repoRoot: string, path: string): string {
   return relative(repoRoot, path).replace(/\\/g, "/");
 }
 
-function unresolvedGaps(feedback: string | null): string {
+/**
+ * The gaps that ended negotiation. Structured findings win when the last
+ * review artifact parsed; otherwise the markdown companion is quoted
+ * whole, which is all that is left when negotiation died before any
+ * artifact was validated.
+ */
+function unresolvedGaps(
+  findings: readonly ContractReviewFinding[] | undefined,
+  feedback: string | null,
+): string {
+  if (findings && findings.length > 0) {
+    return formatContractReviewFindings(findings);
+  }
   if (!feedback) {
     return "(No feedback file was produced; inspect the evaluator log.)";
   }
-  const section = feedback.match(
-    /### If REVISE, specific gaps:\s*([\s\S]*?)(?=\n### |$)/i,
-  )?.[1]?.trim();
-  return section || feedback.trim();
+  return feedback.trim();
 }
 
 export function preserveNegotiationFailure(
@@ -355,12 +393,10 @@ export function preserveNegotiationFailure(
     contractPath,
     contextPath,
     capDecision,
+    findings,
   } = details;
   const archiveDir = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
   const feedback = readIfExists(feedbackPath);
-  const verdictText =
-    feedback?.split(/\r?\n/).find((line) => /\bVERDICT\b/i.test(line))?.trim() ??
-    `VERDICT: ${verdict}`;
   const stuckPath = join(sliceDir, "stuck.md");
   const archiveContract = join(archiveDir, "contract.md");
   const archiveContext = join(archiveDir, "context.md");
@@ -371,12 +407,12 @@ export function preserveNegotiationFailure(
     `- Slice: #${ghIssue} ${title}`,
     `- Outcome: ${outcome}`,
     `- Round: ${round}`,
-    `- Final verdict: ${verdictText}`,
+    `- Final verdict: VERDICT: ${verdict}`,
     `- Round-cap decision: ${capDecision ?? "No extension decision was recorded."}`,
     "",
     "## Unresolved gaps",
     "",
-    unresolvedGaps(feedback),
+    unresolvedGaps(findings, feedback),
     "",
     "## Next action",
     "",

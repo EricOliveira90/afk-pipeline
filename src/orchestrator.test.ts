@@ -48,6 +48,8 @@ import {
 } from "./command-runtime.js";
 import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
 import { terminateProcessTree } from "./kill-tree.js";
+import { writeContractReview } from "./test-support.js";
+import { readContractStatus } from "./artifacts.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -845,9 +847,10 @@ function buildStubProvider(opts: {
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+          "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
           "utf-8",
         );
+        writeContractReview(sliceArtifactDir, "ACCEPT");
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         if (fixture.simulateIdleDeferral) {
           options.onIdleDeferral?.({ silentSeconds: 600, busyProcesses: 2 });
@@ -2260,11 +2263,9 @@ describe("round-scoped contract feedback", () => {
           if (plannerRounds === 1) writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
-          const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
-          writeFileSync(
-            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
-            `VERDICT: ${verdict}\n`,
-            "utf-8",
+          writeContractReview(
+            artifactDir,
+            evaluatorRounds === 1 ? "REVISE" : "ACCEPT",
           );
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -2354,8 +2355,26 @@ describe("round-scoped contract feedback", () => {
           const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
           writeFileSync(
             join(artifactDir, `feedback-r${evaluatorRounds}.md`),
-            `## Evaluator feedback — round ${evaluatorRounds}\n\nVERDICT: ${verdict}\n`,
+            `## Evaluator feedback — round ${evaluatorRounds}\n\nProse for ${verdict}.\n`,
             "utf-8",
+          );
+          writeContractReview(
+            artifactDir,
+            verdict,
+            verdict === "REVISE"
+              ? [
+                  {
+                    id: "F-01",
+                    severity: "BLOCKING",
+                    behaviorIds: ["B-01"],
+                    evidence: '"it reaches review"',
+                    expected: "a falsifiable observable result",
+                    observed: "an unfalsifiable one",
+                    clearCondition:
+                      "B-01 names a command that fails when the header is absent",
+                  },
+                ]
+              : [],
           );
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -2382,18 +2401,18 @@ describe("round-scoped contract feedback", () => {
     expect(plannerPrompts[0]).not.toContain("gh issue view 9001");
     expect(plannerPrompts[1]).toContain("feedback-r1.md");
     expect(plannerPrompts[1]).not.toContain("feedback-r2.md");
+    // Round 1's REVISE reaches the planner as structured findings with
+    // their clear-conditions, not as a pointer to prose.
+    expect(plannerPrompts[1]).toContain("[F-01] BLOCKING");
+    expect(plannerPrompts[1]).toContain(
+      "Clear when: B-01 names a command that fails when the header is absent",
+    );
     expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
 
     const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
     expect(contract).toMatch(/^\*\*Status:\*\*\s*LOCKED\s*$/m);
     expect(contract).not.toContain("## Evaluator feedback");
-    expect(readFileSync(join(ctx.absSliceDir, "feedback-r1.md"), "utf-8")).toContain(
-      "VERDICT: REVISE",
-    );
-    expect(readFileSync(join(ctx.absSliceDir, "feedback-r2.md"), "utf-8")).toContain(
-      "VERDICT: ACCEPT",
-    );
   });
 
   it("grants exactly one extra round to a converging negotiation", async () => {
@@ -2427,12 +2446,22 @@ describe("round-scoped contract feedback", () => {
           writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
-          const verdict = evaluatorRounds === 3 ? "ACCEPT" : "REVISE";
+          // Gap counts are derived from the findings, so convergence is
+          // expressed by writing fewer blocking findings — and by giving
+          // round 2 fresh IDs, since a reused ID is a re-raised gap.
           const gaps = evaluatorRounds === 1 ? 4 : evaluatorRounds === 2 ? 2 : 0;
-          writeFileSync(
-            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
-            `VERDICT: ${verdict}\nGAPS: ${gaps}\nRE_RAISED_GAPS: 0\n`,
-            "utf-8",
+          writeContractReview(
+            artifactDir,
+            gaps === 0 ? "ACCEPT" : "REVISE",
+            Array.from({ length: gaps }, (_unused, index) => ({
+              id: `F-r${evaluatorRounds}-${index + 1}`,
+              severity: "BLOCKING" as const,
+              behaviorIds: ["B-01"],
+              evidence: '"it reaches review"',
+              expected: "a falsifiable observable result",
+              observed: `unfalsifiable gap ${index + 1}`,
+              clearCondition: `gap ${index + 1} names a failing command`,
+            })),
           );
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -2499,11 +2528,17 @@ describe("round-scoped contract feedback", () => {
           );
           writeAcceptanceManifest(artifactDir);
         } else if (opts.role === "evaluator-contract") {
-          writeFileSync(
-            join(artifactDir, "feedback-r1.md"),
-            "VERDICT: ESCALATE\n\n### If REVISE, specific gaps:\n- Clarify the issue body.\n",
-            "utf-8",
-          );
+          writeContractReview(artifactDir, "REVISE", [
+            {
+              id: "F-01",
+              severity: "BLOCKING",
+              behaviorIds: [],
+              evidence: '"the issue body"',
+              expected: "an unambiguous scope statement",
+              observed: "an ambiguous one",
+              clearCondition: "Clarify the issue body.",
+            },
+          ]);
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -2516,7 +2551,17 @@ describe("round-scoped contract feedback", () => {
     mkdirSync(archiveParent, { recursive: true });
     writeFileSync(join(archiveParent, `${slug}-stub`), "blocked", "utf-8");
     const ctx = makeSliceContext(
-      { repoRoot: repo, prdSlug: slug, prdDir, specsDir, dag, provider },
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        // One round, so the REVISE hits the cap with no previous round
+        // to measure progress against and escalates immediately.
+        maxContractRounds: 1,
+      },
       slice,
       logger,
       featBranch,
@@ -2542,6 +2587,512 @@ describe("round-scoped contract feedback", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * The contract review artifact is the negotiate stage's fail-closed
+ * boundary (issue #77). Every case below asserts the *slice* outcome, not
+ * just the parser's opinion: a refused artifact ends negotiation with the
+ * artifact named, and the planner is never handed another round to
+ * recover from an evaluator's broken output.
+ *
+ * The cases are enumerated one per conjunct of the validity rules, with
+ * the counterexample values the issue names — a fixture that "covers" a
+ * compound rule proves only that one of its conjuncts holds.
+ */
+describe("contract review fails closed", () => {
+  const FINDING = {
+    id: "F-01",
+    severity: "BLOCKING",
+    behaviorIds: ["B-01"],
+    evidence: '"it reaches review"',
+    expected: "a falsifiable observable result",
+    observed: "an unfalsifiable one",
+    clearCondition: "the entry names a command that can fail",
+  };
+
+  function reviewText(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      version: 1,
+      verdict: "REVISE",
+      findings: [FINDING],
+      ...overrides,
+    });
+  }
+
+  /** A one-finding REVISE with the finding edited. */
+  function findingText(overrides: Record<string, unknown>): string {
+    return reviewText({ findings: [{ ...FINDING, ...overrides }] });
+  }
+
+  /**
+   * Negotiate one slice whose evaluator writes `artifact` (or nothing,
+   * when it is `null`). Two contract rounds are allowed, so "the planner
+   * ran once" is evidence the refusal was terminal rather than a spent
+   * round.
+   */
+  async function negotiateWithArtifact(
+    slug: string,
+    ghIssue: string,
+    artifact: string | null,
+  ) {
+    const repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue,
+      title: "Review artifact",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          writeFileSync(
+            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
+            "## Evaluator feedback\n\nProse.\n",
+            "utf-8",
+          );
+          if (artifact !== null) {
+            writeFileSync(
+              join(artifactDir, "contract-review.json"),
+              artifact,
+              "utf-8",
+            );
+          }
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+    const outcome = await runSliceNegotiate(ctx);
+    return {
+      outcome,
+      ctx,
+      repo,
+      plannerRounds: () => plannerRounds,
+      evaluatorRounds: () => evaluatorRounds,
+    };
+  }
+
+  const CONTRADICTORY: Array<[string, string, RegExp]> = [
+    [
+      "ACCEPT beside one blocking finding",
+      reviewText({ verdict: "ACCEPT" }),
+      /verdict ACCEPT contradicts 1 BLOCKING finding\(s\): F-01/,
+    ],
+    [
+      "ACCEPT beside several blocking findings",
+      reviewText({
+        verdict: "ACCEPT",
+        findings: [FINDING, { ...FINDING, id: "F-02" }],
+      }),
+      /contradicts 2 BLOCKING finding\(s\): F-01, F-02/,
+    ],
+    [
+      "REVISE with no blocking finding",
+      reviewText({ verdict: "REVISE", findings: [] }),
+      /REVISE requires at least one BLOCKING finding/,
+    ],
+    [
+      "two verdicts",
+      '{"version":1,"verdict":"ACCEPT","verdict":"REVISE","findings":[]}',
+      /declares the key "verdict" more than once/,
+    ],
+    [
+      "a duplicate findings control field",
+      '{"version":1,"verdict":"ACCEPT","findings":[],"findings":[]}',
+      /declares the key "findings" more than once/,
+    ],
+    [
+      "a duplicate version control field",
+      '{"version":1,"version":1,"verdict":"ACCEPT","findings":[]}',
+      /declares the key "version" more than once/,
+    ],
+  ];
+
+  const MALFORMED: Array<[string, string | null, RegExp]> = [
+    ["a missing artifact", null, /contract-review\.json is missing/],
+    ["invalid JSON", "{", /is not valid JSON/],
+    ["a JSON array at the root", "[]", /must contain a JSON object/],
+    [
+      "an unknown version",
+      reviewText({ version: 2 }),
+      /must declare version 1/,
+    ],
+    [
+      "an extra root key",
+      reviewText({ gaps: 0 }),
+      /root object must contain exactly version, verdict, findings/,
+    ],
+    [
+      "an unrecognized verdict",
+      reviewText({ verdict: "ESCALATE" }),
+      /verdict must be ACCEPT or REVISE/,
+    ],
+    [
+      "an unrecognized severity",
+      findingText({ severity: "MINOR" }),
+      /severity must be BLOCKING or ADVISORY/,
+    ],
+    [
+      "an extra finding key",
+      findingText({ note: "extra" }),
+      /finding must contain exactly id, severity, behaviorIds/,
+    ],
+  ];
+
+  // Each type violation the issue names, one fixture per case. The two
+  // behaviorIds counterexamples are separate because `[1]` exercises "the
+  // only element is a number" and `["a", 2]` exercises "a later element
+  // is a number": a check that looks at the first element only would pass
+  // one and fail the other.
+  const TYPE_VIOLATIONS: Array<[string, string, RegExp]> = [
+    [
+      "behaviorIds [1]",
+      findingText({ behaviorIds: [1] }),
+      /behaviorIds must contain only strings/,
+    ],
+    [
+      'behaviorIds ["a", 2]',
+      findingText({ behaviorIds: ["a", 2] }),
+      /behaviorIds must contain only strings/,
+    ],
+    [
+      "behaviorIds given as a string",
+      findingText({ behaviorIds: "B-01" }),
+      /behaviorIds must be an array/,
+    ],
+    [
+      "a non-string id",
+      findingText({ id: 1 }),
+      /finding id must be a non-blank string/,
+    ],
+    [
+      "a non-string evidence",
+      findingText({ evidence: 1 }),
+      /finding evidence must be a non-blank string/,
+    ],
+    [
+      "a non-string expected",
+      findingText({ expected: 1 }),
+      /finding expected must be a non-blank string/,
+    ],
+    [
+      "a non-string observed",
+      findingText({ observed: 1 }),
+      /finding observed must be a non-blank string/,
+    ],
+    [
+      "a non-string clearCondition",
+      findingText({ clearCondition: 1 }),
+      /finding clearCondition must be a non-blank string/,
+    ],
+  ];
+
+  it.each([...CONTRADICTORY, ...MALFORMED, ...TYPE_VIOLATIONS])(
+    "fails the slice closed on %s, naming the artifact",
+    async (name, artifact, expectedDefect) => {
+      const slug = `review-${name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+      const { outcome, ctx, plannerRounds, evaluatorRounds } =
+        await negotiateWithArtifact(slug, "9100", artifact);
+
+      expect(outcome.phase).toBe("ERROR");
+      const cause = outcome.phase === "ERROR" ? outcome.cause : undefined;
+      expect(cause?.kind).toBe("review-artifact");
+      expect(cause?.summary).toContain("contract-review.json");
+      expect(cause?.summary).toMatch(expectedDefect);
+      expect(cause?.summary).toContain("no verdict");
+      // Nothing advances: the contract never locks, and the refusal does
+      // not buy the planner a second round.
+      expect(readContractStatus(join(ctx.absSliceDir, "contract.md"))).toBe(
+        "NEGOTIATING",
+      );
+      expect(plannerRounds()).toBe(1);
+      expect(evaluatorRounds()).toBe(1);
+    },
+    60_000,
+  );
+
+  it("archives every review round without overwriting an earlier one", async () => {
+    const repo = makeRepo();
+    const slug = "review-archive";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9101",
+      title: "Review archive",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          writeFileSync(
+            join(artifactDir, `feedback-r${evaluatorRounds}.md`),
+            `## Evaluator feedback — round ${evaluatorRounds}\n`,
+            "utf-8",
+          );
+          writeContractReview(
+            artifactDir,
+            evaluatorRounds === 1 ? "REVISE" : "ACCEPT",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("LOCKED");
+    const reviews = join(
+      repo,
+      ".afk",
+      "artifacts",
+      `${slug}-stub`,
+      "slice-01",
+      "reviews",
+    );
+    expect(readdirSync(reviews).sort()).toEqual([
+      "contract-review-r1-a1.json",
+      "contract-review-r2-a1.json",
+      "feedback-r1-a1.md",
+      "feedback-r2-a1.md",
+    ]);
+    // The working artifact has one fixed name, so round 2 would have
+    // clobbered round 1's had the archive not been round-stamped.
+    expect(
+      readFileSync(join(reviews, "contract-review-r1-a1.json"), "utf-8"),
+    ).toContain('"verdict": "REVISE"');
+    expect(
+      readFileSync(join(reviews, "contract-review-r2-a1.json"), "utf-8"),
+    ).toContain('"verdict": "ACCEPT"');
+  });
+
+  it("archives a died attempt's artifact alongside the retry's", async () => {
+    const repo = makeRepo();
+    const slug = "review-archive-attempts";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9102",
+      title: "Review attempts",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let evaluatorAttempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorAttempts++;
+          if (evaluatorAttempts === 1) {
+            // A half-written artifact, then death: the attempt an
+            // operator most needs to read is exactly the one that failed.
+            writeFileSync(
+              join(artifactDir, "contract-review.json"),
+              "{",
+              "utf-8",
+            );
+            opts.logStream?.write("stub evaluator output\n");
+            throw new Error("Agent evaluator-contract exited with code 1");
+          }
+          writeContractReview(artifactDir, "ACCEPT");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        infrastructureRetries: 1,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("LOCKED");
+    expect(evaluatorAttempts).toBe(2);
+    const reviews = join(
+      repo,
+      ".afk",
+      "artifacts",
+      `${slug}-stub`,
+      "slice-01",
+      "reviews",
+    );
+    // Neither attempt wrote a markdown companion, so only the JSON
+    // artifacts appear — one per attempt, the dead one included.
+    expect(readdirSync(reviews).sort()).toEqual([
+      "contract-review-r1-a1.json",
+      "contract-review-r1-a2.json",
+    ]);
+    expect(
+      readFileSync(join(reviews, "contract-review-r1-a1.json"), "utf-8"),
+    ).toBe("{");
+    expect(
+      readFileSync(join(reviews, "contract-review-r1-a2.json"), "utf-8"),
+    ).toContain('"verdict": "ACCEPT"');
+  });
+
+  it("does not read a previous round's review when an attempt writes none", async () => {
+    const repo = makeRepo();
+    const slug = "review-freshness";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9103",
+      title: "Review freshness",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          // Round 1 leaves a REVISE behind; round 2 writes nothing at
+          // all. Without the pre-attempt delete, round 2 would read
+          // round 1's REVISE as its own verdict.
+          if (evaluatorRounds === 1) writeContractReview(artifactDir, "REVISE");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 3,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /contract-review\.json is missing/,
+    );
+    expect(evaluatorRounds).toBe(2);
   });
 });
 
@@ -2630,9 +3181,10 @@ describe("orchestrator-owned contract status", () => {
         if (opts.role === "evaluator-contract" && sliceArtifactDir) {
           writeFileSync(
             join(sliceArtifactDir, "feedback-r1.md"),
-            "## Evaluator feedback — round 1\n\nVERDICT: ACCEPT\n",
+            "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
             "utf-8",
           );
+          writeContractReview(sliceArtifactDir, "ACCEPT");
           records.push({
             role: opts.role,
             cwd: opts.cwd,

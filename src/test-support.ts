@@ -1,4 +1,46 @@
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  CONTRACT_REVIEW_FILENAME,
+  type ContractReviewFinding,
+  type ContractReviewVerdict,
+} from "./contract-review.js";
+
+/**
+ * Write a schema-valid contract review artifact into a slice directory —
+ * what a stub `evaluator-contract` produces. Every fixture that drives a
+ * verdict goes through here, so a schema change breaks in one place
+ * rather than in thirty stub providers.
+ *
+ * A bare `REVISE` gets one BLOCKING finding, because a REVISE with no
+ * blocking finding is a contradiction the parser refuses.
+ */
+export function writeContractReview(
+  sliceDir: string,
+  verdict: ContractReviewVerdict,
+  findings?: readonly ContractReviewFinding[],
+): void {
+  const resolved =
+    findings ??
+    (verdict === "REVISE"
+      ? [
+          {
+            id: "F-01",
+            severity: "BLOCKING" as const,
+            behaviorIds: [],
+            evidence: '"the contract as written"',
+            expected: "a falsifiable test plan entry",
+            observed: "no entry that can fail",
+            clearCondition: "the test plan names a command that can fail",
+          },
+        ]
+      : []);
+  writeFileSync(
+    join(sliceDir, CONTRACT_REVIEW_FILENAME),
+    JSON.stringify({ version: 1, verdict, findings: resolved }, null, 2),
+    "utf-8",
+  );
+}
 
 /** Errors Windows raises while another process still holds a handle. */
 const TRANSIENT_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM", "EACCES"]);
