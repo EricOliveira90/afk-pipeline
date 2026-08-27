@@ -185,6 +185,94 @@ describe("temporary repository isolation", () => {
 });
 
 describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
+  it("archives partial evaluator output before retrying a failed invocation", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        attempts++;
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          `# QA Report\n\nAttempt ${attempts}\n`,
+          "utf-8",
+        );
+        if (attempts === 1) {
+          writeFileSync(
+            join(artifactDir, "qa-review.json"),
+            '{"version":1,"verdict":',
+            "utf-8",
+          );
+          throw new Error("provider disconnected");
+        }
+        writeQAReview(artifactDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      { outcome: "PASS" },
+    );
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(readFileSync(join(artifactDir, "qa-report-r1-a1.md"), "utf-8")).toContain(
+      "Attempt 1",
+    );
+    expect(
+      readFileSync(join(reviewDir, "qa-review-r1-a1.json"), "utf-8"),
+    ).toBe('{"version":1,"verdict":');
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toMatch(/valid JSON/);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("archives canonical validation when the Markdown companion is missing", async () => {
+    const repo = makeRepo();
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing/,
+    );
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toMatch(/qa-review\.json is missing/);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
   it("fails closed when Markdown passes without canonical QA JSON", async () => {
     const repo = makeRepo();
     let artifactDir = "";

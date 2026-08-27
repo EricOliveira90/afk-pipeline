@@ -2184,7 +2184,93 @@ export async function runQAStage(
     : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
 
   for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
-    const invokeEvaluator = async () => {
+    const archiveName = stage === "deterministic"
+      ? `qa-report-r${round}-a${attempt}.md`
+      : `uat-report-r${round}-a${attempt}.md`;
+    const archivePath = join(ctx.absSliceDir, archiveName);
+    type AttemptEvidence = {
+      rawArchiveName: string | null;
+      reportArchived: boolean;
+      reviewResult:
+        | {
+            review: QAReview;
+            nextHistory: readonly QAReviewFinding[];
+          }
+        | { error: string };
+    };
+
+    const archiveAttemptEvidence = (): AttemptEvidence => {
+      let rawArchiveName: string | null = null;
+      try {
+        rawArchiveName = artifacts.archiveQAReviewAttempt({
+          sliceDir: ctx.absSliceDir,
+          archiveDir: reviewArchiveDir,
+          stage,
+          round,
+          attempt,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.phase(
+          `${ctx.tag}: Warning: failed to archive ${stage} review round ${round} ` +
+            `attempt ${attempt} to ${reviewArchiveDir}: ${message}`,
+          "error",
+          {
+            type: "warn",
+            reason: "qa-review-archive-failed",
+            ghIssue: slice.ghIssue,
+            message,
+          },
+        );
+      }
+      const reportArchived = artifacts.archiveQAReport(reportPath, archivePath);
+
+      try {
+        const review = loadQAReview(ctx.absSliceDir, stage);
+        return {
+          rawArchiveName,
+          reportArchived,
+          reviewResult: {
+            review,
+            nextHistory: advanceQAReviewHistory(history, review),
+          },
+        };
+      } catch (error) {
+        const evidence = error instanceof Error ? error.message : String(error);
+        try {
+          artifacts.archiveQAReviewValidation({
+            archiveDir: reviewArchiveDir,
+            stage,
+            round,
+            attempt,
+            evidence,
+          });
+        } catch (archiveError) {
+          const message =
+            archiveError instanceof Error
+              ? archiveError.message
+              : String(archiveError);
+          logger.phase(
+            `${ctx.tag}: Warning: failed to archive ${stage} validation evidence ` +
+              `for round ${round} attempt ${attempt}: ${message}`,
+            "error",
+            {
+              type: "warn",
+              reason: "qa-review-archive-failed",
+              ghIssue: slice.ghIssue,
+              message,
+            },
+          );
+        }
+        return {
+          rawArchiveName,
+          reportArchived,
+          reviewResult: { error: evidence },
+        };
+      }
+    };
+
+    const invokeEvaluator = async (): Promise<AttemptEvidence> => {
       rmSync(reportPath, { force: true });
       rmSync(reviewPath, { force: true });
       if (stage === "shared-preview") {
@@ -2202,39 +2288,46 @@ export async function runQAStage(
 
       const logRole = stage === "deterministic" ? "evaluator-qa" : "evaluator-uat";
       const evalLog = logger.agentLog(slice.number, logRole, round * 10 + attempt);
-      await invoke({
-        role: "evaluator-qa",
-        prompt: renderPrompt("evaluator-qa", {
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: ctx.relevantFilesBlock,
-          SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-          // No TEST_COMMAND: QA is told the sanity command set and
-          // nothing else, so a narrowed generator command cannot reach
-          // it (ADR 0038). `renderPrompt` enforces this — the template
-          // rejects an arg it does not reference.
-          SANITY_COMMANDS: ctx.sanityCommandsBlock,
-          QA_SCOPE: scope,
-          REPORT_PATH: reportDisplayPath,
-          UNRESOLVED_FINDINGS:
-            formatUnresolvedQAFindings(previousUnresolved),
-          COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
-          HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
-        }),
-        cwd: ctx.worktreeDir,
-        logStream: evalLog,
-        ...longCommandRoleBounds({
-          idleTimeoutMs: commandTimeoutMs,
-          idleWarningIntervalMs: heartbeatIntervalMs,
-          maxDurationMs: config.maxAgentDurationMs,
-        }),
-      }).finally(() => closeAgentLog(evalLog));
+      try {
+        await invoke({
+          role: "evaluator-qa",
+          prompt: renderPrompt("evaluator-qa", {
+            SLICE_DIR: ctx.relSliceDir,
+            RELEVANT_FILES: ctx.relevantFilesBlock,
+            SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+            // No TEST_COMMAND: QA is told the sanity command set and
+            // nothing else, so a narrowed generator command cannot reach
+            // it (ADR 0038). `renderPrompt` enforces this — the template
+            // rejects an arg it does not reference.
+            SANITY_COMMANDS: ctx.sanityCommandsBlock,
+            QA_SCOPE: scope,
+            REPORT_PATH: reportDisplayPath,
+            UNRESOLVED_FINDINGS:
+              formatUnresolvedQAFindings(previousUnresolved),
+            COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
+            HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
+          }),
+          cwd: ctx.worktreeDir,
+          logStream: evalLog,
+          ...longCommandRoleBounds({
+            idleTimeoutMs: commandTimeoutMs,
+            idleWarningIntervalMs: heartbeatIntervalMs,
+            maxDurationMs: config.maxAgentDurationMs,
+          }),
+        }).finally(() => closeAgentLog(evalLog));
+      } catch (error) {
+        archiveAttemptEvidence();
+        throw error;
+      }
+      return archiveAttemptEvidence();
     };
 
+    let attemptEvidence: AttemptEvidence;
     try {
       if (stage === "shared-preview") {
         const lockPath = config.sharedPreview!.lockPath ??
           join(config.repoRoot, ".afk", "locks", "shared-preview.lock");
-        await withCrossProcessLock(
+        attemptEvidence = await withCrossProcessLock(
           lockPath,
           {
             acquireTimeoutMs: commandTimeoutMs,
@@ -2245,7 +2338,7 @@ export async function runQAStage(
           invokeEvaluator,
         );
       } else {
-        await invokeEvaluator();
+        attemptEvidence = await invokeEvaluator();
       }
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
@@ -2267,73 +2360,17 @@ export async function runQAStage(
       );
     }
 
-    const archiveName = stage === "deterministic"
-      ? `qa-report-r${round}-a${attempt}.md`
-      : `uat-report-r${round}-a${attempt}.md`;
-    const archivePath = join(ctx.absSliceDir, archiveName);
-    let rawArchiveName: string | null = null;
-    try {
-      rawArchiveName = artifacts.archiveQAReviewAttempt({
-        sliceDir: ctx.absSliceDir,
-        archiveDir: reviewArchiveDir,
-        stage,
-        round,
-        attempt,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.phase(
-        `${ctx.tag}: Warning: failed to archive ${stage} review round ${round} ` +
-          `attempt ${attempt} to ${reviewArchiveDir}: ${message}`,
-        "error",
-        {
-          type: "warn",
-          reason: "qa-review-archive-failed",
-          ghIssue: slice.ghIssue,
-          message,
-        },
-      );
+    const { rawArchiveName, reportArchived, reviewResult } = attemptEvidence;
+    if ("error" in reviewResult) {
+      throw new Error(`${stage} review artifact ERROR: ${reviewResult.error}`);
     }
-    if (!artifacts.archiveQAReport(reportPath, archivePath)) {
+    if (!reportArchived) {
       if (attempt <= infrastructureRetries) continue;
       throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
     }
-    const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
-    let review: QAReview;
-    let nextHistory: readonly QAReviewFinding[];
-    try {
-      review = loadQAReview(ctx.absSliceDir, stage);
-      nextHistory = advanceQAReviewHistory(history, review);
-    } catch (error) {
-      const evidence = error instanceof Error ? error.message : String(error);
-      try {
-        artifacts.archiveQAReviewValidation({
-          archiveDir: reviewArchiveDir,
-          stage,
-          round,
-          attempt,
-          evidence,
-        });
-      } catch (archiveError) {
-        const message =
-          archiveError instanceof Error
-            ? archiveError.message
-            : String(archiveError);
-        logger.phase(
-          `${ctx.tag}: Warning: failed to archive ${stage} validation evidence ` +
-            `for round ${round} attempt ${attempt}: ${message}`,
-          "error",
-          {
-            type: "warn",
-            reason: "qa-review-archive-failed",
-            ghIssue: slice.ghIssue,
-            message,
-          },
-        );
-      }
-      throw new Error(`${stage} review artifact ERROR: ${evidence}`);
-    }
 
+    const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
+    const { review, nextHistory } = reviewResult;
     const expectedRawArchiveName =
       `${stage === "deterministic" ? "qa" : "uat"}-review-r${round}-a${attempt}.json`;
     const canonicalArchivePath = relative(
