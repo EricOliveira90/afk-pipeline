@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import * as artifacts from "./artifacts.js";
 import {
+  buildContractNegotiationOutcome,
   buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
   formatContractReviewFindings,
@@ -952,6 +953,55 @@ describe("buildContractReviewAttemptRecord", () => {
           plannerEvidence: "planner points to the new failing command",
           evaluatorEvidence:
             "evaluator observes the command fail as required",
+        },
+      ],
+    });
+  });
+});
+
+describe("buildContractNegotiationOutcome", () => {
+  it("classifies a held BLOCKING contest as IMPASSE with both positions", () => {
+    expect(
+      buildContractNegotiationOutcome({
+        version: 1,
+        round: 2,
+        attempt: 1,
+        verdict: "REVISE",
+        findings: [
+          {
+            id: "F-CONTEST",
+            severity: "BLOCKING",
+            state: "CONTESTED",
+            unresolved: true,
+            plannerPosition: "CONTESTED",
+            plannerEvidence: "the gate already covers this path",
+            evaluatorEvidence: "the gate omits the negative case",
+          },
+          {
+            id: "F-ADVICE",
+            severity: "ADVISORY",
+            state: "OPEN",
+            unresolved: true,
+            plannerPosition: null,
+            plannerEvidence: null,
+            evaluatorEvidence: "rename the section",
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 1,
+      classification: "IMPASSE",
+      round: 2,
+      attempt: 1,
+      findings: [
+        {
+          id: "F-CONTEST",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the gate already covers this path",
+          evaluatorEvidence: "the gate omits the negative case",
         },
       ],
     });

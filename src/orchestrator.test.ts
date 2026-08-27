@@ -2325,6 +2325,7 @@ describe("round-scoped contract feedback", () => {
       blockedBy: [],
       userStories: "",
     };
+    let plannerRounds = 0;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -2333,12 +2334,16 @@ describe("round-scoped contract feedback", () => {
         if (opts.role === "explorer") {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
+          plannerRounds++;
           writeFileSync(
             join(artifactDir, "contract.md"),
             "# Contract\n\n**Status:** NEGOTIATING\n",
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 2) {
+            writeContractResponse(artifactDir, ["F-01"]);
+          }
         } else if (opts.role === "evaluator-contract") {
           writeContractReview(artifactDir, "REVISE", [
             {
@@ -2370,9 +2375,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        // One round, so the REVISE hits the cap with no previous round
-        // to measure progress against and escalates immediately.
-        maxContractRounds: 1,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -2392,7 +2395,30 @@ describe("round-scoped contract feedback", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       const stuckPath = join(ctx.absSliceDir, "stuck.md");
       expect(existsSync(stuckPath)).toBe(true);
-      expect(readFileSync(stuckPath, "utf-8")).toContain("Clarify the issue body.");
+      const stuck = readFileSync(stuckPath, "utf-8");
+      expect(stuck).toContain("Clarify the issue body.");
+      expect(stuck).toContain("Exhaustion classification: NON_CONVERGENCE");
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
+            "utf-8",
+          ),
+        ),
+      ).toMatchObject({
+        version: 1,
+        classification: "NON_CONVERGENCE",
+        round: 2,
+        findings: [
+          {
+            id: "F-01",
+            severity: "BLOCKING",
+            state: "OPEN",
+            unresolved: true,
+            plannerPosition: "UNRESOLVED",
+          },
+        ],
+      });
       expect(errorSpy.mock.calls.flat().join(" ")).toContain(
         "failed to archive negotiation artifacts",
       );

@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 export const CONTRACT_REVIEW_FILENAME = "contract-review.json";
 export const CONTRACT_RESPONSE_FILENAME = "contract-response.json";
+export const CONTRACT_NEGOTIATION_OUTCOME_FILENAME =
+  "contract-negotiation-outcome.json";
 
 /**
  * The only verdicts the contract review can carry. `ESCALATE` is gone:
@@ -113,6 +115,14 @@ export interface ContractReviewAttemptRecord {
   round: number;
   attempt: number;
   verdict: ContractReviewVerdict;
+  findings: ContractReviewAttemptFinding[];
+}
+
+export interface ContractNegotiationOutcome {
+  version: 1;
+  classification: "IMPASSE" | "NON_CONVERGENCE";
+  round: number;
+  attempt: number;
   findings: ContractReviewAttemptFinding[];
 }
 
@@ -702,6 +712,24 @@ export function buildContractReviewAttemptRecord(
         evaluatorEvidence: finding.evidence,
       };
     }),
+  };
+}
+
+/** Classify final unresolved BLOCKING records at negotiation exhaustion. */
+export function buildContractNegotiationOutcome(
+  record: ContractReviewAttemptRecord,
+): ContractNegotiationOutcome {
+  const findings = record.findings.filter(
+    (finding) => finding.severity === "BLOCKING" && finding.unresolved,
+  );
+  return {
+    version: 1,
+    classification: findings.some((finding) => finding.state === "CONTESTED")
+      ? "IMPASSE"
+      : "NON_CONVERGENCE",
+    round: record.round,
+    attempt: record.attempt,
+    findings,
   };
 }
 

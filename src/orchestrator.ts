@@ -103,6 +103,7 @@ import {
 import {
   CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
+  buildContractNegotiationOutcome,
   buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
   formatContractReviewFindings,
@@ -110,8 +111,10 @@ import {
   loadContractReview,
   openContractReviewFindings,
   type ContractResponse,
+  type ContractNegotiationOutcome,
   type ContractRevisionArtifacts,
   type ContractReview,
+  type ContractReviewAttemptRecord,
   type ContractReviewFinding,
   type RecordedContractVerdict,
   validateRound1ContractReview,
@@ -779,6 +782,7 @@ function preserveContractNegotiationFailure(
   feedbackPath: string,
   capDecision: string,
   findings?: readonly ContractReviewFinding[],
+  negotiationOutcome?: ContractNegotiationOutcome,
 ): void {
   const provider = ctx.config.provider ?? kiroProvider;
   const result = artifacts.preserveNegotiationFailure({
@@ -796,6 +800,7 @@ function preserveContractNegotiationFailure(
     contextPath: join(ctx.absSliceDir, "context.md"),
     capDecision,
     findings,
+    negotiationOutcome,
   });
   if (result.archived) {
     ctx.logger.phase(
@@ -818,7 +823,7 @@ function archiveContractReviewAttempt(
   previousReview: ContractReview | null,
   plannerResponse: ContractResponse | null,
   revisions: ContractRevisionArtifacts | null,
-): void {
+): ContractReviewAttemptRecord | null {
   try {
     const archived = artifacts.archiveContractReviewAttempt({
       sliceDir: ctx.absSliceDir,
@@ -861,18 +866,19 @@ function archiveContractReviewAttempt(
       );
     }
   } catch {
-    return;
+    return null;
   }
 
+  const record = buildContractReviewAttemptRecord(
+    round,
+    attempt,
+    review,
+    plannerResponse,
+  );
   try {
     const archived = artifacts.archiveContractReviewRecord({
       archiveDir,
-      record: buildContractReviewAttemptRecord(
-        round,
-        attempt,
-        review,
-        plannerResponse,
-      ),
+      record,
     });
     ctx.logger.phase(
       `${ctx.tag}: archived contract review lifecycle record ${archived} to ${archiveDir}`,
@@ -891,6 +897,7 @@ function archiveContractReviewAttempt(
       },
     );
   }
+  return record;
 }
 
 /**
@@ -1620,6 +1627,7 @@ async function negotiateAttempt(
      */
     let previousReview: ContractReview | null = null;
     let lastFindings: readonly ContractReviewFinding[] = [];
+    let lastReviewAttemptRecord: ContractReviewAttemptRecord | null = null;
     let plannerResponse: ContractResponse | null = null;
     let revisionArtifacts: ContractRevisionArtifacts | null = null;
     const reviewArchiveDir = artifacts.contractReviewArchiveDir(
@@ -1994,8 +2002,8 @@ async function negotiateAttempt(
             rmSync(feedbackPath, { force: true });
             rmSync(reviewPath, { force: true });
           },
-          (attempt) =>
-            archiveContractReviewAttempt(
+          (attempt) => {
+            const record = archiveContractReviewAttempt(
               ctx,
               reviewArchiveDir,
               evaluatorRound,
@@ -2003,7 +2011,9 @@ async function negotiateAttempt(
               previousReview,
               plannerResponse,
               revisionArtifacts,
-            ),
+            );
+            if (record) lastReviewAttemptRecord = record;
+          },
         );
 
         lastRound = round;
@@ -2116,6 +2126,10 @@ async function negotiateAttempt(
         }
 
         logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+        const negotiationOutcome =
+          evaluatorRound === 2 && lastReviewAttemptRecord
+            ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
+            : undefined;
         preserveContractNegotiationFailure(
           ctx,
           "ESCALATE",
@@ -2124,6 +2138,7 @@ async function negotiateAttempt(
           feedbackPath,
           capDecisions.join(" "),
           review.findings,
+          negotiationOutcome,
         );
         logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
         const cause = negotiateVerdictCause({

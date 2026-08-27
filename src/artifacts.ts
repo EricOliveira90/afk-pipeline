@@ -8,8 +8,10 @@ import {
 } from "node:fs";
 import { join, relative } from "node:path";
 import {
+  CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
   CONTRACT_REVIEW_FILENAME,
   formatContractReviewFindings,
+  type ContractNegotiationOutcome,
   type ContractReviewAttemptRecord,
   type ContractReviewFinding,
   type RecordedContractVerdict,
@@ -266,6 +268,7 @@ export interface NegotiationFailureDetails {
    * companion.
    */
   findings?: readonly ContractReviewFinding[];
+  negotiationOutcome?: ContractNegotiationOutcome;
 }
 
 export interface NegotiationArchiveResult {
@@ -372,7 +375,14 @@ export function sliceArtifactNames(sliceDir: string): string[] {
         )
         .sort()
     : [];
-  return ["contract.md", "context.md", ...rounds, "handoff.md", "stuck.md"];
+  return [
+    "contract.md",
+    "context.md",
+    ...rounds,
+    "handoff.md",
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+    "stuck.md",
+  ];
 }
 
 export function archiveNegotiationArtifacts(
@@ -443,6 +453,21 @@ function unresolvedGaps(
   return feedback.trim();
 }
 
+function formatNegotiationOutcome(
+  outcome: ContractNegotiationOutcome,
+): string {
+  return outcome.findings
+    .map((finding) =>
+      [
+        `- [${finding.id}] ${finding.severity} ${finding.state}`,
+        `  - Planner position: ${finding.plannerPosition ?? "(none)"}`,
+        `  - Planner evidence: ${finding.plannerEvidence ?? "(none)"}`,
+        `  - Evaluator evidence: ${finding.evaluatorEvidence}`,
+      ].join("\n"),
+    )
+    .join("\n");
+}
+
 export function preserveNegotiationFailure(
   details: NegotiationFailureDetails,
   warn: (message: string) => void = (message) => console.error(message),
@@ -462,6 +487,7 @@ export function preserveNegotiationFailure(
     contextPath,
     capDecision,
     findings,
+    negotiationOutcome,
   } = details;
   const archiveDir = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
   const feedback = readIfExists(feedbackPath);
@@ -469,15 +495,40 @@ export function preserveNegotiationFailure(
   const archiveContract = join(archiveDir, "contract.md");
   const archiveContext = join(archiveDir, "context.md");
   const archiveFeedback = join(archiveDir, `feedback-r${round}.md`);
+  const outcomePath = join(sliceDir, CONTRACT_NEGOTIATION_OUTCOME_FILENAME);
+  const archiveOutcome = join(
+    archiveDir,
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  );
+  if (negotiationOutcome) {
+    writeFileSync(
+      outcomePath,
+      `${JSON.stringify(negotiationOutcome, null, 2)}\n`,
+      "utf-8",
+    );
+  }
   const stuck = [
     "# Contract negotiation stuck",
     "",
     `- Slice: #${ghIssue} ${title}`,
     `- Outcome: ${outcome}`,
+    ...(negotiationOutcome
+      ? [
+          `- Exhaustion classification: ${negotiationOutcome.classification}`,
+        ]
+      : []),
     `- Round: ${round}`,
     `- Final verdict: VERDICT: ${verdict}`,
     `- Round-cap decision: ${capDecision ?? "No extension decision was recorded."}`,
     "",
+    ...(negotiationOutcome
+      ? [
+          "## Exhaustion record",
+          "",
+          formatNegotiationOutcome(negotiationOutcome),
+          "",
+        ]
+      : []),
     "## Unresolved gaps",
     "",
     unresolvedGaps(findings, feedback),
@@ -495,6 +546,12 @@ export function preserveNegotiationFailure(
     `- Archived contract: ${displayPath(repoRoot, archiveContract)}`,
     `- Archived context: ${displayPath(repoRoot, archiveContext)}`,
     `- Archived feedback: ${displayPath(repoRoot, archiveFeedback)}`,
+    ...(negotiationOutcome
+      ? [
+          `- Working exhaustion outcome: ${displayPath(repoRoot, outcomePath)}`,
+          `- Archived exhaustion outcome: ${displayPath(repoRoot, archiveOutcome)}`,
+        ]
+      : []),
     "",
   ].join("\n");
   writeFileSync(stuckPath, stuck, "utf-8");

@@ -23,7 +23,10 @@ import {
   preserveNegotiationFailure,
   readReviewVerdict,
 } from "./artifacts.js";
-import type { ContractReviewAttemptRecord } from "./contract-review.js";
+import type {
+  ContractNegotiationOutcome,
+  ContractReviewAttemptRecord,
+} from "./contract-review.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -190,6 +193,64 @@ describe("preserveNegotiationFailure", () => {
     );
     return { repoRoot, sliceDir };
   }
+
+  it("writes and renders the versioned exhaustion outcome", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    const negotiationOutcome: ContractNegotiationOutcome = {
+      version: 1,
+      classification: "IMPASSE",
+      round: 2,
+      attempt: 1,
+      findings: [
+        {
+          id: "F-CONTEST",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the existing gate is sufficient",
+          evaluatorEvidence: "the gate misses the negative path",
+        },
+      ],
+    };
+    try {
+      preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "impasse-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 2,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        negotiationOutcome,
+      });
+
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(sliceDir, "contract-negotiation-outcome.json"),
+            "utf-8",
+          ),
+        ),
+      ).toEqual(negotiationOutcome);
+      const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
+      expect(stuck).toContain("Exhaustion classification: IMPASSE");
+      expect(stuck).toContain("Planner position: CONTESTED");
+      expect(stuck).toContain(
+        "Planner evidence: the existing gate is sufficient",
+      );
+      expect(stuck).toContain(
+        "Evaluator evidence: the gate misses the negative path",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
 
   it("writes actionable ESCALATE details and archives every negotiation artifact", () => {
     const { repoRoot, sliceDir } = makeFailureFixture();
