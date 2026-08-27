@@ -50,7 +50,15 @@ npx afk-codex --prd-dir .kiro/specs/contacts-crud --slices 01,02,03,04
 npx afk-codex --prd-dir .kiro/specs/contacts-crud --only-failed
 ```
 
-Ctrl-C cancels cleanly: in-flight agents are killed, remaining slices are marked CANCELLED, worktrees are preserved. A second Ctrl-C hard-exits.
+Ctrl-C cancels cleanly: in-flight agents are killed, unfinished slices are
+marked CANCELLED in run state before the wind-down starts, and worktrees are
+preserved. A second stop signal hard-exits.
+
+**Stopping a run on Windows:** use **Ctrl-Break** (or `CTRL_BREAK_EVENT` to
+the run's console group). Windows disables Ctrl-C for a process group created
+with `CREATE_NEW_PROCESS_GROUP`, which is what a detached launch gets, and
+`GenerateConsoleCtrlEvent(CTRL_C_EVENT, ...)` reports success while delivering
+nothing. Ctrl-C still works for a plain foreground launch. See ADR 0039.
 
 ## Input Format
 
@@ -291,7 +299,7 @@ recorded in the PR body and `run-summary.md` (ADR 0015).
 The gate is the decision to open the draft PR, not the `git push` /
 `gh pr create` calls that follow it — those stay best-effort, so a run
 with no `origin` or no `gh` auth still exits 0. There is no
-per-failure-class exit code; a second Ctrl-C still exits 130.
+per-failure-class exit code; a second stop signal still exits 130.
 
 ## Error Handling
 
@@ -308,7 +316,7 @@ per-failure-class exit code; a second Ctrl-C still exits 130.
 | Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
 | Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
 | HITL slice | Skipped entirely |
-| Ctrl-C | In-flight agents killed, remaining → CANCELLED |
+| Ctrl-C (Ctrl-Break on Windows) | Unfinished slices → CANCELLED in run state when the signal fires, in-flight agents killed (ADR 0039) |
 | Pipeline crash | Re-run to resume |
 
 A failed dependency holds its dependents — fix the broken slice and re-run.

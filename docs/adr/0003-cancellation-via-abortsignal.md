@@ -1,9 +1,13 @@
 # Cancellation via AbortSignal, hard-stop semantics
 
+> Amended by ADR 0039: which signals reach this path (Windows needs
+> `SIGBREAK`, and cannot receive `CTRL_C_EVENT` in a detached process
+> group), and when the cancellation record is written.
+
 `runPipeline` accepts an optional `signal: AbortSignal` in
-`PipelineConfig`. The CLI (`afk.ts`, `afk-claude.ts`) wires
-`process.on("SIGINT", () => controller.abort())` so Ctrl-C cancels the
-run cleanly. The signal is threaded through to each `AgentProvider.invoke()`
+`PipelineConfig`. The CLI (`afk.ts`, `afk-claude.ts`, `afk-codex.ts`)
+installs the stop signals via `src/cancellation.ts` so Ctrl-C — or
+Ctrl-Break on Windows — cancels the run cleanly. The signal is threaded through to each `AgentProvider.invoke()`
 call; providers attach a listener that calls `proc.kill("SIGTERM")` when
 the signal fires (mirrors the existing idle-timeout kill path).
 
