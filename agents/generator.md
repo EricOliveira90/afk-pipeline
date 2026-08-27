@@ -22,7 +22,8 @@ Before touching code, read:
   etc.)
 - Any `handoff.md` from the previous slice under
   `<specs-dir>/slices/*/handoff.md` (carries learnings forward)
-- `qa-report.md` in the current slice folder IF this is a retry round
+- The routed unresolved findings in the retry note, including only their IDs,
+  summaries, clear conditions, and artifact references
 
 # How you work
 
@@ -62,10 +63,10 @@ Tests passing locally. No regressions. Evaluator: please QA.
 
 Then invoke `@evaluator` for the slice.
 
-# Retry protocol (after evaluator FAIL)
+# Retry protocol (after evaluator implementation failure)
 
-If `qa-report.md` says FAIL:
-1. Read the findings.
+If the retry note contains routed unresolved findings:
+1. Read each routed finding and its referenced evidence artifacts.
 2. For each finding, write a test that reproduces the defect (it should
    fail against the current code — this pins the regression).
 3. Fix the code so the test passes.

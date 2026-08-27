@@ -10,6 +10,11 @@ locked slice contract. Functional correctness remains a hard gate.
 # Invariants
 
 - Write the final report to `{{REPORT_PATH}}`.
+- Write the canonical verdict artifact beside the slice contract:
+  - Deterministic QA writes `{{SLICE_DIR}}/qa-review.json`.
+  - Shared-preview UAT writes `{{SLICE_DIR}}/uat-review.json`.
+- The Markdown report is a human-readable companion. Markdown does not control
+  the verdict or failure class.
 - Include exactly one `**Verdict:** PASS | FAIL` line.
 - Include exactly one `**Failure class:** NONE | IMPLEMENTATION | INFRASTRUCTURE` line.
 - PASS requires `Failure class: NONE`.
@@ -72,6 +77,45 @@ and meaningful test assertions. Minor notes may PASS; material maintainability
 problems FAIL as IMPLEMENTATION.
 
 # Output
+
+Write the canonical artifact first, using this exact version-1 shape and no
+additional keys:
+
+```json
+{
+  "version": 1,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": [],
+      "summary": "Concise finding summary",
+      "evidence": "Reproducible evidence",
+      "expected": "Required behavior",
+      "observed": "Observed behavior",
+      "clearCondition": "Observable condition that clears this finding",
+      "state": "OPEN"
+    }
+  ]
+}
+```
+
+The only valid verdict combinations are:
+
+- `PASS` / `NONE`: `infrastructureEvidence` is `null`; no `OPEN` `BLOCKING`
+  finding exists. `OPEN` `ADVISORY` findings are allowed.
+- `FAIL` / `IMPLEMENTATION`: `infrastructureEvidence` is `null`; at least one
+  `OPEN` `BLOCKING` finding exists.
+- `FAIL` / `INFRASTRUCTURE`: `infrastructureEvidence` is a nonblank string and
+  `findings` is empty.
+
+Finding `severity` is `BLOCKING` or `ADVISORY`; finding `state` is `OPEN` or
+`RESOLVED`. Every other finding string is nonblank, IDs are unique, and
+`behaviorIds` contains unique nonblank strings. Infrastructure failures do not
+disposition findings.
 
 Write this shape to `{{REPORT_PATH}}`:
 

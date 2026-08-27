@@ -68,6 +68,25 @@ verdict marker and no counts; nothing parses it. The orchestrator flips
 
 **Triggered when:** generator has written `handoff.md`.
 
+Write two output artifacts in the slice directory:
+- `qa-review.json` for deterministic QA, or `uat-review.json` for
+  shared-preview UAT. This is the canonical verdict.
+- `qa-report.md` or `uat-report.md` as the human-readable companion. Markdown
+  does not control the verdict.
+
+The canonical artifact uses exact root keys `"version"`, `"verdict"`,
+`"failureClass"`, `"infrastructureEvidence"`, and `"findings"`, with
+`"version": 1`. Each finding uses exact keys `"id"`, `"severity"`,
+`"behaviorIds"`, `"summary"`, `"evidence"`, `"expected"`, `"observed"`,
+`"clearCondition"`, and `"state"`. Re-check each routed unresolved finding
+and repeat its ID exactly once as `OPEN` or `RESOLVED`; fresh IDs start
+`OPEN`.
+
+Valid combinations are `PASS/NONE` with null infrastructure evidence and no
+open blocker, `FAIL/IMPLEMENTATION` with null infrastructure evidence and at
+least one open blocker, or `FAIL/INFRASTRUCTURE` with nonblank infrastructure
+evidence and no findings.
+
 Two-pass evaluation:
 
 ### Pass 1: Functional Correctness (hard gate)
@@ -93,12 +112,13 @@ guard clauses, test quality.
 
 When in doubt, PASS with notes.
 
-### qa-report.md template
+### Markdown companion template
 
 ```
 # QA Report
 
 **Verdict:** PASS | FAIL
+**Failure class:** NONE | IMPLEMENTATION | INFRASTRUCTURE
 
 ## Pass 1: Functional Correctness
 - Test suite: PASS | FAIL (N passed / M failed)

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
+import { readFileSync } from "node:fs";
 
 describe("renderPrompt", () => {
   it("substitutes placeholders for the explorer template", () => {
@@ -82,6 +83,45 @@ describe("renderPrompt", () => {
         TEST_COMMAND: "pnpm test:fast",
       }),
     ).toThrow(/TEST_COMMAND/);
+  });
+
+  it("requires canonical QA artifacts and structured retry inputs", () => {
+    const evaluatorPrompt = renderPrompt("evaluator-qa", {
+      SLICE_DIR: "x",
+      RELEVANT_FILES: "",
+      SANITY_COMMANDS: "",
+      SIBLING_HANDOFFS: "(none)",
+      QA_SCOPE: "deterministic",
+      REPORT_PATH: "x/qa-report.md",
+      UNRESOLVED_FINDINGS: "(none)",
+      COMMAND_TIMEOUT_SECONDS: 600,
+      HEARTBEAT_SECONDS: 30,
+    });
+    expect(evaluatorPrompt).toContain("qa-review.json");
+    expect(evaluatorPrompt).toContain("uat-review.json");
+    expect(evaluatorPrompt).toContain('"version": 1');
+    expect(evaluatorPrompt).toContain('"failureClass"');
+    expect(evaluatorPrompt).toContain('"infrastructureEvidence"');
+    expect(evaluatorPrompt).toContain('"clearCondition"');
+    expect(evaluatorPrompt).toContain('"state"');
+    expect(evaluatorPrompt).toMatch(/Markdown.+does not control/s);
+
+    const evaluatorPersona = readFileSync(
+      new URL("../agents/evaluator.md", import.meta.url),
+      "utf-8",
+    );
+    expect(evaluatorPersona).toContain("qa-review.json");
+    expect(evaluatorPersona).toContain("uat-review.json");
+    expect(evaluatorPersona).toContain('"failureClass"');
+
+    const generatorPersona = readFileSync(
+      new URL("../agents/generator.md", import.meta.url),
+      "utf-8",
+    );
+    expect(generatorPersona).toContain("routed unresolved findings");
+    expect(generatorPersona).not.toContain(
+      "`qa-report.md` in the current slice folder IF this is a retry round",
+    );
   });
 
   it("loads all eight pipeline templates", () => {
