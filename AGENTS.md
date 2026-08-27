@@ -12,9 +12,16 @@ Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD sli
 
 ## Test loop discipline (read this)
 
-The full suite (`pnpm test`) takes 20+ minutes on Windows — the pipeline
-integration suites (`orchestrator`, `wave`, `resume-integration`,
-`qa-orchestration`, `clean-failed`) spawn hundreds of real git processes.
+The full suite (`pnpm test`) takes about 7 minutes on Windows (416s
+measured 2026-08-26 after the two-file suite splits; paired alone-runs
+that day put the three split suites ~2.5 minutes faster combined than
+their single-file forms) — the pipeline integration suites
+(`orchestrator`, `wave`, `resume-integration`, `qa-orchestration`,
+`clean-failed`) spawn hundreds of real git processes. The three biggest
+suites are each split across two test files balanced by measured
+`describe`-block time (e.g. `wave.test.ts` + `wave-migrations.test.ts`),
+so a single `test:heavy:<name>` run schedules them across both vitest
+workers — see the file headers before adding or moving a block.
 
 - **While iterating:** run the specific test file you are working on
   (`pnpm vitest run src/<file>.test.ts`), or `pnpm test:fast` (unit +
@@ -24,9 +31,9 @@ integration suites (`orchestrator`, `wave`, `resume-integration`,
   of done requires the full suite, not `test:fast`.
 - **Before handoff — running as an AFK pipeline slice agent:** run
   `pnpm test:fast` plus the heavy suites your change touches (e.g.
-  `pnpm vitest run src/wave.test.ts`). Do **not** run the full suite.
+  `pnpm run test:heavy:wave`). Do **not** run the full suite.
   The evaluator-qa runs it on your slice and the pre-ship gate runs it on
-  the merged feature branch. A third run costs 20 minutes and proves
+  the merged feature branch. A third run costs about 7 minutes and proves
   nothing the other two do not.
 - Never loop on the full suite to debug a single failure.
 
@@ -48,3 +55,45 @@ on three full-suite runs inside a single writing round. This is safe
 because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
+
+## Where a new assertion goes (read this before adding a test)
+
+A test that spawns a pipeline or a wave costs seconds of wall clock on
+every run from now on. The suite reached twenty minutes one
+reasonable-looking test at a time, so the default is no longer a new
+spawned scenario. In order:
+
+1. **A unit test.** If the claim is about a pure function — a parser, a
+   verdict rule, a plan builder — assert it there. No git, no agents.
+2. **An existing spawned scenario.** Find the `describe` whose fixture
+   already reaches the state you want to assert and add an `it` that
+   inspects its result. These blocks spawn once in `beforeAll` and split
+   the assertions across cases for exactly this reason.
+3. **A slice added to an existing wave.** A new outcome usually only
+   needs another slice in a fixture that already runs a wave, not another
+   wave.
+4. **A new spawned scenario** — only when the fixture state genuinely
+   differs and no existing one can reach it. Say so in a comment, so the
+   next reader knows the cost was deliberate.
+
+`pnpm test` ends with `pnpm test:budgets`, a per-suite wall-clock budget
+(`suite-budgets.json`). If it goes red, the fix is normally to move the
+assertion up this list — not to raise the number. Raising one is fine
+when the cost is genuinely necessary, but record the measurement in the
+commit message.
+
+Merging scenarios pays off when it removes whole *pipeline* runs — the
+fixed cost of a run is feature-branch setup, the review phase and the
+sanity gate. Packing more slices into one *wave* was measured on
+2026-08-26 and did not help: that cost is per-slice git work, and running
+the lanes concurrently does not recover it on Windows. (That measurement
+predates the hermetic-git fix below; ~35% of wave cost then was hook
+execution. The direction still holds: packing removes pipeline fixed
+cost, not per-slice cost.)
+
+The suite runs git hermetically: `vitest.config.ts` sets
+`GIT_CONFIG_NOSYSTEM=1` and an unreadable `GIT_CONFIG_GLOBAL`, so no
+host-installed gitconfig or hook (e.g. git-defender's `core.hooksPath`)
+reaches fixture repos. Do not remove this — it is correctness first
+(host-independent results) and it is worth ~45% of the suite's former
+runtime (see `docs/slow-test-consolidation-round2-2026-08-26.md`).

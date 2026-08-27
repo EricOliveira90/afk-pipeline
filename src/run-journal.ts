@@ -115,6 +115,53 @@ export class RunJournal {
   }
 
   /**
+   * Persist a provisional `CANCELLED` record for every slice that has no
+   * decided outcome yet, and return the ids written.
+   *
+   * This exists for the moment cancellation is *requested* (issue #114).
+   * The pipeline's own cancellation sweep runs after the wave returns,
+   * which is too late if the process dies during the wind-down: the
+   * in-flight slice then has no run-state entry at all, and the next
+   * `--only-failed` cannot tell "cancelled mid-generator, work preserved
+   * on its branch" from "never ran" (#113).
+   *
+   * Provisional means exactly two things:
+   *
+   * - it does not close the slice in the journal, so a real outcome that
+   *   still lands during the wind-down (a merge already underway)
+   *   overwrites this record rather than being suppressed by it, and
+   * - it is skipped for any slice whose outcome is already decided.
+   *
+   * Failures to write are swallowed per slice: a stop must record what it
+   * can, not abandon the remaining slices on the first bad write.
+   */
+  markCancelledInFlight(slices: SliceIdentity[], error: string): string[] {
+    const written: string[] = [];
+    for (const sliceId of slices) {
+      if (this.terminalSlices.has(sliceId.ghIssue)) continue;
+      const current = this.slices.get(sliceId.ghIssue);
+      if (
+        current &&
+        current.phase !== "PENDING" &&
+        current.phase !== "RUNNING"
+      ) {
+        continue;
+      }
+      try {
+        saveSliceState(this.repoRoot, this.prdSlug, sliceId.ghIssue, {
+          phase: "CANCELLED",
+          ...(sliceId.branch ? { branch: sliceId.branch } : {}),
+          error,
+        });
+        written.push(sliceId.ghIssue);
+      } catch {
+        // Best effort — keep going for the other slices.
+      }
+    }
+    return written;
+  }
+
+  /**
    * Persist one terminal outcome. State lands first (ADR 0018), then the
    * in-memory lifecycle, run.log line, and unchanged slice-outcome event.
    * A completed call is idempotent for the rest of this run.

@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  afterEach,
+} from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
@@ -55,19 +63,28 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
 }
 
+/**
+ * One repo for the whole block. Building a one-commit repo costs two git
+ * processes and around half a second here, so a fixture per `it` is the
+ * dominant cost of a suite like this one — see the note above
+ * `git.hasCommitsAhead` for the rule these shared blocks follow.
+ *
+ * Safe to share because every test here is additive: the branches they
+ * create have distinct names and nobody reads a branch another test
+ * makes. A test that needs to move `main`, or to observe the *absence*
+ * of a branch a sibling creates, needs its own repo.
+ */
 describe("git.branchExists", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     // Init a throwaway repo with a single commit so we can create branches.
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -117,8 +134,6 @@ describe("git.getDefaultBranch", () => {
     const seedDir = mkdtempSync(join(tmpdir(), "afk-default-seed-"));
     try {
       git(seedDir, ["clone", originDir, "."]);
-      git(seedDir, ["config", "user.email", "test@example.com"]);
-      git(seedDir, ["config", "user.name", "Test"]);
       git(seedDir, ["checkout", "-b", branch]);
       git(seedDir, ["commit", "--allow-empty", "-m", "root"]);
       git(seedDir, ["push", "-u", "origin", branch]);
@@ -143,16 +158,12 @@ describe("git.getDefaultBranch", () => {
 
   it("falls back to local master when origin/HEAD is unset", () => {
     git(repoDir, ["init", "--initial-branch=master"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     expect(getDefaultBranch(repoDir)).toBe("master");
   });
 
   it("prefers local main over master when both exist and no origin", () => {
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     git(repoDir, ["branch", "master"]);
     expect(getDefaultBranch(repoDir)).toBe("main");
@@ -160,8 +171,6 @@ describe("git.getDefaultBranch", () => {
 
   it("throws when no canonical default branch can be found", () => {
     git(repoDir, ["init", "--initial-branch=develop"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     expect(() => getDefaultBranch(repoDir)).toThrow(
       /Could not determine default branch/,
@@ -169,18 +178,18 @@ describe("git.getDefaultBranch", () => {
   });
 });
 
+// Shared repo: additive, distinctly-named branches only (see
+// `git.branchExists`).
 describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-wt-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -214,18 +223,18 @@ describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
   });
 });
 
+// Shared repo: each test adds and removes its own uniquely-named branch
+// and worktree (see `git.branchExists`).
 describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-rm-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -305,8 +314,6 @@ describe.runIf(process.platform === "win32")(
       resetWorktreeProcessRegistry();
       repoDir = mkdtempSync(join(tmpdir(), "afk-rm102-"));
       git(repoDir, ["init", "--initial-branch=main"]);
-      git(repoDir, ["config", "user.email", "test@example.com"]);
-      git(repoDir, ["config", "user.name", "Test"]);
       git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
     });
 
@@ -452,8 +459,6 @@ describe("git.mergeSliceBranch — MergeResult", { timeout: 240_000 }, () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-merge-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     writeFileSync(join(repoDir, "file.txt"), "base content\n");
     git(repoDir, ["add", "."]);
     git(repoDir, ["commit", "-m", "root"]);
@@ -519,8 +524,6 @@ describe("git.hasCommitsAhead", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-ahead-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -572,18 +575,18 @@ describe("git.hasCommitsAhead", () => {
  * The fix: refuse to reuse a path unless git agrees it is the worktree
  * for the requested branch.
  */
+// Shared repo: each test works on its own `wt-*` path and `feat/*`
+// branch (see `git.branchExists`).
 describe("git.createWorktree", { timeout: 240_000 }, () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-cw-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -647,18 +650,18 @@ describe("git.createWorktree", { timeout: 240_000 }, () => {
  * adds a removeWorktree → deleteBranch → createWorktree sequence that
  * leaves more windows for filesystem races).
  */
+// Shared repo: each test works on its own `wt-*` path and `feat/*`
+// branch (see `git.branchExists`).
 describe("git.assertWorktreeRegistered", { timeout: 240_000 }, () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-assert-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -771,18 +774,18 @@ describe("nextFreeMigrationPrefix (pure)", () => {
   });
 });
 
+// Shared repo: the missing-ref case reads nothing the other test writes
+// (see `git.branchExists`).
 describe("git.listFilesOnRef", () => {
   let repoDir: string;
 
-  beforeEach(() => {
+  beforeAll(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     rmDirWithRetry(repoDir);
   });
 
@@ -813,8 +816,6 @@ describe("git.listMigrationFiles / migrationPrefixCollisions", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 
@@ -877,8 +878,6 @@ describe("resume git primitives", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-resume-git-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     writeFileSync(join(repoDir, "base.txt"), "base\n", "utf-8");
     git(repoDir, ["add", "base.txt"]);
     git(repoDir, ["commit", "-m", "root"]);
@@ -1033,8 +1032,6 @@ describe("git.mergeBranchIntoWorktree", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-refresh-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     writeFileSync(join(repoDir, "shared.txt"), "line1\nline2\nline3\n", "utf-8");
     git(repoDir, ["add", "shared.txt"]);
     git(repoDir, ["commit", "-m", "root"]);
@@ -1114,8 +1111,6 @@ describe("feature-branch launch guard", () => {
   beforeEach(() => {
     repoDir = mkdtempSync(join(tmpdir(), "afk-guard-"));
     git(repoDir, ["init", "--initial-branch=main"]);
-    git(repoDir, ["config", "user.email", "test@example.com"]);
-    git(repoDir, ["config", "user.name", "Test"]);
     git(repoDir, ["commit", "--allow-empty", "-m", "root"]);
   });
 

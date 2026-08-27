@@ -27,6 +27,7 @@ import {
   buildStuckDiagnosisNote,
   collectResumeFacts,
   decideResume,
+  formatRestartRefusal,
   isForceRestarted,
   isResumeStuckRequested,
 } from "./resume.js";
@@ -93,6 +94,13 @@ import {
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
+/**
+ * Persisted reason on every slice a cancellation stops, whether it was
+ * marked when the signal fired or when its wave unwound (#114). One
+ * string so the two paths cannot drift into two operator-visible reasons
+ * for one stop.
+ */
+const CANCELLED_BY_USER = "Cancelled by user";
 const DEFAULT_INFRASTRUCTURE_RETRIES = 2;
 const DEFAULT_COMMAND_TIMEOUT_MS = 600_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -780,6 +788,14 @@ type NegotiateFailureKind =
   | "orchestrator-kill"
   | "transient-exhausted"
   | "verdict"
+  /**
+   * The slice was not prepared because restarting it from base would have
+   * force-reset unmerged commits away (#113). Terminal for this run and
+   * deliberately not infrastructure-class: retrying the invocation would
+   * hit the same refusal. The operator decides — `--force-restart` to
+   * discard, `--resume-stuck` to keep a STUCK tree, or manual recovery.
+   */
+  | "restart-refused"
   | "internal-error";
 
 interface NegotiateFailureCause {
@@ -978,7 +994,28 @@ function negotiateVerdictCause(args: {
 /** A throw from the pipeline itself, with no dead invocation behind it. */
 function internalNegotiateCause(error: unknown): NegotiateFailureCause {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof RestartRefusedError) {
+    // Reported verbatim, without the `negotiate:` prefix: nothing about
+    // negotiation happened — the slice never started (#113). The wave
+    // records this summary as the slice's outcome reason, so it is what
+    // the next operator reads in `afk status` and in the retry line.
+    return { kind: "restart-refused", summary: message };
+  }
   return { kind: "internal-error", summary: `negotiate: ${message}` };
+}
+
+/**
+ * A slice whose only remaining option was a from-base restart that would
+ * have destroyed unmerged commits (#113). Thrown out of
+ * `prepareSliceWorktree` before anything is mutated, so the branch, the
+ * worktree, and every untracked slice artifact survive byte-identical for
+ * the operator to inspect.
+ */
+export class RestartRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RestartRefusedError";
+  }
 }
 
 /**
@@ -1014,8 +1051,9 @@ function negotiateFailureCauseOf(
  *   contract survives verbatim), refresh the base by merging the
  *   current feature branch into the resumed branch (#35), and record
  *   the resume on `ctx.resume` so Phase B hands the generator the
- *   resume prompt. A refresh conflict falls back to restart — no agent
- *   is asked to resolve a merge it has no context for.
+ *   resume prompt. A refresh conflict refuses the slice (#113) — no
+ *   agent is asked to resolve a merge it has no context for, and the
+ *   conflicting commits are not destroyed to avoid asking.
  * - **resume-stuck** — the operator named a STUCK slice in
  *   `--resume-stuck` (#49) and its preserved branch, registered
  *   worktree, and commits ahead of base all check out: re-attach and
@@ -1026,9 +1064,15 @@ function negotiateFailureCauseOf(
  *   survives, so the refresh is simply declined and the generator is
  *   told its verification world is stale.
  * - **restart** — branch or worktree missing, or nothing committed:
- *   recreate from base deliberately. Today's accidental behavior
- *   (branch creation no-ops for existing branches, silently
- *   re-attaching to the old tip) must never restart implicitly.
+ *   recreate from base deliberately, after archiving the slice's
+ *   untracked spec artifacts to `.afk/artifacts/` (#113). Today's
+ *   accidental behavior (branch creation no-ops for existing branches,
+ *   silently re-attaching to the old tip) must never restart implicitly.
+ * - **refuse** — the slice is not resumable and the restart that would
+ *   follow holds unmerged commits: throw `RestartRefusedError` without
+ *   touching anything, so the slice ends ERROR with a report naming the
+ *   commits and the flags that resolve it (#113). `--force-restart` is
+ *   the one route that still discards.
  * - **fresh** — no evidence of a prior attempt: the normal first-run
  *   creation path, unchanged and unlogged.
  *
@@ -1067,7 +1111,33 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   // path and the refresh-conflict fallback. The attempt counter resets:
   // a fresh tree earns a fresh resume budget (#36).
   const restartFromBase = async (reason: string): Promise<void> => {
-    ctx.logger.phase(`${ctx.tag}: restarting from base (${reason})`);
+    // The slice's spec artifacts (contract.md, context.md, feedback-r*,
+    // qa-report*, handoff.md, stuck.md) are untracked files inside the
+    // worktree, so recreating it deletes the only copy. Archive them
+    // first — the same `.afk/artifacts/` path the ESCALATE/STUCK preserve
+    // path writes to (#113). Best-effort: a failure to archive warns and
+    // the restart proceeds, because the operator asked for the restart
+    // and a half-copied archive must not strand the run.
+    let archived: string | null = null;
+    try {
+      archived = artifacts.archiveArtifactsBeforeRestart(
+        repoRoot,
+        runSlug,
+        ctx.slice.number,
+        ctx.absSliceDir,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.logger.phase(
+        `${ctx.tag}: warning — could not archive slice artifacts before restart: ${message}`,
+      );
+    }
+    ctx.logger.phase(
+      `${ctx.tag}: restarting from base (${reason})` +
+        (archived
+          ? `; slice artifacts archived to ${relative(repoRoot, archived).replace(/\\/g, "/")}`
+          : ""),
+    );
     await git.recreateWorktreeFromBase(
       repoRoot,
       ctx.branch,
@@ -1078,6 +1148,34 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
       attempts: 0,
       lastDecision: `restarted from base (${reason})`,
     });
+  };
+
+  /**
+   * Refuse a restart that would force-reset unmerged commits away, and
+   * end the slice with a report the next operator can act on (#113).
+   * Nothing is mutated: the branch tip, the worktree and its untracked
+   * artifacts are exactly as the previous run left them. The attempt
+   * counter is deliberately NOT reset — no fresh tree was created, so no
+   * fresh resume budget is earned.
+   */
+  const refuseRestart = (reason: string, commitsAhead: number): never => {
+    const message = formatRestartRefusal({
+      reason,
+      commitsAhead,
+      branch: ctx.branch,
+      selector: ghIssue,
+    });
+    recordRetryDecision(repoRoot, runSlug, ghIssue, {
+      attempts: priorAttempts,
+      lastDecision: `refused to restart from base (${reason}) — ${commitsAhead} unmerged commit(s) preserved`,
+    });
+    ctx.logger.phase(`${ctx.tag}: ${message}`, "error", {
+      type: "warn",
+      reason: "restart-refused",
+      ghIssue,
+      message,
+    });
+    throw new RestartRefusedError(message);
   };
 
   if (plan.action === "resume") {
@@ -1095,7 +1193,13 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
     // against the world it will eventually merge into.
     const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
     if (refresh.status === "conflict") {
-      await restartFromBase("feature merge conflict");
+      // `mergeBranchIntoWorktree` aborts on conflict, so the tip and the
+      // worktree are byte-identical here. The old fallback restarted from
+      // base, which threw away exactly the commits that conflicted — the
+      // #113 defect in its most expensive form. Refuse and report: no
+      // agent is asked to resolve a merge it has no context for, and no
+      // work is destroyed to avoid asking.
+      refuseRestart("feature merge conflict", plan.commitsAhead);
     } else {
       ctx.resume = {
         mode: "killed",
@@ -1179,6 +1283,8 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
     if (!alreadyAtBase) {
       await restartFromBase(plan.reason);
     }
+  } else if (plan.action === "refuse") {
+    refuseRestart(plan.reason, plan.commitsAhead);
   } else {
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
   }
@@ -2045,7 +2151,7 @@ export async function runSliceExecute(
         throw new Error("Base gates produced no evidence");
       }
       if (signal?.aborted) {
-        return { phase: "CANCELLED", error: "Cancelled by user" };
+        return { phase: "CANCELLED", error: CANCELLED_BY_USER };
       }
       const evidenceDisplayPath = gateEvidencePath.replace(/\\/g, "/");
       const requiredInfrastructure = gateEvidence.results.filter(
@@ -2227,7 +2333,7 @@ export async function runSliceExecute(
     };
   } catch (err) {
     if (isCancelled(err, signal)) {
-      return { phase: "CANCELLED", error: "Cancelled by user" };
+      return { phase: "CANCELLED", error: CANCELLED_BY_USER };
     }
     const message = err instanceof Error ? err.message : String(err);
     // A wall-clock ceiling kill is terminal by design, not an
@@ -2300,6 +2406,43 @@ export async function runPipeline(
       implementationRoundLimit: MAX_GENERATOR_ROUNDS,
     },
   );
+  // --- The cancellation record, written when the signal fires (#114).
+  //
+  // The wave loop's cancellation sweep further down only runs once
+  // `runWave` has returned. A stop that ends the process before then — a
+  // second signal, a console close, an agent that will not die — used to
+  // leave the in-flight slice with no run-state entry at all, and no stop
+  // line in run.log. That gap is what makes the next `--only-failed`
+  // dangerous: an unmerged slice branch with no state reads as "never
+  // ran" (#113). So the record is contemporaneous with the *request* to
+  // cancel, not with the wind-down that follows it.
+  //
+  // The slice list is a late-bound hook because the signal can fire
+  // during setup, before the run scope is resolved: until then a
+  // cancellation has no dispatched slice to record, only its own line.
+  // The listener's lifetime is the run's — one `AbortController` per CLI
+  // invocation — and `once` drops it as soon as it fires.
+  let cancellableSlices: () => SliceIdentity[] = () => [];
+  const onCancellationRequested = () => {
+    const marked = logger.markCancelledInFlight(
+      cancellableSlices(),
+      CANCELLED_BY_USER,
+    );
+    const detail =
+      marked.length > 0
+        ? `marked CANCELLED in run state: ${marked.map((id) => `#${id}`).join(", ")}`
+        : "no slice had work in flight";
+    logger.phase(`[afk] Cancellation requested — ${detail}`, "error", {
+      type: "warn",
+      reason: "cancellation-requested",
+      message: `Cancellation requested — ${detail}`,
+    });
+  };
+  if (signal?.aborted) onCancellationRequested();
+  else {
+    signal?.addEventListener("abort", onCancellationRequested, { once: true });
+  }
+
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     withTransientRetry(
       () =>
@@ -2604,6 +2747,20 @@ export async function runPipeline(
     );
   }
 
+  // From here on a cancellation has slices to account for: everything in
+  // this run's DAG that is neither a HITL skip nor already settled. The
+  // hook feeds the abort listener installed at the top of the run (#114);
+  // it reads the live sets, so it is correct at whatever moment the
+  // signal happens to fire.
+  cancellableSlices = () =>
+    [...dag.slices]
+      .filter(([id, slice]) => slice.type !== "HITL" && !completed.has(id) && !failed.has(id))
+      .map(([id, slice]) => ({
+        ghIssue: id,
+        title: slice.title,
+        branch: sliceBranch(prdSlug, slice, provider),
+      }));
+
   // Process DAG level by level.
   //
   // Within a wave, ready siblings can touch the same files even when
@@ -2819,7 +2976,7 @@ export async function runPipeline(
         const branch = sliceBranch(prdSlug, slice, provider);
         logger.recordTerminal(
           { ghIssue: id, title: slice.title, branch },
-          { phase: "CANCELLED", error: "Cancelled by user" },
+          { phase: "CANCELLED", error: CANCELLED_BY_USER },
         );
         failed.add(id);
       }

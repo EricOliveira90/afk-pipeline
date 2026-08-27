@@ -140,3 +140,83 @@ describe("RunJournal.recordTerminal", () => {
     ).toEqual(recorded);
   });
 });
+
+/**
+ * The record a stop writes at the moment it is requested (issue #114).
+ * Before this, cancellation bookkeeping happened only after the wave
+ * unwound, so a process that ended during the wind-down left the
+ * in-flight slice with no run-state entry at all — indistinguishable
+ * from a slice that never ran, which is what makes the next
+ * `--only-failed` destructive (#113).
+ */
+describe("RunJournal.markCancelledInFlight", () => {
+  const OTHER: SliceIdentity = {
+    ghIssue: "41",
+    title: "Not started",
+    branch: "afk/demo-slice-02",
+  };
+
+  it("persists CANCELLED for an in-flight and an unstarted slice", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "cancel-inflight");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // 40 is mid-generator; 41 was never dispatched. Both are stopped.
+    journal.trackSlice(lifecycle.running(SLICE, { genRounds: 2, evalRounds: 1 }));
+
+    const marked = journal.markCancelledInFlight([SLICE, OTHER], "Cancelled by user");
+
+    expect(marked).toEqual(["40", "41"]);
+    const state = loadRunState(repo, "cancel-inflight");
+    expect(state.slices["40"]).toEqual({
+      phase: "CANCELLED",
+      branch: SLICE.branch,
+      error: "Cancelled by user",
+    });
+    expect(state.slices["41"]?.phase).toBe("CANCELLED");
+  });
+
+  it("leaves a decided outcome alone", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "cancel-decided");
+    journal.setFeatureBranch("feat/demo");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    journal.recordTerminal(SLICE, { phase: "PASS" });
+
+    expect(journal.markCancelledInFlight([SLICE], "Cancelled by user")).toEqual([]);
+    expect(loadRunState(repo, "cancel-decided").slices["40"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+  });
+
+  it("is provisional: a real outcome landing during the wind-down still wins", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "cancel-provisional");
+    journal.setFeatureBranch("feat/demo");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    journal.trackSlice(lifecycle.running(SLICE));
+
+    journal.markCancelledInFlight([SLICE], "Cancelled by user");
+    // The merge this slice had already started completes after the stop.
+    journal.recordTerminal(SLICE, { phase: "PASS" });
+
+    expect(loadRunState(repo, "cancel-provisional").slices["40"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+  });
+
+  it("keeps going when one slice's write fails", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "cancel-write-failure");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const stateBlocker = join(repo, ".afk", "state");
+    mkdirSync(join(repo, ".afk"), { recursive: true });
+    writeFileSync(stateBlocker, "not a directory", "utf-8");
+
+    // Every write fails here; the point is that the sweep returns rather
+    // than throwing out of an abort listener that has slices left to mark.
+    expect(journal.markCancelledInFlight([SLICE, OTHER], "Cancelled by user")).toEqual([]);
+  });
+});

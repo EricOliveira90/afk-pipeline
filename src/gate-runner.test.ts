@@ -37,8 +37,6 @@ function makeCheckpoint(
   const hooksDir = join(cwd, ".git", "test-hooks");
   mkdirSync(hooksDir);
   git(cwd, ["config", "core.hooksPath", hooksDir]);
-  git(cwd, ["config", "user.email", "test@example.com"]);
-  git(cwd, ["config", "user.name", "Test"]);
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(cwd, name), content, "utf-8");
   }
