@@ -249,7 +249,7 @@ export interface PipelineConfig {
   selectedSliceNumbers?: string[];
   /** Parsed `<prd-dir>/afk.json`; absent preserves legacy behavior. */
   manifest?: AfkManifest | null;
-  /** Contract negotiation cap before convergence may grant one extra round. */
+  /** Contract negotiation cap, bounded by the global two-round limit. */
   maxContractRounds?: number;
   /**
    * Agent provider. Drives branch namespacing (via `provider.name`) and
@@ -718,60 +718,6 @@ function migrationReservationBlock(
     `\`- New migration files: ${claim.length}\` and use those exact prefixes, in order, ` +
     "for the new migration paths. Never calculate or substitute another prefix."
   );
-}
-
-/**
- * Round-cap evidence, all of it derived from the review artifacts by
- * `contractReviewGapMetrics` — never reported by the evaluator itself.
- * `previousGapCount` and `reRaisedGapCount` are null on the first
- * reviewed round, where there is nothing to compare against.
- */
-export interface ContractExtensionEvidence {
-  previousGapCount: number | null;
-  currentGapCount: number;
-  reRaisedGapCount: number | null;
-  extensionAlreadyGranted: boolean;
-}
-
-export type ContractExtensionAssessment =
-  | { grant: true; reason: string }
-  | { grant: false; reason: string };
-
-export function assessContractExtension(
-  evidence: ContractExtensionEvidence,
-): ContractExtensionAssessment {
-  const {
-    previousGapCount,
-    currentGapCount,
-    reRaisedGapCount,
-    extensionAlreadyGranted,
-  } = evidence;
-  if (extensionAlreadyGranted) {
-    return { grant: false, reason: "the one-round extension was already used" };
-  }
-  if (previousGapCount === null || reRaisedGapCount === null) {
-    return {
-      grant: false,
-      reason: "there is no previous reviewed round to measure progress against",
-    };
-  }
-  if (reRaisedGapCount > 0) {
-    return {
-      grant: false,
-      reason: `${reRaisedGapCount} gap(s) from the prior round were re-raised`,
-    };
-  }
-  if (currentGapCount >= previousGapCount) {
-    const trend = currentGapCount === previousGapCount ? "flat" : "rising";
-    return {
-      grant: false,
-      reason: `gap count is ${trend} (${previousGapCount} -> ${currentGapCount})`,
-    };
-  }
-  return {
-    grant: true,
-    reason: `gap count decreased (${previousGapCount} -> ${currentGapCount}) with no re-raised gaps`,
-  };
 }
 
 function preserveContractNegotiationFailure(
@@ -1613,8 +1559,10 @@ async function negotiateAttempt(
     if (!Number.isSafeInteger(maxContractRounds) || maxContractRounds < 1) {
       throw new Error("maxContractRounds must be a positive integer");
     }
-    let allowedContractRounds = maxContractRounds;
-    let extensionGranted = false;
+    const allowedContractRounds = Math.min(
+      maxContractRounds,
+      DEFAULT_MAX_CONTRACT_ROUNDS,
+    );
     let evaluatorRound = 0;
     let lastRound = 0;
     let lastVerdict: RecordedContractVerdict = "NONE";
@@ -1882,10 +1830,8 @@ async function negotiateAttempt(
 
           const reason =
             "the acceptance-manifest scope gate refused the final planner round";
-          capDecisions.push(`Extension refused: ${reason}.`);
-          logger.phase(
-            `${ctx.tag}: contract round extension refused: ${reason}`,
-          );
+          capDecisions.push(`Negotiation stopped because ${reason}.`);
+          logger.phase(`${ctx.tag}: contract negotiation stopped: ${reason}`);
           logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
           preserveContractNegotiationFailure(
             ctx,
@@ -2081,45 +2027,11 @@ async function negotiateAttempt(
           break;
 
         if (round === allowedContractRounds) {
-          // A gate refusal earns no extension. The extension exists for
-          // a planner making measurable progress on review findings; a
-          // gate objection is a concrete mechanical correction the
-          // planner already had every round to make, so failing it is
-          // the escalation the operator should see.
-          //
-          // Any other way of reaching here is a REVISE: an ACCEPT either
-          // broke out of the loop or set `gateObjection` on its way past
-          // the lock gate.
-          const assessment = gateObjection
-            ? {
-                grant: false as const,
-                reason:
-                  "the contract-lock gate refused the final round's contract",
-              }
-            : assessContractExtension({
-                previousGapCount: previousReview
-                  ? contractReviewGapMetrics(previousReview, null).gapCount
-                  : null,
-                currentGapCount: metrics.gapCount,
-                reRaisedGapCount: metrics.reRaisedGapCount,
-                extensionAlreadyGranted: extensionGranted,
-              });
-          if (assessment.grant) {
-            extensionGranted = true;
-            allowedContractRounds = maxContractRounds + 1;
-            capDecisions.push(
-              `Granted one extra round because ${assessment.reason}.`,
-            );
-            logger.phase(
-              `${ctx.tag}: granting contract round ${allowedContractRounds}: ${assessment.reason}`,
-            );
-            previousReview = review;
-            continue;
-          }
-          capDecisions.push(`Extension refused: ${assessment.reason}.`);
-          logger.phase(
-            `${ctx.tag}: contract round extension refused: ${assessment.reason}`,
-          );
+          const reason = gateObjection
+            ? "the contract-lock gate refused the final round's contract"
+            : `the negotiation reached its hard cap of ${allowedContractRounds} planner round(s)`;
+          capDecisions.push(`Negotiation stopped because ${reason}.`);
+          logger.phase(`${ctx.tag}: contract negotiation stopped: ${reason}`);
         } else {
           previousReview = review;
           continue;

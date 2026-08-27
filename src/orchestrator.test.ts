@@ -28,7 +28,6 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
-  assessContractExtension,
   collectRequiredGateFailures,
   isCancelled,
   makeAsyncMutex,
@@ -572,54 +571,6 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
  * Tests for `makeAsyncMutex`. The mutex serialises lane merges across
  * concurrently-running lanes; correctness here pins that contract.
  */
-describe("assessContractExtension", () => {
-  it("grants a converging round", () => {
-    expect(
-      assessContractExtension({
-        previousGapCount: 6,
-        currentGapCount: 3,
-        reRaisedGapCount: 0,
-        extensionAlreadyGranted: false,
-      }),
-    ).toMatchObject({ grant: true });
-  });
-
-  it("refuses flat or rising gap counts", () => {
-    for (const currentGapCount of [3, 4]) {
-      expect(
-        assessContractExtension({
-          previousGapCount: 3,
-          currentGapCount,
-          reRaisedGapCount: 0,
-          extensionAlreadyGranted: false,
-        }).grant,
-      ).toBe(false);
-    }
-  });
-
-  it("refuses a re-raised gap despite a lower count", () => {
-    expect(
-      assessContractExtension({
-        previousGapCount: 6,
-        currentGapCount: 2,
-        reRaisedGapCount: 1,
-        extensionAlreadyGranted: false,
-      }),
-    ).toMatchObject({ grant: false, reason: expect.stringContaining("re-raised") });
-  });
-
-  it("never grants a second extension", () => {
-    expect(
-      assessContractExtension({
-        previousGapCount: 3,
-        currentGapCount: 1,
-        reRaisedGapCount: 0,
-        extensionAlreadyGranted: true,
-      }),
-    ).toMatchObject({ grant: false, reason: expect.stringContaining("already used") });
-  });
-});
-
 describe("makeAsyncMutex", () => {
   it("serialises two concurrent acquirers in submission order", async () => {
     const lock = makeAsyncMutex();
@@ -1573,10 +1524,8 @@ describe("round-scoped contract feedback", () => {
     );
 
     expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
-    expect(plannerPrompts).toHaveLength(3);
+    expect(plannerPrompts).toHaveLength(2);
     expect(plannerPrompts[1]).toContain("missing-gate");
-    expect(plannerPrompts[2]).toContain("B-01");
-    expect(plannerPrompts[2]).toContain("B-02");
     expect(evaluatorRounds).toBe(0);
     expect(
       readdirSync(ctx.absSliceDir).filter((name) =>
@@ -1682,9 +1631,8 @@ describe("round-scoped contract feedback", () => {
     );
 
     expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
-    expect(plannerPrompts).toHaveLength(3);
+    expect(plannerPrompts).toHaveLength(2);
     expect(plannerPrompts[1]).toContain("behaviors");
-    expect(plannerPrompts[2]).toContain("P-01");
     expect(evaluatorRounds).toBe(0);
     expect(
       readdirSync(ctx.absSliceDir).filter((name) =>
@@ -2184,7 +2132,7 @@ describe("round-scoped contract feedback", () => {
     expect(contract).not.toContain("## Evaluator feedback");
   });
 
-  it("grants exactly one extra round to a converging negotiation", async () => {
+  it("caps a converging negotiation at two rounds", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2291,7 +2239,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 2,
+        maxContractRounds: 7,
       },
       slice,
       logger,
@@ -2301,13 +2249,29 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+      expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(plannerRounds).toBe(3);
-      expect(evaluatorRounds).toBe(3);
-      expect(errorSpy.mock.calls.flat().join(" ")).toContain(
-        "granting contract round 3",
+      expect(plannerRounds).toBe(2);
+      expect(evaluatorRounds).toBe(2);
+      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
+        "granting contract round",
       );
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
+            "utf-8",
+          ),
+        ),
+      ).toMatchObject({
+        version: 1,
+        classification: "NON_CONVERGENCE",
+        round: 2,
+        findings: [
+          { id: "F-r2-1", state: "OPEN", unresolved: true },
+          { id: "F-r2-2", state: "OPEN", unresolved: true },
+        ],
+      });
     } finally {
       errorSpy.mockRestore();
     }
@@ -3975,7 +3939,7 @@ describe("run.log observability (ADR 0017)", () => {
     expect(runLog).toContain("Wave 1: dispatching 2 slice(s)");
     expect(runLog).toContain("Slice #9101 (Lead): exploring...");
     // Contract negotiation is observable: verdict and lock per slice.
-    expect(runLog).toContain("contract verdict ACCEPT (round 1/3)");
+    expect(runLog).toContain("contract verdict ACCEPT (round 1/2)");
     expect(runLog).toContain("Slice #9101 (Lead): contract LOCKED");
     // Lane queueing is explicit — a waiting successor is distinguishable
     // from a dropped one.

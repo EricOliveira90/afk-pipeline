@@ -7,13 +7,14 @@ import {
 } from "./cli-options.js";
 
 describe("parseMaxContractRounds", () => {
-  it("defaults at the call site to three rounds", () => {
-    expect(DEFAULT_MAX_CONTRACT_ROUNDS).toBe(3);
+  it("defaults at the call site to two rounds", () => {
+    expect(DEFAULT_MAX_CONTRACT_ROUNDS).toBe(2);
   });
 
-  it("accepts positive integers", () => {
+  it("accepts positive integers and caps them at two", () => {
     expect(parseMaxContractRounds("1")).toBe(1);
-    expect(parseMaxContractRounds("4")).toBe(4);
+    expect(parseMaxContractRounds("2")).toBe(2);
+    expect(parseMaxContractRounds("4")).toBe(2);
   });
 
   it.each([undefined, "", "0", "-1", "1.5", "abc"])(
