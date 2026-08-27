@@ -769,7 +769,8 @@ function archiveContractReviewAttempt(
   previousReview: ContractReview | null,
   plannerResponse: ContractResponse | null,
   revisions: ContractRevisionArtifacts | null,
-): ContractReviewAttemptRecord | null {
+  lifecyclePrevious: ContractReview | null = previousReview,
+): { record: ContractReviewAttemptRecord; review: ContractReview } | null {
   try {
     const archived = artifacts.archiveContractReviewAttempt({
       sliceDir: ctx.absSliceDir,
@@ -809,6 +810,7 @@ function archiveContractReviewAttempt(
         plannerResponse,
         review,
         revisions ?? undefined,
+        lifecyclePrevious ?? previousReview,
       );
     }
   } catch {
@@ -843,7 +845,7 @@ function archiveContractReviewAttempt(
       },
     );
   }
-  return record;
+  return { record, review };
 }
 
 /**
@@ -1906,6 +1908,8 @@ async function negotiateAttempt(
           `feedback-r${evaluatorRound}.md`,
         );
         const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
+        let latestValidAttemptReview: ContractReview | null = null;
+        let attemptLifecyclePrevious: ContractReview | null = null;
         await invokeAgent(
           {
             role: "evaluator-contract",
@@ -1944,11 +1948,12 @@ async function negotiateAttempt(
           // review from an earlier attempt or round can never be read as
           // this attempt's verdict.
           () => {
+            attemptLifecyclePrevious = latestValidAttemptReview;
             rmSync(feedbackPath, { force: true });
             rmSync(reviewPath, { force: true });
           },
           (attempt) => {
-            const record = archiveContractReviewAttempt(
+            const archived = archiveContractReviewAttempt(
               ctx,
               reviewArchiveDir,
               evaluatorRound,
@@ -1956,8 +1961,12 @@ async function negotiateAttempt(
               previousReview,
               plannerResponse,
               revisionArtifacts,
+              attemptLifecyclePrevious ?? previousReview,
             );
-            if (record) lastReviewAttemptRecord = record;
+            if (archived) {
+              latestValidAttemptReview = archived.review;
+              lastReviewAttemptRecord = archived.record;
+            }
           },
         );
 
@@ -1975,6 +1984,7 @@ async function negotiateAttempt(
               plannerResponse,
               review,
               revisionArtifacts ?? undefined,
+              attemptLifecyclePrevious ?? previousReview,
             );
           }
         } catch (error) {

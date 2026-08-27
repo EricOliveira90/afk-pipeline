@@ -2774,7 +2774,7 @@ describe("contract review fails closed", () => {
     });
   });
 
-  it("archives raw died attempts and records lifecycle-valid ones", async () => {
+  it("archives died attempts and rejects terminal reactivation on retry", async () => {
     const repo = makeRepo();
     const slug = "review-archive-attempts";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2786,6 +2786,7 @@ describe("contract review fails closed", () => {
       blockedBy: [],
       userStories: "",
     };
+    let plannerRounds = 0;
     let evaluatorAttempts = 0;
     const provider: AgentProvider = {
       name: "stub",
@@ -2795,12 +2796,16 @@ describe("contract review fails closed", () => {
         if (opts.role === "explorer") {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
+          plannerRounds++;
           writeFileSync(
             join(artifactDir, "contract.md"),
             "# Contract\n\n**Status:** NEGOTIATING\n",
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 2) {
+            writeContractResponse(artifactDir, ["F-01"], "CONDITION_MET");
+          }
         } else if (opts.role === "evaluator-contract") {
           evaluatorAttempts++;
           if (evaluatorAttempts === 1) {
@@ -2814,8 +2819,29 @@ describe("contract review fails closed", () => {
             opts.logStream?.write("stub evaluator output\n");
             throw new Error("Agent evaluator-contract exited with code 1");
           }
-          writeContractReview(artifactDir, "ACCEPT");
+          if (evaluatorAttempts <= 3) {
+            writeContractReview(artifactDir, "REVISE");
+          } else if (evaluatorAttempts === 4) {
+            writeContractReview(artifactDir, "ACCEPT", [
+              {
+                id: "F-01",
+                severity: "BLOCKING",
+                behaviorIds: [],
+                evidence: '"the contract as written"',
+                expected: "a falsifiable test plan entry",
+                observed: "the test plan now names a command",
+                clearCondition: "the test plan names a command that can fail",
+                state: "RESOLVED",
+              },
+            ]);
+          } else {
+            writeContractReview(artifactDir, "REVISE");
+          }
           if (evaluatorAttempts === 2) {
+            opts.logStream?.write("stub evaluator output\n");
+            throw new Error("Agent evaluator-contract exited with code 1");
+          }
+          if (evaluatorAttempts === 4) {
             opts.logStream?.write("stub evaluator output\n");
             throw new Error("Agent evaluator-contract exited with code 1");
           }
@@ -2844,8 +2870,12 @@ describe("contract review fails closed", () => {
       "pnpm test",
     );
 
-    expect((await runSliceNegotiate(ctx)).phase).toBe("LOCKED");
-    expect(evaluatorAttempts).toBe(3);
+    const outcome = await runSliceNegotiate(ctx);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /terminal finding F-01 cannot reactivate as OPEN/,
+    );
+    expect(evaluatorAttempts).toBe(5);
     const reviews = join(
       repo,
       ".afk",
@@ -2854,21 +2884,24 @@ describe("contract review fails closed", () => {
       "slice-01",
       "reviews",
     );
-    // The malformed first attempt has no invented lifecycle record. The
-    // valid died attempt and final retry each preserve a derived record.
+    // The malformed first attempt and reactivating final attempt have no
+    // invented lifecycle records. Valid died attempts retain their records.
     expect(readdirSync(reviews).sort()).toEqual([
       "contract-review-r1-a1.json",
       "contract-review-r1-a2-record.json",
       "contract-review-r1-a2.json",
       "contract-review-r1-a3-record.json",
       "contract-review-r1-a3.json",
+      "contract-review-r2-a1-record.json",
+      "contract-review-r2-a1.json",
+      "contract-review-r2-a2.json",
     ]);
     expect(
       readFileSync(join(reviews, "contract-review-r1-a1.json"), "utf-8"),
     ).toBe("{");
     expect(
       readFileSync(join(reviews, "contract-review-r1-a2.json"), "utf-8"),
-    ).toContain('"verdict": "ACCEPT"');
+    ).toContain('"verdict": "REVISE"');
     expect(
       JSON.parse(
         readFileSync(
@@ -2880,8 +2913,31 @@ describe("contract review fails closed", () => {
       version: 1,
       round: 1,
       attempt: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          plannerPosition: null,
+          plannerEvidence: null,
+          evaluatorEvidence: '"the contract as written"',
+        },
+      ],
+    });
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(reviews, "contract-review-r2-a1-record.json"),
+          "utf-8",
+        ),
+      ),
+    ).toMatchObject({
+      round: 2,
+      attempt: 1,
       verdict: "ACCEPT",
-      findings: [],
+      findings: [{ id: "F-01", state: "RESOLVED", unresolved: false }],
     });
   });
 

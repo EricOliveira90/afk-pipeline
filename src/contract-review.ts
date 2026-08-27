@@ -755,9 +755,13 @@ export function validateRound2ContractReview(
   response: ContractResponse,
   current: ContractReview,
   revisions?: ContractRevisionArtifacts,
+  lifecyclePrevious: ContractReview = previous,
 ): void {
   const previousById = new Map(
     previous.findings.map((finding) => [finding.id, finding]),
+  );
+  const lifecyclePreviousById = new Map(
+    lifecyclePrevious.findings.map((finding) => [finding.id, finding]),
   );
   const currentById = new Map(
     current.findings.map((finding) => [finding.id, finding]),
@@ -801,9 +805,11 @@ export function validateRound2ContractReview(
           `${CONTRACT_REVIEW_FILENAME} familiar finding ${finding.id} must use revisionCitation null`,
         );
       }
+      const lifecyclePreviousFinding =
+        lifecyclePreviousById.get(finding.id) ?? previousFinding;
       const wasTerminal =
-        previousFinding.state === "RESOLVED" ||
-        previousFinding.state === "WITHDRAWN";
+        lifecyclePreviousFinding.state === "RESOLVED" ||
+        lifecyclePreviousFinding.state === "WITHDRAWN";
       const isActive =
         finding.state === "OPEN" || finding.state === "CONTESTED";
       if (wasTerminal && isActive) {
