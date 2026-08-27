@@ -2137,11 +2137,30 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
     };
 
+function formatUnresolvedQAFindings(
+  findings: readonly QAReviewAttemptFinding[],
+): string {
+  if (findings.length === 0) return "(none)";
+  return findings
+    .map(
+      (finding) =>
+        [
+          `- Finding ID: \`${finding.id}\``,
+          `  Summary: ${finding.summary}`,
+          `  Clear condition: ${finding.clearCondition}`,
+          "  Artifact references:",
+          ...finding.artifactReferences.map((path) => `  - \`${path}\``),
+        ].join("\n"),
+    )
+    .join("\n");
+}
+
 export async function runQAStage(
   ctx: SliceContext,
   round: number,
   stage: QAReviewStage,
   history: readonly QAReviewFinding[],
+  previousUnresolved: readonly QAReviewAttemptFinding[] = [],
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -2196,7 +2215,8 @@ export async function runQAStage(
           SANITY_COMMANDS: ctx.sanityCommandsBlock,
           QA_SCOPE: scope,
           REPORT_PATH: reportDisplayPath,
-          PREVIOUS_QA_REPORTS: "(none)",
+          UNRESOLVED_FINDINGS:
+            formatUnresolvedQAFindings(previousUnresolved),
           COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
           HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
         }),
@@ -2430,11 +2450,13 @@ export async function runSliceExecute(
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
-  const qaReports: string[] = [];
-  const repairReferences: string[] = [];
+  const stuckReferences: string[] = [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
   let deterministicHistory: readonly QAReviewFinding[] = [];
+  let deterministicUnresolved: readonly QAReviewAttemptFinding[] = [];
   let sharedPreviewHistory: readonly QAReviewFinding[] = [];
+  let sharedPreviewUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let retryNote = "";
 
   try {
     for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
@@ -2487,9 +2509,7 @@ export async function runSliceExecute(
               RELEVANT_FILES: ctx.relevantFilesBlock,
               SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
               TEST_COMMAND: ctx.testCommand,
-              RETRY_NOTE: round > 1
-                ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${repairReferences.map((path) => `- \`${path}\``).join("\n")}`
-                : "",
+              RETRY_NOTE: round > 1 ? retryNote : "",
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             });
       await invoke({
@@ -2680,18 +2700,23 @@ export async function runSliceExecute(
         declarations,
       );
       if (requiredFailures.length > 0) {
-        repairReferences.push(
+        const baseGateRepairReferences = [
           ...new Set(
             requiredFailures.map(({ evidencePath }) =>
               evidencePath.replace(/\\/g, "/"),
             ),
           ),
-        );
-        repairReferences.push(
           ...requiredFailures.map(({ result }) =>
             join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
           ),
-        );
+        ];
+        stuckReferences.push(...baseGateRepairReferences);
+        retryNote =
+          `This is implementation round ${round + 1}. Fix every unresolved ` +
+          `base-gate failure in these preserved artifacts:\n` +
+          baseGateRepairReferences
+            .map((path) => `- \`${path}\``)
+            .join("\n");
         if (round < MAX_GENERATOR_ROUNDS) continue;
       } else {
         assertGateEvidenceReleasesEvaluation(
@@ -2716,8 +2741,10 @@ export async function runSliceExecute(
           round,
           "deterministic",
           deterministicHistory,
+          deterministicUnresolved,
         );
         deterministicHistory = deterministic.history;
+        deterministicUnresolved = deterministic.unresolved;
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
@@ -2728,8 +2755,13 @@ export async function runSliceExecute(
         });
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
-        qaReports.push(deterministic.report);
-        repairReferences.push(deterministic.report);
+        stuckReferences.push(deterministic.report);
+        if (implementationFailed) {
+          retryNote =
+            `This is implementation round ${round + 1}. Fix every current ` +
+            `unresolved deterministic QA finding:\n` +
+            formatUnresolvedQAFindings(deterministic.unresolved);
+        }
         if (
           deterministic.outcome !== "IMPLEMENTATION" &&
           config.sharedPreview
@@ -2750,8 +2782,10 @@ export async function runSliceExecute(
             round,
             "shared-preview",
             sharedPreviewHistory,
+            sharedPreviewUnresolved,
           );
           sharedPreviewHistory = remote.history;
+          sharedPreviewUnresolved = remote.unresolved;
           logger.event({
             type: "phase-ended",
             ghIssue: slice.ghIssue,
@@ -2760,10 +2794,13 @@ export async function runSliceExecute(
             round,
             verdict: remote.outcome,
           });
-          qaReports.push(remote.report);
-          repairReferences.push(remote.report);
+          stuckReferences.push(remote.report);
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
+            retryNote =
+              `This is implementation round ${round + 1}. Fix every current ` +
+              `unresolved shared-preview UAT finding:\n` +
+              formatUnresolvedQAFindings(remote.unresolved);
           }
         }
 
@@ -2820,7 +2857,7 @@ export async function runSliceExecute(
           role: "generator-stuck",
           prompt: renderPrompt("generator-stuck", {
             SLICE_DIR: ctx.relSliceDir,
-            QA_REPORTS: repairReferences
+            QA_REPORTS: stuckReferences
               .map((path) => `- \`${path}\``)
               .join("\n"),
           }),

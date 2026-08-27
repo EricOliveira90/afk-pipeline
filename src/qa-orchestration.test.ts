@@ -501,9 +501,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(existsSync(join(artifactDir, "qa-report-r1-a2.md"))).toBe(true);
   });
 
-  it("preserves every implementation report and passes all prior reports to retries", async () => {
+  it("routes only the current unresolved findings to QA and generator retries", async () => {
     const repo = makeRepo();
     const generatorPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
     let artifactDir = "";
     const provider: AgentProvider = {
       name: "stub",
@@ -512,13 +513,87 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           generatorPrompts.push(options.prompt);
           writeFileSync(join(repo, "change.txt"), `${generatorPrompts.length}\n`, "utf-8");
         } else if (options.role === "evaluator-qa") {
+          evaluatorPrompts.push(options.prompt);
+          const round = evaluatorPrompts.length;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
-            `# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n\n## Findings\nFinding ${generatorPrompts.length}\n`,
+            `# QA Report\n\n**Verdict:** ${round === 3 ? "PASS" : "FAIL"}\n`,
             "utf-8",
           );
+          const finding = (
+            id: string,
+            severity: "BLOCKING" | "ADVISORY",
+            summary: string,
+            clearCondition: string,
+            state: "OPEN" | "RESOLVED" = "OPEN",
+          ) => ({
+            id,
+            severity,
+            behaviorIds: [],
+            summary,
+            evidence: `${id} evidence`,
+            expected: `${id} expected`,
+            observed: `${id} observed`,
+            clearCondition,
+            state,
+          });
+          const findings =
+            round === 1
+              ? [
+                  finding(
+                    "QA-BLOCKING",
+                    "BLOCKING",
+                    "Blocking summary",
+                    "Blocking condition",
+                  ),
+                  finding(
+                    "QA-ADVISORY",
+                    "ADVISORY",
+                    "Advisory summary",
+                    "Advisory condition",
+                  ),
+                ]
+              : round === 2
+                ? [
+                    finding(
+                      "QA-BLOCKING",
+                      "BLOCKING",
+                      "Blocking summary",
+                      "Blocking condition",
+                      "RESOLVED",
+                    ),
+                    finding(
+                      "QA-ADVISORY",
+                      "ADVISORY",
+                      "Advisory summary",
+                      "Advisory condition",
+                    ),
+                    finding(
+                      "QA-FRESH",
+                      "BLOCKING",
+                      "Fresh summary",
+                      "Fresh condition",
+                    ),
+                  ]
+                : [
+                    finding(
+                      "QA-ADVISORY",
+                      "ADVISORY",
+                      "Advisory summary",
+                      "Advisory condition",
+                      "RESOLVED",
+                    ),
+                    finding(
+                      "QA-FRESH",
+                      "BLOCKING",
+                      "Fresh summary",
+                      "Fresh condition",
+                      "RESOLVED",
+                    ),
+                  ];
           writeQAReview(artifactDir, "deterministic", {
-            verdict: "FAIL",
+            verdict: round === 3 ? "PASS" : "FAIL",
+            findings,
           });
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -527,15 +602,43 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const ctx = makeContext(repo, provider);
     artifactDir = ctx.absSliceDir;
 
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
-      phase: "STUCK",
-      error: "QA failed after 3 implementation rounds",
-    });
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generatorPrompts).toHaveLength(3);
+    expect(evaluatorPrompts).toHaveLength(3);
+
+    expect(generatorPrompts[1]).toContain("QA-BLOCKING");
+    expect(generatorPrompts[1]).toContain("Blocking summary");
+    expect(generatorPrompts[1]).toContain("Blocking condition");
+    expect(generatorPrompts[1]).toContain("QA-ADVISORY");
+    expect(generatorPrompts[1]).toContain("Advisory summary");
+    expect(generatorPrompts[1]).toContain("Advisory condition");
+    expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
-    expect(generatorPrompts[2]).toContain("qa-report-r1-a1.md");
+
+    expect(evaluatorPrompts[1]).toContain("QA-BLOCKING");
+    expect(evaluatorPrompts[1]).toContain("QA-ADVISORY");
+    expect(evaluatorPrompts[1]).toContain("qa-review-r1-a1.json");
+    expect(evaluatorPrompts[1]).toContain("qa-report-r1-a1.md");
+
+    expect(generatorPrompts[2]).not.toContain("QA-BLOCKING");
+    expect(generatorPrompts[2]).toContain("QA-ADVISORY");
+    expect(generatorPrompts[2]).toContain("Advisory summary");
+    expect(generatorPrompts[2]).toContain("Advisory condition");
+    expect(generatorPrompts[2]).toContain("QA-FRESH");
+    expect(generatorPrompts[2]).toContain("Fresh summary");
+    expect(generatorPrompts[2]).toContain("Fresh condition");
+    expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
-    expect(readFileSync(join(artifactDir, "qa-report-r3-a1.md"), "utf-8")).toContain("Finding 3");
+    expect(generatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
+    expect(generatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
+
+    expect(evaluatorPrompts[2]).not.toContain("QA-BLOCKING");
+    expect(evaluatorPrompts[2]).toContain("QA-ADVISORY");
+    expect(evaluatorPrompts[2]).toContain("QA-FRESH");
+    expect(evaluatorPrompts[2]).toContain("qa-review-r2-a1.json");
+    expect(evaluatorPrompts[2]).toContain("qa-report-r2-a1.md");
+    expect(evaluatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
+    expect(evaluatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
   });
 
   it("cancels a base gate process tree without evaluator or repair", async () => {

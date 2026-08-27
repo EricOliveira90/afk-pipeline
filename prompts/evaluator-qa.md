@@ -27,8 +27,8 @@ Also read:
 - Every ADR cited by the contract
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}
-- Prior deterministic and shared-preview QA reports:
-{{PREVIOUS_QA_REPORTS}}
+- Current unresolved findings from this QA stage:
+{{UNRESOLVED_FINDINGS}}
 
 # Failure Classification
 
@@ -58,9 +58,10 @@ independent command, behavior, boundary, and preservation findings in this one
 report. Skip only checks that strictly depend on a failed prerequisite, and
 state that dependency. Do not stop at the first failure.
 
-Re-check every finding in the prior reports. The Findings section must contain
-all findings still unresolved, not merely newly discovered findings. Explicitly
-list cleared finding titles under `## Resolved findings`.
+Re-check every routed finding. Repeat each routed ID exactly once in the
+canonical review artifact as `OPEN` or `RESOLVED`. Give each newly discovered
+finding a fresh ID and `OPEN` state. Do not reconstruct findings from prior
+reports or from the other QA stage.
 
 Do not proceed to Pass 2 unless Pass 1 is clean.
 
