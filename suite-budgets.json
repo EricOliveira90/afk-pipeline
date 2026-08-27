@@ -61,13 +61,31 @@
     "clean-failed": 12.6,
     "_total": "411.9s of suite time, 6m56s of `pnpm test`, 765 tests"
   },
+  "_measured2026_08_27": {
+    "_note": [
+      "Full chain on main at fbe98ac (PRs #116 + #117 merged, 803 tests),",
+      "idle machine. fast tripped its 79s budget at 81.6s with no new",
+      "slow test — the wave-1 PRs added ~0.15s to fast. Alone-runs the",
+      "same day: 75.2 (idle, straight after the chain) and 84.1 (s7",
+      "worktree, agent session resident). The observed band 75-84s",
+      "straddled the 79s budget, so the budget sat inside ordinary",
+      "variance; raised to 90 per the ~30%-above-in-chain rule above."
+    ],
+    "fast": 81.6,
+    "orchestrator": 157.7,
+    "wave": 87.5,
+    "resume-integration": 44.6,
+    "qa-orchestration": 43.7,
+    "clean-failed": 12.7,
+    "_total": "427.8s of suite time, 803 tests"
+  },
   "suites": {
-    "fast": 79,
+    "fast": 90,
     "orchestrator": 205,
     "wave": 110,
     "resume-integration": 63,
     "qa-orchestration": 68,
     "clean-failed": 13
   },
-  "totalSeconds": 538
+  "totalSeconds": 549
 }
