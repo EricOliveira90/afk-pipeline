@@ -260,8 +260,6 @@ describe("migration claims", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-generated-"));
     roots.push(root);
     execFileSync("git", ["init", "-b", "main"], { cwd: root });
-    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-    execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
     writeFileSync(join(root, "base.txt"), "base\n");
     execFileSync("git", ["add", "."], { cwd: root });
     execFileSync("git", ["commit", "-m", "base"], { cwd: root });

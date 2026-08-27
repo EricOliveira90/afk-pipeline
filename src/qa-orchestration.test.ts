@@ -83,8 +83,6 @@ function makeRepo(): string {
   const hooksDir = join(repo, ".git", "test-hooks");
   mkdirSync(hooksDir);
   git(repo, ["config", "core.hooksPath", hooksDir]);
-  git(repo, ["config", "user.email", "test@example.com"]);
-  git(repo, ["config", "user.name", "Test"]);
   writeFileSync(join(repo, "README.md"), "fixture\n", "utf-8");
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "root"]);

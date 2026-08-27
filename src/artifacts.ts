@@ -335,21 +335,72 @@ export function archiveContractReviewAttempt(details: {
   return archived;
 }
 
+/**
+ * Untracked slice spec artifacts, in archive order: the fixed set plus
+ * every round-numbered file the slice actually produced.
+ *
+ * These files live inside the slice worktree and are never committed, so
+ * they exist in exactly one place until something copies them out. That
+ * is why both archive callers — the ESCALATE/STUCK preserve path and the
+ * pre-restart archive (#113) — take the list from here rather than each
+ * naming its own subset and drifting.
+ */
+export function sliceArtifactNames(sliceDir: string): string[] {
+  const rounds = existsSync(sliceDir)
+    ? readdirSync(sliceDir)
+        .filter((name) =>
+          /^(feedback-r\d+|qa-report(-r\d+)?|uat-report(-r\d+)?)\.md$/i.test(
+            name,
+          ),
+        )
+        .sort()
+    : [];
+  return ["contract.md", "context.md", ...rounds, "handoff.md", "stuck.md"];
+}
+
 export function archiveNegotiationArtifacts(
   sliceDir: string,
   archiveDir: string,
 ): void {
   mkdirSync(archiveDir, { recursive: true });
-  const feedbackFiles = existsSync(sliceDir)
-    ? readdirSync(sliceDir)
-        .filter((name) => /^feedback-r\d+\.md$/i.test(name))
-        .sort()
-    : [];
-  const names = ["contract.md", "context.md", ...feedbackFiles, "stuck.md"];
-  for (const name of names) {
+  for (const name of sliceArtifactNames(sliceDir)) {
     const source = join(sliceDir, name);
     if (existsSync(source)) cpSync(source, join(archiveDir, name));
   }
+}
+
+/**
+ * Copy a slice's untracked spec artifacts out of its worktree before a
+ * from-base restart force-resets the branch and recreates the worktree
+ * (#113). Returns the archive directory, or `null` when the slice dir
+ * held nothing worth keeping.
+ *
+ * Archives land in a numbered `pre-restart-<n>` subdirectory of the
+ * slice's usual archive dir, so a second restart cannot overwrite the
+ * first one's copies and neither can clobber an ESCALATE/STUCK archive
+ * sitting alongside them. The index is the next free one on disk — no
+ * clock, so the path is reproducible in tests.
+ */
+export function archiveArtifactsBeforeRestart(
+  repoRoot: string,
+  runSlug: string,
+  sliceNumber: string,
+  sliceDir: string,
+): string | null {
+  const present = sliceArtifactNames(sliceDir).filter((name) =>
+    existsSync(join(sliceDir, name)),
+  );
+  if (present.length === 0) return null;
+
+  const parent = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
+  let index = 1;
+  while (existsSync(join(parent, `pre-restart-${index}`))) index++;
+  const archiveDir = join(parent, `pre-restart-${index}`);
+  mkdirSync(archiveDir, { recursive: true });
+  for (const name of present) {
+    cpSync(join(sliceDir, name), join(archiveDir, name));
+  }
+  return archiveDir;
 }
 
 function displayPath(repoRoot: string, path: string): string {

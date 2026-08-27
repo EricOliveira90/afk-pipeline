@@ -139,10 +139,15 @@ export type RunEventPayload =
        * #49), a locked contract
        * sent back to the planner by the contract-lock gate (ADR 0028),
        * the launch guard fast-forwarding a stale feature branch to
-       * the host worktree's HEAD before any wave dispatches, and a
-       * contract review attempt whose audit copy could not be written.
+       * the host worktree's HEAD before any wave dispatches, a
+       * contract review attempt whose audit copy could not be written,
+       * a from-base restart refused because the slice branch still holds
+       * unmerged commits (#113), and the cancellation record written
+       * the moment a stop signal fires, naming the slices it marked
+       * CANCELLED in run state (#114).
        */
       reason:
+        | "cancellation-requested"
         | "lane-continuation"
         | "infrastructure-retry"
         | "backoff-retry"
@@ -153,7 +158,8 @@ export type RunEventPayload =
         | "resume-stuck"
         | "contract-lock-refused"
         | "contract-review-archive-failed"
-        | "feature-branch-fast-forward";
+        | "feature-branch-fast-forward"
+        | "restart-refused";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

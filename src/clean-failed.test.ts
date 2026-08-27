@@ -43,8 +43,6 @@ function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-clean-"));
   tempDirs.push(dir);
   sh(dir, ["init", "--initial-branch=main"]);
-  sh(dir, ["config", "user.email", "test@example.com"]);
-  sh(dir, ["config", "user.name", "Test"]);
   writeFileSync(join(dir, "README.md"), "root\n", "utf-8");
   sh(dir, ["add", "README.md"]);
   sh(dir, ["commit", "-m", "root"]);

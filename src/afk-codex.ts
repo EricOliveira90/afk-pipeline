@@ -19,6 +19,7 @@ import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runCleanFailedCli } from "./clean-failed.js";
 import { codexProvider } from "./codex.js";
 import { loadAfkManifest } from "./afk-manifest.js";
+import { installCancellationSignals } from "./cancellation.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -208,20 +209,14 @@ async function main() {
     return;
   }
 
-  console.log("Starting pipeline... (Ctrl-C to cancel)\n");
-  const controller = new AbortController();
-  let sigintCount = 0;
-  const onSigint = () => {
-    sigintCount++;
-    if (sigintCount === 1) {
-      console.error("\nReceived SIGINT — cancelling pipeline...");
-      controller.abort();
-    } else {
-      console.error("Second SIGINT — exiting hard.");
-      process.exit(130);
-    }
-  };
-  process.on("SIGINT", onSigint);
+  // A stop signal fires an AbortController: in-flight agent invocations
+  // are killed and unfinished slices are marked CANCELLED in run state.
+  // A second signal exits hard. Which signals count — and why Windows
+  // needs more than SIGINT — is in src/cancellation.ts (#114).
+  const cancellation = installCancellationSignals();
+  console.log(
+    `Starting pipeline... (${cancellation.signals.join(" / ")} to cancel)\n`,
+  );
 
   let result;
   try {
@@ -237,11 +232,11 @@ async function main() {
       manifest: afkManifest,
       provider: codexProvider,
       migrationValidation,
-      signal: controller.signal,
+      signal: cancellation.signal,
       ...runtimeOptions,
     });
   } catch (err) {
-    process.off("SIGINT", onSigint);
+    cancellation.dispose();
     if (err instanceof PipelineError) {
       console.log("\n" + err.partialResult.consoleSummary);
       console.error("\nPipeline aborted by unhandled error:");
@@ -251,7 +246,7 @@ async function main() {
     throw err;
   }
 
-  process.off("SIGINT", onSigint);
+  cancellation.dispose();
 
   console.log("\n" + result.consoleSummary);
 

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  archiveArtifactsBeforeRestart,
   classifyReviewFailure,
   hasStuckFile,
   isFavorableReviewOutcome,
@@ -41,6 +42,98 @@ function withTempFile(content: string, fn: (path: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+
+/**
+ * A from-base restart recreates the slice worktree, so the untracked spec
+ * artifacts under it are the only copy until something copies them out
+ * (#113). The PRD 1 incident lost a LOCKED contract, its operator
+ * amendment, context.md, two feedback rounds and every qa-report this
+ * way, because archiving only ran on ESCALATE/STUCK.
+ */
+describe("archiveArtifactsBeforeRestart (#113)", () => {
+  function makeSliceFixture(names: string[]) {
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-prerestart-"));
+    const sliceDir = join(repoRoot, ".afk", "worktrees", "s01", "slices", "01-demo");
+    mkdirSync(sliceDir, { recursive: true });
+    for (const name of names) writeFileSync(join(sliceDir, name), `# ${name}\n`, "utf-8");
+    return { repoRoot, sliceDir };
+  }
+
+  it("copies out the contract, context, feedback rounds and qa reports", () => {
+    const names = [
+      "contract.md",
+      "context.md",
+      "feedback-r1.md",
+      "feedback-r2.md",
+      "qa-report.md",
+      "uat-report.md",
+      "handoff.md",
+    ];
+    const { repoRoot, sliceDir } = makeSliceFixture(names);
+    try {
+      writeFileSync(join(sliceDir, "contract.md"), "**Status:** LOCKED\n", "utf-8");
+
+      const archiveDir = archiveArtifactsBeforeRestart(
+        repoRoot,
+        "demo-stub",
+        "01",
+        sliceDir,
+      );
+
+      expect(archiveDir).toBe(
+        join(repoRoot, ".afk", "artifacts", "demo-stub", "slice-01", "pre-restart-1"),
+      );
+      // The restart would delete the worktree — prove the archive stands alone.
+      rmSync(sliceDir, { recursive: true, force: true });
+      for (const name of names) {
+        expect(existsSync(join(archiveDir!, name))).toBe(true);
+      }
+      expect(readFileSync(join(archiveDir!, "contract.md"), "utf-8")).toContain(
+        "**Status:** LOCKED",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("numbers each restart so a second one cannot overwrite the first", () => {
+    const { repoRoot, sliceDir } = makeSliceFixture(["contract.md"]);
+    try {
+      writeFileSync(join(sliceDir, "contract.md"), "first\n", "utf-8");
+      const first = archiveArtifactsBeforeRestart(repoRoot, "s", "01", sliceDir)!;
+      writeFileSync(join(sliceDir, "contract.md"), "second\n", "utf-8");
+      const second = archiveArtifactsBeforeRestart(repoRoot, "s", "01", sliceDir)!;
+
+      expect(second).not.toBe(first);
+      expect(readFileSync(join(first, "contract.md"), "utf-8")).toContain("first");
+      expect(readFileSync(join(second, "contract.md"), "utf-8")).toContain("second");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("archives nothing, and creates no directory, for a slice with no artifacts", () => {
+    const { repoRoot, sliceDir } = makeSliceFixture([]);
+    try {
+      expect(archiveArtifactsBeforeRestart(repoRoot, "s", "01", sliceDir)).toBeNull();
+      expect(existsSync(join(repoRoot, ".afk", "artifacts"))).toBe(false);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("tolerates a slice dir that does not exist yet", () => {
+    const { repoRoot } = makeSliceFixture([]);
+    try {
+      expect(
+        archiveArtifactsBeforeRestart(repoRoot, "s", "01", join(repoRoot, "nope")),
+      ).toBeNull();
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("preserveNegotiationFailure", () => {
   function makeFailureFixture() {

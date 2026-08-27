@@ -50,7 +50,15 @@ npx afk-codex --prd-dir .kiro/specs/contacts-crud --slices 01,02,03,04
 npx afk-codex --prd-dir .kiro/specs/contacts-crud --only-failed
 ```
 
-Ctrl-C cancels cleanly: in-flight agents are killed, remaining slices are marked CANCELLED, worktrees are preserved. A second Ctrl-C hard-exits.
+Ctrl-C cancels cleanly: in-flight agents are killed, unfinished slices are
+marked CANCELLED in run state before the wind-down starts, and worktrees are
+preserved. A second stop signal hard-exits.
+
+**Stopping a run on Windows:** use **Ctrl-Break** (or `CTRL_BREAK_EVENT` to
+the run's console group). Windows disables Ctrl-C for a process group created
+with `CREATE_NEW_PROCESS_GROUP`, which is what a detached launch gets, and
+`GenerateConsoleCtrlEvent(CTRL_C_EVENT, ...)` reports success while delivering
+nothing. Ctrl-C still works for a plain foreground launch. See ADR 0040.
 
 ## Input Format
 
@@ -204,7 +212,9 @@ Convenience scripts for your `package.json`:
 
 ## Resumability
 
-State persists in `.afk/state/<run-slug>.json`, where the run slug includes the agent provider for non-Kiro runs. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and failed slices retry from their surviving artifact and git state. A slice whose generator died mid-run resumes from its branch tip; a slice that went STUCK restarts from base unless you opt in with `--resume-stuck` (below).
+State persists in `.afk/state/<run-slug>.json`, where the run slug includes the agent provider for non-Kiro runs. The first non-dry run stores the resolved slice identities. Re-run the same command to resume: completed slices are skipped and failed slices retry from their surviving artifact and git state. A slice whose generator died mid-run resumes from its branch tip; a slice that went STUCK is not resumed unless you opt in with `--resume-stuck` (below).
+
+A retry never force-resets a slice branch that still holds commits ahead of the feature branch. When the only remaining option would be a from-base restart of such a branch — the resume-attempt cap is spent, the worktree vanished, a `stuck.md` is terminal, or the base refresh will not merge cleanly — the slice refuses and reports instead: the branch, its worktree and its untracked artifacts are left byte-identical, the slice ends ERROR, and the run log names the commit count plus the flag that resolves it (`--force-restart` to discard, `--resume-stuck` to keep a preserved diagnosis). A branch already at base restarts silently, as before. Any restart — including `--force-restart` — first copies the slice's untracked spec artifacts to `.afk/artifacts/<run-slug>/slice-<NN>/pre-restart-<n>/`, so a locked contract is recoverable even after the worktree is gone. See ADR 0039.
 
 A retry with no `--slices` argument reuses the persisted scope. A selection that *adds* work outside it is rejected, so a changed manifest or command cannot silently expand the run; a selection that is a strict *subset* of it is allowed and runs narrowed — the persisted scope is left untouched as the run's scope of record, the left-out members are reported as skipped for the reason `narrowed`, and the post-merge reviewer is told to judge only the slices this invocation ran. `--only-failed` is sugar for the common narrowing: it reads the run state and selects the scope members that are not recorded as merged PASS.
 
@@ -214,10 +224,12 @@ A narrowed invocation still honours the DAG. Dependencies are satisfied from the
 
 A slice that exhausts its implementation rounds is declared STUCK, and
 the pipeline writes a `stuck.md` diagnosis into the slice's artifact
-directory. By default that diagnosis is **terminal**: the next run
-restarts the slice from base, discarding its branch and worktree. That is
-the right default — a slice that failed QA three times usually needs a
-renegotiated contract, not another pass at the same code.
+directory. By default that diagnosis is **terminal**: the next run does
+not resume the slice. That is the right default — a slice that failed QA
+three times usually needs a renegotiated contract, not another pass at
+the same code. If the branch holds no commits ahead of the feature
+branch the next run restarts it from base; if it does hold commits, the
+run refuses and asks you to choose (ADR 0039).
 
 When you have read the diagnosis and judged the work worth finishing,
 `--resume-stuck` grants exactly one more implementation/QA attempt on the
@@ -287,7 +299,7 @@ recorded in the PR body and `run-summary.md` (ADR 0015).
 The gate is the decision to open the draft PR, not the `git push` /
 `gh pr create` calls that follow it — those stay best-effort, so a run
 with no `origin` or no `gh` auth still exits 0. There is no
-per-failure-class exit code; a second Ctrl-C still exits 130.
+per-failure-class exit code; a second stop signal still exits 130.
 
 ## Error Handling
 
@@ -304,7 +316,7 @@ per-failure-class exit code; a second Ctrl-C still exits 130.
 | Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
 | Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
 | HITL slice | Skipped entirely |
-| Ctrl-C | In-flight agents killed, remaining → CANCELLED |
+| Ctrl-C (Ctrl-Break on Windows) | Unfinished slices → CANCELLED in run state when the signal fires, in-flight agents killed (ADR 0040) |
 | Pipeline crash | Re-run to resume |
 
 A failed dependency holds its dependents — fix the broken slice and re-run.
