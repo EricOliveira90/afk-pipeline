@@ -897,30 +897,61 @@ describe("base gate observability", () => {
 });
 
 describe("shared-preview QA", () => {
-  it("verifies and applies migrations centrally before remote UAT", async () => {
+  it("keeps deterministic and UAT findings isolated across a UAT retry", async () => {
     const repo = makeRepo();
     const marker = join(repo, "migration-order.txt").replace(/\\/g, "/");
+    const generatorPrompts: string[] = [];
+    const deterministicPrompts: string[] = [];
+    const uatPrompts: string[] = [];
     let artifactDir = "";
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
-        expect(readFileSync(marker, "utf-8")).toBe("verify\napply\n");
-        expect(options.prompt).toContain("Shared-preview UAT only");
+        if (options.role === "generator") {
+          generatorPrompts.push(options.prompt);
+          writeFileSync(
+            join(repo, "change.txt"),
+            `${generatorPrompts.length}\n`,
+            "utf-8",
+          );
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+
+        const isUAT = options.prompt.includes("Shared-preview UAT only");
+        const prompts = isUAT ? uatPrompts : deterministicPrompts;
+        prompts.push(options.prompt);
+        const state = prompts.length === 1 ? "OPEN" : "RESOLVED";
+        const id = isUAT ? "UAT-OPEN" : "QA-ADVISORY";
+        const severity = isUAT ? "BLOCKING" : "ADVISORY";
+        if (isUAT) {
+          expect(readFileSync(marker, "utf-8")).toBe(
+            "verify\napply\n".repeat(uatPrompts.length),
+          );
+        }
         writeFileSync(
-          join(artifactDir, "uat-report.md"),
-          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          join(artifactDir, isUAT ? "uat-report.md" : "qa-report.md"),
+          `# QA Report\n\n**Verdict:** ${isUAT && state === "OPEN" ? "FAIL" : "PASS"}\n`,
           "utf-8",
         );
-        writeFileSync(
-          join(artifactDir, "uat-review.json"),
-          JSON.stringify({
-            version: 1,
-            verdict: "PASS",
-            failureClass: "NONE",
-            infrastructureEvidence: null,
-            findings: [],
-          }),
-          "utf-8",
+        writeQAReview(
+          artifactDir,
+          isUAT ? "shared-preview" : "deterministic",
+          {
+            verdict: isUAT && state === "OPEN" ? "FAIL" : "PASS",
+            findings: [
+              {
+                id,
+                severity,
+                behaviorIds: [],
+                summary: `${id} summary`,
+                evidence: `${id} evidence`,
+                expected: `${id} expected`,
+                observed: `${id} observed`,
+                clearCondition: `${id} condition`,
+                state,
+              },
+            ],
+          },
         );
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -935,28 +966,47 @@ describe("shared-preview QA", () => {
     });
     artifactDir = ctx.absSliceDir;
 
-    await expect(
-      runQAStage(ctx, 1, "shared-preview", []),
-    ).resolves.toMatchObject({
-      outcome: "PASS",
-      report: "specs/slices/01-prd-070-regression/uat-report-r1-a1.md",
-      history: [],
-      unresolved: [],
-    });
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
+    expect(generatorPrompts).toHaveLength(2);
+    expect(deterministicPrompts).toHaveLength(2);
+    expect(uatPrompts).toHaveLength(2);
+
+    expect(generatorPrompts[1]).toContain("UAT-OPEN");
+    expect(generatorPrompts[1]).toContain("UAT-OPEN summary");
+    expect(generatorPrompts[1]).toContain("UAT-OPEN condition");
+    expect(generatorPrompts[1]).toContain("uat-review-r1-a1.json");
+    expect(generatorPrompts[1]).toContain("uat-report-r1-a1.md");
+    expect(generatorPrompts[1]).not.toContain("QA-ADVISORY");
+
+    expect(deterministicPrompts[1]).toContain("QA-ADVISORY");
+    expect(deterministicPrompts[1]).not.toContain("UAT-OPEN");
+    expect(uatPrompts[1]).toContain("UAT-OPEN");
+    expect(uatPrompts[1]).not.toContain("QA-ADVISORY");
+
+    expect(existsSync(join(artifactDir, "qa-report-r1-a1.md"))).toBe(true);
+    expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "uat-report-r1-a1.md"))).toBe(true);
-    expect(
-      existsSync(
-        join(
-          repo,
-          ".afk",
-          "artifacts",
-          "prd-070-stub",
-          "slice-01",
-          "reviews",
-          "uat-review-r1-a1-record.json",
-        ),
-      ),
-    ).toBe(true);
+    expect(existsSync(join(artifactDir, "uat-report-r2-a1.md"))).toBe(true);
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    for (const stage of ["qa", "uat"]) {
+      for (const round of [1, 2]) {
+        expect(
+          existsSync(join(reviewDir, `${stage}-review-r${round}-a1.json`)),
+        ).toBe(true);
+        expect(
+          existsSync(
+            join(reviewDir, `${stage}-review-r${round}-a1-record.json`),
+          ),
+        ).toBe(true);
+      }
+    }
   });
 });
 
