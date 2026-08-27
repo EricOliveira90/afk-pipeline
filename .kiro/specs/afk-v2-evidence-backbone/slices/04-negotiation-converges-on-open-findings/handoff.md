@@ -5,6 +5,7 @@
 - Fresh planner response validation, including post-review contract-lock refusals: `src/contract-review.ts:loadContractResponse` and `src/orchestrator.ts:negotiateAttempt`.
 - Complete evaluator lifecycle dispositions: `src/contract-review.ts:validateRound2ContractReview`.
 - Revision-bound fresh findings, changed-text proof, and terminal-state protection: `src/contract-review.ts:validateRound2ContractReview`.
+- Terminal-state protection across evaluator retries: `src/orchestrator.ts:archiveContractReviewAttempt` and `src/contract-review.ts:validateRound2ContractReview`.
 - Per-attempt lifecycle evidence: `src/contract-review.ts:buildContractReviewAttemptRecord` and `src/orchestrator.ts:archiveContractReviewAttempt`.
 - Impasse and non-convergence outcomes only when unresolved BLOCKING findings remain: `src/contract-review.ts:buildContractNegotiationOutcome` and `src/orchestrator.ts:preserveContractNegotiationFailure`.
 - Hard two-round cap: `src/cli-options.ts:parseMaxContractRounds` and `src/orchestrator.ts:negotiateAttempt`.
@@ -16,12 +17,14 @@
 - A planner response is required in planner round 2 when a prior evaluator review exists, regardless of whether that review returned REVISE or ACCEPT; pre-evaluation mechanical gate retries keep their existing path.
 - Exhaustion outcomes include unresolved BLOCKING findings only; no such finding means no outcome artifact, and any held CONTESTED finding classifies the outcome as IMPASSE.
 - A fresh finding's cited before excerpt must disappear and its after excerpt must be new in the selected artifact snapshot.
+- Round-2 routing validation remains anchored to the round-1 open set, while lifecycle validation uses the latest schema-valid evaluator attempt.
 
 ## Gotchas / learnings
 - A contract-lock refusal can follow an ACCEPT review with an empty routed set; the second planner still writes a fresh response whose responses array is empty.
 - Round-2 planner response freshness depends on deleting the working artifact in the invocation hook immediately before the planner runs.
 - Exact revision citations compare both excerpts across both contract or acceptance-manifest snapshots; unequal prose that existed in both snapshots is insufficient.
 - Contract-lock refusals still consume the same planner budget and evaluator invocation count under the hard cap.
+- A lifecycle-valid evaluator artifact binds later infrastructure retries even when the attempt that wrote it exits unsuccessfully.
 
 ## Status
 Tests passing locally. No regressions.
