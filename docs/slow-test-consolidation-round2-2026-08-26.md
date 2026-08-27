@@ -8,7 +8,8 @@ Starting number of record: **765s** for `pnpm test`, idle machine, commit
 9542cb6, 765 tests passing.
 
 Finishing number: **415.9s** (6m56s), same machine, same 765 tests, budget
-gate green. 410.5s of that is inside the six `test:*` suites.
+gate green. 410.5s of that is inside the six `test:*` suites. A second
+full run measured 442.9s / 437.2s of suite time — see "Variance" below.
 
 | Suite | Round 1 | Round 2 | Change |
 |---|---|---|---|
@@ -100,12 +101,38 @@ those blocks move `main` or observe the absence of refs a sibling would
 create — the two things that make sharing unsafe. The rule is written
 into the block comments so the next reader does not have to re-derive it.
 
+## Variance: measured alone is not measured in the chain
+
+The first cut of the new budgets was red, and the gate was right. It set
+`qa-orchestration` to 46s from a single 35.4s in-chain reading; the next
+full run put the same suite at 51.8s. Run on its own three times it is
+35.3 / 35.8 / 35.8s.
+
+So there are two different numbers, and they differ by much more than the
+5% per-suite noise floor round 1 recorded:
+
+| Suite | alone (3 runs) | in-chain (2 runs) |
+|---|---|---|
+| qa-orchestration | 35.3 / 35.8 / 35.8 | 35.4, 51.8 |
+| resume-integration | 40.8 / 41.5 / 43.1 | 39.8, 48.2 |
+
+Measured alone a suite is stable to about 2%. The same suite inside
+`pnpm test` can land 45% higher — plausibly Windows Defender working
+through the temp repos the earlier suites left behind, though that was
+not chased down.
+
+`scripts/timed-suite.mjs` reads the in-chain number, so that is the one a
+budget has to cover. Use paired alone-runs to *decide* whether a change
+helped, which is what every measurement above does, and the in-chain
+maximum to *set* the budget.
+
 ## The ratchet
 
-`suite-budgets.json` is re-cut ~30% above the new measurements, and
-records both rounds' numbers. It also carries a warning the numbers now
-need: they assume no machine-wide git hook runs. A host that never had
-one was always faster and still meets the budgets.
+`suite-budgets.json` is re-cut ~30% above the slowest observed in-chain
+run, and records both rounds' numbers plus the alone-vs-in-chain gap. It
+also carries a warning the numbers now need: they assume no machine-wide
+git hook runs. A host that never had one was always faster and still
+meets the budgets.
 
 ## Not done
 
