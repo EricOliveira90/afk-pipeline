@@ -58,7 +58,7 @@ preserved. A second stop signal hard-exits.
 the run's console group). Windows disables Ctrl-C for a process group created
 with `CREATE_NEW_PROCESS_GROUP`, which is what a detached launch gets, and
 `GenerateConsoleCtrlEvent(CTRL_C_EVENT, ...)` reports success while delivering
-nothing. Ctrl-C still works for a plain foreground launch. See ADR 0039.
+nothing. Ctrl-C still works for a plain foreground launch. See ADR 0040.
 
 ## Input Format
 
@@ -316,7 +316,7 @@ per-failure-class exit code; a second stop signal still exits 130.
 | Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
 | Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
 | HITL slice | Skipped entirely |
-| Ctrl-C (Ctrl-Break on Windows) | Unfinished slices → CANCELLED in run state when the signal fires, in-flight agents killed (ADR 0039) |
+| Ctrl-C (Ctrl-Break on Windows) | Unfinished slices → CANCELLED in run state when the signal fires, in-flight agents killed (ADR 0040) |
 | Pipeline crash | Re-run to resume |
 
 A failed dependency holds its dependents — fix the broken slice and re-run.

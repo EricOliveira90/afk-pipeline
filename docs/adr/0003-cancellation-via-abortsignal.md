@@ -1,6 +1,6 @@
 # Cancellation via AbortSignal, hard-stop semantics
 
-> Amended by ADR 0039: which signals reach this path (Windows needs
+> Amended by ADR 0040: which signals reach this path (Windows needs
 > `SIGBREAK`, and cannot receive `CTRL_C_EVENT` in a detached process
 > group), and when the cancellation record is written.
 
