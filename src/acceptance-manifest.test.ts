@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseAcceptanceManifest,
   validateAcceptanceManifestCoverage,
+  validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
 
 const validBehavior = {
@@ -201,6 +202,23 @@ describe("acceptance-manifest.json", () => {
     ).toThrow(
       /missing behavior anchors: B-02, P-02; duplicate behavior anchors: B-03/,
     );
+  });
+
+  it("allows gate changes but refuses case-sensitive behavior ID changes", () => {
+    const previous = parseAcceptanceManifest(version2Manifest());
+    const gateChanged = parseAcceptanceManifest(
+      version2Manifest([{ ...validBehavior, gateIds: ["typecheck"] }]),
+    );
+    const idChanged = parseAcceptanceManifest(
+      version2Manifest([{ ...validBehavior, id: "b-01" }]),
+    );
+
+    expect(() =>
+      validateAcceptanceManifestStability(previous, gateChanged),
+    ).not.toThrow();
+    expect(() =>
+      validateAcceptanceManifestStability(previous, idChanged),
+    ).toThrow(/B-01.*b-01/);
   });
 
   it("requires the planner to write the machine declaration beside the contract", () => {

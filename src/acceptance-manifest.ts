@@ -372,6 +372,60 @@ export function validateAcceptanceManifestBindings(
       `non-executable gate IDs: ${[...nonExecutable].sort().join(", ") || "none"}`,
   );
 }
+
+function behaviorEvidenceKey(behavior: AcceptanceBehavior): string {
+  return JSON.stringify([
+    behavior.source,
+    behavior.given,
+    behavior.when,
+    behavior.then,
+    behavior.observableResult,
+    behavior.preservation,
+  ]);
+}
+
+export function validateAcceptanceManifestStability(
+  previous: AcceptanceManifest,
+  current: AcceptanceManifest,
+  source = ACCEPTANCE_MANIFEST_FILENAME,
+): void {
+  if (previous.version !== 2 || current.version !== 2) return;
+
+  const idsByEvidence = (
+    behaviors: readonly AcceptanceBehavior[],
+  ): Map<string, string[]> => {
+    const groups = new Map<string, string[]>();
+    for (const behavior of behaviors) {
+      const key = behaviorEvidenceKey(behavior);
+      groups.set(key, [...(groups.get(key) ?? []), behavior.id]);
+    }
+    return groups;
+  };
+  const previousGroups = idsByEvidence(previous.behaviors);
+  const currentGroups = idsByEvidence(current.behaviors);
+  const transitions: string[] = [];
+
+  for (const [key, previousIds] of previousGroups) {
+    const currentIds = currentGroups.get(key);
+    if (!currentIds) continue;
+    const previousOnly = previousIds
+      .filter((id) => !currentIds.includes(id))
+      .sort();
+    const currentOnly = currentIds
+      .filter((id) => !previousIds.includes(id))
+      .sort();
+    const pairCount = Math.min(previousOnly.length, currentOnly.length);
+    for (let index = 0; index < pairCount; index++) {
+      transitions.push(`${previousOnly[index]} -> ${currentOnly[index]}`);
+    }
+  }
+  if (transitions.length === 0) return;
+
+  throw new Error(
+    `${source} behavior ID stability refused: unchanged behavior renumbered ` +
+      transitions.join(", "),
+  );
+}
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 

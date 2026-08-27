@@ -1740,6 +1740,96 @@ describe("runPipeline summary report", () => {
 
 /** Round feedback must stay separate from the contract specification. */
 describe("round-scoped contract feedback", () => {
+  it("refuses behavior renumbering between adjacent schema-valid outputs", async () => {
+    const repo = makeRepo();
+    const slug = "behavior-id-stability";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9008",
+      title: "Behavior ID stability",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const plannerPrompts: string[] = [];
+    let evaluatorRounds = 0;
+    const ids = ["B-01", "B-02", "B-03"];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerPrompts.push(opts.prompt);
+          const round = plannerPrompts.length;
+          const id = ids[round - 1]!;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            [
+              "# Contract",
+              "",
+              "**Status:** NEGOTIATING",
+              "",
+              "### In scope",
+              `- [behavior:${id}] Stable behavior evidence.`,
+            ].join("\n"),
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir, ["src/example.ts"], [
+            {
+              id,
+              source: "GH #76 AC6",
+              given: "unchanged behavior evidence",
+              when: "the planner emits another schema-valid manifest",
+              then: "the behavior ID remains stable",
+              observableResult: "renumbering is refused",
+              preservation: false,
+              gateIds: round === 1 ? ["missing-gate"] : ["tests"],
+            },
+          ]);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 3,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+    expect(plannerPrompts).toHaveLength(3);
+    expect(plannerPrompts[1]).toContain("missing-gate");
+    expect(plannerPrompts[2]).toContain("B-01");
+    expect(plannerPrompts[2]).toContain("B-02");
+    expect(evaluatorRounds).toBe(0);
+    expect(
+      readdirSync(ctx.absSliceDir).filter((name) =>
+        /^feedback-r\d+\.md$/.test(name),
+      ),
+    ).toEqual([]);
+  });
+
   it("spends planner rounds only for consecutive mechanical refusals", async () => {
     const repo = makeRepo();
     const slug = "mechanical-refusal-rounds";

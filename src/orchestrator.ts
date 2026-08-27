@@ -94,8 +94,10 @@ import {
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
   loadAcceptanceManifest,
+  type AcceptanceManifestV2,
   validateAcceptanceManifestBindings,
   validateAcceptanceManifestCoverage,
+  validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
@@ -1355,6 +1357,7 @@ async function negotiateAttempt(
      * refused after the evaluator had accepted it.
      */
     let gateObjection: string | null = null;
+    let previousSchemaValidManifest: AcceptanceManifestV2 | null = null;
 
     /**
      * Consult the contract-lock gate on a contract that just reached
@@ -1440,6 +1443,13 @@ async function negotiateAttempt(
 
     const loadBehaviorLockArtifacts = () => {
       const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+      if (manifest.version === 2) {
+        const previous = previousSchemaValidManifest;
+        previousSchemaValidManifest = manifest;
+        if (previous) {
+          validateAcceptanceManifestStability(previous, manifest);
+        }
+      }
       validateAcceptanceManifestCoverage(
         readFileSync(contractPath, "utf-8"),
         manifest,
