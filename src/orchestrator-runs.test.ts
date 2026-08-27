@@ -205,6 +205,113 @@ describe("runPipeline per-slice state persistence", () => {
  * kill during slice execution is terminal (no infrastructure retry) and
  * the persisted error points the operator at the remedy.
  */
+/**
+ * Cancellation bookkeeping, written when the stop is *requested* (issue
+ * #114). Observed failure: only CTRL_BREAK_EVENT stopped a live Windows
+ * run, and that exit skipped the abort path — no stop line in run.log and
+ * no run-state entry at all for the slice that was mid-generator. A later
+ * `--only-failed` then saw an unmerged slice branch with no state, which
+ * reads as "never ran" (#113).
+ *
+ * This is a new spawned scenario on purpose (AGENTS.md, "Where a new
+ * assertion goes", case 4): no existing fixture stops mid-slice. The
+ * closest one, "cancellation landed after the last merge but before the
+ * ship gates" in orchestrator.test.ts, cancels when every slice is
+ * already PASS — the state it asserts is the state this bug leaves
+ * empty. The spawn is short: the run stops during the first slice's first
+ * generator round, so no QA, merge or ship gate runs.
+ */
+describe("a cancellation requested mid-slice", () => {
+  const slug = "cancel-midslice";
+  let repo: string;
+  let statePath: string;
+  /** Run state as it stood the instant `abort()` returned. */
+  let atAbort: {
+    slices: Record<string, { phase?: string; branch?: string; error?: string }>;
+  };
+  let finalState: {
+    slices: Record<string, { phase?: string; error?: string }>;
+  };
+  let runLog: string;
+  let result: Awaited<ReturnType<typeof runPipeline>>;
+
+  beforeAll(async () => {
+    repo = makeRepo();
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "8101", title: "In flight", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "8102", title: "Never started", type: "AFK", blockedBy: ["8101"], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["8101", { files: ["src/a.txt"], qaPasses: true, outputFile: "src/a.txt", outputContent: "a" }],
+      ["8102", { files: ["src/b.txt"], qaPasses: true, outputFile: "src/b.txt", outputContent: "b" }],
+    ]);
+    statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+
+    // Stop the run the way an operator does: while 8101's generator is
+    // the in-flight work, and before anything of its own has landed.
+    const controller = new AbortController();
+    const inner = buildStubProvider({ fixtures, slices, records: [] });
+    let snapshot: string | null = null;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator" && snapshot === null) {
+          controller.abort();
+          // Read on the line after abort(): whatever is on disk here is
+          // what a process killed by the stop signal would leave behind.
+          snapshot = existsSync(statePath)
+            ? readFileSync(statePath, "utf-8")
+            : "{}";
+        }
+        return inner.invoke(options);
+      },
+    };
+
+    result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      signal: controller.signal,
+    });
+
+    atAbort = JSON.parse(snapshot ?? "{}");
+    finalState = JSON.parse(readFileSync(statePath, "utf-8"));
+    const logsDir = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(logsDir).find((d) => /^run-\d{8}-\d{6}/.test(d))!;
+    runLog = readFileSync(join(logsDir, runDir, "run.log"), "utf-8");
+  }, 240_000);
+
+  it("has the in-flight slice CANCELLED in run state before the wave unwinds", () => {
+    expect(atAbort.slices["8101"]).toMatchObject({
+      phase: "CANCELLED",
+      error: "Cancelled by user",
+    });
+    // With the branch, so the next run can find the preserved work.
+    expect(atAbort.slices["8101"]?.branch).toBe(
+      `afk-stub/${slug}-slice-01-in-flight`,
+    );
+  });
+
+  it("marks the slice that never started too", () => {
+    expect(atAbort.slices["8102"]?.phase).toBe("CANCELLED");
+  });
+
+  it("writes a stop line to run.log naming what it recorded", () => {
+    expect(runLog).toContain("Cancellation requested");
+    expect(runLog).toMatch(/Cancellation requested — marked CANCELLED[^\n]*#8101/);
+  });
+
+  it("keeps both slices CANCELLED once the run unwinds", () => {
+    expect(finalState.slices["8101"]?.phase).toBe("CANCELLED");
+    expect(finalState.slices["8102"]?.phase).toBe("CANCELLED");
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("wall-clock ceiling configuration (ADR 0019)", () => {
   function makeSingleSliceSetup(slug: string, ghIssue: string) {
     const repo = makeRepo();

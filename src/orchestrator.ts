@@ -94,6 +94,13 @@ import {
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
+/**
+ * Persisted reason on every slice a cancellation stops, whether it was
+ * marked when the signal fired or when its wave unwound (#114). One
+ * string so the two paths cannot drift into two operator-visible reasons
+ * for one stop.
+ */
+const CANCELLED_BY_USER = "Cancelled by user";
 const DEFAULT_INFRASTRUCTURE_RETRIES = 2;
 const DEFAULT_COMMAND_TIMEOUT_MS = 600_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -2144,7 +2151,7 @@ export async function runSliceExecute(
         throw new Error("Base gates produced no evidence");
       }
       if (signal?.aborted) {
-        return { phase: "CANCELLED", error: "Cancelled by user" };
+        return { phase: "CANCELLED", error: CANCELLED_BY_USER };
       }
       const evidenceDisplayPath = gateEvidencePath.replace(/\\/g, "/");
       const requiredInfrastructure = gateEvidence.results.filter(
@@ -2326,7 +2333,7 @@ export async function runSliceExecute(
     };
   } catch (err) {
     if (isCancelled(err, signal)) {
-      return { phase: "CANCELLED", error: "Cancelled by user" };
+      return { phase: "CANCELLED", error: CANCELLED_BY_USER };
     }
     const message = err instanceof Error ? err.message : String(err);
     // A wall-clock ceiling kill is terminal by design, not an
@@ -2399,6 +2406,43 @@ export async function runPipeline(
       implementationRoundLimit: MAX_GENERATOR_ROUNDS,
     },
   );
+  // --- The cancellation record, written when the signal fires (#114).
+  //
+  // The wave loop's cancellation sweep further down only runs once
+  // `runWave` has returned. A stop that ends the process before then — a
+  // second signal, a console close, an agent that will not die — used to
+  // leave the in-flight slice with no run-state entry at all, and no stop
+  // line in run.log. That gap is what makes the next `--only-failed`
+  // dangerous: an unmerged slice branch with no state reads as "never
+  // ran" (#113). So the record is contemporaneous with the *request* to
+  // cancel, not with the wind-down that follows it.
+  //
+  // The slice list is a late-bound hook because the signal can fire
+  // during setup, before the run scope is resolved: until then a
+  // cancellation has no dispatched slice to record, only its own line.
+  // The listener's lifetime is the run's — one `AbortController` per CLI
+  // invocation — and `once` drops it as soon as it fires.
+  let cancellableSlices: () => SliceIdentity[] = () => [];
+  const onCancellationRequested = () => {
+    const marked = logger.markCancelledInFlight(
+      cancellableSlices(),
+      CANCELLED_BY_USER,
+    );
+    const detail =
+      marked.length > 0
+        ? `marked CANCELLED in run state: ${marked.map((id) => `#${id}`).join(", ")}`
+        : "no slice had work in flight";
+    logger.phase(`[afk] Cancellation requested — ${detail}`, "error", {
+      type: "warn",
+      reason: "cancellation-requested",
+      message: `Cancellation requested — ${detail}`,
+    });
+  };
+  if (signal?.aborted) onCancellationRequested();
+  else {
+    signal?.addEventListener("abort", onCancellationRequested, { once: true });
+  }
+
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     withTransientRetry(
       () =>
@@ -2703,6 +2747,20 @@ export async function runPipeline(
     );
   }
 
+  // From here on a cancellation has slices to account for: everything in
+  // this run's DAG that is neither a HITL skip nor already settled. The
+  // hook feeds the abort listener installed at the top of the run (#114);
+  // it reads the live sets, so it is correct at whatever moment the
+  // signal happens to fire.
+  cancellableSlices = () =>
+    [...dag.slices]
+      .filter(([id, slice]) => slice.type !== "HITL" && !completed.has(id) && !failed.has(id))
+      .map(([id, slice]) => ({
+        ghIssue: id,
+        title: slice.title,
+        branch: sliceBranch(prdSlug, slice, provider),
+      }));
+
   // Process DAG level by level.
   //
   // Within a wave, ready siblings can touch the same files even when
@@ -2918,7 +2976,7 @@ export async function runPipeline(
         const branch = sliceBranch(prdSlug, slice, provider);
         logger.recordTerminal(
           { ghIssue: id, title: slice.title, branch },
-          { phase: "CANCELLED", error: "Cancelled by user" },
+          { phase: "CANCELLED", error: CANCELLED_BY_USER },
         );
         failed.add(id);
       }
