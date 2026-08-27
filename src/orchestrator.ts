@@ -112,6 +112,8 @@ import {
   type ContractReview,
   type ContractReviewFinding,
   type RecordedContractVerdict,
+  validateRound1ContractReview,
+  validateRound2ContractReview,
 } from "./contract-review.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
@@ -1930,6 +1932,15 @@ async function negotiateAttempt(
         let review: ContractReview;
         try {
           review = loadContractReview(ctx.absSliceDir);
+          if (evaluatorRound === 1) {
+            validateRound1ContractReview(review);
+          } else if (previousReview && plannerResponse) {
+            validateRound2ContractReview(
+              previousReview,
+              plannerResponse,
+              review,
+            );
+          }
         } catch (error) {
           // The evaluator finished but said nothing the orchestrator can
           // act on. There is no default verdict and no extra round: a

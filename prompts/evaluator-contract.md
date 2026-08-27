@@ -120,6 +120,16 @@ Field rules:
   findings cite changed contract or acceptance-manifest text; round-2
   rules are supplied in the machine-validated review context.
 
+On round 2, disposition every planner response exactly once:
+
+- `UNRESOLVED` stays `OPEN`.
+- `CONDITION_MET` is `RESOLVED` only when you judge its clear-condition
+  met; otherwise it stays `OPEN`.
+- `CONTESTED` is `CONTESTED` when you hold the finding or `WITHDRAWN`
+  when the planner's evidence changes your judgment.
+- Keep the planner's contested evidence in the response artifact and
+  state your independent evidence in the review finding.
+
 Types are checked strictly: a number where a string belongs — including
 inside `behaviorIds` — makes the artifact malformed and fails the slice.
 

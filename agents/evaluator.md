@@ -52,6 +52,10 @@ ACCEPT cannot coexist with an active BLOCKING finding (`OPEN` or
 `CONTESTED`), and REVISE requires at least one. Reuse a finding's `id`
 across rounds while the same gap stands.
 
+In round 2, disposition every routed planner response: unresolved stays
+OPEN; a claimed clear-condition becomes RESOLVED only when observed;
+contested becomes CONTESTED when held or WITHDRAWN when accepted.
+
 Then write the human-readable companion `feedback-rN.md`. It carries no
 verdict marker and no counts; nothing parses it. The orchestrator flips
 **Status:** to LOCKED — never edit Status yourself (ADR 0008).

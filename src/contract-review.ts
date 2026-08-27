@@ -650,3 +650,61 @@ export function openContractReviewFindings(
 ): ContractReviewFinding[] {
   return findings.filter((finding) => finding.state === "OPEN");
 }
+
+/** Round 1 establishes finding identity; no finding is terminal yet. */
+export function validateRound1ContractReview(review: ContractReview): void {
+  const nonOpen = review.findings.filter((finding) => finding.state !== "OPEN");
+  if (nonOpen.length > 0) {
+    throw new Error(
+      `${CONTRACT_REVIEW_FILENAME} round 1 findings must be OPEN: ` +
+        nonOpen.map(({ id }) => id).join(", "),
+    );
+  }
+}
+
+/**
+ * Validate the evaluator's disposition of each routed planner position.
+ * Fresh round-2 IDs are validated separately against revision citations.
+ */
+export function validateRound2ContractReview(
+  previous: ContractReview,
+  response: ContractResponse,
+  current: ContractReview,
+): void {
+  const previousById = new Map(
+    previous.findings.map((finding) => [finding.id, finding]),
+  );
+  const currentById = new Map(
+    current.findings.map((finding) => [finding.id, finding]),
+  );
+  const legalStates: Record<
+    ContractResponsePosition,
+    readonly ContractFindingState[]
+  > = {
+    UNRESOLVED: ["OPEN"],
+    CONDITION_MET: ["OPEN", "RESOLVED"],
+    CONTESTED: ["CONTESTED", "WITHDRAWN"],
+  };
+
+  for (const plannerPosition of response.responses) {
+    const previousFinding = previousById.get(plannerPosition.findingId);
+    if (previousFinding?.state !== "OPEN") {
+      throw new Error(
+        `${CONTRACT_RESPONSE_FILENAME} routed ID ${plannerPosition.findingId} must identify a previous OPEN finding`,
+      );
+    }
+    const disposition = currentById.get(plannerPosition.findingId);
+    if (!disposition) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} round 2 omitted routed finding ${plannerPosition.findingId}`,
+      );
+    }
+    const allowed = legalStates[plannerPosition.position];
+    if (!allowed.includes(disposition.state)) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} finding ${plannerPosition.findingId} with planner position ` +
+          `${plannerPosition.position} must be ${allowed.join(" or ")}, not ${disposition.state}`,
+      );
+    }
+  }
+}

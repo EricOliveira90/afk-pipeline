@@ -17,6 +17,7 @@ import {
   openContractReviewFindings,
   parseContractResponse,
   parseContractReview,
+  validateRound2ContractReview,
   type ContractReview,
   type ContractReviewFinding,
 } from "./contract-review.js";
@@ -634,6 +635,110 @@ describe("parseContractResponse", () => {
         [],
       ),
     ).toThrow(/declares the key "round" more than once/);
+  });
+});
+
+describe("validateRound2ContractReview", () => {
+  function responseFor(
+    position: "UNRESOLVED" | "CONDITION_MET" | "CONTESTED",
+  ) {
+    return parseContractResponse(
+      JSON.stringify({
+        version: 1,
+        round: 2,
+        responses: [
+          {
+            findingId: "F-01",
+            position,
+            evidence: position === "UNRESOLVED" ? "" : "planner evidence",
+          },
+        ],
+      }),
+      ["F-01"],
+    );
+  }
+
+  it("requires one legal evaluator disposition for every planner position", () => {
+    const previous: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        FINDING,
+        { ...FINDING, id: "F-02", clearCondition: "the claim is withdrawn" },
+      ],
+    };
+    const response = parseContractResponse(
+      JSON.stringify({
+        version: 1,
+        round: 2,
+        responses: [
+          {
+            findingId: "F-01",
+            position: "CONDITION_MET",
+            evidence: "the command is now explicit",
+          },
+          {
+            findingId: "F-02",
+            position: "CONTESTED",
+            evidence: "the cited gate already proves the claim",
+          },
+        ],
+      }),
+      ["F-01", "F-02"],
+    );
+    const current: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        { ...FINDING, state: "RESOLVED" },
+        { ...FINDING, id: "F-02", state: "CONTESTED" },
+      ],
+    };
+
+    expect(() =>
+      validateRound2ContractReview(previous, response, current),
+    ).not.toThrow();
+    expect(() =>
+      validateRound2ContractReview(previous, response, {
+        ...current,
+        findings: [
+          current.findings[0]!,
+          { ...current.findings[1]!, state: "OPEN" },
+        ],
+      }),
+    ).toThrow(/F-02.*CONTESTED.*must be CONTESTED or WITHDRAWN/);
+  });
+
+  it.each([
+    ["UNRESOLVED", "OPEN"],
+    ["CONDITION_MET", "OPEN"],
+    ["CONDITION_MET", "RESOLVED"],
+    ["CONTESTED", "CONTESTED"],
+    ["CONTESTED", "WITHDRAWN"],
+  ] as const)("accepts %s -> %s", (position, state) => {
+    const current: ContractReview = {
+      version: 2,
+      verdict:
+        state === "OPEN" || state === "CONTESTED" ? "REVISE" : "ACCEPT",
+      findings: [{ ...FINDING, state }],
+    };
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "REVISE", findings: [FINDING] },
+        responseFor(position),
+        current,
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses an omitted routed finding", () => {
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "REVISE", findings: [FINDING] },
+        responseFor("UNRESOLVED"),
+        { version: 2, verdict: "ACCEPT", findings: [] },
+      ),
+    ).toThrow(/omitted routed finding F-01/);
   });
 });
 

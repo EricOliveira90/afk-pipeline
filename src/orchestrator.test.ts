@@ -2130,20 +2130,19 @@ describe("round-scoped contract feedback", () => {
           writeContractReview(
             artifactDir,
             verdict,
-            verdict === "REVISE"
-              ? [
-                  {
-                    id: "F-01",
-                    severity: "BLOCKING",
-                    behaviorIds: ["B-01"],
-                    evidence: '"it reaches review"',
-                    expected: "a falsifiable observable result",
-                    observed: "an unfalsifiable one",
-                    clearCondition:
-                      "B-01 names a command that fails when the header is absent",
-                  },
-                ]
-              : [],
+            [
+              {
+                id: "F-01",
+                severity: "BLOCKING",
+                behaviorIds: ["B-01"],
+                evidence: '"it reaches review"',
+                expected: "a falsifiable observable result",
+                observed: "an unfalsifiable one",
+                clearCondition:
+                  "B-01 names a command that fails when the header is absent",
+                state: verdict === "REVISE" ? "OPEN" : "RESOLVED",
+              },
+            ],
           );
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -2218,6 +2217,7 @@ describe("round-scoped contract feedback", () => {
             writeContractResponse(
               artifactDir,
               ["F-r1-1", "F-r1-2", "F-r1-3", "F-r1-4"],
+              "CONDITION_MET",
             );
           }
         } else if (opts.role === "evaluator-contract") {
@@ -2226,18 +2226,34 @@ describe("round-scoped contract feedback", () => {
           // expressed by writing fewer blocking findings — and by giving
           // round 2 fresh IDs, since a reused ID is a re-raised gap.
           const gaps = evaluatorRounds === 1 ? 4 : evaluatorRounds === 2 ? 2 : 0;
+          const resolved =
+            evaluatorRounds === 2
+              ? Array.from({ length: 4 }, (_unused, index) => ({
+                  id: `F-r1-${index + 1}`,
+                  severity: "BLOCKING" as const,
+                  behaviorIds: ["B-01"],
+                  evidence: '"it reaches review"',
+                  expected: "a falsifiable observable result",
+                  observed: `round-1 gap ${index + 1} was cleared`,
+                  clearCondition: `gap ${index + 1} names a failing command`,
+                  state: "RESOLVED" as const,
+                }))
+              : [];
           writeContractReview(
             artifactDir,
             gaps === 0 ? "ACCEPT" : "REVISE",
-            Array.from({ length: gaps }, (_unused, index) => ({
-              id: `F-r${evaluatorRounds}-${index + 1}`,
-              severity: "BLOCKING" as const,
-              behaviorIds: ["B-01"],
-              evidence: '"it reaches review"',
-              expected: "a falsifiable observable result",
-              observed: `unfalsifiable gap ${index + 1}`,
-              clearCondition: `gap ${index + 1} names a failing command`,
-            })),
+            [
+              ...resolved,
+              ...Array.from({ length: gaps }, (_unused, index) => ({
+                id: `F-r${evaluatorRounds}-${index + 1}`,
+                severity: "BLOCKING" as const,
+                behaviorIds: ["B-01"],
+                evidence: '"it reaches review"',
+                expected: "a falsifiable observable result",
+                observed: `unfalsifiable gap ${index + 1}`,
+                clearCondition: `gap ${index + 1} names a failing command`,
+              })),
+            ],
           );
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -2645,7 +2661,7 @@ describe("contract review fails closed", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
-          writeContractResponse(artifactDir, ["F-01"]);
+          writeContractResponse(artifactDir, ["F-01"], "CONDITION_MET");
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           writeFileSync(
@@ -2656,6 +2672,21 @@ describe("contract review fails closed", () => {
           writeContractReview(
             artifactDir,
             evaluatorRounds === 1 ? "REVISE" : "ACCEPT",
+            evaluatorRounds === 1
+              ? undefined
+              : [
+                  {
+                    id: "F-01",
+                    severity: "BLOCKING",
+                    behaviorIds: [],
+                    evidence: '"the contract as written"',
+                    expected: "a falsifiable test plan entry",
+                    observed: "the test plan now names a command",
+                    clearCondition:
+                      "the test plan names a command that can fail",
+                    state: "RESOLVED",
+                  },
+                ],
           );
         }
         return { exitCode: 0, stdout: "", stats: {} };
