@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   advanceQAReviewHistory,
+  buildQAReviewAttemptRecord,
   openQAReviewFindings,
   parseQAReview,
   type QAReview,
@@ -364,5 +365,90 @@ describe("openQAReviewFindings", () => {
     expect(openQAReviewFindings(findings).map(({ id }) => id)).toEqual([
       "QA-02",
     ]);
+  });
+});
+
+describe("buildQAReviewAttemptRecord", () => {
+  it("derives unresolved state and artifact references for a valid attempt", () => {
+    const parsed = parseQAReview(
+      review({
+        findings: [
+          { ...FINDING, severity: "ADVISORY" },
+          { ...FINDING, id: "QA-02", state: "RESOLVED" },
+        ],
+      }),
+    );
+
+    expect(
+      buildQAReviewAttemptRecord({
+        stage: "deterministic",
+        round: 2,
+        attempt: 3,
+        review: parsed,
+        canonicalArchivePath:
+          ".afk/artifacts/demo/slice-01/reviews/qa-review-r2-a3.json",
+        markdownArchivePath:
+          "specs/slices/01-demo/qa-report-r2-a3.md",
+      }),
+    ).toEqual({
+      version: 1,
+      stage: "deterministic",
+      round: 2,
+      attempt: 3,
+      verdict: "PASS",
+      failureClass: "NONE",
+      findings: [
+        {
+          id: "QA-01",
+          severity: "ADVISORY",
+          state: "OPEN",
+          unresolved: true,
+          summary: "Canonical verdict is ignored",
+          clearCondition: "A missing JSON artifact ends the slice as ERROR",
+          artifactReferences: [
+            ".afk/artifacts/demo/slice-01/reviews/qa-review-r2-a3.json",
+            "specs/slices/01-demo/qa-report-r2-a3.md",
+          ],
+        },
+        {
+          id: "QA-02",
+          severity: "BLOCKING",
+          state: "RESOLVED",
+          unresolved: false,
+          summary: "Canonical verdict is ignored",
+          clearCondition: "A missing JSON artifact ends the slice as ERROR",
+          artifactReferences: [
+            ".afk/artifacts/demo/slice-01/reviews/qa-review-r2-a3.json",
+            "specs/slices/01-demo/qa-report-r2-a3.md",
+          ],
+        },
+      ],
+    });
+  });
+
+  it("records an infrastructure attempt without findings", () => {
+    const parsed = parseQAReview(
+      review({
+        verdict: "FAIL",
+        failureClass: "INFRASTRUCTURE",
+        infrastructureEvidence: "Preview database unavailable",
+      }),
+    );
+
+    expect(
+      buildQAReviewAttemptRecord({
+        stage: "shared-preview",
+        round: 1,
+        attempt: 2,
+        review: parsed,
+        canonicalArchivePath: "uat-review-r1-a2.json",
+        markdownArchivePath: "uat-report-r1-a2.md",
+      }),
+    ).toMatchObject({
+      stage: "shared-preview",
+      verdict: "FAIL",
+      failureClass: "INFRASTRUCTURE",
+      findings: [],
+    });
   });
 });

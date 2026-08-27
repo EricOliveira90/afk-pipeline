@@ -16,6 +16,12 @@ import {
   type ContractReviewFinding,
   type RecordedContractVerdict,
 } from "./contract-review.js";
+import {
+  QA_REVIEW_FILENAME,
+  UAT_REVIEW_FILENAME,
+  type QAReviewAttemptRecord,
+  type QAReviewStage,
+} from "./qa-review.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
 export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
@@ -347,6 +353,69 @@ export function archiveContractReviewRecord(details: {
   const { archiveDir, record } = details;
   const name =
     `contract-review-r${record.round}-a${record.attempt}-record.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
+}
+
+function qaArchivePrefix(stage: QAReviewStage): "qa" | "uat" {
+  return stage === "deterministic" ? "qa" : "uat";
+}
+
+/** Preserve one evaluator's raw canonical artifact when it exists. */
+export function archiveQAReviewAttempt(details: {
+  sliceDir: string;
+  archiveDir: string;
+  stage: QAReviewStage;
+  round: number;
+  attempt: number;
+}): string | null {
+  const { sliceDir, archiveDir, stage, round, attempt } = details;
+  const prefix = qaArchivePrefix(stage);
+  const sourceName =
+    stage === "deterministic" ? QA_REVIEW_FILENAME : UAT_REVIEW_FILENAME;
+  const source = join(sliceDir, sourceName);
+  if (!existsSync(source)) return null;
+
+  const name = `${prefix}-review-r${round}-a${attempt}.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  cpSync(source, join(archiveDir, name), {
+    errorOnExist: true,
+    force: false,
+  });
+  return name;
+}
+
+/** Preserve named evidence for a missing or refused canonical artifact. */
+export function archiveQAReviewValidation(details: {
+  archiveDir: string;
+  stage: QAReviewStage;
+  round: number;
+  attempt: number;
+  evidence: string;
+}): string {
+  const { archiveDir, stage, round, attempt, evidence } = details;
+  const name =
+    `${qaArchivePrefix(stage)}-review-r${round}-a${attempt}-validation.txt`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${evidence.trimEnd()}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
+}
+
+/** Archive the code-derived lifecycle record beside the raw QA attempt. */
+export function archiveQAReviewRecord(details: {
+  archiveDir: string;
+  record: QAReviewAttemptRecord;
+}): string {
+  const { archiveDir, record } = details;
+  const name =
+    `${qaArchivePrefix(record.stage)}-review-r${record.round}-a${record.attempt}-record.json`;
   mkdirSync(archiveDir, { recursive: true });
   writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
     encoding: "utf-8",

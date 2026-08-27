@@ -12,6 +12,9 @@ import { join } from "node:path";
 import {
   archiveContractReviewRecord,
   archiveArtifactsBeforeRestart,
+  archiveQAReviewAttempt,
+  archiveQAReviewRecord,
+  archiveQAReviewValidation,
   classifyReviewFailure,
   hasStuckFile,
   isFavorableReviewOutcome,
@@ -27,6 +30,7 @@ import type {
   ContractNegotiationOutcome,
   ContractReviewAttemptRecord,
 } from "./contract-review.js";
+import type { QAReviewAttemptRecord } from "./qa-review.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -76,6 +80,131 @@ describe("archiveContractReviewRecord", () => {
         JSON.parse(
           readFileSync(
             join(archiveDir, "contract-review-r2-a3-record.json"),
+            "utf-8",
+          ),
+        ),
+      ).toEqual(record);
+    } finally {
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("canonical QA review archives", () => {
+  it("copies raw QA and UAT attempts under exact stage-specific names", () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-qa-review-source-"));
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-review-archive-"));
+    try {
+      writeFileSync(join(sliceDir, "qa-review.json"), '{"version":1}', "utf-8");
+      writeFileSync(join(sliceDir, "uat-review.json"), '{"version":1}', "utf-8");
+
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "deterministic",
+          round: 2,
+          attempt: 3,
+        }),
+      ).toBe("qa-review-r2-a3.json");
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "shared-preview",
+          round: 1,
+          attempt: 2,
+        }),
+      ).toBe("uat-review-r1-a2.json");
+      expect(
+        readFileSync(join(archiveDir, "qa-review-r2-a3.json"), "utf-8"),
+      ).toBe('{"version":1}');
+      expect(
+        readFileSync(join(archiveDir, "uat-review-r1-a2.json"), "utf-8"),
+      ).toBe('{"version":1}');
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null and creates no raw archive when canonical JSON is missing", () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-qa-review-source-"));
+    const archiveDir = join(sliceDir, "reviews");
+    try {
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+        }),
+      ).toBeNull();
+      expect(existsSync(archiveDir)).toBe(false);
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes validation evidence without inventing a lifecycle record", () => {
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-validation-"));
+    try {
+      expect(
+        archiveQAReviewValidation({
+          archiveDir,
+          stage: "shared-preview",
+          round: 3,
+          attempt: 1,
+          evidence: "uat-review.json is missing",
+        }),
+      ).toBe("uat-review-r3-a1-validation.txt");
+      expect(
+        readFileSync(
+          join(archiveDir, "uat-review-r3-a1-validation.txt"),
+          "utf-8",
+        ),
+      ).toBe("uat-review.json is missing\n");
+      expect(
+        existsSync(join(archiveDir, "uat-review-r3-a1-record.json")),
+      ).toBe(false);
+    } finally {
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a valid lifecycle record under the exact attempt name", () => {
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-record-"));
+    const record: QAReviewAttemptRecord = {
+      version: 1,
+      stage: "deterministic",
+      round: 1,
+      attempt: 1,
+      verdict: "FAIL",
+      failureClass: "IMPLEMENTATION",
+      findings: [
+        {
+          id: "QA-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "Retry needed",
+          clearCondition: "The regression test passes",
+          artifactReferences: [
+            "qa-review-r1-a1.json",
+            "qa-report-r1-a1.md",
+          ],
+        },
+      ],
+    };
+    try {
+      expect(archiveQAReviewRecord({ archiveDir, record })).toBe(
+        "qa-review-r1-a1-record.json",
+      );
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(archiveDir, "qa-review-r1-a1-record.json"),
             "utf-8",
           ),
         ),

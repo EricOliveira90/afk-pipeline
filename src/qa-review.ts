@@ -35,6 +35,28 @@ export interface QAReview {
   findings: QAReviewFinding[];
 }
 
+export type QAReviewStage = "deterministic" | "shared-preview";
+
+export interface QAReviewAttemptFinding {
+  id: string;
+  severity: ContractFindingSeverity;
+  state: QAReviewFindingState;
+  unresolved: boolean;
+  summary: string;
+  clearCondition: string;
+  artifactReferences: string[];
+}
+
+export interface QAReviewAttemptRecord {
+  version: 1;
+  stage: QAReviewStage;
+  round: number;
+  attempt: number;
+  verdict: QAReviewVerdict;
+  failureClass: QAReviewFailureClass;
+  findings: QAReviewAttemptFinding[];
+}
+
 const REVIEW_KEYS = [
   "version",
   "verdict",
@@ -286,4 +308,43 @@ export function openQAReviewFindings(
   findings: readonly QAReviewFinding[],
 ): QAReviewFinding[] {
   return findings.filter((finding) => finding.state === "OPEN");
+}
+
+export function buildQAReviewAttemptRecord(details: {
+  stage: QAReviewStage;
+  round: number;
+  attempt: number;
+  review: QAReview;
+  canonicalArchivePath: string;
+  markdownArchivePath: string;
+}): QAReviewAttemptRecord {
+  const {
+    stage,
+    round,
+    attempt,
+    review,
+    canonicalArchivePath,
+    markdownArchivePath,
+  } = details;
+  const artifactReferences = [
+    canonicalArchivePath.replace(/\\/g, "/"),
+    markdownArchivePath.replace(/\\/g, "/"),
+  ];
+  return {
+    version: 1,
+    stage,
+    round,
+    attempt,
+    verdict: review.verdict,
+    failureClass: review.failureClass,
+    findings: review.findings.map((finding) => ({
+      id: finding.id,
+      severity: finding.severity,
+      state: finding.state,
+      unresolved: finding.state === "OPEN",
+      summary: finding.summary,
+      clearCondition: finding.clearCondition,
+      artifactReferences: [...artifactReferences],
+    })),
+  };
 }
