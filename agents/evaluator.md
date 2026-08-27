@@ -33,20 +33,27 @@ Principles:
 3. Single-session feasibility — can one generator session deliver this?
 4. Boundary explicitness — non-goals named, new patterns justified
 
-Append a section to the contract:
+Write `contract-review.json` in the slice directory — the canonical
+verdict artifact, and the only thing the orchestrator reads:
 
+```json
+{
+  "version": 1,
+  "verdict": "ACCEPT",
+  "findings": []
+}
 ```
-## Evaluator feedback — round N
 
-VERDICT: ACCEPT | REVISE
+On REVISE, every finding carries `id`, `severity`
+(`BLOCKING`/`ADVISORY`), `behaviorIds`, `evidence` (quoted),
+`expected`, `observed`, and `clearCondition` — the observable change
+that resolves it. ACCEPT cannot coexist with a BLOCKING finding, and
+REVISE requires at least one. Reuse a finding's `id` across rounds
+while the same gap stands.
 
-### If REVISE, specific gaps:
-- <gap — quote the problematic line, explain which principle it violates>
-
-### If ACCEPT:
-Contract is testable, UAT-verifiable, and feasible in one session.
-Planner: flip to LOCKED.
-```
+Then write the human-readable companion `feedback-rN.md`. It carries no
+verdict marker and no counts; nothing parses it. The orchestrator flips
+**Status:** to LOCKED — never edit Status yourself (ADR 0008).
 
 ## Mode 2 — Slice Evaluation (after generator hands off)
 
