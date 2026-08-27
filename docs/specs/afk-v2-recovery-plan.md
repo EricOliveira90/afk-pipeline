@@ -96,13 +96,32 @@ every step records numbers before the next is decided.
    diagnosis: relocating pure-function assertions off the
    spawned-pipeline seam, reducing `git worktree add` churn, and
    step 8's concurrency option.
-8. **Concurrent heavy suites: deferred, conditional.** The birpc
-   failure is per-process, so separate vitest processes do escape it —
-   but five processes × 2 workers is the Windows process contention
-   `maxWorkers: 2` exists to bound, and a flaky timeout inside a gate
-   reads as a candidate failure. Revisit only if steps 5 and 7 leave
-   the full suite too slow; trial as a `test` script change with one
-   benchmark run before it ever runs inside a gate.
+7b. **Heavy-suite diagnosis session — DONE (two sessions, 2026-08-26).**
+   Fresh idle baseline 844.4s (857s reference confirmed). Round 1:
+   consolidation (one spawned pipeline per describe block) took it to
+   765s; both anti-compounding guards shipped (`suite-budgets.json`
+   gate at the end of `pnpm test`, AGENTS.md assertion-placement
+   rule). Round 2 found the real wave cost: the machine-wide
+   git-defender `core.hooksPath` ran `post-commit`/`post-checkout`
+   hooks on every fixture git call (~750ms per commit). Hermetic git
+   (`GIT_CONFIG_NOSYSTEM=1` + unreadable `GIT_CONFIG_GLOBAL` in
+   vitest.config.ts) plus env-based committer identity and shared
+   git.test.ts fixtures landed the suite at **421s**. This also
+   explains step 7's null result: hook cost swamped fixture cost.
+   Write-ups: afk repo, `docs/slow-test-consolidation-2026-08-26.md`
+   and `docs/slow-test-consolidation-round2-2026-08-26.md`.
+   Discovery beyond tests: real AFK runs pay the same hook tax —
+   `--no-verify` skips only `pre-commit`/`commit-msg`, so
+   `post-commit` fires on every slice commit and `post-checkout` on
+   every worktree add. Known pipeline overhead, quantified; not
+   bypassed in production (git-defender is credential safety on real
+   repos).
+8. **Concurrent heavy suites: five-way REJECTED (benchmarked
+   2026-08-26).** Three runs against the 844.4s serial baseline:
+   584/706/798s (gains shrank 31% → 5.5%) with one hard flake (qa
+   kill-timing assertion). Two-group concurrency (orchestrator alone
+   vs the rest) remains unmeasured and is only worth revisiting if
+   421s is still too slow; same trial protocol as before.
 9. **No hand-built gate caching.** Tree-identity caching keyed
    `(treeId, command set)` and the related-tests split are PRD 4's
    charter (#86), and the QA-dedup half requires an ADR 0012
