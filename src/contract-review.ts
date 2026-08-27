@@ -176,7 +176,7 @@ const RESPONSE_POSITIONS: readonly string[] = [
   "CONTESTED",
 ];
 
-function requireExactKeys(
+export function requireExactKeys(
   value: Record<string, unknown>,
   expected: readonly string[],
   field: string,
@@ -192,7 +192,7 @@ function requireExactKeys(
   }
 }
 
-function requireNonBlankString(
+export function requireNonBlankString(
   value: unknown,
   field: string,
   source: string,
@@ -220,7 +220,7 @@ type JsonScope = { kind: "object"; keys: Set<string> } | { kind: "array" };
  * it does not need to validate syntax, only to walk strings correctly so
  * a `":"` inside a string value is never mistaken for a key separator.
  */
-function findDuplicateJsonKey(text: string): string | null {
+export function findDuplicateJsonKey(text: string): string | null {
   const scopes: JsonScope[] = [];
   let index = 0;
   while (index < text.length) {
