@@ -99,13 +99,30 @@
     "clean-failed": 17.7,
     "_total": "820.0s of suite time, 883 tests"
   },
+  "_measured2026_08_27_afk_run4_gates": {
+    "_note": [
+      "Three measurements of this same tree inside AFK run 4's gates,",
+      "load rising as agents accumulated: fast 87.5 -> 105.1 -> 130.5s",
+      "(gate r1, gate r2, QA r2's own run) against the 84.8s idle",
+      "baseline and the 110s budget; orchestrator 329.1 -> 382.4s",
+      "against 400. QA r2's 130.5s tripped the fast budget and became a",
+      "blocking Major finding on slice #78 with zero failing tests.",
+      "During an AFK run the resident agents ARE the environment, and",
+      "the budget must cover the in-chain number in that environment:",
+      "fast raised 110 -> 170 (~30% above the 130.5 worst), orchestrator",
+      "400 -> 500 (~30% above 382.4). Operator raise, not a generator",
+      "edit — the ratchet rule reserves this for a recorded measurement."
+    ],
+    "fast": 130.5,
+    "orchestrator": 382.4
+  },
   "suites": {
-    "fast": 110,
-    "orchestrator": 400,
+    "fast": 170,
+    "orchestrator": 500,
     "wave": 295,
     "resume-integration": 152,
     "qa-orchestration": 87,
     "clean-failed": 23
   },
-  "totalSeconds": 1067
+  "totalSeconds": 1227
 }
