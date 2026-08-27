@@ -75,7 +75,10 @@ import {
   type SliceFixture,
 } from "./orchestrator.fixtures.js";
 import { writeAcceptanceManifest } from "./orchestrator.fixtures.js";
-import { writeContractReview } from "./test-support.js";
+import {
+  writeContractResponse,
+  writeContractReview,
+} from "./test-support.js";
 import { readContractStatus } from "./artifacts.js";
 
 /**
@@ -2098,6 +2101,23 @@ describe("round-scoped contract feedback", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 2) {
+            writeFileSync(
+              join(artifactDir, "contract-response.json"),
+              JSON.stringify({
+                version: 1,
+                round: 2,
+                responses: [
+                  {
+                    findingId: "F-01",
+                    position: "CONDITION_MET",
+                    evidence: "B-01 now names the failing command",
+                  },
+                ],
+              }),
+              "utf-8",
+            );
+          }
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           evaluatorPrompts.push(opts.prompt);
@@ -2158,6 +2178,7 @@ describe("round-scoped contract feedback", () => {
     );
     expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
+    expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
 
     const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
     expect(contract).toMatch(/^\*\*Status:\*\*\s*LOCKED\s*$/m);
@@ -2193,6 +2214,12 @@ describe("round-scoped contract feedback", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 2) {
+            writeContractResponse(
+              artifactDir,
+              ["F-r1-1", "F-r1-2", "F-r1-3", "F-r1-4"],
+            );
+          }
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           // Gap counts are derived from the findings, so convergence is
@@ -2618,6 +2645,7 @@ describe("contract review fails closed", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          writeContractResponse(artifactDir, ["F-01"]);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           writeFileSync(
@@ -2796,6 +2824,7 @@ describe("contract review fails closed", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          writeContractResponse(artifactDir, ["F-01"]);
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           // Round 1 leaves a REVISE behind; round 2 writes nothing at
@@ -2833,6 +2862,92 @@ describe("contract review fails closed", () => {
       /contract-review\.json is missing/,
     );
     expect(evaluatorRounds).toBe(2);
+  });
+
+  // This needs its own run: the required state is a stale planner
+  // artifact followed by a successful planner invocation that writes no
+  // replacement, and success means the evaluator is not invoked.
+  it("deletes a stale planner response and stops before round-2 evaluation", async () => {
+    const repo = makeRepo();
+    const slug = "response-freshness";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9104",
+      title: "Response freshness",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          writeContractReview(
+            artifactDir,
+            evaluatorRounds === 1 ? "REVISE" : "ACCEPT",
+          );
+          if (evaluatorRounds === 1) {
+            writeFileSync(
+              join(artifactDir, "contract-response.json"),
+              JSON.stringify({
+                version: 1,
+                round: 2,
+                responses: [
+                  {
+                    findingId: "F-01",
+                    position: "UNRESOLVED",
+                    evidence: "",
+                  },
+                ],
+              }),
+              "utf-8",
+            );
+          }
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /contract-response\.json is missing/,
+    );
+    expect(evaluatorRounds).toBe(1);
   });
 });
 

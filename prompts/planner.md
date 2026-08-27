@@ -122,6 +122,10 @@ reading first. Never create a GitHub issue. Then rewrite
 `{{SLICE_DIR}}/contract.md` as a concise specification (target: about 60
 lines), not an accumulated review transcript:
 
+## Negotiation response
+
+{{CONTRACT_RESPONSE_NOTE}}
+
 ```
 # Slice Contract — <slice name>
 

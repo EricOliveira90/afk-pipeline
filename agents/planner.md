@@ -131,6 +131,11 @@ Max **2 rounds**. After round 2, escalate to human.
 - Round 2: evaluator either ACCEPTs or escalates.
 - On ACCEPT, you flip `Status: LOCKED`. Contract is frozen.
 
+On round 2, write `contract-response.json` with exactly one
+`UNRESOLVED`, `CONDITION_MET`, or `CONTESTED` position per routed
+finding ID. Include non-blank evidence for `CONDITION_MET` and
+`CONTESTED`; the orchestrator deletes stale output before invoking you.
+
 # Rules
 
 - **Scope is sacred.** Once LOCKED, you are the only agent who can amend

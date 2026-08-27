@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const CONTRACT_REVIEW_FILENAME = "contract-review.json";
+export const CONTRACT_RESPONSE_FILENAME = "contract-response.json";
 
 /**
  * The only verdicts the contract review can carry. `ESCALATE` is gone:
@@ -75,6 +76,23 @@ export interface ContractReview {
   findings: ContractReviewFinding[];
 }
 
+export type ContractResponsePosition =
+  | "UNRESOLVED"
+  | "CONDITION_MET"
+  | "CONTESTED";
+
+export interface ContractResponseEntry {
+  findingId: string;
+  position: ContractResponsePosition;
+  evidence: string;
+}
+
+export interface ContractResponse {
+  version: 1;
+  round: 2;
+  responses: ContractResponseEntry[];
+}
+
 /** Root keys the artifact must carry, and nothing else. */
 const REVIEW_KEYS = ["version", "verdict", "findings"] as const;
 
@@ -117,6 +135,13 @@ const CITATION_ARTIFACTS: readonly string[] = [
   "acceptance-manifest.json",
 ];
 const CITATION_KEYS = ["artifact", "before", "after"] as const;
+const RESPONSE_KEYS = ["version", "round", "responses"] as const;
+const RESPONSE_ENTRY_KEYS = ["findingId", "position", "evidence"] as const;
+const RESPONSE_POSITIONS: readonly string[] = [
+  "UNRESOLVED",
+  "CONDITION_MET",
+  "CONTESTED",
+];
 
 function requireExactKeys(
   value: Record<string, unknown>,
@@ -415,6 +440,110 @@ export function parseContractReview(
   return { version: 2, verdict, findings };
 }
 
+/**
+ * Parse the planner's round-2 positions and verify that their IDs equal
+ * the routed OPEN set. Response order is presentation; identity is the
+ * control boundary.
+ */
+export function parseContractResponse(
+  text: string,
+  routedFindingIds: readonly string[],
+  source = CONTRACT_RESPONSE_FILENAME,
+): ContractResponse {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `${source} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const duplicateKey = findDuplicateJsonKey(text);
+  if (duplicateKey !== null) {
+    throw new Error(
+      `${source} declares the key "${duplicateKey}" more than once in one object`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${source} must contain a JSON object`);
+  }
+  const input = parsed as Record<string, unknown>;
+  requireExactKeys(input, RESPONSE_KEYS, "root object", source);
+  if (input.version !== 1) {
+    throw new Error(`${source} must declare version 1`);
+  }
+  if (input.round !== 2) {
+    throw new Error(`${source} must declare round 2`);
+  }
+  if (!Array.isArray(input.responses)) {
+    throw new Error(`${source} responses must be an array`);
+  }
+
+  const responses = input.responses.map((raw, index) => {
+    const field = `responses[${index}] response`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`${source} ${field} must be an object`);
+    }
+    const response = raw as Record<string, unknown>;
+    requireExactKeys(response, RESPONSE_ENTRY_KEYS, field, source);
+    const findingId = requireNonBlankString(
+      response.findingId,
+      `${field} findingId`,
+      source,
+    );
+    if (
+      typeof response.position !== "string" ||
+      !RESPONSE_POSITIONS.includes(response.position)
+    ) {
+      throw new Error(
+        `${source} ${field} position must be ${RESPONSE_POSITIONS.join(", ")}`,
+      );
+    }
+    if (typeof response.evidence !== "string") {
+      throw new Error(`${source} ${field} evidence must be a string`);
+    }
+    if (
+      response.position !== "UNRESOLVED" &&
+      response.evidence.trim() === ""
+    ) {
+      throw new Error(
+        `${source} ${field} evidence must be non-blank for ${response.position}`,
+      );
+    }
+    return {
+      findingId,
+      position: response.position as ContractResponsePosition,
+      evidence: response.evidence,
+    };
+  });
+
+  const responseIds = responses.map((response) => response.findingId);
+  const duplicate = responseIds.find(
+    (id, index) => responseIds.indexOf(id) !== index,
+  );
+  if (duplicate !== undefined) {
+    throw new Error(
+      `${source} response IDs must be unique; duplicate "${duplicate}"`,
+    );
+  }
+  const routed = new Set(routedFindingIds);
+  const actual = new Set(responseIds);
+  const missing = routedFindingIds.filter((id) => !actual.has(id));
+  const unexpected = responseIds.filter((id) => !routed.has(id));
+  if (missing.length > 0 || unexpected.length > 0) {
+    const details = [
+      missing.length > 0 ? `missing ${missing.join(", ")}` : "",
+      unexpected.length > 0 ? `unexpected ${unexpected.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("; ");
+    throw new Error(
+      `${source} response IDs must equal routed finding IDs (${details})`,
+    );
+  }
+  return { version: 1, round: 2, responses };
+}
+
 export function contractReviewPath(sliceDir: string): string {
   return join(sliceDir, CONTRACT_REVIEW_FILENAME);
 }
@@ -430,6 +559,21 @@ export function loadContractReview(sliceDir: string): ContractReview {
     throw new Error(`${path} is missing`);
   }
   return parseContractReview(readFileSync(path, "utf-8"), path);
+}
+
+export function loadContractResponse(
+  sliceDir: string,
+  routedFindingIds: readonly string[],
+): ContractResponse {
+  const path = join(sliceDir, CONTRACT_RESPONSE_FILENAME);
+  if (!existsSync(path)) {
+    throw new Error(`${path} is missing`);
+  }
+  return parseContractResponse(
+    readFileSync(path, "utf-8"),
+    routedFindingIds,
+    path,
+  );
 }
 
 export interface ContractReviewGapMetrics {

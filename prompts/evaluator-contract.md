@@ -64,6 +64,12 @@ Derived baseline gate catalog:
 {{BASE_GATE_CATALOG}}
 ```
 
+Planner response:
+
+```json
+{{PLANNER_RESPONSE}}
+```
+
 # Task
 
 Read `{{SLICE_DIR}}/contract.md` and judge the manifest's scenario

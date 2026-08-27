@@ -15,6 +15,7 @@ import {
   formatContractReviewFindings,
   loadContractReview,
   openContractReviewFindings,
+  parseContractResponse,
   parseContractReview,
   type ContractReview,
   type ContractReviewFinding,
@@ -541,6 +542,98 @@ describe("openContractReviewFindings", () => {
       "F-OPEN-1",
       "F-OPEN-2",
     ]);
+  });
+});
+
+describe("parseContractResponse", () => {
+  function response(
+    responses: Array<Record<string, unknown>>,
+    overrides: Record<string, unknown> = {},
+  ): string {
+    return JSON.stringify({ version: 1, round: 2, responses, ...overrides });
+  }
+
+  it("requires exactly one valid round-2 position per routed finding", () => {
+    const text = JSON.stringify({
+      version: 1,
+      round: 2,
+      responses: [
+        { findingId: "F-01", position: "UNRESOLVED", evidence: "" },
+        {
+          findingId: "F-02",
+          position: "CONDITION_MET",
+          evidence: "contract.md now names the failing command",
+        },
+        {
+          findingId: "F-03",
+          position: "CONTESTED",
+          evidence: "the cited gate already proves the behavior",
+        },
+      ],
+    });
+
+    expect(parseContractResponse(text, ["F-01", "F-02", "F-03"])).toEqual({
+      version: 1,
+      round: 2,
+      responses: [
+        { findingId: "F-01", position: "UNRESOLVED", evidence: "" },
+        {
+          findingId: "F-02",
+          position: "CONDITION_MET",
+          evidence: "contract.md now names the failing command",
+        },
+        {
+          findingId: "F-03",
+          position: "CONTESTED",
+          evidence: "the cited gate already proves the behavior",
+        },
+      ],
+    });
+  });
+
+  it("refuses duplicate response IDs", () => {
+    expect(() =>
+      parseContractResponse(
+        response([
+          { findingId: "F-01", position: "UNRESOLVED", evidence: "" },
+          { findingId: "F-01", position: "UNRESOLVED", evidence: "" },
+        ]),
+        ["F-01"],
+      ),
+    ).toThrow(/response IDs must be unique; duplicate "F-01"/);
+  });
+
+  it("refuses missing and unexpected routed IDs", () => {
+    expect(() =>
+      parseContractResponse(
+        response([
+          { findingId: "F-01", position: "UNRESOLVED", evidence: "" },
+          { findingId: "F-03", position: "UNRESOLVED", evidence: "" },
+        ]),
+        ["F-01", "F-02"],
+      ),
+    ).toThrow(/missing F-02; unexpected F-03/);
+  });
+
+  it.each(["CONDITION_MET", "CONTESTED"])(
+    "requires evidence for %s",
+    (position) => {
+      expect(() =>
+        parseContractResponse(
+          response([{ findingId: "F-01", position, evidence: " " }]),
+          ["F-01"],
+        ),
+      ).toThrow(new RegExp(`evidence must be non-blank for ${position}`));
+    },
+  );
+
+  it("refuses duplicate JSON keys before parsing positions", () => {
+    expect(() =>
+      parseContractResponse(
+        '{"version":1,"round":2,"round":2,"responses":[]}',
+        [],
+      ),
+    ).toThrow(/declares the key "round" more than once/);
   });
 });
 

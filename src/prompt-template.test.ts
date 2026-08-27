@@ -26,6 +26,7 @@ describe("renderPrompt", () => {
       SLICE_BODY: "Local issue body",
       MIGRATION_RESERVATION: "No claim yet",
       BASE_GATE_CATALOG: "- tests: pnpm run test:run",
+      CONTRACT_RESPONSE_NOTE: "Write contract-response.json",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).not.toContain("{{");
@@ -96,6 +97,7 @@ describe("renderPrompt", () => {
         SLICE_BODY: "Fetch with gh",
         MIGRATION_RESERVATION: "No claim yet",
         BASE_GATE_CATALOG: "- tests: pnpm run test:run",
+        CONTRACT_RESPONSE_NOTE: "Do not write contract-response.json",
       }),
     ).toContain("- tests: pnpm run test:run");
     expect(
@@ -108,6 +110,7 @@ describe("renderPrompt", () => {
         ACCEPTANCE_MANIFEST: '{"version":2}',
         BASE_GATE_CATALOG: "- tests: pnpm run test",
         CONTRACT_REVIEW_FILE: "contract-review.json",
+        PLANNER_RESPONSE: "(first review round; no planner response)",
       }),
     ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();

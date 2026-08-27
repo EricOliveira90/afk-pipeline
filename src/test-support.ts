@@ -1,7 +1,9 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
+  type ContractResponsePosition,
   type ContractReviewFinding,
   type ContractReviewVerdict,
 } from "./contract-review.js";
@@ -49,6 +51,33 @@ export function writeContractReview(
   writeFileSync(
     join(sliceDir, CONTRACT_REVIEW_FILENAME),
     JSON.stringify({ version: 2, verdict, findings: resolved }, null, 2),
+    "utf-8",
+  );
+}
+
+export function writeContractResponse(
+  sliceDir: string,
+  findingIds: readonly string[],
+  position: ContractResponsePosition = "UNRESOLVED",
+): void {
+  writeFileSync(
+    join(sliceDir, CONTRACT_RESPONSE_FILENAME),
+    JSON.stringify(
+      {
+        version: 1,
+        round: 2,
+        responses: findingIds.map((findingId) => ({
+          findingId,
+          position,
+          evidence:
+            position === "UNRESOLVED"
+              ? ""
+              : `planner evidence for ${findingId}`,
+        })),
+      },
+      null,
+      2,
+    ),
     "utf-8",
   );
 }

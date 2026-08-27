@@ -101,11 +101,14 @@ import {
   validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
 import {
+  CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
   contractReviewGapMetrics,
   formatContractReviewFindings,
+  loadContractResponse,
   loadContractReview,
   openContractReviewFindings,
+  type ContractResponse,
   type ContractReview,
   type ContractReviewFinding,
   type RecordedContractVerdict,
@@ -1080,14 +1083,26 @@ function negotiateVerdictCause(args: {
  * summary names the artifact and the defect instead of a verdict, and the
  * slice stops where it is.
  */
-function reviewArtifactCause(defect: string): NegotiateFailureCause {
+function negotiationArtifactCause(
+  role: "planner" | "evaluator-contract",
+  label: string,
+  defect: string,
+): NegotiateFailureCause {
   return {
     kind: "review-artifact",
-    role: "evaluator-contract",
+    role,
     summary:
-      `negotiate: the contract review artifact was refused, so no verdict ` +
+      `negotiate: the ${label} artifact was refused, so no verdict ` +
       `was reached — ${defect}`,
   };
+}
+
+function reviewArtifactCause(defect: string): NegotiateFailureCause {
+  return negotiationArtifactCause(
+    "evaluator-contract",
+    "contract review",
+    defect,
+  );
 }
 
 /** A throw from the pipeline itself, with no dead invocation behind it. */
@@ -1553,6 +1568,7 @@ async function negotiateAttempt(
      */
     let previousReview: ContractReview | null = null;
     let lastFindings: readonly ContractReviewFinding[] = [];
+    let plannerResponse: ContractResponse | null = null;
     const reviewArchiveDir = artifacts.contractReviewArchiveDir(
       config.repoRoot,
       pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
@@ -1705,6 +1721,10 @@ async function negotiateAttempt(
         // below misattribute that REVISE to the gate.
         const pendingObjection = gateObjection;
         gateObjection = null;
+        const routedFindings =
+          round === 2 ? openContractReviewFindings(lastFindings) : [];
+        const requiresPlannerResponse =
+          round === 2 && lastVerdict === "REVISE";
 
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
@@ -1731,6 +1751,15 @@ async function negotiateAttempt(
               RELEVANT_FILES: relevantFilesBlock,
               SLICE_BODY: sliceBodyNote,
               REVISION_NOTE: revisionNote(pendingObjection),
+              CONTRACT_RESPONSE_NOTE: requiresPlannerResponse
+                ? [
+                    `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
+                    "Use exactly this schema:",
+                    '{"version":1,"round":2,"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}',
+                    `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
+                    "CONDITION_MET and CONTESTED require non-blank evidence.",
+                  ].join("\n")
+                : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`,
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
               // The planner must bind every behavior to a gate the
               // lock gate can verify, so it is told the same derived
@@ -1744,6 +1773,14 @@ async function negotiateAttempt(
             maxDurationMs: config.maxAgentDurationMs,
           },
           () => logger.agentLog(slice.number, "planner", round),
+          requiresPlannerResponse
+            ? () => {
+                rmSync(
+                  join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
+                  { force: true },
+                );
+              }
+            : undefined,
         );
         logger.event({
           type: "phase-ended",
@@ -1796,6 +1833,33 @@ async function negotiateAttempt(
           return { phase: "ESCALATE", cause };
         }
 
+        plannerResponse = null;
+        if (requiresPlannerResponse) {
+          try {
+            plannerResponse = loadContractResponse(
+              ctx.absSliceDir,
+              routedFindings.map(({ id }) => id),
+            );
+          } catch (error) {
+            const defect =
+              error instanceof Error ? error.message : String(error);
+            const cause = negotiationArtifactCause(
+              "planner",
+              "contract response",
+              defect,
+            );
+            logger.phase(`${ctx.tag}: ${cause.summary}`, "error", {
+              type: "phase-ended",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              agent: "planner",
+              round,
+              verdict: "NONE",
+            });
+            return { phase: "ERROR", cause };
+          }
+        }
+
         evaluatorRound++;
         logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
@@ -1831,6 +1895,9 @@ async function negotiateAttempt(
               ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
               BASE_GATE_CATALOG: baseGateCatalogBlock,
               CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
+              PLANNER_RESPONSE: plannerResponse
+                ? JSON.stringify(plannerResponse, null, 2)
+                : "(first review round; no planner response)",
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
