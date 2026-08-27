@@ -740,6 +740,151 @@ describe("validateRound2ContractReview", () => {
       ),
     ).toThrow(/omitted routed finding F-01/);
   });
+
+  it("refuses terminal reactivation and uncited fresh findings", () => {
+    const noResponses = parseContractResponse(
+      '{"version":1,"round":2,"responses":[]}',
+      [],
+    );
+    const terminalPrevious: ContractReview = {
+      version: 2,
+      verdict: "ACCEPT",
+      findings: [{ ...FINDING, state: "RESOLVED" }],
+    };
+    const activeCurrent: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [FINDING],
+    };
+    const revisions = {
+      "contract.md": {
+        before: "old contract text",
+        after: "new contract text",
+      },
+      "acceptance-manifest.json": {
+        before: '{"observableResult":"old"}',
+        after: '{"observableResult":"new"}',
+      },
+    };
+
+    expect(() =>
+      validateRound2ContractReview(
+        terminalPrevious,
+        noResponses,
+        activeCurrent,
+        revisions,
+      ),
+    ).toThrow(/terminal finding F-01 cannot reactivate as OPEN/);
+
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "ACCEPT", findings: [] },
+        noResponses,
+        {
+          version: 2,
+          verdict: "REVISE",
+          findings: [{ ...FINDING, id: "F-FRESH" }],
+        },
+        revisions,
+      ),
+    ).toThrow(/fresh finding F-FRESH requires a revisionCitation/);
+  });
+
+  it("accepts only exact unequal revision excerpts for a fresh OPEN ID", () => {
+    const previous: ContractReview = {
+      version: 2,
+      verdict: "ACCEPT",
+      findings: [],
+    };
+    const response = parseContractResponse(
+      '{"version":1,"round":2,"responses":[]}',
+      [],
+    );
+    const revisions = {
+      "contract.md": {
+        before: "The old observable is absent.",
+        after: "The new observable is explicit.",
+      },
+      "acceptance-manifest.json": {
+        before: '{"observableResult":"old"}',
+        after: '{"observableResult":"new"}',
+      },
+    };
+    const fresh = {
+      ...FINDING,
+      id: "F-FRESH",
+      revisionCitation: {
+        artifact: "contract.md" as const,
+        before: "old observable",
+        after: "new observable",
+      },
+    };
+
+    expect(() =>
+      validateRound2ContractReview(
+        previous,
+        response,
+        { version: 2, verdict: "REVISE", findings: [fresh] },
+        revisions,
+      ),
+    ).not.toThrow();
+
+    for (const [label, revisionCitation, expected] of [
+      [
+        "unchanged",
+        { ...fresh.revisionCitation, after: "old observable" },
+        /before and after must differ/,
+      ],
+      [
+        "prior mismatch",
+        { ...fresh.revisionCitation, before: "missing prior text" },
+        /before does not match prior contract\.md/,
+      ],
+      [
+        "current mismatch",
+        { ...fresh.revisionCitation, after: "missing current text" },
+        /after does not match current contract\.md/,
+      ],
+    ] as const) {
+      expect(
+        () =>
+          validateRound2ContractReview(
+            previous,
+            response,
+            {
+              version: 2,
+              verdict: "REVISE",
+              findings: [{ ...fresh, revisionCitation }],
+            },
+            revisions,
+          ),
+        label,
+      ).toThrow(expected);
+    }
+  });
+
+  it("requires familiar IDs to carry a null revision citation", () => {
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "REVISE", findings: [FINDING] },
+        responseFor("UNRESOLVED"),
+        {
+          version: 2,
+          verdict: "REVISE",
+          findings: [
+            {
+              ...FINDING,
+              revisionCitation: {
+                artifact: "contract.md",
+                before: "old",
+                after: "new",
+              },
+            },
+          ],
+        },
+      ),
+    ).toThrow(/familiar finding F-01 must use revisionCitation null/);
+  });
 });
 
 /**

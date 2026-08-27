@@ -37,6 +37,11 @@ export interface ContractRevisionCitation {
   after: string;
 }
 
+export type ContractRevisionArtifacts = Record<
+  ContractRevisionCitation["artifact"],
+  { before: string; after: string }
+>;
+
 export interface ContractReviewFinding {
   /**
    * Stable identifier for this gap. The evaluator reuses the same ID in
@@ -670,6 +675,7 @@ export function validateRound2ContractReview(
   previous: ContractReview,
   response: ContractResponse,
   current: ContractReview,
+  revisions?: ContractRevisionArtifacts,
 ): void {
   const previousById = new Map(
     previous.findings.map((finding) => [finding.id, finding]),
@@ -704,6 +710,61 @@ export function validateRound2ContractReview(
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} finding ${plannerPosition.findingId} with planner position ` +
           `${plannerPosition.position} must be ${allowed.join(" or ")}, not ${disposition.state}`,
+      );
+    }
+  }
+
+  for (const finding of current.findings) {
+    const previousFinding = previousById.get(finding.id);
+    if (previousFinding) {
+      if (finding.revisionCitation !== null) {
+        throw new Error(
+          `${CONTRACT_REVIEW_FILENAME} familiar finding ${finding.id} must use revisionCitation null`,
+        );
+      }
+      const wasTerminal =
+        previousFinding.state === "RESOLVED" ||
+        previousFinding.state === "WITHDRAWN";
+      const isActive =
+        finding.state === "OPEN" || finding.state === "CONTESTED";
+      if (wasTerminal && isActive) {
+        throw new Error(
+          `${CONTRACT_REVIEW_FILENAME} terminal finding ${finding.id} cannot reactivate as ${finding.state}`,
+        );
+      }
+      continue;
+    }
+
+    if (finding.state !== "OPEN") {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} must be OPEN`,
+      );
+    }
+    const citation = finding.revisionCitation;
+    if (!citation) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} requires a revisionCitation`,
+      );
+    }
+    if (citation.before === citation.after) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before and after must differ`,
+      );
+    }
+    const artifact = revisions?.[citation.artifact];
+    if (!artifact) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} cannot validate revisionCitation without revision artifacts`,
+      );
+    }
+    if (!artifact.before.includes(citation.before)) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before does not match prior ${citation.artifact}`,
+      );
+    }
+    if (!artifact.after.includes(citation.after)) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation after does not match current ${citation.artifact}`,
       );
     }
   }

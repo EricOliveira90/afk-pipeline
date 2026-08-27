@@ -111,6 +111,7 @@ describe("renderPrompt", () => {
         BASE_GATE_CATALOG: "- tests: pnpm run test",
         CONTRACT_REVIEW_FILE: "contract-review.json",
         PLANNER_RESPONSE: "(first review round; no planner response)",
+        REVISION_CONTEXT: "(first review round; no prior revision)",
       }),
     ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();

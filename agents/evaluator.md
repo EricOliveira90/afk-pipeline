@@ -55,6 +55,10 @@ across rounds while the same gap stands.
 In round 2, disposition every routed planner response: unresolved stays
 OPEN; a claimed clear-condition becomes RESOLVED only when observed;
 contested becomes CONTESTED when held or WITHDRAWN when accepted.
+Only revision-changed contract or acceptance-manifest text can justify a
+fresh round-2 ID; copy exact unequal before/after excerpts into its
+`revisionCitation`. Familiar IDs use `null`, and terminal IDs never
+reactivate.
 
 Then write the human-readable companion `feedback-rN.md`. It carries no
 verdict marker and no counts; nothing parses it. The orchestrator flips

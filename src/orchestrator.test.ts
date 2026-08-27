@@ -2213,7 +2213,19 @@ describe("round-scoped contract feedback", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 1) {
+            writeFileSync(
+              join(artifactDir, "contract.md"),
+              "# Contract\n\n**Status:** NEGOTIATING\n\nRound 1\n",
+              "utf-8",
+            );
+          }
           if (plannerRounds === 2) {
+            writeFileSync(
+              join(artifactDir, "contract.md"),
+              "# Contract\n\n**Status:** NEGOTIATING\n\nRound 2\n",
+              "utf-8",
+            );
             writeContractResponse(
               artifactDir,
               ["F-r1-1", "F-r1-2", "F-r1-3", "F-r1-4"],
@@ -2252,6 +2264,14 @@ describe("round-scoped contract feedback", () => {
                 expected: "a falsifiable observable result",
                 observed: `unfalsifiable gap ${index + 1}`,
                 clearCondition: `gap ${index + 1} names a failing command`,
+                revisionCitation:
+                  evaluatorRounds === 2
+                    ? {
+                        artifact: "contract.md" as const,
+                        before: "Round 1",
+                        after: "Round 2",
+                      }
+                    : null,
               })),
             ],
           );

@@ -109,6 +109,7 @@ import {
   loadContractReview,
   openContractReviewFindings,
   type ContractResponse,
+  type ContractRevisionArtifacts,
   type ContractReview,
   type ContractReviewFinding,
   type RecordedContractVerdict,
@@ -1571,6 +1572,7 @@ async function negotiateAttempt(
     let previousReview: ContractReview | null = null;
     let lastFindings: readonly ContractReviewFinding[] = [];
     let plannerResponse: ContractResponse | null = null;
+    let revisionArtifacts: ContractRevisionArtifacts | null = null;
     const reviewArchiveDir = artifacts.contractReviewArchiveDir(
       config.repoRoot,
       pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
@@ -1727,6 +1729,15 @@ async function negotiateAttempt(
           round === 2 ? openContractReviewFindings(lastFindings) : [];
         const requiresPlannerResponse =
           round === 2 && lastVerdict === "REVISE";
+        const previousArtifactText = requiresPlannerResponse
+          ? {
+              contract: readFileSync(contractPath, "utf-8"),
+              manifest: readFileSync(
+                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                "utf-8",
+              ),
+            }
+          : null;
 
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
@@ -1836,12 +1847,26 @@ async function negotiateAttempt(
         }
 
         plannerResponse = null;
+        revisionArtifacts = null;
         if (requiresPlannerResponse) {
           try {
             plannerResponse = loadContractResponse(
               ctx.absSliceDir,
               routedFindings.map(({ id }) => id),
             );
+            revisionArtifacts = {
+              "contract.md": {
+                before: previousArtifactText!.contract,
+                after: readFileSync(contractPath, "utf-8"),
+              },
+              "acceptance-manifest.json": {
+                before: previousArtifactText!.manifest,
+                after: readFileSync(
+                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                  "utf-8",
+                ),
+              },
+            };
           } catch (error) {
             const defect =
               error instanceof Error ? error.message : String(error);
@@ -1900,6 +1925,9 @@ async function negotiateAttempt(
               PLANNER_RESPONSE: plannerResponse
                 ? JSON.stringify(plannerResponse, null, 2)
                 : "(first review round; no planner response)",
+              REVISION_CONTEXT: revisionArtifacts
+                ? JSON.stringify(revisionArtifacts, null, 2)
+                : "(first review round; no prior revision)",
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
@@ -1939,6 +1967,7 @@ async function negotiateAttempt(
               previousReview,
               plannerResponse,
               review,
+              revisionArtifacts ?? undefined,
             );
           }
         } catch (error) {

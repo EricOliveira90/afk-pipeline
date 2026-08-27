@@ -70,6 +70,12 @@ Planner response:
 {{PLANNER_RESPONSE}}
 ```
 
+Revision text available for exact fresh-finding citations:
+
+```json
+{{REVISION_CONTEXT}}
+```
+
 # Task
 
 Read `{{SLICE_DIR}}/contract.md` and judge the manifest's scenario
@@ -129,6 +135,9 @@ On round 2, disposition every planner response exactly once:
   when the planner's evidence changes your judgment.
 - Keep the planner's contested evidence in the response artifact and
   state your independent evidence in the review finding.
+- A fresh round-2 ID must be `OPEN` and cite unequal `before`/`after`
+  excerpts copied exactly from the corresponding prior/current artifact
+  above. Familiar IDs always use `revisionCitation: null`.
 
 Types are checked strictly: a number where a string belongs — including
 inside `behaviorIds` — makes the artifact malformed and fails the slice.
