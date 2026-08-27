@@ -13,9 +13,10 @@ Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD sli
 
 ## Test loop discipline (agents: read this)
 
-The full suite (`pnpm test`) takes 20+ minutes on Windows — the pipeline
-integration suites (`orchestrator`, `wave`, `resume-integration`,
-`qa-orchestration`, `clean-failed`) spawn hundreds of real git processes.
+The full suite (`pnpm test`) takes about 7 minutes on Windows (421s
+measured 2026-08-26, idle machine) — the pipeline integration suites
+(`orchestrator`, `wave`, `resume-integration`, `qa-orchestration`,
+`clean-failed`) spawn hundreds of real git processes.
 
 - **While iterating:** run the specific test file you are working on
   (`pnpm vitest run src/<file>.test.ts`), or `pnpm test:fast` (unit +
@@ -27,7 +28,7 @@ integration suites (`orchestrator`, `wave`, `resume-integration`,
   `pnpm test:fast` plus the heavy suites your change touches (e.g.
   `pnpm vitest run src/wave.test.ts`). Do **not** run the full suite.
   The evaluator-qa runs it on your slice and the pre-ship gate runs it on
-  the merged feature branch. A third run costs 20 minutes and proves
+  the merged feature branch. A third run costs about 7 minutes and proves
   nothing the other two do not.
 - Never loop on the full suite to debug a single failure.
 
