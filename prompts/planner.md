@@ -41,26 +41,62 @@ evaluator grades against.
 - Always write `## Migration requirements` with one line:
   `- New migration files: N`. Follow the AFK reservation below exactly.
   AFK owns prefix allocation; never calculate a next prefix from the tree.
+- Every bullet under `### In scope` and under `### Existing behavior to
+  preserve` must open with a behavior anchor — `- [behavior:B-01] <the
+  behavior>` — and nothing else in `contract.md` may use that form. IDs
+  are case-sensitive, unique across both sections, and match
+  `[A-Z][A-Z0-9-]*` (use `B-` for in-scope, `P-` for preservation).
+  These anchors are the only part of the contract a machine reads; the
+  lock gate refuses a contract whose anchor set does not match the
+  manifest's behavior IDs exactly.
+- Behavior IDs are stable. When you rewrite the contract, a behavior
+  whose `source`, Given/When/Then, observable result, and preservation
+  flag are unchanged keeps the ID it had last round, even if its gates
+  changed. Renumbering an unchanged behavior is refused.
 - Always write `{{SLICE_DIR}}/acceptance-manifest.json` beside
-  `contract.md`. It is the machine source for file scope and migration
-  count. Overwrite it on every round with exactly this version 1 shape:
+  `contract.md`. It is the machine source for file scope, migration
+  count, and behavior evidence. Overwrite it on every round with exactly
+  this version 2 shape:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "fileScope": {
     "kind": "paths",
     "paths": ["exact/repo-relative/file.ts"]
   },
-  "migrationCount": 0
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #123 AC1",
+      "given": "the precondition",
+      "when": "the action",
+      "then": "the expected outcome",
+      "observableResult": "what a verifier sees",
+      "preservation": false,
+      "gateIds": ["tests"]
+    }
+  ]
 }
 ```
 
+  One entry per behavior anchor, in both sections — `"preservation":
+  true` for the `### Existing behavior to preserve` ones. Every field is
+  required, every string non-blank, and `gateIds` is a non-empty list of
+  distinct IDs taken verbatim from the gate catalog below. Naming a gate
+  that is absent or has no command is refused.
   Use a non-empty `paths` array of exact file paths, or use
   `"fileScope": { "kind": "no-repository-changes" }` with
   `"migrationCount": 0`. Never use placeholders, globs, absolute paths,
   directories, or `.` / `..` segments. Keep the prose file list and
   migration count in `contract.md` as the matching human-readable view.
+
+# Gate catalog (the only bindable gate IDs)
+
+```text
+{{BASE_GATE_CATALOG}}
+```
 
 # Migration reservation
 
@@ -98,7 +134,7 @@ lines), not an accumulated review transcript:
 <one paragraph: the end-to-end behavior this slice delivers>
 
 ### In scope
-- <specific, verifiable behavior>
+- [behavior:B-01] <specific, verifiable behavior>
 
 ### Non-goals (explicit out-of-scope)
 - <thing that might seem related but is NOT this slice>
@@ -108,7 +144,7 @@ lines), not an accumulated review transcript:
   From explorer's context.md, list affordances in touched files that must
   keep working. The generator may not remove these.
 -->
-- <affordance — file:symbol>
+- [behavior:P-01] <affordance — file:symbol>
 
 ### Changes to existing behavior (only if the issue asks for it)
 - <renamed/removed/altered item — quote the issue line that authorizes it>

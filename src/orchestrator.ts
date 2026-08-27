@@ -1517,6 +1517,13 @@ async function negotiateAttempt(
               SLICE_BODY: sliceBodyNote,
               REVISION_NOTE: revisionNote(pendingObjection),
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
+              // The planner must bind every behavior to a gate the
+              // lock gate can verify, so it is told the same derived
+              // catalog that check reads — otherwise it can only guess
+              // IDs and burn rounds on refusals.
+              BASE_GATE_CATALOG: formatBaseGateCatalog(
+                resolveBaseGateDeclarations(ctx.worktreeDir),
+              ),
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,

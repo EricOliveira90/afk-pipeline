@@ -25,6 +25,7 @@ describe("renderPrompt", () => {
       RELEVANT_FILES: "",
       SLICE_BODY: "Local issue body",
       MIGRATION_RESERVATION: "No claim yet",
+      BASE_GATE_CATALOG: "- tests: pnpm run test:run",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).not.toContain("{{");
@@ -94,8 +95,9 @@ describe("renderPrompt", () => {
         RELEVANT_FILES: "",
         SLICE_BODY: "Fetch with gh",
         MIGRATION_RESERVATION: "No claim yet",
+        BASE_GATE_CATALOG: "- tests: pnpm run test:run",
       }),
-    ).toBeTruthy();
+    ).toContain("- tests: pnpm run test:run");
     expect(
       renderPrompt("evaluator-contract", {
         SPECS_DIR: "s",

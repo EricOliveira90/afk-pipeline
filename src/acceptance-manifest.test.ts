@@ -228,7 +228,25 @@ describe("acceptance-manifest.json", () => {
     );
 
     expect(prompt).toContain("acceptance-manifest.json");
-    expect(prompt).toContain('"version": 1');
+    expect(prompt).toContain('"version": 2');
     expect(prompt).toContain('"no-repository-changes"');
+    // The gate reads only anchored bullets and refuses a manifest whose
+    // behavior IDs do not match them, so the prompt has to teach both
+    // the anchor grammar and the behavior fields it validates.
+    expect(prompt).toContain("- [behavior:B-01]");
+    expect(prompt).toContain("- [behavior:P-01]");
+    for (const field of [
+      '"id"',
+      '"source"',
+      '"given"',
+      '"when"',
+      '"then"',
+      '"observableResult"',
+      '"preservation"',
+      '"gateIds"',
+    ]) {
+      expect(prompt).toContain(field);
+    }
+    expect(prompt).toContain("{{BASE_GATE_CATALOG}}");
   });
 });
