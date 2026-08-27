@@ -1,3 +1,18 @@
+/**
+ * Retry integration for the resume-a-dead-slice feature (spec #33,
+ * design note on #15), at the outermost seam: two `runPipeline` runs
+ * against the same real repo. Run 1's generator dies mid-slice; run 2
+ * retries. Assertions are external behavior only — worktree/branch
+ * state, prompt inputs at the prompt-assembly seam, run.log lines —
+ * never internal call sequences.
+ *
+ * The `prepareSliceWorktree` block lives in `resume-worktree.test.ts`;
+ * two files exist so one `vitest run` schedules the suite across both
+ * workers (`maxWorkers: 2`) instead of pinning it to one. Shared
+ * helpers are in `resume-integration.fixtures.ts`. When adding a
+ * `describe`, keep the halves balanced by measured block time
+ * (`--reporter=./scripts/describe-times.reporter.mjs`), not test count.
+ */
 import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
 import {
   existsSync,
@@ -15,202 +30,23 @@ import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestra
 import { RunJournal as Logger } from "./run-journal.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
-
-/**
- * Retry integration for the resume-a-dead-slice feature (spec #33,
- * design note on #15), at the outermost seam: two `runPipeline` runs
- * against the same real repo. Run 1's generator dies mid-slice; run 2
- * retries. Assertions are external behavior only — worktree/branch
- * state, prompt inputs at the prompt-assembly seam, run.log lines —
- * never internal call sequences.
- */
-
-const tempDirs: string[] = [];
+import {
+  allRunLogs,
+  buildProvider,
+  cleanupResumeTempDirs,
+  findSliceArtifactDir,
+  git,
+  makeRepo,
+  makeSlice,
+  sliceLogLines,
+  sliceNumberFromCwd,
+  writePrdFixture,
+  type PromptRecord,
+} from "./resume-integration.fixtures.js";
 
 afterEach(() => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop()!;
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  }
+  cleanupResumeTempDirs();
 });
-
-function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
-}
-
-/**
- * A throwaway git repo. By default the per-test `afterEach` removes it;
- * pass `{ lifetime: "describe" }` when a block spawns its runs once in
- * `beforeAll` and splits the assertions across `it` cases — those cases
- * still need the repo on disk, so the caller owns cleanup in `afterAll`.
- */
-function makeRepo(opts: { lifetime?: "test" | "describe" } = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), "afk-resume-int-"));
-  if (opts.lifetime !== "describe") tempDirs.push(dir);
-  git(dir, ["init", "--initial-branch=main"]);
-  writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
-  git(dir, ["commit", "-m", "root"]);
-  return dir;
-}
-
-function writePrdFixture(repoDir: string, slug: string): { prdDir: string; specsDir: string } {
-  const specsDir = join(".kiro", "specs", slug);
-  const prdDir = join(repoDir, specsDir);
-  mkdirSync(prdDir, { recursive: true });
-  writeFileSync(
-    join(prdDir, "prd.md"),
-    `# ${slug}\n\n## Relevant Files\n- README.md — root readme\n`,
-    "utf-8",
-  );
-  return { prdDir, specsDir };
-}
-
-function makeSlice(): Slice {
-  return {
-    number: "01",
-    ghIssue: "4001",
-    title: "Resumable",
-    type: "AFK",
-    blockedBy: [],
-    userStories: "",
-  };
-}
-
-/** Locate the slice artifact dir inside a worktree (same walk as orchestrator tests). */
-function findSliceArtifactDir(cwd: string, sliceNumber: string): string | null {
-  const specsRoot = join(cwd, ".kiro", "specs");
-  if (!existsSync(specsRoot)) return null;
-  for (const slug of readdirSync(specsRoot)) {
-    const slicesDir = join(specsRoot, slug, "slices");
-    if (!existsSync(slicesDir)) continue;
-    for (const entry of readdirSync(slicesDir)) {
-      if (entry.startsWith(`${sliceNumber}-`)) return join(slicesDir, entry);
-    }
-  }
-  return null;
-}
-
-/**
- * Slice number the invocation's worktree belongs to — worktrees live at
- * `.afk/worktrees/<prefix>-<slug>-s<NN>` (see `sliceWorktreeDir`). Empty
- * for the post-merge review worktree, which belongs to no slice.
- */
-function sliceNumberFromCwd(cwd: string): string {
-  return /-s(\d+)$/.exec(cwd.replace(/\\/g, "/"))?.[1] ?? "";
-}
-
-interface PromptRecord {
-  role: string;
-  /** Slice the invocation ran for, so merged multi-slice runs stay assertable. */
-  sliceNumber: string;
-  prompt: string;
-  /** Whether run 1's uncommitted casualty file was visible at invocation time. */
-  dirtyFilePresent: boolean;
-  /** Whether the sibling commit that advanced the feature branch was visible. */
-  featureFilePresent: boolean;
-  /** Whether BOTH colliding migration files (slice's + feature's) were visible. */
-  migrationCollisionPresent: boolean;
-  /** Whether the previous run's UNCOMMITTED in-flight edit survived (#49). */
-  inFlightPresent: boolean;
-  /** Whether the preserved stuck.md diagnosis survived into this run (#49). */
-  stuckFilePresent: boolean;
-}
-
-/**
- * Stub provider. Explorer/planner/evaluator behave like the standard
- * fixture stub; the generator behavior is injected per run.
- */
-function buildProvider(opts: {
-  generator: (
-    cwd: string,
-    options: InvokeOptions,
-    sliceNumber: string,
-  ) => Promise<void> | void;
-  records?: PromptRecord[];
-  /** Deterministic QA verdict for every evaluator-qa invocation. */
-  qaVerdict?: "PASS" | "FAIL";
-}): AgentProvider {
-  return {
-    name: "stub",
-    async invoke(options: InvokeOptions): Promise<InvokeResult> {
-      const { role, cwd } = options;
-      const sliceNumber = sliceNumberFromCwd(cwd);
-      opts.records?.push({
-        role,
-        sliceNumber,
-        prompt: options.prompt,
-        dirtyFilePresent: existsSync(join(cwd, "src", "half-written.ts")),
-        featureFilePresent: existsSync(join(cwd, "src", "sibling.ts")),
-        migrationCollisionPresent:
-          existsSync(join(cwd, "supabase", "migrations", "125_slice_work.sql")) &&
-          existsSync(join(cwd, "supabase", "migrations", "125_sibling.sql")),
-        inFlightPresent: existsSync(join(cwd, "src", "in-flight.ts")),
-        stuckFilePresent: (() => {
-          const dir = findSliceArtifactDir(cwd, sliceNumber);
-          return dir !== null && existsSync(join(dir, "stuck.md"));
-        })(),
-      });
-      const artifactDir = findSliceArtifactDir(cwd, sliceNumber);
-      if (role === "explorer" && artifactDir) {
-        writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
-      } else if (role === "planner" && artifactDir) {
-        writeFileSync(
-          join(artifactDir, "contract.md"),
-          // Per-slice declared file, so a merged multi-slice run gets
-          // disjoint lanes and its slices really do overlap.
-          `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- src/work-${sliceNumber}.ts\n`,
-          "utf-8",
-        );
-      } else if (role === "evaluator-contract" && artifactDir) {
-        writeFileSync(
-          join(artifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
-          "utf-8",
-        );
-      } else if (role === "generator") {
-        await opts.generator(cwd, options, sliceNumber);
-      } else if (role === "evaluator-qa" && artifactDir) {
-        writeFileSync(
-          join(artifactDir, "qa-report.md"),
-          `# QA Report\n\n**Verdict:** ${opts.qaVerdict ?? "PASS"}\n`,
-          "utf-8",
-        );
-      } else if (role === "generator-stuck" && artifactDir) {
-        writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");
-      }
-      return { exitCode: 0, stdout: "", stats: {} };
-    },
-  };
-}
-
-/** Concatenated run.log content across every run directory for the slug. */
-function allRunLogs(repo: string, loggerSlug: string): string {
-  const logsRoot = join(repo, ".afk", "logs", loggerSlug);
-  if (!existsSync(logsRoot)) return "";
-  let out = "";
-  for (const entry of readdirSync(logsRoot)) {
-    const logPath = join(logsRoot, entry, "run.log");
-    if (existsSync(logPath)) out += readFileSync(logPath, "utf-8");
-  }
-  return out;
-}
-
-/**
- * The run.log lines belonging to one slice. Every per-slice line carries
- * the slice's tag (`[afk] Slice #<id> (<title>)`), so a merged run stays
- * as assertable as a single-slice one.
- */
-function sliceLogLines(repo: string, loggerSlug: string, ghIssue: string): string {
-  return allRunLogs(repo, loggerSlug)
-    .split(/\r?\n/)
-    .filter((line) => line.includes(`Slice #${ghIssue}`))
-    .join("\n");
-}
 
 describe("retried slice resume (spec #33)", () => {
   /**
@@ -716,167 +552,4 @@ describe("retried slice resume (spec #33)", () => {
     expect(finalState.resume["4001"].attempts).toBe(0);
   }, 240_000);
 
-});
-
-
-/**
- * Cheaper checks at the worktree-preparation seam: `prepareSliceWorktree`
- * is the exported orchestrator unit that inspects git state, decides,
- * and mutates the worktree. No agent invocations needed.
- */
-describe("prepareSliceWorktree", () => {
-  const stubProvider: AgentProvider = {
-    name: "stub",
-    invoke: async () => ({ exitCode: 0, stdout: "", stats: {} }),
-  };
-
-  function makeCtx(
-    repo: string,
-    slug: string,
-    slice: Slice,
-    flags: { forceRestart?: string[]; resumeStuck?: string[] } = {},
-  ) {
-    return makeSliceContext(
-      {
-        repoRoot: repo,
-        prdSlug: slug,
-        prdDir: join(repo, ".kiro", "specs", slug),
-        specsDir: join(".kiro", "specs", slug),
-        dag: buildDAG([slice]),
-        provider: stubProvider,
-        ...(flags.forceRestart ? { forceRestart: flags.forceRestart } : {}),
-        ...(flags.resumeStuck ? { resumeStuck: flags.resumeStuck } : {}),
-      },
-      slice,
-      new Logger(repo, `${slug}-stub`),
-      `feat-stub/${slug}`,
-      "- README.md",
-      "pnpm test",
-    );
-  }
-
-  function sliceAt(number: string, ghIssue: string): Slice {
-    return { number, ghIssue, title: `S${number}`, type: "AFK", blockedBy: [], userStories: "" };
-  }
-
-  /** Create the feature branch, the slice worktree, and one commit in it. */
-  function seedResumableSlice(repo: string, ctx: ReturnType<typeof makeCtx>) {
-    git(repo, ["branch", ctx.featBranch]);
-    execFileSync("git", ["worktree", "add", "-b", ctx.branch, ctx.worktreeDir, ctx.featBranch], {
-      cwd: repo, encoding: "utf-8",
-    });
-    mkdirSync(join(ctx.worktreeDir, "src"), { recursive: true });
-    writeFileSync(join(ctx.worktreeDir, "src", `work-${ctx.slice.number}.ts`), "export {};\n", "utf-8");
-    git(ctx.worktreeDir, ["add", "-A"]);
-    git(ctx.worktreeDir, ["commit", "-m", `feat(#${ctx.slice.ghIssue}): work`]);
-  }
-
-  it("a feature branch that has not moved is a no-op refresh and still resumes (#35)", async () => {
-    const repo = makeRepo();
-    const ctx = makeCtx(repo, "noop-refresh", sliceAt("01", "4001"));
-    seedResumableSlice(repo, ctx);
-    const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
-
-    await prepareSliceWorktree(ctx);
-
-    // Resumed — and the no-op merge added no commit.
-    expect(ctx.resume).toBeDefined();
-    expect(ctx.resume!.commitsAhead).toBe(1);
-    expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
-  }, 240_000);
-
-  it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", async () => {
-    const repo = makeRepo();
-    const slug = "multi-force";
-    const forced = ["01", "4003"]; // slice 01 by number, slice 03 by GH issue
-    const contexts = [
-      makeCtx(repo, slug, sliceAt("01", "4001"), { forceRestart: forced }),
-      makeCtx(repo, slug, sliceAt("02", "4002"), { forceRestart: forced }),
-      makeCtx(repo, slug, sliceAt("03", "4003"), { forceRestart: forced }),
-    ];
-    git(repo, ["branch", contexts[0]!.featBranch]);
-    for (const ctx of contexts) {
-      execFileSync("git", ["worktree", "add", "-b", ctx.branch, ctx.worktreeDir, ctx.featBranch], {
-        cwd: repo, encoding: "utf-8",
-      });
-      mkdirSync(join(ctx.worktreeDir, "src"), { recursive: true });
-      writeFileSync(join(ctx.worktreeDir, "src", `work-${ctx.slice.number}.ts`), "export {};\n", "utf-8");
-      git(ctx.worktreeDir, ["add", "-A"]);
-      git(ctx.worktreeDir, ["commit", "-m", `feat(#${ctx.slice.ghIssue}): work`]);
-    }
-
-    for (const ctx of contexts) await prepareSliceWorktree(ctx);
-
-    expect(contexts[0]!.resume).toBeUndefined(); // forced by slice number
-    expect(contexts[1]!.resume).toBeDefined(); // unnamed — resumes
-    expect(contexts[2]!.resume).toBeUndefined(); // forced by GH issue id
-    // Forced slices really went back to base.
-    expect(git(repo, ["rev-parse", contexts[0]!.branch])).toBe(
-      git(repo, ["rev-parse", contexts[0]!.featBranch]),
-    );
-  }, 240_000);
-
-  /**
-   * Mark a seeded slice STUCK the way the pipeline does — a stuck.md in
-   * the slice artifact dir — and leave an uncommitted edit behind.
-   */
-  function markStuckWithDirtyTree(ctx: ReturnType<typeof makeCtx>) {
-    mkdirSync(ctx.absSliceDir, { recursive: true });
-    writeFileSync(join(ctx.absSliceDir, "stuck.md"), "# Stuck Handoff\nFinding 1.\n", "utf-8");
-    writeFileSync(join(ctx.worktreeDir, "src", "in-flight.ts"), "export const x =", "utf-8");
-  }
-
-  it("--resume-stuck keeps the preserved tip, the dirty tree, and stuck.md (#49)", async () => {
-    const repo = makeRepo();
-    const ctx = makeCtx(repo, "stuck-optin", sliceAt("20", "49"), { resumeStuck: ["49"] });
-    seedResumableSlice(repo, ctx);
-    markStuckWithDirtyTree(ctx);
-    const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
-
-    await prepareSliceWorktree(ctx);
-
-    expect(ctx.resume).toEqual({
-      mode: "stuck",
-      commitsAhead: 1,
-      commitLog: expect.stringContaining("work"),
-      handoffNote: "",
-      stuckNote: expect.stringContaining("Finding 1."),
-      baseRefreshed: true,
-    });
-    // Nothing was reset, cleaned, or recreated.
-    expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
-    expect(existsSync(join(ctx.worktreeDir, "src", "in-flight.ts"))).toBe(true);
-    expect(existsSync(join(ctx.absSliceDir, "stuck.md"))).toBe(true);
-  }, 240_000);
-
-  it("--resume-stuck on an unnamed slice leaves the terminal restart alone (#49)", async () => {
-    const repo = makeRepo();
-    const ctx = makeCtx(repo, "stuck-unnamed", sliceAt("20", "49"), { resumeStuck: ["21"] });
-    seedResumableSlice(repo, ctx);
-    markStuckWithDirtyTree(ctx);
-
-    await prepareSliceWorktree(ctx);
-
-    expect(ctx.resume).toBeUndefined();
-    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
-      git(repo, ["rev-parse", ctx.featBranch]),
-    );
-  }, 240_000);
-
-  it("--force-restart beats --resume-stuck on the same slice (#49)", async () => {
-    const repo = makeRepo();
-    const ctx = makeCtx(repo, "stuck-contested", sliceAt("20", "49"), {
-      forceRestart: ["20"],
-      resumeStuck: ["49"],
-    });
-    seedResumableSlice(repo, ctx);
-    markStuckWithDirtyTree(ctx);
-
-    await prepareSliceWorktree(ctx);
-
-    expect(ctx.resume).toBeUndefined();
-    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
-      git(repo, ["rev-parse", ctx.featBranch]),
-    );
-  }, 240_000);
 });

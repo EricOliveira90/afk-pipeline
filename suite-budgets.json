@@ -43,13 +43,31 @@
     "_total": "410.5s then 437.2s of suite time; 6m56s and 7m23s of `pnpm test`, 765 tests",
     "_alone": "Measured alone, same machine: wave 96.4-99.0, git (inside fast) 49.0, qa 35.3-35.8, resume 40.8-43.1"
   },
+  "_measured2026_08_26_round3": {
+    "_note": [
+      "Round 3: orchestrator, wave and resume-integration each split into",
+      "two test files balanced by measured describe-block time, so one",
+      "`test:heavy:<name>` invocation schedules both across the two",
+      "workers. Full chain, same day but with an agent session resident",
+      "(alone-runs that day were ~40% above the round-2 record, so these",
+      "in-chain numbers are conservative). Paired alone-runs, idle-ish:",
+      "orchestrator 244.0 -> 156.7, wave 131.8 -> 82.2, resume 58.2 -> 46.7."
+    ],
+    "fast": 71.9,
+    "orchestrator": 152.9,
+    "wave": 84.1,
+    "resume-integration": 48.0,
+    "qa-orchestration": 42.4,
+    "clean-failed": 12.6,
+    "_total": "411.9s of suite time, 6m56s of `pnpm test`, 765 tests"
+  },
   "suites": {
     "fast": 79,
-    "orchestrator": 225,
-    "wave": 130,
+    "orchestrator": 205,
+    "wave": 110,
     "resume-integration": 63,
     "qa-orchestration": 68,
     "clean-failed": 13
   },
-  "totalSeconds": 568
+  "totalSeconds": 538
 }

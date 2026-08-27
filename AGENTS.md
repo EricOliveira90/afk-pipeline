@@ -12,10 +12,16 @@ Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD sli
 
 ## Test loop discipline (read this)
 
-The full suite (`pnpm test`) takes about 7 minutes on Windows (421s
-measured 2026-08-26, idle machine) — the pipeline integration suites
+The full suite (`pnpm test`) takes about 7 minutes on Windows (416s
+measured 2026-08-26 after the two-file suite splits; paired alone-runs
+that day put the three split suites ~2.5 minutes faster combined than
+their single-file forms) — the pipeline integration suites
 (`orchestrator`, `wave`, `resume-integration`, `qa-orchestration`,
-`clean-failed`) spawn hundreds of real git processes.
+`clean-failed`) spawn hundreds of real git processes. The three biggest
+suites are each split across two test files balanced by measured
+`describe`-block time (e.g. `wave.test.ts` + `wave-migrations.test.ts`),
+so a single `test:heavy:<name>` run schedules them across both vitest
+workers — see the file headers before adding or moving a block.
 
 - **While iterating:** run the specific test file you are working on
   (`pnpm vitest run src/<file>.test.ts`), or `pnpm test:fast` (unit +
@@ -25,7 +31,7 @@ measured 2026-08-26, idle machine) — the pipeline integration suites
   of done requires the full suite, not `test:fast`.
 - **Before handoff — running as an AFK pipeline slice agent:** run
   `pnpm test:fast` plus the heavy suites your change touches (e.g.
-  `pnpm vitest run src/wave.test.ts`). Do **not** run the full suite.
+  `pnpm run test:heavy:wave`). Do **not** run the full suite.
   The evaluator-qa runs it on your slice and the pre-ship gate runs it on
   the merged feature branch. A third run costs about 7 minutes and proves
   nothing the other two do not.
@@ -70,7 +76,7 @@ spawned scenario. In order:
    differs and no existing one can reach it. Say so in a comment, so the
    next reader knows the cost was deliberate.
 
-`pnpm test` ends with `pnpm test:budgets`, a per-file wall-clock budget
+`pnpm test` ends with `pnpm test:budgets`, a per-suite wall-clock budget
 (`suite-budgets.json`). If it goes red, the fix is normally to move the
 assertion up this list — not to raise the number. Raising one is fine
 when the cost is genuinely necessary, but record the measurement in the
