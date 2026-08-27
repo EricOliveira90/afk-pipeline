@@ -718,10 +718,12 @@ export function buildContractReviewAttemptRecord(
 /** Classify final unresolved BLOCKING records at negotiation exhaustion. */
 export function buildContractNegotiationOutcome(
   record: ContractReviewAttemptRecord,
-): ContractNegotiationOutcome {
+): ContractNegotiationOutcome | undefined {
   const findings = record.findings.filter(
     (finding) => finding.severity === "BLOCKING" && finding.unresolved,
   );
+  if (findings.length === 0) return undefined;
+
   return {
     version: 1,
     classification: findings.some((finding) => finding.state === "CONTESTED")

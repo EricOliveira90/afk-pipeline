@@ -830,6 +830,19 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(stuck).toContain("contract-lock gate");
     expect(stuck).toContain("003");
     expect(stuck).toContain("004");
+    expect(stuck).not.toContain("Exhaustion classification:");
+    expect(
+      existsSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "wave-gate-escalate-stub",
+          "slice-01",
+          "contract-negotiation-outcome.json",
+        ),
+      ),
+    ).toBe(false);
   }, 240_000);
 
   it("still refuses at the merge mutex when the generator collides but the contract did not", async () => {
