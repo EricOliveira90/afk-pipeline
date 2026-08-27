@@ -127,5 +127,14 @@ the operator's type-strictness amendment) were the spec.
 
 ## Status
 
-Full `pnpm test` green in this worktree (see the handoff message for the
-run). No regressions.
+Full `pnpm test` green in this worktree, exit 0: 929 tests across all six
+suites (fast 710, orchestrator 141, wave 43, resume-integration 13,
+qa-orchestration 13, clean-failed 9). No regressions.
+
+One trap worth naming for the next hand-run: the suite is not hermetic
+and takes ~17 minutes, so nothing may touch the worktree while it runs.
+Two earlier attempts here were self-inflicted — one died when a
+`| head -40` on the output closed the pipe under `pnpm test`, and one
+reported three orchestrator failures because the working tree was
+checked out to the base commit mid-run, which put the pre-slice prompt
+template back on disk under a running suite.
