@@ -116,13 +116,28 @@
     "fast": 130.5,
     "orchestrator": 382.4
   },
+  "_measured2026_08_27_afk_run5": {
+    "_note": [
+      "AFK run 5. Slice #79's generator measured test:heavy:orchestrator at",
+      "~516s against the 500s budget with zero failing tests, under its own",
+      "load plus a resident babysitter session. Same settled class as run 4:",
+      "wall-clock variance under agent load, not a test regression. Raised",
+      "500 -> 560 pre-emptively, because the consumer of this number is the",
+      "pre-ship gate's test:budgets — which runs with guardian reviews and a",
+      "babysitter resident, and where a red gate on a 3% overshoot would",
+      "block a ship after three-plus hours of work. #78's own base gate ran",
+      "its tests step at 691.9s, under the 820s feature-branch baseline, so",
+      "nothing here indicates the suite itself got slower."
+    ],
+    "orchestrator": 516
+  },
   "suites": {
     "fast": 170,
-    "orchestrator": 500,
+    "orchestrator": 560,
     "wave": 295,
     "resume-integration": 152,
     "qa-orchestration": 87,
     "clean-failed": 23
   },
-  "totalSeconds": 1227
+  "totalSeconds": 1287
 }
