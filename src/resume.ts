@@ -17,6 +17,13 @@ import * as git from "./git.js";
  * resume/restart plan + reason out. Later guards (stuck.md, the
  * resume-attempt cap, --force-restart, --resume-stuck) only add inputs
  * to it.
+ *
+ * One invariant outranks every guard here (#113): a from-base restart
+ * force-resets the branch and recreates the worktree, so it must never
+ * run on a branch that still holds unmerged commits unless the operator
+ * named the slice in `--force-restart`. Every guard that would otherwise
+ * restart such a branch returns `refuse` instead — see
+ * {@link restartOrRefuse}.
  */
 
 /** Git-state facts about a slice's surviving branch + worktree. */
@@ -44,9 +51,13 @@ export interface ResumeFacts {
 }
 
 /**
- * Resumes allowed per slice tree before the next retry restarts from
- * base — repeated death on the same tree is itself evidence of poison.
- * The counter resets on restart, so a fresh tree earns a fresh budget.
+ * Resumes allowed per slice tree before the next retry stops resuming it
+ * — repeated death on the same tree is itself evidence of poison. The
+ * counter resets on restart, so a fresh tree earns a fresh budget.
+ *
+ * Reaching the cap does **not** license destroying the tree: with commits
+ * on the branch the slice refuses and reports (#113). Only a branch
+ * already at base restarts silently, because there is nothing to lose.
  */
 export const MAX_RESUME_ATTEMPTS = 2;
 
@@ -62,8 +73,73 @@ export type ResumePlan =
   | { action: "resume-stuck"; commitsAhead: number }
   /** Deliberately recreate the worktree from base; `reason` is logged and audited. */
   | { action: "restart"; reason: string }
+  /**
+   * The slice cannot run this attempt: it is not resumable *and* a
+   * from-base restart would force-reset a branch that still holds
+   * unmerged commits. Refuse and report instead of destroying (#113).
+   * `reason` is the restart reason that would otherwise have applied.
+   */
+  | { action: "refuse"; reason: string; commitsAhead: number }
   /** No evidence of a prior attempt — the normal first-run creation path. */
   | { action: "fresh" };
+
+/** The one restart reason that carries explicit operator intent to discard. */
+export const FORCE_RESTART_REASON = "--force-restart";
+
+/**
+ * The core #113 invariant, in one place: **the pipeline never
+ * force-resets a slice branch that still holds unmerged commits unless
+ * the operator asked for it by name.**
+ *
+ * A from-base restart resets the branch to base and recreates the
+ * worktree, so every commit not yet merged into the feature branch and
+ * every untracked slice artifact under it is gone. When the branch is
+ * already at base there is nothing to lose and the restart proceeds
+ * exactly as before — that is the ordinary case (death before the first
+ * commit, a lane-successor refresh).
+ *
+ * This mirrors `clean-failed`, which keeps and reports a branch with
+ * commits ahead of the feature branch rather than deleting it
+ * (ADR 0023), and the `--resume-stuck` guard below, which already
+ * refuses to let a cap silently restart a preserved tree.
+ */
+export function restartOrRefuse(
+  reason: string,
+  commitsAheadOfBase: number,
+): ResumePlan {
+  if (commitsAheadOfBase > 0) {
+    return { action: "refuse", reason, commitsAhead: commitsAheadOfBase };
+  }
+  return { action: "restart", reason };
+}
+
+/**
+ * Operator-facing explanation of a refused restart: what was about to be
+ * destroyed, and the two ways forward. Shared by the decision-time
+ * refusal and the base-refresh-conflict refusal so both read the same.
+ */
+export function formatRestartRefusal(details: {
+  reason: string;
+  commitsAhead: number;
+  branch: string;
+  /** What the operator would pass to `--force-restart` (the GH issue id). */
+  selector: string;
+  /** Where the untracked slice artifacts were archived, repo-relative. */
+  archiveDir?: string;
+}): string {
+  const { reason, commitsAhead, branch, selector, archiveDir } = details;
+  const stuckHint = /stuck\.md/.test(reason)
+    ? ` To keep the tree and its diagnosis instead, re-run with \`--resume-stuck ${selector}\`.`
+    : "";
+  return (
+    `refusing to restart ${branch} from base (${reason}): the branch holds ` +
+    `${commitsAhead} unmerged commit(s), and a from-base restart would ` +
+    `force-reset them away. Inspect the branch, then merge or cherry-pick ` +
+    `what is worth keeping, or re-run with \`${FORCE_RESTART_REASON} ` +
+    `${selector}\` to discard it deliberately.${stuckHint}` +
+    (archiveDir ? ` Slice artifacts were archived to ${archiveDir}.` : "")
+  );
+}
 
 /** Pure eligibility decision. See module doc. */
 export function decideResume(facts: ResumeFacts): ResumePlan {
@@ -75,8 +151,10 @@ export function decideResume(facts: ResumeFacts): ResumePlan {
   // and therefore the more deliberate instruction. The CLI rejects a
   // slice named in both flags, so this only settles the precedence for
   // programmatic callers.
+  // The only restart that may destroy unmerged commits: the operator
+  // named this slice, so the discard is deliberate (#113).
   if (facts.forceRestart) {
-    return { action: "restart", reason: "--force-restart" };
+    return { action: "restart", reason: FORCE_RESTART_REASON };
   }
   // A resume of any kind needs a branch, a registered worktree, and
   // committed work — these three guards are what "the preserved tree is
@@ -85,11 +163,20 @@ export function decideResume(facts: ResumeFacts): ResumePlan {
     return { action: "restart", reason: "slice branch missing" };
   }
   if (!facts.worktreeRegistered) {
-    return { action: "restart", reason: "worktree missing or unregistered" };
+    return restartOrRefuse(
+      "worktree missing or unregistered",
+      facts.commitsAheadOfBase,
+    );
   }
   if (facts.stuckFilePresent) {
     if (!facts.resumeStuck) {
-      return { action: "restart", reason: "stuck.md present (terminal diagnosis)" };
+      // A stuck.md stays terminal — but terminal means "do not resume",
+      // not "destroy". With commits on the branch the operator is told to
+      // choose between `--resume-stuck` and `--force-restart` (#113).
+      return restartOrRefuse(
+        "stuck.md present (terminal diagnosis)",
+        facts.commitsAheadOfBase,
+      );
     }
     if (facts.commitsAheadOfBase <= 0) {
       return {
@@ -109,10 +196,17 @@ export function decideResume(facts: ResumeFacts): ResumePlan {
     return { action: "restart", reason: "no commits beyond base" };
   }
   if (facts.resumeAttempts >= MAX_RESUME_ATTEMPTS) {
-    return {
-      action: "restart",
-      reason: `resume attempt cap (${MAX_RESUME_ATTEMPTS}) reached`,
-    };
+    // The cap's job is to stop an unattended launcher resuming a poisoned
+    // tree forever. It does that by refusing to *resume*; converting the
+    // refusal into a from-base restart is what destroyed a LOCKED
+    // contract and 11 commits in the PRD 1 run (#113). Past the
+    // zero-commits check above this branch always has commits, so this is
+    // always the refusal — `restartOrRefuse` keeps the invariant in one
+    // place rather than restating it.
+    return restartOrRefuse(
+      `resume attempt cap (${MAX_RESUME_ATTEMPTS}) reached`,
+      facts.commitsAheadOfBase,
+    );
   }
   return { action: "resume", commitsAhead: facts.commitsAheadOfBase };
 }

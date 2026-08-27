@@ -21,6 +21,8 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestrator.js";
+import { MAX_RESUME_ATTEMPTS } from "./resume.js";
+import { loadRunState, recordRetryDecision } from "./run-state.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
@@ -173,18 +175,22 @@ describe("prepareSliceWorktree", () => {
     expect(existsSync(join(ctx.absSliceDir, "stuck.md"))).toBe(true);
   }, 240_000);
 
-  it("--resume-stuck on an unnamed slice leaves the terminal restart alone (#49)", async () => {
+  it("--resume-stuck on an unnamed slice still declines to resume it (#49)", async () => {
     const repo = makeRepo();
     const ctx = makeCtx(repo, "stuck-unnamed", sliceAt("20", "49"), { resumeStuck: ["21"] });
     seedResumableSlice(repo, ctx);
     markStuckWithDirtyTree(ctx);
+    const tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
 
-    await prepareSliceWorktree(ctx);
+    // Terminal still means terminal — but since #113 the branch's commits
+    // are not force-reset away to express that; the slice refuses and the
+    // message names both flags that resolve it.
+    await expect(prepareSliceWorktree(ctx)).rejects.toThrow(
+      /refusing to restart .*--resume-stuck 49/s,
+    );
 
     expect(ctx.resume).toBeUndefined();
-    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
-      git(repo, ["rev-parse", ctx.featBranch]),
-    );
+    expect(git(repo, ["rev-parse", ctx.branch])).toBe(tipBefore);
   }, 240_000);
 
   it("--force-restart beats --resume-stuck on the same slice (#49)", async () => {
@@ -202,5 +208,160 @@ describe("prepareSliceWorktree", () => {
     expect(git(repo, ["rev-parse", ctx.branch])).toBe(
       git(repo, ["rev-parse", ctx.featBranch]),
     );
+  }, 240_000);
+
+  /**
+   * #113: the resume-attempt cap used to convert into a from-base restart,
+   * which force-reset the branch and recreated the worktree — destroying
+   * 11 unmerged commits and a LOCKED contract in the PRD 1 run. These
+   * cases live at this seam rather than in a spawned pipeline because the
+   * whole defect is inside `prepareSliceWorktree`: no agent, contract
+   * negotiation or QA round takes part in it.
+   */
+  function writeSliceArtifacts(ctx: ReturnType<typeof makeCtx>) {
+    mkdirSync(ctx.absSliceDir, { recursive: true });
+    writeFileSync(
+      join(ctx.absSliceDir, "contract.md"),
+      "# Slice Contract\n\n**Status:** LOCKED\n\n## Operator amendment\nKeep me.\n",
+      "utf-8",
+    );
+    writeFileSync(join(ctx.absSliceDir, "context.md"), "# Context\n", "utf-8");
+    writeFileSync(join(ctx.absSliceDir, "feedback-r2.md"), "VERDICT: ACCEPT\n", "utf-8");
+    writeFileSync(join(ctx.absSliceDir, "qa-report.md"), "**Verdict:** FAIL\n", "utf-8");
+  }
+
+  /** Spend the slice's whole resume budget, as a prior run would have. */
+  function spendResumeBudget(repo: string, slug: string, ghIssue: string) {
+    recordRetryDecision(repo, `${slug}-stub`, ghIssue, {
+      attempts: MAX_RESUME_ATTEMPTS,
+      lastDecision: "resumed from 1 commit(s)",
+    });
+  }
+
+  /**
+   * The PRD 1 incident state, prepared once: a spent resume budget, a
+   * commit on the branch, and the untracked artifacts in the worktree.
+   * Every claim about the refusal reads off this one preparation.
+   */
+  describe("at the resume cap with commits on the branch (#113)", () => {
+    const slug = "cap-refuses";
+    let repo: string;
+    let ctx: ReturnType<typeof makeCtx>;
+    let tipBefore: string;
+    let rejection: Error;
+
+    beforeAll(async () => {
+      repo = makeRepo({ lifetime: "describe" });
+      ctx = makeCtx(repo, slug, sliceAt("05", "75"));
+      seedResumableSlice(repo, ctx);
+      writeSliceArtifacts(ctx);
+      spendResumeBudget(repo, slug, "75");
+      tipBefore = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
+      rejection = await prepareSliceWorktree(ctx).then(
+        () => {
+          throw new Error("prepareSliceWorktree resolved — the cap did not refuse");
+        },
+        (err: Error) => err,
+      );
+    }, 240_000);
+
+    afterAll(() => {
+      try {
+        rmSync(repo, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    });
+
+    it("refuses instead of restarting, naming the commits at risk", () => {
+      expect(rejection.message).toMatch(/refusing to restart .*1 unmerged commit\(s\)/s);
+      expect(ctx.resume).toBeUndefined();
+    });
+
+    it("leaves the commits and the LOCKED contract exactly where they were", () => {
+      expect(git(repo, ["rev-parse", ctx.branch])).toBe(tipBefore);
+      expect(git(repo, ["rev-parse", ctx.branch])).not.toBe(
+        git(repo, ["rev-parse", ctx.featBranch]),
+      );
+      const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
+      expect(contract).toContain("**Status:** LOCKED");
+      expect(contract).toContain("Keep me.");
+    });
+
+    it("names --force-restart and keeps the spent attempt count", () => {
+      // The cap still binds: the counter is not reset, so the next
+      // unattended run refuses again rather than granting a fresh budget.
+      expect(rejection.message).toMatch(/--force-restart 75/);
+      const recorded = loadRunState(repo, `${slug}-stub`).resume?.["75"];
+      expect(recorded?.attempts).toBe(MAX_RESUME_ATTEMPTS);
+      expect(recorded?.lastDecision).toMatch(/refused to restart from base/);
+      expect(sliceLogLines(repo, `${slug}-stub`, "75")).toMatch(
+        /refusing to restart/,
+      );
+    });
+  });
+
+  it("--force-restart archives the slice artifacts before resetting the branch (#113)", async () => {
+    const repo = makeRepo();
+    const slug = "force-archives";
+    const ctx = makeCtx(repo, slug, sliceAt("05", "75"), { forceRestart: ["75"] });
+    seedResumableSlice(repo, ctx);
+    writeSliceArtifacts(ctx);
+
+    await prepareSliceWorktree(ctx);
+
+    // The operator asked for the discard, so the branch really does go
+    // back to base — but the artifacts are recoverable afterwards.
+    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
+      git(repo, ["rev-parse", ctx.featBranch]),
+    );
+    expect(existsSync(join(ctx.absSliceDir, "contract.md"))).toBe(false);
+    const archiveDir = join(
+      repo, ".afk", "artifacts", `${slug}-stub`, "slice-05", "pre-restart-1",
+    );
+    expect(readdirSync(archiveDir).sort()).toEqual([
+      "context.md",
+      "contract.md",
+      "feedback-r2.md",
+      "qa-report.md",
+    ]);
+    expect(readFileSync(join(archiveDir, "contract.md"), "utf-8")).toContain(
+      "Keep me.",
+    );
+    expect(sliceLogLines(repo, `${slug}-stub`, "75")).toMatch(
+      /artifacts archived to \.afk\/artifacts/,
+    );
+  }, 240_000);
+
+  it("a capped slice with no commits beyond base still restarts plainly (#113)", async () => {
+    const repo = makeRepo();
+    const slug = "cap-no-commits";
+    const ctx = makeCtx(repo, slug, sliceAt("05", "75"));
+    git(repo, ["branch", ctx.featBranch]);
+    execFileSync("git", ["worktree", "add", "-b", ctx.branch, ctx.worktreeDir, ctx.featBranch], {
+      cwd: repo, encoding: "utf-8",
+    });
+    // Uncommitted work only — so there is nothing to lose and the restart
+    // is not a no-op refresh either.
+    mkdirSync(join(ctx.worktreeDir, "src"), { recursive: true });
+    writeFileSync(join(ctx.worktreeDir, "src", "half-written.ts"), "export const x =", "utf-8");
+    writeSliceArtifacts(ctx);
+    spendResumeBudget(repo, slug, "75");
+
+    await prepareSliceWorktree(ctx);
+
+    expect(ctx.resume).toBeUndefined();
+    expect(git(repo, ["rev-parse", ctx.branch])).toBe(
+      git(repo, ["rev-parse", ctx.featBranch]),
+    );
+    expect(existsSync(join(ctx.worktreeDir, "src", "half-written.ts"))).toBe(false);
+    // Restart earns a fresh resume budget, and the artifacts it deleted
+    // were archived on the way out.
+    expect(loadRunState(repo, `${slug}-stub`).resume?.["75"]?.attempts).toBe(0);
+    expect(
+      existsSync(join(
+        repo, ".afk", "artifacts", `${slug}-stub`, "slice-05", "pre-restart-1", "contract.md",
+      )),
+    ).toBe(true);
   }, 240_000);
 });
