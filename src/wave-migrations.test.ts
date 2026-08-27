@@ -676,8 +676,9 @@ describe("runWave — contract-lock migration prefix gate", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    expect(outcomes.get("2002")?.phase).toBe("ERROR");
-    expect(outcomes.get("2002")?.error).toMatch(
+    const outcome = outcomes.get("2002");
+    expect(outcome?.phase).toBe("ERROR");
+    expect(outcome?.phase === "ERROR" ? outcome.error : "").toMatch(
       /contract-response\.json is missing/,
     );
     expect(plannerPrompts).toHaveLength(2);
