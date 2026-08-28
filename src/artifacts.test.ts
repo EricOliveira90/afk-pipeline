@@ -15,6 +15,7 @@ import {
   archiveQAReviewAttempt,
   archiveQAReviewRecord,
   archiveQAReviewValidation,
+  archiveScopeEscalationAttempt,
   classifyReviewFailure,
   hasStuckFile,
   isFavorableReviewOutcome,
@@ -51,6 +52,83 @@ function withTempFile(content: string, fn: (path: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe("archiveScopeEscalationAttempt", () => {
+  it("preserves two generator attempts from the same implementation round", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-escalation-archive-"));
+    const sliceDir = join(root, "slice");
+    const archiveDir = join(root, "reviews");
+    mkdirSync(sliceDir, { recursive: true });
+    const source = join(sliceDir, "escalation.md");
+    const first = '{"version":1,"findingIds":["F-01"]}';
+    const second = '{"version":1,"findingIds":["F-02"]}';
+
+    try {
+      writeFileSync(source, first, "utf-8");
+      expect(
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 1,
+          attempt: 1,
+        }),
+      ).toBe("escalation-r1-a1.md");
+
+      writeFileSync(source, second, "utf-8");
+      expect(
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 1,
+          attempt: 2,
+        }),
+      ).toBe("escalation-r1-a2.md");
+
+      expect(
+        readFileSync(join(archiveDir, "escalation-r1-a1.md"), "utf-8"),
+      ).toBe(first);
+      expect(
+        readFileSync(join(archiveDir, "escalation-r1-a2.md"), "utf-8"),
+      ).toBe(second);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a duplicate stamp without changing the archived bytes", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-escalation-archive-"));
+    const sliceDir = join(root, "slice");
+    const archiveDir = join(root, "reviews");
+    mkdirSync(sliceDir, { recursive: true });
+    const source = join(sliceDir, "escalation.md");
+    const original = Buffer.from([0x00, 0x61, 0x0d, 0x0a, 0xff]);
+    writeFileSync(source, original);
+
+    try {
+      archiveScopeEscalationAttempt({
+        sliceDir,
+        archiveDir,
+        round: 2,
+        attempt: 3,
+      });
+      writeFileSync(source, "replacement", "utf-8");
+
+      expect(() =>
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 2,
+          attempt: 3,
+        }),
+      ).toThrow();
+      expect(
+        readFileSync(join(archiveDir, "escalation-r2-a3.md")),
+      ).toEqual(original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("archiveContractReviewRecord", () => {
   it("writes a round-and-attempt-stamped lifecycle record", () => {
