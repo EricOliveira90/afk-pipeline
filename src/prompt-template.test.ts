@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
+import { parseQAReview } from "./qa-review.js";
 import { readFileSync } from "node:fs";
 
 describe("renderPrompt", () => {
@@ -105,6 +106,13 @@ describe("renderPrompt", () => {
     expect(evaluatorPrompt).toContain('"clearCondition"');
     expect(evaluatorPrompt).toContain('"state"');
     expect(evaluatorPrompt).toMatch(/Markdown.+does not control/s);
+    const canonicalExample = /```json\r?\n([\s\S]*?)\r?\n```/.exec(
+      evaluatorPrompt,
+    )?.[1];
+    expect(canonicalExample).toBeDefined();
+    expect(() =>
+      parseQAReview(canonicalExample!, "evaluator QA prompt example"),
+    ).not.toThrow();
 
     const evaluatorPersona = readFileSync(
       new URL("../agents/evaluator.md", import.meta.url),

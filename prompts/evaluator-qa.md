@@ -90,7 +90,7 @@ additional keys:
   "findings": [
     {
       "id": "QA-01",
-      "severity": "BLOCKING",
+      "severity": "ADVISORY",
       "behaviorIds": [],
       "summary": "Concise finding summary",
       "evidence": "Reproducible evidence",
