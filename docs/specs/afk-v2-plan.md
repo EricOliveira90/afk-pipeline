@@ -73,7 +73,7 @@ misleads the next actor.**
 | PRD | Theme | Depends on | Slices | Debate changes |
 |---|---|---|---|---|
 | 1 (#69) | Evidence backbone | — | #75–#79 | run-ID provenance fields land at assembly (§3 item 11) |
-| 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #94 | carries `afk adopt` (§3 item 10); **defer story 14** (babysit-skill packaging) |
+| 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #94, #129 | carries `afk adopt` (§3 item 10, ticket #129); **defer story 14** (babysit-skill packaging) |
 | 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5); **defer story 16** (cross-provider parity matrix) with the fence: envelope *assembly* stays provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it) |
 | 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86 | carries §3 items 2, 5 (artifact), 12; **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
 | 5 (#73) | Quality loops | 4 | #87, #92, #97 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20 |
