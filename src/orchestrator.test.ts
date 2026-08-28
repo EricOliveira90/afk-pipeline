@@ -923,7 +923,7 @@ describe("runPipeline lane scheduling", () => {
 describe("generator scope escalation", () => {
   // No successful pipeline fixture can reach a malformed post-generator
   // control artifact, so this scenario deliberately stops at that boundary.
-  it("fails malformed evidence before revision planning, gates, or QA", async () => {
+  it("archives malformed and absent-field evidence before revision planning, gates, or QA", async () => {
     const repo = makeRepo();
     const slug = "malformed-generator-escalation";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -943,40 +943,61 @@ describe("generator scope escalation", () => {
     git(repo, ["add", "package.json"]);
     git(repo, ["commit", "-m", "make gate observable"]);
 
-    const slice: Slice = {
-      number: "01",
-      ghIssue: "1080",
-      title: "Malformed escalation",
-      type: "AFK",
-      blockedBy: [],
-      userStories: "",
-    };
-    const dag = buildDAG([slice]);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "1080",
+        title: "Absent field escalation",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "1082",
+        title: "Malformed escalation",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const absentField = JSON.stringify({
+      version: 1,
+      findingIds: ["F-17"],
+      reason: "the parser also needs another file",
+    });
+    const malformed = '{"version":1,"findingIds":["F-18"],';
     const fixtures = new Map<string, SliceFixture>([
       [
-        slice.ghIssue,
+        slices[0]!.ghIssue,
         {
-          files: ["src/declared.ts"],
+          files: ["src/declared-a.ts"],
           qaPasses: true,
-          outputFile: "src/declared.ts",
+          outputFile: "src/declared-a.ts",
           outputContent: "declared work",
-          escalation: JSON.stringify({
-            version: 1,
-            findingIds: ["F-17"],
-            reason: "the parser also needs another file",
-          }),
+          escalation: absentField,
+        },
+      ],
+      [
+        slices[1]!.ghIssue,
+        {
+          files: ["src/declared-b.ts"],
+          qaPasses: true,
+          outputFile: "src/declared-b.ts",
+          outputContent: "declared work",
+          escalation: malformed,
         },
       ],
     ]);
     const records: InvocationRecord[] = [];
-    const provider = buildStubProvider({ fixtures, slices: [slice], records });
+    const provider = buildStubProvider({ fixtures, slices, records });
 
     await runPipeline({
       repoRoot: repo,
       prdSlug: slug,
       prdDir,
       specsDir,
-      dag,
+      dag: buildDAG(slices),
       provider,
     });
 
@@ -986,21 +1007,49 @@ describe("generator scope escalation", () => {
         "utf-8",
       ),
     );
-    expect(state.slices[slice.ghIssue].phase).toBe("ERROR");
-    expect(state.slices[slice.ghIssue].error).toMatch(
+    expect(state.slices[slices[0]!.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slices[0]!.ghIssue].error).toMatch(
       /escalation\.md root object must contain exactly/,
     );
-    expect(records.filter(({ role }) => role === "planner")).toHaveLength(1);
-    expect(records.filter(({ role }) => role === "generator")).toHaveLength(1);
+    expect(state.slices[slices[1]!.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slices[1]!.ghIssue].error).toMatch(
+      /escalation\.md is not valid JSON/,
+    );
+    for (const slice of slices) {
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "planner" && ghIssue === slice.ghIssue,
+        ),
+      ).toHaveLength(1);
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "generator" && ghIssue === slice.ghIssue,
+        ),
+      ).toHaveLength(1);
+    }
     expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
     expect(existsSync(gateMarker)).toBe(false);
 
-    const generatorCwd = records.find(({ role }) => role === "generator")!.cwd;
-    const artifactDir = findSliceArtifactDir(generatorCwd, slice.number);
-    expect(artifactDir).not.toBeNull();
-    expect(readFileSync(join(artifactDir!, "escalation.md"), "utf-8")).toBe(
-      fixtures.get(slice.ghIssue)!.escalation,
-    );
+    for (const [slice, raw] of [
+      [slices[0]!, absentField],
+      [slices[1]!, malformed],
+    ] as const) {
+      expect(
+        readFileSync(
+          join(
+            repo,
+            ".afk",
+            "artifacts",
+            `${slug}-stub`,
+            `slice-${slice.number}`,
+            "reviews",
+            "escalation-r1-a1.md",
+          ),
+        ),
+      ).toEqual(Buffer.from(raw));
+    }
   }, 60_000);
 });
 
