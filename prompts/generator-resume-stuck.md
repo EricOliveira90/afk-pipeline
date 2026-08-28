@@ -57,11 +57,9 @@ way:
    If a finding describes a class of failure, change the design so the
    whole class is impossible, then prove it with a test matrix that
    covers the combinations — not just the examples quoted.
-2. **Honor the contract boundary.** A finding that says a change fell
-   outside the locked slice means that change must be reverted out of
-   this slice, even when it made the suite green. Revert it and record it
-   in `handoff.md` under "Gotchas" so it can be picked up properly
-   elsewhere.
+2. **Honor the contract boundary.** If a finding's correct fix requires
+   an undeclared path, follow the scope-escalation protocol below before
+   editing that path.
 3. **If a finding is genuinely unachievable** within the locked
    contract, stop and say so plainly in `{{SLICE_DIR}}/handoff.md`. Do
    not silently narrow the contract.
@@ -117,6 +115,19 @@ Also read:
 - The preserved diagnosis at `{{SLICE_DIR}}/stuck.md`
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}
+
+# Scope escalation
+
+If a cited finding's correct fix requires an undeclared file path:
+1. Stop before making the undeclared edit.
+2. Write `escalation.md` in the slice directory with exactly this JSON:
+   `{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}`.
+3. End the invocation. Do not edit the undeclared path, the locked contract,
+   or its acceptance manifest.
+
+The payload contains no fields other than `version`, `findingIds`, `paths`,
+and `reason`. Use the cited finding IDs, list every needed undeclared path,
+and give a non-blank reason that explains why those paths are required.
 
 # Task
 

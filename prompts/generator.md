@@ -49,11 +49,8 @@ Do this for each behavior BEFORE writing the RED test.
 - Migration ownership is a machine gate. Use only the exact assignment
   below and create exactly the migration paths locked in the contract.
 - **Never delete working code to satisfy the file list.** The locked file
-  list is not yours to edit, and it is not yours to obey by destroying
-  work either. If a change the contract's behaviors require lands in a
-  file the list does not name, keep the change, say so in `handoff.md`,
-  and let QA route the file list for amendment. Reverting correct work to
-  come back inside the boundary is the one remedy you must not take.
+  list is not yours to edit. Follow the scope-escalation protocol below
+  before making a required undeclared edit.
 
 # Migration assignment
 
@@ -69,6 +66,19 @@ Also read:
 - Every ADR cited by the contract (grep for `docs/adr/`)
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}
+
+# Scope escalation
+
+If a cited finding's correct fix requires an undeclared file path:
+1. Stop before making the undeclared edit.
+2. Write `escalation.md` in the slice directory with exactly this JSON:
+   `{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}`.
+3. End the invocation. Do not edit the undeclared path, the locked contract,
+   or its acceptance manifest.
+
+The payload contains no fields other than `version`, `findingIds`, `paths`,
+and `reason`. Use the cited finding IDs, list every needed undeclared path,
+and give a non-blank reason that explains why those paths are required.
 
 # Task
 

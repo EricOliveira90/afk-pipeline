@@ -93,6 +93,19 @@ Also read:
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}
 
+# Scope escalation
+
+If a cited finding's correct fix requires an undeclared file path:
+1. Stop before making the undeclared edit.
+2. Write `escalation.md` in the slice directory with exactly this JSON:
+   `{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}`.
+3. End the invocation. Do not edit the undeclared path, the locked contract,
+   or its acceptance manifest.
+
+The payload contains no fields other than `version`, `findingIds`, `paths`,
+and `reason`. Use the cited finding IDs, list every needed undeclared path,
+and give a non-blank reason that explains why those paths are required.
+
 # Task
 
 Complete the remaining "In scope" behaviors of the locked contract,

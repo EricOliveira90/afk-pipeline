@@ -140,6 +140,37 @@ describe("renderPrompt", () => {
     );
   });
 
+  it("gives every generator invocation the canonical scope-escalation contract", () => {
+    const sources = [
+      new URL("../agents/generator.md", import.meta.url),
+      new URL("../prompts/generator.md", import.meta.url),
+      new URL("../prompts/generator-resume.md", import.meta.url),
+      new URL("../prompts/generator-resume-stuck.md", import.meta.url),
+    ];
+    const escalationSections = sources.map((source) => {
+      const content = readFileSync(source, "utf-8");
+      const section = content.match(
+        /^# Scope escalation\r?\n([\s\S]*?)(?=^# |\Z)/m,
+      );
+      expect(section, source.pathname).not.toBeNull();
+      return section![1]!.trim();
+    });
+
+    expect(new Set(escalationSections)).toHaveLength(1);
+    expect(escalationSections[0]).toContain(
+      "a cited finding's correct fix requires an undeclared file path",
+    );
+    expect(escalationSections[0]).toContain(
+      "Stop before making the undeclared edit",
+    );
+    expect(escalationSections[0]).toContain(
+      '{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}',
+    );
+    expect(escalationSections[0]).toMatch(
+      /contains no fields other than `version`, `findingIds`, `paths`,\s+and `reason`/,
+    );
+  });
+
   it("loads all eight pipeline templates", () => {
     expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "" })).toBeTruthy();
     expect(

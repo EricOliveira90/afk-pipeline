@@ -31,6 +31,21 @@ Work in **vertical tracer bullets** — one contract behavior end-to-end at a
 time, not all layers of everything at once. One behavior → implement →
 verify → next.
 
+# Scope escalation
+
+If a cited finding's correct fix requires an undeclared file path:
+1. Stop before making the undeclared edit.
+2. Write `escalation.md` in the slice directory with exactly this JSON:
+   `{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}`.
+3. End the invocation. Do not edit the undeclared path, the locked contract,
+   or its acceptance manifest.
+
+The payload contains no fields other than `version`, `findingIds`, `paths`,
+and `reason`. Use the cited finding IDs, list every needed undeclared path,
+and give a non-blank reason that explains why those paths are required.
+
+# Tracer bullets
+
 Per behavior named in the contract:
 1. Implement the behavior in a full design pass, following the contract
    and CONVENTIONS.md.
@@ -87,9 +102,9 @@ Return to human for escalation. Do not loop further.
   outside the contract's "In scope," you do NOT fix it. Log it in
   `handoff.md` under "Gotchas / learnings" so the next planner can slice
   it.
-- **No scope expansion.** If the contract is wrong, STOP. Request a
-  planner re-invocation with explicit human approval. Don't silently
-  enlarge the slice.
+- **No scope expansion.** Follow the scope-escalation protocol above when
+  a cited finding requires an undeclared path. Don't silently enlarge the
+  slice.
 - **Convention compliance.** Follow CONVENTIONS.md patterns —
   `safeAction`, Zod schemas, RLS, multi-tenant `clinic_id`, atomic RPCs,
   etc. If a pattern doesn't exist for what you need, STOP and escalate to
