@@ -63,12 +63,16 @@ describe("retried slice resume (spec #33)", () => {
     const slice = (number: string, ghIssue: string, title: string): Slice => ({
       number, ghIssue, title, type: "AFK", blockedBy: [], userStories: "",
     });
-    /** 01 resumes, 02 hits the conflict refusal, 03 is forced, 04 has no commits. */
+    /**
+     * 01 resumes, 02 hits the conflict refusal, 03 is forced, 04 has no
+     * commits, and 05 resumes after completing its first QA round.
+     */
     const slices = [
       slice("01", "4001", "Resumable"),
       slice("02", "4002", "Conflicting"),
       slice("03", "4003", "Forced"),
       slice("04", "4004", "Empty"),
+      slice("05", "4005", "QA resume"),
     ];
     const records: PromptRecord[] = [];
     let repo: string;
@@ -100,6 +104,10 @@ describe("retried slice resume (spec #33)", () => {
         ...runConfig,
         dag,
         provider: buildProvider({
+          qaResult: (sliceNumber) =>
+            sliceNumber === "05"
+              ? { verdict: "FAIL", findingState: "OPEN" }
+              : undefined,
           generator: (cwd, _options, sliceNumber) => {
             mkdirSync(join(cwd, "src"), { recursive: true });
             if (sliceNumber === "01") {
@@ -137,6 +145,16 @@ describe("retried slice resume (spec #33)", () => {
               git(cwd, ["add", "-A"]);
               git(cwd, ["commit", "-m", "feat(#4003): committed before death"]);
               throw new Error("killed");
+            }
+            if (sliceNumber === "05") {
+              const path = join(cwd, "src", "work-05.ts");
+              if (!existsSync(path)) {
+                writeFileSync(path, "export const firstRound = 1;\n", "utf-8");
+                git(cwd, ["add", "src/work-05.ts"]);
+                git(cwd, ["commit", "-m", "feat(#4005): complete QA round one"]);
+                return;
+              }
+              throw new Error("killed during generator round two");
             }
             throw new Error("killed before any commit");
           },
@@ -177,6 +195,10 @@ describe("retried slice resume (spec #33)", () => {
         forceRestart: ["03"],
         provider: buildProvider({
           records,
+          qaResult: (sliceNumber) =>
+            sliceNumber === "05"
+              ? { verdict: "PASS", findingState: "RESOLVED" }
+              : undefined,
           generator: (cwd, _options, sliceNumber) => {
             if (sliceNumber === "01") {
               // Follow the prompt's migration-prefix rule: renumber to
@@ -189,6 +211,16 @@ describe("retried slice resume (spec #33)", () => {
               writeFileSync(join(cwd, "src", "finish.ts"), "export const finished = 1;\n", "utf-8");
               git(cwd, ["add", "src/finish.ts"]);
               git(cwd, ["commit", "-m", "feat(#4001): finished after resume"]);
+              return;
+            }
+            if (sliceNumber === "05") {
+              writeFileSync(
+                join(cwd, "src", "finish-05.ts"),
+                "export const resumed = 1;\n",
+                "utf-8",
+              );
+              git(cwd, ["add", "src/finish-05.ts"]);
+              git(cwd, ["commit", "-m", "feat(#4005): finish after QA resume"]);
               return;
             }
             mkdirSync(join(cwd, "src"), { recursive: true });
@@ -214,7 +246,11 @@ describe("retried slice resume (spec #33)", () => {
 
     it("leaves every dead slice in ERROR after the first run", () => {
       expect(deathPhases).toEqual({
-        "4001": "ERROR", "4002": "ERROR", "4003": "ERROR", "4004": "ERROR",
+        "4001": "ERROR",
+        "4002": "ERROR",
+        "4003": "ERROR",
+        "4004": "ERROR",
+        "4005": "ERROR",
       });
     });
 
@@ -258,6 +294,50 @@ describe("retried slice resume (spec #33)", () => {
       // The commit log stays the slice's OWN work — the sibling commit
       // merged during refresh must not appear as the generator's history.
       expect(prompt).not.toContain("sibling slice merged while dead");
+    });
+
+    it("continues QA lifecycle and evidence numbering after an ordinary resume", () => {
+      const generatorPrompt = generatorRecord("05").prompt;
+      expect(generatorPrompt).toContain("QA-01");
+      expect(generatorPrompt).toContain("Fixture implementation finding");
+      expect(generatorPrompt).toContain(
+        "The fixture evaluator observes the behavior passing",
+      );
+      expect(generatorPrompt).toContain("qa-review-r1-a1.json");
+      expect(generatorPrompt).toContain("qa-report-r1-a1.md");
+
+      const evaluatorPrompt = records.find(
+        (record) =>
+          record.role === "evaluator-qa" && record.sliceNumber === "05",
+      )!.prompt;
+      expect(evaluatorPrompt).toContain("QA-01");
+      expect(evaluatorPrompt).toContain("qa-review-r1-a1.json");
+      expect(evaluatorPrompt).toContain("qa-report-r1-a1.md");
+
+      const reviewDir = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-05",
+        "reviews",
+      );
+      expect(existsSync(join(reviewDir, "qa-review-r1-a1.json"))).toBe(true);
+      expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+        true,
+      );
+      expect(existsSync(join(reviewDir, "qa-review-r2-a1.json"))).toBe(true);
+      const resumedRecord = JSON.parse(
+        readFileSync(
+          join(reviewDir, "qa-review-r2-a1-record.json"),
+          "utf-8",
+        ),
+      );
+      expect(resumedRecord).toMatchObject({
+        round: 2,
+        verdict: "PASS",
+        findings: [{ id: "QA-01", state: "RESOLVED", unresolved: false }],
+      });
     });
 
     it("splices slice 01's fresh handoff and the reconciliation rules in (#38)", () => {
@@ -307,6 +387,8 @@ describe("retried slice resume (spec #33)", () => {
       const tracked = git(repo, ["ls-tree", "-r", "--name-only", `feat-stub/${slug}`]);
       expect(tracked).toContain("src/work-01.ts");
       expect(tracked).toContain("src/finish.ts");
+      expect(tracked).toContain("src/work-05.ts");
+      expect(tracked).toContain("src/finish-05.ts");
       expect(tracked).not.toContain("src/half-written.ts");
       // The renumbered migration, not the colliding prefix.
       expect(tracked).toContain("supabase/migrations/126_slice_work.sql");

@@ -156,6 +156,11 @@ export function buildProvider(opts: {
   qaVerdict?: "PASS" | "FAIL";
   /** Explicit lifecycle disposition for the fixture's deterministic finding. */
   qaFindingState?: "OPEN" | "RESOLVED";
+  /** Per-slice override for deterministic QA lifecycle fixtures. */
+  qaResult?: (sliceNumber: string) => {
+    verdict: "PASS" | "FAIL";
+    findingState?: "OPEN" | "RESOLVED";
+  } | undefined;
 }): AgentProvider {
   return {
     name: "stub",
@@ -219,14 +224,18 @@ export function buildProvider(opts: {
       } else if (role === "generator") {
         await opts.generator(cwd, options, sliceNumber);
       } else if (role === "evaluator-qa" && artifactDir) {
+        const qaResult = opts.qaResult?.(sliceNumber) ?? {
+          verdict: opts.qaVerdict ?? "PASS",
+          findingState: opts.qaFindingState,
+        };
         writeFileSync(
           join(artifactDir, "qa-report.md"),
-          `# QA Report\n\n**Verdict:** ${opts.qaVerdict ?? "PASS"}\n`,
+          `# QA Report\n\n**Verdict:** ${qaResult.verdict}\n`,
           "utf-8",
         );
         writeQAReview(artifactDir, "deterministic", {
-          verdict: opts.qaVerdict ?? "PASS",
-          ...(opts.qaFindingState
+          verdict: qaResult.verdict,
+          ...(qaResult.findingState
             ? {
                 findings: [
                   {
@@ -240,7 +249,7 @@ export function buildProvider(opts: {
                     observed: "The behavior fails",
                     clearCondition:
                       "The fixture evaluator observes the behavior passing",
-                    state: opts.qaFindingState,
+                    state: qaResult.findingState,
                   },
                 ],
               }

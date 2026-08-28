@@ -2499,7 +2499,7 @@ export async function runSliceExecute(
   let retryNote = "";
 
   try {
-    if (ctx.resume?.mode === "stuck") {
+    if (ctx.resume) {
       const reviewArchiveDir = artifacts.contractReviewArchiveDir(
         config.repoRoot,
         pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
@@ -2572,6 +2572,8 @@ export async function runSliceExecute(
               COMMITS_AHEAD: ctx.resume.commitsAhead,
               COMMIT_LOG: ctx.resume.commitLog,
               FEAT_BRANCH: featBranch,
+              UNRESOLVED_FINDINGS:
+                formatUnresolvedQAFindings(resumedUnresolved),
               HANDOFF_NOTE: ctx.resume.handoffNote,
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             })
