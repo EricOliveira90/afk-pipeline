@@ -68,6 +68,7 @@ import {
 } from "./command-runtime.js";
 import {
   createCandidateCheckpoint,
+  resolveCandidateTreeId,
   runGates,
   verifyGateEvidence,
   type GateDeclaration,
@@ -75,6 +76,11 @@ import {
   type GateEvidenceArtifact,
   type GateResult,
 } from "./gate-runner.js";
+import {
+  authorizeBaseGateSkip,
+  formatBaseGateSkipAuthorization,
+  type BaseGateSkipAuthorization,
+} from "./qa-gate-authorization.js";
 import {
   loadRunState,
   saveRunState,
@@ -2377,12 +2383,26 @@ function formatUnresolvedQAFindings(
     .join("\n");
 }
 
+/**
+ * What the orchestrator knows about the base gates it ran for this round,
+ * handed to QA so the evaluator can be authorized to cite them (ADR 0012's
+ * 2026-08-28 amendment). Omitted by callers that have no gate run to offer;
+ * QA then behaves exactly as it did before the amendment.
+ */
+export interface QABaseGateEvidence {
+  evidence: GateEvidence;
+  /** Repo-relative path of the verified evidence artifact. */
+  evidenceArtifactId: string;
+  declarations: readonly GateDeclaration[];
+}
+
 export async function runQAStage(
   ctx: SliceContext,
   round: number,
   stage: QAReviewStage,
   history: readonly QAReviewLifecycleFinding[],
   previousUnresolved: readonly QAReviewAttemptFinding[] = [],
+  baseGate: QABaseGateEvidence | null = null,
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -2407,11 +2427,56 @@ export async function runQAStage(
   let currentHistory = history;
   let currentUnresolved = previousUnresolved;
 
+  /**
+   * Decide the skip authorization for one attempt (ADR 0012, 2026-08-28).
+   *
+   * Per attempt, not once per stage, because an attempt is only reached by an
+   * infrastructure retry — and the previous attempt archived its report into
+   * the worktree, so the tree has moved. Re-hashing lets that fall closed
+   * instead of citing a gate run against a tree that no longer exists.
+   *
+   * Only the deterministic stage can be authorized: shared-preview UAT is
+   * told to skip the sanity list outright and run remote scenarios, so there
+   * is nothing to dedup.
+   */
+  const authorizeSkip = (): BaseGateSkipAuthorization => {
+    if (stage !== "deterministic") {
+      // Refusing is what denies the citation; the prompt renders its own UAT
+      // wording, because the generic refusal ends by ordering the sanity run
+      // that UAT's scope forbids.
+      return {
+        authorized: false,
+        reason:
+          "shared-preview UAT does not run the deterministic sanity list",
+      };
+    }
+    if (!baseGate) {
+      return {
+        authorized: false,
+        reason: "no base-gate run was handed to this QA stage",
+      };
+    }
+    let reviewTreeId: string | null = null;
+    try {
+      reviewTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+    } catch (error) {
+      // Hashing the candidate is the whole basis of the authorization, so a
+      // failure here is not an error to propagate — it is simply no
+      // authorization, and QA runs the gates as it always did.
+      logger.phase(
+        `${ctx.tag}: could not hash the tree under review; QA will re-run ` +
+          `the base gates (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+    return authorizeBaseGateSkip({ ...baseGate, reviewTreeId });
+  };
+
   for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
     const archiveName = stage === "deterministic"
       ? `qa-report-r${round}-a${attempt}.md`
       : `uat-report-r${round}-a${attempt}.md`;
     const archivePath = join(ctx.absSliceDir, archiveName);
+    const skipAuthorization = authorizeSkip();
     type AttemptEvidence = {
       rawArchiveName: string | null;
       reportArchived: boolean;
@@ -2557,6 +2622,9 @@ export async function runQAStage(
         review,
         canonicalArchivePath,
         markdownArchivePath: archiveDisplayPath,
+        baseGateCitation: skipAuthorization.authorized
+          ? skipAuthorization.citation
+          : null,
       });
       // Required evidence fails closed (#79): a lifecycle record that
       // cannot be preserved must not let the attempt's verdict stand.
@@ -2621,6 +2689,17 @@ export async function runQAStage(
             // it (ADR 0038). `renderPrompt` enforces this — the template
             // rejects an arg it does not reference.
             SANITY_COMMANDS: ctx.sanityCommandsBlock,
+            // Orchestrator-asserted gate evidence, or the reason there is
+            // none (ADR 0012, 2026-08-28). Always rendered: an evaluator
+            // that reads "no authorization is in force" cannot mistake a
+            // missing block for a granted skip. UAT gets its own line —
+            // the formatter's refusal orders the sanity run, which is
+            // exactly what the UAT scope forbids.
+            BASE_GATE_AUTHORIZATION:
+              stage === "deterministic"
+                ? formatBaseGateSkipAuthorization(skipAuthorization)
+                : "No skip authorization applies to shared-preview UAT — " +
+                  "your scope already excludes the deterministic sanity list.",
             QA_SCOPE: scope,
             REPORT_PATH: reportDisplayPath,
             UNRESOLVED_FINDINGS:
@@ -3154,6 +3233,18 @@ export async function runSliceExecute(
           checkpoint.treeId,
         );
         for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+        // The gates just passed on this tree; hand QA the evidence so it can
+        // be authorized to cite them rather than run them again (ADR 0012,
+        // 2026-08-28). `runQAStage` re-hashes the tree and refuses on any
+        // mismatch, so passing the evidence never weakens the review.
+        const qaBaseGate: QABaseGateEvidence = {
+          evidence: gateEvidence,
+          evidenceArtifactId: relative(
+            config.repoRoot,
+            gateEvidencePath,
+          ).replace(/\\/g, "/"),
+          declarations,
+        };
         logger.phase(
           `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
           "error",
@@ -3171,6 +3262,7 @@ export async function runSliceExecute(
           "deterministic",
           deterministicHistory,
           deterministicUnresolved,
+          qaBaseGate,
         );
         deterministicHistory = deterministic.history;
         deterministicUnresolved = deterministic.unresolved;

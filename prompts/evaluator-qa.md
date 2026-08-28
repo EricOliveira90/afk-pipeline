@@ -45,9 +45,9 @@ Also read:
   source changes cannot fix. Cite direct evidence. A timeout alone is not
   enough when fixture or application code could be responsible — but a
   timeout is *not* a code finding when the orchestrator's base gate ran the
-  same command to green on the same tree. That gate evidence is supplied to
-  you; cite it and classify the interruption as INFRASTRUCTURE rather than
-  reporting a defect the tree does not contain.
+  same command to green on the same tree. That gate evidence is supplied
+  under Pass 1 below; cite it and classify the interruption as
+  INFRASTRUCTURE rather than reporting a defect the tree does not contain.
 - **NONE:** all assigned checks passed.
 
 # Pass 1: Functional Correctness
@@ -59,6 +59,8 @@ For deterministic slice QA, run every sanity command below in order:
 That list is the complete command set for this pass — it already includes
 the project's tests. Do not run the project tests twice, and do not
 substitute a command the list does not name.
+
+{{BASE_GATE_AUTHORIZATION}}
 
 Launch any command you expect to run for more than a few minutes as a
 background job and poll it to completion, rather than invoking it directly

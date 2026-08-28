@@ -39,6 +39,13 @@ function review(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+const CITATION = {
+  evidenceArtifactId: ".afk/runs/run-1/gates/s01/gate-evidence.json",
+  attemptId: "attempt-abc",
+  treeId: "1111111111111111111111111111111111111111",
+  gateIds: ["typecheck", "lint", "tests"],
+};
+
 function implementationReview(
   findingOverrides: Record<string, unknown> = {},
 ): string {
@@ -458,6 +465,136 @@ describe("buildQAReviewAttemptRecord", () => {
       verdict: "FAIL",
       failureClass: "INFRASTRUCTURE",
       findings: [],
+    });
+  });
+
+  it("records the base-gate citation beside the verdict when one was issued", () => {
+    const record = buildQAReviewAttemptRecord({
+      stage: "deterministic",
+      round: 1,
+      attempt: 1,
+      review: parseQAReview(review()),
+      canonicalArchivePath: "reviews/qa-review-r1-a1.json",
+      markdownArchivePath: "slice/qa-report-r1-a1.md",
+      baseGateCitation: CITATION,
+    });
+
+    expect(record.baseGateCitation).toEqual(CITATION);
+  });
+
+  it("omits the citation key entirely when no skip was authorized", () => {
+    for (const baseGateCitation of [null, undefined]) {
+      const record = buildQAReviewAttemptRecord({
+        stage: "deterministic",
+        round: 1,
+        attempt: 1,
+        review: parseQAReview(review()),
+        canonicalArchivePath: "reviews/qa-review-r1-a1.json",
+        markdownArchivePath: "slice/qa-report-r1-a1.md",
+        baseGateCitation,
+      });
+
+      expect("baseGateCitation" in record).toBe(false);
+    }
+  });
+});
+
+describe("the QA attempt record carries an auditable base-gate citation", () => {
+  function withRecordDir<T>(
+    fn: (dirs: { reviewDir: string; sliceDir: string }) => T,
+  ): T {
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-citation-"));
+    const reviewDir = join(root, "reviews");
+    const sliceDir = join(root, "slice");
+    mkdirSync(reviewDir);
+    mkdirSync(sliceDir);
+    try {
+      return fn({ reviewDir, sliceDir });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function writeRecord(reviewDir: string, record: unknown): void {
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-record.json"),
+      JSON.stringify(record),
+      "utf-8",
+    );
+  }
+
+  function recordWithCitation(citation: unknown): Record<string, unknown> {
+    return {
+      ...buildQAReviewAttemptRecord({
+        stage: "deterministic",
+        round: 1,
+        attempt: 1,
+        review: parseQAReview(review()),
+        canonicalArchivePath: "reviews/qa-review-r1-a1.json",
+        markdownArchivePath: "slice/qa-report-r1-a1.md",
+      }),
+      baseGateCitation: citation,
+    };
+  }
+
+  it("round-trips a written citation back out of the archive", () => {
+    withRecordDir(({ reviewDir, sliceDir }) => {
+      writeRecord(reviewDir, recordWithCitation(CITATION));
+
+      // The resume reader is the only consumer that reparses these records;
+      // it accepting the key is what makes the citation durable evidence
+      // rather than a write nobody can read back.
+      expect(() => loadQAReviewResumeState(reviewDir, sliceDir)).not.toThrow();
+    });
+  });
+
+  it("still reads a record written before the citation existed", () => {
+    withRecordDir(({ reviewDir, sliceDir }) => {
+      writeRecord(
+        reviewDir,
+        buildQAReviewAttemptRecord({
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+          review: parseQAReview(review()),
+          canonicalArchivePath: "reviews/qa-review-r1-a1.json",
+          markdownArchivePath: "slice/qa-report-r1-a1.md",
+        }),
+      );
+
+      expect(loadQAReviewResumeState(reviewDir, sliceDir).nextRound).toBe(2);
+    });
+  });
+
+  it.each([
+    ["a non-object citation", "gate-evidence.json", "must be an object"],
+    [
+      "a citation missing a key",
+      { evidenceArtifactId: "x", attemptId: "y", treeId: "z" },
+      "must contain exactly",
+    ],
+    [
+      "a citation with an extra key",
+      { ...CITATION, note: "trust me" },
+      "must contain exactly",
+    ],
+    [
+      "a blank tree sha",
+      { ...CITATION, treeId: "  " },
+      "treeId must be a non-blank string",
+    ],
+    [
+      "an empty gate list",
+      { ...CITATION, gateIds: [] },
+      "gateIds must contain at least one non-blank string",
+    ],
+  ])("refuses %s", (_label, citation, message) => {
+    withRecordDir(({ reviewDir, sliceDir }) => {
+      writeRecord(reviewDir, recordWithCitation(citation));
+
+      expect(() => loadQAReviewResumeState(reviewDir, sliceDir)).toThrow(
+        message as string,
+      );
     });
   });
 });
