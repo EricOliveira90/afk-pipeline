@@ -1,5 +1,5 @@
 import { appendFileSync, type WriteStream } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
 import { Logger, type SanityGateResult } from "./logger.js";
 import {
@@ -37,6 +37,7 @@ export class RunJournal {
   private readonly terminalSlices = new Set<string>();
   private readonly logger: Logger;
   private featureBranch?: string;
+  private fatalStreamError?: (error: unknown, origin: string) => void;
 
   readonly runDir: string;
 
@@ -223,8 +224,31 @@ export class RunJournal {
     this.logger.writeIdleWarning(stream, agent, minutes);
   }
 
+  /**
+   * Route a fatal `'error'` event on an agent log stream to the crash
+   * recorder (#121). Run 6 died exactly here: a `WriteStream` hit ENOSPC,
+   * nothing listened, and Node's unhandled-`'error'` throw ended the
+   * process before any record was written.
+   *
+   * Registered by `runPipeline` only when the CLI supplied a crash
+   * recorder. Without one, no listener is attached and an unhandled
+   * `'error'` stays process-fatal exactly as before — a stream failure
+   * must not become a silence just because nobody is recording.
+   */
+  onFatalStreamError(handler: (error: unknown, origin: string) => void) {
+    this.fatalStreamError = handler;
+  }
+
   agentLog(sliceId: string, agent: string, round?: number): WriteStream {
-    return this.logger.agentLog(sliceId, agent, round);
+    const stream = this.logger.agentLog(sliceId, agent, round);
+    if (this.fatalStreamError) {
+      // Named by the file being written: "the disk refused this log" is a
+      // different diagnosis from "an agent threw", and the record should
+      // not make the operator guess which one happened.
+      const origin = basename(String(stream.path));
+      stream.on("error", (error) => this.fatalStreamError?.(error, origin));
+    }
+    return stream;
   }
 
   setReviewOutcomes(

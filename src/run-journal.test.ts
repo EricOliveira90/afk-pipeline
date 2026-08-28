@@ -220,3 +220,44 @@ describe("RunJournal.markCancelledInFlight", () => {
     expect(journal.markCancelledInFlight([SLICE, OTHER], "Cancelled by user")).toEqual([]);
   });
 });
+
+/**
+ * Issue #121: run 6's crash was an unhandled `'error'` event on an agent
+ * log `WriteStream` (ENOSPC). Node's default action ended the process, so
+ * no record was written and the state file kept a two-runs-stale reason.
+ */
+describe("RunJournal.agentLog", () => {
+  it("routes a fatal stream error to the crash recorder, naming the log file", () => {
+    const journal = new RunJournal(makeRepo(), "stream-error");
+    const seen: Array<{ message: string; origin: string }> = [];
+    journal.onFatalStreamError((error, origin) => {
+      seen.push({ message: (error as Error).message, origin });
+    });
+
+    const stream = journal.agentLog("05", "generator", 2);
+    stream.emit("error", new Error("ENOSPC: no space left on device, write"));
+    stream.destroy();
+
+    expect(seen).toEqual([
+      {
+        message: "ENOSPC: no space left on device, write",
+        origin: "slice-05-generator-r2.log",
+      },
+    ]);
+  });
+
+  it("leaves a stream error process-fatal when no recorder is installed", () => {
+    // In-process callers (this suite) pass no crash recorder, and a
+    // stream failure must not become a silence just because nobody is
+    // recording it: with no listener, Node still throws.
+    const journal = new RunJournal(makeRepo(), "stream-error-unrecorded");
+
+    const stream = journal.agentLog("05", "generator");
+    expect(() => stream.emit("error", new Error("ENOSPC"))).toThrow("ENOSPC");
+    // Only after the assertion, and only for teardown: this temp repo is
+    // removed while the real file's open is still in flight, and that
+    // ENOENT would then be an unhandled error of the suite's own making.
+    stream.on("error", () => {});
+    stream.destroy();
+  });
+});

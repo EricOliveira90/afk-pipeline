@@ -51,6 +51,10 @@ import {
   runIdFor,
   writeStopAck,
 } from "./stop-sentinel.js";
+import {
+  crashRecorderFor,
+  type CrashRecorderRegistrar,
+} from "./crash-records.js";
 
 import {
   ProcessTreeTerminationError,
@@ -383,6 +387,15 @@ export interface PipelineConfig {
   requestCancellation?: () => void;
   /** Sentinel poll interval override. Exists for tests. */
   stopSentinelIntervalMs?: number;
+  /**
+   * The CLI's crash recorder (#121). Supplied only by an entry point that
+   * owns the process, because the handlers behind it end the process: the
+   * pipeline registers what to write, never when to die. In-process
+   * callers pass nothing and keep Node's own behaviour.
+   *
+   * See `src/crash-records.ts` and ADR 0044.
+   */
+  crashRecords?: CrashRecorderRegistrar;
 }
 
 export interface PipelineResult {
@@ -3352,6 +3365,33 @@ export async function runPipeline(
     signal?.addEventListener("abort", onCancellationRequested, { once: true });
   }
 
+  // --- The same record for the exit no signal announces (#121, ADR 0044).
+  //
+  // The listener above fires on the `AbortSignal`. A crash never touches
+  // it: run 6 died on an unhandled `'error'` event from a log stream
+  // (ENOSPC), so nothing was recorded and the state file still named
+  // slice #79's typecheck failure from two runs earlier — already fixed
+  // by then, and the first thing an operator read. The crash handlers
+  // therefore reach the *same* `markCancelledInFlight`, with `CRASHED`
+  // and the error text as the cause, and the recorded phase stays
+  // CANCELLED so the slice branch is preserved exactly as a stop
+  // preserves it.
+  //
+  // Only a CLI that owns the process supplies the handle — the handlers
+  // behind it exit — and the same `cancellableSlices` hook feeds both
+  // paths, so a crash during setup records its line and no slice, which
+  // is the truth at that moment.
+  const crashRecords = config.crashRecords;
+  let unregisterCrashRecorder: (() => void) | undefined;
+  if (crashRecords) {
+    unregisterCrashRecorder = crashRecords.register(
+      crashRecorderFor(logger, () => cancellableSlices()),
+    );
+    logger.onFatalStreamError((error, origin) =>
+      crashRecords.reportFatalStreamError(error, origin),
+    );
+  }
+
   // --- `afk stop`: the same abort path, delivered as a file (ADR 0043).
   //
   // A signal is the wrong instrument for a detached Windows run:
@@ -4276,5 +4316,9 @@ export async function runPipeline(
     // (the test suite runs many pipelines per worker) would accumulate
     // one per run.
     stopWatcher?.stop();
+    // The handlers outlive this run — the CLI owns them — but the recorder
+    // must not: it writes through this run's journal, and a crash after
+    // the run has returned would record against a finished run.
+    unregisterCrashRecorder?.();
   }
 }
