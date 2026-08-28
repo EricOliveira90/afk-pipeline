@@ -31,6 +31,13 @@
  * only safe because cancellation bookkeeping is written *when the signal
  * fires* rather than when the wind-down finishes — see the abort
  * listener in `runPipeline`.
+ *
+ * One stop request does not arrive as a signal at all: `requestStop` is
+ * the same button, pressed by the pipeline when it finds this run's stop
+ * sentinel on disk (ADR 0041). Windows made that necessary — a detached
+ * run lives in a process group the OS will not deliver `CTRL_C_EVENT` to,
+ * and the API says otherwise — but it is the delivery that differs.
+ * Everything past `controller.abort()` is identical whichever pressed it.
  */
 
 /** Node's `process`, narrowed to what the installer touches. */
@@ -55,6 +62,17 @@ export interface CancellationHandle {
   readonly signal: AbortSignal;
   /** Signal names actually registered on this host. */
   readonly signals: readonly string[];
+  /**
+   * Press the same stop button without a signal, naming what asked.
+   *
+   * The pipeline calls this when it finds this run's stop sentinel — the
+   * delivery mechanism for a detached run no console event reaches
+   * (ADR 0041). It shares the escalation counter with the signal
+   * listeners deliberately: two stop requests are two stop requests, and
+   * an operator who sends both a sentinel and a Ctrl-Break has asked
+   * twice.
+   */
+  requestStop(source: string): void;
   /** Remove the listeners once the run has finished. */
   dispose(): void;
 }
@@ -88,17 +106,20 @@ export function installCancellationSignals(
   const signals = cancellationSignalsFor(host.platform);
   let count = 0;
 
+  /** One stop request, whatever delivered it. */
+  const stop = (description: string, label: string) => {
+    count++;
+    if (count === 1) {
+      log(`\n${description} — cancelling pipeline...`);
+      controller.abort();
+    } else {
+      log(`Second stop request (${label}) — exiting hard.`);
+      host.exit(hardExitCode);
+    }
+  };
+
   const listeners = signals.map((name) => {
-    const listener = () => {
-      count++;
-      if (count === 1) {
-        log(`\nReceived ${name} — cancelling pipeline...`);
-        controller.abort();
-      } else {
-        log(`Second stop signal (${name}) — exiting hard.`);
-        host.exit(hardExitCode);
-      }
-    };
+    const listener = () => stop(`Received ${name}`, name);
     host.on(name, listener);
     return { name, listener };
   });
@@ -106,6 +127,9 @@ export function installCancellationSignals(
   return {
     signal: controller.signal,
     signals,
+    requestStop(source: string) {
+      stop(`Stop requested by ${source}`, source);
+    },
     dispose() {
       for (const { name, listener } of listeners) host.off(name, listener);
     },

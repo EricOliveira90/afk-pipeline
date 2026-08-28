@@ -3,6 +3,11 @@
 > Amended by ADR 0040: which signals reach this path (Windows needs
 > `SIGBREAK`, and cannot receive `CTRL_C_EVENT` in a detached process
 > group), and when the cancellation record is written.
+>
+> Amended by ADR 0041: a stop can also arrive as a file the run polls for
+> (`afk stop`), because a detached Windows run cannot be reached by a
+> console event at all. It enters this same path via
+> `CancellationHandle.requestStop`.
 
 `runPipeline` accepts an optional `signal: AbortSignal` in
 `PipelineConfig`. The CLI (`afk.ts`, `afk-claude.ts`, `afk-codex.ts`)

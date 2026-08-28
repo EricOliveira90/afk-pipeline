@@ -37,6 +37,12 @@ import {
   type SliceIdentity,
 } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
+import {
+  clearStopSentinel,
+  createStopSentinelWatcher,
+  runIdFor,
+  writeStopAck,
+} from "./stop-sentinel.js";
 
 import {
   ProcessTreeTerminationError,
@@ -344,6 +350,18 @@ export interface PipelineConfig {
    * CANCELLED. See ADR 0003.
    */
   signal?: AbortSignal;
+  /**
+   * Fires the same abort path a stop signal fires. Supplied by the CLI,
+   * which owns the `AbortController` behind `signal` — the pipeline only
+   * ever sees the read-only half, so it needs a way to ask.
+   *
+   * Its presence is what enables the `afk stop` sentinel poll: a caller
+   * that cannot be cancelled has nothing to poll for. See
+   * `src/stop-sentinel.ts` and ADR 0041.
+   */
+  requestCancellation?: () => void;
+  /** Sentinel poll interval override. Exists for tests. */
+  stopSentinelIntervalMs?: number;
 }
 
 export interface PipelineResult {
@@ -3209,11 +3227,18 @@ export async function runPipeline(
   // The listener's lifetime is the run's — one `AbortController` per CLI
   // invocation — and `once` drops it as soon as it fires.
   let cancellableSlices: () => SliceIdentity[] = () => [];
+  /**
+   * What the abort listener recorded, kept for the sentinel's ack: that
+   * is the whole point of the ack, so it has to report the real ids
+   * rather than a promise that something was written.
+   */
+  let markedAtCancellation: string[] = [];
   const onCancellationRequested = () => {
     const marked = logger.markCancelledInFlight(
       cancellableSlices(),
       CANCELLED_BY_USER,
     );
+    markedAtCancellation = marked;
     const detail =
       marked.length > 0
         ? `marked CANCELLED in run state: ${marked.map((id) => `#${id}`).join(", ")}`
@@ -3228,6 +3253,79 @@ export async function runPipeline(
   else {
     signal?.addEventListener("abort", onCancellationRequested, { once: true });
   }
+
+  // --- `afk stop`: the same abort path, delivered as a file (ADR 0041).
+  //
+  // A signal is the wrong instrument for a detached Windows run:
+  // `CTRL_C_EVENT` reported success twice into a live run without
+  // delivering anything, and the `CTRL_BREAK_EVENT` that did land exited
+  // the process before ADR 0040's record was written. So the run also
+  // watches a file in its own log directory, and a sentinel that appears
+  // there goes through `requestCancellation` — the CLI's own stop button,
+  // the same `AbortController`, the same listener above.
+  //
+  // Cleared first: a run must never inherit a stop. The path is unique
+  // per run (see src/stop-sentinel.ts), so this should find nothing; if
+  // it finds something, that is worth a line rather than a silent delete.
+  const clearedSentinels = clearStopSentinel(logger.runDir);
+  if (clearedSentinels.length > 0) {
+    logger.phase(
+      `[afk] Cleared stale stop sentinel(s) in this run's log dir before launch: ${clearedSentinels.join(", ")}`,
+      "error",
+    );
+  }
+  const requestCancellation = config.requestCancellation;
+  const stopWatcher = requestCancellation
+    ? createStopSentinelWatcher({
+        runDir: logger.runDir,
+        intervalMs: config.stopSentinelIntervalMs,
+        onOtherRun: (targetRunId) => {
+          logger.phase(
+            `[afk] Ignoring a stop sentinel in this run's log dir: it names run ${targetRunId}, not ${runIdFor(logger.runDir)}`,
+            "error",
+          );
+        },
+        onStop: (decision) => {
+          // Already cancelling — a second request must not escalate into
+          // the CLI's hard exit; the ack below still tells `afk stop` the
+          // truth, which is that this run is winding down.
+          const alreadyCancelling = signal?.aborted === true;
+          const detail =
+            decision.reason === "unreadable"
+              ? `sentinel unreadable (${decision.detail}) — stopping anyway`
+              : decision.request.source
+                ? `requested by ${decision.request.source} at ${decision.request.requestedAt}`
+                : `requested at ${decision.request.requestedAt}`;
+          const message =
+            `Stop requested via sentinel (${detail})` +
+            (alreadyCancelling ? " — this run was already cancelling" : "");
+          logger.phase(`[afk] ${message}`, "error", {
+            type: "warn",
+            reason: "stop-requested",
+            message,
+          });
+          // The listener registered above runs synchronously inside
+          // abort(), so by the time this returns the CANCELLED records
+          // are on disk — which is what makes the ack worth writing.
+          if (!alreadyCancelling) requestCancellation();
+          const wrote = writeStopAck(logger.runDir, {
+            runId: runIdFor(logger.runDir),
+            ...(decision.reason === "requested"
+              ? { requestedAt: decision.request.requestedAt }
+              : {}),
+            acknowledgedAt: new Date().toISOString(),
+            cancelledSlices: markedAtCancellation,
+          });
+          if (!wrote) {
+            logger.phase(
+              `[afk] Warning: could not write the stop acknowledgement to ${logger.runDir} — ` +
+                `the cancellation itself is unaffected; 'afk stop' will report it as unacknowledged`,
+              "error",
+            );
+          }
+        },
+      })
+    : null;
 
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     withTransientRetry(
@@ -4008,5 +4106,12 @@ export async function runPipeline(
       consoleSummary,
     };
     throw new PipelineError(err, partial);
+  } finally {
+    // The timer is unref'd, so this is tidiness rather than a
+    // requirement — but a watcher that outlives its run would keep
+    // stat-ing a directory nobody writes to, and in-process callers
+    // (the test suite runs many pipelines per worker) would accumulate
+    // one per run.
+    stopWatcher?.stop();
   }
 }

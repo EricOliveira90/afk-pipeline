@@ -88,7 +88,30 @@ describe("installCancellationSignals", () => {
     // requests, whatever the operator's tooling had to send.
     fake.deliver("SIGBREAK");
     expect(fake.exits).toEqual([130]);
-    expect(logged.join("\n")).toContain("Second stop signal (SIGBREAK)");
+    expect(logged.join("\n")).toContain("Second stop request (SIGBREAK)");
+  });
+
+  /**
+   * The `afk stop` sentinel is the same button (ADR 0041) — the pipeline
+   * presses it when it finds the sentinel, because a detached Windows run
+   * cannot be reached by a console event at all.
+   */
+  it("aborts on requestStop, and counts it toward the hard-exit escalation", () => {
+    const fake = makeHost("win32");
+    const logged: string[] = [];
+    const handle = installCancellationSignals({
+      host: fake.host,
+      log: (message) => logged.push(message),
+    });
+
+    handle.requestStop("stop sentinel");
+    expect(handle.signal.aborted).toBe(true);
+    expect(fake.exits).toEqual([]);
+    expect(logged[0]).toContain("Stop requested by stop sentinel");
+
+    // A sentinel followed by a Ctrl-Break is an operator asking twice.
+    fake.deliver("SIGBREAK");
+    expect(fake.exits).toEqual([130]);
   });
 
   it("names the signal it received, so an operator can tell which one landed", () => {

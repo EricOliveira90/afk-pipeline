@@ -142,12 +142,16 @@ export type RunEventPayload =
        * the host worktree's HEAD before any wave dispatches, a
        * contract review attempt whose audit copy could not be written,
        * a from-base restart refused because the slice branch still holds
-       * unmerged commits (#113), and the cancellation record written
+       * unmerged commits (#113), the cancellation record written
        * the moment a stop signal fires, naming the slices it marked
-       * CANCELLED in run state (#114).
+       * CANCELLED in run state (#114), and the `afk stop` sentinel this
+       * run found in its own log directory (ADR 0041) — which is
+       * immediately followed by the `cancellation-requested` line it
+       * triggers.
        */
       reason:
         | "cancellation-requested"
+        | "stop-requested"
         | "lane-continuation"
         | "infrastructure-retry"
         | "backoff-retry"
