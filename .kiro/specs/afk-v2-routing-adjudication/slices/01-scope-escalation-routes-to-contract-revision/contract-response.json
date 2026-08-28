@@ -1,0 +1,1 @@
+{"version":1,"round":2,"responses":[{"findingId":"F-01","position":"CONDITION_MET","evidence":"contract.md Test plan now captures focused-planner and fresh-generator inputs, asserts the submitted findingIds, paths, and reason exactly in planner input, and asserts the evaluator-accepted complete revised fileScope in fresh-generator input."}]}

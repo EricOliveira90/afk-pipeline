@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03", "B-04"],
+      "evidence": "\"the captured focused-planner input contains that exact evidence, the captured fresh-generator input contains the evaluator-accepted locked manifest's complete revised `fileScope` including both paths\"",
+      "expected": "the orchestration test plan observes the exact findingIds, paths, and reason delivered to the focused planner revision and the revised locked scope delivered to the fresh generator",
+      "observed": "the revised heavy-orchestration scenario captures both invocation inputs, asserts the exact submitted escalation evidence in planner input, and asserts the complete evaluator-accepted revised fileScope in fresh-generator input",
+      "clearCondition": "the B-03/B-04 orchestration test plan captures planner and fresh-generator inputs and asserts the submitted findingIds, paths, and reason in the planner revision input and the accepted revised scope in the fresh-generator input",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}
