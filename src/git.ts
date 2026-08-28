@@ -1000,6 +1000,47 @@ export function listAddedMigrationFiles(
   }
 }
 
+/**
+ * Every repo-relative path this worktree changed relative to `base`,
+ * committed or not: the committed diff since the merge base, plus the
+ * working tree's modifications, plus untracked files listed
+ * individually.
+ *
+ * Uncommitted work counts because the generator's changes are only
+ * committed once the slice passes, so a scope check that read HEAD alone
+ * would see nothing at all during QA (#112).
+ *
+ * Failures return what was collected rather than throwing: the only
+ * caller uses this to *refuse* an amendment for a path the slice never
+ * touched, so an empty list refuses everything, which is the
+ * conservative answer.
+ */
+export function listChangedFiles(worktreeDir: string, base: string): string[] {
+  const paths = new Set<string>();
+  const collect = (args: string[]) => {
+    try {
+      for (const raw of git(args, {
+        cwd: worktreeDir,
+        stdio: ["pipe", "pipe", "pipe"],
+      }).split(/\r?\n/)) {
+        const path = raw.trim();
+        if (path !== "") paths.add(path.replace(/\\/g, "/"));
+      }
+    } catch {
+      // Leave what was already collected in place.
+    }
+  };
+
+  // Three commands rather than one `status --porcelain`, because each of
+  // these prints bare paths: a porcelain status line leads with two
+  // status characters that are blank for an unstaged change, and the
+  // shared runner trims the output it returns.
+  collect(["diff", "--name-only", `${base}...HEAD`]);
+  collect(["diff", "--name-only", "HEAD"]);
+  collect(["ls-files", "--others", "--exclude-standard"]);
+  return [...paths].sort();
+}
+
 /** Repo-relative files added between two refs, independent of project layout. */
 export function listAddedFiles(
   repoRoot: string,

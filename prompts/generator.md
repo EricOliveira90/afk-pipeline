@@ -48,6 +48,12 @@ Do this for each behavior BEFORE writing the RED test.
 - If `contract.md` Status is not `LOCKED`, stop and report immediately.
 - Migration ownership is a machine gate. Use only the exact assignment
   below and create exactly the migration paths locked in the contract.
+- **Never delete working code to satisfy the file list.** The locked file
+  list is not yours to edit, and it is not yours to obey by destroying
+  work either. If a change the contract's behaviors require lands in a
+  file the list does not name, keep the change, say so in `handoff.md`,
+  and let QA route the file list for amendment. Reverting correct work to
+  come back inside the boundary is the one remedy you must not take.
 
 # Migration assignment
 

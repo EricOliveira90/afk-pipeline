@@ -176,7 +176,7 @@ describe("canonical QA review archives", () => {
   it("writes a valid lifecycle record under the exact attempt name", () => {
     const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-record-"));
     const record: QAReviewAttemptRecord = {
-      version: 1,
+      version: 2,
       stage: "deterministic",
       round: 1,
       attempt: 1,
@@ -190,6 +190,7 @@ describe("canonical QA review archives", () => {
           unresolved: true,
           summary: "Retry needed",
           clearCondition: "The regression test passes",
+          remedy: "SOURCE_CHANGE",
           artifactReferences: [
             "qa-review-r1-a1.json",
             "qa-report-r1-a1.md",

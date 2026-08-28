@@ -43,6 +43,22 @@ function requireExactKeys(
   }
 }
 
+/**
+ * The comparison key for one declared path: trimmed, forward-slashed,
+ * `./`-stripped, lowercased — or a throw naming the defect.
+ *
+ * Exported so that a path proposed for the file scope after the lock (a
+ * scope amendment, #112) is held to exactly the rules the planner's
+ * manifest was held to, rather than to a second copy of them that can
+ * drift.
+ */
+export function normalizeAcceptanceManifestPath(
+  raw: unknown,
+  source = ACCEPTANCE_MANIFEST_FILENAME,
+): string {
+  return normalizePath(raw, source);
+}
+
 function normalizePath(raw: unknown, source: string): string {
   if (typeof raw !== "string") {
     throw new Error(`${source} fileScope paths must contain only strings`);

@@ -89,8 +89,11 @@ export function writeContractResponse(
   );
 }
 
-type QAReviewFindingInput = Omit<QAReviewFinding, "state"> &
-  Partial<Pick<QAReviewFinding, "state">>;
+type QAReviewFindingInput = Omit<
+  QAReviewFinding,
+  "state" | "remedy" | "amendmentPaths"
+> &
+  Partial<Pick<QAReviewFinding, "state" | "remedy" | "amendmentPaths">>;
 
 /** Write a schema-valid canonical QA/UAT artifact from a stub evaluator. */
 export function writeQAReview(
@@ -127,7 +130,7 @@ export function writeQAReview(
     join(sliceDir, qaReviewFilename(stage)),
     JSON.stringify(
       {
-        version: 1,
+        version: 2,
         verdict,
         failureClass,
         infrastructureEvidence:
@@ -138,6 +141,8 @@ export function writeQAReview(
         findings: findings.map((finding) => ({
           ...finding,
           state: finding.state ?? "OPEN",
+          remedy: finding.remedy ?? "SOURCE_CHANGE",
+          amendmentPaths: finding.amendmentPaths ?? [],
         })),
       },
       null,
