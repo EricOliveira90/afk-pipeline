@@ -58,10 +58,10 @@ truth-on-exit gaps.
 |---|---|---|---|
 | #113 | From-base restart destroyed unmerged commits | Fixed, merged | — |
 | #114 | Windows stop bypassed the abort path | Fixed, merged | — |
-| #111 | Run killed mid-round keeps the previous run's error message | Open | §3 item 11 (clear-on-dispatch) |
-| #112 | Contract-amendment gap: QA boundary findings satisfiable only by reverting work | Open | reliability wave, as filed |
-| #120 | Candidate's own compile failure classified INFRASTRUCTURE | Open | §3 item 1 (one fix, one ADR — the plan previously double-counted these) |
-| #121 | Process-fatal crash bypasses cancellation bookkeeping | Open | §3 item 4 |
+| #111 | Run killed mid-round keeps the previous run's error message | Fixed, merged (PR #128, s7, ADR 0047) | §3 item 11 (clear-on-dispatch) |
+| #112 | Contract-amendment gap: QA boundary findings satisfiable only by reverting work | Fixed, merged (PR #128, s9, ADR 0048) | reliability wave, as filed |
+| #120 | Candidate's own compile failure classified INFRASTRUCTURE | Fixed, merged (PR #127, s1, ADR 0041) | §3 item 1 (one fix, one ADR — the plan previously double-counted these) |
+| #121 | Process-fatal crash bypasses cancellation bookkeeping | Fixed, merged (PR #128, s3, ADR 0044) | §3 item 4 |
 
 All six are one class: **the pipeline records or classifies something that
 misleads the next actor.**
