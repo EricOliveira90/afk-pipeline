@@ -2566,11 +2566,13 @@ export async function runSliceExecute(
             : [];
       firstRound = restored.nextRound;
     }
-    const finalRound = firstRound + MAX_GENERATOR_ROUNDS - 1;
+    const implementationAttemptLimit =
+      ctx.resume?.mode === "stuck" ? 1 : MAX_GENERATOR_ROUNDS;
+    const finalRound = firstRound + implementationAttemptLimit - 1;
 
     for (
       let implementationAttempt = 1;
-      implementationAttempt <= MAX_GENERATOR_ROUNDS;
+      implementationAttempt <= implementationAttemptLimit;
       implementationAttempt++
     ) {
       const round = firstRound + implementationAttempt - 1;
@@ -2835,7 +2837,7 @@ export async function runSliceExecute(
           baseGateRepairReferences
             .map((path) => `- \`${path}\``)
             .join("\n");
-        if (implementationAttempt < MAX_GENERATOR_ROUNDS) continue;
+        if (implementationAttempt < implementationAttemptLimit) continue;
       } else {
         assertGateEvidenceReleasesEvaluation(
           gateEvidence,
@@ -2963,7 +2965,7 @@ export async function runSliceExecute(
         }
       }
 
-      if (implementationAttempt === MAX_GENERATOR_ROUNDS) {
+      if (implementationAttempt === implementationAttemptLimit) {
         logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
           type: "phase-started",
           ghIssue: slice.ghIssue,

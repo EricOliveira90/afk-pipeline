@@ -454,6 +454,10 @@ describe("retried slice resume (spec #33)", () => {
       number: "02", ghIssue: "4002", title: "Unnamed",
       type: "AFK", blockedBy: [], userStories: "",
     };
+    const failing: Slice = {
+      number: "03", ghIssue: "4003", title: "Still failing",
+      type: "AFK", blockedBy: [], userStories: "",
+    };
     const namedBranch = `afk-stub/${slug}-slice-01-named`;
     const records: PromptRecord[] = [];
     let repo: string;
@@ -470,8 +474,9 @@ describe("retried slice resume (spec #33)", () => {
       const { prdDir, specsDir } = writePrdFixture(repo, slug);
       statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
       const runConfig = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
-      const dag = buildDAG([named, unnamed]);
-      const ghIssueOf = (n: string) => (n === "01" ? named.ghIssue : unnamed.ghIssue);
+      const dag = buildDAG([named, unnamed, failing]);
+      const ghIssueOf = (n: string) =>
+        n === "01" ? named.ghIssue : n === "02" ? unnamed.ghIssue : failing.ghIssue;
 
       // --- Run 1: both generators commit work every round but QA always
       // fails — each slice ends STUCK with a generator-stuck stuck.md.
@@ -514,6 +519,7 @@ describe("retried slice resume (spec #33)", () => {
       stuckPhases = {
         "4001": afterRun1.slices["4001"].phase,
         "4002": afterRun1.slices["4002"].phase,
+        "4003": afterRun1.slices["4003"].phase,
       };
       stuckTip = git(repo, ["rev-parse", namedBranch]);
 
@@ -523,10 +529,15 @@ describe("retried slice resume (spec #33)", () => {
       await runPipeline({
         ...runConfig,
         dag,
-        resumeStuck: ["01"],
+        resumeStuck: ["01", "03"],
         provider: buildProvider({
           records,
-          qaFindingState: "RESOLVED",
+          qaResult: (sliceNumber) =>
+            sliceNumber === "01"
+              ? { verdict: "PASS", findingState: "RESOLVED" }
+              : sliceNumber === "03"
+                ? { verdict: "FAIL", findingState: "OPEN" }
+                : undefined,
           generator: (cwd, _options, sliceNumber) => {
             if (sliceNumber === "01") {
               // Resumed onto the preserved tree: finish the in-flight edit.
@@ -542,6 +553,25 @@ describe("retried slice resume (spec #33)", () => {
               );
               git(cwd, ["add", "-A"]);
               git(cwd, ["commit", "-m", "feat(#4001): cleared the stuck findings"]);
+              return;
+            }
+            if (sliceNumber === "03") {
+              const attempt = records.filter(
+                (record) =>
+                  record.role === "generator" &&
+                  record.sliceNumber === "03",
+              ).length;
+              writeFileSync(
+                join(cwd, "src", `still-failing-${attempt}.ts`),
+                `export const attempt = ${attempt};\n`,
+                "utf-8",
+              );
+              git(cwd, ["add", "-A"]);
+              git(cwd, [
+                "commit",
+                "-m",
+                `feat(#4003): resumed attempt ${attempt}`,
+              ]);
               return;
             }
             // The unnamed slice must never get here: its branch holds
@@ -562,7 +592,11 @@ describe("retried slice resume (spec #33)", () => {
     });
 
     it("drives both slices to STUCK in the first run", () => {
-      expect(stuckPhases).toEqual({ "4001": "STUCK", "4002": "STUCK" });
+      expect(stuckPhases).toEqual({
+        "4001": "STUCK",
+        "4002": "STUCK",
+        "4003": "STUCK",
+      });
     });
 
     it("resumes the named slice without renegotiating its locked contract", () => {
@@ -653,6 +687,32 @@ describe("retried slice resume (spec #33)", () => {
       expect(state.slices["4001"].phase).toBe("PASS");
       expect(state.resume["4001"].attempts).toBe(1);
       expect(state.resume["4001"].lastDecision).toMatch(/--resume-stuck/);
+    });
+
+    it("grants a failing STUCK resume exactly one implementation attempt", () => {
+      const roles = records
+        .filter((record) => record.sliceNumber === "03")
+        .map((record) => record.role);
+      expect(roles.filter((role) => role === "generator")).toHaveLength(1);
+      expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(1);
+      expect(roles.filter((role) => role === "generator-stuck")).toHaveLength(1);
+
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.slices["4003"].phase).toBe("STUCK");
+      const reviewDir = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-03",
+        "reviews",
+      );
+      expect(existsSync(join(reviewDir, "qa-review-r4-a1-record.json"))).toBe(
+        true,
+      );
+      expect(existsSync(join(reviewDir, "qa-review-r5-a1-record.json"))).toBe(
+        false,
+      );
     });
 
     it("audits the named slice's resume and never logs a restart for it", () => {
