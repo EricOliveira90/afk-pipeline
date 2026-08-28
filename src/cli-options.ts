@@ -1,4 +1,4 @@
-export const DEFAULT_MAX_CONTRACT_ROUNDS = 3;
+export const DEFAULT_MAX_CONTRACT_ROUNDS = 2;
 
 export function parseMaxContractRounds(value: string | undefined): number {
   if (value === undefined || !/^\d+$/.test(value)) {
@@ -8,7 +8,7 @@ export function parseMaxContractRounds(value: string | undefined): number {
   if (!Number.isSafeInteger(rounds) || rounds < 1) {
     throw new Error("--max-contract-rounds must be a positive integer");
   }
-  return rounds;
+  return Math.min(rounds, DEFAULT_MAX_CONTRACT_ROUNDS);
 }
 
 export function parseSliceSelection(value: string | undefined): string[] {

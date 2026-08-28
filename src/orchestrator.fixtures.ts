@@ -25,8 +25,10 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Slice } from "./issues-parser.js";
+import { resolveBaseGateDeclarations } from "./orchestrator.js";
+import { writeContractReview, writeQAReview } from "./test-support.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -104,9 +106,81 @@ export function makeRepo(opts: { lifetime?: "test" | "describe" } = {}): string 
   git(dir, ["init", "--initial-branch=main"]);
   // Need at least one commit before we can branch.
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
+  // A behavior's gate IDs must name a baseline gate backed by a
+  // discovered command, so the fixture repo needs the one sanity script
+  // the derived catalog reads (`resolveSanityPlan`). Without it no
+  // manifest could bind, and every negotiation here would refuse (#76).
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "consumer-fixture",
+      private: true,
+      scripts: { "test:run": "node -e \"process.exit(0)\"" },
+    }),
+    "utf-8",
+  );
+  git(dir, ["add", "README.md", "package.json"]);
   git(dir, ["commit", "-m", "root"]);
   return dir;
+}
+
+/**
+ * Version-2 acceptance manifest for a planner stub (#76): one behavior
+ * bound to a gate the fixture repo's derived catalog resolves, unless
+ * the caller declares its own behaviors.
+ */
+export function writeAcceptanceManifest(
+  artifactDir: string,
+  paths: string[] = ["src/example.ts"],
+  behaviors?: Array<{
+    id: string;
+    source: string;
+    given: string;
+    when: string;
+    then: string;
+    observableResult: string;
+    preservation: boolean;
+    gateIds: string[];
+  }>,
+): void {
+  const migrationCount = paths.filter((path) =>
+    /(^|[\\/])migrations[\\/].*\.sql$/i.test(path),
+  ).length;
+  const fileScope =
+    paths.length > 0
+      ? { kind: "paths", paths }
+      : { kind: "no-repository-changes" };
+  let repoRoot = artifactDir;
+  while (!existsSync(join(repoRoot, ".git"))) {
+    const parent = dirname(repoRoot);
+    if (parent === repoRoot) throw new Error("fixture repository root missing");
+    repoRoot = parent;
+  }
+  const gateId =
+    resolveBaseGateDeclarations(repoRoot).find((gate) => gate.command)?.id ??
+    "tests";
+  const behaviorDeclarations = behaviors ?? [
+    {
+      id: "B-01",
+      source: "test fixture",
+      given: "a contract",
+      when: "it is negotiated",
+      then: "it reaches review",
+      observableResult: "the evaluator receives the contract",
+      preservation: false,
+      gateIds: [gateId],
+    },
+  ];
+  writeFileSync(
+    join(artifactDir, "acceptance-manifest.json"),
+    JSON.stringify({
+      version: 2,
+      fileScope,
+      migrationCount,
+      behaviors: behaviorDeclarations,
+    }),
+    "utf-8",
+  );
 }
 
 export function writePrdFixture(repoDir: string, slug: string): { prdDir: string; specsDir: string } {
@@ -181,12 +255,14 @@ export function buildStubProvider(opts: {
           `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
+        writeAcceptanceManifest(sliceArtifactDir, fixture.files);
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+          "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
           "utf-8",
         );
+        writeContractReview(sliceArtifactDir, "ACCEPT");
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         if (fixture.simulateIdleDeferral) {
           options.onIdleDeferral?.({ silentSeconds: 600, busyProcesses: 2 });
@@ -211,6 +287,10 @@ export function buildStubProvider(opts: {
             "# QA Report\n\n**Verdict:** FAIL\n\n**Failure class:** INFRASTRUCTURE\n",
             "utf-8",
           );
+          writeQAReview(sliceArtifactDir, "deterministic", {
+            verdict: "FAIL",
+            failureClass: "INFRASTRUCTURE",
+          });
         } else {
           const verdict = fixture.qaPasses ? "PASS" : "FAIL";
           writeFileSync(
@@ -218,6 +298,7 @@ export function buildStubProvider(opts: {
             `# QA Report\n\n**Verdict:** ${verdict}\n`,
             "utf-8",
           );
+          writeQAReview(sliceArtifactDir, "deterministic", { verdict });
         }
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(

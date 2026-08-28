@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   claimMigrationPrefixes,
+  claimContractMigrations,
   initializeMigrationClaims,
   migrationClaimFor,
   releaseUnmergedMigrationClaims,
@@ -31,6 +32,21 @@ function stateRoot(slug = "run", pool = ["144", "145", "146"]) {
   });
   saveRunState(root, state);
   return { root, slug, pool };
+}
+
+function writeAcceptanceManifest(
+  dir: string,
+  paths: string[],
+  migrationCount: number,
+): void {
+  writeFileSync(
+    join(dir, "acceptance-manifest.json"),
+    JSON.stringify({
+      version: 1,
+      fileScope: { kind: "paths", paths },
+      migrationCount,
+    }),
+  );
 }
 
 describe("migration claims", () => {
@@ -147,18 +163,94 @@ describe("migration claims", () => {
     })).toEqual(["200"]);
   });
 
-  it("rejects a contract that substitutes another prefix", () => {
+  it("claims the migration count and paths declared by the acceptance manifest", () => {
+    const setup = stateRoot("manifest-claim", ["144", "145"]);
+    const contract = join(setup.root, "contract.md");
+    writeFileSync(
+      contract,
+      [
+        "## Files expected to change",
+        "- src/prose-only.ts",
+        "",
+        "## Migration requirements",
+        "- New migration files: 0",
+        "",
+      ].join("\n"),
+    );
+    writeAcceptanceManifest(
+      setup.root,
+      [
+        "supabase/migrations/144_first.sql",
+        "supabase/migrations/145_second.sql",
+      ],
+      2,
+    );
+
+    expect(
+      claimContractMigrations({
+        repoRoot: setup.root,
+        runSlug: setup.slug,
+        ghIssue: "1001",
+        contractPath: contract,
+        expectedPool: setup.pool,
+      }),
+    ).toBeNull();
+    expect(migrationClaimFor(setup.root, setup.slug, "1001")).toEqual([
+      "144",
+      "145",
+    ]);
+  });
+
+  it("returns an objection when a manifest changes a persisted claim count", () => {
+    const setup = stateRoot("manifest-count-change", ["144", "145"]);
+    const contract = join(setup.root, "contract.md");
+    writeFileSync(contract, "# Slice Contract\n");
+    writeAcceptanceManifest(
+      setup.root,
+      ["supabase/migrations/144_first.sql"],
+      1,
+    );
+    const input = {
+      repoRoot: setup.root,
+      runSlug: setup.slug,
+      ghIssue: "1001",
+      contractPath: contract,
+      expectedPool: setup.pool,
+    };
+    expect(claimContractMigrations(input)).toBeNull();
+
+    writeAcceptanceManifest(
+      setup.root,
+      [
+        "supabase/migrations/144_first.sql",
+        "supabase/migrations/145_second.sql",
+      ],
+      2,
+    );
+
+    expect(claimContractMigrations(input)).toMatch(
+      /declares 2 new migration file\(s\), but slice ownership is 1/,
+    );
+    expect(migrationClaimFor(setup.root, setup.slug, "1001")).toEqual(["144"]);
+  });
+
+  it("rejects an acceptance manifest that substitutes another prefix", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-contract-"));
     roots.push(root);
     const contract = join(root, "contract.md");
     writeFileSync(contract, [
       "## Files expected to change",
-      "- supabase/migrations/999_wrong.sql",
+      "- supabase/migrations/144_prose.sql",
       "",
       "## Migration requirements",
       "- New migration files: 1",
       "",
     ].join("\n"));
+    writeAcceptanceManifest(
+      root,
+      ["supabase/migrations/999_machine.sql"],
+      1,
+    );
 
     expect(validateContractMigrationClaim({ contractPath: contract, claim: ["144"] }))
       .toMatch(/owns migration prefix 144/);
@@ -179,12 +271,17 @@ describe("migration claims", () => {
     const contract = join(root, "contract.md");
     writeFileSync(contract, [
       "## Files expected to change",
-      "- supabase/migrations/144_right.sql",
+      "- supabase/migrations/999_wrong.sql",
       "",
       "## Migration requirements",
       "- New migration files: 1",
       "",
     ].join("\n"));
+    writeAcceptanceManifest(
+      root,
+      ["supabase/migrations/144_right.sql"],
+      1,
+    );
 
     expect(validateGeneratedMigrations({
       worktreeDir: root,

@@ -19,8 +19,12 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { rmDirWithRetry } from "./test-support.js";
+import { dirname, join } from "node:path";
+import {
+  rmDirWithRetry,
+  writeContractReview,
+  writeQAReview,
+} from "./test-support.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import type {
@@ -30,6 +34,7 @@ import type {
 } from "./agent-provider.js";
 import { TransientProviderError } from "./agent-provider.js";
 import type { PipelineConfig } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./orchestrator.js";
 
 const tempDirs: string[] = [];
 
@@ -59,22 +64,87 @@ export function makeRepo(): string {
   tempDirs.push(dir);
   git(dir, ["init", "--initial-branch=main"]);
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
+  // A behavior's gate IDs must name a baseline gate backed by a
+  // discovered command, so the fixture repo needs the one sanity script
+  // the derived catalog reads (`resolveSanityPlan`). Without it no
+  // manifest could bind, and every negotiation here would refuse (#76).
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "wave-fixture",
+      private: true,
+      scripts: { "test:run": "node -e \"process.exit(0)\"" },
+    }),
+    "utf-8",
+  );
+  git(dir, ["add", "README.md", "package.json"]);
   git(dir, ["commit", "-m", "root"]);
   return dir;
 }
 
 export interface SliceFixture {
   files: string[];
+  /** `null` is explicit no-repository-change; absent mirrors `files`. */
+  manifestFiles?: string[] | null;
   qaPasses: boolean;
   outputFile: string;
   outputContent: string;
   /**
-   * Verdict the contract evaluator writes. Defaults to ACCEPT; ESCALATE
-   * drives the "genuine verdict" negotiate failure — the evaluator lived
-   * and decided, so nothing about it is an infrastructure death.
+   * Verdict the contract evaluator writes. Defaults to ACCEPT; REVISE
+   * against a one-round cap drives the "genuine verdict" negotiate
+   * failure — the evaluator lived and decided, so nothing about it is an
+   * infrastructure death.
    */
-  contractVerdict?: "ACCEPT" | "ESCALATE";
+  contractVerdict?: "ACCEPT" | "REVISE";
+}
+
+/**
+ * Write the version-2 acceptance manifest a planner stub declares for a
+ * slice (#76): one behavior bound to a gate the fixture repo's derived
+ * catalog can actually resolve.
+ */
+export function writeAcceptanceManifest(
+  artifactDir: string,
+  paths: string[] | null,
+): void {
+  const migrationCount =
+    paths?.filter((path) =>
+      /(^|[\\/])migrations[\\/].*\.sql$/i.test(path),
+    ).length ?? 0;
+  const fileScope =
+    paths === null
+      ? { kind: "no-repository-changes" }
+      : { kind: "paths", paths };
+  let repoRoot = artifactDir;
+  while (!existsSync(join(repoRoot, ".git"))) {
+    const parent = dirname(repoRoot);
+    if (parent === repoRoot) throw new Error("fixture repository root missing");
+    repoRoot = parent;
+  }
+  const gateId =
+    resolveBaseGateDeclarations(repoRoot).find((gate) => gate.command)?.id ??
+    "tests";
+  writeFileSync(
+    join(artifactDir, "acceptance-manifest.json"),
+    JSON.stringify({
+      version: 2,
+      fileScope,
+      migrationCount,
+      behaviors: [
+        {
+          id: "B-01",
+          source: "wave fixture",
+          given: "a wave fixture slice",
+          when: "its contract is negotiated",
+          then: "the behavior lock passes",
+          observableResult: "the slice reaches its own assertions",
+          preservation: false,
+          gateIds: [gateId],
+        },
+      ],
+    }),
+    "utf-8",
+  );
 }
 
 /**
@@ -200,13 +270,20 @@ export function buildStubProvider(opts: {
           `# Slice Contract\n\n**Status:** DRAFT\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
+        writeAcceptanceManifest(
+          sliceArtifactDir,
+          fixture.manifestFiles === undefined
+            ? fixture.files
+            : fixture.manifestFiles,
+        );
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
         const verdict = fixture?.contractVerdict ?? "ACCEPT";
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
-          `## Evaluator feedback — round 1\n\n**Verdict:** ${verdict}\n`,
+          `## Evaluator feedback — round 1\n\nProse for ${verdict}.\n`,
           "utf-8",
         );
+        writeContractReview(sliceArtifactDir, verdict);
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         const round = (generatorRounds.get(ghIssue) ?? 0) + 1;
         generatorRounds.set(ghIssue, round);
@@ -224,6 +301,7 @@ export function buildStubProvider(opts: {
           `# QA Report\n\n**Verdict:** ${verdict}\n`,
           "utf-8",
         );
+        writeQAReview(sliceArtifactDir, "deterministic", { verdict });
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "stuck.md"),

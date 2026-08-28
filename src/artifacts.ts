@@ -4,14 +4,28 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
+import {
+  CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  CONTRACT_REVIEW_FILENAME,
+  formatContractReviewFindings,
+  type ContractNegotiationOutcome,
+  type ContractReviewAttemptRecord,
+  type ContractReviewFinding,
+  type RecordedContractVerdict,
+} from "./contract-review.js";
+import {
+  QA_REVIEW_FILENAME,
+  UAT_REVIEW_FILENAME,
+  type QAReviewAttemptRecord,
+  type QAReviewStage,
+} from "./qa-review.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
-export type EvaluatorVerdict = "ACCEPT" | "REVISE" | "ESCALATE" | "UNKNOWN";
-export type QAVerdict = "PASS" | "FAIL" | "UNKNOWN";
-export type QAFailureClass = "NONE" | "IMPLEMENTATION" | "INFRASTRUCTURE";
 /**
  * Verdict parsed from a guardian review file. `UNPARSEABLE` means the
  * agent finished but the review file is missing or carries no
@@ -103,70 +117,6 @@ export function readContractStatus(contractPath: string): ContractStatus {
   if (upper === "LOCKED") return "LOCKED";
   if (upper === "DRAFT") return "DRAFT";
   return "NEGOTIATING";
-}
-
-export function readEvaluatorVerdict(
-  feedbackPath: string,
-): EvaluatorVerdict {
-  const content = readIfExists(feedbackPath);
-  if (!content) return "UNKNOWN";
-  const match = content.match(
-    /\bVERDICT(?:\s*:\s*|\s+)\*{0,2}\s*(ACCEPT|REVISE|ESCALATE)\b/i,
-  );
-  const v = match?.[1]?.toUpperCase();
-  if (v === "ACCEPT") return "ACCEPT";
-  if (v === "REVISE") return "REVISE";
-  if (v === "ESCALATE") return "ESCALATE";
-  return "UNKNOWN";
-}
-
-export interface EvaluatorFeedbackMetrics {
-  gapCount: number | null;
-  reRaisedGapCount: number | null;
-}
-
-export function readEvaluatorFeedbackMetrics(
-  feedbackPath: string,
-): EvaluatorFeedbackMetrics {
-  const content = readIfExists(feedbackPath);
-  if (!content) return { gapCount: null, reRaisedGapCount: null };
-  const gap = content.match(
-    /^\s*\*{0,2}GAPS\s*:\s*\*{0,2}\s*(\d+)\b/im,
-  )?.[1];
-  const reRaised = content.match(
-    /^\s*\*{0,2}RE_RAISED_GAPS\s*:\s*\*{0,2}\s*(\d+)\b/im,
-  )?.[1];
-  return {
-    gapCount: gap === undefined ? null : Number(gap),
-    reRaisedGapCount: reRaised === undefined ? null : Number(reRaised),
-  };
-}
-
-export function readQAVerdict(qaReportPath: string): QAVerdict {
-  const content = readIfExists(qaReportPath);
-  if (!content) return "UNKNOWN";
-  // Find all Verdict fields and use the last one (evaluator may write
-  // intermediate verdicts in summary tables before the final one).
-  const matches = content.match(/\*\*Verdict:\*\*\s*(\S+)/gi);
-  if (!matches || matches.length === 0) return "UNKNOWN";
-  const last = matches[matches.length - 1]!;
-  const v = last.match(/\*\*Verdict:\*\*\s*(\S+)/i)?.[1]?.toUpperCase();
-  if (v === "PASS") return "PASS";
-  if (v === "FAIL") return "FAIL";
-  return "UNKNOWN";
-}
-
-export function readQAFailureClass(qaReportPath: string): QAFailureClass {
-  const content = readIfExists(qaReportPath);
-  if (!content) return "IMPLEMENTATION";
-  const value = matchField(
-    content,
-    /\*\*Failure class:\*\*\s*(NONE|IMPLEMENTATION|INFRASTRUCTURE)/i,
-  )?.toUpperCase();
-  if (value === "NONE" || value === "INFRASTRUCTURE") return value;
-  // Backwards-compatible and fail-closed: an unclassified FAIL remains an
-  // implementation failure and still consumes one of the three QA rounds.
-  return "IMPLEMENTATION";
 }
 
 export function archiveQAReport(
@@ -285,11 +235,19 @@ export interface NegotiationFailureDetails {
   title: string;
   round: number;
   outcome: "ESCALATE" | "STUCK";
-  verdict: EvaluatorVerdict;
+  verdict: RecordedContractVerdict;
   feedbackPath: string;
   contractPath: string;
   contextPath: string;
   capDecision?: string;
+  /**
+   * Findings from the last review artifact that parsed. Rendered into
+   * `stuck.md` verbatim so the operator reads the same structured gaps
+   * the planner was given, rather than a scrape of the markdown
+   * companion.
+   */
+  findings?: readonly ContractReviewFinding[];
+  negotiationOutcome?: ContractNegotiationOutcome;
 }
 
 export interface NegotiationArchiveResult {
@@ -304,6 +262,145 @@ export function negotiationArchiveDir(
   sliceNumber: string,
 ): string {
   return join(repoRoot, ".afk", "artifacts", runSlug, `slice-${sliceNumber}`);
+}
+
+/**
+ * One slice life's review archives, inside its slice archive dir. Named
+ * here because a restart has to move the whole directory aside (#123).
+ */
+const REVIEW_ARCHIVE_DIRNAME = "reviews";
+
+/**
+ * Where every contract review attempt is kept. Under the repo root, not
+ * the slice worktree: the worktree is torn down, and the audit trail of
+ * what each evaluator attempt actually wrote has to outlive it.
+ */
+export function contractReviewArchiveDir(
+  repoRoot: string,
+  runSlug: string,
+  sliceNumber: string,
+): string {
+  return join(
+    negotiationArchiveDir(repoRoot, runSlug, sliceNumber),
+    REVIEW_ARCHIVE_DIRNAME,
+  );
+}
+
+/**
+ * Archive one contract review attempt — the canonical JSON artifact and
+ * its markdown companion — under names stamped with both the round and
+ * the attempt within that round.
+ *
+ * Every attempt is kept, including the ones that produced a malformed or
+ * missing artifact: those are precisely the attempts an operator needs to
+ * read. Because the working artifact has a fixed name and is deleted
+ * before each attempt, the archive is the only record of an earlier
+ * attempt, so the copy refuses to overwrite an existing file rather than
+ * losing one silently.
+ *
+ * Returns the archived file names. Best-effort by contract: callers warn
+ * on failure rather than failing a negotiation over an audit copy.
+ */
+export function archiveContractReviewAttempt(details: {
+  sliceDir: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+}): string[] {
+  const { sliceDir, archiveDir, round, attempt } = details;
+  const suffix = `r${round}-a${attempt}`;
+  const copies: Array<[source: string, target: string]> = [
+    [CONTRACT_REVIEW_FILENAME, `contract-review-${suffix}.json`],
+    [`feedback-r${round}.md`, `feedback-${suffix}.md`],
+  ];
+  const archived: string[] = [];
+  for (const [sourceName, targetName] of copies) {
+    const source = join(sliceDir, sourceName);
+    if (!existsSync(source)) continue;
+    mkdirSync(archiveDir, { recursive: true });
+    cpSync(source, join(archiveDir, targetName), { errorOnExist: true, force: false });
+    archived.push(targetName);
+  }
+  return archived;
+}
+
+/** Archive the code-derived lifecycle record beside its raw attempt. */
+export function archiveContractReviewRecord(details: {
+  archiveDir: string;
+  record: ContractReviewAttemptRecord;
+}): string {
+  const { archiveDir, record } = details;
+  const name =
+    `contract-review-r${record.round}-a${record.attempt}-record.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
+}
+
+function qaArchivePrefix(stage: QAReviewStage): "qa" | "uat" {
+  return stage === "deterministic" ? "qa" : "uat";
+}
+
+/** Preserve one evaluator's raw canonical artifact when it exists. */
+export function archiveQAReviewAttempt(details: {
+  sliceDir: string;
+  archiveDir: string;
+  stage: QAReviewStage;
+  round: number;
+  attempt: number;
+}): string | null {
+  const { sliceDir, archiveDir, stage, round, attempt } = details;
+  const prefix = qaArchivePrefix(stage);
+  const sourceName =
+    stage === "deterministic" ? QA_REVIEW_FILENAME : UAT_REVIEW_FILENAME;
+  const source = join(sliceDir, sourceName);
+  if (!existsSync(source)) return null;
+
+  const name = `${prefix}-review-r${round}-a${attempt}.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  cpSync(source, join(archiveDir, name), {
+    errorOnExist: true,
+    force: false,
+  });
+  return name;
+}
+
+/** Preserve named evidence for a missing or refused canonical artifact. */
+export function archiveQAReviewValidation(details: {
+  archiveDir: string;
+  stage: QAReviewStage;
+  round: number;
+  attempt: number;
+  evidence: string;
+}): string {
+  const { archiveDir, stage, round, attempt, evidence } = details;
+  const name =
+    `${qaArchivePrefix(stage)}-review-r${round}-a${attempt}-validation.txt`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${evidence.trimEnd()}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
+}
+
+/** Archive the code-derived lifecycle record beside the raw QA attempt. */
+export function archiveQAReviewRecord(details: {
+  archiveDir: string;
+  record: QAReviewAttemptRecord;
+}): string {
+  const { archiveDir, record } = details;
+  const name =
+    `${qaArchivePrefix(record.stage)}-review-r${record.round}-a${record.attempt}-record.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
 }
 
 /**
@@ -326,7 +423,14 @@ export function sliceArtifactNames(sliceDir: string): string[] {
         )
         .sort()
     : [];
-  return ["contract.md", "context.md", ...rounds, "handoff.md", "stuck.md"];
+  return [
+    "contract.md",
+    "context.md",
+    ...rounds,
+    "handoff.md",
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+    "stuck.md",
+  ];
 }
 
 export function archiveNegotiationArtifacts(
@@ -341,16 +445,55 @@ export function archiveNegotiationArtifacts(
 }
 
 /**
- * Copy a slice's untracked spec artifacts out of its worktree before a
- * from-base restart force-resets the branch and recreates the worktree
- * (#113). Returns the archive directory, or `null` when the slice dir
- * held nothing worth keeping.
+ * Move a directory, falling back to copy-then-delete when the rename is
+ * refused — on Windows an open handle from an indexer or an editor is
+ * enough for EPERM/EBUSY. A failure here propagates: both callers of the
+ * pre-restart archive treat it as best-effort and warn.
+ */
+function moveDirectory(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+  } catch {
+    cpSync(from, to, { recursive: true });
+    rmSync(from, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
+  }
+}
+
+/**
+ * Put a slice's previous life's artifacts out of the next life's way
+ * before it starts from base. Returns the archive directory, or `null`
+ * when the slice had nothing to move aside.
+ *
+ * Two kinds of artifact, for two reasons:
+ *
+ * - The untracked spec artifacts (contract.md, context.md, feedback-r*,
+ *   qa-report*, handoff.md, stuck.md) are **copied** out of the worktree,
+ *   because a from-base restart recreates the worktree and they are the
+ *   only copy (#113).
+ * - The `reviews/` archive dir is **moved**, because the next life's
+ *   round-1 evidence writes target the same `r1-a1` names and fail closed
+ *   on a collision (#79/#123). Copying would not free the slots. The
+ *   whole directory travels together, so the prior life's records and the
+ *   raw artifacts they reference stay side by side — only their prefix
+ *   changes.
  *
  * Archives land in a numbered `pre-restart-<n>` subdirectory of the
  * slice's usual archive dir, so a second restart cannot overwrite the
  * first one's copies and neither can clobber an ESCALATE/STUCK archive
  * sitting alongside them. The index is the next free one on disk — no
  * clock, so the path is reproducible in tests.
+ *
+ * Callers are the two paths that begin a slice life at round 1 with no
+ * resume state: the from-base restart, and a launch that finds no branch
+ * and no worktree at all (`clean-failed` and manual branch deletion never
+ * touch `.afk/artifacts`, so a stale `reviews/` outlives them). The
+ * resume paths must never call it — their round arithmetic reads exactly
+ * the evidence this moves.
  */
 export function archiveArtifactsBeforeRestart(
   repoRoot: string,
@@ -361,15 +504,21 @@ export function archiveArtifactsBeforeRestart(
   const present = sliceArtifactNames(sliceDir).filter((name) =>
     existsSync(join(sliceDir, name)),
   );
-  if (present.length === 0) return null;
-
   const parent = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
+  const staleReviews = join(parent, REVIEW_ARCHIVE_DIRNAME);
+  const hasStaleReviews =
+    existsSync(staleReviews) && readdirSync(staleReviews).length > 0;
+  if (present.length === 0 && !hasStaleReviews) return null;
+
   let index = 1;
   while (existsSync(join(parent, `pre-restart-${index}`))) index++;
   const archiveDir = join(parent, `pre-restart-${index}`);
   mkdirSync(archiveDir, { recursive: true });
   for (const name of present) {
     cpSync(join(sliceDir, name), join(archiveDir, name));
+  }
+  if (hasStaleReviews) {
+    moveDirectory(staleReviews, join(archiveDir, REVIEW_ARCHIVE_DIRNAME));
   }
   return archiveDir;
 }
@@ -378,14 +527,38 @@ function displayPath(repoRoot: string, path: string): string {
   return relative(repoRoot, path).replace(/\\/g, "/");
 }
 
-function unresolvedGaps(feedback: string | null): string {
+/**
+ * The gaps that ended negotiation. Structured findings win when the last
+ * review artifact parsed; otherwise the markdown companion is quoted
+ * whole, which is all that is left when negotiation died before any
+ * artifact was validated.
+ */
+function unresolvedGaps(
+  findings: readonly ContractReviewFinding[] | undefined,
+  feedback: string | null,
+): string {
+  if (findings && findings.length > 0) {
+    return formatContractReviewFindings(findings);
+  }
   if (!feedback) {
     return "(No feedback file was produced; inspect the evaluator log.)";
   }
-  const section = feedback.match(
-    /### If REVISE, specific gaps:\s*([\s\S]*?)(?=\n### |$)/i,
-  )?.[1]?.trim();
-  return section || feedback.trim();
+  return feedback.trim();
+}
+
+function formatNegotiationOutcome(
+  outcome: ContractNegotiationOutcome,
+): string {
+  return outcome.findings
+    .map((finding) =>
+      [
+        `- [${finding.id}] ${finding.severity} ${finding.state}`,
+        `  - Planner position: ${finding.plannerPosition ?? "(none)"}`,
+        `  - Planner evidence: ${finding.plannerEvidence ?? "(none)"}`,
+        `  - Evaluator evidence: ${finding.evaluatorEvidence}`,
+      ].join("\n"),
+    )
+    .join("\n");
 }
 
 export function preserveNegotiationFailure(
@@ -406,28 +579,52 @@ export function preserveNegotiationFailure(
     contractPath,
     contextPath,
     capDecision,
+    findings,
+    negotiationOutcome,
   } = details;
   const archiveDir = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
   const feedback = readIfExists(feedbackPath);
-  const verdictText =
-    feedback?.split(/\r?\n/).find((line) => /\bVERDICT\b/i.test(line))?.trim() ??
-    `VERDICT: ${verdict}`;
   const stuckPath = join(sliceDir, "stuck.md");
   const archiveContract = join(archiveDir, "contract.md");
   const archiveContext = join(archiveDir, "context.md");
   const archiveFeedback = join(archiveDir, `feedback-r${round}.md`);
+  const outcomePath = join(sliceDir, CONTRACT_NEGOTIATION_OUTCOME_FILENAME);
+  const archiveOutcome = join(
+    archiveDir,
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  );
+  if (negotiationOutcome) {
+    writeFileSync(
+      outcomePath,
+      `${JSON.stringify(negotiationOutcome, null, 2)}\n`,
+      "utf-8",
+    );
+  }
   const stuck = [
     "# Contract negotiation stuck",
     "",
     `- Slice: #${ghIssue} ${title}`,
     `- Outcome: ${outcome}`,
+    ...(negotiationOutcome
+      ? [
+          `- Exhaustion classification: ${negotiationOutcome.classification}`,
+        ]
+      : []),
     `- Round: ${round}`,
-    `- Final verdict: ${verdictText}`,
+    `- Final verdict: VERDICT: ${verdict}`,
     `- Round-cap decision: ${capDecision ?? "No extension decision was recorded."}`,
     "",
+    ...(negotiationOutcome
+      ? [
+          "## Exhaustion record",
+          "",
+          formatNegotiationOutcome(negotiationOutcome),
+          "",
+        ]
+      : []),
     "## Unresolved gaps",
     "",
-    unresolvedGaps(feedback),
+    unresolvedGaps(findings, feedback),
     "",
     "## Next action",
     "",
@@ -442,6 +639,12 @@ export function preserveNegotiationFailure(
     `- Archived contract: ${displayPath(repoRoot, archiveContract)}`,
     `- Archived context: ${displayPath(repoRoot, archiveContext)}`,
     `- Archived feedback: ${displayPath(repoRoot, archiveFeedback)}`,
+    ...(negotiationOutcome
+      ? [
+          `- Working exhaustion outcome: ${displayPath(repoRoot, outcomePath)}`,
+          `- Archived exhaustion outcome: ${displayPath(repoRoot, archiveOutcome)}`,
+        ]
+      : []),
     "",
   ].join("\n");
   writeFileSync(stuckPath, stuck, "utf-8");
@@ -460,10 +663,6 @@ export function preserveNegotiationFailure(
 
 export function hasStuckFile(sliceDir: string): boolean {
   return existsSync(`${sliceDir}/stuck.md`);
-}
-
-export function hasPassingQA(sliceDir: string): boolean {
-  return readQAVerdict(`${sliceDir}/qa-report.md`) === "PASS";
 }
 
 /**

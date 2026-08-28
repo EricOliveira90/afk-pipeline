@@ -45,9 +45,15 @@ import {
   makeRepo,
   setupWave,
   sliceFromCwd,
+  writeAcceptanceManifest,
   type ProviderDeath,
   type SliceFixture,
 } from "./wave.fixtures.js";
+import {
+  writeContractResponse,
+  writeContractReview,
+  writeQAReview,
+} from "./test-support.js";
 
 afterEach(() => {
   cleanupWaveTempDirs();
@@ -82,8 +88,20 @@ describe("runWave — migration lane grouping", () => {
     const first = "supabase/migrations/20240101000000_first.sql";
     const second = "db/migrations/20240202000000_second.sql";
     const fixtures = new Map<string, SliceFixture>([
-      ["1001", { files: [first], qaPasses: true, outputFile: first, outputContent: "-- first" }],
-      ["1002", { files: [second], qaPasses: true, outputFile: second, outputContent: "-- second" }],
+      ["1001", {
+        files: ["src/first-prose.ts"],
+        manifestFiles: [first],
+        qaPasses: true,
+        outputFile: first,
+        outputContent: "-- first",
+      }],
+      ["1002", {
+        files: ["src/second-prose.ts"],
+        manifestFiles: [second],
+        qaPasses: true,
+        outputFile: second,
+        outputContent: "-- second",
+      }],
     ]);
     const { config, dag, logger, featBranch, provider } = setupWave(
       repo,
@@ -329,14 +347,31 @@ describe("runWave — contract-lock migration prefix gate", () => {
    */
   function buildPlannerProvider(opts: {
     slices: Slice[];
-    /** Migration path this slice's planner declares on the given round. */
+    /** Prose path this slice's planner declares on the given round. */
     pathForRound: (ghIssue: string, round: number) => string;
+    /** Machine path; defaults to the prose path. */
+    manifestPathForRound?: (ghIssue: string, round: number) => string;
     /** Overrides what the generator writes; defaults to the declared path. */
     generatorPath?: (ghIssue: string) => string;
     /** Every planner prompt, in invocation order. */
     plannerPrompts?: string[];
+    /** Skip the fresh round-2 response to exercise fail-closed handling. */
+    writeRound2Response?: boolean;
+    /** Leave a round-1 response behind to prove round-2 freshness. */
+    writeStaleResponseAfterRound1?: boolean;
+    /** Every evaluator prompt, in invocation order. */
+    evaluatorPrompts?: string[];
   }): AgentProvider {
-    const { slices, pathForRound, generatorPath, plannerPrompts } = opts;
+    const {
+      slices,
+      pathForRound,
+      manifestPathForRound,
+      generatorPath,
+      plannerPrompts,
+      writeRound2Response = true,
+      writeStaleResponseAfterRound1 = false,
+      evaluatorPrompts,
+    } = opts;
     const plannerRounds = new Map<string, number>();
     const declaredNow = new Map<string, string>();
 
@@ -356,21 +391,32 @@ describe("runWave — contract-lock migration prefix gate", () => {
           plannerRounds.set(ghIssue, round);
           plannerPrompts?.push(prompt);
           const path = pathForRound(ghIssue, round);
+          const manifestPath =
+            manifestPathForRound?.(ghIssue, round) ?? path;
           declaredNow.set(ghIssue, path);
           writeFileSync(
             join(dir, "contract.md"),
             `# Slice Contract\n\n**Status:** NEGOTIATING\n\n## Files expected to change\n- ${path}\n`,
             "utf-8",
           );
+          writeAcceptanceManifest(dir, [manifestPath]);
+          if (round === 2 && writeRound2Response) {
+            writeContractResponse(dir, []);
+          }
         } else if (role === "evaluator-contract" && dir) {
           // Always ACCEPT. The evaluator has no idea what is on the
           // feature branch, which is exactly why the gate has to exist.
           const round = plannerRounds.get(ghIssue) ?? 1;
+          evaluatorPrompts?.push(prompt);
           writeFileSync(
             join(dir, `feedback-r${round}.md`),
-            `## Evaluator feedback — round ${round}\n\n**Verdict:** ACCEPT\n\nGAPS: 0\nRE_RAISED_GAPS: 0\n`,
+            `## Evaluator feedback — round ${round}\n\nThe contract is testable.\n`,
             "utf-8",
           );
+          writeContractReview(dir, "ACCEPT");
+          if (round === 1 && writeStaleResponseAfterRound1) {
+            writeContractResponse(dir, []);
+          }
         } else if (role === "generator" && dir) {
           const path =
             generatorPath?.(ghIssue) ?? declaredNow.get(ghIssue) ?? "src/x.txt";
@@ -383,6 +429,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
             "# QA Report\n\n**Verdict:** PASS\n",
             "utf-8",
           );
+          writeQAReview(dir, "deterministic");
         }
 
         return { exitCode: 0, stdout: "", stats: {} };
@@ -433,13 +480,18 @@ describe("runWave — contract-lock migration prefix gate", () => {
             ].join("\n"),
             "utf-8",
           );
+          writeAcceptanceManifest(dir, [path]);
+          if (round === 2) {
+            writeContractResponse(dir, []);
+          }
         } else if (role === "evaluator-contract" && dir) {
           const round = plannerRounds.get(ghIssue) ?? 1;
           writeFileSync(
             join(dir, `feedback-r${round}.md`),
-            `## Evaluator feedback - round ${round}\n\n**Verdict:** ACCEPT\n`,
+            `## Evaluator feedback - round ${round}\n\nThe contract is testable.\n`,
             "utf-8",
           );
+          writeContractReview(dir, "ACCEPT");
         } else if (role === "generator" && dir) {
           observedPrompts.push(prompt);
           const path = assignedPaths.get(ghIssue);
@@ -455,6 +507,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
             "# QA Report\n\n**Verdict:** PASS\n",
             "utf-8",
           );
+          writeQAReview(dir, "deterministic");
         }
 
         return { exitCode: 0, stdout: "", stats: {} };
@@ -564,7 +617,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     // one — a mechanical correction rather than a puzzle.
     expect(plannerPrompts[1]).toContain("003");
     expect(plannerPrompts[1]).toContain("004");
-    expect(plannerPrompts[1]).toMatch(/REJECTED by the/i);
+    expect(plannerPrompts[1]).toMatch(/pipeline REJECTED/i);
 
     // Observable in the event stream, under one warn reason.
     const refusals = readEvents(logger.runDir).filter(
@@ -582,6 +635,59 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(
       existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
     ).toBe(false);
+  }, 240_000);
+
+  it("requires a fresh planner response after an acceptance-manifest lock refusal", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "2002", title: "Machine-declared migration", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-gate-manifest-source",
+      slices,
+      new Map<string, SliceFixture>(),
+    );
+    addMigrationToFeatBranch(
+      repo,
+      featBranch,
+      "db/migrations/003_users.sql",
+    );
+    config.maxContractRounds = 2;
+
+    const plannerPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
+    config.provider = buildPlannerProvider({
+      slices,
+      plannerPrompts,
+      evaluatorPrompts,
+      writeRound2Response: false,
+      writeStaleResponseAfterRound1: true,
+      pathForRound: () => "src/prose-only.ts",
+      manifestPathForRound: () => "db/migrations/003_orders.sql",
+    });
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["2002"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    const outcome = outcomes.get("2002");
+    expect(outcome?.phase).toBe("ERROR");
+    expect(outcome?.phase === "ERROR" ? outcome.error : "").toMatch(
+      /contract-response\.json is missing/,
+    );
+    expect(plannerPrompts).toHaveLength(2);
+    expect(plannerPrompts[1]).toContain("003");
+    expect(evaluatorPrompts).toHaveLength(1);
+    expect(existsSync(join(repo, "src", "prose-only.ts"))).toBe(false);
   }, 240_000);
 
   it("does not flag a contract re-touching a migration it already owns", async () => {
@@ -728,6 +834,19 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(stuck).toContain("contract-lock gate");
     expect(stuck).toContain("003");
     expect(stuck).toContain("004");
+    expect(stuck).not.toContain("Exhaustion classification:");
+    expect(
+      existsSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "wave-gate-escalate-stub",
+          "slice-01",
+          "contract-negotiation-outcome.json",
+        ),
+      ),
+    ).toBe(false);
   }, 240_000);
 
   it("still refuses at the merge mutex when the generator collides but the contract did not", async () => {
@@ -803,6 +922,26 @@ describe("runWave — contract-lock migration prefix gate", () => {
       "supabase/migrations/003_users.sql": "-- existing\n",
       [`${sliceDir}/contract.md`]:
         "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- supabase/migrations/003_orders.sql\n",
+      [`${sliceDir}/acceptance-manifest.json`]: JSON.stringify({
+        version: 2,
+        fileScope: {
+          kind: "paths",
+          paths: ["supabase/migrations/003_orders.sql"],
+        },
+        migrationCount: 1,
+        behaviors: [
+          {
+            id: "B-01",
+            source: "wave fixture",
+            given: "a contract left LOCKED by an earlier run",
+            when: "this run negotiates the slice",
+            then: "the prefix gate, not the behavior lock, decides",
+            observableResult: "negotiation reopens on the collision",
+            preservation: false,
+            gateIds: ["tests"],
+          },
+        ],
+      }),
     });
 
     const plannerPrompts: string[] = [];
@@ -830,7 +969,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     // planner entirely and carried the stale colliding contract into
     // generation. The gate reopened it, so the planner ran once.
     expect(plannerPrompts).toHaveLength(1);
-    expect(plannerPrompts[0]).toMatch(/REJECTED by the/i);
+    expect(plannerPrompts[0]).toMatch(/pipeline REJECTED/i);
 
     // Announced as a refusal by a previous run's lock, not by a round
     // this run never ran.
@@ -848,6 +987,87 @@ describe("runWave — contract-lock migration prefix gate", () => {
       existsSync(join(repo, "supabase", "migrations", "003_orders.sql")),
     ).toBe(false);
   }, 240_000);
+
+  it.each([
+    ["missing", null, /acceptance-manifest\.json is missing/],
+    ["malformed", "{", /not valid JSON/],
+  ])(
+    "reopens a prior LOCKED contract with a %s companion manifest before evaluation",
+    async (_case, manifestContent, expectedDefect) => {
+      const repo = makeRepo();
+      const slices: Slice[] = [
+        { number: "01", ghIssue: "2052", title: "Invalid prior lock", type: "AFK", blockedBy: [], userStories: "" },
+      ];
+      const slug = `wave-prior-lock-${_case}`;
+      const { config, dag, logger, featBranch } = setupWave(
+        repo,
+        slug,
+        slices,
+        new Map<string, SliceFixture>(),
+      );
+      config.maxContractRounds = 2;
+      const sliceDir = `.kiro/specs/${slug}/slices/01-invalid-prior-lock`;
+      const seeded: Record<string, string> = {
+        [`${sliceDir}/contract.md`]:
+          "# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- src/x.ts\n",
+      };
+      if (manifestContent !== null) {
+        seeded[`${sliceDir}/acceptance-manifest.json`] = manifestContent;
+      }
+      commitToFeatBranch(repo, featBranch, seeded);
+
+      const plannerPrompts: string[] = [];
+      let evaluatorInvocations = 0;
+      let generatorInvocations = 0;
+      config.provider = {
+        name: "stub",
+        async invoke(options: InvokeOptions): Promise<InvokeResult> {
+          const dir = findSliceArtifactDir(options.cwd, "01");
+          if (options.role === "explorer" && dir) {
+            writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+          } else if (options.role === "planner") {
+            plannerPrompts.push(options.prompt);
+          } else if (options.role === "evaluator-contract") {
+            evaluatorInvocations++;
+          } else if (options.role === "generator") {
+            generatorInvocations++;
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["2052"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        testCommand: "pnpm test",
+        mergeMutex: makeAsyncMutex(),
+      });
+
+      expect(outcomes.get("2052")?.phase).toBe("ESCALATE");
+      expect(plannerPrompts).toHaveLength(2);
+      expect(plannerPrompts[0]).toMatch(expectedDefect);
+      expect(evaluatorInvocations).toBe(0);
+      expect(generatorInvocations).toBe(0);
+      const archivedContract = readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "contract.md",
+        ),
+        "utf-8",
+      );
+      expect(archivedContract).toMatch(/^\*\*Status:\*\*\s*NEGOTIATING$/m);
+    },
+    240_000,
+  );
 });
 
 /**

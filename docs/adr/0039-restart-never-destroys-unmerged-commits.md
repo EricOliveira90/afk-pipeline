@@ -112,3 +112,42 @@ to lose), and a half-copied archive must not strand the run.
   from it.
 - Restart still resets the attempt counter to 0. A fresh tree earns a
   fresh budget (#36).
+
+## Amendment (2026-08-28) — the archive also moves `reviews/` aside (#123)
+
+Decision 2 copied the slice's spec artifacts and left
+`.afk/artifacts/<run-slug>/slice-<NN>/reviews/` — the contract-review and
+QA/UAT evidence archives — where it was. Nothing else ever cleared that
+directory either: `clean-failed` and the pre-restart archive both leave it
+alone, and `pipelineRunSlug` has no per-launch discriminator, so every
+launch of the same PRD and provider shares it.
+
+Since #79 the QA evidence writes fail closed on a collision
+(`errorOnExist` for the raw artifact, `wx` for the record and the
+validation file). A slice whose previous life reached QA therefore
+restarted into a deterministic collision at `r1-a1`, burning its
+infrastructure retries and possibly ending the run ERROR before the *next*
+re-launch — which has commits ahead, takes the resume path, and skips past
+the occupied rounds — could self-heal.
+
+So the pre-restart archive now **moves** `reviews/` into the same
+`pre-restart-<n>` directory it copies the spec artifacts into. Moving, not
+copying: a copy leaves the round-1 names occupied, which is the whole
+problem. The directory travels whole, so a life's records and the raw
+artifacts they reference stay side by side and only their path prefix
+changes.
+
+Two entry points call it, both being the start of a slice life at round 1
+with no resume state:
+
+- the from-base restart (`restartFromBase`), and
+- a launch that finds no branch and no worktree — the `fresh` decision.
+  `clean-failed` and manual branch deletion leave `.afk/artifacts` alone,
+  so "fresh" in git is not fresh on disk. The move is logged; an ordinary
+  first run, with nothing to move, stays silent.
+
+The resume paths deliberately do **not** call it: `loadQAReviewResumeState`
+reads exactly the evidence this moves, and the global three-round cap
+(ADR 0014) is computed from it. A restart already grants a fresh round
+budget, so relocating a restarted slice's prior evidence changes no
+round arithmetic.

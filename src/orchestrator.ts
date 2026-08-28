@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   rmSync,
   statSync,
@@ -91,6 +92,45 @@ import {
   migrationClaimFor,
   releaseUnmergedMigrationClaims,
 } from "./migration-claims.js";
+import {
+  ACCEPTANCE_MANIFEST_FILENAME,
+  loadAcceptanceManifest,
+  type AcceptanceManifestV2,
+  validateAcceptanceManifestBindings,
+  validateAcceptanceManifestCoverage,
+  validateAcceptanceManifestStability,
+} from "./acceptance-manifest.js";
+import {
+  CONTRACT_RESPONSE_FILENAME,
+  CONTRACT_REVIEW_FILENAME,
+  buildContractNegotiationOutcome,
+  buildContractReviewAttemptRecord,
+  contractReviewGapMetrics,
+  formatContractReviewFindings,
+  loadContractResponse,
+  loadContractReview,
+  openContractReviewFindings,
+  type ContractResponse,
+  type ContractNegotiationOutcome,
+  type ContractRevisionArtifacts,
+  type ContractReview,
+  type ContractReviewAttemptRecord,
+  type ContractReviewFinding,
+  type RecordedContractVerdict,
+  validateRound1ContractReview,
+  validateRound2ContractReview,
+} from "./contract-review.js";
+import {
+  advanceQAReviewHistory,
+  buildQAReviewAttemptRecord,
+  loadQAReview,
+  loadQAReviewResumeState,
+  qaReviewFilename,
+  type QAReview,
+  type QAReviewAttemptFinding,
+  type QAReviewLifecycleFinding,
+  type QAReviewStage,
+} from "./qa-review.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
@@ -189,6 +229,17 @@ export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
     };
   });
 }
+
+function formatBaseGateCatalog(catalog: readonly GateDeclaration[]): string {
+  return catalog
+    .map((gate) => {
+      const command = gate.command
+        ? [gate.command, ...(gate.args ?? [])].join(" ")
+        : "(not executable)";
+      return `- ${gate.id}: ${command}`;
+    })
+    .join("\n");
+}
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
   verifyMigrationCommand: string;
@@ -209,7 +260,7 @@ export interface PipelineConfig {
   selectedSliceNumbers?: string[];
   /** Parsed `<prd-dir>/afk.json`; absent preserves legacy behavior. */
   manifest?: AfkManifest | null;
-  /** Contract negotiation cap before convergence may grant one extra round. */
+  /** Contract negotiation cap, bounded by the global two-round limit. */
   maxContractRounds?: number;
   /**
    * Agent provider. Drives branch namespacing (via `provider.name`) and
@@ -680,62 +731,15 @@ function migrationReservationBlock(
   );
 }
 
-export interface ContractExtensionEvidence {
-  previousGapCount: number | null;
-  currentGapCount: number | null;
-  reRaisedGapCount: number | null;
-  extensionAlreadyGranted: boolean;
-}
-
-export type ContractExtensionAssessment =
-  | { grant: true; reason: string }
-  | { grant: false; reason: string };
-
-export function assessContractExtension(
-  evidence: ContractExtensionEvidence,
-): ContractExtensionAssessment {
-  const {
-    previousGapCount,
-    currentGapCount,
-    reRaisedGapCount,
-    extensionAlreadyGranted,
-  } = evidence;
-  if (extensionAlreadyGranted) {
-    return { grant: false, reason: "the one-round extension was already used" };
-  }
-  if (
-    previousGapCount === null ||
-    currentGapCount === null ||
-    reRaisedGapCount === null
-  ) {
-    return { grant: false, reason: "gap metrics are missing or malformed" };
-  }
-  if (reRaisedGapCount > 0) {
-    return {
-      grant: false,
-      reason: `${reRaisedGapCount} gap(s) from the prior round were re-raised`,
-    };
-  }
-  if (currentGapCount >= previousGapCount) {
-    const trend = currentGapCount === previousGapCount ? "flat" : "rising";
-    return {
-      grant: false,
-      reason: `gap count is ${trend} (${previousGapCount} -> ${currentGapCount})`,
-    };
-  }
-  return {
-    grant: true,
-    reason: `gap count decreased (${previousGapCount} -> ${currentGapCount}) with no re-raised gaps`,
-  };
-}
-
 function preserveContractNegotiationFailure(
   ctx: SliceContext,
   outcome: "ESCALATE" | "STUCK",
   round: number,
-  verdict: artifacts.EvaluatorVerdict,
+  verdict: RecordedContractVerdict,
   feedbackPath: string,
   capDecision: string,
+  findings?: readonly ContractReviewFinding[],
+  negotiationOutcome?: ContractNegotiationOutcome,
 ): void {
   const provider = ctx.config.provider ?? kiroProvider;
   const result = artifacts.preserveNegotiationFailure({
@@ -752,12 +756,107 @@ function preserveContractNegotiationFailure(
     contractPath: join(ctx.absSliceDir, "contract.md"),
     contextPath: join(ctx.absSliceDir, "context.md"),
     capDecision,
+    findings,
+    negotiationOutcome,
   });
   if (result.archived) {
     ctx.logger.phase(
       `${ctx.tag}: archived negotiation artifacts to ${result.archiveDir}`,
     );
   }
+}
+
+/**
+ * Keep one contract review attempt's artifacts. Best-effort: an audit
+ * copy that cannot be written is a warning, never the thing that fails a
+ * negotiation. The warning names the attempt so a gap in the archive is
+ * traceable rather than invisible.
+ */
+function archiveContractReviewAttempt(
+  ctx: SliceContext,
+  archiveDir: string,
+  round: number,
+  attempt: number,
+  previousReview: ContractReview | null,
+  plannerResponse: ContractResponse | null,
+  revisions: ContractRevisionArtifacts | null,
+  lifecyclePrevious: ContractReview | null = previousReview,
+): { record: ContractReviewAttemptRecord; review: ContractReview } | null {
+  try {
+    const archived = artifacts.archiveContractReviewAttempt({
+      sliceDir: ctx.absSliceDir,
+      archiveDir,
+      round,
+      attempt,
+    });
+    if (archived.length > 0) {
+      ctx.logger.phase(
+        `${ctx.tag}: archived contract review round ${round} attempt ${attempt} ` +
+          `(${archived.join(", ")}) to ${archiveDir}`,
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.phase(
+      `${ctx.tag}: Warning: failed to archive contract review round ${round} ` +
+        `attempt ${attempt} to ${archiveDir}: ${message}`,
+      "error",
+      {
+        type: "warn",
+        reason: "contract-review-archive-failed",
+        ghIssue: ctx.slice.ghIssue,
+        message,
+      },
+    );
+  }
+
+  let review: ContractReview;
+  try {
+    review = loadContractReview(ctx.absSliceDir);
+    if (round === 1) {
+      validateRound1ContractReview(review);
+    } else if (previousReview && plannerResponse) {
+      validateRound2ContractReview(
+        previousReview,
+        plannerResponse,
+        review,
+        revisions ?? undefined,
+        lifecyclePrevious ?? previousReview,
+      );
+    }
+  } catch {
+    return null;
+  }
+
+  const record = buildContractReviewAttemptRecord(
+    round,
+    attempt,
+    review,
+    plannerResponse,
+  );
+  try {
+    const archived = artifacts.archiveContractReviewRecord({
+      archiveDir,
+      record,
+    });
+    ctx.logger.phase(
+      `${ctx.tag}: archived contract review lifecycle record ${archived} to ${archiveDir}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.phase(
+      `${ctx.tag}: Warning: failed to archive contract review lifecycle record ` +
+        `for round ${round} attempt ${attempt} to ${archiveDir}: ${message}`,
+      "error",
+      {
+        type: "warn",
+        reason: "contract-review-archive-failed",
+        ghIssue: ctx.slice.ghIssue,
+        message,
+      },
+    );
+  }
+  return { record, review };
 }
 
 /**
@@ -778,6 +877,10 @@ type AgentKillClass =
  * - `transient-exhausted` — the transient-provider retry window closed
  *   without the outage clearing (ADR 0022).
  * - `verdict` — nothing died; the evaluator wrote a real verdict.
+ * - `review-artifact` — the evaluator finished but its contract review
+ *   artifact was missing, malformed, or self-contradictory. Terminal for
+ *   the slice: there is no verdict to act on, and inventing a default
+ *   would be the silent ACCEPT this failure mode exists to prevent.
  * - `internal-error` — the pipeline itself threw (git, filesystem).
  *
  * The first three are *infrastructure* causes and are the only ones the
@@ -788,6 +891,7 @@ type NegotiateFailureKind =
   | "orchestrator-kill"
   | "transient-exhausted"
   | "verdict"
+  | "review-artifact"
   /**
    * The slice was not prepared because restarting it from base would have
    * force-reset unmerged commits away (#113). Terminal for this run and
@@ -814,7 +918,7 @@ interface NegotiateFailureCause {
   /** `orchestrator-kill` only — which bound tripped. */
   killClass?: AgentKillClass;
   /** `verdict` only — what the evaluator actually wrote. */
-  verdict?: artifacts.EvaluatorVerdict;
+  verdict?: RecordedContractVerdict;
   /** Tail of the dead invocation's output. Absent for `verdict`. */
   outputTail?: string;
 }
@@ -975,7 +1079,7 @@ function classifyNegotiateFailure(args: {
  */
 function negotiateVerdictCause(args: {
   outcome: "ESCALATE" | "STUCK";
-  verdict: artifacts.EvaluatorVerdict;
+  verdict: RecordedContractVerdict;
   round: number;
 }): NegotiateFailureCause {
   const { outcome, verdict, round } = args;
@@ -989,6 +1093,34 @@ function negotiateVerdictCause(args: {
         : `negotiate: contract not locked after negotiation — last evaluator ` +
           `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
   };
+}
+
+/**
+ * The evaluator finished and its review artifact was refused. Distinct
+ * from a `verdict` cause: nothing was decided about the contract, so the
+ * summary names the artifact and the defect instead of a verdict, and the
+ * slice stops where it is.
+ */
+function negotiationArtifactCause(
+  role: "planner" | "evaluator-contract",
+  label: string,
+  defect: string,
+): NegotiateFailureCause {
+  return {
+    kind: "review-artifact",
+    role,
+    summary:
+      `negotiate: the ${label} artifact was refused, so no verdict ` +
+      `was reached — ${defect}`,
+  };
+}
+
+function reviewArtifactCause(defect: string): NegotiateFailureCause {
+  return negotiationArtifactCause(
+    "evaluator-contract",
+    "contract review",
+    defect,
+  );
 }
 
 /** A throw from the pipeline itself, with no dead invocation behind it. */
@@ -1073,8 +1205,10 @@ function negotiateFailureCauseOf(
  *   touching anything, so the slice ends ERROR with a report naming the
  *   commits and the flags that resolve it (#113). `--force-restart` is
  *   the one route that still discards.
- * - **fresh** — no evidence of a prior attempt: the normal first-run
- *   creation path, unchanged and unlogged.
+ * - **fresh** — no branch and no worktree: the normal first-run creation
+ *   path, unlogged, except that a prior life's review archives left on
+ *   disk by `clean-failed` or a manual branch deletion are moved aside
+ *   first and that move is logged (#123).
  *
  * Every resume/restart decision is announced on console + run.log
  * (`resuming from <n> commits` / `restarting from base (<reason>)`)
@@ -1107,20 +1241,28 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   );
   const plan = decideResume(facts);
 
-  // Restart teardown + bookkeeping shared by the decision's restart
-  // path and the refresh-conflict fallback. The attempt counter resets:
-  // a fresh tree earns a fresh resume budget (#36).
-  const restartFromBase = async (reason: string): Promise<void> => {
-    // The slice's spec artifacts (contract.md, context.md, feedback-r*,
-    // qa-report*, handoff.md, stuck.md) are untracked files inside the
-    // worktree, so recreating it deletes the only copy. Archive them
-    // first — the same `.afk/artifacts/` path the ESCALATE/STUCK preserve
-    // path writes to (#113). Best-effort: a failure to archive warns and
-    // the restart proceeds, because the operator asked for the restart
-    // and a half-copied archive must not strand the run.
-    let archived: string | null = null;
+  /**
+   * Put the previous life's artifacts out of this one's way, for the two
+   * paths that start a slice at round 1 with no resume state.
+   *
+   * The slice's spec artifacts (contract.md, context.md, feedback-r*,
+   * qa-report*, handoff.md, stuck.md) are untracked files inside the
+   * worktree, so recreating it deletes the only copy — they are copied to
+   * the same `.afk/artifacts/` path the ESCALATE/STUCK preserve path
+   * writes to (#113). The `reviews/` archive dir is moved aside, because
+   * the next round-1 evidence write targets the same `r1-a1` names and
+   * fails closed on a collision — burning infrastructure retries and
+   * possibly ending the run ERROR before the next re-launch's resume
+   * self-heals past the occupied rounds (#123).
+   *
+   * Best-effort: a failure warns and the run proceeds, because the
+   * operator asked for the restart and a half-copied archive must not
+   * strand it. A `reviews/` dir left in place then fails closed at round
+   * 1, exactly as it did before this relocation existed.
+   */
+  const archivePriorLife = (): string | null => {
     try {
-      archived = artifacts.archiveArtifactsBeforeRestart(
+      return artifacts.archiveArtifactsBeforeRestart(
         repoRoot,
         runSlug,
         ctx.slice.number,
@@ -1129,9 +1271,17 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.phase(
-        `${ctx.tag}: warning — could not archive slice artifacts before restart: ${message}`,
+        `${ctx.tag}: warning — could not archive the slice's prior-life artifacts: ${message}`,
       );
+      return null;
     }
+  };
+
+  // Restart teardown + bookkeeping shared by the decision's restart
+  // path and the refresh-conflict fallback. The attempt counter resets:
+  // a fresh tree earns a fresh resume budget (#36).
+  const restartFromBase = async (reason: string): Promise<void> => {
+    const archived = archivePriorLife();
     ctx.logger.phase(
       `${ctx.tag}: restarting from base (${reason})` +
         (archived
@@ -1286,6 +1436,20 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   } else if (plan.action === "refuse") {
     refuseRestart(plan.reason, plan.commitsAhead);
   } else {
+    // "Fresh" is fresh in git only. A slice whose branch and worktree are
+    // gone — `clean-failed`, a manual deletion — can still have a prior
+    // life's review archives on disk, and nothing else ever clears them
+    // (#123). Move them aside before round 1 writes over their names.
+    // Logged only when something actually moved, so an ordinary first run
+    // stays unlogged as documented above.
+    const archived = archivePriorLife();
+    if (archived) {
+      ctx.logger.phase(
+        `${ctx.tag}: prior-life artifacts archived to ` +
+          `${relative(repoRoot, archived).replace(/\\/g, "/")} ` +
+          `(no branch or worktree survived)`,
+      );
+    }
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
   }
 
@@ -1337,40 +1501,52 @@ async function negotiateAttempt(
    * Run one negotiate invocation, closing its log before classifying a
    * failure — `closeAgentLog` awaits the stream's flush, so the output
    * tail read afterwards is complete.
+   *
+   * `afterAttempt` runs once per attempt whatever the attempt did —
+   * succeeded, died, or was cancelled — because an attempt that died can
+   * still have written the artifact an operator needs to see. It runs
+   * before the failure is classified so the archive is taken while the
+   * working artifact is still on disk.
    */
   const invokeAgent = async (
     opts: Omit<Parameters<SliceContext["invoke"]>[0], "logStream">,
     createLogStream: () => WriteStream,
     beforeAttempt?: () => void,
+    afterAttempt?: (attempt: number) => void,
   ): Promise<void> => {
     for (let attempt = 1; ; attempt++) {
       beforeAttempt?.();
       const logStream = createLogStream();
+      let failure: { error: unknown } | null = null;
       try {
         await invoke({ ...opts, logStream }).finally(() =>
           closeAgentLog(logStream),
         );
-        return;
       } catch (err) {
-        if (isCancelled(err, signal)) throw err;
-        const cause = classifyNegotiateFailure({
-          role: opts.role,
-          error: err,
-          outputTail: readInvocationOutputTail(agentLogPath(logStream)),
-        });
-        if (!isInfrastructureCause(cause) || attempt > infrastructureRetries) {
-          throw new NegotiateInvocationError(cause);
-        }
-        const message =
-          `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
-          cause.summary;
-        logger.phase(`${ctx.tag}: ${message}`, "error", {
-          type: "warn",
-          reason: "infrastructure-retry",
-          ghIssue: slice.ghIssue,
-          message,
-        });
+        failure = { error: err };
       }
+      afterAttempt?.(attempt);
+      if (failure === null) return;
+
+      const { error } = failure;
+      if (isCancelled(error, signal)) throw error;
+      const cause = classifyNegotiateFailure({
+        role: opts.role,
+        error,
+        outputTail: readInvocationOutputTail(agentLogPath(logStream)),
+      });
+      if (!isInfrastructureCause(cause) || attempt > infrastructureRetries) {
+        throw new NegotiateInvocationError(cause);
+      }
+      const message =
+        `negotiate infrastructure retry ${attempt}/${infrastructureRetries} — ` +
+        cause.summary;
+      logger.phase(`${ctx.tag}: ${message}`, "error", {
+        type: "warn",
+        reason: "infrastructure-retry",
+        ghIssue: slice.ghIssue,
+        message,
+      });
     }
   };
 
@@ -1428,13 +1604,30 @@ async function negotiateAttempt(
     if (!Number.isSafeInteger(maxContractRounds) || maxContractRounds < 1) {
       throw new Error("maxContractRounds must be a positive integer");
     }
-    let allowedContractRounds = maxContractRounds;
-    let extensionGranted = false;
-    let previousMetrics: artifacts.EvaluatorFeedbackMetrics | null = null;
+    const allowedContractRounds = Math.min(
+      maxContractRounds,
+      DEFAULT_MAX_CONTRACT_ROUNDS,
+    );
+    let evaluatorRound = 0;
     let lastRound = 0;
-    let lastVerdict: artifacts.EvaluatorVerdict = "UNKNOWN";
+    let lastVerdict: RecordedContractVerdict = "NONE";
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
     const capDecisions: string[] = [];
+    /**
+     * The previous round's review, kept so this round's re-raised-gap
+     * count can be derived from finding IDs rather than taken from the
+     * evaluator's word.
+     */
+    let previousReview: ContractReview | null = null;
+    let lastFindings: readonly ContractReviewFinding[] = [];
+    let lastReviewAttemptRecord: ContractReviewAttemptRecord | null = null;
+    let plannerResponse: ContractResponse | null = null;
+    let revisionArtifacts: ContractRevisionArtifacts | null = null;
+    const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+      config.repoRoot,
+      pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+      slice.number,
+    );
 
     /**
      * Objection raised by `ctx.onContractLocked` and not yet handed to a
@@ -1442,6 +1635,7 @@ async function negotiateAttempt(
      * refused after the evaluator had accepted it.
      */
     let gateObjection: string | null = null;
+    let previousSchemaValidManifest: AcceptanceManifestV2 | null = null;
 
     /**
      * Consult the contract-lock gate on a contract that just reached
@@ -1476,29 +1670,79 @@ async function negotiateAttempt(
       return true;
     };
 
+    const refuseInvalidManifest = (
+      objection: string,
+      refusedAt: string,
+    ): void => {
+      gateObjection = objection;
+      if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+        artifacts.reopenContract(contractPath);
+      }
+      contractStatus = "NEGOTIATING";
+      capDecisions.push(
+        `The acceptance-manifest scope gate refused ${refusedAt}: ${objection}`,
+      );
+      logger.phase(
+        `${ctx.tag}: contract lock refused before evaluation — ${objection}`,
+        "error",
+        {
+          type: "warn",
+          reason: "contract-lock-refused",
+          ghIssue: slice.ghIssue,
+          message: objection,
+        },
+      );
+    };
+
     /**
      * The planner's REVISION_NOTE for `round`. A pending gate objection
      * takes the lead: it is a concrete, mechanical correction, and the
-     * evaluator feedback it supersedes said ACCEPT.
+     * review it supersedes said ACCEPT.
+     *
+     * A REVISE reaches the planner as the review's structured findings,
+     * each with its clear-condition, rather than as a pointer to prose:
+     * the planner is told the observable change that resolves every gap.
+     * The markdown companion is named as further reading, not as the
+     * carrier of the gaps.
      */
-    const revisionNote = (round: number, objection: string | null): string => {
-      const priorFeedback =
-        round > 1
-          ? `${ctx.relSliceDir}/feedback-r${round - 1}.md`
+    const revisionNote = (objection: string | null): string => {
+      const openFindings = openContractReviewFindings(lastFindings);
+      const priorFindings =
+        openFindings.length > 0
+          ? `The contract review returned REVISE with these findings. ` +
+            `Respond to each clear-condition:\n\n` +
+            `${formatContractReviewFindings(openFindings)}`
           : null;
       if (objection === null) {
-        return priorFeedback
-          ? `Revise based only on evaluator feedback in ${priorFeedback}.`
-          : "";
+        return priorFindings ?? "";
       }
       return (
-        `The previous contract was accepted by the evaluator and then REJECTED by the ` +
-        `pipeline, before any code was generated:\n\n${objection}\n\n` +
+        `The pipeline REJECTED the previous contract before any code was generated:\n\n` +
+        `${objection}\n\n` +
         `Resolve exactly that in this revision.` +
-        (priorFeedback
-          ? ` Keep the evaluator feedback in ${priorFeedback} satisfied too.`
+        (priorFindings
+          ? `\n\nKeep the previous review's findings satisfied too.\n\n${priorFindings}`
           : "")
       );
+    };
+
+    const loadBehaviorLockArtifacts = () => {
+      const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+      if (manifest.version === 2) {
+        const previous = previousSchemaValidManifest;
+        previousSchemaValidManifest = manifest;
+        if (previous) {
+          validateAcceptanceManifestStability(previous, manifest);
+        }
+      }
+      validateAcceptanceManifestCoverage(
+        readFileSync(contractPath, "utf-8"),
+        manifest,
+        contractPath,
+      );
+      const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
+      validateAcceptanceManifestBindings(manifest, gateCatalog);
+      return { manifest, gateCatalog };
     };
 
     // A contract left LOCKED on disk by an earlier run has never been
@@ -1506,7 +1750,21 @@ async function negotiateAttempt(
     // before skipping negotiation altogether; a refusal reopens the
     // contract and the round loop below runs normally.
     if (contractStatus === "LOCKED") {
-      lockRefusedByGate("a previous run");
+      let manifestObjection: string | null = null;
+      try {
+        loadBehaviorLockArtifacts();
+      } catch (error) {
+        manifestObjection =
+          error instanceof Error ? error.message : String(error);
+      }
+      if (manifestObjection !== null) {
+        refuseInvalidManifest(
+          manifestObjection,
+          "a previous LOCKED contract",
+        );
+      } else {
+        lockRefusedByGate("a previous run");
+      }
     }
 
     if (contractStatus !== "LOCKED") {
@@ -1517,6 +1775,18 @@ async function negotiateAttempt(
         // below misattribute that REVISE to the gate.
         const pendingObjection = gateObjection;
         gateObjection = null;
+        const routedFindings =
+          round === 2 ? openContractReviewFindings(lastFindings) : [];
+        const requiresPlannerResponse = round === 2 && previousReview !== null;
+        const previousArtifactText = requiresPlannerResponse
+          ? {
+              contract: readFileSync(contractPath, "utf-8"),
+              manifest: readFileSync(
+                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                "utf-8",
+              ),
+            }
+          : null;
 
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
@@ -1529,6 +1799,9 @@ async function negotiateAttempt(
             round,
           },
         );
+        rmSync(join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME), {
+          force: true,
+        });
         await invokeAgent(
           {
             role: "planner",
@@ -1539,13 +1812,37 @@ async function negotiateAttempt(
               ROUND: round,
               RELEVANT_FILES: relevantFilesBlock,
               SLICE_BODY: sliceBodyNote,
-              REVISION_NOTE: revisionNote(round, pendingObjection),
+              REVISION_NOTE: revisionNote(pendingObjection),
+              CONTRACT_RESPONSE_NOTE: requiresPlannerResponse
+                ? [
+                    `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
+                    "Use exactly this schema:",
+                    '{"version":1,"round":2,"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}',
+                    `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
+                    "CONDITION_MET and CONTESTED require non-blank evidence.",
+                  ].join("\n")
+                : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`,
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
+              // The planner must bind every behavior to a gate the
+              // lock gate can verify, so it is told the same derived
+              // catalog that check reads — otherwise it can only guess
+              // IDs and burn rounds on refusals.
+              BASE_GATE_CATALOG: formatBaseGateCatalog(
+                resolveBaseGateDeclarations(ctx.worktreeDir),
+              ),
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
           () => logger.agentLog(slice.number, "planner", round),
+          requiresPlannerResponse
+            ? () => {
+                rmSync(
+                  join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
+                  { force: true },
+                );
+              }
+            : undefined,
         );
         logger.event({
           type: "phase-ended",
@@ -1555,6 +1852,89 @@ async function negotiateAttempt(
           round,
         });
 
+        let acceptanceManifestBlock = "";
+        let baseGateCatalogBlock = "";
+        try {
+          const lockArtifacts = loadBehaviorLockArtifacts();
+          acceptanceManifestBlock = JSON.stringify(
+            lockArtifacts.manifest,
+            null,
+            2,
+          );
+          baseGateCatalogBlock = formatBaseGateCatalog(
+            lockArtifacts.gateCatalog,
+          );
+        } catch (error) {
+          const objection =
+            error instanceof Error ? error.message : String(error);
+          refuseInvalidManifest(objection, `planner round ${round}`);
+          lastRound = round;
+          lastVerdict = "NONE";
+          if (round < allowedContractRounds) continue;
+
+          const reason =
+            "the acceptance-manifest scope gate refused the final planner round";
+          capDecisions.push(`Negotiation stopped because ${reason}.`);
+          logger.phase(`${ctx.tag}: contract negotiation stopped: ${reason}`);
+          logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+          preserveContractNegotiationFailure(
+            ctx,
+            "ESCALATE",
+            round,
+            "NONE",
+            lastFeedbackPath,
+            capDecisions.join(" "),
+          );
+          const cause = negotiateVerdictCause({
+            outcome: "ESCALATE",
+            verdict: "NONE",
+            round,
+          });
+          return { phase: "ESCALATE", cause };
+        }
+
+        plannerResponse = null;
+        revisionArtifacts = null;
+        if (requiresPlannerResponse) {
+          try {
+            plannerResponse = loadContractResponse(
+              ctx.absSliceDir,
+              routedFindings.map(({ id }) => id),
+            );
+            revisionArtifacts = {
+              "contract.md": {
+                before: previousArtifactText!.contract,
+                after: readFileSync(contractPath, "utf-8"),
+              },
+              "acceptance-manifest.json": {
+                before: previousArtifactText!.manifest,
+                after: readFileSync(
+                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                  "utf-8",
+                ),
+              },
+            };
+          } catch (error) {
+            const defect =
+              error instanceof Error ? error.message : String(error);
+            const cause = negotiationArtifactCause(
+              "planner",
+              "contract response",
+              defect,
+            );
+            logger.phase(`${ctx.tag}: ${cause.summary}`, "error", {
+              type: "phase-ended",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              agent: "planner",
+              round,
+              verdict: "NONE",
+            });
+            return { phase: "ERROR", cause };
+          }
+        }
+
+        evaluatorRound++;
         logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
           "error",
@@ -1563,54 +1943,130 @@ async function negotiateAttempt(
             ghIssue: slice.ghIssue,
             sliceNumber: slice.number,
             agent: "evaluator-contract",
-            round,
+            round: evaluatorRound,
           },
         );
-        const feedbackPath = join(ctx.absSliceDir, `feedback-r${round}.md`);
+        const feedbackPath = join(
+          ctx.absSliceDir,
+          `feedback-r${evaluatorRound}.md`,
+        );
+        const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
+        let latestValidAttemptReview: ContractReview | null = null;
+        let attemptLifecyclePrevious: ContractReview | null = null;
         await invokeAgent(
           {
             role: "evaluator-contract",
             prompt: renderPrompt("evaluator-contract", {
               SPECS_DIR: ctx.relSpecsDir,
               SLICE_DIR: ctx.relSliceDir,
-              ROUND: round,
+              ROUND: evaluatorRound,
               RELEVANT_FILES: relevantFilesBlock,
-              PREVIOUS_FEEDBACK_NOTE:
-                round > 1
-                  ? `Read ${ctx.relSliceDir}/feedback-r${round - 1}.md. Compare its gaps with this round and count materially repeated gaps as RE_RAISED_GAPS.`
-                  : "There is no previous feedback round; set RE_RAISED_GAPS to 0.",
+              PREVIOUS_REVIEW_NOTE:
+                evaluatorRound > 1
+                  ? `A previous round's findings were handed to the planner. ` +
+                    `Its prose companion is ${ctx.relSliceDir}/feedback-r${evaluatorRound - 1}.md. ` +
+                    `Reuse a finding's exact \`id\` when the same gap still stands — ` +
+                    `the orchestrator measures repeated gaps by ID.`
+                  : "This is the first review round; every finding ID is new.",
+              ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
+              BASE_GATE_CATALOG: baseGateCatalogBlock,
+              CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
+              PLANNER_RESPONSE: plannerResponse
+                ? JSON.stringify(plannerResponse, null, 2)
+                : "(first review round; no planner response)",
+              REVISION_CONTEXT: revisionArtifacts
+                ? JSON.stringify(revisionArtifacts, null, 2)
+                : "(first review round; no prior revision)",
             }),
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
-          () => logger.agentLog(slice.number, "evaluator-contract", round),
-          () => rmSync(feedbackPath, { force: true }),
+          () =>
+            logger.agentLog(
+              slice.number,
+              "evaluator-contract",
+              evaluatorRound,
+            ),
+          // Both artifacts are deleted before every attempt, so a stale
+          // review from an earlier attempt or round can never be read as
+          // this attempt's verdict.
+          () => {
+            attemptLifecyclePrevious = latestValidAttemptReview;
+            rmSync(feedbackPath, { force: true });
+            rmSync(reviewPath, { force: true });
+          },
+          (attempt) => {
+            const archived = archiveContractReviewAttempt(
+              ctx,
+              reviewArchiveDir,
+              evaluatorRound,
+              attempt,
+              previousReview,
+              plannerResponse,
+              revisionArtifacts,
+              attemptLifecyclePrevious ?? previousReview,
+            );
+            if (archived) {
+              latestValidAttemptReview = archived.review;
+              lastReviewAttemptRecord = archived.record;
+            }
+          },
         );
 
-        const verdict = artifacts.readEvaluatorVerdict(feedbackPath);
-        const metrics = artifacts.readEvaluatorFeedbackMetrics(feedbackPath);
-        // An UNKNOWN verdict means the evaluator exited without writing
-        // a parseable verdict — surface it instead of silently looping,
-        // so an operator can tell a dropped negotiation from a pending
-        // one. See ADR 0017.
+        lastRound = round;
+        lastFeedbackPath = feedbackPath;
+
+        let review: ContractReview;
+        try {
+          review = loadContractReview(ctx.absSliceDir);
+          if (evaluatorRound === 1) {
+            validateRound1ContractReview(review);
+          } else if (previousReview && plannerResponse) {
+            validateRound2ContractReview(
+              previousReview,
+              plannerResponse,
+              review,
+              revisionArtifacts ?? undefined,
+              attemptLifecyclePrevious ?? previousReview,
+            );
+          }
+        } catch (error) {
+          // The evaluator finished but said nothing the orchestrator can
+          // act on. There is no default verdict and no extra round: a
+          // malformed, missing, or self-contradictory review artifact is
+          // terminal, and the operator gets the artifact named. See
+          // ADR 0017 for the earlier, weaker version of this rule.
+          const defect = error instanceof Error ? error.message : String(error);
+          const cause = reviewArtifactCause(defect);
+          logger.phase(`${ctx.tag}: ${cause.summary}`, "error", {
+            type: "phase-ended",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "evaluator-contract",
+            round: evaluatorRound,
+            verdict: "NONE",
+          });
+          logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
+          return { phase: "ERROR", cause };
+        }
+
+        const verdict = review.verdict;
+        const metrics = contractReviewGapMetrics(review, previousReview);
         logger.phase(
           `${ctx.tag}: contract verdict ${verdict} (round ${round}/${allowedContractRounds})` +
-            (verdict === "UNKNOWN"
-              ? " — evaluator produced no parseable verdict"
-              : ""),
+            ` — ${metrics.gapCount} blocking finding(s)`,
           "error",
           {
             type: "phase-ended",
             ghIssue: slice.ghIssue,
             sliceNumber: slice.number,
             agent: "evaluator-contract",
-            round,
+            round: evaluatorRound,
             verdict,
           },
         );
-        lastRound = round;
         lastVerdict = verdict;
-        lastFeedbackPath = feedbackPath;
+        lastFindings = review.findings;
         if (verdict === "ACCEPT") {
           artifacts.lockContract(contractPath);
           contractStatus = "LOCKED";
@@ -1622,56 +2078,22 @@ async function negotiateAttempt(
         if (contractStatus === "LOCKED" && !lockRefusedByGate(`round ${round}`))
           break;
 
-        if (verdict === "ESCALATE") {
-          capDecisions.push(
-            "Evaluator explicitly escalated; no cap extension was considered.",
-          );
-          logger.phase(`${ctx.tag}: contract extension not considered: explicit ESCALATE`);
-        } else if (round === allowedContractRounds) {
-          // A gate refusal earns no extension. The extension exists for
-          // a planner making measurable progress on evaluator gaps; a
-          // gate objection is a concrete mechanical correction the
-          // planner already had every round to make, so failing it is
-          // the escalation the operator should see.
-          const assessment = gateObjection
-            ? {
-                grant: false as const,
-                reason:
-                  "the contract-lock gate refused the final round's contract",
-              }
-            : verdict === "REVISE"
-              ? assessContractExtension({
-                  previousGapCount: previousMetrics?.gapCount ?? null,
-                  currentGapCount: metrics.gapCount,
-                  reRaisedGapCount: metrics.reRaisedGapCount,
-                  extensionAlreadyGranted: extensionGranted,
-                })
-              : {
-                  grant: false as const,
-                  reason: `verdict was ${verdict}, not REVISE`,
-                };
-          if (assessment.grant) {
-            extensionGranted = true;
-            allowedContractRounds = maxContractRounds + 1;
-            capDecisions.push(
-              `Granted one extra round because ${assessment.reason}.`,
-            );
-            logger.phase(
-              `${ctx.tag}: granting contract round ${allowedContractRounds}: ${assessment.reason}`,
-            );
-            previousMetrics = metrics;
-            continue;
-          }
-          capDecisions.push(`Extension refused: ${assessment.reason}.`);
-          logger.phase(
-            `${ctx.tag}: contract round extension refused: ${assessment.reason}`,
-          );
+        if (round === allowedContractRounds) {
+          const reason = gateObjection
+            ? "the contract-lock gate refused the final round's contract"
+            : `the negotiation reached its hard cap of ${allowedContractRounds} planner round(s)`;
+          capDecisions.push(`Negotiation stopped because ${reason}.`);
+          logger.phase(`${ctx.tag}: contract negotiation stopped: ${reason}`);
         } else {
-          previousMetrics = metrics;
+          previousReview = review;
           continue;
         }
 
         logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
+        const negotiationOutcome =
+          evaluatorRound === 2 && lastReviewAttemptRecord
+            ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
+            : undefined;
         preserveContractNegotiationFailure(
           ctx,
           "ESCALATE",
@@ -1679,8 +2101,10 @@ async function negotiateAttempt(
           verdict,
           feedbackPath,
           capDecisions.join(" "),
+          review.findings,
+          negotiationOutcome,
         );
-        logger.bumpEvalRound(slice.ghIssue, round);
+        logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
         const cause = negotiateVerdictCause({
           outcome: "ESCALATE",
           verdict,
@@ -1701,6 +2125,7 @@ async function negotiateAttempt(
         capDecisions.length > 0
           ? capDecisions.join(" ")
           : "The configured round cap was not reached.",
+        lastFindings,
       );
       const cause = negotiateVerdictCause({
         outcome: "STUCK",
@@ -1732,14 +2157,43 @@ async function negotiateAttempt(
  * branch — that's the orchestrator's job, under a mutex.
  */
 export type QAStageResult =
-  | { outcome: "PASS"; report: string }
-  | { outcome: "IMPLEMENTATION"; report: string };
+  | {
+      outcome: "PASS";
+      report: string;
+      history: readonly QAReviewLifecycleFinding[];
+      unresolved: QAReviewAttemptFinding[];
+    }
+  | {
+      outcome: "IMPLEMENTATION";
+      report: string;
+      history: readonly QAReviewLifecycleFinding[];
+      unresolved: QAReviewAttemptFinding[];
+    };
+
+function formatUnresolvedQAFindings(
+  findings: readonly QAReviewAttemptFinding[],
+): string {
+  if (findings.length === 0) return "(none)";
+  return findings
+    .map(
+      (finding) =>
+        [
+          `- Finding ID: \`${finding.id}\``,
+          `  Summary: ${finding.summary}`,
+          `  Clear condition: ${finding.clearCondition}`,
+          "  Artifact references:",
+          ...finding.artifactReferences.map((path) => `  - \`${path}\``),
+        ].join("\n"),
+    )
+    .join("\n");
+}
 
 export async function runQAStage(
   ctx: SliceContext,
   round: number,
-  stage: "deterministic" | "shared-preview",
-  previousReports: readonly string[],
+  stage: QAReviewStage,
+  history: readonly QAReviewLifecycleFinding[],
+  previousUnresolved: readonly QAReviewAttemptFinding[] = [],
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
@@ -1751,13 +2205,206 @@ export async function runQAStage(
   const reportName = stage === "deterministic" ? "qa-report.md" : "uat-report.md";
   const reportPath = join(ctx.absSliceDir, reportName);
   const reportDisplayPath = `${ctx.relSliceDir}/${reportName}`;
+  const reviewName = qaReviewFilename(stage);
+  const reviewPath = join(ctx.absSliceDir, reviewName);
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
   const scope = stage === "deterministic"
     ? "Deterministic slice QA only. Do not access a shared preview database or run remote UAT."
     : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
+  let currentHistory = history;
+  let currentUnresolved = previousUnresolved;
 
   for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
-    const invokeEvaluator = async () => {
+    const archiveName = stage === "deterministic"
+      ? `qa-report-r${round}-a${attempt}.md`
+      : `uat-report-r${round}-a${attempt}.md`;
+    const archivePath = join(ctx.absSliceDir, archiveName);
+    type AttemptEvidence = {
+      rawArchiveName: string | null;
+      reportArchived: boolean;
+      /**
+       * Why the refusal evidence for an invalid canonical artifact could
+       * not itself be preserved, or `null` when nothing was lost (#124).
+       *
+       * Carried out of the archive step instead of thrown from it because
+       * the two callers must fail in different places: on the success
+       * path the attempt already ends the slice a few lines below, and on
+       * the invoke-failure path the attempt is about to be retried as
+       * infrastructure — that retry is what has to stop, or a later
+       * attempt's PASS ships without the refused attempt's evidence.
+       */
+      validationArchiveError: string | null;
+      reviewResult:
+        | {
+            review: QAReview;
+            nextHistory: readonly QAReviewLifecycleFinding[];
+          }
+        | { error: string };
+    };
+    type ValidAttemptEvidence = {
+      review: QAReview;
+      nextHistory: readonly QAReviewLifecycleFinding[];
+      unresolved: QAReviewAttemptFinding[];
+      reportArchived: boolean;
+      archiveDisplayPath: string;
+    };
+
+    const archiveAttemptEvidence = (): AttemptEvidence => {
+      // Required evidence fails closed (#79): a raw canonical artifact
+      // that cannot be preserved must not let this attempt count. The
+      // throw lands in the attempt-level catch, where it is treated as
+      // an infrastructure failure — retried, then exhausted as ERROR —
+      // never as a warning underneath a later PASS.
+      let rawArchiveName: string | null;
+      try {
+        rawArchiveName = artifacts.archiveQAReviewAttempt({
+          sliceDir: ctx.absSliceDir,
+          archiveDir: reviewArchiveDir,
+          stage,
+          round,
+          attempt,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${stage} review round ${round} attempt ${attempt} could not ` +
+            `preserve its raw canonical artifact in ${reviewArchiveDir}: ${message}`,
+        );
+      }
+      const reportArchived = artifacts.archiveQAReport(reportPath, archivePath);
+
+      try {
+        const review = loadQAReview(ctx.absSliceDir, stage);
+        return {
+          rawArchiveName,
+          reportArchived,
+          validationArchiveError: null,
+          reviewResult: {
+            review,
+            nextHistory: advanceQAReviewHistory(currentHistory, review),
+          },
+        };
+      } catch (error) {
+        const evidence = error instanceof Error ? error.message : String(error);
+        let validationArchiveError: string | null = null;
+        try {
+          artifacts.archiveQAReviewValidation({
+            archiveDir: reviewArchiveDir,
+            stage,
+            round,
+            attempt,
+            evidence,
+          });
+        } catch (archiveError) {
+          validationArchiveError =
+            archiveError instanceof Error
+              ? archiveError.message
+              : String(archiveError);
+          logger.phase(
+            `${ctx.tag}: ${stage} review round ${round} attempt ${attempt} ` +
+              `could not preserve its validation evidence: ${validationArchiveError}`,
+            "error",
+            {
+              type: "warn",
+              reason: "qa-review-archive-failed",
+              ghIssue: slice.ghIssue,
+              message: validationArchiveError,
+            },
+          );
+        }
+        return {
+          rawArchiveName,
+          reportArchived,
+          validationArchiveError,
+          reviewResult: { error: evidence },
+        };
+      }
+    };
+
+    /**
+     * How a lost validation write reads in the failure that carries it
+     * (#124). Both throw sites name the archive dir, so an operator sees
+     * the occupied or unwritable location, not only the OS message.
+     */
+    const validationArchiveNote = (lost: string): string =>
+      `${stage} review round ${round} attempt ${attempt} could not ` +
+      `preserve its validation evidence in ${reviewArchiveDir}: ${lost}`;
+
+    /**
+     * Read `validationArchiveError` off evidence that may be absent.
+     * A function rather than a property access because the caller's
+     * holder is only ever assigned from a closure: TypeScript's flow
+     * analysis sees just the `null` initialiser and narrows the guarded
+     * value to `never`, which has no properties.
+     */
+    const lostValidationEvidence = (
+      evidence: AttemptEvidence | null,
+    ): string | null => evidence?.validationArchiveError ?? null;
+
+    const recordValidAttempt = (
+      evidence: AttemptEvidence,
+    ): ValidAttemptEvidence | null => {
+      if ("error" in evidence.reviewResult) return null;
+
+      const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
+      const { review, nextHistory } = evidence.reviewResult;
+      const expectedRawArchiveName =
+        `${stage === "deterministic" ? "qa" : "uat"}-review-r${round}-a${attempt}.json`;
+      const canonicalArchivePath = relative(
+        config.repoRoot,
+        join(
+          reviewArchiveDir,
+          evidence.rawArchiveName ?? expectedRawArchiveName,
+        ),
+      ).replace(/\\/g, "/");
+      const record = buildQAReviewAttemptRecord({
+        stage,
+        round,
+        attempt,
+        review,
+        canonicalArchivePath,
+        markdownArchivePath: archiveDisplayPath,
+      });
+      // Required evidence fails closed (#79): a lifecycle record that
+      // cannot be preserved must not let the attempt's verdict stand.
+      // The review outcome is already known, so a retry would re-invoke
+      // the evaluator over a local write failure; instead the throw
+      // propagates and ends the slice as ERROR without merging.
+      try {
+        artifacts.archiveQAReviewRecord({
+          archiveDir: reviewArchiveDir,
+          record,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${stage} review round ${round} attempt ${attempt} could not ` +
+            `preserve its lifecycle record in ${reviewArchiveDir}: ${message}`,
+        );
+      }
+      const unresolved =
+        review.failureClass === "INFRASTRUCTURE"
+          ? [...currentUnresolved]
+          : record.findings.filter((finding) => finding.unresolved);
+      currentHistory = nextHistory;
+      currentUnresolved = unresolved;
+      return {
+        review,
+        nextHistory,
+        unresolved,
+        reportArchived: evidence.reportArchived,
+        archiveDisplayPath,
+      };
+    };
+
+    let failedAttemptEvidence: AttemptEvidence | null = null;
+    const invokeEvaluator = async (): Promise<AttemptEvidence> => {
       rmSync(reportPath, { force: true });
+      rmSync(reviewPath, { force: true });
       if (stage === "shared-preview") {
         const preview = config.sharedPreview!;
         const commandOptions = {
@@ -1773,40 +2420,66 @@ export async function runQAStage(
 
       const logRole = stage === "deterministic" ? "evaluator-qa" : "evaluator-uat";
       const evalLog = logger.agentLog(slice.number, logRole, round * 10 + attempt);
-      await invoke({
-        role: "evaluator-qa",
-        prompt: renderPrompt("evaluator-qa", {
-          SLICE_DIR: ctx.relSliceDir,
-          RELEVANT_FILES: ctx.relevantFilesBlock,
-          SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-          // No TEST_COMMAND: QA is told the sanity command set and
-          // nothing else, so a narrowed generator command cannot reach
-          // it (ADR 0038). `renderPrompt` enforces this — the template
-          // rejects an arg it does not reference.
-          SANITY_COMMANDS: ctx.sanityCommandsBlock,
-          QA_SCOPE: scope,
-          REPORT_PATH: reportDisplayPath,
-          PREVIOUS_QA_REPORTS: previousReports.length > 0
-            ? previousReports.map((path) => `- \`${path}\``).join("\n")
-            : "(none)",
-          COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
-          HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
-        }),
-        cwd: ctx.worktreeDir,
-        logStream: evalLog,
-        ...longCommandRoleBounds({
-          idleTimeoutMs: commandTimeoutMs,
-          idleWarningIntervalMs: heartbeatIntervalMs,
-          maxDurationMs: config.maxAgentDurationMs,
-        }),
-      }).finally(() => closeAgentLog(evalLog));
+      try {
+        await invoke({
+          role: "evaluator-qa",
+          prompt: renderPrompt("evaluator-qa", {
+            SLICE_DIR: ctx.relSliceDir,
+            RELEVANT_FILES: ctx.relevantFilesBlock,
+            SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+            // No TEST_COMMAND: QA is told the sanity command set and
+            // nothing else, so a narrowed generator command cannot reach
+            // it (ADR 0038). `renderPrompt` enforces this — the template
+            // rejects an arg it does not reference.
+            SANITY_COMMANDS: ctx.sanityCommandsBlock,
+            QA_SCOPE: scope,
+            REPORT_PATH: reportDisplayPath,
+            UNRESOLVED_FINDINGS:
+              formatUnresolvedQAFindings(currentUnresolved),
+            COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
+            HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
+          }),
+          cwd: ctx.worktreeDir,
+          logStream: evalLog,
+          ...longCommandRoleBounds({
+            idleTimeoutMs: commandTimeoutMs,
+            idleWarningIntervalMs: heartbeatIntervalMs,
+            maxDurationMs: config.maxAgentDurationMs,
+          }),
+        }).finally(() => closeAgentLog(evalLog));
+      } catch (error) {
+        // `archiveAttemptEvidence` can itself throw (raw canonical
+        // archive fails closed, #79). Without chaining, that throw
+        // would replace the evaluator failure that got us here and the
+        // root cause would vanish from the retry warns and the final
+        // ERROR message. Cancellation is rethrown as-is so it stays
+        // recognisable to `isCancelled`.
+        try {
+          failedAttemptEvidence = archiveAttemptEvidence();
+        } catch (archiveError) {
+          if (isCancelled(error, config.signal)) throw error;
+          const archiveMessage =
+            archiveError instanceof Error
+              ? archiveError.message
+              : String(archiveError);
+          const invokeMessage =
+            error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `${archiveMessage} (while handling evaluator failure: ${invokeMessage})`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      return archiveAttemptEvidence();
     };
 
+    let attemptEvidence: AttemptEvidence;
     try {
       if (stage === "shared-preview") {
         const lockPath = config.sharedPreview!.lockPath ??
           join(config.repoRoot, ".afk", "locks", "shared-preview.lock");
-        await withCrossProcessLock(
+        attemptEvidence = await withCrossProcessLock(
           lockPath,
           {
             acquireTimeoutMs: commandTimeoutMs,
@@ -1817,10 +2490,30 @@ export async function runQAStage(
           invokeEvaluator,
         );
       } else {
-        await invokeEvaluator();
+        attemptEvidence = await invokeEvaluator();
       }
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
+      const failure = error instanceof Error ? error.message : String(error);
+      const lostValidation = lostValidationEvidence(failedAttemptEvidence);
+      if (failedAttemptEvidence) {
+        recordValidAttempt(failedAttemptEvidence);
+      }
+      // Required evidence fails closed (#124). The refused attempt's
+      // validation file is the only record that this attempt happened,
+      // and the infrastructure retry below is what would bury the loss:
+      // attempt N+1 can PASS and ship the slice with attempt N's evidence
+      // missing. The evidence is already in hand — a retry re-invokes the
+      // evaluator over a local write failure and can never recover it —
+      // so the slice ends ERROR instead, the same way an unarchivable
+      // lifecycle record does.
+      if (lostValidation) {
+        throw new Error(
+          `${validationArchiveNote(lostValidation)} ` +
+            `(while handling evaluator failure: ${failure})`,
+          { cause: error },
+        );
+      }
       if (attempt <= infrastructureRetries) {
         logger.phase(
           `${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
@@ -1835,22 +2528,43 @@ export async function runQAStage(
         continue;
       }
       throw new Error(
-        `${stage} infrastructure failed after ${attempt} attempt(s): ${error instanceof Error ? error.message : String(error)}`,
+        `${stage} infrastructure failed after ${attempt} attempt(s): ${failure}`,
       );
     }
 
-    const archiveName = stage === "deterministic"
-      ? `qa-report-r${round}-a${attempt}.md`
-      : `uat-report-r${round}-a${attempt}.md`;
-    const archivePath = join(ctx.absSliceDir, archiveName);
-    if (!artifacts.archiveQAReport(reportPath, archivePath)) {
+    const { reviewResult } = attemptEvidence;
+    if ("error" in reviewResult) {
+      // This attempt already ends the slice, so the lost validation write
+      // (#124) changes no control flow here — it is reported so the
+      // operator knows the refusal was never written down.
+      const lost = attemptEvidence.validationArchiveError;
+      throw new Error(
+        `${stage} review artifact ERROR: ${reviewResult.error}` +
+          (lost ? `; ${validationArchiveNote(lost)}` : ""),
+      );
+    }
+    const validAttempt = recordValidAttempt(attemptEvidence)!;
+    if (!validAttempt.reportArchived) {
       if (attempt <= infrastructureRetries) continue;
       throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
     }
-    const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
-    const verdict = artifacts.readQAVerdict(reportPath);
-    if (verdict === "PASS") return { outcome: "PASS", report: archiveDisplayPath };
-    if (artifacts.readQAFailureClass(reportPath) === "INFRASTRUCTURE") {
+
+    const {
+      review,
+      nextHistory,
+      unresolved,
+      archiveDisplayPath,
+    } = validAttempt;
+
+    if (review.verdict === "PASS") {
+      return {
+        outcome: "PASS",
+        report: archiveDisplayPath,
+        history: nextHistory,
+        unresolved,
+      };
+    }
+    if (review.failureClass === "INFRASTRUCTURE") {
       if (attempt <= infrastructureRetries) {
         logger.phase(
           `${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`,
@@ -1866,7 +2580,12 @@ export async function runQAStage(
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
     }
-    return { outcome: "IMPLEMENTATION", report: archiveDisplayPath };
+    return {
+      outcome: "IMPLEMENTATION",
+      report: archiveDisplayPath,
+      history: nextHistory,
+      unresolved,
+    };
   }
 
   throw new Error(`${stage} QA exhausted without a result`);
@@ -1921,15 +2640,61 @@ export async function runSliceExecute(
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
-  const qaReports: string[] = [];
-  const repairReferences: string[] = [];
+  const stuckReferences: string[] = [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
+  let deterministicHistory: readonly QAReviewLifecycleFinding[] = [];
+  let deterministicUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let sharedPreviewHistory: readonly QAReviewLifecycleFinding[] = [];
+  let sharedPreviewUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let firstRound = 1;
+  let retryNote = "";
 
   try {
-    for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
+    if (ctx.resume) {
+      const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+        config.repoRoot,
+        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+        slice.number,
+      );
+      const restored = loadQAReviewResumeState(
+        reviewArchiveDir,
+        ctx.absSliceDir,
+      );
+      deterministicHistory = restored.deterministic.history;
+      deterministicUnresolved = restored.deterministic.unresolved;
+      sharedPreviewHistory = restored.sharedPreview.history;
+      sharedPreviewUnresolved = restored.sharedPreview.unresolved;
+      resumedUnresolved =
+        restored.retryStage === "deterministic"
+          ? deterministicUnresolved
+          : restored.retryStage === "shared-preview"
+            ? sharedPreviewUnresolved
+            : [];
+      firstRound = restored.nextRound;
+    }
+    // The three-round cap is global across a slice's lives (ADR 0014):
+    // an ordinary resume restores the round counter from archived
+    // evidence and receives only the rounds still unspent under
+    // MAX_GENERATOR_ROUNDS, not a fresh budget of three. Only a STUCK
+    // resume earns headroom beyond the cap — its documented single
+    // extra attempt. A resume whose evidence already shows the cap
+    // spent gets zero attempts and falls through to the STUCK return.
+    const implementationAttemptLimit =
+      ctx.resume?.mode === "stuck"
+        ? 1
+        : Math.max(0, MAX_GENERATOR_ROUNDS - firstRound + 1);
+    const finalRound = firstRound + implementationAttemptLimit - 1;
+
+    for (
+      let implementationAttempt = 1;
+      implementationAttempt <= implementationAttemptLimit;
+      implementationAttempt++
+    ) {
+      const round = firstRound + implementationAttempt - 1;
       logger.bumpGenRound(slice.ghIssue, round);
       logger.phase(
-        `${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+        `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
         "error",
         {
           type: "phase-started",
@@ -1944,7 +2709,7 @@ export async function runSliceExecute(
       const heartbeatMs =
         config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
       const generatorPrompt =
-        round === 1 && ctx.resume?.mode === "stuck"
+        implementationAttempt === 1 && ctx.resume?.mode === "stuck"
           ? renderPrompt("generator-resume-stuck", {
               SLICE_DIR: ctx.relSliceDir,
               RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -1956,10 +2721,12 @@ export async function runSliceExecute(
                 ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
                 : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
               STUCK_NOTE: ctx.resume.stuckNote ?? "",
+              UNRESOLVED_FINDINGS:
+                formatUnresolvedQAFindings(resumedUnresolved),
               HANDOFF_NOTE: ctx.resume.handoffNote,
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             })
-          : round === 1 && ctx.resume
+          : implementationAttempt === 1 && ctx.resume
           ? renderPrompt("generator-resume", {
               SLICE_DIR: ctx.relSliceDir,
               RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -1968,6 +2735,8 @@ export async function runSliceExecute(
               COMMITS_AHEAD: ctx.resume.commitsAhead,
               COMMIT_LOG: ctx.resume.commitLog,
               FEAT_BRANCH: featBranch,
+              UNRESOLVED_FINDINGS:
+                formatUnresolvedQAFindings(resumedUnresolved),
               HANDOFF_NOTE: ctx.resume.handoffNote,
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             })
@@ -1976,9 +2745,7 @@ export async function runSliceExecute(
               RELEVANT_FILES: ctx.relevantFilesBlock,
               SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
               TEST_COMMAND: ctx.testCommand,
-              RETRY_NOTE: round > 1
-                ? `This is implementation round ${round}. Fix every unresolved finding in these preserved reports:\n${repairReferences.map((path) => `- \`${path}\``).join("\n")}`
-                : "",
+              RETRY_NOTE: implementationAttempt > 1 ? retryNote : "",
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             });
       await invoke({
@@ -2169,19 +2936,24 @@ export async function runSliceExecute(
         declarations,
       );
       if (requiredFailures.length > 0) {
-        repairReferences.push(
+        const baseGateRepairReferences = [
           ...new Set(
             requiredFailures.map(({ evidencePath }) =>
               evidencePath.replace(/\\/g, "/"),
             ),
           ),
-        );
-        repairReferences.push(
           ...requiredFailures.map(({ result }) =>
             join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
           ),
-        );
-        if (round < MAX_GENERATOR_ROUNDS) continue;
+        ];
+        stuckReferences.push(...baseGateRepairReferences);
+        retryNote =
+          `This is implementation round ${round + 1}. Fix every unresolved ` +
+          `base-gate failure in these preserved artifacts:\n` +
+          baseGateRepairReferences
+            .map((path) => `- \`${path}\``)
+            .join("\n");
+        if (implementationAttempt < implementationAttemptLimit) continue;
       } else {
         assertGateEvidenceReleasesEvaluation(
           gateEvidence,
@@ -2190,7 +2962,7 @@ export async function runSliceExecute(
         );
         for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
         logger.phase(
-          `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+          `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
           "error",
           {
             type: "phase-started",
@@ -2204,8 +2976,11 @@ export async function runSliceExecute(
           ctx,
           round,
           "deterministic",
-          qaReports,
+          deterministicHistory,
+          deterministicUnresolved,
         );
+        deterministicHistory = deterministic.history;
+        deterministicUnresolved = deterministic.unresolved;
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
@@ -2216,14 +2991,19 @@ export async function runSliceExecute(
         });
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
-        qaReports.push(deterministic.report);
-        repairReferences.push(deterministic.report);
+        stuckReferences.push(deterministic.report);
+        if (implementationFailed) {
+          retryNote =
+            `This is implementation round ${round + 1}. Fix every current ` +
+            `unresolved deterministic QA finding:\n` +
+            formatUnresolvedQAFindings(deterministic.unresolved);
+        }
         if (
           deterministic.outcome !== "IMPLEMENTATION" &&
           config.sharedPreview
         ) {
           logger.phase(
-            `${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+            `${ctx.tag}: shared-preview UAT (round ${round}/${finalRound})...`,
             "error",
             {
               type: "phase-started",
@@ -2237,8 +3017,11 @@ export async function runSliceExecute(
             ctx,
             round,
             "shared-preview",
-            qaReports,
+            sharedPreviewHistory,
+            sharedPreviewUnresolved,
           );
+          sharedPreviewHistory = remote.history;
+          sharedPreviewUnresolved = remote.unresolved;
           logger.event({
             type: "phase-ended",
             ghIssue: slice.ghIssue,
@@ -2247,10 +3030,13 @@ export async function runSliceExecute(
             round,
             verdict: remote.outcome,
           });
-          qaReports.push(remote.report);
-          repairReferences.push(remote.report);
+          stuckReferences.push(remote.report);
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
+            retryNote =
+              `This is implementation round ${round + 1}. Fix every current ` +
+              `unresolved shared-preview UAT finding:\n` +
+              formatUnresolvedQAFindings(remote.unresolved);
           }
         }
 
@@ -2295,7 +3081,7 @@ export async function runSliceExecute(
         }
       }
 
-      if (round === MAX_GENERATOR_ROUNDS) {
+      if (implementationAttempt === implementationAttemptLimit) {
         logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
           type: "phase-started",
           ghIssue: slice.ghIssue,
@@ -2307,7 +3093,7 @@ export async function runSliceExecute(
           role: "generator-stuck",
           prompt: renderPrompt("generator-stuck", {
             SLICE_DIR: ctx.relSliceDir,
-            QA_REPORTS: repairReferences
+            QA_REPORTS: stuckReferences
               .map((path) => `- \`${path}\``)
               .join("\n"),
           }),
