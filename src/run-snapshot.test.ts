@@ -192,5 +192,92 @@ describe("foldEvents", () => {
       source: "event",
       error: "generator rounds exhausted",
     });
+    expect(snapshot.outcomeMismatches).toEqual([]);
+  });
+
+  /**
+   * The reader-side half of #111. `.afk/state/<slug>.json` is cumulative
+   * across every run of a slug, and `afk status --run <dir>` folds it into
+   * *one* run's events — so a gap-filling record has to be attributable to
+   * that run, and since a dispatch clears the slice's record, a record for
+   * a dispatched slice is not. It still fills the gap; it no longer does
+   * so silently.
+   */
+  describe("records this run cannot account for", () => {
+    it("reports a dispatched slice's persisted outcome, and stays quiet about an undispatched one", () => {
+      const state: RunState = {
+        ...EMPTY_STATE,
+        slices: {
+          // Dispatched by this run's wave 1: a later run wrote this.
+          "102": { phase: "ERROR", error: "exceeded 100 tool calls" },
+          // Never dispatched here — this genuinely is a prior run's record
+          // and reads correctly as one.
+          "100": { phase: "PASS", mergedToFeature: true },
+        },
+      };
+
+      const snapshot = foldEvents(realisticStream(), state);
+
+      expect(snapshot.outcomeMismatches).toHaveLength(1);
+      expect(snapshot.outcomeMismatches[0]).toMatchObject({
+        ghIssue: "102",
+        phase: "ERROR",
+      });
+      expect(snapshot.outcomeMismatches[0]!.message).toContain(
+        "comes from the run-state file, not from this run's events",
+      );
+      // Reported, not withheld: it is still the only outcome on offer.
+      expect(snapshot.slices["102"]!.outcome).toMatchObject({
+        phase: "ERROR",
+        source: "run-state",
+      });
+    });
+
+    it("stays quiet about the provisional CANCELLED records a stop writes", () => {
+      // A stop writes CANCELLED straight to run state with no per-slice
+      // event (#114), so those records ARE this run's. Reporting them
+      // would fire on every interrupted run and train operators to
+      // ignore the line.
+      const stream = [
+        ...realisticStream(),
+        event("2026-08-22T10:00:25.000Z", {
+          type: "warn",
+          reason: "cancellation-requested",
+          message: "Cancellation requested — marked CANCELLED in run state: #102",
+        }),
+      ];
+      const state: RunState = {
+        ...EMPTY_STATE,
+        slices: { "102": { phase: "CANCELLED", error: "Cancelled by user" } },
+      };
+
+      expect(foldEvents(stream, state).outcomeMismatches).toEqual([]);
+    });
+
+    it("still reports a non-cancelled record on a run that was stopped", () => {
+      const stream = [
+        ...realisticStream(),
+        event("2026-08-22T10:00:25.000Z", {
+          type: "warn",
+          reason: "stop-requested",
+          message: "afk stop sentinel found",
+        }),
+      ];
+      const state: RunState = {
+        ...EMPTY_STATE,
+        slices: { "102": { phase: "STUCK", error: "QA never passed" } },
+      };
+
+      expect(foldEvents(stream, state).outcomeMismatches).toMatchObject([
+        { ghIssue: "102", phase: "STUCK" },
+      ]);
+    });
+
+    it("is empty when the state file holds nothing for the dispatched slices", () => {
+      expect(foldEvents(realisticStream(), EMPTY_STATE).outcomeMismatches).toEqual(
+        [],
+      );
+      expect(foldEvents(realisticStream(), undefined).outcomeMismatches).toEqual([]);
+    });
   });
 });

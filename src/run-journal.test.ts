@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -138,6 +139,141 @@ describe("RunJournal.recordTerminal", () => {
     expect(
       eventsOf(journal).find((event) => event.type === "slice-outcome")?.slice,
     ).toEqual(recorded);
+  });
+});
+
+/**
+ * Clear-on-dispatch (issue #111). A slice going RUNNING is this run
+ * taking ownership of its record, so the previous attempt's persisted
+ * record goes at that moment. Before this, memory said RUNNING while
+ * disk still said `ERROR — exceeded 100 tool calls` from two runs back,
+ * and every reader believed the disk.
+ */
+describe("RunJournal.trackSlice clears stale records on dispatch", () => {
+  /** The #111 record: a failure reason from an already-fixed defect. */
+  const STALE = {
+    version: 1,
+    prdSlug: "dispatch",
+    featureBranch: "feat/dispatch",
+    slices: {
+      "40": {
+        phase: "ERROR",
+        branch: "afk/demo-slice-01",
+        error: "exceeded 100 tool calls",
+      },
+      "41": { phase: "STUCK", branch: "afk/demo-slice-02", error: "QA never passed" },
+    },
+    resume: { "40": { attempts: 1, lastDecision: "resumed from 3 commits" } },
+  };
+
+  function seedStale(repo: string, slug = "dispatch"): void {
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      join(repo, ".afk", "state", `${slug}.json`),
+      JSON.stringify({ ...STALE, prdSlug: slug }),
+      "utf-8",
+    );
+  }
+
+  it("drops the dispatched slice's record and keeps its resume budget", () => {
+    const repo = makeRepo();
+    seedStale(repo);
+    const journal = new RunJournal(repo, "dispatch");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    journal.trackSlice(lifecycle.running(SLICE));
+
+    const state = loadRunState(repo, "dispatch");
+    expect(state.slices["40"]).toBeUndefined();
+    // Untouched: the resume cap is what stops an unattended launcher
+    // resuming a poisoned tree forever (#36).
+    expect(state.resume?.["40"]?.attempts).toBe(1);
+    // Untouched: #41 was not dispatched, so its record still describes
+    // the last run that decided it.
+    expect(state.slices["41"]?.error).toBe("QA never passed");
+  });
+
+  it("announces what it cleared on run.log and as a typed event", () => {
+    const repo = makeRepo();
+    seedStale(repo);
+    const journal = new RunJournal(repo, "dispatch");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    journal.trackSlice(lifecycle.running(SLICE));
+
+    expect(readFileSync(join(journal.runDir, "run.log"), "utf-8")).toContain(
+      "cleared the previous attempt's persisted record (ERROR — exceeded 100 tool calls)",
+    );
+    expect(
+      eventsOf(journal).find((event) => event.reason === "stale-record-cleared"),
+    ).toMatchObject({
+      type: "warn",
+      ghIssue: "40",
+      previousPhase: "ERROR",
+      previousError: "exceeded 100 tool calls",
+    });
+  });
+
+  it("says nothing on a first run, and creates no state file", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "first-run");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    journal.trackSlice(lifecycle.running(SLICE));
+
+    expect(log).not.toHaveBeenCalled();
+    expect(existsSync(join(repo, ".afk", "state", "first-run.json"))).toBe(false);
+  });
+
+  it("does not clear a record this run already decided", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "redispatch");
+    journal.setFeatureBranch("feat/demo");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    journal.trackSlice(lifecycle.running(SLICE));
+    journal.recordTerminal(SLICE, { phase: "PASS" });
+
+    // A re-dispatch after a decided outcome must not wipe a record this
+    // run is entitled to.
+    journal.trackSlice(lifecycle.running(SLICE));
+
+    expect(loadRunState(repo, "redispatch").slices["40"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+  });
+
+  it("warns and dispatches anyway when the clear cannot be written", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "dispatch");
+    seedStale(repo);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Make the read-modify-write fail: the record is unparseable, so
+    // loadRunState throws inside the clear.
+    writeFileSync(join(repo, ".afk", "state", "dispatch.json"), "{ not json", "utf-8");
+
+    journal.trackSlice(lifecycle.running(SLICE));
+
+    expect(journal.getSlice("40")?.phase).toBe("RUNNING");
+    expect(warn.mock.calls.flat().join("\n")).toContain(
+      "could not clear slice #40's stale run-state record at dispatch",
+    );
+  });
+
+  it("leaves PENDING and SKIPPED records alone — neither is a dispatch", () => {
+    const repo = makeRepo();
+    seedStale(repo);
+    const journal = new RunJournal(repo, "dispatch");
+
+    journal.trackSlice(lifecycle.pending(SLICE));
+    journal.trackSlice(
+      lifecycle.skipped({ ghIssue: "41", title: "HITL", branch: "—" }),
+    );
+
+    const state = loadRunState(repo, "dispatch");
+    expect(state.slices["40"]?.error).toBe("exceeded 100 tool calls");
+    expect(state.slices["41"]?.phase).toBe("STUCK");
   });
 });
 

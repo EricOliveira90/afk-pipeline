@@ -68,6 +68,27 @@ export interface SnapshotSlice {
   blockedBy: string[];
 }
 
+/**
+ * A displayed outcome this run cannot claim as its own (#111).
+ *
+ * `afk status --run <dir>` folds one run's event stream together with
+ * `.afk/state/<slug>.json`, which is cumulative across every run of that
+ * slug. A record in that file is only attributable to the run being read
+ * if the run's own events say so — and since a dispatch now clears the
+ * slice's record, a record for a slice *this* run dispatched, with no
+ * `slice-outcome` event behind it, was written after that dispatch. It
+ * may belong to a later run sharing the file. Presenting it as this
+ * run's result is precisely how #111's two-runs-stale error text reached
+ * a post-mortem, so it is reported rather than silently adopted.
+ */
+export interface SnapshotOutcomeMismatch {
+  ghIssue: string;
+  /** The phase carried by the unattributable record. */
+  phase: SlicePhase;
+  /** Operator-facing one-liner; rendered by `afk status`. */
+  message: string;
+}
+
 export interface SnapshotWave {
   wave: number;
   slices: string[];
@@ -104,6 +125,12 @@ export interface RunSnapshot {
   chronology: SnapshotChronologyEntry[];
   slices: Record<string, SnapshotSlice>;
   sliceOrder: string[];
+  /**
+   * Persisted records shown as this run's outcomes that this run's events
+   * do not account for. Empty in the ordinary case. See
+   * {@link SnapshotOutcomeMismatch}.
+   */
+  outcomeMismatches: SnapshotOutcomeMismatch[];
   waves: SnapshotWave[];
   maxDispatchedWave: number;
   currentLanes: {
@@ -124,6 +151,11 @@ function invocationKey(input: {
 
 function runPhaseKey(input: { phase: RunPhase; attempt?: number }): string {
   return `${input.phase}|${input.attempt ?? ""}`;
+}
+
+/** Phases a stop writes provisionally, without a per-slice event (#114). */
+function isCancelledPhase(phase: SlicePhase): boolean {
+  return traitsFor(phase).bucket === "cancelled";
 }
 
 function fromPersisted(state: PersistedSliceState): SnapshotSliceOutcome {
@@ -178,6 +210,12 @@ function closeSliceInvocations(
  * Project the append-only run events and persisted run state into the
  * status read model. Event outcomes describe this run and therefore
  * override persisted records; persisted records fill event-stream gaps.
+ *
+ * A gap-filling record that this run's own dispatch should have cleared
+ * is still used — it is the only outcome on offer — but it is also listed
+ * in `outcomeMismatches`, because the run-state file is shared across
+ * runs and this reader is the one that presents its contents as a
+ * particular run's result (#111).
  */
 export function foldEvents(
   events: readonly RunEvent[],
@@ -192,6 +230,12 @@ export function foldEvents(
   const runPhases: SnapshotRunPhaseInvocation[] = [];
   const openRunPhases = new Map<string, SnapshotRunPhaseInvocation[]>();
   const eventOutcomes = new Set<string>();
+  // A stop this run requested writes provisional CANCELLED records
+  // straight to run state without a per-slice event (#114), so those are
+  // this run's own records even though the event stream cannot name them.
+  // Tracked here so the mismatch report below does not fire on every
+  // interrupted run and train operators to ignore it.
+  let cancellationRequested = false;
   let currentLanes: RunSnapshot["currentLanes"] = null;
   let runStarted: RunStartedEvent | undefined;
   let runEnded: RunEndedEvent | undefined;
@@ -346,6 +390,12 @@ export function foldEvents(
             slice.blockedBy = [...event.blockedBy];
           }
         }
+        if (
+          event.reason === "cancellation-requested" ||
+          event.reason === "stop-requested"
+        ) {
+          cancellationRequested = true;
+        }
         chronology.push({ type: "warn", event });
         break;
       case "run-phase-started": {
@@ -382,11 +432,27 @@ export function foldEvents(
     }
   }
 
+  const outcomeMismatches: SnapshotOutcomeMismatch[] = [];
   for (const [ghIssue, state] of Object.entries(runState?.slices ?? {})) {
     if (eventOutcomes.has(ghIssue)) continue;
     const slice = sliceFor(ghIssue);
     slice.outcome = fromPersisted(state);
     closeSliceInvocations(openInvocations, ghIssue, "run-state");
+    // The record still fills the gap — it is the only outcome on offer —
+    // but a record for a slice *this* run dispatched cannot be this run's,
+    // because dispatch clears it and a decided outcome emits an event.
+    // Say so rather than presenting it as this run's result (#111).
+    if (!slice.dispatched) continue;
+    if (cancellationRequested && isCancelledPhase(state.phase)) continue;
+    outcomeMismatches.push({
+      ghIssue,
+      phase: state.phase,
+      message:
+        `#${ghIssue}: the ${state.phase} record shown for this slice comes from ` +
+        `the run-state file, not from this run's events — this run dispatched ` +
+        `#${ghIssue}, and a dispatch clears the slice's record, so this one was ` +
+        `written afterwards (most likely by a later run of the same PRD)`,
+    });
   }
 
   const renderedWaves = [...waves.values()].sort((a, b) => a.wave - b.wave);
@@ -403,6 +469,7 @@ export function foldEvents(
     chronology,
     slices,
     sliceOrder,
+    outcomeMismatches,
     waves: renderedWaves,
     maxDispatchedWave: renderedWaves.reduce(
       (max, wave) => Math.max(max, wave.startedTs === undefined ? 0 : wave.wave),

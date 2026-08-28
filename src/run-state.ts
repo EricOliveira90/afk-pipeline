@@ -378,6 +378,48 @@ export function saveSliceState(
   writeFileSync(p, JSON.stringify(current, null, 2));
 }
 
+/**
+ * Drop a slice's persisted record because this run is dispatching it
+ * again (#111). Returns the record that was removed, or `null` when
+ * there was nothing to remove — the file is then left untouched, so a
+ * first run does not create a state file just to prove it had nothing
+ * to clear.
+ *
+ * Every field of `PersistedSliceState` is a claim about a *decided*
+ * outcome of a previous attempt: the phase, the branch it was decided
+ * on, the failure reason, `mergedToFeature`, and the prefixes that
+ * refused a merge. The moment the slice is dispatched again none of them
+ * describes anything true, and nothing in the file says so. After run
+ * 6's crash, #79's persisted `error` still named a typecheck failure
+ * from two runs earlier — already fixed — and the next run's retry
+ * announcement pointed the operator at the wrong defect.
+ *
+ * So the whole record goes, not only the error text. ADR 0018 already
+ * makes absence mean "no decided outcome" (RUNNING is never persisted),
+ * so removal is the one state that is honest for a slice in flight, and
+ * `--only-failed` reads "not complete" rather than "recorded failed", so
+ * a cleared slice stays eligible for the next run exactly as before.
+ *
+ * Deliberately NOT cleared: `resume` bookkeeping (its `attempts` is the
+ * poison-tree cap, and the dispatch this clearing accompanies is about
+ * to increment it), `scope`, `migrations`, and `reviewPhase`. None of
+ * those is a per-attempt outcome claim.
+ */
+export function clearSliceStateForDispatch(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+): PersistedSliceState | null {
+  const p = statePath(repoRoot, prdSlug);
+  if (!existsSync(p)) return null;
+  const current = loadRunState(repoRoot, prdSlug);
+  const previous = current.slices[ghIssue];
+  if (!previous) return null;
+  delete current.slices[ghIssue];
+  writeFileSync(p, JSON.stringify(current, null, 2));
+  return previous;
+}
+
 export function saveRunState(repoRoot: string, state: RunState) {
   const p = statePath(repoRoot, state.prdSlug);
   mkdirSync(dirname(p), { recursive: true });

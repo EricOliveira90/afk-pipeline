@@ -510,3 +510,98 @@ describe("afk status future section integration (#30)", () => {
     });
   });
 });
+
+/**
+ * Reader-side half of #111. `.afk/state/<slug>.json` is cumulative across
+ * every run of a slug, and `--run <dir>` post-mortems a specific one — so
+ * a persisted record shown as that run's outcome has to be attributable
+ * to it. Since a dispatch clears the slice's record, a record for a slice
+ * that run dispatched is not, and saying nothing is how a two-runs-stale
+ * error text reached a post-mortem as the most recent failure.
+ */
+describe("afk status reports records a run cannot account for (#111)", () => {
+  function dispatchedThenKilled(): Array<Record<string, unknown>> {
+    return [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      {
+        type: "run-started",
+        provider: "stub",
+        runSlug: "demo-stub",
+        ts: "2026-08-18T10:00:00.100Z",
+      },
+      {
+        type: "wave-dispatched",
+        wave: 1,
+        slices: ["9401"],
+        ts: "2026-08-18T10:00:01.000Z",
+      },
+      {
+        type: "phase-started",
+        ghIssue: "9401",
+        agent: "generator",
+        round: 1,
+        ts: "2026-08-18T10:00:02.000Z",
+      },
+    ];
+  }
+
+  function writeState(root: string, slices: Record<string, unknown>): void {
+    mkdirSync(join(root, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      join(root, ".afk", "state", "demo-stub.json"),
+      JSON.stringify({
+        version: 1,
+        prdSlug: "demo-stub",
+        featureBranch: "feat/demo",
+        slices,
+      }),
+      "utf-8",
+    );
+  }
+
+  it("flags the outcome and names why it is not this run's", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", dispatchedThenKilled());
+    // Written by a later run of the same PRD, into the same state file.
+    writeState(root, { "9401": { phase: "ERROR", error: "exceeded 100 tool calls" } });
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    expect(output).toContain("Records this run cannot account for:");
+    expect(output).toContain(
+      "comes from the run-state file, not from this run's events",
+    );
+    expect(output).toMatch(/#9401.*dispatch clears the slice's record/);
+    // The warning qualifies the sections that read the outcome, so it
+    // lands above them.
+    expect(output.indexOf("Records this run cannot account for:")).toBeLessThan(
+      output.indexOf("Present:"),
+    );
+  });
+
+  it("carries the mismatch structurally in --json", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", dispatchedThenKilled());
+    writeState(root, { "9401": { phase: "ERROR", error: "exceeded 100 tool calls" } });
+
+    const model = JSON.parse(runStatus(["--json"], root).output);
+
+    expect(model.outcomeMismatches).toMatchObject([
+      { ghIssue: "9401", phase: "ERROR" },
+    ]);
+  });
+
+  it("adds nothing to an ordinary run's output", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", standardEvents());
+    writeState(root, { "9401": { phase: "PASS", mergedToFeature: true } });
+
+    const { output } = runStatus([], root);
+
+    expect(output).not.toContain("Records this run cannot account for");
+    expect(JSON.parse(runStatus(["--json"], root).output).outcomeMismatches).toEqual(
+      [],
+    );
+  });
+});
