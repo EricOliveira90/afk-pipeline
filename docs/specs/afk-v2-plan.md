@@ -20,7 +20,10 @@ Three companion documents, each authoritative for its own scope:
 
 ## 1. Where the work stands
 
-### PRD 1 — Evidence backbone (#69), five slices, effectively complete
+### PRD 1 — Evidence backbone (#69): complete
+
+PR **#125** merged to main (`ab0e25a`, 2026-08-28); #69 closed. Full suite
+passed on the merged head, all budgets green.
 
 | Slice | State | How |
 |---|---|---|
@@ -28,19 +31,12 @@ Three companion documents, each authoritative for its own scope:
 | #76 Every behavior locks with an executable binding | PASS, merged `ab18bc2` | Hand-finished |
 | #77 Contract review fails closed | PASS, merged `d86b8f6` | Hand-finished |
 | #78 Negotiation converges on open findings | PASS, merged `2b8eaa6` | AFK |
-| #79 QA verdicts and retries run on the same rails | Reviewed: **SHIP-WITH-NOTES**, no blocker (`.afk\artifacts\...\slice-05\independent-review.md`) | AFK + follow-up sessions |
+| #79 QA verdicts and retries run on the same rails | PASS, merged via #125 | AFK; review SHIP-WITH-NOTES + follow-ups |
 
-Remaining path: PR **#125** (ready for review — full suite passed on its
-head `575bd9b`, all budgets green, 2026-08-28) → merge → close #69. The
-feature branch already contains everything that hung off slice 05:
-
-- `followup/s05-n3-preserve-invoke-error` (`df46f8a`) — review note N3,
-  error-cause chaining in the archive-failure catch
-- `f481faf` — issue #124 (closed): the QA validation archive fails closed
-- `8cccd2d` — issue #123 (closed): restart relocates stale `reviews\`
-  archives before round 1
-- `575bd9b` — the slice-artifact trail: contract, negotiation feedback, QA
-  reports and stuck.md in history, matching slices 02 and 04
+The #79 follow-ups shipped inside #125: `df46f8a` (review note N3,
+error-cause chaining), `f481faf` (#124, validation archive fails closed),
+`8cccd2d` (#123, stale review archives relocated on restart), `575bd9b`
+(the slice-05 artifact trail, matching slices 02 and 04).
 
 Wave session s7 (clear-on-dispatch) must read the #123 fix (`8cccd2d`)
 before designing — same behavioral area, different scope.
@@ -138,21 +134,21 @@ a time), so "parallel" for PRDs means *prep in parallel, run whichever is
 ready*.
 
 ```
-NOW, four tracks in parallel:
-├─ Track 1 (manual)           PR #125 ready for review (suite green on 575bd9b) → merge → close #69
-│                             (run-ID fields, item 11's schema half, ride the merge or the wave)
+NOW, three tracks in parallel (Track 1 — PRD 1 / PR #125 — DONE, merged 2026-08-28):
+├─ Track 1 DONE               PR #125 merged (ab0e25a); #69 closed
+│                             (run-ID fields, item 11's schema half, now ride the wave)
 ├─ Track 2 (manual wave, parallel worktrees — every item pays from the next run)
 │    item 1  classifier fix + ADR        item 9  QA-dedup + ADR 0012 amendment
 │    item 3  afk stop sentinel           item 4  crash records
-│    item 7  preflight (detection-only)  item 11 clear-on-dispatch
+│    item 7  preflight (detection-only)  item 11 clear-on-dispatch + run-ID fields
 │    item 14 bounds + journal event      reader-side budget check
 │    #112 contract-amendment gap (as filed)
-│    NOTE: items 9 and 11 touch files #79 rewrote (orchestrator, artifacts,
-│    run-state). Those two sessions base on the feature branch, or start
-│    after PRD 1 merges. The other sessions base on main.
+│    All sessions base on main — PRD 1 is merged, so the s5/s7 base-branch
+│    checks in their prompts now resolve to main.
+│
 ├─ Track 3 (manual)           item 6 ticket lint tool → lint PRDs 2–6 tickets, fix what it flags
 └─ Track 4 (manual, docs)     loaded-in-chain budget ADR (item 12's half) · AGENTS.md
-                              launch-command correction (interim until item 2)
+                              launch-command correction — DONE (interim command until item 2)
 
 GATE: PRD 1 closed + wave merged + tickets linted
   → AFK: PRD 2 (item 10 afk adopt; story 14 deferred)
