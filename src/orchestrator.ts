@@ -2194,6 +2194,18 @@ export async function runQAStage(
     type AttemptEvidence = {
       rawArchiveName: string | null;
       reportArchived: boolean;
+      /**
+       * Why the refusal evidence for an invalid canonical artifact could
+       * not itself be preserved, or `null` when nothing was lost (#124).
+       *
+       * Carried out of the archive step instead of thrown from it because
+       * the two callers must fail in different places: on the success
+       * path the attempt already ends the slice a few lines below, and on
+       * the invoke-failure path the attempt is about to be retried as
+       * infrastructure — that retry is what has to stop, or a later
+       * attempt's PASS ships without the refused attempt's evidence.
+       */
+      validationArchiveError: string | null;
       reviewResult:
         | {
             review: QAReview;
@@ -2238,6 +2250,7 @@ export async function runQAStage(
         return {
           rawArchiveName,
           reportArchived,
+          validationArchiveError: null,
           reviewResult: {
             review,
             nextHistory: advanceQAReviewHistory(currentHistory, review),
@@ -2245,6 +2258,7 @@ export async function runQAStage(
         };
       } catch (error) {
         const evidence = error instanceof Error ? error.message : String(error);
+        let validationArchiveError: string | null = null;
         try {
           artifacts.archiveQAReviewValidation({
             archiveDir: reviewArchiveDir,
@@ -2254,29 +2268,50 @@ export async function runQAStage(
             evidence,
           });
         } catch (archiveError) {
-          const message =
+          validationArchiveError =
             archiveError instanceof Error
               ? archiveError.message
               : String(archiveError);
           logger.phase(
-            `${ctx.tag}: Warning: failed to archive ${stage} validation evidence ` +
-              `for round ${round} attempt ${attempt}: ${message}`,
+            `${ctx.tag}: ${stage} review round ${round} attempt ${attempt} ` +
+              `could not preserve its validation evidence: ${validationArchiveError}`,
             "error",
             {
               type: "warn",
               reason: "qa-review-archive-failed",
               ghIssue: slice.ghIssue,
-              message,
+              message: validationArchiveError,
             },
           );
         }
         return {
           rawArchiveName,
           reportArchived,
+          validationArchiveError,
           reviewResult: { error: evidence },
         };
       }
     };
+
+    /**
+     * How a lost validation write reads in the failure that carries it
+     * (#124). Both throw sites name the archive dir, so an operator sees
+     * the occupied or unwritable location, not only the OS message.
+     */
+    const validationArchiveNote = (lost: string): string =>
+      `${stage} review round ${round} attempt ${attempt} could not ` +
+      `preserve its validation evidence in ${reviewArchiveDir}: ${lost}`;
+
+    /**
+     * Read `validationArchiveError` off evidence that may be absent.
+     * A function rather than a property access because the caller's
+     * holder is only ever assigned from a closure: TypeScript's flow
+     * analysis sees just the `null` initialiser and narrows the guarded
+     * value to `never`, which has no properties.
+     */
+    const lostValidationEvidence = (
+      evidence: AttemptEvidence | null,
+    ): string | null => evidence?.validationArchiveError ?? null;
 
     const recordValidAttempt = (
       evidence: AttemptEvidence,
@@ -2427,8 +2462,25 @@ export async function runQAStage(
       }
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
+      const failure = error instanceof Error ? error.message : String(error);
+      const lostValidation = lostValidationEvidence(failedAttemptEvidence);
       if (failedAttemptEvidence) {
         recordValidAttempt(failedAttemptEvidence);
+      }
+      // Required evidence fails closed (#124). The refused attempt's
+      // validation file is the only record that this attempt happened,
+      // and the infrastructure retry below is what would bury the loss:
+      // attempt N+1 can PASS and ship the slice with attempt N's evidence
+      // missing. The evidence is already in hand — a retry re-invokes the
+      // evaluator over a local write failure and can never recover it —
+      // so the slice ends ERROR instead, the same way an unarchivable
+      // lifecycle record does.
+      if (lostValidation) {
+        throw new Error(
+          `${validationArchiveNote(lostValidation)} ` +
+            `(while handling evaluator failure: ${failure})`,
+          { cause: error },
+        );
       }
       if (attempt <= infrastructureRetries) {
         logger.phase(
@@ -2444,13 +2496,20 @@ export async function runQAStage(
         continue;
       }
       throw new Error(
-        `${stage} infrastructure failed after ${attempt} attempt(s): ${error instanceof Error ? error.message : String(error)}`,
+        `${stage} infrastructure failed after ${attempt} attempt(s): ${failure}`,
       );
     }
 
     const { reviewResult } = attemptEvidence;
     if ("error" in reviewResult) {
-      throw new Error(`${stage} review artifact ERROR: ${reviewResult.error}`);
+      // This attempt already ends the slice, so the lost validation write
+      // (#124) changes no control flow here — it is reported so the
+      // operator knows the refusal was never written down.
+      const lost = attemptEvidence.validationArchiveError;
+      throw new Error(
+        `${stage} review artifact ERROR: ${reviewResult.error}` +
+          (lost ? `; ${validationArchiveNote(lost)}` : ""),
+      );
     }
     const validAttempt = recordValidAttempt(attemptEvidence)!;
     if (!validAttempt.reportArchived) {

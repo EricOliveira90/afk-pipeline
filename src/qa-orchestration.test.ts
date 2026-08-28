@@ -662,6 +662,116 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     });
   });
 
+  // The cross-attempt hole the #79 fix left open (#124): attempt 1's
+  // refusal evidence cannot be written, the loop infra-retries, and
+  // attempt 2 PASSes — shipping the slice with the refused attempt's
+  // validation file missing. The lost write now ends the slice instead,
+  // because a retry re-invokes the evaluator and can never recover it.
+  it("refuses to retry past an unarchivable validation write", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        attempts++;
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          `# QA Report\n\nAttempt ${attempts}\n`,
+          "utf-8",
+        );
+        if (attempts === 1) {
+          // Truncated canonical output, then a dead provider: exactly the
+          // `failedAttemptEvidence` path that archives validation evidence.
+          writeFileSync(
+            join(artifactDir, "qa-review.json"),
+            '{"version":1,"verdict":',
+            "utf-8",
+          );
+          throw new Error("provider disconnected");
+        }
+        writeQAReview(artifactDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    // Occupy the validation file's `wx` slot the way another life's
+    // archive does after a restart.
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-validation.txt"),
+      "stale validation from another life\n",
+      "utf-8",
+    );
+
+    const error = await runQAStage(ctx, 1, "deterministic", []).then(
+      () => {
+        throw new Error("expected runQAStage to reject");
+      },
+      (err) => err as Error,
+    );
+    expect(error.message).toMatch(
+      /could not preserve its validation evidence/,
+    );
+    // The evaluator failure that produced the evidence stays visible.
+    expect(error.message).toMatch(
+      /while handling evaluator failure: provider disconnected/,
+    );
+    // The retry that would have shipped a PASS over the lost evidence
+    // never ran, and the occupied slot was refused, not overwritten.
+    expect(attempts).toBe(1);
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toBe("stale validation from another life\n");
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("names the lost validation write alongside the artifact ERROR", async () => {
+    const repo = makeRepo();
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-validation.txt"),
+      "stale validation from another life\n",
+      "utf-8",
+    );
+
+    // This attempt already ended the slice before #124, so the fix only
+    // has to say what was lost — the operator must not have to infer that
+    // the refusal was never written down.
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing.*could not preserve its validation evidence/s,
+    );
+  });
+
   it("does not treat the inactivity timeout as the base-gate wall-clock limit", async () => {
     const repo = makeRepo();
     writeFileSync(
