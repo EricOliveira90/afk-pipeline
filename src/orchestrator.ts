@@ -155,14 +155,32 @@ import {
   loadQAReview,
   loadQAReviewResumeState,
   qaReviewFilename,
+  scopeAmendmentRequests,
   spentImplementationRounds,
   type QAReview,
   type QAReviewAttemptFinding,
   type QAReviewLifecycleFinding,
   type QAReviewStage,
 } from "./qa-review.js";
+import {
+  applyScopeAmendment,
+  buildScopeAmendmentRecord,
+  planScopeAmendment,
+} from "./scope-amendment.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
+
+/**
+ * Scope amendments granted per QA stage per round (#112).
+ *
+ * One, because the tree does not change between attempts in a round —
+ * only the contract does. An evaluator that asks for a second amendment
+ * after the first has landed is reporting a file it should have seen in
+ * the same pass, and granting attempt after attempt on that basis is a
+ * loop with no source change in it (ADR 0041). The next round's
+ * generator work earns a fresh grant.
+ */
+const MAX_SCOPE_AMENDMENTS_PER_ROUND = 1;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 /**
  * Persisted reason on every slice a cancellation stops, whether it was
@@ -2404,7 +2422,7 @@ export async function runQAStage(
   previousUnresolved: readonly QAReviewAttemptFinding[] = [],
   baseGate: QABaseGateEvidence | null = null,
 ): Promise<QAStageResult> {
-  const { config, slice, logger, invoke } = ctx;
+  const { config, slice, logger, invoke, featBranch } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
   if (!Number.isSafeInteger(infrastructureRetries) || infrastructureRetries < 0) {
     throw new Error("infrastructureRetries must be a non-negative integer");
@@ -2426,14 +2444,25 @@ export async function runQAStage(
     : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
   let currentHistory = history;
   let currentUnresolved = previousUnresolved;
+  /**
+   * Extra attempts this stage-round has earned by applying a scope
+   * amendment (#112). An amendment changes the contract the tree is
+   * graded against, so the grade has to be taken again — and only the
+   * evaluator can take it, since a boundary failure in Pass 1 means
+   * Pass 2 never ran.
+   */
+  let amendments = 0;
+  /** Attempts this stage-round may still spend, amendments included. */
+  const attemptLimit = () => infrastructureRetries + 1 + amendments;
 
   /**
    * Decide the skip authorization for one attempt (ADR 0012, 2026-08-28).
    *
    * Per attempt, not once per stage, because an attempt is only reached by an
-   * infrastructure retry — and the previous attempt archived its report into
-   * the worktree, so the tree has moved. Re-hashing lets that fall closed
-   * instead of citing a gate run against a tree that no longer exists.
+   * infrastructure retry or a scope amendment's extra attempt (#112) — and
+   * the previous attempt archived its report into the worktree, so the tree
+   * has moved. Re-hashing lets that fall closed instead of citing a gate run
+   * against a tree that no longer exists.
    *
    * Only the deterministic stage can be authorized: shared-preview UAT is
    * told to skip the sanity list outright and run remote scenarios, so there
@@ -2471,7 +2500,7 @@ export async function runQAStage(
     return authorizeBaseGateSkip({ ...baseGate, reviewTreeId });
   };
 
-  for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
+  for (let attempt = 1; attempt <= attemptLimit(); attempt++) {
     const archiveName = stage === "deterministic"
       ? `qa-report-r${round}-a${attempt}.md`
       : `uat-report-r${round}-a${attempt}.md`;
@@ -2782,7 +2811,7 @@ export async function runQAStage(
           { cause: error },
         );
       }
-      if (attempt <= infrastructureRetries) {
+      if (attempt < attemptLimit()) {
         logger.phase(
           `${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
           "error",
@@ -2813,7 +2842,7 @@ export async function runQAStage(
     }
     const validAttempt = recordValidAttempt(attemptEvidence)!;
     if (!validAttempt.reportArchived) {
-      if (attempt <= infrastructureRetries) continue;
+      if (attempt < attemptLimit()) continue;
       throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
     }
 
@@ -2824,6 +2853,60 @@ export async function runQAStage(
       archiveDisplayPath,
     } = validAttempt;
 
+    // A scope-amendment finding is the orchestrator's to clear, never the
+    // generator's (#112, ADR 0008). It is handled before the verdict is
+    // acted on, so a finding whose only available remedy is deleting
+    // correct work never reaches a generator round.
+    const requests = scopeAmendmentRequests(review);
+    if (requests.length > 0) {
+      const requested = requests
+        .map(
+          (request) => `${request.findingId} (${request.paths.join(", ")})`,
+        )
+        .join("; ");
+      const plan = planScopeAmendment({
+        requests,
+        manifest: loadAcceptanceManifest(ctx.absSliceDir),
+        changedFiles: git.listChangedFiles(ctx.worktreeDir, featBranch),
+        options: { migrationPathPattern: config.migrationPathPattern },
+      });
+      if (!plan.ok) {
+        throw new Error(
+          `${stage} scope amendment refused in round ${round} attempt ` +
+            `${attempt}: ${plan.refusal}. Requested: ${requested}. The ` +
+            `contract is unchanged and no work was reverted; amend the ` +
+            `contract by hand or renegotiate it before resuming.`,
+        );
+      }
+      if (amendments >= MAX_SCOPE_AMENDMENTS_PER_ROUND) {
+        throw new Error(
+          `${stage} scope amendment refused in round ${round} attempt ` +
+            `${attempt}: round ${round} already spent its ` +
+            `${MAX_SCOPE_AMENDMENTS_PER_ROUND} amendment(s) and the tree has ` +
+            `not changed since. Requested: ${requested}. Add the path(s) to ` +
+            `the contract by hand before resuming.`,
+        );
+      }
+      applyScopeAmendment({ sliceDir: ctx.absSliceDir, plan });
+      artifacts.archiveScopeAmendment({
+        archiveDir: reviewArchiveDir,
+        record: buildScopeAmendmentRecord({ stage, round, attempt, plan }),
+      });
+      amendments++;
+      const amended = plan.entries.map((entry) => entry.path).join(", ");
+      const message =
+        `${stage} scope amendment applied for ${requested}: added ${amended} ` +
+        `to the locked file scope; re-grading round ${round} without ` +
+        `consuming an implementation round`;
+      logger.phase(`${ctx.tag}: ${message}`, "error", {
+        type: "warn",
+        reason: "scope-amended",
+        ghIssue: slice.ghIssue,
+        message,
+      });
+      continue;
+    }
+
     if (review.verdict === "PASS") {
       return {
         outcome: "PASS",
@@ -2833,7 +2916,7 @@ export async function runQAStage(
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
-      if (attempt <= infrastructureRetries) {
+      if (attempt < attemptLimit()) {
         logger.phase(
           `${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`,
           "error",

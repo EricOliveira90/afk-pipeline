@@ -103,11 +103,16 @@ describe("renderPrompt", () => {
     });
     expect(evaluatorPrompt).toContain("qa-review.json");
     expect(evaluatorPrompt).toContain("uat-review.json");
-    expect(evaluatorPrompt).toContain('"version": 1');
+    expect(evaluatorPrompt).toContain('"version": 2');
     expect(evaluatorPrompt).toContain('"failureClass"');
     expect(evaluatorPrompt).toContain('"infrastructureEvidence"');
     expect(evaluatorPrompt).toContain('"clearCondition"');
     expect(evaluatorPrompt).toContain('"state"');
+    // The remedy decides who clears a finding, so the prompt has to name
+    // both the field and the case that needs it (#112).
+    expect(evaluatorPrompt).toContain('"remedy"');
+    expect(evaluatorPrompt).toContain('"amendmentPaths"');
+    expect(evaluatorPrompt).toContain("SCOPE_AMENDMENT");
     expect(evaluatorPrompt).toMatch(/Markdown.+does not control/s);
     const canonicalExample = /```json\r?\n([\s\S]*?)\r?\n```/.exec(
       evaluatorPrompt,

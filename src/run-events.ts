@@ -184,7 +184,9 @@ export type RunEventPayload =
        * deferrals from the busy probe (ADR 0021), operator-granted
        * resumes of a STUCK slice's preserved tree (`--resume-stuck`,
        * #49), a locked contract
-       * sent back to the planner by the contract-lock gate (ADR 0028),
+       * sent back to the planner by the contract-lock gate (ADR 0028), a
+       * locked file scope widened mid-slice by the orchestrator because QA
+       * found correct work in an undeclared file (#112),
        * the launch guard fast-forwarding a stale feature branch to
        * the host worktree's HEAD before any wave dispatches, a
        * contract review attempt whose audit copy could not be written,
@@ -217,6 +219,7 @@ export type RunEventPayload =
         | "idle-deferral"
         | "resume-stuck"
         | "contract-lock-refused"
+        | "scope-amended"
         | "contract-review-archive-failed"
         | "qa-review-archive-failed"
         | "feature-branch-fast-forward"

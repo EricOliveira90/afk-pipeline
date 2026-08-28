@@ -18,6 +18,21 @@ export type QAReviewFailureClass =
   | "INFRASTRUCTURE";
 export type QAReviewFindingState = "OPEN" | "RESOLVED";
 
+/**
+ * Who can clear the finding, and by doing what (#112).
+ *
+ * - `SOURCE_CHANGE` — the change under review is wrong. The generator
+ *   clears it by changing (or reverting) source. This is every ordinary
+ *   finding.
+ * - `SCOPE_AMENDMENT` — the change under review is right, but it touches
+ *   a file the locked contract never declared. The generator has no
+ *   authority over the locked file list, so routing this to the
+ *   generator leaves it one remedy it should never take: destroying its
+ *   own correct work to comply. The orchestrator owns the contract
+ *   (ADR 0008), so the orchestrator performs the amendment.
+ */
+export type QAReviewFindingRemedy = "SOURCE_CHANGE" | "SCOPE_AMENDMENT";
+
 export interface QAReviewFinding {
   id: string;
   severity: ContractFindingSeverity;
@@ -28,10 +43,18 @@ export interface QAReviewFinding {
   observed: string;
   clearCondition: string;
   state: QAReviewFindingState;
+  remedy: QAReviewFindingRemedy;
+  /**
+   * Repo-relative paths to add to the locked file scope — non-empty for
+   * `SCOPE_AMENDMENT` and empty for `SOURCE_CHANGE`. The paths carry the
+   * per-file judgment: one finding may cover three undeclared files of
+   * which only two belong in scope, and only the evaluator can say which.
+   */
+  amendmentPaths: string[];
 }
 
 export interface QAReview {
-  version: 1;
+  version: 2;
   verdict: QAReviewVerdict;
   failureClass: QAReviewFailureClass;
   infrastructureEvidence: string | null;
@@ -48,10 +71,18 @@ export interface QAReviewAttemptFinding {
   summary: string;
   clearCondition: string;
   artifactReferences: string[];
+  /**
+   * Carried into the record so a resumed run can tell an amendment
+   * request apart from an ordinary finding without re-reading the raw
+   * artifact (#112). Version-1 records predate the field; they are read
+   * as `SOURCE_CHANGE`, which is what every finding written before this
+   * existed was.
+   */
+  remedy: QAReviewFindingRemedy;
 }
 
 export interface QAReviewAttemptRecord {
-  version: 1;
+  version: 2;
   stage: QAReviewStage;
   round: number;
   attempt: number;
@@ -108,6 +139,8 @@ const FINDING_KEYS = [
   "observed",
   "clearCondition",
   "state",
+  "remedy",
+  "amendmentPaths",
 ] as const;
 const FINDING_STRING_FIELDS = [
   "id",
@@ -136,7 +169,7 @@ const CITATION_KEYS = [
   "treeId",
   "gateIds",
 ] as const;
-const RECORD_FINDING_KEYS = [
+const RECORD_FINDING_KEYS_V1 = [
   "id",
   "severity",
   "state",
@@ -145,6 +178,7 @@ const RECORD_FINDING_KEYS = [
   "clearCondition",
   "artifactReferences",
 ] as const;
+const RECORD_FINDING_KEYS_V2 = [...RECORD_FINDING_KEYS_V1, "remedy"] as const;
 const VERDICTS: readonly string[] = ["PASS", "FAIL"];
 const FAILURE_CLASSES: readonly string[] = [
   "NONE",
@@ -153,6 +187,7 @@ const FAILURE_CLASSES: readonly string[] = [
 ];
 const SEVERITIES: readonly string[] = ["BLOCKING", "ADVISORY"];
 const STATES: readonly string[] = ["OPEN", "RESOLVED"];
+const REMEDIES: readonly string[] = ["SOURCE_CHANGE", "SCOPE_AMENDMENT"];
 
 function parseFindings(value: unknown, source: string): QAReviewFinding[] {
   if (!Array.isArray(value)) {
@@ -213,6 +248,51 @@ function parseFindings(value: unknown, source: string): QAReviewFinding[] {
       );
     }
 
+    if (
+      typeof finding.remedy !== "string" ||
+      !REMEDIES.includes(finding.remedy)
+    ) {
+      throw new Error(
+        `${source} ${field} remedy must be ${REMEDIES.join(" or ")}`,
+      );
+    }
+    const remedy = finding.remedy as QAReviewFindingRemedy;
+    if (!Array.isArray(finding.amendmentPaths)) {
+      throw new Error(`${source} ${field} amendmentPaths must be an array`);
+    }
+    if (
+      finding.amendmentPaths.some(
+        (path) => typeof path !== "string" || path.trim() === "",
+      )
+    ) {
+      throw new Error(
+        `${source} ${field} amendmentPaths must contain only non-blank strings`,
+      );
+    }
+    const amendmentPaths = finding.amendmentPaths as string[];
+    const duplicatePath = amendmentPaths.find(
+      (path, position) => amendmentPaths.indexOf(path) !== position,
+    );
+    if (duplicatePath !== undefined) {
+      throw new Error(
+        `${source} ${field} amendmentPaths must be unique; duplicate "${duplicatePath}"`,
+      );
+    }
+    // The remedy and the paths are one statement, so a contradiction
+    // between them is refused rather than resolved by precedence: a
+    // SOURCE_CHANGE carrying paths would leave it unsaid whether the
+    // orchestrator is meant to amend, and an empty SCOPE_AMENDMENT names
+    // no remedy anybody can perform.
+    if (remedy === "SCOPE_AMENDMENT" && amendmentPaths.length === 0) {
+      throw new Error(
+        `${source} ${field} remedy SCOPE_AMENDMENT requires at least one amendmentPaths entry`,
+      );
+    }
+    if (remedy === "SOURCE_CHANGE" && amendmentPaths.length > 0) {
+      throw new Error(
+        `${source} ${field} remedy SOURCE_CHANGE requires empty amendmentPaths`,
+      );
+    }
     return {
       id: strings.id!,
       severity: finding.severity as ContractFindingSeverity,
@@ -223,6 +303,8 @@ function parseFindings(value: unknown, source: string): QAReviewFinding[] {
       observed: strings.observed!,
       clearCondition: strings.clearCondition!,
       state: finding.state as QAReviewFindingState,
+      remedy,
+      amendmentPaths: [...amendmentPaths],
     };
   });
 
@@ -262,8 +344,8 @@ export function parseQAReview(
 
   const input = parsed as Record<string, unknown>;
   requireExactKeys(input, REVIEW_KEYS, "root object", source);
-  if (input.version !== 1) {
-    throw new Error(`${source} must declare version 1`);
+  if (input.version !== 2) {
+    throw new Error(`${source} must declare version 2`);
   }
   if (typeof input.verdict !== "string" || !VERDICTS.includes(input.verdict)) {
     throw new Error(`${source} verdict must be PASS or FAIL`);
@@ -316,7 +398,7 @@ export function parseQAReview(
   }
 
   return {
-    version: 1,
+    version: 2,
     verdict,
     failureClass,
     infrastructureEvidence,
@@ -419,6 +501,10 @@ function parseQAReviewAttemptRecord(
   }
 
   const input = parsed as Record<string, unknown>;
+  // The citation is optional in either version (ADR 0012's 2026-08-28
+  // amendment): absent means the evaluator was told to run the whole
+  // sanity list, which is what every record written before the amendment
+  // says by omission.
   requireExactKeys(
     input,
     "baseGateCitation" in input ? RECORD_KEYS_WITH_CITATION : RECORD_KEYS,
@@ -429,9 +515,15 @@ function parseQAReviewAttemptRecord(
     "baseGateCitation" in input
       ? parseBaseGateCitation(input.baseGateCitation, source)
       : undefined;
-  if (input.version !== 1) {
-    throw new Error(`${source} must declare version 1`);
+  // Version 1 records were written before findings carried a remedy
+  // (#112) and are still the only evidence a run interrupted before this
+  // change has. Refusing them would turn a schema addition into a
+  // resume-breaking change, so they are read with the remedy every
+  // finding then had: SOURCE_CHANGE.
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error(`${source} must declare version 1 or 2`);
   }
+  const recordVersion = input.version as 1 | 2;
   if (input.stage !== "deterministic" && input.stage !== "shared-preview") {
     throw new Error(
       `${source} stage must be deterministic or shared-preview`,
@@ -466,7 +558,21 @@ function parseQAReviewAttemptRecord(
       throw new Error(`${source} ${field} must be an object`);
     }
     const finding = raw as Record<string, unknown>;
-    requireExactKeys(finding, RECORD_FINDING_KEYS, field, source);
+    requireExactKeys(
+      finding,
+      recordVersion === 2 ? RECORD_FINDING_KEYS_V2 : RECORD_FINDING_KEYS_V1,
+      field,
+      source,
+    );
+    if (
+      recordVersion === 2 &&
+      (typeof finding.remedy !== "string" ||
+        !REMEDIES.includes(finding.remedy))
+    ) {
+      throw new Error(
+        `${source} ${field} remedy must be ${REMEDIES.join(" or ")}`,
+      );
+    }
     const id = requireNonBlankString(finding.id, `${field} id`, source);
     const summary = requireNonBlankString(
       finding.summary,
@@ -514,6 +620,10 @@ function parseQAReviewAttemptRecord(
       summary,
       clearCondition,
       artifactReferences: [...finding.artifactReferences] as string[],
+      remedy:
+        recordVersion === 2
+          ? (finding.remedy as QAReviewFindingRemedy)
+          : "SOURCE_CHANGE",
     };
   });
 
@@ -549,7 +659,7 @@ function parseQAReviewAttemptRecord(
   }
 
   return {
-    version: 1,
+    version: 2,
     stage: input.stage,
     round: input.round as number,
     attempt: input.attempt as number,
@@ -628,7 +738,35 @@ function restoreQAReviewStage(
     lastImplementationRound =
       record.failureClass === "IMPLEMENTATION" ? record.round : null;
   }
-  return { history, unresolved, lastImplementationRound };
+
+  // An amendment request is dropped from the state a resumed run
+  // inherits (#112). It is not the generator's to clear — routing it
+  // would hand the generator a finding whose only available remedy is
+  // deleting correct work — and the amendment it asked for either
+  // already landed on disk, in which case the finding is stale, or it
+  // did not, in which case the next QA pass re-raises it against the
+  // contract as it actually stands. Dropped only after the replay:
+  // removing an ID mid-replay would make a later attempt's disposition
+  // of it read as a fresh finding.
+  const amended = new Set(
+    history
+      .filter((entry) =>
+        records.some(
+          (record) =>
+            record.findings.some(
+              (finding) =>
+                finding.id === entry.id &&
+                finding.remedy === "SCOPE_AMENDMENT",
+            ),
+        ),
+      )
+      .map((entry) => entry.id),
+  );
+  return {
+    history: history.filter((entry) => !amended.has(entry.id)),
+    unresolved: unresolved.filter((finding) => !amended.has(finding.id)),
+    lastImplementationRound,
+  };
 }
 
 /**
@@ -726,6 +864,30 @@ export function openQAReviewFindings(
   return findings.filter((finding) => finding.state === "OPEN");
 }
 
+/**
+ * The review's outstanding scope-amendment requests, in evaluator order
+ * (#112). Only `OPEN` ones: a routed amendment finding the evaluator
+ * re-checked against the amended contract and marked `RESOLVED` keeps its
+ * remedy and paths as the record of what cleared it, and asking for that
+ * amendment a second time would only be refused as already declared.
+ *
+ * An INFRASTRUCTURE review disposition holds no findings at all, so there
+ * is nothing to read there — the parser refuses one that carries them.
+ */
+export function scopeAmendmentRequests(
+  review: QAReview,
+): { findingId: string; paths: string[] }[] {
+  return review.findings
+    .filter(
+      (finding) =>
+        finding.remedy === "SCOPE_AMENDMENT" && finding.state === "OPEN",
+    )
+    .map((finding) => ({
+      findingId: finding.id,
+      paths: [...finding.amendmentPaths],
+    }));
+}
+
 export function buildQAReviewAttemptRecord(details: {
   stage: QAReviewStage;
   round: number;
@@ -754,7 +916,7 @@ export function buildQAReviewAttemptRecord(details: {
     markdownArchivePath.replace(/\\/g, "/"),
   ];
   return {
-    version: 1,
+    version: 2,
     stage,
     round,
     attempt,
@@ -776,6 +938,7 @@ export function buildQAReviewAttemptRecord(details: {
       summary: finding.summary,
       clearCondition: finding.clearCondition,
       artifactReferences: [...artifactReferences],
+      remedy: finding.remedy,
     })),
   };
 }

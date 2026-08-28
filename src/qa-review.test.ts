@@ -5,6 +5,7 @@ import {
   loadQAReviewResumeState,
   openQAReviewFindings,
   parseQAReview,
+  scopeAmendmentRequests,
   type QAReview,
 } from "./qa-review.js";
 import {
@@ -26,11 +27,13 @@ const FINDING = {
   observed: "A Markdown-only pass advances",
   clearCondition: "A missing JSON artifact ends the slice as ERROR",
   state: "OPEN",
+  remedy: "SOURCE_CHANGE",
+  amendmentPaths: [] as string[],
 } as const;
 
 function review(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
-    version: 1,
+    version: 2,
     verdict: "PASS",
     failureClass: "NONE",
     infrastructureEvidence: null,
@@ -56,10 +59,10 @@ function implementationReview(
   });
 }
 
-describe("parseQAReview accepts canonical version-1 combinations", () => {
+describe("parseQAReview accepts canonical version-2 combinations", () => {
   it("accepts PASS/NONE with no findings", () => {
     expect(parseQAReview(review())).toEqual({
-      version: 1,
+      version: 2,
       verdict: "PASS",
       failureClass: "NONE",
       infrastructureEvidence: null,
@@ -110,10 +113,10 @@ describe("parseQAReview refuses malformed canonical data", () => {
     ["invalid JSON", "{", /is not valid JSON/],
     ["an array root", "[]", /must contain a JSON object/],
     ["a null root", "null", /must contain a JSON object/],
-    ["a missing root key", '{"version":1,"verdict":"PASS"}', /root object must contain exactly/],
+    ["a missing root key", '{"version":2,"verdict":"PASS"}', /root object must contain exactly/],
     ["an extra root key", review({ note: "extra" }), /root object must contain exactly/],
-    ["an unknown version", review({ version: 2 }), /must declare version 1/],
-    ["a mistyped version", review({ version: "1" }), /must declare version 1/],
+    ["a superseded version", review({ version: 1 }), /must declare version 2/],
+    ["a mistyped version", review({ version: "2" }), /must declare version 2/],
     ["an unknown verdict", review({ verdict: "ACCEPT" }), /verdict must be PASS or FAIL/],
     ["an unknown failure class", review({ failureClass: "CODE" }), /failureClass must be NONE, IMPLEMENTATION, or INFRASTRUCTURE/],
     ["mistyped infrastructure evidence", review({ infrastructureEvidence: 7 }), /infrastructureEvidence must be a non-blank string or null/],
@@ -134,7 +137,7 @@ describe("parseQAReview refuses malformed canonical data", () => {
 
   it("refuses a duplicate JSON key before trusting JSON.parse", () => {
     const text =
-      '{"version":1,"verdict":"PASS","verdict":"FAIL","failureClass":"NONE","infrastructureEvidence":null,"findings":[]}';
+      '{"version":2,"verdict":"PASS","verdict":"FAIL","failureClass":"NONE","infrastructureEvidence":null,"findings":[]}';
     expect((JSON.parse(text) as { verdict: string }).verdict).toBe("FAIL");
     expect(() => parseQAReview(text)).toThrow(
       /declares the key "verdict" more than once/,
@@ -188,6 +191,56 @@ describe("parseQAReview refuses malformed canonical data", () => {
       ).toThrow(new RegExp(`${field} must be a non-blank string`));
     });
   }
+});
+
+describe("parseQAReview reads the finding remedy (#112)", () => {
+  const amendment = {
+    remedy: "SCOPE_AMENDMENT",
+    amendmentPaths: ["src/resume-integration.test.ts"],
+  };
+
+  it("accepts a blocking scope-amendment request", () => {
+    const parsed = parseQAReview(implementationReview(amendment));
+    expect(parsed.findings[0]).toMatchObject(amendment);
+    expect(scopeAmendmentRequests(parsed)).toEqual([
+      {
+        findingId: "QA-01",
+        paths: ["src/resume-integration.test.ts"],
+      },
+    ]);
+  });
+
+  it("reports no requests when every finding is a source change", () => {
+    expect(scopeAmendmentRequests(parseQAReview(implementationReview()))).toEqual(
+      [],
+    );
+  });
+
+  it.each([
+    ["an unknown remedy", { remedy: "REVERT" }, /remedy must be SOURCE_CHANGE or SCOPE_AMENDMENT/],
+    ["a missing remedy", { remedy: undefined }, /finding must contain exactly/],
+    ["scalar amendmentPaths", { ...amendment, amendmentPaths: "src/a.ts" }, /amendmentPaths must be an array/],
+    ["a blank amendment path", { ...amendment, amendmentPaths: [" "] }, /amendmentPaths must contain only non-blank strings/],
+    ["duplicate amendment paths", { ...amendment, amendmentPaths: ["src/a.ts", "src/a.ts"] }, /amendmentPaths must be unique/],
+    ["an amendment with no paths", { remedy: "SCOPE_AMENDMENT", amendmentPaths: [] }, /SCOPE_AMENDMENT requires at least one amendmentPaths entry/],
+    ["a source change carrying paths", { amendmentPaths: ["src/a.ts"] }, /SOURCE_CHANGE requires empty amendmentPaths/],
+  ])("refuses %s", (_name, overrides, pattern) => {
+    expect(() => parseQAReview(implementationReview(overrides))).toThrow(
+      pattern,
+    );
+  });
+
+  // The re-graded attempt repeats the routed amendment finding as
+  // RESOLVED, keeping the remedy and paths that cleared it. Reading that
+  // as an outstanding request would ask for the same amendment twice.
+  it("does not request an amendment a resolved finding already records", () => {
+    const parsed = parseQAReview(
+      review({ findings: [{ ...FINDING, ...amendment, state: "RESOLVED" }] }),
+    );
+
+    expect(parsed.findings[0]).toMatchObject({ state: "RESOLVED", ...amendment });
+    expect(scopeAmendmentRequests(parsed)).toEqual([]);
+  });
 });
 
 describe("parseQAReview refuses contradictory combinations", () => {
@@ -407,7 +460,7 @@ describe("buildQAReviewAttemptRecord", () => {
           "specs/slices/01-demo/qa-report-r2-a3.md",
       }),
     ).toEqual({
-      version: 1,
+      version: 2,
       stage: "deterministic",
       round: 2,
       attempt: 3,
@@ -421,6 +474,7 @@ describe("buildQAReviewAttemptRecord", () => {
           unresolved: true,
           summary: "Canonical verdict is ignored",
           clearCondition: "A missing JSON artifact ends the slice as ERROR",
+          remedy: "SOURCE_CHANGE",
           artifactReferences: [
             ".afk/artifacts/demo/slice-01/reviews/qa-review-r2-a3.json",
             "specs/slices/01-demo/qa-report-r2-a3.md",
@@ -433,6 +487,7 @@ describe("buildQAReviewAttemptRecord", () => {
           unresolved: false,
           summary: "Canonical verdict is ignored",
           clearCondition: "A missing JSON artifact ends the slice as ERROR",
+          remedy: "SOURCE_CHANGE",
           artifactReferences: [
             ".afk/artifacts/demo/slice-01/reviews/qa-review-r2-a3.json",
             "specs/slices/01-demo/qa-report-r2-a3.md",
@@ -657,6 +712,117 @@ describe("loadQAReviewResumeState", () => {
       ]);
       expect(restored.deterministic.unresolved[0]?.id).toBe("QA-01");
       expect(restored.sharedPreview.unresolved[0]?.id).toBe("UAT-01");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // A resume must not hand the generator a finding whose only available
+  // remedy is deleting correct work (#112). The next QA pass re-checks
+  // boundary compliance against the contract as it now stands.
+  it("drops a scope-amendment request from the state a resume inherits", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-resume-amend-"));
+    const reviewDir = join(root, "reviews");
+    const sliceDir = join(root, "slice");
+    mkdirSync(reviewDir);
+    mkdirSync(sliceDir);
+    try {
+      const record = buildQAReviewAttemptRecord({
+        stage: "deterministic",
+        round: 1,
+        attempt: 1,
+        review: parseQAReview(
+          review({
+            verdict: "FAIL",
+            failureClass: "IMPLEMENTATION",
+            findings: [
+              FINDING,
+              {
+                ...FINDING,
+                id: "QA-02",
+                remedy: "SCOPE_AMENDMENT",
+                amendmentPaths: ["src/resume-integration.test.ts"],
+              },
+            ],
+          }),
+        ),
+        canonicalArchivePath: "reviews/qa-review-r1-a1.json",
+        markdownArchivePath: "slice/qa-report-r1-a1.md",
+      });
+      writeFileSync(
+        join(reviewDir, "qa-review-r1-a1-record.json"),
+        JSON.stringify(record),
+        "utf-8",
+      );
+
+      const restored = loadQAReviewResumeState(reviewDir, sliceDir);
+
+      expect(restored.deterministic.history).toEqual([
+        { id: "QA-01", state: "OPEN" },
+      ]);
+      expect(restored.deterministic.unresolved.map(({ id }) => id)).toEqual([
+        "QA-01",
+      ]);
+      expect(restored.nextRound).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // Records written before findings carried a remedy are the only
+  // evidence a run interrupted by this change has; refusing them would
+  // strand the resume.
+  it("reads a version-1 record's findings as source changes", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-resume-v1-"));
+    const reviewDir = join(root, "reviews");
+    const sliceDir = join(root, "slice");
+    mkdirSync(reviewDir);
+    mkdirSync(sliceDir);
+    try {
+      writeFileSync(
+        join(reviewDir, "qa-review-r1-a1-record.json"),
+        JSON.stringify({
+          version: 1,
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+          verdict: "FAIL",
+          failureClass: "IMPLEMENTATION",
+          findings: [
+            {
+              id: "QA-01",
+              severity: "BLOCKING",
+              state: "OPEN",
+              unresolved: true,
+              summary: "Legacy finding",
+              clearCondition: "The regression test passes",
+              artifactReferences: [
+                "reviews/qa-review-r1-a1.json",
+                "slice/qa-report-r1-a1.md",
+              ],
+            },
+          ],
+        }),
+        "utf-8",
+      );
+
+      const restored = loadQAReviewResumeState(reviewDir, sliceDir);
+
+      expect(restored.deterministic.unresolved).toEqual([
+        {
+          id: "QA-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "Legacy finding",
+          clearCondition: "The regression test passes",
+          artifactReferences: [
+            "reviews/qa-review-r1-a1.json",
+            "slice/qa-report-r1-a1.md",
+          ],
+          remedy: "SOURCE_CHANGE",
+        },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
