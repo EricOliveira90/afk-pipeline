@@ -123,7 +123,10 @@ import {
 } from "./migration-claims.js";
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
+  acceptanceManifestPaths,
   loadAcceptanceManifest,
+  normalizeAcceptanceManifestPath,
+  type AcceptanceManifest,
   type AcceptanceManifestV2,
   validateAcceptanceManifestBindings,
   validateAcceptanceManifestCoverage,
@@ -1026,7 +1029,10 @@ function archiveContractReviewAttempt(
 async function runFocusedScopeRevision(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
-): Promise<{ phase: "LOCKED" } | { phase: "ERROR"; error: string }> {
+): Promise<
+  | { phase: "LOCKED"; manifest: AcceptanceManifest }
+  | { phase: "ERROR"; error: string }
+> {
   const { config, slice, logger, invoke } = ctx;
   const contractPath = join(ctx.absSliceDir, "contract.md");
   const manifestPath = join(
@@ -1112,6 +1118,31 @@ async function runFocusedScopeRevision(
   );
   const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
   validateAcceptanceManifestBindings(revisedManifest, gateCatalog);
+  const requestedPaths = escalation.paths.map((path) =>
+    normalizeAcceptanceManifestPath(path, ESCALATION_FILENAME),
+  );
+  const revisedManifestPaths = new Set(
+    acceptanceManifestPaths(revisedManifest),
+  );
+  const revisedContractPaths = new Set(
+    (artifacts.readContractFiles(contractPath) ?? []).map((path) =>
+      normalizeAcceptanceManifestPath(path, contractPath),
+    ),
+  );
+  const missingManifestPaths = requestedPaths.filter(
+    (path) => !revisedManifestPaths.has(path),
+  );
+  const missingContractPaths = requestedPaths.filter(
+    (path) => !revisedContractPaths.has(path),
+  );
+  if (missingManifestPaths.length > 0 || missingContractPaths.length > 0) {
+    throw new Error(
+      "Focused scope revision did not declare every requested path: " +
+        `contract.md missing [${missingContractPaths.join(", ")}]; ` +
+        `${ACCEPTANCE_MANIFEST_FILENAME} missing ` +
+        `[${missingManifestPaths.join(", ")}]`,
+    );
+  }
   const revisions: ContractRevisionArtifacts = {
     "contract.md": {
       before: previousContract,
@@ -1204,7 +1235,7 @@ async function runFocusedScopeRevision(
 
   artifacts.lockContract(contractPath);
   logger.phase(`${ctx.tag}: focused scope revision LOCKED`);
-  return { phase: "LOCKED" };
+  return { phase: "LOCKED", manifest: revisedManifest };
 }
 
 /**
@@ -3237,83 +3268,103 @@ export async function runSliceExecute(
     ) {
       const round = firstRound + implementationAttempt - 1;
       logger.bumpGenRound(slice.ghIssue, round);
-      logger.phase(
-        `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
-        "error",
-        {
-          type: "phase-started",
+      const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
+      const heartbeatMs =
+        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+      const escalationPath = join(ctx.absSliceDir, ESCALATION_FILENAME);
+      let generatorAttempt = 0;
+      let scopeRevisionNote = "";
+      while (true) {
+        generatorAttempt++;
+        logger.phase(
+          `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "generator",
+            round,
+          },
+        );
+        const genLog = logger.agentLog(slice.number, "generator", round);
+        const generatorPrompt =
+          generatorAttempt === 1 &&
+          implementationAttempt === 1 &&
+          ctx.resume?.mode === "stuck"
+            ? renderPrompt("generator-resume-stuck", {
+                SLICE_DIR: ctx.relSliceDir,
+                RELEVANT_FILES: ctx.relevantFilesBlock,
+                SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+                TEST_COMMAND: ctx.testCommand,
+                COMMITS_AHEAD: ctx.resume.commitsAhead,
+                COMMIT_LOG: ctx.resume.commitLog,
+                BASE_REFRESH_NOTE: ctx.resume.baseRefreshed
+                  ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
+                  : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`,
+                STUCK_NOTE: ctx.resume.stuckNote ?? "",
+                UNRESOLVED_FINDINGS:
+                  formatUnresolvedQAFindings(resumedUnresolved),
+                HANDOFF_NOTE: ctx.resume.handoffNote,
+                MIGRATION_RESERVATION: migrationReservationBlock(
+                  config,
+                  slice.ghIssue,
+                ),
+              })
+            : generatorAttempt === 1 &&
+                implementationAttempt === 1 &&
+                ctx.resume
+              ? renderPrompt("generator-resume", {
+                  SLICE_DIR: ctx.relSliceDir,
+                  RELEVANT_FILES: ctx.relevantFilesBlock,
+                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+                  TEST_COMMAND: ctx.testCommand,
+                  COMMITS_AHEAD: ctx.resume.commitsAhead,
+                  COMMIT_LOG: ctx.resume.commitLog,
+                  FEAT_BRANCH: featBranch,
+                  UNRESOLVED_FINDINGS:
+                    formatUnresolvedQAFindings(resumedUnresolved),
+                  HANDOFF_NOTE: ctx.resume.handoffNote,
+                  MIGRATION_RESERVATION: migrationReservationBlock(
+                    config,
+                    slice.ghIssue,
+                  ),
+                })
+              : renderPrompt("generator", {
+                  SLICE_DIR: ctx.relSliceDir,
+                  RELEVANT_FILES: ctx.relevantFilesBlock,
+                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+                  TEST_COMMAND: ctx.testCommand,
+                  RETRY_NOTE:
+                    scopeRevisionNote ||
+                    (implementationAttempt > 1 ? retryNote : ""),
+                  MIGRATION_RESERVATION: migrationReservationBlock(
+                    config,
+                    slice.ghIssue,
+                  ),
+                });
+        rmSync(escalationPath, { force: true });
+        await invoke({
+          role: "generator",
+          prompt: generatorPrompt,
+          cwd: ctx.worktreeDir,
+          logStream: genLog,
+          ...longCommandRoleBounds({
+            idleTimeoutMs: timeoutMs,
+            idleWarningIntervalMs: heartbeatMs,
+            maxDurationMs: config.maxAgentDurationMs,
+          }),
+        }).finally(() => closeAgentLog(genLog));
+        logger.event({
+          type: "phase-ended",
           ghIssue: slice.ghIssue,
           sliceNumber: slice.number,
           agent: "generator",
           round,
-        },
-      );
-      const genLog = logger.agentLog(slice.number, "generator", round);
-      const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
-      const heartbeatMs =
-        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-      const generatorPrompt =
-        implementationAttempt === 1 && ctx.resume?.mode === "stuck"
-          ? renderPrompt("generator-resume-stuck", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              COMMITS_AHEAD: ctx.resume.commitsAhead,
-              COMMIT_LOG: ctx.resume.commitLog,
-              BASE_REFRESH_NOTE: ctx.resume.baseRefreshed
-                ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
-                : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
-              STUCK_NOTE: ctx.resume.stuckNote ?? "",
-              UNRESOLVED_FINDINGS:
-                formatUnresolvedQAFindings(resumedUnresolved),
-              HANDOFF_NOTE: ctx.resume.handoffNote,
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-            })
-          : implementationAttempt === 1 && ctx.resume
-          ? renderPrompt("generator-resume", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              COMMITS_AHEAD: ctx.resume.commitsAhead,
-              COMMIT_LOG: ctx.resume.commitLog,
-              FEAT_BRANCH: featBranch,
-              UNRESOLVED_FINDINGS:
-                formatUnresolvedQAFindings(resumedUnresolved),
-              HANDOFF_NOTE: ctx.resume.handoffNote,
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-            })
-          : renderPrompt("generator", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              RETRY_NOTE: implementationAttempt > 1 ? retryNote : "",
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-            });
-      const escalationPath = join(ctx.absSliceDir, ESCALATION_FILENAME);
-      rmSync(escalationPath, { force: true });
-      await invoke({
-        role: "generator",
-        prompt: generatorPrompt,
-        cwd: ctx.worktreeDir,
-        logStream: genLog,
-        ...longCommandRoleBounds({
-          idleTimeoutMs: timeoutMs,
-          idleWarningIntervalMs: heartbeatMs,
-          maxDurationMs: config.maxAgentDurationMs,
-        }),
-      }).finally(() => closeAgentLog(genLog));
-      logger.event({
-        type: "phase-ended",
-        ghIssue: slice.ghIssue,
-        sliceNumber: slice.number,
-        agent: "generator",
-        round,
-      });
+        });
 
-      if (existsSync(escalationPath)) {
+        if (!existsSync(escalationPath)) break;
+
         const reviewArchiveDir = artifacts.contractReviewArchiveDir(
           config.repoRoot,
           pipelineRunSlug(
@@ -3326,7 +3377,7 @@ export async function runSliceExecute(
           sliceDir: ctx.absSliceDir,
           archiveDir: reviewArchiveDir,
           round,
-          attempt: 1,
+          attempt: generatorAttempt,
         });
         const escalation = parseScopeEscalation(
           readFileSync(escalationPath, "utf-8"),
@@ -3336,10 +3387,12 @@ export async function runSliceExecute(
         );
         const revision = await runFocusedScopeRevision(ctx, escalation);
         if (revision.phase === "ERROR") return revision;
-        return {
-          phase: "ERROR",
-          error: "Focused scope revision accepted; generation did not resume",
-        };
+        scopeRevisionNote =
+          "# Focused scope revision accepted\n\n" +
+          "The contract was revised and re-locked without spending this " +
+          "implementation round. Continue under this complete accepted " +
+          "file scope:\n\n" +
+          JSON.stringify({ fileScope: revision.manifest.fileScope }, null, 2);
       }
 
       if (config.manifest) {

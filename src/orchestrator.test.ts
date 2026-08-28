@@ -1079,13 +1079,40 @@ describe("focused generator scope revision", () => {
       "generator",
       "planner",
       "evaluator-contract",
+      "generator",
     ]);
-    expect(relevant.at(-1)!.prompt!).toContain("src/extra-a.ts");
-    expect(relevant.at(-1)!.prompt!).toContain("src/extra-b.ts");
+    const freshGeneratorPrompt = relevant.at(-1)!.prompt!;
+    expect(freshGeneratorPrompt).toContain('"fileScope"');
+    expect(freshGeneratorPrompt).toContain("src/declared.ts");
+    expect(freshGeneratorPrompt).toContain("src/extra-a.ts");
+    expect(freshGeneratorPrompt).toContain("src/extra-b.ts");
   });
 
-  it("does not spend another implementation round while revising", () => {
-    expect(records.filter(({ role }) => role === "generator")).toHaveLength(1);
+  it("resumes generation in the same implementation round", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const generatorStarts = readFileSync(
+      join(runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter(
+        (event) =>
+          event.type === "phase-started" && event.agent === "generator",
+      );
+
+    expect(generatorStarts.map(({ round }) => round)).toEqual([1, 1]);
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(2);
+  });
+
+  it("continues through QA after fresh generation", () => {
+    expect(records.filter(({ role }) => role === "evaluator-qa")).toHaveLength(
+      1,
+    );
   });
 
   it("archives the escalating generator attempt", () => {
