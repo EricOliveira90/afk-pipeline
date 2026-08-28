@@ -305,6 +305,8 @@ describe("runGates", () => {
         stage: "base",
         required: true,
         command: process.execPath,
+        // Exit 1 is the package manager's own error code, the one exit code
+        // that is not read as a candidate-owned lifecycle failure (ADR 0041).
         args: ["-e", "process.exit(1)"],
       },
       declarations: [
@@ -384,6 +386,123 @@ describe("runGates", () => {
       expect(gate.detail).toContain("Gate environment preparation failed");
       expect(gate.detail).toContain("ERR_PNPM_OUTDATED_LOCKFILE");
     }
+    verifyGateEvidence(result.artifact);
+  });
+
+  // #120: the candidate's `prepare` script ran the project's compiler, the
+  // compiler found errors the candidate had introduced, and the install
+  // exited with the compiler's code. Classifying that as INFRASTRUCTURE
+  // spent both retries on byte-identical attempts and killed the slice.
+  it("routes a failing lifecycle script in the candidate to the generator as a gate FAIL", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          // What `pnpm install` prints when the root `prepare` script runs
+          // `tsc` and the candidate does not compile: the compiler's
+          // diagnostics, then pnpm propagating the script's exit code.
+          "console.error('src/run-events.ts(51,7): error TS2820: Type \\\"qa-review-archive-failed\\\" is not assignable.');" +
+            "console.error(' ELIFECYCLE  Command failed with exit code 2.');" +
+            "process.exit(2)",
+        ],
+      },
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(
+      result.evidence.results.map(({ gateId, status, failureKind }) => ({
+        gateId,
+        status,
+        failureKind,
+      })),
+    ).toEqual([
+      { gateId: "typecheck", status: "FAIL", failureKind: "CONFIGURATION" },
+      { gateId: "tests", status: "FAIL", failureKind: "CONFIGURATION" },
+    ]);
+    for (const gate of result.evidence.results) {
+      expect(gate.detail).toContain("lifecycle script in the candidate");
+      // The round that has to fix it needs to see the compiler errors, not
+      // just the exit code (#120).
+      expect(gate.detail).toContain("TS2820");
+    }
+    verifyGateEvidence(result.artifact);
+  });
+
+  it("keeps a package manager's own install error as infrastructure", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          // A registry that cannot be reached fails before any lifecycle
+          // script runs, and pnpm reports it with its own exit code 1. A
+          // retry can genuinely succeed, so this must stay INFRASTRUCTURE.
+          "console.error(' ERR_PNPM_META_FETCH_FAIL  GET https://registry.example/left-pad: ECONNREFUSED');" +
+            "process.exit(1)",
+        ],
+      },
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results).toHaveLength(1);
+    const [gate] = result.evidence.results;
+    expect(gate?.gateId).toBe("typecheck");
+    expect(gate?.status).toBe("INFRASTRUCTURE");
+    expect(gate?.failureKind).toBeNull();
+    expect(gate?.detail).toContain("Gate environment preparation failed");
     verifyGateEvidence(result.artifact);
   });
 

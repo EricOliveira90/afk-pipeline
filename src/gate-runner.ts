@@ -61,12 +61,15 @@ export interface RunGatesOptions {
    * `pnpm run` exits instantly and the gate reads a missing toolchain as a
    * red suite (#101, and the same bug on the per-round path). Runs once
    * before the gates and outside the evidence declarations. Its failure is
-   * classified by who can fix it: a lockfile that no longer matches the
-   * candidate's `package.json` fails the install deterministically and is
-   * recorded as FAIL/CONFIGURATION against every declaration for the
-   * generator to repair, while environment faults (`pnpm` absent, network,
-   * timeout) are INFRASTRUCTURE, so the orchestrator's retry applies
-   * instead of blaming the generator.
+   * classified by who can fix it. Two things the candidate owns are recorded
+   * as FAIL/CONFIGURATION against every declaration for the generator to
+   * repair: a lockfile that no longer matches its `package.json`, and a
+   * lifecycle script of its own (`prepare` running the project's compiler)
+   * that exited non-zero — both fail deterministically for a given tree, so
+   * an identical retry can only fail identically. Environment faults (`pnpm`
+   * absent, network, registry, timeout) are INFRASTRUCTURE, so the
+   * orchestrator's retry applies instead of blaming the generator. ADR 0041
+   * records why the tie is broken toward the branch that cannot loop.
    */
   prepare?: GateDeclaration;
   signal?: AbortSignal;
@@ -202,6 +205,29 @@ export function createCandidateCheckpoint(
 const LOCKFILE_DRIFT_MARKER = /ERR_PNPM_OUTDATED_LOCKFILE/;
 
 /**
+ * Exit code a package manager reserves for its own install failures, and the
+ * one exit code that therefore cannot be blamed on the candidate.
+ *
+ * pnpm reports what it did itself — lockfile drift, a registry or network
+ * fault, an unresolvable version — by printing an `ERR_PNPM_*` code and
+ * exiting 1, but it reports a failing *lifecycle script* by propagating that
+ * script's own exit code. Measured 2026-08-28 with the pnpm on this machine: a
+ * `prepare` script exiting 3 makes `pnpm install` exit 3, while a refused
+ * registry (`ERR_PNPM_META_FETCH_FAIL`) and lockfile drift
+ * (`ERR_PNPM_OUTDATED_LOCKFILE`) both exit 1. The #120 incident's `prepare`
+ * ran `tsc`, which exits 2 when it emits with errors — recorded in the
+ * evidence as `(EXITED, exit 2)`.
+ *
+ * So a prepare that exits non-zero with anything other than this code ran a
+ * lifecycle script from the candidate's own `package.json` and that script
+ * failed. Keying on the code rather than on message text means the rule does
+ * not have to be kept in step with a package manager's wording, and it is
+ * narrow: everything that fails *before* lifecycle scripts run — fetch,
+ * network, registry — exits 1 and stays INFRASTRUCTURE (ADR 0041).
+ */
+const PACKAGE_MANAGER_ERROR_EXIT_CODE = 1;
+
+/**
  * How much prepare output is retained for classification and the failure
  * detail. A tail window bounds memory on chatty installs while keeping the
  * error block, which pnpm prints last.
@@ -241,16 +267,22 @@ export async function runGates(
   }
 
   // Prepare the environment inside the checkpoint before any gate runs. A
-  // failure here is classified by who can fix it. A candidate whose
-  // `pnpm-lock.yaml` no longer matches its `package.json` fails the install
-  // deterministically — an infrastructure retry re-runs the identical
-  // install against the identical tree and can never succeed (the ADR 0036
-  // anti-pattern) — so it becomes `prepareFailure` and the loop below
-  // records it as FAIL/CONFIGURATION against every declaration, routing the
-  // repair to the generator. Anything else (`pnpm` absent, network,
-  // timeout) is an environment fault: it joins `checkpointError`, which the
-  // loop below records as INFRASTRUCTURE against the first declaration it
-  // reaches and then stops, leaving the orchestrator's retry to apply.
+  // failure here is classified by who can fix it, and the test is whether a
+  // retry could plausibly change the result. Two failures are the
+  // candidate's: a `pnpm-lock.yaml` that no longer matches its
+  // `package.json`, and a lifecycle script of the candidate's own that
+  // exited non-zero (see `PACKAGE_MANAGER_ERROR_EXIT_CODE`). Both are
+  // deterministic for a given tree — an infrastructure retry re-runs the
+  // identical install against the identical tree and can never succeed (the
+  // ADR 0036 anti-pattern) — so they become `prepareFailure` and the loop
+  // below records that as FAIL/CONFIGURATION against every declaration,
+  // routing the repair to the generator, which is the only actor able to
+  // change the tree. Everything that fails before lifecycle scripts run
+  // (`pnpm` absent, network, registry, timeout) is an environment fault: it
+  // joins `checkpointError`, which the loop below records as INFRASTRUCTURE
+  // against the first declaration it reaches and then stops, leaving the
+  // orchestrator's retry to apply. ADR 0041 has the reasoning and the known
+  // residual case (a lifecycle script that itself exits 1).
   const prepareCommand = options.prepare?.command;
   let prepareFailure: string | undefined;
   if (options.prepare && prepareCommand && restoreCheckpoint && !checkpointError) {
@@ -290,15 +322,29 @@ export async function runGates(
           `Gate environment preparation failed: ` +
           `${[prepare.command, ...(prepare.args ?? [])].join(" ")} ` +
           `(${execution.outcome}, exit ${String(execution.exitCode)})`;
+        const tail = outputTail(captured);
+        const candidateFailure = (cause: string) =>
+          `${summary}: ${cause}` + (tail ? ` — ${tail}` : "");
         if (
           execution.outcome === "EXITED" &&
           LOCKFILE_DRIFT_MARKER.test(captured)
         ) {
-          const tail = outputTail(captured);
-          prepareFailure =
-            `${summary}: the candidate's pnpm-lock.yaml does not match its ` +
-            `package.json (ERR_PNPM_OUTDATED_LOCKFILE)` +
-            (tail ? ` — ${tail}` : "");
+          prepareFailure = candidateFailure(
+            `the candidate's pnpm-lock.yaml does not match its ` +
+              `package.json (ERR_PNPM_OUTDATED_LOCKFILE)`,
+          );
+        } else if (
+          execution.outcome === "EXITED" &&
+          execution.exitCode !== null &&
+          execution.exitCode !== PACKAGE_MANAGER_ERROR_EXIT_CODE
+        ) {
+          prepareFailure = candidateFailure(
+            `a package lifecycle script in the candidate exited ` +
+              `${String(execution.exitCode)} (the exit code the package ` +
+              `manager propagates from a script such as \`prepare\` running ` +
+              `the project's compiler), so the candidate's own tree is what ` +
+              `needs repair`,
+          );
         } else {
           checkpointError = summary;
         }
