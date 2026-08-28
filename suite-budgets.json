@@ -7,6 +7,17 @@
     "from growing back one reasonable-looking test at a time. AGENTS.md",
     "has the cheaper places to put a new assertion.",
     "",
+    "`suites` and `totalSeconds` are the only numbers that govern. The",
+    "`_measured…` blocks are recorded history, and each one is named",
+    "`_measured<YYYY_MM_DD>[_<qualifier>]@<branch>` — the branch it was",
+    "measured on, verbatim after the `@`. The check compares a run only",
+    "against a block labelled with the branch you are on and refuses the",
+    "rest: run 3's babysitter compared a feature-branch measurement",
+    "against main's and raised a budget for a slowdown that was not there,",
+    "and the labels were already there — nobody read them. When you record",
+    "a new block, label it, and append it (the check treats the last",
+    "matching block as the newest).",
+    "",
     "Budgets are ~30% above the slowest observed IN-CHAIN run, not above",
     "the suite measured alone. The distinction matters and cost round 2 a",
     "red gate: run on its own, qa-orchestration is 35.3 / 35.8 / 35.8s,",
@@ -23,7 +34,7 @@
     "budgets therefore assume no such hook runs. On a host that never had",
     "one the numbers were always lower, and the budgets are still met."
   ],
-  "_measured2026_08_26_round1": {
+  "_measured2026_08_26_round1@feat/launch-guard-feature-branch-freshness": {
     "fast": 114.8,
     "orchestrator": 242.3,
     "wave": 153.6,
@@ -32,7 +43,7 @@
     "clean-failed": 14.1,
     "_total": "624.5s of suite time, 10m30s of `pnpm test`, 765 tests"
   },
-  "_measured2026_08_26_round2": {
+  "_measured2026_08_26_round2@feat/launch-guard-feature-branch-freshness": {
     "_note": "Two full-chain runs; each entry is the slower of the two.",
     "fast": 60.7,
     "orchestrator": 170.3,
@@ -43,7 +54,7 @@
     "_total": "410.5s then 437.2s of suite time; 6m56s and 7m23s of `pnpm test`, 765 tests",
     "_alone": "Measured alone, same machine: wave 96.4-99.0, git (inside fast) 49.0, qa 35.3-35.8, resume 40.8-43.1"
   },
-  "_measured2026_08_26_round3": {
+  "_measured2026_08_26_round3@feat/launch-guard-feature-branch-freshness": {
     "_note": [
       "Round 3: orchestrator, wave and resume-integration each split into",
       "two test files balanced by measured describe-block time, so one",
@@ -61,7 +72,7 @@
     "clean-failed": 12.6,
     "_total": "411.9s of suite time, 6m56s of `pnpm test`, 765 tests"
   },
-  "_measured2026_08_27": {
+  "_measured2026_08_27@main": {
     "_note": [
       "Full chain on main at fbe98ac (PRs #116 + #117 merged, 803 tests),",
       "idle machine. fast tripped its 79s budget at 81.6s with no new",
@@ -79,7 +90,7 @@
     "clean-failed": 12.7,
     "_total": "427.8s of suite time, 803 tests"
   },
-  "_measured2026_08_27_feature_branch": {
+  "_measured2026_08_27_feature_branch@feat-codex/afk-v2-evidence-backbone": {
     "_note": [
       "feat-codex/afk-v2-evidence-backbone after merging main (wave-1",
       "fixes + suite split + hermetic git) into the #75-#77 slice work.",
@@ -99,7 +110,7 @@
     "clean-failed": 17.7,
     "_total": "820.0s of suite time, 883 tests"
   },
-  "_measured2026_08_27_afk_run4_gates": {
+  "_measured2026_08_27_afk_run4_gates@afk-codex/afk-v2-evidence-backbone-slice-04-negotiation-converges-on-open-findings": {
     "_note": [
       "Three measurements of this same tree inside AFK run 4's gates,",
       "load rising as agents accumulated: fast 87.5 -> 105.1 -> 130.5s",
@@ -116,7 +127,7 @@
     "fast": 130.5,
     "orchestrator": 382.4
   },
-  "_measured2026_08_27_afk_run5": {
+  "_measured2026_08_27_afk_run5@afk-codex/afk-v2-evidence-backbone-slice-05-qa-verdicts-and-retries-run-on-the-same-rails": {
     "_note": [
       "AFK run 5. Slice #79's generator measured test:heavy:orchestrator at",
       "~516s against the 500s budget with zero failing tests, under its own",
