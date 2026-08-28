@@ -142,6 +142,24 @@
     ],
     "orchestrator": 516
   },
+  "_measured2026_08_28_wave2@wave/reliability-integration": {
+    "_note": [
+      "Full chain on the wave-2 integration branch (s1 classifier fix,",
+      "s8 budget reader, s4 preflight, s2 stop sentinel merged onto main",
+      "at cfac304), agent session resident. First run on this tree",
+      "failed before any suite finished: vitest's transform rejects a",
+      "CRLF checkout of scripts/check-suite-budgets.mjs (bare node",
+      "parses it fine) — fixed with .gitattributes `*.mjs text eol=lf`,",
+      "not a budget matter. No budget raised."
+    ],
+    "fast": 106.9,
+    "orchestrator": 376.0,
+    "wave": 222.0,
+    "resume-integration": 138.7,
+    "qa-orchestration": 81.1,
+    "clean-failed": 19.6,
+    "_total": "944.3s of suite time"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
