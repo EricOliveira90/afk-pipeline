@@ -1,0 +1,10 @@
+## Evaluator feedback — round 2
+
+VERDICT: REVISE
+GAPS: 3
+RE_RAISED_GAPS: 1
+
+### If REVISE, specific gaps:
+- New patterns / deps / schema — "`Finding`, exact keys: `{ id, severity, behaviorIds, summary, evidence, expected, observed, clearCondition, state }`" and "`behaviorIds` is a duplicate-free array" never require finding IDs to be unique within one attempt. Two first-attempt findings may therefore share one ID while satisfying every stated schema and transition rule, leaving no deterministic identity for later resolution. This materially repeats round 1's unresolved need for an exact finding/lifecycle contract and violates boundary explicitness and falsifiability; declare duplicate finding IDs invalid and add a parser test that refuses them.
+- In scope / Test plan — "`delete each working JSON before its evaluator attempt`" has no test that places a valid stale working JSON before an evaluator omits the new canonical artifact. The Markdown-only missing-artifact scenario starts without stated stale JSON, so an implementation can skip deletion, reuse a prior attempt's canonical verdict, and pass every listed assertion. This violates falsifiability; add a scenario where attempt two emits Markdown only after attempt one left canonical JSON and assert terminal `ERROR`, no merge, and missing-artifact validation evidence.
+- In scope / Test plan — "`On a stage's first valid non-infrastructure attempt, every finding is `OPEN`. Each later non-infrastructure attempt repeats every currently `OPEN` ID exactly once as `OPEN` or `RESOLVED` ... `RESOLVED` IDs cannot return`" is covered only by valid transition scenarios. No listed test fails when a first attempt reports `RESOLVED`, a later attempt omits or duplicates an open ID, or a resolved ID reactivates; the infrastructure scenario also starts with no finding history and cannot prove that infrastructure attempts leave history unchanged. This violates falsifiability; add focused lifecycle tests for those illegal transitions and for an infrastructure attempt preserving a nonempty open set.
