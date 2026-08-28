@@ -154,10 +154,16 @@ clean machine.
 - `listProcessPaths` joins `listPidPpid` in `kill-tree.ts`. Both are
   read-only listers sharing that module's spawn plumbing and platform
   reasoning; neither terminates anything.
-- Cost: one `statfsSync`, one `git worktree list`, one process-table
-  listing (~100ms per ADR 0020's measurements) and one shallow namespace
-  `readdir` per launch. Nothing per slice, nothing on the happy path's
-  output — a clean preflight prints no lines at all.
+- Cost: one `statfsSync`, one `git worktree list` and one shallow
+  `readdir` per namespace root, per launch. The process-table listing —
+  the only expensive part, ~100ms via PowerShell CIM per ADR 0020's
+  measurements — runs *only* when a namespace path actually exists, since
+  a directory that is not there cannot be held; every first launch of a
+  PRD skips it entirely. That bound was not in the first draft, and
+  `test:heavy:orchestrator` found out why it needed to be: dozens of
+  `runPipeline` calls across two workers spawned enough PowerShell to
+  make the fixtures' `git init` fail. Nothing per slice, and nothing on
+  the happy path's output — a clean preflight prints no lines at all.
 
 ## Verification
 
