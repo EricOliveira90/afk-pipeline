@@ -66,6 +66,8 @@ export interface SliceFixture {
    * slice should end up STUCK after MAX_GENERATOR_ROUNDS.
    */
   qaPasses: boolean;
+  /** Number of implementation QA failures before `qaPasses` takes effect. */
+  qaFailuresBeforePass?: number;
   /**
    * Number of leading evaluator-qa invocations that report FAIL with
    * `**Failure class:** INFRASTRUCTURE` before behaving per `qaPasses`.
@@ -83,6 +85,8 @@ export interface SliceFixture {
   outputContent: string;
   /** Raw scope-escalation artifact emitted after generator work, when set. */
   escalation?: string;
+  /** One-based generator invocation that emits `escalation`. Defaults to 1. */
+  escalationGeneratorInvocation?: number;
 }
 
 export interface InvocationRecord {
@@ -292,7 +296,10 @@ export function buildStubProvider(opts: {
           `${fixture.outputContent}\n// generator round ${round} for #${ghIssue}\n`,
           "utf-8",
         );
-        if (round === 1 && fixture.escalation !== undefined) {
+        if (
+          round === (fixture.escalationGeneratorInvocation ?? 1) &&
+          fixture.escalation !== undefined
+        ) {
           writeFileSync(
             join(sliceArtifactDir, "escalation.md"),
             fixture.escalation,
@@ -313,13 +320,37 @@ export function buildStubProvider(opts: {
             failureClass: "INFRASTRUCTURE",
           });
         } else {
-          const verdict = fixture.qaPasses ? "PASS" : "FAIL";
+          const verdict =
+            attempt > (fixture.qaFailuresBeforePass ?? 0) && fixture.qaPasses
+              ? "PASS"
+              : "FAIL";
+          const resolvedFixtureFinding =
+            verdict === "PASS" && (fixture.qaFailuresBeforePass ?? 0) > 0
+              ? [
+                  {
+                    id: "QA-01",
+                    severity: "BLOCKING" as const,
+                    behaviorIds: [],
+                    summary: "Fixture implementation finding",
+                    evidence:
+                      "The fixture evaluator observed a passing behavior",
+                    expected: "The behavior passes",
+                    observed: "The behavior passes",
+                    clearCondition:
+                      "The fixture evaluator observes the behavior passing",
+                    state: "RESOLVED" as const,
+                  },
+                ]
+              : undefined;
           writeFileSync(
             join(sliceArtifactDir, "qa-report.md"),
             `# QA Report\n\n**Verdict:** ${verdict}\n`,
             "utf-8",
           );
-          writeQAReview(sliceArtifactDir, "deterministic", { verdict });
+          writeQAReview(sliceArtifactDir, "deterministic", {
+            verdict,
+            findings: resolvedFixtureFinding,
+          });
         }
       } else if (role === "generator-stuck" && sliceArtifactDir) {
         writeFileSync(

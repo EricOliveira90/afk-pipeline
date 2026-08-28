@@ -3288,10 +3288,8 @@ export async function runSliceExecute(
           },
         );
         const genLog = logger.agentLog(slice.number, "generator", round);
-        const generatorPrompt =
-          generatorAttempt === 1 &&
-          implementationAttempt === 1 &&
-          ctx.resume?.mode === "stuck"
+        const generatorPromptBase =
+          implementationAttempt === 1 && ctx.resume?.mode === "stuck"
             ? renderPrompt("generator-resume-stuck", {
                 SLICE_DIR: ctx.relSliceDir,
                 RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -3311,9 +3309,7 @@ export async function runSliceExecute(
                   slice.ghIssue,
                 ),
               })
-            : generatorAttempt === 1 &&
-                implementationAttempt === 1 &&
-                ctx.resume
+            : implementationAttempt === 1 && ctx.resume
               ? renderPrompt("generator-resume", {
                   SLICE_DIR: ctx.relSliceDir,
                   RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -3336,13 +3332,15 @@ export async function runSliceExecute(
                   SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
                   TEST_COMMAND: ctx.testCommand,
                   RETRY_NOTE:
-                    scopeRevisionNote ||
-                    (implementationAttempt > 1 ? retryNote : ""),
+                    implementationAttempt > 1 ? retryNote : "",
                   MIGRATION_RESERVATION: migrationReservationBlock(
                     config,
                     slice.ghIssue,
                   ),
                 });
+        const generatorPrompt = scopeRevisionNote
+          ? `${generatorPromptBase}\n\n${scopeRevisionNote}`
+          : generatorPromptBase;
         rmSync(escalationPath, { force: true });
         await invoke({
           role: "generator",

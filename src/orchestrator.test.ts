@@ -1038,9 +1038,11 @@ describe("focused generator scope revision", () => {
             "src/extra-b.ts",
           ],
           qaPasses: true,
+          qaFailuresBeforePass: 1,
           outputFile: "src/declared.ts",
           outputContent: "declared work",
           escalation: JSON.stringify(escalation),
+          escalationGeneratorInvocation: 2,
         },
       ],
     ]);
@@ -1077,6 +1079,7 @@ describe("focused generator scope revision", () => {
       "planner",
       "evaluator-contract",
       "generator",
+      "generator",
       "planner",
       "evaluator-contract",
       "generator",
@@ -1086,6 +1089,14 @@ describe("focused generator scope revision", () => {
     expect(freshGeneratorPrompt).toContain("src/declared.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-a.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-b.ts");
+    expect(freshGeneratorPrompt).toContain("This is implementation round 2");
+    expect(freshGeneratorPrompt).toContain("QA-01");
+    expect(freshGeneratorPrompt).toContain("Fixture implementation finding");
+    expect(freshGeneratorPrompt).toContain(
+      "The fixture evaluator observes the behavior passing",
+    );
+    expect(freshGeneratorPrompt).toContain("qa-review-r1-a1.json");
+    expect(freshGeneratorPrompt).toContain("qa-report-r1-a1.md");
   });
 
   it("resumes generation in the same implementation round", () => {
@@ -1105,13 +1116,13 @@ describe("focused generator scope revision", () => {
           event.type === "phase-started" && event.agent === "generator",
       );
 
-    expect(generatorStarts.map(({ round }) => round)).toEqual([1, 1]);
-    expect(records.filter(({ role }) => role === "generator")).toHaveLength(2);
+    expect(generatorStarts.map(({ round }) => round)).toEqual([1, 2, 2]);
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
   });
 
   it("continues through QA after fresh generation", () => {
     expect(records.filter(({ role }) => role === "evaluator-qa")).toHaveLength(
-      1,
+      2,
     );
   });
 
@@ -1125,7 +1136,7 @@ describe("focused generator scope revision", () => {
           `${slug}-stub`,
           "slice-01",
           "reviews",
-          "escalation-r1-a1.md",
+          "escalation-r2-a1.md",
         ),
         "utf-8",
       ),
