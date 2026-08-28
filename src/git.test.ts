@@ -35,6 +35,7 @@ import {
   findWorktreeForBranch,
   getDefaultBranch,
   hasCommitsAhead,
+  listChangedFiles,
   listFilesOnRef,
   listMigrationFiles,
   mergeSliceBranch,
@@ -807,6 +808,53 @@ describe("git.listFilesOnRef", () => {
 
   it("returns empty for a ref that does not exist", () => {
     expect(listFilesOnRef(repoDir, "no/such/ref")).toEqual([]);
+  });
+});
+
+describe("git.listChangedFiles", () => {
+  let repoDir: string;
+
+  beforeAll(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-git-changed-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    writeFileSync(join(repoDir, "tracked.ts"), "export const a = 1;\n");
+    writeFileSync(join(repoDir, "untouched.ts"), "export const b = 2;\n");
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "root"]);
+    git(repoDir, ["checkout", "-b", "slice"]);
+    // One committed change, one uncommitted change to a tracked file, and
+    // one untracked file inside a new directory. A scope amendment is
+    // checked against all three: the generator's work is only committed
+    // once the slice passes (#112).
+    writeFileSync(join(repoDir, "committed.ts"), "export const c = 3;\n");
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "slice work"]);
+    writeFileSync(join(repoDir, "tracked.ts"), "export const a = 11;\n");
+    mkdirSync(join(repoDir, "src"), { recursive: true });
+    writeFileSync(join(repoDir, "src", "new.ts"), "export const d = 4;\n");
+  });
+
+  afterAll(() => {
+    rmDirWithRetry(repoDir);
+  });
+
+  it("reports committed, uncommitted, and untracked changes against the base", () => {
+    expect(listChangedFiles(repoDir, "main")).toEqual([
+      "committed.ts",
+      "src/new.ts",
+      "tracked.ts",
+    ]);
+  });
+
+  it("returns nothing for a base that does not exist", () => {
+    const clean = mkdtempSync(join(tmpdir(), "afk-git-clean-"));
+    try {
+      git(clean, ["init", "--initial-branch=main"]);
+      git(clean, ["commit", "--allow-empty", "-m", "root"]);
+      expect(listChangedFiles(clean, "no/such/ref")).toEqual([]);
+    } finally {
+      rmDirWithRetry(clean);
+    }
   });
 });
 

@@ -51,6 +51,7 @@ describe("renderPrompt", () => {
         SLICE_DIR: "x",
         RELEVANT_FILES: "",
         SANITY_COMMANDS: "",
+        BASE_GATE_AUTHORIZATION: "",
         SIBLING_HANDOFFS: "(none)",
         QA_SCOPE: "deterministic",
         REPORT_PATH: "d/qa-report.md",
@@ -75,6 +76,7 @@ describe("renderPrompt", () => {
         SLICE_DIR: "x",
         RELEVANT_FILES: "",
         SANITY_COMMANDS: "pnpm run typecheck",
+        BASE_GATE_AUTHORIZATION: "",
         SIBLING_HANDOFFS: "(none)",
         QA_SCOPE: "deterministic",
         REPORT_PATH: "d/qa-report.md",
@@ -91,6 +93,7 @@ describe("renderPrompt", () => {
       SLICE_DIR: "x",
       RELEVANT_FILES: "",
       SANITY_COMMANDS: "",
+      BASE_GATE_AUTHORIZATION: "",
       SIBLING_HANDOFFS: "(none)",
       QA_SCOPE: "deterministic",
       REPORT_PATH: "x/qa-report.md",
@@ -100,11 +103,16 @@ describe("renderPrompt", () => {
     });
     expect(evaluatorPrompt).toContain("qa-review.json");
     expect(evaluatorPrompt).toContain("uat-review.json");
-    expect(evaluatorPrompt).toContain('"version": 1');
+    expect(evaluatorPrompt).toContain('"version": 2');
     expect(evaluatorPrompt).toContain('"failureClass"');
     expect(evaluatorPrompt).toContain('"infrastructureEvidence"');
     expect(evaluatorPrompt).toContain('"clearCondition"');
     expect(evaluatorPrompt).toContain('"state"');
+    // The remedy decides who clears a finding, so the prompt has to name
+    // both the field and the case that needs it (#112).
+    expect(evaluatorPrompt).toContain('"remedy"');
+    expect(evaluatorPrompt).toContain('"amendmentPaths"');
+    expect(evaluatorPrompt).toContain("SCOPE_AMENDMENT");
     expect(evaluatorPrompt).toMatch(/Markdown.+does not control/s);
     const canonicalExample = /```json\r?\n([\s\S]*?)\r?\n```/.exec(
       evaluatorPrompt,
@@ -163,7 +171,7 @@ describe("renderPrompt", () => {
       }),
     ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();

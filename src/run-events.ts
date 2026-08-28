@@ -103,6 +103,53 @@ export type RunEventPayload =
       logArtifactId: string;
     }
   | {
+      /**
+       * The budgets one slice dispatch is running under (plan §3.9,
+       * wave item 14): resume attempts, implementation rounds, contract
+       * rounds, infrastructure retries. One per dispatch, emitted beside
+       * the same numbers' `run.log` line so `afk status` renders them
+       * without re-deriving anything. Not a warning — these are the
+       * limits, stated, before anything has gone wrong.
+       */
+      type: "slice-bounds";
+      ghIssue: string;
+      sliceNumber?: string;
+      resumeAttemptsRemaining: number;
+      resumeAttemptLimit: number;
+      implementationRoundsRemaining: number;
+      implementationRoundLimit: number;
+      contractRoundsRemaining: number;
+      contractRoundLimit: number;
+      infrastructureRetriesPerInvocation: number;
+      /** Present when this dispatch resumed a preserved tree. */
+      resumeMode?: "killed" | "stuck";
+    }
+  | {
+      /**
+       * One invocation's wall-clock duration against the durations the
+       * same stage recorded before it — the watchdog ping's surviving
+       * residue, kept as data only. See `stage-durations.ts` for why
+       * nothing thresholds, alerts on, or acts upon this event; its
+       * consumers are the morning babysitter and PRD 5 story 17's ROI
+       * dataset.
+       */
+      type: "stage-duration";
+      ghIssue: string;
+      sliceNumber?: string;
+      /** Agent role — the stage identity; the history pools its rounds. */
+      agent: string;
+      round?: number;
+      durationMs: number;
+      /** Prior samples for this stage; `null` on a stage's first invocation. */
+      history: {
+        samples: number;
+        medianMs: number;
+        maxMs: number;
+      } | null;
+      /** `durationMs / history.medianMs`, two decimals. Descriptive, not a verdict. */
+      ratioToMedian?: number;
+    }
+  | {
       type: "run-phase-started";
       phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
       attempt?: number;
@@ -137,23 +184,32 @@ export type RunEventPayload =
        * deferrals from the busy probe (ADR 0021), operator-granted
        * resumes of a STUCK slice's preserved tree (`--resume-stuck`,
        * #49), a locked contract
-       * sent back to the planner by the contract-lock gate (ADR 0028),
+       * sent back to the planner by the contract-lock gate (ADR 0028), a
+       * locked file scope widened mid-slice by the orchestrator because QA
+       * found correct work in an undeclared file (#112),
        * the launch guard fast-forwarding a stale feature branch to
        * the host worktree's HEAD before any wave dispatches, a
        * contract review attempt whose audit copy could not be written,
        * a from-base restart refused because the slice branch still holds
        * unmerged commits (#113), the cancellation record written
        * the moment a stop signal fires, naming the slices it marked
-       * CANCELLED in run state (#114), the launch preflight's report
+       * CANCELLED in run state (#114), the crash record written when the
+       * process observes its own death — an uncaught exception, an
+       * unhandled rejection, or a fatal log-stream error (#121, ADR 0044),
+       * which is the last event the run emits before exiting non-zero and
+       * is followed only by `run-ended`, the launch preflight's report
        * — swept shells, reported conditions, and a refusal bypassed with
-       * `--preflight-report-only` (ADR 0042) — and the `afk stop`
+       * `--preflight-report-only` (ADR 0042) — the `afk stop`
        * sentinel this run found in its own log directory (ADR 0043),
        * which is immediately followed by the `cancellation-requested`
-       * line it triggers.
+       * line it triggers, and the previous attempt's persisted slice
+       * record dropped when this run dispatched the slice (#111).
        */
       reason:
         | "cancellation-requested"
+        | "stale-record-cleared"
         | "stop-requested"
+        | "crashed"
         | "lane-continuation"
         | "infrastructure-retry"
         | "backoff-retry"
@@ -163,6 +219,7 @@ export type RunEventPayload =
         | "idle-deferral"
         | "resume-stuck"
         | "contract-lock-refused"
+        | "scope-amended"
         | "contract-review-archive-failed"
         | "qa-review-archive-failed"
         | "feature-branch-fast-forward"
@@ -171,9 +228,13 @@ export type RunEventPayload =
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;
-      /** prior-run-state: the phase persisted by the previous run. */
+      /**
+       * prior-run-state / stale-record-cleared: the phase persisted by
+       * the previous run — announced at run start, and again by name when
+       * the dispatch drops it.
+       */
       previousPhase?: string;
-      /** prior-run-state: the failure reason persisted by the previous run. */
+      /** prior-run-state / stale-record-cleared: the reason that record carried. */
       previousError?: string;
       /** not-run-hold: unresolved blockers this slice waits on. */
       blockedBy?: string[];

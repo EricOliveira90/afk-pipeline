@@ -38,6 +38,11 @@ import {
 } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 import {
+  computeSliceBounds,
+  formatSliceBounds,
+  implementationRoundsRemaining,
+} from "./bounds.js";
+import {
   DEFAULT_MIN_FREE_DISK_GB,
   formatPreflightRefusal,
   formatPreflightReport,
@@ -51,6 +56,10 @@ import {
   runIdFor,
   writeStopAck,
 } from "./stop-sentinel.js";
+import {
+  crashRecorderFor,
+  type CrashRecorderRegistrar,
+} from "./crash-records.js";
 
 import {
   ProcessTreeTerminationError,
@@ -59,6 +68,7 @@ import {
 } from "./command-runtime.js";
 import {
   createCandidateCheckpoint,
+  resolveCandidateTreeId,
   runGates,
   verifyGateEvidence,
   type GateDeclaration,
@@ -66,6 +76,11 @@ import {
   type GateEvidenceArtifact,
   type GateResult,
 } from "./gate-runner.js";
+import {
+  authorizeBaseGateSkip,
+  formatBaseGateSkipAuthorization,
+  type BaseGateSkipAuthorization,
+} from "./qa-gate-authorization.js";
 import {
   loadRunState,
   saveRunState,
@@ -140,13 +155,32 @@ import {
   loadQAReview,
   loadQAReviewResumeState,
   qaReviewFilename,
+  scopeAmendmentRequests,
+  spentImplementationRounds,
   type QAReview,
   type QAReviewAttemptFinding,
   type QAReviewLifecycleFinding,
   type QAReviewStage,
 } from "./qa-review.js";
+import {
+  applyScopeAmendment,
+  buildScopeAmendmentRecord,
+  planScopeAmendment,
+} from "./scope-amendment.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
+
+/**
+ * Scope amendments granted per QA stage per round (#112).
+ *
+ * One, because the tree does not change between attempts in a round —
+ * only the contract does. An evaluator that asks for a second amendment
+ * after the first has landed is reporting a file it should have seen in
+ * the same pass, and granting attempt after attempt on that basis is a
+ * loop with no source change in it (ADR 0041). The next round's
+ * generator work earns a fresh grant.
+ */
+const MAX_SCOPE_AMENDMENTS_PER_ROUND = 1;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 /**
  * Persisted reason on every slice a cancellation stops, whether it was
@@ -383,6 +417,15 @@ export interface PipelineConfig {
   requestCancellation?: () => void;
   /** Sentinel poll interval override. Exists for tests. */
   stopSentinelIntervalMs?: number;
+  /**
+   * The CLI's crash recorder (#121). Supplied only by an entry point that
+   * owns the process, because the handlers behind it end the process: the
+   * pipeline registers what to write, never when to die. In-process
+   * callers pass nothing and keep Node's own behaviour.
+   *
+   * See `src/crash-records.ts` and ADR 0044.
+   */
+  crashRecords?: CrashRecorderRegistrar;
 }
 
 export interface PipelineResult {
@@ -1573,6 +1616,59 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
 }
 
 /**
+ * Report this dispatch's budgets — one `run.log` line and one typed
+ * `slice-bounds` event (plan §3.9, wave item 14). See `bounds.ts` for
+ * why: these four numbers decide what a struggling slice may still do,
+ * and until now the only way to read them was `.afk/state/<slug>.json`.
+ *
+ * Called once per slice dispatch, after `prepareSliceWorktree` — the
+ * resume decision has landed by then, so the attempt counter and the
+ * resume mode are the ones this dispatch actually runs under rather than
+ * the ones it inherited.
+ *
+ * Reporting only. Every budget is still enforced where it was.
+ */
+export function reportSliceBounds(ctx: SliceContext): void {
+  const { config, slice } = ctx;
+  const provider = config.provider ?? kiroProvider;
+  const runSlug = pipelineRunSlug(config.prdSlug, provider);
+  const bounds = computeSliceBounds({
+    resumeAttemptsSpent: getResumeAttempts(
+      loadRunState(config.repoRoot, runSlug),
+      slice.ghIssue,
+    ),
+    // A fresh or restarted slice starts at round 1 whatever is on disk;
+    // only a resume inherits the rounds its prior lives spent.
+    implementationRoundsSpent: ctx.resume
+      ? spentImplementationRounds(
+          artifacts.contractReviewArchiveDir(
+            config.repoRoot,
+            runSlug,
+            slice.number,
+          ),
+          ctx.absSliceDir,
+        )
+      : 0,
+    implementationRoundLimit: MAX_GENERATOR_ROUNDS,
+    contractRoundLimit: Math.min(
+      config.maxContractRounds ?? DEFAULT_MAX_CONTRACT_ROUNDS,
+      DEFAULT_MAX_CONTRACT_ROUNDS,
+    ),
+    infrastructureRetries:
+      config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+    ...(ctx.resume ? { resumeMode: ctx.resume.mode } : {}),
+  });
+  // Same stream as the resume/restart and round lines it sits between, so
+  // the console order matches run.log's.
+  ctx.logger.phase(`${ctx.tag}: ${formatSliceBounds(bounds)}`, "error", {
+    type: "slice-bounds",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    ...bounds,
+  });
+}
+
+/**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
  *
@@ -1676,6 +1772,7 @@ async function negotiateAttempt(
   try {
     await prepareSliceWorktree(ctx);
     mkdirSync(ctx.absSliceDir, { recursive: true });
+    reportSliceBounds(ctx);
 
     // --- Step 1: Explorer ---
     const localSliceContent = readSliceFile(prdDir, slice.number);
@@ -2304,14 +2401,28 @@ function formatUnresolvedQAFindings(
     .join("\n");
 }
 
+/**
+ * What the orchestrator knows about the base gates it ran for this round,
+ * handed to QA so the evaluator can be authorized to cite them (ADR 0012's
+ * 2026-08-28 amendment). Omitted by callers that have no gate run to offer;
+ * QA then behaves exactly as it did before the amendment.
+ */
+export interface QABaseGateEvidence {
+  evidence: GateEvidence;
+  /** Repo-relative path of the verified evidence artifact. */
+  evidenceArtifactId: string;
+  declarations: readonly GateDeclaration[];
+}
+
 export async function runQAStage(
   ctx: SliceContext,
   round: number,
   stage: QAReviewStage,
   history: readonly QAReviewLifecycleFinding[],
   previousUnresolved: readonly QAReviewAttemptFinding[] = [],
+  baseGate: QABaseGateEvidence | null = null,
 ): Promise<QAStageResult> {
-  const { config, slice, logger, invoke } = ctx;
+  const { config, slice, logger, invoke, featBranch } = ctx;
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
   if (!Number.isSafeInteger(infrastructureRetries) || infrastructureRetries < 0) {
     throw new Error("infrastructureRetries must be a non-negative integer");
@@ -2333,12 +2444,68 @@ export async function runQAStage(
     : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
   let currentHistory = history;
   let currentUnresolved = previousUnresolved;
+  /**
+   * Extra attempts this stage-round has earned by applying a scope
+   * amendment (#112). An amendment changes the contract the tree is
+   * graded against, so the grade has to be taken again — and only the
+   * evaluator can take it, since a boundary failure in Pass 1 means
+   * Pass 2 never ran.
+   */
+  let amendments = 0;
+  /** Attempts this stage-round may still spend, amendments included. */
+  const attemptLimit = () => infrastructureRetries + 1 + amendments;
 
-  for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
+  /**
+   * Decide the skip authorization for one attempt (ADR 0012, 2026-08-28).
+   *
+   * Per attempt, not once per stage, because an attempt is only reached by an
+   * infrastructure retry or a scope amendment's extra attempt (#112) — and
+   * the previous attempt archived its report into the worktree, so the tree
+   * has moved. Re-hashing lets that fall closed instead of citing a gate run
+   * against a tree that no longer exists.
+   *
+   * Only the deterministic stage can be authorized: shared-preview UAT is
+   * told to skip the sanity list outright and run remote scenarios, so there
+   * is nothing to dedup.
+   */
+  const authorizeSkip = (): BaseGateSkipAuthorization => {
+    if (stage !== "deterministic") {
+      // Refusing is what denies the citation; the prompt renders its own UAT
+      // wording, because the generic refusal ends by ordering the sanity run
+      // that UAT's scope forbids.
+      return {
+        authorized: false,
+        reason:
+          "shared-preview UAT does not run the deterministic sanity list",
+      };
+    }
+    if (!baseGate) {
+      return {
+        authorized: false,
+        reason: "no base-gate run was handed to this QA stage",
+      };
+    }
+    let reviewTreeId: string | null = null;
+    try {
+      reviewTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+    } catch (error) {
+      // Hashing the candidate is the whole basis of the authorization, so a
+      // failure here is not an error to propagate — it is simply no
+      // authorization, and QA runs the gates as it always did.
+      logger.phase(
+        `${ctx.tag}: could not hash the tree under review; QA will re-run ` +
+          `the base gates (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+    return authorizeBaseGateSkip({ ...baseGate, reviewTreeId });
+  };
+
+  for (let attempt = 1; attempt <= attemptLimit(); attempt++) {
     const archiveName = stage === "deterministic"
       ? `qa-report-r${round}-a${attempt}.md`
       : `uat-report-r${round}-a${attempt}.md`;
     const archivePath = join(ctx.absSliceDir, archiveName);
+    const skipAuthorization = authorizeSkip();
     type AttemptEvidence = {
       rawArchiveName: string | null;
       reportArchived: boolean;
@@ -2484,6 +2651,9 @@ export async function runQAStage(
         review,
         canonicalArchivePath,
         markdownArchivePath: archiveDisplayPath,
+        baseGateCitation: skipAuthorization.authorized
+          ? skipAuthorization.citation
+          : null,
       });
       // Required evidence fails closed (#79): a lifecycle record that
       // cannot be preserved must not let the attempt's verdict stand.
@@ -2548,6 +2718,17 @@ export async function runQAStage(
             // it (ADR 0038). `renderPrompt` enforces this — the template
             // rejects an arg it does not reference.
             SANITY_COMMANDS: ctx.sanityCommandsBlock,
+            // Orchestrator-asserted gate evidence, or the reason there is
+            // none (ADR 0012, 2026-08-28). Always rendered: an evaluator
+            // that reads "no authorization is in force" cannot mistake a
+            // missing block for a granted skip. UAT gets its own line —
+            // the formatter's refusal orders the sanity run, which is
+            // exactly what the UAT scope forbids.
+            BASE_GATE_AUTHORIZATION:
+              stage === "deterministic"
+                ? formatBaseGateSkipAuthorization(skipAuthorization)
+                : "No skip authorization applies to shared-preview UAT — " +
+                  "your scope already excludes the deterministic sanity list.",
             QA_SCOPE: scope,
             REPORT_PATH: reportDisplayPath,
             UNRESOLVED_FINDINGS:
@@ -2630,7 +2811,7 @@ export async function runQAStage(
           { cause: error },
         );
       }
-      if (attempt <= infrastructureRetries) {
+      if (attempt < attemptLimit()) {
         logger.phase(
           `${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
           "error",
@@ -2661,7 +2842,7 @@ export async function runQAStage(
     }
     const validAttempt = recordValidAttempt(attemptEvidence)!;
     if (!validAttempt.reportArchived) {
-      if (attempt <= infrastructureRetries) continue;
+      if (attempt < attemptLimit()) continue;
       throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
     }
 
@@ -2672,6 +2853,60 @@ export async function runQAStage(
       archiveDisplayPath,
     } = validAttempt;
 
+    // A scope-amendment finding is the orchestrator's to clear, never the
+    // generator's (#112, ADR 0008). It is handled before the verdict is
+    // acted on, so a finding whose only available remedy is deleting
+    // correct work never reaches a generator round.
+    const requests = scopeAmendmentRequests(review);
+    if (requests.length > 0) {
+      const requested = requests
+        .map(
+          (request) => `${request.findingId} (${request.paths.join(", ")})`,
+        )
+        .join("; ");
+      const plan = planScopeAmendment({
+        requests,
+        manifest: loadAcceptanceManifest(ctx.absSliceDir),
+        changedFiles: git.listChangedFiles(ctx.worktreeDir, featBranch),
+        options: { migrationPathPattern: config.migrationPathPattern },
+      });
+      if (!plan.ok) {
+        throw new Error(
+          `${stage} scope amendment refused in round ${round} attempt ` +
+            `${attempt}: ${plan.refusal}. Requested: ${requested}. The ` +
+            `contract is unchanged and no work was reverted; amend the ` +
+            `contract by hand or renegotiate it before resuming.`,
+        );
+      }
+      if (amendments >= MAX_SCOPE_AMENDMENTS_PER_ROUND) {
+        throw new Error(
+          `${stage} scope amendment refused in round ${round} attempt ` +
+            `${attempt}: round ${round} already spent its ` +
+            `${MAX_SCOPE_AMENDMENTS_PER_ROUND} amendment(s) and the tree has ` +
+            `not changed since. Requested: ${requested}. Add the path(s) to ` +
+            `the contract by hand before resuming.`,
+        );
+      }
+      applyScopeAmendment({ sliceDir: ctx.absSliceDir, plan });
+      artifacts.archiveScopeAmendment({
+        archiveDir: reviewArchiveDir,
+        record: buildScopeAmendmentRecord({ stage, round, attempt, plan }),
+      });
+      amendments++;
+      const amended = plan.entries.map((entry) => entry.path).join(", ");
+      const message =
+        `${stage} scope amendment applied for ${requested}: added ${amended} ` +
+        `to the locked file scope; re-grading round ${round} without ` +
+        `consuming an implementation round`;
+      logger.phase(`${ctx.tag}: ${message}`, "error", {
+        type: "warn",
+        reason: "scope-amended",
+        ghIssue: slice.ghIssue,
+        message,
+      });
+      continue;
+    }
+
     if (review.verdict === "PASS") {
       return {
         outcome: "PASS",
@@ -2681,7 +2916,7 @@ export async function runQAStage(
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
-      if (attempt <= infrastructureRetries) {
+      if (attempt < attemptLimit()) {
         logger.phase(
           `${ctx.tag}: ${stage} report classified infrastructure; retrying without consuming round ${round}`,
           "error",
@@ -2796,10 +3031,14 @@ export async function runSliceExecute(
     // resume earns headroom beyond the cap — its documented single
     // extra attempt. A resume whose evidence already shows the cap
     // spent gets zero attempts and falls through to the STUCK return.
-    const implementationAttemptLimit =
-      ctx.resume?.mode === "stuck"
-        ? 1
-        : Math.max(0, MAX_GENERATOR_ROUNDS - firstRound + 1);
+    //
+    // Shared with the dispatch bounds line so the number the operator
+    // was told at dispatch is the number this loop runs on.
+    const implementationAttemptLimit = implementationRoundsRemaining({
+      limit: MAX_GENERATOR_ROUNDS,
+      spent: firstRound - 1,
+      resumeMode: ctx.resume?.mode,
+    });
     const finalRound = firstRound + implementationAttemptLimit - 1;
 
     for (
@@ -3077,6 +3316,18 @@ export async function runSliceExecute(
           checkpoint.treeId,
         );
         for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+        // The gates just passed on this tree; hand QA the evidence so it can
+        // be authorized to cite them rather than run them again (ADR 0012,
+        // 2026-08-28). `runQAStage` re-hashes the tree and refuses on any
+        // mismatch, so passing the evidence never weakens the review.
+        const qaBaseGate: QABaseGateEvidence = {
+          evidence: gateEvidence,
+          evidenceArtifactId: relative(
+            config.repoRoot,
+            gateEvidencePath,
+          ).replace(/\\/g, "/"),
+          declarations,
+        };
         logger.phase(
           `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
           "error",
@@ -3094,6 +3345,7 @@ export async function runSliceExecute(
           "deterministic",
           deterministicHistory,
           deterministicUnresolved,
+          qaBaseGate,
         );
         deterministicHistory = deterministic.history;
         deterministicUnresolved = deterministic.unresolved;
@@ -3350,6 +3602,33 @@ export async function runPipeline(
   if (signal?.aborted) onCancellationRequested();
   else {
     signal?.addEventListener("abort", onCancellationRequested, { once: true });
+  }
+
+  // --- The same record for the exit no signal announces (#121, ADR 0044).
+  //
+  // The listener above fires on the `AbortSignal`. A crash never touches
+  // it: run 6 died on an unhandled `'error'` event from a log stream
+  // (ENOSPC), so nothing was recorded and the state file still named
+  // slice #79's typecheck failure from two runs earlier — already fixed
+  // by then, and the first thing an operator read. The crash handlers
+  // therefore reach the *same* `markCancelledInFlight`, with `CRASHED`
+  // and the error text as the cause, and the recorded phase stays
+  // CANCELLED so the slice branch is preserved exactly as a stop
+  // preserves it.
+  //
+  // Only a CLI that owns the process supplies the handle — the handlers
+  // behind it exit — and the same `cancellableSlices` hook feeds both
+  // paths, so a crash during setup records its line and no slice, which
+  // is the truth at that moment.
+  const crashRecords = config.crashRecords;
+  let unregisterCrashRecorder: (() => void) | undefined;
+  if (crashRecords) {
+    unregisterCrashRecorder = crashRecords.register(
+      crashRecorderFor(logger, () => cancellableSlices()),
+    );
+    logger.onFatalStreamError((error, origin) =>
+      crashRecords.reportFatalStreamError(error, origin),
+    );
   }
 
   // --- `afk stop`: the same abort path, delivered as a file (ADR 0043).
@@ -4276,5 +4555,9 @@ export async function runPipeline(
     // (the test suite runs many pipelines per worker) would accumulate
     // one per run.
     stopWatcher?.stop();
+    // The handlers outlive this run — the CLI owns them — but the recorder
+    // must not: it writes through this run's journal, and a crash after
+    // the run has returned would record against a finished run.
+    unregisterCrashRecorder?.();
   }
 }

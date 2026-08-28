@@ -12,10 +12,15 @@
  */
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { formatSliceBounds } from "./bounds.js";
 import { parseIssuesMd } from "./issues-parser.js";
 import { readRunEvents, type RunEvent } from "./run-events.js";
 import { loadRunState } from "./run-state.js";
-import { foldEvents, type RunSnapshot } from "./run-snapshot.js";
+import {
+  foldEvents,
+  type RunSnapshot,
+  type SnapshotOutcomeMismatch,
+} from "./run-snapshot.js";
 import {
   buildFutureSection,
   prdSlugFromRunSlug,
@@ -46,6 +51,11 @@ export interface StatusModel {
   future: FutureSection;
   /** Wave/lane/round projection consumed by the web dashboard. */
   pipeline: PipelineSection;
+  /**
+   * Outcomes shown for this run that its own events do not account for
+   * (#111). Empty in the ordinary case; see `SnapshotOutcomeMismatch`.
+   */
+  outcomeMismatches: SnapshotOutcomeMismatch[];
 }
 
 export interface StatusResult {
@@ -164,6 +174,7 @@ export function buildStatusModel(
         future,
         now,
       }),
+      outcomeMismatches: snapshot.outcomeMismatches,
     },
   };
 }
@@ -223,6 +234,16 @@ export function renderStatus(model: StatusModel, snapshot: RunSnapshot): string 
         lines.push(`  ${clock(event.ts)}  ⚠ ${prefix}${event.message}`);
         break;
       }
+      case "slice-bounds": {
+        const { event } = entry;
+        any = true;
+        // No warn marker: these are the budgets stated at dispatch, not
+        // a signal that anything is wrong (wave item 14).
+        lines.push(
+          `  ${clock(event.ts)}  #${event.ghIssue} ${formatSliceBounds(event)}`,
+        );
+        break;
+      }
       case "slice-outcome": {
         const { event } = entry;
         any = true;
@@ -244,6 +265,16 @@ export function renderStatus(model: StatusModel, snapshot: RunSnapshot): string 
     }
   }
   if (!any) lines.push("  (no events)");
+  // Only rendered when there is something to report, so an ordinary run's
+  // output is unchanged — and when it does appear it is above Present /
+  // Future, because it qualifies the outcomes those sections read (#111).
+  if (snapshot.outcomeMismatches.length > 0) {
+    lines.push("");
+    lines.push("Records this run cannot account for:");
+    for (const mismatch of snapshot.outcomeMismatches) {
+      lines.push(`  ⚠ ${mismatch.message}`);
+    }
+  }
   lines.push("");
   lines.push("Present:");
   lines.push(...renderPresentSection(model.present));

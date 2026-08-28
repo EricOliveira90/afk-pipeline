@@ -1,5 +1,5 @@
 import { appendFileSync, type WriteStream } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
 import { Logger, type SanityGateResult } from "./logger.js";
 import {
@@ -9,13 +9,24 @@ import {
   type RunEventPayload,
 } from "./run-events.js";
 import {
+  ratioToMedian,
+  readStageDurationHistory,
+  stageInvocationKey,
+  summarizeStageHistory,
+} from "./stage-durations.js";
+import {
   lifecycle,
   type FailurePhase,
   type SliceIdentity,
   type SliceLifecycle,
   type SliceProgress,
 } from "./slice-lifecycle.js";
-import { projectForPersistence, saveSliceState } from "./run-state.js";
+import {
+  clearSliceStateForDispatch,
+  projectForPersistence,
+  saveSliceState,
+  type PersistedSliceState,
+} from "./run-state.js";
 
 const ZERO_PROGRESS: SliceProgress = { genRounds: 0, evalRounds: 0 };
 
@@ -37,6 +48,16 @@ export class RunJournal {
   private readonly terminalSlices = new Set<string>();
   private readonly logger: Logger;
   private featureBranch?: string;
+  private fatalStreamError?: (error: unknown, origin: string) => void;
+  /** Start epoch-ms of each `phase-started` still awaiting its `phase-ended`. */
+  private readonly openStages = new Map<string, number>();
+  /**
+   * Per-stage durations, seeded from the PRD's earlier runs on first use
+   * and grown by this run's own invocations. Lazy because a run that
+   * closes no stage — every unit test that only records outcomes — should
+   * not pay a directory scan for it.
+   */
+  private stageHistory?: Map<string, number[]>;
 
   readonly runDir: string;
 
@@ -69,14 +90,83 @@ export class RunJournal {
 
   /** Append a timestamped typed event without a human run-log line. */
   event(payload: RunEventPayload) {
+    const ts = new Date().toISOString();
+    this.append(payload, ts);
+    this.observeStageDuration(payload, ts);
+  }
+
+  private append(payload: RunEventPayload, ts: string) {
     try {
       appendFileSync(
         join(this.runDir, EVENTS_FILE),
-        serializeRunEvent({ ...payload, ts: new Date().toISOString() }),
+        serializeRunEvent({ ...payload, ts }),
       );
     } catch {
       // Best effort: run state remains authoritative.
     }
+  }
+
+  /**
+   * Derive the stage-duration event from the phase events already
+   * flowing through this seam (plan riding item; see
+   * `stage-durations.ts`). Doing it here rather than at each call site
+   * is what makes it free: every stage already reports its start and end
+   * through the journal, so no invocation site changes and none can
+   * forget.
+   *
+   * Data only — it records a duration beside its history and stops
+   * there. A stage whose `phase-ended` never arrives (the run died
+   * inside it) simply produces no event.
+   */
+  private observeStageDuration(payload: RunEventPayload, ts: string) {
+    if (payload.type === "phase-started") {
+      const startedMs = Date.parse(ts);
+      if (Number.isFinite(startedMs)) {
+        // Last start wins: an infrastructure retry re-opens the same
+        // round, and the duration that matters is the attempt that ended.
+        this.openStages.set(stageInvocationKey(payload), startedMs);
+      }
+      return;
+    }
+    if (payload.type !== "phase-ended") return;
+    const key = stageInvocationKey(payload);
+    const startedMs = this.openStages.get(key);
+    const endedMs = Date.parse(ts);
+    if (startedMs === undefined || !Number.isFinite(endedMs)) return;
+    this.openStages.delete(key);
+    const durationMs = Math.max(0, endedMs - startedMs);
+    const samples = this.stageSamples(payload.agent);
+    const history = summarizeStageHistory(samples);
+    samples.push(durationMs);
+    const ratio = history ? ratioToMedian(durationMs, history) : undefined;
+    this.append(
+      {
+        type: "stage-duration",
+        ghIssue: payload.ghIssue,
+        ...(payload.sliceNumber !== undefined
+          ? { sliceNumber: payload.sliceNumber }
+          : {}),
+        agent: payload.agent,
+        ...(payload.round !== undefined ? { round: payload.round } : {}),
+        durationMs,
+        history,
+        ...(ratio !== undefined ? { ratioToMedian: ratio } : {}),
+      },
+      ts,
+    );
+  }
+
+  /** This stage's prior durations, seeding the cross-run history on first use. */
+  private stageSamples(agent: string): number[] {
+    this.stageHistory ??= readStageDurationHistory(
+      dirname(this.runDir),
+      this.runDir,
+    );
+    const existing = this.stageHistory.get(agent);
+    if (existing) return existing;
+    const created: number[] = [];
+    this.stageHistory.set(agent, created);
+    return created;
   }
 
   /** Track an in-flight slice or a HITL skip; terminal phases use recordTerminal. */
@@ -86,7 +176,64 @@ export class RunJournal {
         `RunJournal.trackSlice: terminal phase ${next.phase} must use recordTerminal`,
       );
     }
+    if (next.phase === "RUNNING") this.clearRecordsOnDispatch(next);
     this.slices.set(next.ghIssue, next);
+  }
+
+  /**
+   * A slice going RUNNING is this run taking ownership of its record, so
+   * the previous attempt's persisted record is dropped here (#111).
+   *
+   * This is the dispatch moment in the journal's own vocabulary, and it
+   * is where ADR 0018's "RUNNING is never persisted" was only half true:
+   * memory said RUNNING while disk still said `ERROR — exceeded 100 tool
+   * calls` from two runs back, and every reader believed the disk. A run
+   * killed mid-round then handed the *next* run a failure story about a
+   * defect that was already fixed. Clearing at dispatch makes disk agree
+   * with memory: a dispatched slice has no persisted outcome until this
+   * run decides one.
+   *
+   * Nothing is cleared for a slice this run has already closed
+   * (`recordTerminal`): a re-dispatch after a decided outcome would
+   * otherwise wipe a record this run is entitled to.
+   *
+   * Best effort. A failed clear warns and the slice runs anyway — the
+   * cost is the misleading record we already live with, and refusing to
+   * dispatch over it would be strictly worse.
+   */
+  private clearRecordsOnDispatch(slice: SliceLifecycle) {
+    if (this.terminalSlices.has(slice.ghIssue)) return;
+    let previous: PersistedSliceState | null;
+    try {
+      previous = clearSliceStateForDispatch(
+        this.repoRoot,
+        this.prdSlug,
+        slice.ghIssue,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.phase(
+        `[afk] Warning: could not clear slice #${slice.ghIssue}'s stale run-state ` +
+          `record at dispatch (${message}) — a reader may still be shown the ` +
+          `previous run's outcome for it`,
+        "warn",
+      );
+      return;
+    }
+    if (!previous) return;
+    const reason = previous.error ? ` — ${previous.error}` : "";
+    const message =
+      `#${slice.ghIssue} ${slice.title}: dispatched — cleared the previous ` +
+      `attempt's persisted record (${previous.phase}${reason}); this run owns ` +
+      `the record from here`;
+    this.phase(`[afk] ${message}`, "log", {
+      type: "warn",
+      reason: "stale-record-cleared",
+      ghIssue: slice.ghIssue,
+      message,
+      previousPhase: previous.phase,
+      ...(previous.error !== undefined ? { previousError: previous.error } : {}),
+    });
   }
 
   /** Restore an already-persisted PASS for this run's summary. */
@@ -223,8 +370,31 @@ export class RunJournal {
     this.logger.writeIdleWarning(stream, agent, minutes);
   }
 
+  /**
+   * Route a fatal `'error'` event on an agent log stream to the crash
+   * recorder (#121). Run 6 died exactly here: a `WriteStream` hit ENOSPC,
+   * nothing listened, and Node's unhandled-`'error'` throw ended the
+   * process before any record was written.
+   *
+   * Registered by `runPipeline` only when the CLI supplied a crash
+   * recorder. Without one, no listener is attached and an unhandled
+   * `'error'` stays process-fatal exactly as before — a stream failure
+   * must not become a silence just because nobody is recording.
+   */
+  onFatalStreamError(handler: (error: unknown, origin: string) => void) {
+    this.fatalStreamError = handler;
+  }
+
   agentLog(sliceId: string, agent: string, round?: number): WriteStream {
-    return this.logger.agentLog(sliceId, agent, round);
+    const stream = this.logger.agentLog(sliceId, agent, round);
+    if (this.fatalStreamError) {
+      // Named by the file being written: "the disk refused this log" is a
+      // different diagnosis from "an agent threw", and the record should
+      // not make the operator guess which one happened.
+      const origin = basename(String(stream.path));
+      stream.on("error", (error) => this.fatalStreamError?.(error, origin));
+    }
+    return stream;
   }
 
   setReviewOutcomes(

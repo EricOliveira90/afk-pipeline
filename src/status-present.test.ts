@@ -66,6 +66,7 @@ function inFlightSnapshot(): RunSnapshot {
       provider: "stub",
       startedTs: "2026-08-18T10:00:00.100Z",
     },
+    outcomeMismatches: [],
     chronology: [],
     slices: {
       "9401": {

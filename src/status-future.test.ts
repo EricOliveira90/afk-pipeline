@@ -66,6 +66,7 @@ function snapshotFixture(): RunSnapshot {
       provider: "stub",
       startedTs: "2025-01-01T00:00:01.000Z",
     },
+    outcomeMismatches: [],
     chronology: [],
     slices: {
       "100": {

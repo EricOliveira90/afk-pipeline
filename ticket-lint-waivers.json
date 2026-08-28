@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Recorded waivers for `pnpm lint:tickets` (scripts/lint-tickets.mjs).",
+    "",
+    "One entry per waived finding. Every entry needs a `reason` — a waiver with",
+    "a blank reason fails the lint, because the only thing standing between",
+    "waive-with-reason and a rubber stamp is that the reason is written down",
+    "here, in the diff, where the next reader trips over it.",
+    "",
+    "Fields:",
+    "  issue  the issue number the finding is on",
+    "  check  \"2a\" | \"2b\" | \"3\"  (check 4 warns and needs no waiver)",
+    "  token  the flagged token, when there is one (optional; omit to cover",
+    "         every token of that check on that issue — prefer naming it)",
+    "  match  a substring that must still appear in the flagged text. Rewrite",
+    "         the criterion and the waiver stops matching, so the finding",
+    "         returns and gets looked at again with the new words in view.",
+    "  reason why the ticket is right as written",
+    "",
+    "A waiver that matches nothing is reported as a note. Delete it rather than",
+    "leaving it: a file of stale waivers is how the mechanism stops meaning",
+    "anything."
+  ],
+
+  "waivers": [
+    {
+      "issue": 95,
+      "check": "3",
+      "token": "captured",
+      "match": "Captured prompts prove",
+      "reason": "\"Captured\" names the stub provider's test fixture, not a recording obligation on the pipeline. The prompts are captured in memory by the fixture that then asserts on them; nothing is persisted, so there is no channel to name. #83's sibling criterion says the same thing as \"A stub provider capturing prompts proves\", which the lint does not flag — the difference is grammar, not substance. Recorded 2026-08-28 during the track-3 lint of PRDs 2-6."
+    },
+    {
+      "issue": 92,
+      "check": "3",
+      "token": "reports",
+      "match": "Fake mutation tool reports a survivor",
+      "reason": "\"Reports\" is the fake mutation tool handing a survivor to the orchestrator inside a fixture, not the pipeline recording anything. The channel that does matter — survivors delivered as normalized JSON through the project-owned adapter script — is already specified in the ticket's What-to-build, and the criterion is a test scenario, not the contract for that channel. Recorded 2026-08-28 during the track-3 lint of PRDs 2-6; an earlier edit that spliced \"as normalized JSON through the adapter script\" into this criterion was reverted, because rewording a scenario to satisfy a lexicon is the phrase-around-the-lint failure the tool's own docs warn about."
+    },
+    {
+      "issue": 93,
+      "check": "3",
+      "token": "recording",
+      "match": "PM override behavior and recording unchanged",
+      "reason": "A no-change claim about behavior that already exists, not a new obligation. Naming a channel would assert where today's code writes the PM-override record — something this slice does not change and the criterion deliberately does not pin, since pinning it wrongly would put the slice in conflict with working code. Recorded 2026-08-28 during the track-3 lint of PRDs 2-6."
+    }
+  ]
+}

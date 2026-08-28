@@ -24,6 +24,7 @@ import {
   type QAReviewAttemptRecord,
   type QAReviewStage,
 } from "./qa-review.js";
+import type { ScopeAmendmentRecord } from "./scope-amendment.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
 /**
@@ -395,6 +396,27 @@ export function archiveQAReviewRecord(details: {
   const { archiveDir, record } = details;
   const name =
     `${qaArchivePrefix(record.stage)}-review-r${record.round}-a${record.attempt}-record.json`;
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
+    encoding: "utf-8",
+    flag: "wx",
+  });
+  return name;
+}
+
+/**
+ * Record one applied scope amendment beside the QA attempt that asked
+ * for it (#112). The amendment edits the locked contract, so the record
+ * is the only place the run says who widened the file scope and on which
+ * finding's evidence.
+ */
+export function archiveScopeAmendment(details: {
+  archiveDir: string;
+  record: ScopeAmendmentRecord;
+}): string {
+  const { archiveDir, record } = details;
+  const name =
+    `${qaArchivePrefix(record.stage)}-scope-amendment-r${record.round}-a${record.attempt}.json`;
   mkdirSync(archiveDir, { recursive: true });
   writeFileSync(join(archiveDir, name), `${JSON.stringify(record, null, 2)}\n`, {
     encoding: "utf-8",

@@ -15,7 +15,7 @@ import {
   type SpawnOptions,
 } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { lifecycle } from "./slice-lifecycle.js";
 import { RunJournal as Logger } from "./run-journal.js";
@@ -84,7 +84,14 @@ function makeRepo(): string {
   mkdirSync(hooksDir);
   git(repo, ["config", "core.hooksPath", hooksDir]);
   writeFileSync(join(repo, "README.md"), "fixture\n", "utf-8");
-  git(repo, ["add", "README.md"]);
+  // Every real consumer ignores `.afk/`, and this fixture has to as well:
+  // it uses the repo root as the slice worktree, so without the ignore the
+  // run's own journal and gate evidence would land inside the tree being
+  // hashed — and the QA-dedup tree-sha comparison (ADR 0012) would see the
+  // candidate change under it for reasons that have nothing to do with the
+  // candidate.
+  writeFileSync(join(repo, ".gitignore"), ".afk/\nnode_modules/\n", "utf-8");
+  git(repo, ["add", "README.md", ".gitignore"]);
   git(repo, ["commit", "-m", "root"]);
   return repo;
 }
@@ -327,7 +334,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         writeFileSync(
           join(artifactDir, "qa-review.json"),
           JSON.stringify({
-            version: 1,
+            version: 2,
             verdict: "PASS",
             failureClass: "NONE",
             infrastructureEvidence: null,
@@ -380,7 +387,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           writeFileSync(
             join(artifactDir, "qa-review.json"),
             JSON.stringify({
-              version: 1,
+              version: 2,
               verdict: "FAIL",
               failureClass: "INFRASTRUCTURE",
               infrastructureEvidence: "Registry unavailable",
@@ -465,6 +472,8 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       "reviews",
     );
     mkdirSync(reviewDir, { recursive: true });
+    // Deliberately a version-1 record: a run interrupted before findings
+    // carried a remedy (#112) must still resume from the evidence it has.
     writeFileSync(
       join(reviewDir, "qa-review-r1-a1-record.json"),
       JSON.stringify(
@@ -833,6 +842,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     let evaluators = 0;
     let artifactDir = "";
     const generatorPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -846,6 +856,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           );
         } else if (options.role === "evaluator-qa") {
           evaluators++;
+          evaluatorPrompts.push(options.prompt);
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -905,6 +916,54 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           ).length === 2,
       ),
     ).toBe(true);
+
+    // QA-dedup (ADR 0012, 2026-08-28). Asserted on this scenario rather than
+    // a new one because it is the only fixture that already runs real base
+    // gates to green on a real candidate — which is exactly what the skip
+    // authorization is derived from. The unit tests in
+    // `qa-gate-authorization.test.ts` own the decision table; what only a
+    // spawned run can prove is that the tree sha the orchestrator hashes at
+    // QA dispatch still equals the one the gates ran on, so the grant is
+    // reachable at all and not permanently fail-closed.
+    const passingIndex = attempts.findIndex((attempt) =>
+      attempt.results.every(
+        (gate: { status: string }) => gate.status !== "FAIL",
+      ),
+    );
+    const passingAttempt = attempts[passingIndex];
+    const qaPrompt = evaluatorPrompts[0] ?? "";
+    expect(qaPrompt).toContain("Skip authorization");
+    expect(qaPrompt).toContain(`\`${passingAttempt.treeId}\``);
+    expect(qaPrompt).toContain(`\`${passingAttempt.attemptId}\``);
+    // `lint` has no script in this fixture, so the gate never ran it and the
+    // authorization must not vouch for it.
+    expect(qaPrompt).toContain("- typecheck — `pnpm run typecheck` — PASS at");
+    expect(qaPrompt).toContain("- tests — `pnpm run test` — PASS at");
+    expect(qaPrompt).not.toContain("- lint —");
+
+    const record = JSON.parse(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "reviews",
+          "qa-review-r2-a1-record.json",
+        ),
+        "utf-8",
+      ),
+    );
+    expect(record.baseGateCitation).toEqual({
+      evidenceArtifactId: relative(
+        repo,
+        join(evidenceDir, evidenceFiles[passingIndex]!),
+      ).replace(/\\/g, "/"),
+      attemptId: passingAttempt.attemptId,
+      treeId: passingAttempt.treeId,
+      gateIds: ["typecheck", "tests"],
+    });
   });
 
   it("retries infrastructure without consuming an implementation round", async () => {
@@ -1170,6 +1229,230 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const childPid = Number(readFileSync(childPidPath, "utf-8"));
     expect(() => process.kill(childPid, 0)).toThrow();
   }, 30_000);
+});
+
+// Mid-slice scope amendments (#112). These drive `runQAStage` directly with
+// a stub evaluator rather than a whole slice: the claim is about what the QA
+// loop does with an amendment finding, and no existing scenario in this
+// suite reaches a locked contract with an undeclared change in the tree.
+describe("scope amendments during QA", { timeout: 60_000 }, () => {
+  const CONTRACT = [
+    "# Slice Contract — undeclared scope",
+    "",
+    "**Status:** LOCKED",
+    "",
+    "## Files expected to change",
+    "- src/declared.ts",
+    "",
+    "## Migration requirements",
+    "- New migration files: 0",
+    "",
+  ].join("\n");
+
+  function lockContract(repo: string, sliceDir: string): void {
+    writeFileSync(join(sliceDir, "contract.md"), CONTRACT, "utf-8");
+    writeFileSync(
+      join(sliceDir, "acceptance-manifest.json"),
+      `${JSON.stringify(
+        {
+          version: 2,
+          fileScope: { kind: "paths", paths: ["src/declared.ts"] },
+          migrationCount: 0,
+          behaviors: [
+            {
+              id: "B-01",
+              source: "GH #70 AC1",
+              given: "a declared file",
+              when: "the suite runs",
+              then: "it passes",
+              observableResult: "green suite",
+              preservation: false,
+              gateIds: ["tests"],
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      "utf-8",
+    );
+    mkdirSync(join(repo, "src"), { recursive: true });
+    // The undeclared files the generator wrote and QA is about to find.
+    writeFileSync(join(repo, "src", "support.ts"), "export const x = 1;\n", "utf-8");
+    writeFileSync(join(repo, "src", "support-two.ts"), "export const z = 3;\n", "utf-8");
+    writeFileSync(join(repo, "src", "declared.ts"), "export const y = 2;\n", "utf-8");
+  }
+
+  function amendmentFinding(
+    paths: string[],
+    state: "OPEN" | "RESOLVED",
+  ) {
+    return {
+      id: "QA-02",
+      severity: "BLOCKING" as const,
+      behaviorIds: [],
+      summary: "Test support lives in an undeclared file",
+      evidence: "src/support.ts is not on the contract's file list",
+      expected: "The file list names every file the behaviors need",
+      observed: "The file list omits src/support.ts",
+      clearCondition: "The locked file scope declares src/support.ts",
+      state,
+      remedy: "SCOPE_AMENDMENT" as const,
+      amendmentPaths: paths,
+    };
+  }
+
+  /**
+   * A stub evaluator that asks for an amendment on attempt 1, and on
+   * attempt 2 either repeats the routed finding as RESOLVED (the amended
+   * contract satisfied it) or asks for a second, different amendment.
+   */
+  function amendingProvider(
+    artifactDir: () => string,
+    paths: string[],
+    onSecondAttempt: "resolve" | "request-another",
+  ): { provider: AgentProvider; attempts: () => number } {
+    let attempts = 0;
+    return {
+      attempts: () => attempts,
+      provider: {
+        name: "stub",
+        async invoke(): Promise<InvokeResult> {
+          attempts++;
+          const requesting =
+            attempts === 1 || onSecondAttempt === "request-another";
+          writeFileSync(
+            join(artifactDir(), "qa-report.md"),
+            `# QA Report\n\n**Verdict:** ${requesting ? "FAIL" : "PASS"}\n`,
+            "utf-8",
+          );
+          writeQAReview(artifactDir(), "deterministic", {
+            verdict: requesting ? "FAIL" : "PASS",
+            findings: [
+              amendmentFinding(
+                attempts > 1 && onSecondAttempt === "request-another"
+                  ? ["src/support-two.ts"]
+                  : paths,
+                requesting ? "OPEN" : "RESOLVED",
+              ),
+            ],
+          });
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      },
+    };
+  }
+
+  it("amends the locked scope and re-grades without consuming the round", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const { provider, attempts } = amendingProvider(
+      () => artifactDir,
+      ["src/support.ts"],
+      "resolve",
+    );
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    lockContract(repo, ctx.absSliceDir);
+
+    const result = await runQAStage(ctx, 1, "deterministic", []);
+
+    // The amendment bought exactly one extra attempt inside round 1 —
+    // `infrastructureRetries: 0` allows no other second attempt.
+    expect(attempts()).toBe(2);
+    expect(result.outcome).toBe("PASS");
+    // The amendment finding never reaches the generator's routed set.
+    expect(result.unresolved).toEqual([]);
+
+    const manifest = JSON.parse(
+      readFileSync(join(ctx.absSliceDir, "acceptance-manifest.json"), "utf-8"),
+    );
+    expect(manifest.fileScope.paths).toEqual([
+      "src/declared.ts",
+      "src/support.ts",
+    ]);
+    expect(manifest.behaviors).toHaveLength(1);
+    const contract = readFileSync(
+      join(ctx.absSliceDir, "contract.md"),
+      "utf-8",
+    );
+    expect(contract).toContain(
+      "- src/support.ts (added by scope amendment for QA finding QA-02)",
+    );
+    expect(contract).toContain("**Status:** LOCKED");
+
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(reviewDir, "qa-scope-amendment-r1-a1.json"),
+          "utf-8",
+        ),
+      ),
+    ).toEqual({
+      version: 1,
+      stage: "deterministic",
+      round: 1,
+      attempt: 1,
+      findingIds: ["QA-02"],
+      paths: ["src/support.ts"],
+    });
+    expect(
+      readFileSync(join(ctx.logger.runDir, "run.log"), "utf-8"),
+    ).toContain("scope amendment applied");
+  });
+
+  it("refuses a second amendment in the same round and reverts nothing", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const { provider, attempts } = amendingProvider(
+      () => artifactDir,
+      ["src/support.ts"],
+      "request-another",
+    );
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    lockContract(repo, ctx.absSliceDir);
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /already spent its 1 amendment\(s\)/,
+    );
+    expect(attempts()).toBe(2);
+  });
+
+  it("refuses an amendment for a path the slice never changed", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const { provider, attempts } = amendingProvider(
+      () => artifactDir,
+      ["src/never-written.ts"],
+      "resolve",
+    );
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    lockContract(repo, ctx.absSliceDir);
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /not among the files this slice changed/,
+    );
+    // Refused before any evaluator retry, and with the contract intact.
+    expect(attempts()).toBe(1);
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(ctx.absSliceDir, "acceptance-manifest.json"),
+          "utf-8",
+        ),
+      ).fileScope.paths,
+    ).toEqual(["src/declared.ts"]);
+  });
 });
 
 describe("provider-independent policy-less base gates", () => {

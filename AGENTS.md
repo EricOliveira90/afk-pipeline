@@ -39,6 +39,10 @@ workers — see the file headers before adding or moving a block.
 
 ## Self-run launch command (AFK running on this repo)
 
+Before a PRD's tickets enter AFK, run `pnpm lint:tickets <issue>...`
+(ADR 0049); check 1 (compound predicates) is an authoring-checklist item,
+not a lint.
+
 Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 

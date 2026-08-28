@@ -160,6 +160,23 @@
     "clean-failed": 19.6,
     "_total": "944.3s of suite time"
   },
+  "_measured2026_08_28_wave3@wave/wave3-track3-integration": {
+    "_note": [
+      "Full chain on the wave-3 + track-3 integration branch (track3",
+      "ticket lint, s3 crash records, s7 clear-on-dispatch, s6 bounds",
+      "visibility, s5 QA-dedup, s9 contract amendment merged onto main",
+      "at 96672dd), 9 resident agent processes all dormant (<0.2",
+      "CPU-sec/10s sampled before launch). Exit 0, 62 test files, every",
+      "suite within budget with headroom. No budget raised."
+    ],
+    "fast": 94.4,
+    "orchestrator": 431.1,
+    "wave": 218.0,
+    "resume-integration": 126.9,
+    "qa-orchestration": 75.4,
+    "clean-failed": 15.9,
+    "_total": "961.7s of suite time"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
