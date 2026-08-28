@@ -154,6 +154,8 @@ export function buildProvider(opts: {
   records?: PromptRecord[];
   /** Deterministic QA verdict for every evaluator-qa invocation. */
   qaVerdict?: "PASS" | "FAIL";
+  /** Explicit lifecycle disposition for the fixture's deterministic finding. */
+  qaFindingState?: "OPEN" | "RESOLVED";
 }): AgentProvider {
   return {
     name: "stub",
@@ -224,6 +226,25 @@ export function buildProvider(opts: {
         );
         writeQAReview(artifactDir, "deterministic", {
           verdict: opts.qaVerdict ?? "PASS",
+          ...(opts.qaFindingState
+            ? {
+                findings: [
+                  {
+                    id: "QA-01",
+                    severity: "BLOCKING",
+                    behaviorIds: [],
+                    summary: "Fixture implementation finding",
+                    evidence:
+                      "The fixture evaluator observed a failing behavior",
+                    expected: "The behavior passes",
+                    observed: "The behavior fails",
+                    clearCondition:
+                      "The fixture evaluator observes the behavior passing",
+                    state: opts.qaFindingState,
+                  },
+                ],
+              }
+            : {}),
         });
       } else if (role === "generator-stuck" && artifactDir) {
         writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");

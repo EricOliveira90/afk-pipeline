@@ -124,10 +124,11 @@ import {
   advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
   loadQAReview,
+  loadQAReviewResumeState,
   qaReviewFilename,
   type QAReview,
   type QAReviewAttemptFinding,
-  type QAReviewFinding,
+  type QAReviewLifecycleFinding,
   type QAReviewStage,
 } from "./qa-review.js";
 
@@ -2127,13 +2128,13 @@ export type QAStageResult =
   | {
       outcome: "PASS";
       report: string;
-      history: readonly QAReviewFinding[];
+      history: readonly QAReviewLifecycleFinding[];
       unresolved: QAReviewAttemptFinding[];
     }
   | {
       outcome: "IMPLEMENTATION";
       report: string;
-      history: readonly QAReviewFinding[];
+      history: readonly QAReviewLifecycleFinding[];
       unresolved: QAReviewAttemptFinding[];
     };
 
@@ -2159,7 +2160,7 @@ export async function runQAStage(
   ctx: SliceContext,
   round: number,
   stage: QAReviewStage,
-  history: readonly QAReviewFinding[],
+  history: readonly QAReviewLifecycleFinding[],
   previousUnresolved: readonly QAReviewAttemptFinding[] = [],
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke } = ctx;
@@ -2194,7 +2195,7 @@ export async function runQAStage(
       reviewResult:
         | {
             review: QAReview;
-            nextHistory: readonly QAReviewFinding[];
+            nextHistory: readonly QAReviewLifecycleFinding[];
           }
         | { error: string };
     };
@@ -2489,17 +2490,48 @@ export async function runSliceExecute(
   const { signal } = config;
   const stuckReferences: string[] = [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
-  let deterministicHistory: readonly QAReviewFinding[] = [];
+  let deterministicHistory: readonly QAReviewLifecycleFinding[] = [];
   let deterministicUnresolved: readonly QAReviewAttemptFinding[] = [];
-  let sharedPreviewHistory: readonly QAReviewFinding[] = [];
+  let sharedPreviewHistory: readonly QAReviewLifecycleFinding[] = [];
   let sharedPreviewUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let firstRound = 1;
   let retryNote = "";
 
   try {
-    for (let round = 1; round <= MAX_GENERATOR_ROUNDS; round++) {
+    if (ctx.resume?.mode === "stuck") {
+      const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+        config.repoRoot,
+        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+        slice.number,
+      );
+      const restored = loadQAReviewResumeState(
+        reviewArchiveDir,
+        ctx.absSliceDir,
+      );
+      deterministicHistory = restored.deterministic.history;
+      deterministicUnresolved = restored.deterministic.unresolved;
+      sharedPreviewHistory = restored.sharedPreview.history;
+      sharedPreviewUnresolved = restored.sharedPreview.unresolved;
+      resumedUnresolved =
+        restored.retryStage === "deterministic"
+          ? deterministicUnresolved
+          : restored.retryStage === "shared-preview"
+            ? sharedPreviewUnresolved
+            : [];
+      firstRound = restored.nextRound;
+    }
+    const finalRound = firstRound + MAX_GENERATOR_ROUNDS - 1;
+
+    for (
+      let implementationAttempt = 1;
+      implementationAttempt <= MAX_GENERATOR_ROUNDS;
+      implementationAttempt++
+    ) {
+      const round = firstRound + implementationAttempt - 1;
       logger.bumpGenRound(slice.ghIssue, round);
       logger.phase(
-        `${ctx.tag}: implementing (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+        `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
         "error",
         {
           type: "phase-started",
@@ -2514,7 +2546,7 @@ export async function runSliceExecute(
       const heartbeatMs =
         config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
       const generatorPrompt =
-        round === 1 && ctx.resume?.mode === "stuck"
+        implementationAttempt === 1 && ctx.resume?.mode === "stuck"
           ? renderPrompt("generator-resume-stuck", {
               SLICE_DIR: ctx.relSliceDir,
               RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -2526,10 +2558,12 @@ export async function runSliceExecute(
                 ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
                 : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
               STUCK_NOTE: ctx.resume.stuckNote ?? "",
+              UNRESOLVED_FINDINGS:
+                formatUnresolvedQAFindings(resumedUnresolved),
               HANDOFF_NOTE: ctx.resume.handoffNote,
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             })
-          : round === 1 && ctx.resume
+          : implementationAttempt === 1 && ctx.resume
           ? renderPrompt("generator-resume", {
               SLICE_DIR: ctx.relSliceDir,
               RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -2546,7 +2580,7 @@ export async function runSliceExecute(
               RELEVANT_FILES: ctx.relevantFilesBlock,
               SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
               TEST_COMMAND: ctx.testCommand,
-              RETRY_NOTE: round > 1 ? retryNote : "",
+              RETRY_NOTE: implementationAttempt > 1 ? retryNote : "",
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             });
       await invoke({
@@ -2754,7 +2788,7 @@ export async function runSliceExecute(
           baseGateRepairReferences
             .map((path) => `- \`${path}\``)
             .join("\n");
-        if (round < MAX_GENERATOR_ROUNDS) continue;
+        if (implementationAttempt < MAX_GENERATOR_ROUNDS) continue;
       } else {
         assertGateEvidenceReleasesEvaluation(
           gateEvidence,
@@ -2763,7 +2797,7 @@ export async function runSliceExecute(
         );
         for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
         logger.phase(
-          `${ctx.tag}: deterministic QA (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+          `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
           "error",
           {
             type: "phase-started",
@@ -2804,7 +2838,7 @@ export async function runSliceExecute(
           config.sharedPreview
         ) {
           logger.phase(
-            `${ctx.tag}: shared-preview UAT (round ${round}/${MAX_GENERATOR_ROUNDS})...`,
+            `${ctx.tag}: shared-preview UAT (round ${round}/${finalRound})...`,
             "error",
             {
               type: "phase-started",
@@ -2882,7 +2916,7 @@ export async function runSliceExecute(
         }
       }
 
-      if (round === MAX_GENERATOR_ROUNDS) {
+      if (implementationAttempt === MAX_GENERATOR_ROUNDS) {
         logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
           type: "phase-started",
           ghIssue: slice.ghIssue,

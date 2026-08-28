@@ -409,6 +409,7 @@ describe("retried slice resume (spec #33)", () => {
         resumeStuck: ["01"],
         provider: buildProvider({
           records,
+          qaFindingState: "RESOLVED",
           generator: (cwd, _options, sliceNumber) => {
             if (sliceNumber === "01") {
               // Resumed onto the preserved tree: finish the in-flight edit.
@@ -462,6 +463,64 @@ describe("retried slice resume (spec #33)", () => {
       expect(prompt).toContain("feat(#4001): round 3");
       // The preserved diagnosis rode into the prompt.
       expect(prompt).toMatch(/declared STUCK/i);
+      expect(prompt).toContain("QA-01");
+      expect(prompt).toContain("Fixture implementation finding");
+      expect(prompt).toContain(
+        "The fixture evaluator observes the behavior passing",
+      );
+      expect(prompt).toContain("qa-review-r3-a1.json");
+      expect(prompt).toContain("qa-report-r3-a1.md");
+      expect(prompt).not.toContain("qa-review-r1-a1.json");
+      expect(prompt).not.toContain("`qa-report-r2-a1.md`");
+    });
+
+    it("continues the deterministic lifecycle in the resumed evaluator", () => {
+      const prompt = records.find(
+        (record) =>
+          record.role === "evaluator-qa" && record.sliceNumber === "01",
+      )!.prompt;
+      expect(prompt).toContain("QA-01");
+      expect(prompt).toContain("qa-review-r3-a1.json");
+      expect(prompt).toContain("qa-report-r3-a1.md");
+      expect(prompt).not.toContain("qa-review-r1-a1.json");
+    });
+
+    it("preserves prior QA evidence and archives the resumed attempt as round 4", () => {
+      const reportPath = `.kiro/specs/${slug}/slices/01-named`;
+      const reviewDir = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-01",
+        "reviews",
+      );
+      expect(
+        git(repo, [
+          "show",
+          `feat-stub/${slug}:${reportPath}/qa-report-r1-a1.md`,
+        ]),
+      ).toContain("FAIL");
+      expect(
+        git(repo, [
+          "show",
+          `feat-stub/${slug}:${reportPath}/qa-report-r4-a1.md`,
+        ]),
+      ).toContain("PASS");
+      expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(true);
+      const resumedRecord = JSON.parse(
+        readFileSync(
+          join(reviewDir, "qa-review-r4-a1-record.json"),
+          "utf-8",
+        ),
+      );
+      expect(resumedRecord).toMatchObject({
+        stage: "deterministic",
+        round: 4,
+        attempt: 1,
+        verdict: "PASS",
+        findings: [{ id: "QA-01", state: "RESOLVED", unresolved: false }],
+      });
     });
 
     it("leaves the named slice's uncommitted edit and stuck.md untouched", () => {

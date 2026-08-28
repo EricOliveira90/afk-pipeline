@@ -2,10 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
+  loadQAReviewResumeState,
   openQAReviewFindings,
   parseQAReview,
   type QAReview,
 } from "./qa-review.js";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const FINDING = {
   id: "QA-01",
@@ -450,5 +459,69 @@ describe("buildQAReviewAttemptRecord", () => {
       failureClass: "INFRASTRUCTURE",
       findings: [],
     });
+  });
+});
+
+describe("loadQAReviewResumeState", () => {
+  it("restores independent stage histories and advances past preserved evidence", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-resume-"));
+    const reviewDir = join(root, "reviews");
+    const sliceDir = join(root, "slice");
+    mkdirSync(reviewDir);
+    mkdirSync(sliceDir);
+    try {
+      const deterministic = buildQAReviewAttemptRecord({
+        stage: "deterministic",
+        round: 1,
+        attempt: 1,
+        review: parseQAReview(
+          review({
+            findings: [{ ...FINDING, severity: "ADVISORY" }],
+          }),
+        ),
+        canonicalArchivePath: "reviews/qa-review-r1-a1.json",
+        markdownArchivePath: "slice/qa-report-r1-a1.md",
+      });
+      const sharedPreview = buildQAReviewAttemptRecord({
+        stage: "shared-preview",
+        round: 1,
+        attempt: 1,
+        review: parseQAReview(
+          implementationReview({ id: "UAT-01" }),
+        ),
+        canonicalArchivePath: "reviews/uat-review-r1-a1.json",
+        markdownArchivePath: "slice/uat-report-r1-a1.md",
+      });
+      writeFileSync(
+        join(reviewDir, "qa-review-r1-a1-record.json"),
+        JSON.stringify(deterministic),
+        "utf-8",
+      );
+      writeFileSync(
+        join(reviewDir, "uat-review-r1-a1-record.json"),
+        JSON.stringify(sharedPreview),
+        "utf-8",
+      );
+      writeFileSync(
+        join(sliceDir, "uat-report-r4-a2.md"),
+        "# preserved",
+        "utf-8",
+      );
+
+      const restored = loadQAReviewResumeState(reviewDir, sliceDir);
+
+      expect(restored.nextRound).toBe(5);
+      expect(restored.retryStage).toBe("shared-preview");
+      expect(restored.deterministic.history).toEqual([
+        { id: "QA-01", state: "OPEN" },
+      ]);
+      expect(restored.sharedPreview.history).toEqual([
+        { id: "UAT-01", state: "OPEN" },
+      ]);
+      expect(restored.deterministic.unresolved[0]?.id).toBe("QA-01");
+      expect(restored.sharedPreview.unresolved[0]?.id).toBe("UAT-01");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

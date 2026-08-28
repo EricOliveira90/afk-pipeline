@@ -523,6 +523,8 @@ describe("generator-resume-stuck prompt rendering", () => {
       COMMIT_LOG: "71066cc feat: round 3",
       BASE_REFRESH_NOTE: overrides.baseNote ?? "The feature branch was merged in.",
       STUCK_NOTE: overrides.stuckNote ?? "",
+      UNRESOLVED_FINDINGS:
+        "- Finding ID: `QA-01`\n  Summary: The behavior fails",
       HANDOFF_NOTE: overrides.handoffNote ?? "",
       MIGRATION_RESERVATION: "This slice owns exactly: 144.",
     });
@@ -558,5 +560,11 @@ describe("generator-resume-stuck prompt rendering", () => {
     expect(render({ baseNote: "could **not** be merged" })).toContain(
       "could **not** be merged",
     );
+  });
+
+  it("routes code-derived unresolved findings without requiring prior reports", () => {
+    const prompt = render();
+    expect(prompt).toContain("Finding ID: `QA-01`");
+    expect(prompt).not.toContain("Every preserved QA report");
   });
 });
