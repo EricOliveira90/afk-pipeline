@@ -12,9 +12,11 @@
  */
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { formatSliceBounds } from "./bounds.js";
 import type {
   RunSnapshot,
   SnapshotPhaseInvocation,
+  SnapshotSliceBounds,
 } from "./run-snapshot.js";
 
 /**
@@ -45,6 +47,12 @@ export interface PresentActiveSlice {
    * all, which is even deader — possibly hung.
    */
   stale: boolean;
+  /**
+   * Budgets reported at this slice's dispatch (wave item 14) — how much
+   * headroom the thing you are watching has left. Absent for runs that
+   * predate the `slice-bounds` event.
+   */
+  bounds?: SnapshotSliceBounds;
 }
 
 /** JSON-serializable — `--json` embeds it verbatim. */
@@ -138,6 +146,7 @@ export function buildPresentSection(input: {
         stale:
           timeInPhaseMs >= STALE_AFTER_MS &&
           (silentMs === null || silentMs >= STALE_AFTER_MS),
+        ...(slice.bounds ? { bounds: slice.bounds } : {}),
       });
     }
   }
@@ -195,6 +204,10 @@ export function renderPresentSection(present: PresentSection): string[] {
     lines.push(
       `  #${a.ghIssue} ${a.agent}${round} — ${formatDuration(a.timeInPhaseMs)} in phase${activityCell(a)}`,
     );
+    // The dispatch's budgets, indented under the slice they belong to:
+    // "is it dead or just slow?" is usually followed by "and how many
+    // tries does it have left?" (wave item 14).
+    if (a.bounds) lines.push(`      ${formatSliceBounds(a.bounds)}`);
   }
   return lines;
 }

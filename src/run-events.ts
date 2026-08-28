@@ -103,6 +103,53 @@ export type RunEventPayload =
       logArtifactId: string;
     }
   | {
+      /**
+       * The budgets one slice dispatch is running under (plan §3.9,
+       * wave item 14): resume attempts, implementation rounds, contract
+       * rounds, infrastructure retries. One per dispatch, emitted beside
+       * the same numbers' `run.log` line so `afk status` renders them
+       * without re-deriving anything. Not a warning — these are the
+       * limits, stated, before anything has gone wrong.
+       */
+      type: "slice-bounds";
+      ghIssue: string;
+      sliceNumber?: string;
+      resumeAttemptsRemaining: number;
+      resumeAttemptLimit: number;
+      implementationRoundsRemaining: number;
+      implementationRoundLimit: number;
+      contractRoundsRemaining: number;
+      contractRoundLimit: number;
+      infrastructureRetriesPerInvocation: number;
+      /** Present when this dispatch resumed a preserved tree. */
+      resumeMode?: "killed" | "stuck";
+    }
+  | {
+      /**
+       * One invocation's wall-clock duration against the durations the
+       * same stage recorded before it — the watchdog ping's surviving
+       * residue, kept as data only. See `stage-durations.ts` for why
+       * nothing thresholds, alerts on, or acts upon this event; its
+       * consumers are the morning babysitter and PRD 5 story 17's ROI
+       * dataset.
+       */
+      type: "stage-duration";
+      ghIssue: string;
+      sliceNumber?: string;
+      /** Agent role — the stage identity; the history pools its rounds. */
+      agent: string;
+      round?: number;
+      durationMs: number;
+      /** Prior samples for this stage; `null` on a stage's first invocation. */
+      history: {
+        samples: number;
+        medianMs: number;
+        maxMs: number;
+      } | null;
+      /** `durationMs / history.medianMs`, two decimals. Descriptive, not a verdict. */
+      ratioToMedian?: number;
+    }
+  | {
       type: "run-phase-started";
       phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
       attempt?: number;
