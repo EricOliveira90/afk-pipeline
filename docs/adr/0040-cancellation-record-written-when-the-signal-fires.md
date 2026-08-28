@@ -2,6 +2,12 @@
 
 Amends ADR 0003 (cancellation via `AbortSignal`). Issue #114.
 
+> Extended by ADR 0044: the record below is written by a listener on the
+> `AbortSignal`, so an exit that no signal announces — an uncaught
+> exception, an unhandled rejection, a fatal log-stream error — bypassed
+> it entirely. Run 6's ENOSPC crash is the proof (issue #121). Those three
+> now reach this same `markCancelledInFlight` with cause `CRASHED`.
+
 > Amended by ADR 0043: this ADR fixed what happens once a stop arrives
 > and documented Ctrl-Break as the way to deliver one. Whether it arrives
 > at all was the other half — see the `AttachConsole`/`CTRL_C_EVENT`

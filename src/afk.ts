@@ -22,6 +22,7 @@ import { runStatus } from "./status.js";
 import { runStatusWeb } from "./status-web.js";
 import { loadAfkManifest } from "./afk-manifest.js";
 import { installCancellationSignals } from "./cancellation.js";
+import { installCrashRecorder } from "./crash-records.js";
 import { runStopCli } from "./stop-command.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
@@ -257,6 +258,12 @@ async function main() {
   // how `afk stop` reaches a detached run that no console event can
   // be delivered to (ADR 0043).
   const cancellation = installCancellationSignals();
+  // The other end of the same bookkeeping: a crash announces nothing, so
+  // an uncaught exception, an unhandled rejection or a fatal log-stream
+  // error records CRASHED for the slices in flight and exits non-zero
+  // (#121, ADR 0044). Installed here rather than in the pipeline because
+  // these handlers end the process, and only an entry point owns it.
+  const crashRecords = installCrashRecorder();
   console.log(
     `Starting pipeline... (${cancellation.signals.join(" / ")} to cancel, ` +
       `or \`afk stop ${prdSlug}\` from another shell)\n`,
@@ -277,10 +284,12 @@ async function main() {
       migrationValidation,
       signal: cancellation.signal,
       requestCancellation: () => cancellation.requestStop("stop sentinel"),
+      crashRecords,
       ...runtimeOptions,
     });
   } catch (err) {
     cancellation.dispose();
+    crashRecords.dispose();
     if (err instanceof PipelineError) {
       console.log("\n" + err.partialResult.consoleSummary);
       console.error("\nPipeline aborted by unhandled error:");
@@ -291,6 +300,7 @@ async function main() {
   }
 
   cancellation.dispose();
+  crashRecords.dispose();
 
   console.log("\n" + result.consoleSummary);
 

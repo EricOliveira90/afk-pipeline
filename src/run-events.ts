@@ -144,7 +144,11 @@ export type RunEventPayload =
        * a from-base restart refused because the slice branch still holds
        * unmerged commits (#113), the cancellation record written
        * the moment a stop signal fires, naming the slices it marked
-       * CANCELLED in run state (#114), the launch preflight's report
+       * CANCELLED in run state (#114), the crash record written when the
+       * process observes its own death — an uncaught exception, an
+       * unhandled rejection, or a fatal log-stream error (#121, ADR 0044),
+       * which is the last event the run emits before exiting non-zero and
+       * is followed only by `run-ended`, the launch preflight's report
        * — swept shells, reported conditions, and a refusal bypassed with
        * `--preflight-report-only` (ADR 0042) — and the `afk stop`
        * sentinel this run found in its own log directory (ADR 0043),
@@ -154,6 +158,7 @@ export type RunEventPayload =
       reason:
         | "cancellation-requested"
         | "stop-requested"
+        | "crashed"
         | "lane-continuation"
         | "infrastructure-retry"
         | "backoff-retry"

@@ -54,6 +54,13 @@ Ctrl-C cancels cleanly: in-flight agents are killed, unfinished slices are
 marked CANCELLED in run state before the wind-down starts, and worktrees are
 preserved. A second stop signal hard-exits.
 
+A crash writes the same record. An uncaught exception, an unhandled rejection,
+or a fatal error on an agent log stream marks the in-flight slices CANCELLED
+with the cause `CRASHED (<source>): <error>`, then exits non-zero — so a run
+killed by a full disk cannot leave state naming an earlier run's failure. The
+write is best-effort: the condition worth recording is the one that can defeat
+it. See ADR 0044.
+
 ### Stopping a run
 
 ```bash
@@ -479,6 +486,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0027** — Migrations are a lane-shared resource: migration-bearing slices serialise into one lane
 - **ADR 0029** — Recoverable merge deferral: `MERGE-PENDING` keeps the slice branch and the next run retries the merge
 - **ADR 0043** — A stop is delivered as a file the run polls for, and acknowledged once the records are on disk
+- **ADR 0044** — A crash writes the same record a stop writes, with cause `CRASHED`
 
 ## QA Rounds and Shared Preview
 
