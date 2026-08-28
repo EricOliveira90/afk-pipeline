@@ -325,6 +325,36 @@ export function archiveContractReviewAttempt(details: {
   return archived;
 }
 
+/** Preserve one generator scope-escalation artifact under its attempt stamp. */
+export function archiveScopeEscalationAttempt(details: {
+  sliceDir: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+}): string | null {
+  const { sliceDir, archiveDir, round, attempt } = details;
+  const source = join(sliceDir, "escalation.md");
+  if (!existsSync(source)) return null;
+
+  const name = `escalation-r${round}-a${attempt}.md`;
+  mkdirSync(archiveDir, { recursive: true });
+  cpSync(source, join(archiveDir, name), {
+    errorOnExist: true,
+    force: false,
+  });
+  return name;
+}
+
+/** The next unused contract-review round in a slice's shared review archive. */
+export function nextContractReviewRound(archiveDir: string): number {
+  if (!existsSync(archiveDir)) return 1;
+  const rounds = readdirSync(archiveDir).flatMap((name) => {
+    const match = /^contract-review-r(\d+)-a\d+\.json$/.exec(name);
+    return match ? [Number(match[1])] : [];
+  });
+  return (rounds.length > 0 ? Math.max(...rounds) : 0) + 1;
+}
+
 /** Archive the code-derived lifecycle record beside its raw attempt. */
 export function archiveContractReviewRecord(details: {
   archiveDir: string;

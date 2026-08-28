@@ -58,6 +58,8 @@ export function cleanupIntegrationTempDirs(): void {
 export interface SliceFixture {
   /** Files the planner declares in `contract.md`'s "Files expected to change". */
   files: string[];
+  /** Files emitted by a focused second planner invocation, when present. */
+  revisedFiles?: string[];
   /**
    * Whether the QA evaluator should pass on the first generator round.
    * If `false`, the qa-report verdict is "FAIL" for all rounds, and the
@@ -85,6 +87,7 @@ export interface SliceFixture {
 
 export interface InvocationRecord {
   role: string;
+  prompt?: string;
   cwd: string;
   startedAt: number;
   finishedAt: number;
@@ -221,6 +224,7 @@ export function buildStubProvider(opts: {
   // Track per-slice generator round so the stub can write fresh content
   // and decide PASS vs FAIL based on the round.
   const generatorRounds = new Map<string, number>();
+  const plannerRounds = new Map<string, number>();
   // Per-slice count of evaluator-qa invocations, for qaInfraAttempts.
   const qaAttempts = new Map<string, number>();
 
@@ -251,17 +255,25 @@ export function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {
-        const filesBlock = fixture.files.map((f) => `- ${f}`).join("\n");
+        const plannerRound = (plannerRounds.get(ghIssue) ?? 0) + 1;
+        plannerRounds.set(ghIssue, plannerRound);
+        const files =
+          plannerRound > 1 && fixture.revisedFiles
+            ? fixture.revisedFiles
+            : fixture.files;
+        const filesBlock = files.map((f) => `- ${f}`).join("\n");
         writeFileSync(
           join(sliceArtifactDir, "contract.md"),
           `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
-        writeAcceptanceManifest(sliceArtifactDir, fixture.files);
+        writeAcceptanceManifest(sliceArtifactDir, files);
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
+        const feedbackRound =
+          /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "1";
         writeFileSync(
-          join(sliceArtifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
+          join(sliceArtifactDir, `feedback-r${feedbackRound}.md`),
+          `## Evaluator feedback — round ${feedbackRound}\n\nThe contract is testable.\n`,
           "utf-8",
         );
         writeContractReview(sliceArtifactDir, "ACCEPT");
@@ -280,7 +292,7 @@ export function buildStubProvider(opts: {
           `${fixture.outputContent}\n// generator round ${round} for #${ghIssue}\n`,
           "utf-8",
         );
-        if (fixture.escalation !== undefined) {
+        if (round === 1 && fixture.escalation !== undefined) {
           writeFileSync(
             join(sliceArtifactDir, "escalation.md"),
             fixture.escalation,
@@ -320,7 +332,14 @@ export function buildStubProvider(opts: {
       // UNKNOWN, blocking PR creation. That path is fine for our tests.
 
       const finishedAt = Date.now();
-      records.push({ role, cwd, startedAt, finishedAt, ghIssue });
+      records.push({
+        role,
+        prompt: options.prompt,
+        cwd,
+        startedAt,
+        finishedAt,
+        ghIssue,
+      });
       return { exitCode: 0, stdout: "", stats: {} };
     },
   };

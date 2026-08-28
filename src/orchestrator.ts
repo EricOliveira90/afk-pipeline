@@ -944,6 +944,7 @@ function archiveContractReviewAttempt(
   plannerResponse: ContractResponse | null,
   revisions: ContractRevisionArtifacts | null,
   lifecyclePrevious: ContractReview | null = previousReview,
+  validateAsFresh = false,
 ): { record: ContractReviewAttemptRecord; review: ContractReview } | null {
   try {
     const archived = artifacts.archiveContractReviewAttempt({
@@ -976,7 +977,7 @@ function archiveContractReviewAttempt(
   let review: ContractReview;
   try {
     review = loadContractReview(ctx.absSliceDir);
-    if (round === 1) {
+    if (round === 1 || validateAsFresh) {
       validateRound1ContractReview(review);
     } else if (previousReview && plannerResponse) {
       validateRound2ContractReview(
@@ -1020,6 +1021,190 @@ function archiveContractReviewAttempt(
     );
   }
   return { record, review };
+}
+
+async function runFocusedScopeRevision(
+  ctx: SliceContext,
+  escalation: import("./escalation.js").ScopeEscalation,
+): Promise<{ phase: "LOCKED" } | { phase: "ERROR"; error: string }> {
+  const { config, slice, logger, invoke } = ctx;
+  const contractPath = join(ctx.absSliceDir, "contract.md");
+  const manifestPath = join(
+    ctx.absSliceDir,
+    ACCEPTANCE_MANIFEST_FILENAME,
+  );
+  const previousContract = readFileSync(contractPath, "utf-8");
+  const previousManifestText = readFileSync(manifestPath, "utf-8");
+  const previousManifest = loadAcceptanceManifest(ctx.absSliceDir);
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
+  const revisionRound = artifacts.nextContractReviewRound(reviewArchiveDir);
+  const evidence = JSON.stringify({
+    findingIds: escalation.findingIds,
+    paths: escalation.paths,
+    reason: escalation.reason,
+  });
+
+  artifacts.reopenContract(contractPath);
+  logger.phase(
+    `${ctx.tag}: focused scope revision (contract round ${revisionRound})...`,
+    "error",
+    {
+      type: "phase-started",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      agent: "planner",
+      round: revisionRound,
+    },
+  );
+  rmSync(manifestPath, { force: true });
+  const plannerLog = logger.agentLog(
+    slice.number,
+    "planner",
+    revisionRound,
+  );
+  await invoke({
+    role: "planner",
+    prompt: renderPrompt("planner", {
+      GH_ISSUE: slice.ghIssue,
+      SPECS_DIR: ctx.relSpecsDir,
+      SLICE_DIR: ctx.relSliceDir,
+      ROUND: revisionRound,
+      RELEVANT_FILES: ctx.relevantFilesBlock,
+      SLICE_BODY:
+        `This is a focused revision of the already accepted contract. ` +
+        `The generator supplied this validated scope evidence:\n${evidence}`,
+      REVISION_NOTE:
+        `The generator stopped before an undeclared edit. Revise only the ` +
+        `contract and acceptance manifest needed to declare this request:\n` +
+        `${evidence}\n\nPreserve every other locked term.`,
+      CONTRACT_RESPONSE_NOTE:
+        `Do not write ${CONTRACT_RESPONSE_FILENAME} for this focused scope revision.`,
+      MIGRATION_RESERVATION: migrationReservationBlock(
+        config,
+        slice.ghIssue,
+      ),
+      BASE_GATE_CATALOG: formatBaseGateCatalog(
+        resolveBaseGateDeclarations(ctx.worktreeDir),
+      ),
+    }),
+    cwd: ctx.worktreeDir,
+    logStream: plannerLog,
+    maxDurationMs: config.maxAgentDurationMs,
+  }).finally(() => closeAgentLog(plannerLog));
+  logger.event({
+    type: "phase-ended",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    agent: "planner",
+    round: revisionRound,
+  });
+
+  const revisedManifest = loadAcceptanceManifest(ctx.absSliceDir);
+  validateAcceptanceManifestStability(previousManifest, revisedManifest);
+  validateAcceptanceManifestCoverage(
+    readFileSync(contractPath, "utf-8"),
+    revisedManifest,
+    contractPath,
+  );
+  const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
+  validateAcceptanceManifestBindings(revisedManifest, gateCatalog);
+  const revisions: ContractRevisionArtifacts = {
+    "contract.md": {
+      before: previousContract,
+      after: readFileSync(contractPath, "utf-8"),
+    },
+    "acceptance-manifest.json": {
+      before: previousManifestText,
+      after: readFileSync(manifestPath, "utf-8"),
+    },
+  };
+
+  logger.phase(
+    `${ctx.tag}: evaluating focused scope revision ` +
+      `(contract round ${revisionRound})...`,
+    "error",
+    {
+      type: "phase-started",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      agent: "evaluator-contract",
+      round: revisionRound,
+    },
+  );
+  const feedbackPath = join(
+    ctx.absSliceDir,
+    `feedback-r${revisionRound}.md`,
+  );
+  const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
+  rmSync(feedbackPath, { force: true });
+  rmSync(reviewPath, { force: true });
+  const evaluatorLog = logger.agentLog(
+    slice.number,
+    "evaluator-contract",
+    revisionRound,
+  );
+  await invoke({
+    role: "evaluator-contract",
+    prompt: renderPrompt("evaluator-contract", {
+      SPECS_DIR: ctx.relSpecsDir,
+      SLICE_DIR: ctx.relSliceDir,
+      ROUND: revisionRound,
+      RELEVANT_FILES: ctx.relevantFilesBlock,
+      PREVIOUS_REVIEW_NOTE:
+        "This is a fresh evaluation of one focused generator scope revision.",
+      ACCEPTANCE_MANIFEST: JSON.stringify(revisedManifest, null, 2),
+      BASE_GATE_CATALOG: formatBaseGateCatalog(gateCatalog),
+      CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
+      PLANNER_RESPONSE:
+        "(fresh scope revision; no contract-review finding response)",
+      REVISION_CONTEXT: JSON.stringify(
+        { scopeEscalation: escalation, revisions },
+        null,
+        2,
+      ),
+    }),
+    cwd: ctx.worktreeDir,
+    logStream: evaluatorLog,
+    maxDurationMs: config.maxAgentDurationMs,
+  }).finally(() => closeAgentLog(evaluatorLog));
+
+  archiveContractReviewAttempt(
+    ctx,
+    reviewArchiveDir,
+    revisionRound,
+    1,
+    null,
+    null,
+    revisions,
+    null,
+    true,
+  );
+  const review = loadContractReview(ctx.absSliceDir);
+  validateRound1ContractReview(review);
+  logger.event({
+    type: "phase-ended",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    agent: "evaluator-contract",
+    round: revisionRound,
+    verdict: review.verdict,
+  });
+  if (review.verdict !== "ACCEPT") {
+    return {
+      phase: "ERROR",
+      error:
+        `Focused scope revision was not accepted: ` +
+        formatContractReviewFindings(review.findings),
+    };
+  }
+
+  artifacts.lockContract(contractPath);
+  logger.phase(`${ctx.tag}: focused scope revision LOCKED`);
+  return { phase: "LOCKED" };
 }
 
 /**
@@ -3129,17 +3314,31 @@ export async function runSliceExecute(
       });
 
       if (existsSync(escalationPath)) {
-        parseScopeEscalation(
+        const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+          config.repoRoot,
+          pipelineRunSlug(
+            config.prdSlug,
+            config.provider ?? kiroProvider,
+          ),
+          slice.number,
+        );
+        artifacts.archiveScopeEscalationAttempt({
+          sliceDir: ctx.absSliceDir,
+          archiveDir: reviewArchiveDir,
+          round,
+          attempt: 1,
+        });
+        const escalation = parseScopeEscalation(
           readFileSync(escalationPath, "utf-8"),
           loadAcceptanceManifest(ctx.absSliceDir),
           { migrationPathPattern: config.migrationPathPattern },
           escalationPath,
         );
+        const revision = await runFocusedScopeRevision(ctx, escalation);
+        if (revision.phase === "ERROR") return revision;
         return {
           phase: "ERROR",
-          error:
-            `${ESCALATION_FILENAME} requested a contract revision, but ` +
-            "scope-escalation routing did not complete",
+          error: "Focused scope revision accepted; generation did not resume",
         };
       }
 

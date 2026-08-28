@@ -1004,6 +1004,108 @@ describe("generator scope escalation", () => {
   }, 60_000);
 });
 
+describe("focused generator scope revision", () => {
+  let repo: string;
+  let records: InvocationRecord[];
+  const slug = "focused-generator-scope-revision";
+  const escalation = {
+    version: 1,
+    findingIds: ["F-17", "F-18"],
+    paths: ["src/extra-a.ts", "src/extra-b.ts"],
+    reason: "both parser modules must change",
+  };
+
+  beforeAll(async () => {
+    repo = makeRepo({ lifetime: "describe" });
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1081",
+      title: "Focused scope revision",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    records = [];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slice.ghIssue,
+        {
+          files: ["src/declared.ts"],
+          revisedFiles: [
+            "src/declared.ts",
+            "src/extra-a.ts",
+            "src/extra-b.ts",
+          ],
+          qaPasses: true,
+          outputFile: "src/declared.ts",
+          outputContent: "declared work",
+          escalation: JSON.stringify(escalation),
+        },
+      ],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({ fixtures, slices: [slice], records }),
+    });
+  }, 60_000);
+
+  afterAll(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("routes the exact escalation evidence through one focused planner", () => {
+    const planners = records.filter(({ role }) => role === "planner");
+    expect(planners).toHaveLength(2);
+    expect(planners[1]!.prompt!).toContain(
+      JSON.stringify(escalation.findingIds),
+    );
+    expect(planners[1]!.prompt!).toContain(JSON.stringify(escalation.paths));
+    expect(planners[1]!.prompt!).toContain(escalation.reason);
+  });
+
+  it("evaluates the revised manifest after the focused planner", () => {
+    const relevant = records.filter(({ role }) =>
+      ["planner", "evaluator-contract", "generator"].includes(role),
+    );
+    expect(relevant.map(({ role }) => role)).toEqual([
+      "planner",
+      "evaluator-contract",
+      "generator",
+      "planner",
+      "evaluator-contract",
+    ]);
+    expect(relevant.at(-1)!.prompt!).toContain("src/extra-a.ts");
+    expect(relevant.at(-1)!.prompt!).toContain("src/extra-b.ts");
+  });
+
+  it("does not spend another implementation round while revising", () => {
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(1);
+  });
+
+  it("archives the escalating generator attempt", () => {
+    expect(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "reviews",
+          "escalation-r1-a1.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe(JSON.stringify(escalation));
+  });
+});
+
 /**
  * A run that dispatches nothing must say so and fail (issue #42). The
  * honest signal is `PipelineResult.success`, and `failureReason` carries
