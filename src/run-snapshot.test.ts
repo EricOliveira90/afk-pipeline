@@ -193,4 +193,96 @@ describe("foldEvents", () => {
       error: "generator rounds exhausted",
     });
   });
+  it("projects a slice's dispatch bounds and keeps them out of the warn stream", () => {
+    const snapshot = foldEvents(
+      [
+        ...realisticStream(),
+        event("2026-08-22T10:00:21.000Z", {
+          type: "slice-bounds",
+          ghIssue: "102",
+          sliceNumber: "02",
+          resumeAttemptsRemaining: 1,
+          resumeAttemptLimit: 2,
+          implementationRoundsRemaining: 2,
+          implementationRoundLimit: 3,
+          contractRoundsRemaining: 2,
+          contractRoundLimit: 2,
+          infrastructureRetriesPerInvocation: 2,
+          resumeMode: "killed",
+        }),
+      ],
+      EMPTY_STATE,
+    );
+
+    expect(snapshot.slices["102"]!.bounds).toEqual({
+      resumeAttemptsRemaining: 1,
+      resumeAttemptLimit: 2,
+      implementationRoundsRemaining: 2,
+      implementationRoundLimit: 3,
+      contractRoundsRemaining: 2,
+      contractRoundLimit: 2,
+      infrastructureRetriesPerInvocation: 2,
+      resumeMode: "killed",
+    });
+    expect(
+      snapshot.chronology.filter((entry) => entry.type === "slice-bounds"),
+    ).toHaveLength(1);
+    expect(snapshot.chronology.some((entry) => entry.type === "warn" &&
+      entry.event.message.includes("bounds"))).toBe(false);
+  });
+
+  it("keeps the latest dispatch's bounds when a slice is dispatched twice", () => {
+    const bounds = {
+      type: "slice-bounds" as const,
+      ghIssue: "101",
+      resumeAttemptLimit: 2,
+      implementationRoundLimit: 3,
+      contractRoundsRemaining: 2,
+      contractRoundLimit: 2,
+      infrastructureRetriesPerInvocation: 2,
+    };
+    const snapshot = foldEvents(
+      [
+        event("2026-08-22T10:00:00.500Z", {
+          ...bounds,
+          resumeAttemptsRemaining: 2,
+          implementationRoundsRemaining: 3,
+        }),
+        event("2026-08-22T10:30:00.000Z", {
+          ...bounds,
+          resumeAttemptsRemaining: 1,
+          implementationRoundsRemaining: 1,
+        }),
+      ],
+      EMPTY_STATE,
+    );
+
+    expect(snapshot.slices["101"]!.bounds).toMatchObject({
+      resumeAttemptsRemaining: 1,
+      implementationRoundsRemaining: 1,
+    });
+  });
+
+  it("ignores stage-duration events — they are harvest data, not a status view", () => {
+    const baseline = foldEvents(realisticStream(), EMPTY_STATE);
+    const withDuration = foldEvents(
+      [
+        ...realisticStream(),
+        event("2026-08-22T10:00:22.000Z", {
+          type: "stage-duration",
+          ghIssue: "101",
+          agent: "generator",
+          round: 1,
+          durationMs: 600_000,
+          history: { samples: 3, medianMs: 120_000, maxMs: 300_000 },
+          // A 5× round emits no signal here: no chronology entry, no
+          // warn, nothing for a reader to be alarmed by (plan debate §2).
+          ratioToMedian: 5,
+        }),
+      ],
+      EMPTY_STATE,
+    );
+
+    expect(withDuration).toEqual(baseline);
+  });
 });

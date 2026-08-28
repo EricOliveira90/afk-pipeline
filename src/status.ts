@@ -12,6 +12,7 @@
  */
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { formatSliceBounds } from "./bounds.js";
 import { parseIssuesMd } from "./issues-parser.js";
 import { readRunEvents, type RunEvent } from "./run-events.js";
 import { loadRunState } from "./run-state.js";
@@ -221,6 +222,16 @@ export function renderStatus(model: StatusModel, snapshot: RunSnapshot): string 
             ? `#${event.ghIssue} `
             : "";
         lines.push(`  ${clock(event.ts)}  ⚠ ${prefix}${event.message}`);
+        break;
+      }
+      case "slice-bounds": {
+        const { event } = entry;
+        any = true;
+        // No warn marker: these are the budgets stated at dispatch, not
+        // a signal that anything is wrong (wave item 14).
+        lines.push(
+          `  ${clock(event.ts)}  #${event.ghIssue} ${formatSliceBounds(event)}`,
+        );
         break;
       }
       case "slice-outcome": {

@@ -276,6 +276,44 @@ describe("retried slice resume (spec #33)", () => {
       }
     });
 
+    /**
+     * Bounds visibility (wave item 14). Riding this fixture rather than
+     * spawning: it is the only scenario that already dispatches the same
+     * slices twice with a resume, a restart and a refusal between the
+     * runs, which is exactly what makes the reported numbers move.
+     */
+    it("reports each dispatch's remaining budgets once, in the numbers that dispatch runs on", () => {
+      const boundsFor = (ghIssue: string) =>
+        logFor(ghIssue)
+          .split(/\r?\n/)
+          .filter((line) => line.includes("bounds:"))
+          .map((line) => line.slice(line.indexOf("bounds:")));
+
+      // One line per dispatch: run 1 dispatched everything fresh, run 2
+      // re-dispatched everything it did not refuse.
+      expect(boundsFor("4001")).toEqual([
+        "bounds: 2/2 resume attempts left · 3/3 implementation rounds left · " +
+          "2/2 contract rounds left · 2 infrastructure retries per invocation",
+        // The resume spent one attempt; no QA round completed before the
+        // death, so the implementation cap is untouched.
+        "bounds: 1/2 resume attempts left · 3/3 implementation rounds left · " +
+          "2/2 contract rounds left · 2 infrastructure retries per invocation",
+      ]);
+      // Slice 05 completed a QA round in run 1, so its resume is charged
+      // for it against the global cap (ADR 0014).
+      expect(boundsFor("4005")[1]).toBe(
+        "bounds: 1/2 resume attempts left · 2/3 implementation rounds left · " +
+          "2/2 contract rounds left · 2 infrastructure retries per invocation",
+      );
+      // A from-base restart earns a fresh resume budget (#36), so the
+      // forced slice 03 and the empty slice 04 report full headroom again.
+      expect(boundsFor("4003")[1]).toContain("2/2 resume attempts left");
+      expect(boundsFor("4004")[1]).toContain("2/2 resume attempts left");
+      // Slice 02's retry was refused before any agent ran — a dispatch
+      // that never happened reports no bounds.
+      expect(boundsFor("4002")).toHaveLength(1);
+    });
+
     it("resumes slice 01 from its surviving tip without renegotiating", () => {
       // Explorer and planner stay skipped — their artifacts survived.
       expect(rolesFor("01")).not.toContain("explorer");

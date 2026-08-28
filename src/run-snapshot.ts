@@ -26,9 +26,19 @@ export type SnapshotChronologyEntry =
     }
   | { type: "warn"; event: Extract<RunEvent, { type: "warn" }> }
   | {
+      type: "slice-bounds";
+      event: Extract<RunEvent, { type: "slice-bounds" }>;
+    }
+  | {
       type: "slice-outcome";
       event: Extract<RunEvent, { type: "slice-outcome" }>;
     };
+
+/** The budgets reported at a slice's dispatch (wave item 14). */
+export type SnapshotSliceBounds = Omit<
+  Extract<RunEvent, { type: "slice-bounds" }>,
+  "type" | "ts" | "ghIssue" | "sliceNumber"
+>;
 
 export type SnapshotPhaseCloseReason =
   | "phase-ended"
@@ -66,6 +76,12 @@ export interface SnapshotSlice {
   invocations: SnapshotPhaseInvocation[];
   outcome?: SnapshotSliceOutcome;
   blockedBy: string[];
+  /**
+   * Budgets from this slice's most recent dispatch, absent in streams
+   * that predate the `slice-bounds` event. Latest wins: a re-dispatch
+   * within one run reports the budgets it is actually running under.
+   */
+  bounds?: SnapshotSliceBounds;
 }
 
 export interface SnapshotWave {
@@ -339,6 +355,18 @@ export function foldEvents(
         chronology.push({ type: "slice-outcome", event });
         break;
       }
+      case "slice-bounds": {
+        const { type, ts, ghIssue, sliceNumber, ...bounds } = event;
+        const slice = sliceFor(ghIssue);
+        slice.sliceNumber = sliceNumber ?? slice.sliceNumber;
+        slice.bounds = bounds;
+        chronology.push({ type: "slice-bounds", event });
+        break;
+      }
+      case "stage-duration":
+        // Data for the babysitter and the ROI harvest, deliberately not
+        // projected into the status views — see `stage-durations.ts`.
+        break;
       case "warn":
         if (event.ghIssue !== undefined) {
           const slice = sliceFor(event.ghIssue);

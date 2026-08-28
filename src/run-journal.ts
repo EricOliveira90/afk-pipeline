@@ -1,5 +1,5 @@
 import { appendFileSync, type WriteStream } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
 import { Logger, type SanityGateResult } from "./logger.js";
 import {
@@ -8,6 +8,12 @@ import {
   serializeRunEvent,
   type RunEventPayload,
 } from "./run-events.js";
+import {
+  ratioToMedian,
+  readStageDurationHistory,
+  stageInvocationKey,
+  summarizeStageHistory,
+} from "./stage-durations.js";
 import {
   lifecycle,
   type FailurePhase,
@@ -37,6 +43,15 @@ export class RunJournal {
   private readonly terminalSlices = new Set<string>();
   private readonly logger: Logger;
   private featureBranch?: string;
+  /** Start epoch-ms of each `phase-started` still awaiting its `phase-ended`. */
+  private readonly openStages = new Map<string, number>();
+  /**
+   * Per-stage durations, seeded from the PRD's earlier runs on first use
+   * and grown by this run's own invocations. Lazy because a run that
+   * closes no stage — every unit test that only records outcomes — should
+   * not pay a directory scan for it.
+   */
+  private stageHistory?: Map<string, number[]>;
 
   readonly runDir: string;
 
@@ -69,14 +84,83 @@ export class RunJournal {
 
   /** Append a timestamped typed event without a human run-log line. */
   event(payload: RunEventPayload) {
+    const ts = new Date().toISOString();
+    this.append(payload, ts);
+    this.observeStageDuration(payload, ts);
+  }
+
+  private append(payload: RunEventPayload, ts: string) {
     try {
       appendFileSync(
         join(this.runDir, EVENTS_FILE),
-        serializeRunEvent({ ...payload, ts: new Date().toISOString() }),
+        serializeRunEvent({ ...payload, ts }),
       );
     } catch {
       // Best effort: run state remains authoritative.
     }
+  }
+
+  /**
+   * Derive the stage-duration event from the phase events already
+   * flowing through this seam (plan riding item; see
+   * `stage-durations.ts`). Doing it here rather than at each call site
+   * is what makes it free: every stage already reports its start and end
+   * through the journal, so no invocation site changes and none can
+   * forget.
+   *
+   * Data only — it records a duration beside its history and stops
+   * there. A stage whose `phase-ended` never arrives (the run died
+   * inside it) simply produces no event.
+   */
+  private observeStageDuration(payload: RunEventPayload, ts: string) {
+    if (payload.type === "phase-started") {
+      const startedMs = Date.parse(ts);
+      if (Number.isFinite(startedMs)) {
+        // Last start wins: an infrastructure retry re-opens the same
+        // round, and the duration that matters is the attempt that ended.
+        this.openStages.set(stageInvocationKey(payload), startedMs);
+      }
+      return;
+    }
+    if (payload.type !== "phase-ended") return;
+    const key = stageInvocationKey(payload);
+    const startedMs = this.openStages.get(key);
+    const endedMs = Date.parse(ts);
+    if (startedMs === undefined || !Number.isFinite(endedMs)) return;
+    this.openStages.delete(key);
+    const durationMs = Math.max(0, endedMs - startedMs);
+    const samples = this.stageSamples(payload.agent);
+    const history = summarizeStageHistory(samples);
+    samples.push(durationMs);
+    const ratio = history ? ratioToMedian(durationMs, history) : undefined;
+    this.append(
+      {
+        type: "stage-duration",
+        ghIssue: payload.ghIssue,
+        ...(payload.sliceNumber !== undefined
+          ? { sliceNumber: payload.sliceNumber }
+          : {}),
+        agent: payload.agent,
+        ...(payload.round !== undefined ? { round: payload.round } : {}),
+        durationMs,
+        history,
+        ...(ratio !== undefined ? { ratioToMedian: ratio } : {}),
+      },
+      ts,
+    );
+  }
+
+  /** This stage's prior durations, seeding the cross-run history on first use. */
+  private stageSamples(agent: string): number[] {
+    this.stageHistory ??= readStageDurationHistory(
+      dirname(this.runDir),
+      this.runDir,
+    );
+    const existing = this.stageHistory.get(agent);
+    if (existing) return existing;
+    const created: number[] = [];
+    this.stageHistory.set(agent, created);
+    return created;
   }
 
   /** Track an in-flight slice or a HITL skip; terminal phases use recordTerminal. */

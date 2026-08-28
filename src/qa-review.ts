@@ -553,6 +553,32 @@ function restoreQAReviewStage(
   return { history, unresolved, lastImplementationRound };
 }
 
+/**
+ * Highest implementation round already evidenced on this tree — i.e. the
+ * rounds a resume has spent against the global cap (ADR 0014).
+ *
+ * Filenames only: no record is parsed and nothing throws on a malformed
+ * one, which is what makes it safe to call for the dispatch-time bounds
+ * line as well as from `loadQAReviewResumeState` (whose `nextRound` is
+ * this plus one). Both callers therefore report the same number.
+ */
+export function spentImplementationRounds(
+  reviewArchiveDir: string,
+  sliceDir: string,
+): number {
+  let maxRound = 0;
+  const scan = (dir: string, pattern: RegExp) => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      const match = pattern.exec(name);
+      if (match) maxRound = Math.max(maxRound, Number(match[1]));
+    }
+  };
+  scan(reviewArchiveDir, REVIEW_EVIDENCE_FILENAME);
+  scan(sliceDir, REPORT_EVIDENCE_FILENAME);
+  return maxRound;
+}
+
 export function loadQAReviewResumeState(
   reviewArchiveDir: string,
   sliceDir: string,
@@ -560,17 +586,7 @@ export function loadQAReviewResumeState(
   const reviewNames = existsSync(reviewArchiveDir)
     ? readdirSync(reviewArchiveDir)
     : [];
-  const reportNames = existsSync(sliceDir) ? readdirSync(sliceDir) : [];
-  let maxRound = 0;
-
-  for (const name of reviewNames) {
-    const match = REVIEW_EVIDENCE_FILENAME.exec(name);
-    if (match) maxRound = Math.max(maxRound, Number(match[1]));
-  }
-  for (const name of reportNames) {
-    const match = REPORT_EVIDENCE_FILENAME.exec(name);
-    if (match) maxRound = Math.max(maxRound, Number(match[1]));
-  }
+  const maxRound = spentImplementationRounds(reviewArchiveDir, sliceDir);
 
   const records = reviewNames
     .map((name) => ({ name, match: RECORD_FILENAME.exec(name) }))

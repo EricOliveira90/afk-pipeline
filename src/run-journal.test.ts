@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -218,5 +219,132 @@ describe("RunJournal.markCancelledInFlight", () => {
     // Every write fails here; the point is that the sweep returns rather
     // than throwing out of an abort listener that has slices left to mark.
     expect(journal.markCancelledInFlight([SLICE, OTHER], "Cancelled by user")).toEqual([]);
+  });
+});
+
+/**
+ * The stage-duration journal event (afk-v2 plan, riding wave item 14).
+ * Derived inside the journal from the phase events every stage already
+ * reports, so these assert at the seam rather than through a pipeline.
+ */
+describe("RunJournal stage durations", () => {
+  function durationEvents(journal: RunJournal) {
+    return eventsOf(journal).filter((e) => e.type === "stage-duration");
+  }
+
+  it("records a stage's duration after its phase-ended, with no history on the first", () => {
+    const journal = new RunJournal(makeRepo(), "stage-first");
+    const started = new Date("2026-08-28T10:00:00.000Z");
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(started);
+      journal.event({ type: "phase-started", ghIssue: "79", sliceNumber: "01", agent: "generator", round: 1 });
+      vi.setSystemTime(new Date(started.getTime() + 90_000));
+      journal.event({ type: "phase-ended", ghIssue: "79", sliceNumber: "01", agent: "generator", round: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(durationEvents(journal)).toEqual([
+      {
+        type: "stage-duration",
+        ts: "2026-08-28T10:01:30.000Z",
+        ghIssue: "79",
+        sliceNumber: "01",
+        agent: "generator",
+        round: 1,
+        durationMs: 90_000,
+        history: null,
+      },
+    ]);
+  });
+
+  it("compares a later round against the earlier rounds of the same stage", () => {
+    const journal = new RunJournal(makeRepo(), "stage-history");
+    const base = new Date("2026-08-28T10:00:00.000Z").getTime();
+    const runStage = (round: number, at: number, durationMs: number) => {
+      vi.setSystemTime(new Date(at));
+      journal.event({ type: "phase-started", ghIssue: "79", agent: "generator", round });
+      vi.setSystemTime(new Date(at + durationMs));
+      journal.event({ type: "phase-ended", ghIssue: "79", agent: "generator", round });
+    };
+    vi.useFakeTimers();
+    try {
+      runStage(1, base, 60_000);
+      runStage(2, base + 600_000, 120_000);
+      runStage(3, base + 1_200_000, 360_000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(durationEvents(journal).map((e) => [e.durationMs, e.history, e.ratioToMedian])).toEqual([
+      [60_000, null, undefined],
+      [120_000, { samples: 1, medianMs: 60_000, maxMs: 60_000 }, 2],
+      [360_000, { samples: 2, medianMs: 90_000, maxMs: 120_000 }, 4],
+    ]);
+  });
+
+  it("emits the duration after the phase-ended it derives from", () => {
+    const journal = new RunJournal(makeRepo(), "stage-order");
+    journal.event({ type: "phase-started", ghIssue: "79", agent: "explorer" });
+    journal.event({ type: "phase-ended", ghIssue: "79", agent: "explorer" });
+
+    expect(eventsOf(journal).map((e) => e.type)).toEqual([
+      "header",
+      "phase-started",
+      "phase-ended",
+      "stage-duration",
+    ]);
+  });
+
+  it("records nothing for a stage whose phase-ended never arrives", () => {
+    const journal = new RunJournal(makeRepo(), "stage-killed");
+    journal.event({ type: "phase-started", ghIssue: "79", agent: "generator", round: 1 });
+
+    expect(durationEvents(journal)).toEqual([]);
+  });
+
+  it("seeds the history from the PRD's earlier runs", () => {
+    const repo = makeRepo();
+    const logDir = join(repo, ".afk", "logs", "prior-runs");
+    const priorRun = join(logDir, "run-20260101-000000");
+    mkdirSync(priorRun, { recursive: true });
+    writeFileSync(
+      join(priorRun, "events.jsonl"),
+      [
+        { type: "phase-started", ghIssue: "12", agent: "generator", round: 1, ts: "2026-01-01T00:00:00.000Z" },
+        { type: "phase-ended", ghIssue: "12", agent: "generator", round: 1, ts: "2026-01-01T00:05:00.000Z" },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join("\n") + "\n",
+      "utf-8",
+    );
+    const journal = new RunJournal(repo, "prior-runs");
+    const started = new Date("2026-08-28T10:00:00.000Z");
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(started);
+      journal.event({ type: "phase-started", ghIssue: "79", agent: "generator", round: 1 });
+      vi.setSystemTime(new Date(started.getTime() + 600_000));
+      journal.event({ type: "phase-ended", ghIssue: "79", agent: "generator", round: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(durationEvents(journal)[0]).toMatchObject({
+      durationMs: 600_000,
+      history: { samples: 1, medianMs: 300_000, maxMs: 300_000 },
+      ratioToMedian: 2,
+    });
+  });
+
+  it("emits data only — no warn event, no run.log line, no threshold", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "stage-data-only");
+    journal.event({ type: "phase-started", ghIssue: "79", agent: "generator", round: 1 });
+    journal.event({ type: "phase-ended", ghIssue: "79", agent: "generator", round: 1 });
+
+    expect(eventsOf(journal).some((e) => e.type === "warn")).toBe(false);
+    expect(existsSync(join(journal.runDir, "run.log"))).toBe(false);
   });
 });

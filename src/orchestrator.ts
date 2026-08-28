@@ -38,6 +38,11 @@ import {
 } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 import {
+  computeSliceBounds,
+  formatSliceBounds,
+  implementationRoundsRemaining,
+} from "./bounds.js";
+import {
   DEFAULT_MIN_FREE_DISK_GB,
   formatPreflightRefusal,
   formatPreflightReport,
@@ -140,6 +145,7 @@ import {
   loadQAReview,
   loadQAReviewResumeState,
   qaReviewFilename,
+  spentImplementationRounds,
   type QAReview,
   type QAReviewAttemptFinding,
   type QAReviewLifecycleFinding,
@@ -1573,6 +1579,59 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
 }
 
 /**
+ * Report this dispatch's budgets — one `run.log` line and one typed
+ * `slice-bounds` event (plan §3.9, wave item 14). See `bounds.ts` for
+ * why: these four numbers decide what a struggling slice may still do,
+ * and until now the only way to read them was `.afk/state/<slug>.json`.
+ *
+ * Called once per slice dispatch, after `prepareSliceWorktree` — the
+ * resume decision has landed by then, so the attempt counter and the
+ * resume mode are the ones this dispatch actually runs under rather than
+ * the ones it inherited.
+ *
+ * Reporting only. Every budget is still enforced where it was.
+ */
+export function reportSliceBounds(ctx: SliceContext): void {
+  const { config, slice } = ctx;
+  const provider = config.provider ?? kiroProvider;
+  const runSlug = pipelineRunSlug(config.prdSlug, provider);
+  const bounds = computeSliceBounds({
+    resumeAttemptsSpent: getResumeAttempts(
+      loadRunState(config.repoRoot, runSlug),
+      slice.ghIssue,
+    ),
+    // A fresh or restarted slice starts at round 1 whatever is on disk;
+    // only a resume inherits the rounds its prior lives spent.
+    implementationRoundsSpent: ctx.resume
+      ? spentImplementationRounds(
+          artifacts.contractReviewArchiveDir(
+            config.repoRoot,
+            runSlug,
+            slice.number,
+          ),
+          ctx.absSliceDir,
+        )
+      : 0,
+    implementationRoundLimit: MAX_GENERATOR_ROUNDS,
+    contractRoundLimit: Math.min(
+      config.maxContractRounds ?? DEFAULT_MAX_CONTRACT_ROUNDS,
+      DEFAULT_MAX_CONTRACT_ROUNDS,
+    ),
+    infrastructureRetries:
+      config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+    ...(ctx.resume ? { resumeMode: ctx.resume.mode } : {}),
+  });
+  // Same stream as the resume/restart and round lines it sits between, so
+  // the console order matches run.log's.
+  ctx.logger.phase(`${ctx.tag}: ${formatSliceBounds(bounds)}`, "error", {
+    type: "slice-bounds",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    ...bounds,
+  });
+}
+
+/**
  * Phase A — explorer + planner ↔ evaluator-contract. Writes
  * `contract.md`. Boundary: ends at the contract-LOCKED check.
  *
@@ -1676,6 +1735,7 @@ async function negotiateAttempt(
   try {
     await prepareSliceWorktree(ctx);
     mkdirSync(ctx.absSliceDir, { recursive: true });
+    reportSliceBounds(ctx);
 
     // --- Step 1: Explorer ---
     const localSliceContent = readSliceFile(prdDir, slice.number);
@@ -2796,10 +2856,14 @@ export async function runSliceExecute(
     // resume earns headroom beyond the cap — its documented single
     // extra attempt. A resume whose evidence already shows the cap
     // spent gets zero attempts and falls through to the STUCK return.
-    const implementationAttemptLimit =
-      ctx.resume?.mode === "stuck"
-        ? 1
-        : Math.max(0, MAX_GENERATOR_ROUNDS - firstRound + 1);
+    //
+    // Shared with the dispatch bounds line so the number the operator
+    // was told at dispatch is the number this loop runs on.
+    const implementationAttemptLimit = implementationRoundsRemaining({
+      limit: MAX_GENERATOR_ROUNDS,
+      spent: firstRound - 1,
+      resumeMode: ctx.resume?.mode,
+    });
     const finalRound = firstRound + implementationAttemptLimit - 1;
 
     for (

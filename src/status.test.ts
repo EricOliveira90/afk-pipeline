@@ -510,3 +510,80 @@ describe("afk status future section integration (#30)", () => {
     });
   });
 });
+
+describe("afk status bounds visibility (wave item 14)", () => {
+  const BOUNDS = {
+    type: "slice-bounds",
+    ghIssue: "9601",
+    sliceNumber: "01",
+    resumeAttemptsRemaining: 1,
+    resumeAttemptLimit: 2,
+    implementationRoundsRemaining: 2,
+    implementationRoundLimit: 3,
+    contractRoundsRemaining: 2,
+    contractRoundLimit: 2,
+    infrastructureRetriesPerInvocation: 2,
+    resumeMode: "killed",
+    ts: "2026-08-18T10:00:05.000Z",
+  };
+
+  it("states the dispatch's budgets in the chronology and beside the running slice", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      { type: "run-started", provider: "stub", runSlug: "demo-stub", ts: "2026-08-18T10:00:00.100Z" },
+      { type: "wave-dispatched", wave: 1, slices: ["9601"], ts: "2026-08-18T10:00:01.000Z" },
+      BOUNDS,
+      // Left open, so the slice is still "present" and the bounds show
+      // up where an operator watching a long round is already looking.
+      { type: "phase-started", ghIssue: "9601", sliceNumber: "01", agent: "generator", round: 2, ts: "2026-08-18T10:00:10.000Z" },
+    ]);
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    expect(output).toMatch(
+      /10:00:05\s+#9601 bounds: 1\/2 resume attempts left · 2\/3 implementation rounds left · 2\/2 contract rounds left · 2 infrastructure retries per invocation/,
+    );
+    // Present section repeats them under the running slice.
+    const presentIdx = output.indexOf("Present:");
+    expect(output.slice(presentIdx)).toMatch(
+      /#9601 generator \(round 2\)[\s\S]*bounds: 1\/2 resume attempts left/,
+    );
+    // Not a warning: the bounds line carries no warn marker.
+    expect(output).not.toMatch(/⚠.*bounds:/);
+  });
+
+  it("--json carries the bounds on the slice and the present entry", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", [
+      { type: "header", version: 1, ts: "2026-08-18T10:00:00.000Z" },
+      { type: "run-started", provider: "stub", runSlug: "demo-stub", ts: "2026-08-18T10:00:00.100Z" },
+      BOUNDS,
+      { type: "phase-started", ghIssue: "9601", sliceNumber: "01", agent: "generator", round: 2, ts: "2026-08-18T10:00:10.000Z" },
+    ]);
+
+    const model = JSON.parse(runStatus(["--json"], root).output);
+
+    expect(model.present.active[0]).toMatchObject({
+      ghIssue: "9601",
+      bounds: {
+        resumeAttemptsRemaining: 1,
+        implementationRoundsRemaining: 2,
+        contractRoundsRemaining: 2,
+        infrastructureRetriesPerInvocation: 2,
+        resumeMode: "killed",
+      },
+    });
+  });
+
+  it("renders a run that predates the event unchanged", () => {
+    const root = makeRoot();
+    writeRunDir(root, "demo-stub", "run-20260818-100000", standardEvents());
+
+    const { output, exitCode } = runStatus([], root);
+
+    expect(exitCode).toBe(0);
+    expect(output).not.toContain("bounds:");
+  });
+});
