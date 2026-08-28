@@ -30,6 +30,7 @@
     "test:heavy:qa": "node scripts/timed-suite.mjs qa-orchestration vitest run src/qa-orchestration.test.ts",
     "test:heavy:clean": "node scripts/timed-suite.mjs clean-failed vitest run src/clean-failed.test.ts",
     "test:budgets": "node scripts/check-suite-budgets.mjs",
+    "lint:tickets": "node scripts/lint-tickets.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
