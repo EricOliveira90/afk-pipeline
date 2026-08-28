@@ -360,6 +360,46 @@ describe("RunJournal.markCancelledInFlight", () => {
     });
   });
 
+  it("leaves an adjudication park and its artifacts unchanged", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "cancel-impasse");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const working = join(repo, "slice", "contract-negotiation-outcome.json");
+    const archived = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "cancel-impasse",
+      "slice-01",
+      "contract-negotiation-outcome.json",
+    );
+    mkdirSync(join(working, ".."), { recursive: true });
+    mkdirSync(join(archived, ".."), { recursive: true });
+    const artifact = '{"classification":"IMPASSE","findings":["F-01"]}\n';
+    writeFileSync(working, artifact, "utf-8");
+    writeFileSync(archived, artifact, "utf-8");
+    journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: "contract impasse on F-01",
+    });
+    journal.trackSlice(lifecycle.running(OTHER));
+
+    expect(
+      journal.markCancelledInFlight([SLICE, OTHER], "Cancelled by user"),
+    ).toEqual(["41"]);
+
+    expect(loadRunState(repo, "cancel-impasse").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: "contract impasse on F-01",
+    });
+    expect(loadRunState(repo, "cancel-impasse").slices["41"]?.phase).toBe(
+      "CANCELLED",
+    );
+    expect(readFileSync(working, "utf-8")).toBe(artifact);
+    expect(readFileSync(archived, "utf-8")).toBe(artifact);
+  });
+
   it("is provisional: a real outcome landing during the wind-down still wins", () => {
     const repo = makeRepo();
     const journal = new RunJournal(repo, "cancel-provisional");

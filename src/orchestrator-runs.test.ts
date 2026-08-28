@@ -186,6 +186,137 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
   }, 240_000);
 });
 
+describe("cancellation after an impasse park", () => {
+  it("cancels only unsettled work and leaves the parked state and artifacts byte-stable", async () => {
+    // This state differs from every existing cancellation fixture: one
+    // slice is terminally parked while its sibling is still active.
+    const repo = makeRepo();
+    const slug = "cancel-after-impasse";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "8281",
+        title: "Parked",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "8282",
+        title: "Active sibling",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "8281",
+        {
+          files: ["src/parked.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/parked.txt",
+          outputContent: "parked",
+        },
+      ],
+      [
+        "8282",
+        {
+          files: ["src/active.txt"],
+          qaPasses: true,
+          outputFile: "src/active.txt",
+          outputContent: "active",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const stub = buildStubProvider({ fixtures, slices, records });
+    const controller = new AbortController();
+    let before:
+      | {
+          parkedState: Record<string, unknown>;
+          workingPath: string;
+          working: string;
+          archivedPath: string;
+          archived: string;
+        }
+      | undefined;
+    const provider: AgentProvider = {
+      name: stub.name,
+      async invoke(options) {
+        const result = await stub.invoke(options);
+        if (
+          options.role === "generator" &&
+          /-s02$/.test(options.cwd.replace(/\\/g, "/"))
+        ) {
+          const parkedCwd = records.find(
+            (record) => record.ghIssue === "8281",
+          )?.cwd;
+          if (!parkedCwd) throw new Error("parked worktree was not invoked");
+          const parkedDir = findSliceArtifactDir(parkedCwd, "01");
+          if (!parkedDir) throw new Error("parked artifact directory missing");
+          const workingPath = join(
+            parkedDir,
+            "contract-negotiation-outcome.json",
+          );
+          const archivedPath = join(
+            repo,
+            ".afk",
+            "artifacts",
+            `${slug}-stub`,
+            "slice-01",
+            "contract-negotiation-outcome.json",
+          );
+          const state = JSON.parse(
+            readFileSync(
+              join(repo, ".afk", "state", `${slug}-stub.json`),
+              "utf-8",
+            ),
+          );
+          before = {
+            parkedState: state.slices["8281"],
+            workingPath,
+            working: readFileSync(workingPath, "utf-8"),
+            archivedPath,
+            archived: readFileSync(archivedPath, "utf-8"),
+          };
+          controller.abort();
+        }
+        return result;
+      },
+    };
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      signal: controller.signal,
+    });
+
+    expect(before).toBeDefined();
+    const finalState = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(finalState.slices["8281"]).toEqual(before!.parkedState);
+    expect(finalState.slices["8281"]).toMatchObject({
+      phase: "AWAITING-ADJUDICATION",
+      branch: expect.any(String),
+    });
+    expect(finalState.slices["8282"]?.phase).toBe("CANCELLED");
+    expect(readFileSync(before!.workingPath, "utf-8")).toBe(before!.working);
+    expect(readFileSync(before!.archivedPath, "utf-8")).toBe(before!.archived);
+  }, 240_000);
+});
+
 
 /**
  * Per-slice state persistence (ADR 0018). A slice's terminal outcome
