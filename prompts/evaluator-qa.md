@@ -43,7 +43,11 @@ Also read:
 - **INFRASTRUCTURE:** external service outage, DNS/network failure, shared
   preview connection-pool exhaustion, provider crash, or another failure that
   source changes cannot fix. Cite direct evidence. A timeout alone is not
-  enough when fixture or application code could be responsible.
+  enough when fixture or application code could be responsible — but a
+  timeout is *not* a code finding when the orchestrator's base gate ran the
+  same command to green on the same tree. That gate evidence is supplied to
+  you; cite it and classify the interruption as INFRASTRUCTURE rather than
+  reporting a defect the tree does not contain.
 - **NONE:** all assigned checks passed.
 
 # Pass 1: Functional Correctness
@@ -55,6 +59,12 @@ For deterministic slice QA, run every sanity command below in order:
 That list is the complete command set for this pass — it already includes
 the project's tests. Do not run the project tests twice, and do not
 substitute a command the list does not name.
+
+Launch any command you expect to run for more than a few minutes as a
+background job and poll it to completion, rather than invoking it directly
+and waiting. Your command wrapper may enforce a ceiling on a single
+invocation's total runtime that a long test suite exceeds; a suite killed
+that way produces no verdict and no usable evidence for this pass.
 For shared-preview UAT, skip the sanity list and run only remote scenarios from
 the contract.
 
