@@ -24,6 +24,17 @@ export interface SliceTotals {
   toolCallCount: number;
 }
 
+export interface DependencyBlocker {
+  ghIssue: string;
+  status: string;
+}
+
+interface DependencyHold {
+  ghIssue: string;
+  title: string;
+  blockers: DependencyBlocker[];
+}
+
 export type { SanityGateResult };
 
 /**
@@ -82,6 +93,7 @@ export function runDirNameFor(startedAt: Date, parentDir: string): string {
 export class Logger {
   private logDir: string;
   private runLog: RunLog;
+  private readonly dependencyHolds: DependencyHold[] = [];
   /**
    * Per-run log directory (`.afk/logs/<prd-slug>/run-<timestamp>/`).
    * Agent invocation logs and run.log live here, so a file's mtime and
@@ -180,6 +192,17 @@ export class Logger {
     this.runLog.prUrl = url;
   }
 
+  recordDependencyHold(
+    slice: Pick<SliceLifecycle, "ghIssue" | "title">,
+    blockers: DependencyBlocker[],
+  ) {
+    this.dependencyHolds.push({
+      ghIssue: slice.ghIssue,
+      title: slice.title,
+      blockers: [...blockers],
+    });
+  }
+
   writeSummary() {
     this.runLog.finishedAt = new Date();
     const {
@@ -243,6 +266,24 @@ export class Logger {
 |-------|-------|------|--------|---------|----------|-----|
 ${gateRows}
 `;
+    const dependencyRows = this.dependencyHolds
+      .map(
+        (hold) =>
+          `| #${hold.ghIssue} ${hold.title} | ${hold.blockers
+            .map((blocker) => `#${blocker.ghIssue} (${blocker.status})`)
+            .join(", ")} |`,
+      )
+      .join("\n");
+    const dependencySection =
+      dependencyRows.length === 0
+        ? ""
+        : `
+## Dependency Holds
+
+| Slice | Blocked by |
+|-------|------------|
+${dependencyRows}
+`;
 
     const summary = `# Run Summary — ${prdSlug}
 
@@ -253,6 +294,7 @@ Finished: ${finishedAt!.toISOString()}
 |-------|--------|--------|--------|------|------------|
 ${rows}
 ${totalsRow}
+${dependencySection}
 ${gateSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}

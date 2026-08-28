@@ -184,6 +184,24 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
       "Pre-ship sanity gate: FAIL (typecheck, tests)",
     );
   });
+
+  it("names dependents held by a parked adjudication issue", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "impasse-hold");
+    recordTerminal(log, id("81", "Parked", "afk/81"), {
+      phase: "AWAITING-ADJUDICATION",
+      error: "contract impasse on F-01",
+    });
+    log.recordDependencyHold(
+      id("82", "Dependent", "afk/82"),
+      [{ ghIssue: "81", status: "AWAITING-ADJUDICATION" }],
+    );
+
+    const md = log.writeSummary();
+
+    expect(md).toContain("#82 Dependent");
+    expect(md).toContain("#81 (AWAITING-ADJUDICATION)");
+  });
 });
 
 

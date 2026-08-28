@@ -68,6 +68,7 @@ import {
 } from "./cancellation.js";
 import { readRunEvents } from "./run-events.js";
 import { readStopAck, writeStopRequest } from "./stop-sentinel.js";
+import { runStatus } from "./status.js";
 import {
   buildStubProvider,
   cleanupIntegrationTempDirs,
@@ -82,6 +83,107 @@ import {
 
 afterEach(() => {
   cleanupIntegrationTempDirs();
+});
+
+describe("an impasse parks its slice and holds only DAG dependents", () => {
+  it("continues an independent sibling and names the undispatched dependent in summary and status", async () => {
+    // This fixture state cannot be reached by an existing pipeline run:
+    // negotiation itself parks while a sibling passes and a dependent
+    // remains undispatched.
+    const repo = makeRepo();
+    const slug = "impasse-dependency";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "8181",
+        title: "Parked foundation",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "8182",
+        title: "Independent sibling",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "03",
+        ghIssue: "8183",
+        title: "Dependent",
+        type: "AFK",
+        blockedBy: ["8181"],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "8181",
+        {
+          files: ["src/shared.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/shared.txt",
+          outputContent: "parked",
+        },
+      ],
+      [
+        "8182",
+        {
+          files: ["src/shared.txt"],
+          qaPasses: true,
+          outputFile: "src/shared.txt",
+          outputContent: "continued",
+        },
+      ],
+      [
+        "8183",
+        {
+          files: ["src/dependent.txt"],
+          qaPasses: true,
+          outputFile: "src/dependent.txt",
+          outputContent: "dependent",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices, records });
+
+    const result = await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    expect(records.some((record) => record.ghIssue === "8183")).toBe(false);
+    expect(
+      records.some(
+        (record) =>
+          record.ghIssue === "8182" && record.role === "generator",
+      ),
+    ).toBe(true);
+    expect(result.summary).toContain("#8183 Dependent");
+    expect(result.summary).toContain("#8181 (AWAITING-ADJUDICATION)");
+
+    const runDir = readdirSync(
+      join(repo, ".afk", "logs", `${slug}-stub`),
+      { withFileTypes: true },
+    )
+      .filter((entry) => entry.isDirectory() && /^run-/.test(entry.name))
+      .map((entry) =>
+        join(repo, ".afk", "logs", `${slug}-stub`, entry.name),
+      )[0]!;
+    const status = runStatus(["--run", runDir], repo);
+    expect(status.output).toContain(
+      "waits on #8181 (AWAITING-ADJUDICATION)",
+    );
+  }, 240_000);
 });
 
 

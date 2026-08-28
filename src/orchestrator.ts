@@ -4656,6 +4656,20 @@ export async function runPipeline(
       `held back by unresolved ` +
       `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`;
     notRunHolds.push({ id, title: slice.title, hold });
+    logger.recordDependencyHold(
+      {
+        ghIssue: id,
+        title: slice.title,
+        branch: sliceBranch(prdSlug, slice, provider),
+      },
+      unresolved.map((dep) => ({
+        ghIssue: dep,
+        status:
+          logger.getSlice(dep)?.phase ??
+          runState.slices[dep]?.phase ??
+          "UNKNOWN",
+      })),
+    );
     logger.phase(
       `[afk] Slice #${id} (${slice.title}): NOT-RUN — ${hold}; ` +
         `fix the blocker(s) and re-run`,

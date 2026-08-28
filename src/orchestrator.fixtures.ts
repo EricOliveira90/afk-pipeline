@@ -28,7 +28,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Slice } from "./issues-parser.js";
 import { resolveBaseGateDeclarations } from "./orchestrator.js";
-import { writeContractReview, writeQAReview } from "./test-support.js";
+import {
+  writeContractResponse,
+  writeContractReview,
+  writeQAReview,
+} from "./test-support.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -87,6 +91,8 @@ export interface SliceFixture {
   escalation?: string;
   /** One-based generator invocation that emits `escalation`. Defaults to 1. */
   escalationGeneratorInvocation?: number;
+  /** Exhaust contract negotiation in round two with a contested finding. */
+  contractImpasse?: boolean;
 }
 
 export interface InvocationRecord {
@@ -268,19 +274,49 @@ export function buildStubProvider(opts: {
         const filesBlock = files.map((f) => `- ${f}`).join("\n");
         writeFileSync(
           join(sliceArtifactDir, "contract.md"),
-          `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n${filesBlock}\n`,
+          `# Slice Contract\n\n**Status:** ${fixture.contractImpasse ? "DRAFT" : "LOCKED"}\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
         writeAcceptanceManifest(sliceArtifactDir, files);
-      } else if (role === "evaluator-contract" && sliceArtifactDir) {
+        if (fixture.contractImpasse && plannerRound === 2) {
+          writeContractResponse(sliceArtifactDir, ["F-IMPASSE"], "CONTESTED");
+        }
+      } else if (
+        role === "evaluator-contract" &&
+        sliceArtifactDir &&
+        fixture
+      ) {
         const feedbackRound =
           /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "1";
+        const impasse = fixture.contractImpasse === true;
         writeFileSync(
           join(sliceArtifactDir, `feedback-r${feedbackRound}.md`),
-          `## Evaluator feedback — round ${feedbackRound}\n\nThe contract is testable.\n`,
+          `## Evaluator feedback — round ${feedbackRound}\n\n${
+            impasse ? "The contract interpretation remains disputed." : "The contract is testable."
+          }\n`,
           "utf-8",
         );
-        writeContractReview(sliceArtifactDir, "ACCEPT");
+        writeContractReview(
+          sliceArtifactDir,
+          impasse ? "REVISE" : "ACCEPT",
+          impasse
+            ? [
+                {
+                  id: "F-IMPASSE",
+                  severity: "BLOCKING",
+                  behaviorIds: ["B-01"],
+                  evidence: '"the evaluator-held interpretation"',
+                  expected: "one agreed interpretation",
+                  observed: "the planner contests the evaluator interpretation",
+                  clearCondition: "a human adjudicates the finding",
+                  state:
+                    plannerRounds.get(ghIssue) === 2
+                      ? "CONTESTED"
+                      : "OPEN",
+                },
+              ]
+            : undefined,
+        );
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         if (fixture.simulateIdleDeferral) {
           options.onIdleDeferral?.({ silentSeconds: 600, busyProcesses: 2 });

@@ -1,7 +1,11 @@
 import { appendFileSync, type WriteStream } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
-import { Logger, type SanityGateResult } from "./logger.js";
+import {
+  Logger,
+  type DependencyBlocker,
+  type SanityGateResult,
+} from "./logger.js";
 import {
   EVENTS_FILE,
   EVENTS_SCHEMA_VERSION,
@@ -419,6 +423,13 @@ export class RunJournal {
 
   setPrUrl(url: string) {
     this.logger.setPrUrl(url);
+  }
+
+  recordDependencyHold(
+    sliceId: SliceIdentity,
+    blockers: DependencyBlocker[],
+  ) {
+    this.logger.recordDependencyHold(sliceId, blockers);
   }
 
   writeSummary() {
