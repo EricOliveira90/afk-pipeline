@@ -2435,22 +2435,46 @@ describe("round-scoped contract feedback", () => {
           );
           writeAcceptanceManifest(artifactDir);
           if (plannerRounds === 2) {
-            writeContractResponse(artifactDir, ["F-01"], "CONTESTED");
+            writeFileSync(
+              join(artifactDir, "contract-response.json"),
+              JSON.stringify({
+                version: 1,
+                round: 2,
+                responses: [
+                  {
+                    findingId: "F-01",
+                    position: "CONTESTED",
+                    evidence: "planner evidence alpha, verbatim",
+                  },
+                  {
+                    findingId: "F-02",
+                    position: "CONTESTED",
+                    evidence: "planner evidence beta, verbatim",
+                  },
+                ],
+              }),
+              "utf-8",
+            );
           }
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
-          writeContractReview(artifactDir, "REVISE", [
-            {
-              id: "F-01",
-              severity: "BLOCKING",
+          writeContractReview(
+            artifactDir,
+            "REVISE",
+            ["F-01", "F-02"].map((id, index) => ({
+              id,
+              severity: "BLOCKING" as const,
               behaviorIds: ["B-01"],
-              evidence: '"the disputed contract clause"',
+              evidence: `evaluator evidence ${index === 0 ? "alpha" : "beta"}, verbatim`,
               expected: "one agreed contract interpretation",
               observed: "planner and evaluator retain different interpretations",
               clearCondition: "a human adjudicates the disputed interpretation",
-              state: evaluatorRounds === 1 ? "OPEN" : "CONTESTED",
-            },
-          ]);
+              state:
+                evaluatorRounds === 1
+                  ? ("OPEN" as const)
+                  : ("CONTESTED" as const),
+            })),
+          );
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -2476,6 +2500,43 @@ describe("round-scoped contract feedback", () => {
     }
     expect(outcome.cause.summary).toContain("IMPASSE");
     expect(outcome.cause.summary).toContain("F-01");
+    expect(outcome.cause.summary).toContain("F-02");
+
+    const working = readFileSync(
+      join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
+      "utf-8",
+    );
+    const archived = readFileSync(
+      join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-01",
+        "contract-negotiation-outcome.json",
+      ),
+      "utf-8",
+    );
+    expect(archived).toBe(working);
+    expect(JSON.parse(working)).toMatchObject({
+      classification: "IMPASSE",
+      findings: [
+        {
+          id: "F-01",
+          state: "CONTESTED",
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "planner evidence alpha, verbatim",
+          evaluatorEvidence: "evaluator evidence alpha, verbatim",
+        },
+        {
+          id: "F-02",
+          state: "CONTESTED",
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "planner evidence beta, verbatim",
+          evaluatorEvidence: "evaluator evidence beta, verbatim",
+        },
+      ],
+    });
   });
 
   it("caps a converging negotiation at two rounds", async () => {

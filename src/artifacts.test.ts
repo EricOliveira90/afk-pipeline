@@ -521,6 +521,15 @@ describe("preserveNegotiationFailure", () => {
           plannerEvidence: "the existing gate is sufficient",
           evaluatorEvidence: "the gate misses the negative path",
         },
+        {
+          id: "F-SCOPE",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the locked file list covers the implementation",
+          evaluatorEvidence: "the status projection requires one more file",
+        },
       ],
     };
     try {
@@ -540,14 +549,23 @@ describe("preserveNegotiationFailure", () => {
         negotiationOutcome,
       });
 
-      expect(
-        JSON.parse(
-          readFileSync(
-            join(sliceDir, "contract-negotiation-outcome.json"),
-            "utf-8",
-          ),
+      const working = readFileSync(
+        join(sliceDir, "contract-negotiation-outcome.json"),
+        "utf-8",
+      );
+      const archived = readFileSync(
+        join(
+          repoRoot,
+          ".afk",
+          "artifacts",
+          "impasse-stub",
+          "slice-01",
+          "contract-negotiation-outcome.json",
         ),
-      ).toEqual(negotiationOutcome);
+        "utf-8",
+      );
+      expect(JSON.parse(working)).toEqual(negotiationOutcome);
+      expect(archived).toBe(working);
       const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
       expect(stuck).toContain("Exhaustion classification: IMPASSE");
       expect(stuck).toContain("Planner position: CONTESTED");
@@ -556,6 +574,12 @@ describe("preserveNegotiationFailure", () => {
       );
       expect(stuck).toContain(
         "Evaluator evidence: the gate misses the negative path",
+      );
+      expect(stuck).toContain(
+        "Planner evidence: the locked file list covers the implementation",
+      );
+      expect(stuck).toContain(
+        "Evaluator evidence: the status projection requires one more file",
       );
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
