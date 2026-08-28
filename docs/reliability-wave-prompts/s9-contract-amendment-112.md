@@ -22,7 +22,7 @@ Work only inside that worktree.
 - Summary for orientation: QA can raise boundary findings that are
   satisfiable only by reverting work the contract itself demanded — the
   contract cannot be amended mid-slice, so the slice wedges.
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan.md` — §1 defect table (the
+- `C:\Code\afk\docs\specs\afk-v2-plan.md` — §1 defect table (the
   defect class: "the pipeline records or classifies something that misleads
   the next actor")
 - `src\contract-review.ts` and `src\orchestrator.ts` (negotiate loop) in
@@ -30,6 +30,10 @@ Work only inside that worktree.
 - `C:\Code\afk\docs\adr\0008-orchestrator-owns-contract-status.md` and
   `0015-guardian-review-failure-classes-and-overrides.md`
 - `AGENTS.md` in your worktree — test discipline
+
+If you write an ADR, it is **ADR 0048** — the number is reserved for this
+session; 0041–0043 are taken by wave 2 and other sessions of this wave have
+their own reservations.
 
 ## Task
 

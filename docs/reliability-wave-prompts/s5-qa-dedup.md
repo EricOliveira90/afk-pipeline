@@ -26,12 +26,16 @@ Work only inside that worktree.
 
 ## Read first
 
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan.md` — §3 item 9
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan-debate.md` — item 9 and its guards
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-recovery-plan.md` — Phase D step 14 (this design, named there first) and Runs 4–6 evidence (QA r1 ran the full suite at 772.5 s on the same tree a base gate had tested at 739.3 s; run 3's QA r2 already passed safely on base-gate evidence with 34 s of commands — the intended pattern)
+- `C:\Code\afk\docs\specs\afk-v2-plan.md` — §3 item 9
+- `C:\Code\afk\docs\specs\afk-v2-plan-debate.md` — item 9 and its guards
+- `C:\Code\afk\docs\specs\afk-v2-recovery-plan.md` — Phase D step 14 (this design, named there first) and Runs 4–6 evidence (QA r1 ran the full suite at 772.5 s on the same tree a base gate had tested at 739.3 s; run 3's QA r2 already passed safely on base-gate evidence with 34 s of commands — the intended pattern)
 - `C:\Code\afk\docs\adr\0012-evaluator-qa-runs-sanity-command-set.md` — the policy you are amending
 - `prompts\evaluator-qa.md`, `src\orchestrator.ts`, `src\artifacts.ts` in your worktree
 - `AGENTS.md` in your worktree — test discipline
+
+If you write a new ADR beyond the ADR 0012 amendment, it is **ADR 0045** —
+the number is reserved for this session; 0041–0043 are taken by wave 2 and
+other sessions of this wave have their own reservations.
 
 ## Task
 

@@ -15,11 +15,15 @@ Work only inside that worktree.
 
 ## Read first
 
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan.md` — §3 item 14 and the "stage-duration journal event" riding item
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan-debate.md` — item 14, and §2 for the watchdog PING that was CUT and must not be built
+- `C:\Code\afk\docs\specs\afk-v2-plan.md` — §3 item 14 and the "stage-duration journal event" riding item
+- `C:\Code\afk\docs\specs\afk-v2-plan-debate.md` — item 14, and §2 for the watchdog PING that was CUT and must not be built
 - `src\resume.ts` in your worktree — `MAX_RESUME_ATTEMPTS` (the invisible cliff; during #79's recovery the difference between "one attempt left" and "none" changed the recommendation and required reading the state file)
-- `src\run-events.ts` and `C:\Code\afk\docs\adr\0031-run-journal.md`
+- `src\run-events.ts` and `C:\Code\afk\docs\adr\0031-run-journal.md` — note wave 2 (merged 2026-08-28, PR #127) added warn reasons `preflight` and `stop-requested` to `run-events.ts` and new `afk status` code in `src\status.ts`; read the current shapes before extending them
 - `AGENTS.md` in your worktree — test discipline
+
+If you write an ADR, it is **ADR 0046** — the number is reserved for this
+session; 0041–0043 are taken by wave 2 and other sessions of this wave have
+their own reservations.
 
 ## Task
 

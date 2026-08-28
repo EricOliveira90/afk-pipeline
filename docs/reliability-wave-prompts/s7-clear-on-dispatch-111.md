@@ -25,7 +25,7 @@ Work only inside that worktree.
 
 ## Related work — read, do not redo
 
-Issue #123 is already fixed: commit `8cccd2d` on the feature branch
+Issue #123 is already fixed: commit `8cccd2d` (merged to main with PR #125)
 relocates a slice's stale `reviews\` archives before round 1 on restart.
 Read that commit before you design. Your scope is different but adjacent —
 run-state records at dispatch, not archive directories at restart. Do not
@@ -33,11 +33,15 @@ duplicate or fight its behavior.
 
 ## Read first
 
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan.md` — §3 item 11; note the scope split below
-- `C:\Code\afk-v2-run\docs\specs\afk-v2-plan-debate.md` — item 11
+- `C:\Code\afk\docs\specs\afk-v2-plan.md` — §3 item 11; note the scope split below
+- `C:\Code\afk\docs\specs\afk-v2-plan-debate.md` — item 11
 - `gh issue view 111 --repo EricOliveira90/afk-pipeline`
 - `src\run-state.ts` (state persistence, `isSliceComplete` near line 416) and `src\resume.ts` (`decideResume`) in your worktree
 - `AGENTS.md` in your worktree — test discipline
+
+If you write an ADR, it is **ADR 0047** — the number is reserved for this
+session; 0041–0043 are taken by wave 2 and other sessions of this wave have
+their own reservations.
 
 ## Task
 
