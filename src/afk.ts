@@ -22,6 +22,7 @@ import { runStatus } from "./status.js";
 import { runStatusWeb } from "./status-web.js";
 import { loadAfkManifest } from "./afk-manifest.js";
 import { installCancellationSignals } from "./cancellation.js";
+import { runStopCli } from "./stop-command.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -31,7 +32,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -60,6 +61,14 @@ async function main() {
     const { output, exitCode } = runStatus(args.slice(1), resolve("."));
     // Error output goes to stderr so it's distinguishable from the
     // rendered view (and from --json documents) in shell pipelines.
+    (exitCode === 0 ? console.log : console.error)(output);
+    process.exit(exitCode);
+  }
+  // `stop` writes the run's stop sentinel — the delivery mechanism that
+  // does not depend on a console signal reaching a detached process
+  // (ADR 0043). Read-mostly: one file written into the run's log dir.
+  if (args[0] === "stop") {
+    const { output, exitCode } = await runStopCli(args.slice(1), resolve("."));
     (exitCode === 0 ? console.log : console.error)(output);
     process.exit(exitCode);
   }
@@ -242,9 +251,15 @@ async function main() {
   // are killed and unfinished slices are marked CANCELLED in run state.
   // A second signal exits hard. Which signals count — and why Windows
   // needs more than SIGINT — is in src/cancellation.ts (#114).
+  //
+  // `requestStop` is the same button with no signal involved: the
+  // pipeline calls it when it finds this run's stop sentinel, which is
+  // how `afk stop` reaches a detached run that no console event can
+  // be delivered to (ADR 0043).
   const cancellation = installCancellationSignals();
   console.log(
-    `Starting pipeline... (${cancellation.signals.join(" / ")} to cancel)\n`,
+    `Starting pipeline... (${cancellation.signals.join(" / ")} to cancel, ` +
+      `or \`afk stop ${prdSlug}\` from another shell)\n`,
   );
 
   let result;
@@ -261,6 +276,7 @@ async function main() {
       manifest: afkManifest,
       migrationValidation,
       signal: cancellation.signal,
+      requestCancellation: () => cancellation.requestStop("stop sentinel"),
       ...runtimeOptions,
     });
   } catch (err) {

@@ -55,16 +55,35 @@ export interface StatusResult {
 
 const RUN_DIR_RE = /^run-\d{8}-\d{6}/;
 
+/** Log-directory names under `.afk/logs` — one per PRD slug + provider. */
+export function listLogSlugs(repoRoot: string): string[] {
+  const logsDir = join(repoRoot, ".afk", "logs");
+  if (!existsSync(logsDir)) return [];
+  return readdirSync(logsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
 /**
  * Latest run directory across all PRD slugs. "Most recently active
  * PRD" = the PRD owning the chronologically newest run directory.
+ *
+ * `matchSlug` narrows the search to log directories it accepts, so a
+ * caller addressing one PRD (`afk stop <slug>`) gets the same
+ * lexicographic-is-chronological selection rather than its own copy of
+ * it. Absent, every slug is in scope — the zero-arg `afk status` case.
  */
-export function findLatestRunDir(repoRoot: string): string | null {
+export function findLatestRunDir(
+  repoRoot: string,
+  options: { matchSlug?: (logSlug: string) => boolean } = {},
+): string | null {
   const logsDir = join(repoRoot, ".afk", "logs");
   if (!existsSync(logsDir)) return null;
   let best: { name: string; path: string } | null = null;
   for (const slug of readdirSync(logsDir, { withFileTypes: true })) {
     if (!slug.isDirectory()) continue;
+    if (options.matchSlug && !options.matchSlug(slug.name)) continue;
     const slugDir = join(logsDir, slug.name);
     for (const entry of readdirSync(slugDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || !RUN_DIR_RE.test(entry.name)) continue;

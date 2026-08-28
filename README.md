@@ -54,11 +54,29 @@ Ctrl-C cancels cleanly: in-flight agents are killed, unfinished slices are
 marked CANCELLED in run state before the wind-down starts, and worktrees are
 preserved. A second stop signal hard-exits.
 
-**Stopping a run on Windows:** use **Ctrl-Break** (or `CTRL_BREAK_EVENT` to
+### Stopping a run
+
+```bash
+# From any other shell — no console access to the run needed
+npx afk stop <prd-slug> [--run <dir>] [--wait-ms <n>]
+```
+
+`afk stop` writes a sentinel file into the run's own log directory
+(`.afk/logs/<run-slug>/run-<timestamp>/stop.request`). The run checks for it
+every two seconds and routes it through the same `AbortSignal` a Ctrl-Break
+uses, so the CANCELLED records land identically. The command then waits for the
+run to write `stop.ack` — which it does only *after* those records are on disk
+— and reports the answer in its exit code: `0` acknowledged (and it names the
+slices marked CANCELLED), `1` written but unacknowledged, `2` nothing written
+because the target could not be resolved. The sentinel is namespaced by run
+directory, so a stale one can never abort a later launch. See ADR 0043.
+
+**In the run's own console:** use **Ctrl-Break** (or `CTRL_BREAK_EVENT` to
 the run's console group). Windows disables Ctrl-C for a process group created
 with `CREATE_NEW_PROCESS_GROUP`, which is what a detached launch gets, and
 `GenerateConsoleCtrlEvent(CTRL_C_EVENT, ...)` reports success while delivering
-nothing. Ctrl-C still works for a plain foreground launch. See ADR 0040.
+nothing — which is why `afk stop` exists for a run you are not sitting at.
+Ctrl-C still works for a plain foreground launch. See ADR 0040.
 
 ## Input Format
 
@@ -317,6 +335,7 @@ per-failure-class exit code; a second stop signal still exits 130.
 | Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
 | HITL slice | Skipped entirely |
 | Ctrl-C (Ctrl-Break on Windows) | Unfinished slices → CANCELLED in run state when the signal fires, in-flight agents killed (ADR 0040) |
+| `afk stop <prd-slug>` | Same abort path, delivered as a polled sentinel file — for a run whose console you cannot reach; reports whether the run acknowledged (ADR 0043) |
 | Pipeline crash | Re-run to resume |
 
 A failed dependency holds its dependents — fix the broken slice and re-run.
@@ -459,6 +478,7 @@ See `docs/adr/` for the reasoning behind key design choices:
 - **ADR 0024** — Lanes continue past a failed member; LANE-CANCELLED reserved for corruption halts
 - **ADR 0027** — Migrations are a lane-shared resource: migration-bearing slices serialise into one lane
 - **ADR 0029** — Recoverable merge deferral: `MERGE-PENDING` keeps the slice branch and the next run retries the merge
+- **ADR 0043** — A stop is delivered as a file the run polls for, and acknowledged once the records are on disk
 
 ## QA Rounds and Shared Preview
 
