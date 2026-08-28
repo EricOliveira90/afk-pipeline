@@ -459,6 +459,33 @@ describe("preflight — holder scan", () => {
     ).toBe(false);
     expect(report.caveats.join("\n")).toContain("process table could not be listed");
   });
+
+  it("does not list the process table at all when no namespace path exists", async () => {
+    // A directory that is not there cannot be held, and the listing is
+    // the one part of the preflight with a real cost. Every first launch
+    // of a PRD lands here.
+    let listed = 0;
+    const report = await runLaunchPreflight(
+      {
+        repoRoot: REPO,
+        namespace: namespace(),
+        minFreeBytes: gbToBytes(5),
+      },
+      {
+        listWorktrees: () => [],
+        freeBytes: () => PLENTY_OF_DISK,
+        listProcesses: async () => {
+          listed++;
+          return [];
+        },
+        fs: makeFs({}),
+        selfPid: 1000,
+      },
+    );
+    expect(listed).toBe(0);
+    expect(report.caveats).toEqual([]);
+    expect(report.findings).toEqual([]);
+  });
 });
 
 describe("findHolders", () => {

@@ -38,6 +38,12 @@ import { listProcessPaths, type ProcessPathRow } from "./kill-tree.js";
  * who just typed the launch command. Re-opening that decision goes
  * through the debate doc's trigger, not through this file.
  *
+ * **Cost.** One `statfsSync`, one `git worktree list`, one shallow
+ * `readdir` per namespace root, and — only when a namespace path actually
+ * exists on disk — one process-table listing (~100ms via PowerShell CIM,
+ * per ADR 0020's measurements). A launch into an empty namespace, which
+ * is every first run of a PRD, never lists the process table at all.
+ *
  * **What the holder scan cannot see.** It reads each process's
  * executable path and command line, which is everything a process table
  * will give us on Windows without native interop — `Win32_Process` does
@@ -347,14 +353,17 @@ export async function runLaunchPreflight(
   }
 
   // --- 4. Holders: name the PIDs, kill nothing.
+  //
+  // Only paths that actually exist are scanned for, and when none does
+  // the process table is never listed at all. A directory that is not
+  // there cannot be held, and the listing is the one part of the
+  // preflight with a real cost — a PowerShell CIM enumeration. So the
+  // first launch of a PRD, the overwhelmingly common case, pays nothing
+  // for this check.
   const namespacePaths = [
-    ...new Set([
-      ...request.namespace.intended.map((entry) => entry.path),
-      ...registeredInNamespace.map((wt) => wt.path),
-      ...onDisk,
-    ]),
+    ...new Set([...registeredInNamespace.map((wt) => wt.path), ...onDisk]),
   ];
-  const rows = await listProcesses();
+  const rows = namespacePaths.length > 0 ? await listProcesses() : [];
   if (rows === undefined) {
     caveats.push(
       "the process table could not be listed — no holder scan ran, so live " +
