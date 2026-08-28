@@ -167,6 +167,10 @@ import {
   buildScopeAmendmentRecord,
   planScopeAmendment,
 } from "./scope-amendment.js";
+import {
+  ESCALATION_FILENAME,
+  parseScopeEscalation,
+} from "./escalation.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 
@@ -3103,6 +3107,8 @@ export async function runSliceExecute(
               RETRY_NOTE: implementationAttempt > 1 ? retryNote : "",
               MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
             });
+      const escalationPath = join(ctx.absSliceDir, ESCALATION_FILENAME);
+      rmSync(escalationPath, { force: true });
       await invoke({
         role: "generator",
         prompt: generatorPrompt,
@@ -3121,6 +3127,21 @@ export async function runSliceExecute(
         agent: "generator",
         round,
       });
+
+      if (existsSync(escalationPath)) {
+        parseScopeEscalation(
+          readFileSync(escalationPath, "utf-8"),
+          loadAcceptanceManifest(ctx.absSliceDir),
+          { migrationPathPattern: config.migrationPathPattern },
+          escalationPath,
+        );
+        return {
+          phase: "ERROR",
+          error:
+            `${ESCALATION_FILENAME} requested a contract revision, but ` +
+            "scope-escalation routing did not complete",
+        };
+      }
 
       if (config.manifest) {
         const gate = checkClaimedGeneratedMigrations({

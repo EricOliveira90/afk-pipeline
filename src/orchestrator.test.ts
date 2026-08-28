@@ -920,6 +920,90 @@ describe("runPipeline lane scheduling", () => {
   }, 240_000);
 });
 
+describe("generator scope escalation", () => {
+  // No successful pipeline fixture can reach a malformed post-generator
+  // control artifact, so this scenario deliberately stops at that boundary.
+  it("fails malformed evidence before revision planning, gates, or QA", async () => {
+    const repo = makeRepo();
+    const slug = "malformed-generator-escalation";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const gateMarker = join(repo, "gate-ran.txt").replace(/\\/g, "/");
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "consumer-fixture",
+        private: true,
+        scripts: {
+          "test:run":
+            `node -e "require('fs').writeFileSync('${gateMarker}','ran')"`,
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "make gate observable"]);
+
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1080",
+      title: "Malformed escalation",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const dag = buildDAG([slice]);
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slice.ghIssue,
+        {
+          files: ["src/declared.ts"],
+          qaPasses: true,
+          outputFile: "src/declared.ts",
+          outputContent: "declared work",
+          escalation: JSON.stringify({
+            version: 1,
+            findingIds: ["F-17"],
+            reason: "the parser also needs another file",
+          }),
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices: [slice], records });
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag,
+      provider,
+    });
+
+    const state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /escalation\.md root object must contain exactly/,
+    );
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(1);
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(1);
+    expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
+    expect(existsSync(gateMarker)).toBe(false);
+
+    const generatorCwd = records.find(({ role }) => role === "generator")!.cwd;
+    const artifactDir = findSliceArtifactDir(generatorCwd, slice.number);
+    expect(artifactDir).not.toBeNull();
+    expect(readFileSync(join(artifactDir!, "escalation.md"), "utf-8")).toBe(
+      fixtures.get(slice.ghIssue)!.escalation,
+    );
+  }, 60_000);
+});
+
 /**
  * A run that dispatches nothing must say so and fail (issue #42). The
  * honest signal is `PipelineResult.success`, and `failureReason` carries

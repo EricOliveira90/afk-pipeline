@@ -79,6 +79,8 @@ export interface SliceFixture {
   /** File the generator should create in the worktree (so commits have content). */
   outputFile: string;
   outputContent: string;
+  /** Raw scope-escalation artifact emitted after generator work, when set. */
+  escalation?: string;
 }
 
 export interface InvocationRecord {
@@ -278,6 +280,13 @@ export function buildStubProvider(opts: {
           `${fixture.outputContent}\n// generator round ${round} for #${ghIssue}\n`,
           "utf-8",
         );
+        if (fixture.escalation !== undefined) {
+          writeFileSync(
+            join(sliceArtifactDir, "escalation.md"),
+            fixture.escalation,
+            "utf-8",
+          );
+        }
       } else if (role === "evaluator-qa" && sliceArtifactDir && fixture) {
         const attempt = (qaAttempts.get(ghIssue) ?? 0) + 1;
         qaAttempts.set(ghIssue, attempt);
