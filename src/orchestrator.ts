@@ -2210,7 +2210,12 @@ export async function runQAStage(
     };
 
     const archiveAttemptEvidence = (): AttemptEvidence => {
-      let rawArchiveName: string | null = null;
+      // Required evidence fails closed (#79): a raw canonical artifact
+      // that cannot be preserved must not let this attempt count. The
+      // throw lands in the attempt-level catch, where it is treated as
+      // an infrastructure failure — retried, then exhausted as ERROR —
+      // never as a warning underneath a later PASS.
+      let rawArchiveName: string | null;
       try {
         rawArchiveName = artifacts.archiveQAReviewAttempt({
           sliceDir: ctx.absSliceDir,
@@ -2221,16 +2226,9 @@ export async function runQAStage(
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.phase(
-          `${ctx.tag}: Warning: failed to archive ${stage} review round ${round} ` +
-            `attempt ${attempt} to ${reviewArchiveDir}: ${message}`,
-          "error",
-          {
-            type: "warn",
-            reason: "qa-review-archive-failed",
-            ghIssue: slice.ghIssue,
-            message,
-          },
+        throw new Error(
+          `${stage} review round ${round} attempt ${attempt} could not ` +
+            `preserve its raw canonical artifact in ${reviewArchiveDir}: ${message}`,
         );
       }
       const reportArchived = artifacts.archiveQAReport(reportPath, archivePath);
@@ -2304,6 +2302,11 @@ export async function runQAStage(
         canonicalArchivePath,
         markdownArchivePath: archiveDisplayPath,
       });
+      // Required evidence fails closed (#79): a lifecycle record that
+      // cannot be preserved must not let the attempt's verdict stand.
+      // The review outcome is already known, so a retry would re-invoke
+      // the evaluator over a local write failure; instead the throw
+      // propagates and ends the slice as ERROR without merging.
       try {
         artifacts.archiveQAReviewRecord({
           archiveDir: reviewArchiveDir,
@@ -2311,16 +2314,9 @@ export async function runQAStage(
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.phase(
-          `${ctx.tag}: Warning: failed to archive ${stage} lifecycle record ` +
-            `for round ${round} attempt ${attempt}: ${message}`,
-          "error",
-          {
-            type: "warn",
-            reason: "qa-review-archive-failed",
-            ghIssue: slice.ghIssue,
-            message,
-          },
+        throw new Error(
+          `${stage} review round ${round} attempt ${attempt} could not ` +
+            `preserve its lifecycle record in ${reviewArchiveDir}: ${message}`,
         );
       }
       const unresolved =
@@ -2566,8 +2562,17 @@ export async function runSliceExecute(
             : [];
       firstRound = restored.nextRound;
     }
+    // The three-round cap is global across a slice's lives (ADR 0014):
+    // an ordinary resume restores the round counter from archived
+    // evidence and receives only the rounds still unspent under
+    // MAX_GENERATOR_ROUNDS, not a fresh budget of three. Only a STUCK
+    // resume earns headroom beyond the cap — its documented single
+    // extra attempt. A resume whose evidence already shows the cap
+    // spent gets zero attempts and falls through to the STUCK return.
     const implementationAttemptLimit =
-      ctx.resume?.mode === "stuck" ? 1 : MAX_GENERATOR_ROUNDS;
+      ctx.resume?.mode === "stuck"
+        ? 1
+        : Math.max(0, MAX_GENERATOR_ROUNDS - firstRound + 1);
     const finalRound = firstRound + implementationAttemptLimit - 1;
 
     for (
