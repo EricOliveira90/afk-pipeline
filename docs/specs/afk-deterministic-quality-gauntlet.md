@@ -1,3 +1,10 @@
+# AFK deterministic quality gauntlet
+
+> **SUPERSEDED (2026-08-24).** `docs/specs/afk-v2-agent-roles.md` refines
+> and amends this document, and wins where they disagree. Live planning:
+> `docs/specs/afk-v2-plan.md`. Kept for what was already considered and
+> rejected, and why.
+
 ## Problem Statement
 
 AFK already separates exploration, contract negotiation, implementation, slice evaluation, and post-implementation guardian review into focused agent invocations. That separation is valuable, but the pipeline still asks agents to enforce several facts that the orchestrator could prove mechanically.

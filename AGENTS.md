@@ -43,12 +43,19 @@ Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
 ```bash
-afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm test:fast"
+afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm typecheck && pnpm test:fast"
 ```
 
 (Substitute `afk`/`afk-claude` for other backends; keep the flag.)
 
-Why: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
+**Typecheck is mandatory in the command.** Vitest strips types without
+checking them: run 5 of the PRD 1 self-runs used the bare `test:fast`
+form, the generator drove 8 commits to green over code that did not
+compile, and the slice died to a misclassified gate failure (#120).
+This is the interim form until the command is derived from the gate
+catalog (`docs/specs/afk-v2-plan.md` §3 item 2).
+
+Why the flag at all: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
 shipped `--test-command`, but the flag only helps if the launch uses
 it. The PRD 1 run didn't, and its generator round 2 spent ~35 minutes
 on three full-suite runs inside a single writing round. This is safe

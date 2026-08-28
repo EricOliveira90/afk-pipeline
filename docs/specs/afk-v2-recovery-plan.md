@@ -1,5 +1,12 @@
 # AFK v2 recovery plan — stabilize, speed up, resume the ladder
 
+> **Superseded as the forward plan by `afk-v2-plan.md`** (2026-08-27),
+> which consolidates the PRD 1–6 ladder, the current state of the work,
+> and the proposals the self-runs produced. This document remains
+> authoritative as the **historical record**: Phases A–D, and the
+> run-by-run evidence for runs 3–6. Read it for *why* a decision was
+> made; read `afk-v2-plan.md` for *what happens next*.
+
 Successor plan to the PRD 1 run stoppage (runs `run-20260825-185429`,
 `run-20260825-203430`). Companion to `afk-v2-ladder-runbook.md`, which
 stays the master sequence for PRDs 1–6; this document is what re-enters
@@ -141,6 +148,14 @@ every step records numbers before the next is decided.
     never exercised: #77 died on EBUSY worktree teardown before its
     explorer ran, so it did not negotiate. Now doubly blocked — the
     held `…-s03` directory handle must clear first.
+    **DONE 2026-08-27, by hand (session S4), not by AFK.** The held
+    handle never cleared on its own, so the slice was rebuilt in a
+    fresh worktree (`C:\Code\afk-s4`) on the same slice branch,
+    fast-forwarded to the feature tip. Merged at `d86b8f6`; run state
+    `"77"` set to PASS. The amendment was consumed as written, and the
+    slice shipped a duplicate-JSON-key scanner because `JSON.parse`
+    keeps the last of a repeated key — "two verdicts" is only
+    detectable by scanning the bytes.
 11. **Amend #75's contract** to add `src/resume-integration.test.ts`
     to the locked file list. Without this the next round faces the
     same contract and the same finding, and repeats round 2's
@@ -151,6 +166,20 @@ every step records numbers before the next is decided.
     (now carrying the gate fix and the guard), push, fast-forward the
     host worktree, `pnpm install`, `pnpm build`, `pnpm test:fast`,
     update the babysit prompt's verified commit.
+    **DONE 2026-08-27, and it was not a step — it was hours.** Merging
+    main into the host branch was clean; merging the host branch into
+    the feature branch produced **seven conflicting files**, because
+    main had split the orchestrator/wave/resume suites into
+    fixtures-plus-two-file pairs while #76 and #77 edited the old
+    monoliths. Resolution adopted main's structure and ported the slice
+    work into it: version-2 manifests and contract-review stubs into
+    the shared fixture providers, the reworked describes replaced from
+    the feature side, and #77's new describe transplanted verbatim
+    (main had moved those describes unchanged, which is what made a
+    wholesale transplant safe). Merge `d5b07a6`; `tsc` clean; full
+    suite 883 passed. **Every future refresh should budget for this
+    class of conflict rather than assuming a fast-forward** — the
+    trigger is main restructuring a file a slice branch is editing.
 13. **Resume:** `--only-failed` for #75 (ERROR, not STUCK — no
     `--resume-stuck`), with `--test-command "pnpm test:fast"`, one
     live run, babysitter attached. **DONE as run 3**, with the compound
@@ -158,6 +187,9 @@ every step records numbers before the next is decided.
     #76 and #77 did not finish. Before the next resume, clear the four
     blocking items at the end of "Run 3 evidence" — #76's missing state
     entry is the issue-#113 setup all over again.
+    **Superseded by runs 4–6** (see "Runs 4–6 evidence" below). All
+    four blocking items were cleared, and the launch command grew a
+    `pnpm typecheck &&` prefix that runs 4–6 proved necessary.
 
 ## Phase D — the ladder continues; AFK implements the systemic work
 
@@ -434,6 +466,144 @@ untracked slice artifacts. In order:
    is asked to run under AFK.
 
 Keep `rescue/76-c58a93b` until #76 merges.
+
+## Runs 4–6 evidence — 2026-08-27, and the wave plan's current state
+
+Written while run 6's relaunch is live, so the evidence survives the
+session. Runs 4, 5 and 6 all targeted #78/#79. Each died of a different
+systemic cause, and none of the three was a code defect in the slice
+being built.
+
+### Where PRD 1 actually stands
+
+| Slice | State |
+|---|---|
+| #75 | PASS, merged (`1540c9b`) |
+| #76 | PASS, merged (`ab18bc2`) — finished by hand |
+| #77 | PASS, merged (`d86b8f6`) — implemented by hand |
+| #78 | PASS, merged (`2b8eaa6`) — by AFK, after one aborted run |
+| #79 | Work complete on its branch (12 commits), QA verdict outstanding |
+
+Run state records 75–78 PASS. #79's persisted `error` text is **stale
+and wrong** — see the crash finding below. The wave plan's Wave 1,
+Gate 1, Wave 2 and Gate 2 are all closed; the remaining path is
+`#79 → S5 (assemble PRD 1) → reliability wave`. Note the old plan's
+critical path named an "S6" that was never defined; it does not exist.
+
+**Gate 2's trust call resolved in favour of relaunching.** All three
+conditions held: #113 merged, #114 merged, and 0 real full-suite starts
+inside generator rounds. That last one held in every subsequent run —
+the compound `--test-command` is now proven across four runs, not one.
+
+### Three run-ending causes, in order
+
+1. **Run 4: the budget gate tripped on wall-clock variance and became a
+   blocking QA finding.** `fast` measured 87.5s → 105.1s → 130.5s across
+   two base gates and QA's own run, against an 84.8s idle baseline and a
+   110s budget, with **zero failing tests** in all three. QA was literally
+   correct — the contract required `pnpm test:fast` to exit successfully —
+   but no code change could clear it, and the generator's only escape
+   would have been editing the ratchet from inside a slice. The run was
+   stopped and the budgets raised by the operator instead.
+   **Standing decision: during an AFK run the resident agents *are* the
+   environment, so a budget must cover the loaded in-chain number, not
+   the idle one.** Raises to date: `fast` 110→170 (`4d18ef7`),
+   `orchestrator` 500→560 (`1022dcc`), each with measurements recorded in
+   `suite-budgets.json`. Deserves an ADR so it is not rediscovered a
+   fourth time.
+2. **Run 5: a compile error in the candidate was misclassified as
+   INFRASTRUCTURE and killed the slice.** #79's generator emitted a warn
+   reason it never added to the union in `src/run-events.ts` (three
+   `TS2820`). Because `package.json`'s `prepare` script is
+   `tsc -p tsconfig.build.json`, the error surfaced inside
+   `pnpm install --frozen-lockfile` during gate *environment
+   preparation* — and `gate-runner.ts` only treats a prepare failure as
+   the candidate's fault when it matches `ERR_PNPM_OUTDATED_LOCKFILE`.
+   Everything else becomes INFRASTRUCTURE, so it burned both retries on
+   byte-identical attempts and ended the slice ERROR with two of three
+   generator rounds unused. Filed as **#120**. This is also the first
+   real exercise of PR #108's `FAIL/CONFIGURATION` route, which run 3's
+   harvest had flagged as an untested design claim: exercised, it went
+   the wrong way.
+   **Root cause of the miss, though, is the launch flag, not the gate:**
+   the verification command contained only vitest suites, and **vitest
+   strips types without checking them**, so the generator drove its loop
+   to green (845 tests) over code that does not compile. #78's generator
+   ran `pnpm typecheck` by its own choice; #79's did not, and nothing
+   required it. Every launch now uses
+   `--test-command "pnpm typecheck && pnpm test:fast && pnpm run test:heavy:resume"`.
+   **`AGENTS.md`'s self-run guidance still prescribes the typecheck-less
+   form and needs updating.**
+3. **Run 6: an ENOSPC crash bypassed cancellation bookkeeping.** The
+   machine filled mid-QA; an unhandled `error` event on a WriteStream
+   terminated the process. #114's fix hangs off the `AbortSignal`, so
+   nothing was recorded, and run state still names the *previous* run's
+   typecheck failure for #79 — a failure already fixed, in a run two
+   attempts stale. Filed as **#121**. The slice branch was unharmed.
+   **The disk cause was misdiagnosed twice and the correction matters:**
+   `%TEMP%` held 467 `afk-*` fixture directories, which looked like a
+   leak, but measured **0.02 GB in total** — empty directory shells left
+   by teardown's `Directory not empty` path on Windows. The whole repo
+   including `.afk` is 0.16 GB. **There is no pipeline space leak**; the
+   machine was full for unrelated reasons. Recorded so nobody re-chases
+   it.
+
+### What the runs proved works
+
+- The compound `--test-command`: 0 full-suite starts inside any
+  generator round, across every run since run 3.
+- Resume: "resumed from 9 commit(s)", explorer and negotiation skipped
+  on a LOCKED contract, base refresh merging the feature branch in.
+- The #113 and #114 fixes, both live-exercised. A Ctrl-Break stop wrote
+  CANCELLED records within 2.4s for the in-flight slice *and* the
+  never-dispatched dependent, and no restart destroyed anything.
+- The raised budgets: run 6's base gate came in at 798s/1287s total with
+  `orchestrator` at 361.9/560 — green with headroom.
+
+### Hand-finishing is a supported recovery move, not an exception
+
+Used successfully four times now (#76, #77, and twice to unblock #79).
+The procedure: work the slice branch in a fresh worktree, verify with
+the full suite, merge into the feature branch, then set the slice's run
+state to `{ "phase": "PASS", "branch": "<slice branch>",
+"mergedToFeature": true }` so `--only-failed` stops selecting it and
+`priorCompleted` unblocks its dependents. `isSliceComplete` is exactly
+`phase === "PASS" && mergedToFeature === true`
+(`src/run-state.ts:416`); `branch` is optional but omitting it makes the
+restore path fall back to a derived name.
+
+### The reliability issue family — proposed next wave
+
+#111, #112, #120, #121 are one class: **the pipeline records or
+classifies something that misleads the next actor.** Four of the five in
+this family (counting merged #113/#114) were found by running AFK on
+itself. Recommended after PRD 1 closes, as parallel manual sessions on
+separate worktrees — pipeline-safety fixes are precisely the changes not
+to depend on the pipeline to deliver.
+
+One design tension to settle *before* ticketing #120: inverting the
+classification default (candidate's fault unless a known environment
+signature) means a transient network failure during install would be
+blamed on the generator and burn a round, where today it correctly
+retries. The narrower alternative — treat a non-zero exit from a
+lifecycle script as candidate-owned, keyed on exit code rather than
+message text — sidesteps the tradeoff. Grill this, don't implement it
+naively.
+
+### Two stale plan items corrected
+
+- **S8's scope is superseded.** It was scoped to diagnose heavy-suite
+  time; PR #115's two-file splits, hermetic git and the budget gate
+  already landed that before Wave 1. The live cost question is
+  different: the feature branch's heavy suites cost roughly **2× main's**
+  (820s vs 428s in-chain) because #76 gave every fixture repo a sanity
+  script, so pipeline scenarios now run real gates. That is an honest
+  tradeoff — real gates for per-scenario cost — not a regression, and it
+  is the thing worth measuring. Re-scope S8 to it.
+- **Every gate estimate in the wave plan was low by roughly an order of
+  magnitude,** and the cause was consistent: each gate grew prep-chain
+  and conflict work the plan treated as a step. Budget refreshes as
+  their own task.
 
 ## Standing corrections to prior analyses
 

@@ -1,5 +1,11 @@
 # AFK v2 ladder - runbook
 
+> **STATUS (2026-08-28).** PRD 1 is complete: PR #125 merged, #69 closed.
+> Live sequencing — the reliability wave, the parallel tracks, and the
+> AFK-vs-manual split — now lives in `docs/specs/afk-v2-plan.md` §4–§5;
+> where this document's sequence and the plan disagree, the plan wins.
+> The launch mechanics and per-PRD procedures below remain valid.
+
 The operational sequence for delivering PRDs 1-6 (#69-#74), one AFK run
 per PRD, each run executed by the AFK version the previous PRD produced.
 Design record: `docs/specs/afk-v2-agent-roles.md`. Tickets: #75-#99.
