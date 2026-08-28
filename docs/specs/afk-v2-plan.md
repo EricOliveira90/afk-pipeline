@@ -1,15 +1,20 @@
 # AFK v2 — the single plan
 
-One document: where the work stands, the six PRDs in dependency order, and
-the findings from running AFK on itself that should change v2's content.
+One document: where the work stands, the six PRDs in dependency order, the
+agreed hardening set from the plan debate, and a sequencing that pays the
+next runs first.
 
-Two companion documents, both still authoritative for their own scope:
+Three companion documents, each authoritative for its own scope:
 
 - `afk-v2-agent-roles.md` — the role-by-role design and cross-cutting
   mechanisms M1–M7. This plan sequences that design; it does not restate it.
 - `afk-v2-recovery-plan.md` — the historical record: Phases A–D of
-  stabilising the pipeline, plus run-by-run evidence (runs 3–6). Read it for
-  *why* a decision was made; read this document for *what happens next*.
+  stabilising the pipeline, plus run-by-run evidence (runs 3–6).
+- `afk-v2-plan-debate.md` — the refereed two-agent debate (2026-08-28) that
+  produced §3 below: full ratings, the cut list with the arguments that
+  killed each item, the audit trail of concessions, and the re-open
+  triggers. Read it for *why an item survived or died*; read this document
+  for *what happens next*.
 
 ---
 
@@ -30,330 +35,191 @@ Remaining path: `#79 → assemble PRD 1 into a draft PR → close #69`.
 Three of five slices needed human hands. That is the headline fact for
 planning PRDs 2–6: **the pipeline could not yet deliver its own evidence
 backbone unattended**, and every failure that stopped it was an
-infrastructure or governance defect, not a coding one. Section 3 is the
-list.
+infrastructure or governance defect, not a coding one. The debate's joint
+finding compresses it further: *the pipeline does not lack checking; it
+lacks memory of checking already done* — the measured waste was rigour
+re-spent on itself (22.7–30.3 min of evaluator reading per round, ~13 min
+of duplicated QA gates per round, ~35 min of redundant full-suite runs in
+one generator round), while the genuine reliability gaps were all cheap
+truth-on-exit gaps.
 
 ### Pipeline defects found by running AFK on itself
 
-| Issue | Defect | State |
-|---|---|---|
-| #113 | A from-base restart destroyed unmerged commits and unarchived artifacts | Fixed, merged |
-| #114 | Windows stop bypassed the abort path; no cancellation record | Fixed, merged |
-| #111 | Run killed mid-round keeps the previous run's error message | Open |
-| #112 | Contract-amendment gap: QA boundary findings satisfiable only by reverting work | Open |
-| #120 | Gate prepare step classifies a candidate's own compile failure as INFRASTRUCTURE | Open |
-| #121 | A process-fatal crash bypasses cancellation bookkeeping | Open |
+| Issue | Defect | State | Absorbed by |
+|---|---|---|---|
+| #113 | From-base restart destroyed unmerged commits | Fixed, merged | — |
+| #114 | Windows stop bypassed the abort path | Fixed, merged | — |
+| #111 | Run killed mid-round keeps the previous run's error message | Open | §3 item 11 (clear-on-dispatch) |
+| #112 | Contract-amendment gap: QA boundary findings satisfiable only by reverting work | Open | reliability wave, as filed |
+| #120 | Candidate's own compile failure classified INFRASTRUCTURE | Open | §3 item 1 (one fix, one ADR — the plan previously double-counted these) |
+| #121 | Process-fatal crash bypasses cancellation bookkeeping | Open | §3 item 4 |
 
 All six are one class: **the pipeline records or classifies something that
-misleads the next actor.** Four were found in the last week of self-runs.
+misleads the next actor.**
 
 ---
 
-## 2. The six PRDs, in dependency order
+## 2. The six PRDs, in dependency order — with the agreed deferrals
 
-Unchanged in substance from #69–#74; restated here so the ladder is legible
-in one place.
+| PRD | Theme | Depends on | Slices | Debate changes |
+|---|---|---|---|---|
+| 1 (#69) | Evidence backbone | — | #75–#79 | run-ID provenance fields land at assembly (§3 item 11) |
+| 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #94 | carries `afk adopt` (§3 item 10); **defer story 14** (babysit-skill packaging) |
+| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5); **defer story 16** (cross-provider parity matrix) with the fence: envelope *assembly* stays provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it) |
+| 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86 | carries §3 items 2, 5 (artifact), 12; **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
+| 5 (#73) | Quality loops | 4 | #87, #92, #97 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20 |
+| 6 (#74) | Aggregate: guardians and remediator | 4 | #88, #93, #98 | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13) |
 
-| PRD | Theme | Depends on | Slices |
-|---|---|---|---|
-| 1 (#69) | Evidence backbone: finding schema, machine manifest, lock validation | — | #75–#79 |
-| 2 (#70) | Routing and adjudication: escalation, impasse, human decisions in live runs | 1 | #80, #81, #82, #89, #94 |
-| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 |
-| 4 (#72) | Acceptance and scope gates: coverage, isolation, two evaluators | 1, 3 | #84, #85, #91, #96, #86 |
-| 5 (#73) | Quality loops: cleaner, hardener, quality policy | 4 | #87, #92, #97 |
-| 6 (#74) | Aggregate: notes-first guardians and the remediator | 4 | #88, #93, #98 |
-
-Why this order holds: PRD 1 makes control-plane facts machine-readable, so
-everything downstream can be deterministic. PRD 3 shapes what each role
-receives before PRD 4 adds roles. PRD 4 establishes the approved behavior
-baseline that PRDs 5 and 6 preserve and repair against.
-
-**Recommended insertion: a reliability wave between PRD 1 and PRD 2** (see
-§4). It is small, it is entirely in the pipeline's own machinery, and every
-later PRD runs on top of it.
+Why this order holds, unchanged: PRD 1 makes control-plane facts
+machine-readable; PRD 3 shapes what each role receives before PRD 4 adds
+roles; PRD 4 establishes the baseline PRDs 5–6 preserve. Note PRDs 2 and 3
+depend only on PRD 1 and are **dependency-independent of each other**, and
+PRDs 5 and 6 both hang off PRD 4 — §4 exploits both facts.
 
 ---
 
-## 3. What the self-runs teach that the PRDs do not yet cover
+## 3. The agreed hardening set (debate consensus, priority order)
 
-Each item below is a proposal, with the PRD that should absorb it. Ordered
-by leverage. Items already covered by an existing PRD are marked so and not
-re-proposed.
+Replaces the previous §3.1–§3.10 wholesale. Ratings are L/C/E/R
+(Leverage / Cost, higher = costlier / Evidence / Reversibility, each 1–5) —
+justifications and the losing arguments are in `afk-v2-plan-debate.md`.
+Nothing on this list adds minutes to the happy path.
 
-### 3.1 Ticket quality is the highest-leverage gate, and nothing gates it
+| # | Item (former §) | Placement | L/C/E/R | Recurring cost | Failure mode |
+|---|---|---|---|---|---|
+| 1 | **Classifier fix, narrow form** (§3.5 + #120, one ADR): non-zero exit from a lifecycle script during gate `prepare` is candidate-owned, keyed on exit code, replacing the one-marker whitelist at `gate-runner.ts:202`. The full inversion was rejected — it converts transient network faults into burned rounds. | wave, ships first | 5/1/5/5 | zero | an env fault inside a lifecycle script burns one recoverable round — vs today's deterministic slice death |
+| 2 | **Derived generator verification command** (§3.2): generator loop derived from the gate catalog (required cheap-on-changed-tree gates in gate order, `test:full` excluded); a flag may narrow, never omit; numeric cheapness threshold. Corrects `AGENTS.md`, which still prescribes the typecheck-less command. | PRD 4 | 4/2/5/4 | seconds/iteration | a gate misdeclared "cheap" taxes every iteration — hence the numeric threshold |
+| 3 | **`afk stop` sentinel** (new; both debaters independently): orchestrator polls a run-namespaced sentinel file, routes through the existing `AbortSignal` path so ADR 0040 records fire; preflight sweeps stale sentinels. | wave | 5/1/5/5 | one `existsSync`/tick | sentinel unseen if the tick loop is wedged — fallback is today's status quo |
+| 4 | **Crash records** (§3.6): `uncaughtException`/`unhandledRejection`/fatal stream errors → cancellation bookkeeping, cause `CRASHED`, best-effort (ENOSPC may defeat it; no reserved-space machinery), item 11's clear-on-dispatch as backstop. | wave | 5/1/5/5 | zero | the handler may be unable to write under the very condition it records — accepted |
+| 5 | **Change-summary-first candidate-evaluator envelope** (new): PRD 4's final-evaluator change-summary artifact gets a second consumer — one manifest entry leads the candidate evaluator's envelope with the slice diff summary + manifest; worktree stays available. Attacks the largest measured recurring cost. **Rider:** if item 13's metric shows no material drop in evaluator nonCommandTime within two PRD runs, the leverage claim was wrong and the ordering is revisited. | PRD 4 artifact, PRD 3 manifest entry | 5/2/4/5 | ms/round | diff-anchoring under-reads preservation — bounded by the full-suite gate and the explorer's preservation catalog |
+| 6 | **Ticket lint** (§3.1, narrowed): checks 2 (criterion names a state/field/artifact absent from the referenced schemas) and 3 (recording obligation without a named channel) gate with recorded waive-with-reason; check 4 (summarised field lists) warns via lexicon lint; check 1 (compound predicates) is an authoring-checklist item, not a lint — free-prose detection is NL parsing and the structural rescue (a mandatory ticket field) was cut as a forever-tax. **Must run against PRDs 2–6 before they enter AFK.** | pre-AFK tool | 4/2/5/5 | zero per slice | waive-with-reason decays into a rubber stamp — the waiver is recorded text |
+| 7 | **Preflight — detection + report + fail-fast only** (§3.7, narrowed): disk floor, leftover registered worktrees, live handles/processes holding run-namespace paths (named PID list for the operator), empty-shell sweep. Auto-kill in *both* debated forms is cut (see debate §2); so is the launch-time state↔branch audit. | wave | 4/2/5/5 | seconds/launch | a false "leftover" report delays a launch — operator-visible and overridable |
+| 8 | **Role-cost governance** (new rider): cleaner + hardener default off until #73 story 17 ROI evidence; any enable/disable recorded in run evidence and the draft PR; #72 story 13 makes the final evaluator free while they are off. | PRDs 5–6 policy | 4/1/3/5 | one config line/run | useful cleaner passes forgone until evidence exists — the point |
+| 9 | **QA-dedup resequenced** (new): before #96 lands, the orchestrator injects base-gate evidence + exact tree sha into the QA prompt as a citable skip authorization (recovery plan Phase D step 14). Exact-sha match else re-run, fail closed; the verdict artifact records the citation; the ADR 0012 amendment lands *with* it. ~13 measured min back per QA round, starting with PRD 2's run. | wave | 4/2/5/3 | one sha compare/round | sha mismatch falls closed to today's behaviour — strictly no worse |
+| 10 | **`afk adopt`, thin** (§3.8): verify the branch merges and gates pass, merge, write the state entry, record who/why; refusal names *which* check failed; the adoption record surfaces in the run summary and draft PR. Carries the write-time state↔branch verification (the launch-time audit died because advisory-forever scanning is unfalsifiable; the check lives where writing state is refusable and the operator is present). | PRD 2 | 4/2/4/4 | zero per slice | adopt becomes a bypass valve — the gate run + surfaced record is the guard; more ceremony was rejected |
+| 11 | **Provenance, narrowed** (§3.3): slice-state records carry run ID (tree identity alone cannot discriminate #121's two-runs-stale error); readers report mismatches; stale error text cleared at dispatch. Gate-evidence provenance is already PRD 4 story 1 and is not re-proposed; the keyed measurement store is cut. | PRD 1 assembly (schema) + wave (clear-on-dispatch) | 4/2/5/3 | bytes/record | provenance written but never checked is decoration — the reader-side half must not be dropped in slicing |
+| 12 | **Advisory environment gates, catalog-declared only** (§3.4, narrowed): a gate *declared* environment-sensitive in the policy-owned catalog is advisory in pipeline context — reports, never blocks, never consumes a round; still surfaces at PR review. The general "no actor can act ⇒ not blocking" corollary is cut as agent-certified classification. Ships with the loaded-in-chain budget ADR. | PRD 4 declarations; ADR now | 3/2/4/4 | zero | first *undeclared* env-sensitive gate deadlocks one round before someone declares it — bounded, once per gate |
+| 13 | **Reading-time metric** (§3.10): per-invocation nonCommandTime as first-class evidence; a measurement, **never a gate**; harvest scripts already compute it. Scores PRD 3's envelope bet and item 5's rider; feeds #73 story 17. | PRD 3/4 evidence | 3/1/5/5 | one timer/invocation | conflates model/tool latency with reading — name it honestly, never gate on it |
+| 14 | **Bounds visibility** (§3.9): remaining resume attempts, rounds, and infrastructure retries at dispatch in `run.log` and `afk status`; carrier for the stage-duration journal event (the watchdog ping's surviving residue — data, never an alarm). | wave | 2/1/3/5 | one log line/dispatch | none worth the name |
 
-**PRD 3, or its own slice.** PRD 3 governs *prompts*. Nothing governs
-*issues*, and the issue is the actual input to negotiation.
+Riding items: the **reader-side budget check** (~10 lines in
+`check-suite-budgets.mjs`: refuse cross-branch block comparison, warn on
+tree divergence — 3/1/5/5, wave) and the **stage-duration journal event**
+(2/1/3/5, rides items 13–14).
 
-Two rounds were lost to the same defect shape, in two different issues:
-
-- #77's in-scope line packed cardinality, uniqueness and type into one
-  sentence (`behaviorIds` is a non-empty unique-string array). The planner
-  covered the two conjuncts that had named example shapes and dropped the
-  one with none. The evaluator checks falsifiability conjunct by conjunct,
-  so **a paraphrase of a compound predicate always loses the conjunct with
-  no example value.**
-- #78 required a `held` finding state that its own enum omitted, then —
-  after that was fixed — required the evaluator to *record* WITHDRAWN while
-  the artifact schema had no channel to express it. **A criterion that
-  requires recording something must name where it is recorded.**
-
-Proposal: a deterministic ticket lint, run before a PRD enters AFK, that
-flags
-
-1. a compound predicate in an acceptance criterion without one rejection
-   case per conjunct,
-2. a criterion naming a state, field, or artifact absent from the schemas
-   the issue itself references,
-3. a criterion that requires recording an outcome without naming the
-   channel,
-4. summarised field lists ("all other strings") where enumeration is
-   possible.
-
-None of that needs an LLM. All four are checkable against the issue text
-plus the referenced schema files. This is cheaper than any negotiation
-round it prevents, and it runs once per ticket rather than once per round.
-
-### 3.2 The generator's verification command should be derived, not passed
-
-**PRD 4** (it owns the gate catalog and the test-cost split).
-
-ADR 0038 shipped `--test-command`, an operator string. Run 5 showed the
-failure mode: the string contained only vitest suites, and **vitest strips
-types without checking them**, so the generator drove its loop to green
-across 8 commits over code that did not compile. The base gate then failed,
-and because `package.json`'s `prepare` script runs `tsc`, it failed during
-*environment preparation* and was classified INFRASTRUCTURE — burning both
-retries and killing the slice with two of three rounds unused (#120).
-
-Proposal: the generator's loop is **derived from the gate catalog** — every
-required gate that is cheap on a changed tree (format, lint, typecheck,
-`test:related`), in gate order, with `test:full` excluded. An operator flag
-may narrow it, never omit a required cheap gate. Then a generator cannot
-reach a gate that will fail on something it never ran.
-
-This subsumes the current AGENTS.md self-run guidance, which still
-prescribes a typecheck-less command and needs correcting either way.
-
-### 3.3 Records must carry provenance, or they mislead
-
-**PRD 1** (it owns artifact schemas and evidence).
-
-Two incidents, one root cause — a record that does not say which run or
-which tree produced it:
-
-- After run 6's crash, `#79`'s persisted `error` named a typecheck failure
-  from two runs earlier, already fixed, in a run whose gate had since
-  passed. An operator reading state is pointed at the wrong defect (#121,
-  and #111 before it).
-- The babysitter compared a gate's suite times against the wrong baseline
-  block in `suite-budgets.json` and concluded a worker had been lost,
-  inventing a scheduling mystery. The numbers were fine; the baseline
-  belonged to a different branch.
-
-Proposal, three parts:
-
-1. Every persisted record — slice state, gate evidence, measurement block —
-   carries the run ID and the tree/branch identity that produced it.
-2. A reader that compares two records must compare like-for-like; a
-   mismatch is reported, not silently tolerated. Cheap version: stale
-   records are cleared when a slice is dispatched, so a previous run's
-   reason cannot survive into this one.
-3. Measurements are keyed by tree identity rather than appended as prose
-   blocks. `suite-budgets.json` now carries five stacked blocks and picking
-   the wrong one is the default failure.
-
-Every numeric claim in a report should name the artifact it came from. Both
-babysitter errors in this session were provenance errors, not reasoning
-errors.
-
-### 3.4 Some gates measure the environment, not the candidate
-
-**PRD 4** (gate declarations) with a consequence for **PRD 1** (verdicts).
-
-Run 4's wall-clock budget gate went red — `fast` at 130.5s against a 110s
-budget — with **zero failing tests**, because QA, the orchestrator, a
-generator and a babysitter were all resident. QA was literally correct that
-the command exited non-zero, so it raised a blocking Major finding. But no
-code change could clear it, and the generator's only escape would have been
-editing the ratchet from inside a slice whose contract said nothing about
-budgets.
-
-Proposal: a gate declaration attribute for environment-sensitive gates.
-Inside a pipeline context such a gate is advisory: it reports, it never
-produces a blocking finding, and it never consumes a round. Corollary for
-PRD 1's finding schema: **a finding that no writing role can act on is not
-a blocking finding.** A judge needs a way to say "this failed, and it is
-not the candidate's fault" without stalling the slice — QA already has
-FAIL/INFRASTRUCTURE for whole-verdict cases, but not per finding.
-
-Related standing decision, worth an ADR either way: during an AFK run the
-resident agents *are* the environment, so a wall-clock budget must cover
-the loaded in-chain number. Three raises so far, each with recorded
-measurements; recording the rule stops a fourth rediscovery.
-
-### 3.5 A classifier that decides "who fixes this" must default to the actor who can act
-
-**Cross-cutting; an ADR, applied first in PRD 4.**
-
-`gate-runner.ts` treats a prepare failure as the candidate's fault only
-when it matches `ERR_PNPM_OUTDATED_LOCKFILE`; everything else becomes
-INFRASTRUCTURE and is retried identically. A compile error in the
-candidate's own `prepare` script is equally deterministic and equally the
-generator's to fix, so it looped and then killed the slice (#120).
-
-The general rule: **when classification is uncertain, choose the branch
-that cannot loop.** Blaming an actor who can change the input costs at most
-a wasted round; blaming the environment for a deterministic failure costs
-every retry plus the slice.
-
-One tension to settle before implementing, not during: inverting the
-default means a transient network failure during install would burn a
-generator round where today it correctly retries. The narrower move — treat
-a non-zero exit from a lifecycle script as candidate-owned, keyed on exit
-code rather than message text — sidesteps it.
-
-### 3.6 Every exit path writes its record
-
-**Reliability wave; mechanism belongs beside PRD 2's routing.**
-
-#114 fixed signal-based stops, verified live: a Ctrl-Break wrote CANCELLED
-records within 2.4s for the in-flight slice and its never-dispatched
-dependent. But the fix hangs off the `AbortSignal`, so run 6's unhandled
-ENOSPC on a WriteStream terminated the process with nothing recorded
-(#121).
-
-Proposal: route `uncaughtException`, `unhandledRejection` and fatal stream
-errors through the same bookkeeping, with a distinct cause (`CRASHED`, with
-the error text), then re-throw. "Died of ENOSPC mid-QA" is recoverable; a
-record naming a stale, already-fixed failure is worse than no record,
-because it invites the wrong fix.
-
-### 3.7 Preflight the resources a run consumes
-
-**Reliability wave.**
-
-Run 6 died with 200 KB free. Run 3's #77 died on a leaked directory handle
-that blocked a worktree refresh for an entire run, and the handle outlived
-the run that created it. Neither is detected before dispatch.
-
-Proposal: a launch preflight that fails fast on free disk below a
-configured floor, on leftover registered worktrees from a previous run, and
-on live processes holding paths inside the namespace this run will use.
-Cheap, and each condition has already cost a multi-hour run.
-
-Sweep the run's own namespace at start, too: teardown leaves empty
-directory shells on Windows (467 of them accumulated), which cost a
-diagnosis cycle by *looking* like a space leak. Measured, they held 0.02 GB
-— there is no space leak, and that correction belongs in the record so it
-is not re-chased.
-
-### 3.8 Hand-finishing is a supported mode; give it a command
-
-**PRD 2** (human decisions in live runs).
-
-Used successfully four times: #76, #77, and twice to unblock #79. The
-procedure is always the same — work the slice branch in a fresh worktree,
-verify with the full suite, merge into the feature branch, then hand-edit
-run state to `{ "phase": "PASS", "branch": ..., "mergedToFeature": true }`
-so `--only-failed` stops selecting it and `priorCompleted` unblocks its
-dependents.
-
-The hand-edit is the weak link: it is JSON surgery on the file the
-orchestrator trusts, and `isSliceComplete` is exactly
-`phase === "PASS" && mergedToFeature === true` (`src/run-state.ts:416`), so
-a typo silently either re-selects the slice or falsely satisfies a
-dependency. Proposal: `afk adopt <slice>` — verify the branch merges and
-its gates pass, merge, write the state entry, record who adopted it and
-why. Hand-finishing stops being off-road.
-
-### 3.9 Make the resume cap and other bounds visible before they bite
-
-**Reliability wave; small.**
-
-`MAX_RESUME_ATTEMPTS` is 2, and the counter is invisible until the run
-refuses. During #79's recovery the difference between "one attempt left"
-and "none" changed the recommendation, and it took reading the state file to
-know. Report remaining attempts, remaining rounds, and remaining
-infrastructure retries at dispatch, in `run.log` and `afk status`.
-
-### 3.10 Measure agent reading time, not just command time
-
-**PRD 3** (envelopes) and **PRD 4** (evidence).
-
-The harvest of run 3 found QA r2 spent **30.3 of 30.9 minutes reading** —
-it ran 34 seconds of commands and passed the slice on the base gate's
-evidence. That is the intended design, and it means suite-selection work
-has hit diminishing returns while *reading* is now the dominant cost. Run 6
-priced the remaining duplication too: QA r1 ran the full suite at 772.5s on
-the same tree the base gate had just tested at 739.3s — about 13 minutes
-per round, which PRD 4's exact-tree reuse (#96) already targets.
-
-Already covered: envelope discipline for writing roles (PRD 3), change
-summaries for the final evaluator (PRD 4). Not covered: the *measurement*.
-Proposal: record reading time versus verification time per invocation as
-first-class evidence, so envelope changes can be judged by their effect on
-the dominant cost rather than argued.
-
-Also unaddressed by anything: generator round 1 alone was 109.6 minutes in
-run 5 — 44% of that run. PRD 3's focused envelope is the hypothesis for
-reducing it; this metric is how we would know.
+Cut, with the killing argument recorded in the debate doc: the watchdog
+ping, auto-kill (both forms), the launch-time state audit, the mandatory
+`rejection-cases` ticket field, the keyed measurement store, the general
+finding rule. Each carries a re-open trigger; do not re-propose without it.
 
 ---
 
-## 4. Sequencing
+## 4. Sequencing — pay the next runs first, in parallel tracks
+
+Ordering principle: **an item's priority is how soon the *next* AFK run
+collects its benefit.** Everything in Track 2 pays from the very next run
+onward; PRD-embedded items pay from their PRD's run onward. Parallelism is
+real for manual sessions (separate worktrees, the proven #113/#114
+pattern); AFK runs themselves serialize on this machine (one full suite at
+a time), so "parallel" for PRDs means *prep in parallel, run whichever is
+ready*.
 
 ```
-#79 → assemble PRD 1 → close #69
-        │
-        ├── reliability wave (#111, #112, #120, #121 + §3.6, §3.7, §3.9)
-        │     parallel manual sessions, separate worktrees
-        │
-        ├── ticket lint (§3.1) — before any PRD enters AFK
-        │
-        └── PRD 2 ──┬── PRD 3 ── PRD 4 ──┬── PRD 5
-                    │                     └── PRD 6
-                    └── (§3.8 afk adopt rides with PRD 2)
+NOW, four tracks in parallel:
+├─ Track 1 (AFK, in flight)   #79 → assemble PRD 1 (+ run-ID fields, item 11) → close #69
+├─ Track 2 (manual wave, parallel worktrees — every item pays from the next run)
+│    item 1  classifier fix + ADR        item 9  QA-dedup + ADR 0012 amendment
+│    item 3  afk stop sentinel           item 4  crash records
+│    item 7  preflight (detection-only)  item 11 clear-on-dispatch
+│    item 14 bounds + journal event      reader-side budget check
+│    #112 contract-amendment gap (as filed)
+├─ Track 3 (manual)           item 6 ticket lint tool → lint PRDs 2–6 tickets, fix what it flags
+└─ Track 4 (manual, docs)     loaded-in-chain budget ADR (item 12's half) · AGENTS.md
+                              launch-command correction (interim until item 2)
+
+GATE: PRD 1 closed + wave merged + tickets linted
+  → AFK: PRD 2 (item 10 afk adopt; story 14 deferred)
+  → AFK: PRD 3 (item 5 manifest entry, item 13; story 16 deferred, assembly fence kept)
+       PRDs 2 and 3 are dependency-independent: prep both, launch in order,
+       and if one stalls on a human decision, start the other.
+  → AFK: PRD 4 (item 2, item 5 artifact, item 12 attribute, provenance story 1;
+                stories 9 and 15 deferred)
+  → AFK: PRD 5 (cleaner only, default-off, story 17 ROI experiment)  ∥  PRD 6
+       both depend only on PRD 4 — parallel-eligible, serialized only by the machine.
 ```
 
-**The reliability wave runs by hand, not by AFK.** Pipeline-safety fixes
-are precisely the changes not to depend on the pipeline to deliver, and
-wave 1 already proved the pattern works: #113 and #114 were fixed by
-parallel manual sessions on separate worktrees, reviewed and merged in one
-gate.
+What each stage banks for the runs after it:
 
-**Grill §3.5 before ticketing #120.** It carries a real tradeoff, and a
-naive inversion trades one wasted round for another.
+- **The wave** removes the three run-killer classes (misclassification,
+  unrecorded exits, resource surprises) and saves ~13 min per QA round —
+  before PRD 2's run ever starts.
+- **The lint** protects the scarce round cap: #77 and #78 each lost rounds
+  to lintable defects in tickets that looked fine to a human.
+- **PRD 4** lands the two big recurring-cost attacks (items 2 and 5,
+  ~35–43 min/round combined with item 9) plus the advisory-gate attribute.
+- **PRD 5's run** is itself the experiment: story 17 produces the ROI
+  evidence that decides whether cleaner/hardener ever default on.
 
-**Run the ticket lint against PRDs 2–6 before they enter AFK.** #77 and #78
-both lost rounds to defects the lint would have caught, in issues that
-looked fine to a human reader.
+### Per-wave discipline, learned the hard way (unchanged, one update)
 
-### Per-wave discipline, learned the hard way
-
-- Budget a prep-chain refresh as its own task, not a step. Merging main
-  into the feature branch produced seven conflicting files because main had
-  restructured test files that slice branches were editing. Expect that
+- Budget a prep-chain refresh as its own task, not a step; expect conflicts
   whenever main restructures a file a slice branch touches.
-- One full test suite at a time on this machine, and prefer the pipeline's
+- One full test suite at a time on this machine; prefer the pipeline's
   gates to own it.
-- Every launch passes the verification command explicitly, and it includes
-  typecheck until §3.2 makes the flag unnecessary.
+- Every launch passes the verification command explicitly **including
+  typecheck** until item 2 lands — and Track 4 corrects the stale
+  `AGENTS.md` guidance now, since a document that misleads the next
+  operator is exactly the defect class this plan exists to kill.
 - A stopped run is recoverable; verify the CANCELLED records landed and
   record the commit the slice branch is left at.
 
 ---
 
-## 5. Open points
+## 5. What runs through AFK, and what stays in normal agent sessions
 
-- Does the ticket lint (§3.1) become a slice of PRD 3, or its own small
-  PRD? It has no dependency on the envelope work and could ship first.
-- §3.4 needs a decision on where the "not the candidate's fault" finding
-  class lives: PRD 1's finding schema, or PRD 4's gate declarations, or
-  both.
-- Whether `afk adopt` (§3.8) is worth building before the reliability wave;
-  it is the only proposal here that adds a command rather than closing a
-  hole.
-- PRD 5's mutation scope and PRD 6's remediator write scope remain as
-  recorded in `afk-v2-agent-roles.md`; nothing in the self-runs touched
-  them, so they are untested by evidence rather than settled.
+The rule of thumb the debate converged on:
+
+> **If the pipeline must survive the change failing, or the change is
+> smaller than one round's overhead, do it by hand. If it is
+> contract-sized feature work whose evidence trail matters — and whose run
+> doubles as the next dogfood experiment — run it through AFK.**
+
+| Work | Mode | Why |
+|---|---|---|
+| Reliability wave (items 1, 3, 4, 7, 9, 11-wave-half, 14, reader-side check, #112) | **Manual**, parallel worktrees | Pipeline-safety fixes are precisely the changes not to depend on the pipeline to deliver — a wave item failing inside AFK could take down the run that was delivering it. Each item is also smaller than one round's overhead (base gates alone are 12.4–14.8 min/round); a run per 10-line fix is negative ROI. Wave 1 (#113/#114) already proved the parallel-manual pattern. |
+| Ticket lint tool + linting PRDs 2–6 (item 6) | **Manual** | It must exist *before* AFK ingests the tickets it gates; it is a small deterministic tool with no contract worth negotiating. |
+| ADRs (classifier, loaded-in-chain budget, ADR 0012 amendment) and the `AGENTS.md` correction | **Manual** | Documents. Zero benefit from the pipeline. |
+| Hand-finishing stuck slices (until item 10 exists) | **Manual, documented procedure** | Verify with the full suite, merge, then edit state — and prefer waiting for `afk adopt` over fresh JSON surgery on `isSliceComplete` (`run-state.ts:416`). |
+| PRD 2 (routing, `afk adopt`), PRD 3 (envelopes), PRD 4 (gates), PRD 5 (cleaner + ROI), PRD 6 (guardians) | **AFK** | Multi-slice, contract-sized feature work where negotiation, lock validation and gate evidence earn their cost — and every run is also the measurement the plan needs (items 13–14 evidence, story 17 ROI). These are the runs the wave exists to protect. |
+| PRD-embedded hardening (items 2, 5, 10, 12, 13, provenance story 1) | **AFK**, as slices of their PRDs | Each is genuine feature work inside a PRD's contract, not pipeline first-aid; splitting them out would re-create the double-counting the debate removed. |
+
+Boundary case, decided: `afk adopt` (item 10) stays an AFK-built PRD 2
+slice, but if #79 or the PRD 2 run itself needs a fifth adoption before it
+exists, the documented manual procedure applies — do not pull it forward
+into the wave just in case.
+
+---
+
+## 6. Open points
+
+The previous open points are resolved by the debate: the ticket lint is its
+own pre-AFK tool (not a PRD 3 slice); the "not the candidate's fault"
+class lives in PRD 4's gate declarations only (the finding-schema variant
+was cut); `afk adopt` rides PRD 2 with the boundary rule above; PRD 5's
+mutation scope is deferred outright rather than left untested.
+
+What remains is not open questions but **standing triggers**:
+
+- **Auto-kill** re-opens only on a second leaked-holder incident in which
+  the survivor record was actually present.
+- **A stage watchdog** re-opens only when the journal events show a bimodal
+  doomed-vs-large duration distribution.
+- **Item 5's L5 rating** is falsifiable by construction: no material drop
+  in evaluator nonCommandTime within two PRD runs of shipping ⇒ revisit
+  the envelope ordering.
+- **Cleaner/hardener defaults** are decided by #73 story 17's evidence, not
+  by argument — the run that produces it is PRD 5's.
+- **Deferred stories** (#70 s14, #71 s16, #72 s9, #72 s15, #73 s9–15+19)
+  re-enter only when an incident or the ROI evidence demands them; the
+  PRD 3 assembly fence (provider-agnostic envelope interface) holds
+  regardless.
