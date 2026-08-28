@@ -571,6 +571,53 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     );
   });
 
+  // Both failures must survive into the terminal error: the archive
+  // refusal (why the attempt cannot count) and the original invocation
+  // failure (the root cause a reader debugs first). Before the fix the
+  // archive throw replaced the evaluator failure outright.
+  it("keeps the evaluator failure visible when its archive also fails", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        // The evaluator wrote a valid review, then the provider died —
+        // the catch path archives the evidence it left behind.
+        writeQAReview(artifactDir, "deterministic");
+        throw new Error("provider disconnected mid-review");
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1.json"),
+      "stale archive from another life\n",
+      "utf-8",
+    );
+
+    const error = await runQAStage(ctx, 1, "deterministic", []).then(
+      () => {
+        throw new Error("expected runQAStage to reject");
+      },
+      (err) => err as Error,
+    );
+    expect(error.message).toMatch(
+      /could not preserve its raw canonical artifact/,
+    );
+    expect(error.message).toMatch(
+      /while handling evaluator failure: provider disconnected mid-review/,
+    );
+  });
+
   it("refuses PASS when the lifecycle record cannot be archived", async () => {
     const repo = makeRepo();
     let artifactDir = "";

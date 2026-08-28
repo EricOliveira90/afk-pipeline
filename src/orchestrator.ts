@@ -2381,7 +2381,27 @@ export async function runQAStage(
           }),
         }).finally(() => closeAgentLog(evalLog));
       } catch (error) {
-        failedAttemptEvidence = archiveAttemptEvidence();
+        // `archiveAttemptEvidence` can itself throw (raw canonical
+        // archive fails closed, #79). Without chaining, that throw
+        // would replace the evaluator failure that got us here and the
+        // root cause would vanish from the retry warns and the final
+        // ERROR message. Cancellation is rethrown as-is so it stays
+        // recognisable to `isCancelled`.
+        try {
+          failedAttemptEvidence = archiveAttemptEvidence();
+        } catch (archiveError) {
+          if (isCancelled(error, config.signal)) throw error;
+          const archiveMessage =
+            archiveError instanceof Error
+              ? archiveError.message
+              : String(archiveError);
+          const invokeMessage =
+            error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `${archiveMessage} (while handling evaluator failure: ${invokeMessage})`,
+            { cause: error },
+          );
+        }
         throw error;
       }
       return archiveAttemptEvidence();
