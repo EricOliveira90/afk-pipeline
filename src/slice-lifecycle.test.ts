@@ -31,6 +31,9 @@ describe("SliceLifecycle constructors", () => {
     expect(stuck.error).toBe("boom");
 
     expect(lifecycle.escalate(ID, P, "esc").phase).toBe("ESCALATE");
+    expect(
+      lifecycle.awaitingAdjudication(ID, P, "contract impasse").phase,
+    ).toBe("AWAITING-ADJUDICATION");
     expect(lifecycle.error(ID, P, "err").phase).toBe("ERROR");
     expect(lifecycle.conflict(ID, P, "merge").phase).toBe("CONFLICT");
     expect(lifecycle.cancelled(ID, P, "abort").phase).toBe("CANCELLED");
@@ -63,6 +66,7 @@ describe("bucketFor", () => {
     expect(bucketFor("PASS")).toBe("succeeded");
     expect(bucketFor("STUCK")).toBe("failed");
     expect(bucketFor("ESCALATE")).toBe("failed");
+    expect(bucketFor("AWAITING-ADJUDICATION")).toBe("failed");
     expect(bucketFor("ERROR")).toBe("failed");
     expect(bucketFor("CONFLICT")).toBe("failed");
     // A deferred merge is neither a success nor a failure: the work is
@@ -79,6 +83,9 @@ describe("bucketFor", () => {
 describe("summaryStatusLabel", () => {
   it("maps ESCALATE and ERROR to STUCK to keep run-summary.md byte-stable", () => {
     expect(summaryStatusLabel("ESCALATE")).toBe("STUCK");
+    expect(summaryStatusLabel("AWAITING-ADJUDICATION")).toBe(
+      "AWAITING-ADJUDICATION",
+    );
     expect(summaryStatusLabel("ERROR")).toBe("STUCK");
     expect(summaryStatusLabel("STUCK")).toBe("STUCK");
     expect(summaryStatusLabel("PASS")).toBe("PASS");
@@ -135,6 +142,30 @@ describe("projectForPersistence + adaptLoadedState round-trip", () => {
     const round = adaptLoadedState(JSON.parse(json), "x");
     expect(round.slices["1"]!.phase).toBe("ESCALATE");
     expect(round.slices["1"]!.error).toBe("max rounds");
+  });
+
+  it("round-trips AWAITING-ADJUDICATION with its branch and reason", () => {
+    const parked = lifecycle.awaitingAdjudication(
+      ID,
+      P,
+      "contract impasse on F-01",
+    );
+    const persisted = projectForPersistence(parked)!;
+    const round = adaptLoadedState(
+      {
+        version: 1,
+        prdSlug: "x",
+        featureBranch: "feat/x",
+        slices: { "1": persisted },
+      },
+      "x",
+    );
+
+    expect(round.slices["1"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/test",
+      error: "contract impasse on F-01",
+    });
   });
 
   it("preserves ERROR distinctly through JSON", () => {

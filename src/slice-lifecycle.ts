@@ -24,6 +24,7 @@ export interface SliceProgress {
 export type FailurePhase =
   | "STUCK"
   | "ESCALATE"
+  | "AWAITING-ADJUDICATION"
   | "ERROR"
   | "CONFLICT"
   | "CANCELLED"
@@ -62,6 +63,7 @@ export const ALL_PHASES = [
   "PASS",
   "STUCK",
   "ESCALATE",
+  "AWAITING-ADJUDICATION",
   "ERROR",
   "CONFLICT",
   "MERGE-PENDING",
@@ -102,6 +104,16 @@ export const lifecycle = {
   }),
   escalate: (id: SliceIdentity, progress: SliceProgress, error: string): SliceLifecycle => ({
     phase: "ESCALATE",
+    ...id,
+    progress,
+    error,
+  }),
+  awaitingAdjudication: (
+    id: SliceIdentity,
+    progress: SliceProgress,
+    error: string,
+  ): SliceLifecycle => ({
+    phase: "AWAITING-ADJUDICATION",
     ...id,
     progress,
     error,
@@ -211,6 +223,14 @@ export const PHASE_TRAITS = {
     bucket: "failed",
     icon: "🔴",
     summaryLabel: "STUCK",
+    persisted: true,
+    terminalThisRun: true,
+    branchDisposition: "branch",
+  },
+  "AWAITING-ADJUDICATION": {
+    bucket: "failed",
+    icon: "⏸️",
+    summaryLabel: "AWAITING-ADJUDICATION",
     persisted: true,
     terminalThisRun: true,
     branchDisposition: "branch",

@@ -348,6 +348,7 @@ export function projectForPersistence(
       };
     case "STUCK":
     case "ESCALATE":
+    case "AWAITING-ADJUDICATION":
     case "ERROR":
     case "CONFLICT":
     case "CANCELLED":

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { RunJournal } from "./run-journal.js";
 import { loadRunState } from "./run-state.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
+import { runStatus } from "./status.js";
 
 const tempDirs: string[] = [];
 const SLICE: SliceIdentity = {
@@ -139,6 +140,40 @@ describe("RunJournal.recordTerminal", () => {
     expect(
       eventsOf(journal).find((event) => event.type === "slice-outcome")?.slice,
     ).toEqual(recorded);
+  });
+
+  it("projects an adjudication park with its branch and reason everywhere", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "impasse");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    journal.event({
+      type: "run-started",
+      provider: "stub",
+      runSlug: "impasse",
+    });
+    const reason =
+      "contract negotiation reached IMPASSE on contested finding F-01";
+
+    const recorded = journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: reason,
+    });
+    const summary = journal.writeSummary();
+    const status = runStatus(["--run", journal.runDir], repo);
+
+    expect(loadRunState(repo, "impasse").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: reason,
+    });
+    expect(
+      eventsOf(journal).find((event) => event.type === "slice-outcome")?.slice,
+    ).toEqual(recorded);
+    for (const projection of [summary, status.output]) {
+      expect(projection).toContain("AWAITING-ADJUDICATION");
+      expect(projection).toContain(SLICE.branch);
+      expect(projection).toContain(reason);
+    }
   });
 });
 

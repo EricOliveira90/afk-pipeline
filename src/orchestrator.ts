@@ -1305,7 +1305,10 @@ interface NegotiateFailureCause {
 export type NegotiateOutcome =
   | { phase: "LOCKED" }
   | { phase: "CANCELLED" }
-  | { phase: "STUCK" | "ESCALATE" | "ERROR"; cause: NegotiateFailureCause };
+  | {
+      phase: "STUCK" | "ESCALATE" | "AWAITING-ADJUDICATION" | "ERROR";
+      cause: NegotiateFailureCause;
+    };
 
 /**
  * Whether a negotiate failure is worth retrying. A genuine verdict
@@ -1471,6 +1474,23 @@ function negotiateVerdictCause(args: {
           `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
         : `negotiate: contract not locked after negotiation — last evaluator ` +
           `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+function negotiateImpasseCause(
+  outcome: ContractNegotiationOutcome,
+  verdict: RecordedContractVerdict,
+): NegotiateFailureCause {
+  const contestedIds = outcome.findings
+    .filter((finding) => finding.state === "CONTESTED")
+    .map((finding) => finding.id);
+  return {
+    kind: "verdict",
+    verdict,
+    summary:
+      `negotiate: contract negotiation reached IMPASSE after ${outcome.round} round(s) — ` +
+      `contested blocking finding${contestedIds.length === 1 ? "" : "s"} ` +
+      `${contestedIds.join(", ")} require human adjudication`,
   };
 }
 
@@ -2522,11 +2542,15 @@ async function negotiateAttempt(
           continue;
         }
 
-        logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
         const negotiationOutcome =
           evaluatorRound === 2 && lastReviewAttemptRecord
             ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
             : undefined;
+        const impasse = negotiationOutcome?.classification === "IMPASSE";
+        logger.phase(
+          `${ctx.tag}: ${impasse ? "AWAITING-ADJUDICATION" : "ESCALATE"} — ` +
+            `contract negotiation failed`,
+        );
         preserveContractNegotiationFailure(
           ctx,
           "ESCALATE",
@@ -2538,6 +2562,12 @@ async function negotiateAttempt(
           negotiationOutcome,
         );
         logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
+        if (impasse) {
+          return {
+            phase: "AWAITING-ADJUDICATION",
+            cause: negotiateImpasseCause(negotiationOutcome, verdict),
+          };
+        }
         const cause = negotiateVerdictCause({
           outcome: "ESCALATE",
           verdict,
@@ -3788,7 +3818,14 @@ async function runSlice(
   featBranch: string,
   relevantFilesBlock: string,
   testCommand: string,
-): Promise<"PASS" | "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED"> {
+): Promise<
+  | "PASS"
+  | "STUCK"
+  | "ESCALATE"
+  | "AWAITING-ADJUDICATION"
+  | "ERROR"
+  | "CANCELLED"
+> {
   const ctx = makeSliceContext(
     config,
     slice,

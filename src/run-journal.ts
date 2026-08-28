@@ -464,6 +464,8 @@ function terminalLifecycle(
       return lifecycle.stuck(sliceId, progress, outcome.error);
     case "ESCALATE":
       return lifecycle.escalate(sliceId, progress, outcome.error);
+    case "AWAITING-ADJUDICATION":
+      return lifecycle.awaitingAdjudication(sliceId, progress, outcome.error);
     case "ERROR":
       return lifecycle.error(sliceId, progress, outcome.error);
     case "CONFLICT":

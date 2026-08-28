@@ -2405,6 +2405,79 @@ describe("round-scoped contract feedback", () => {
     expect(contract).not.toContain("## Evaluator feedback");
   });
 
+  it("parks a contested round-two exhaustion for adjudication", async () => {
+    const repo = makeRepo();
+    const slug = "contract-impasse";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9081",
+      title: "Contested contract",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 2) {
+            writeContractResponse(artifactDir, ["F-01"], "CONTESTED");
+          }
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          writeContractReview(artifactDir, "REVISE", [
+            {
+              id: "F-01",
+              severity: "BLOCKING",
+              behaviorIds: ["B-01"],
+              evidence: '"the disputed contract clause"',
+              expected: "one agreed contract interpretation",
+              observed: "planner and evaluator retain different interpretations",
+              clearCondition: "a human adjudicates the disputed interpretation",
+              state: evaluatorRounds === 1 ? "OPEN" : "CONTESTED",
+            },
+          ]);
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      { repoRoot: repo, prdSlug: slug, prdDir, specsDir, dag, provider },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+
+    expect(outcome.phase).toBe("AWAITING-ADJUDICATION");
+    if (outcome.phase !== "AWAITING-ADJUDICATION") {
+      throw new Error(`expected impasse park, got ${outcome.phase}`);
+    }
+    expect(outcome.cause.summary).toContain("IMPASSE");
+    expect(outcome.cause.summary).toContain("F-01");
+  });
+
   it("caps a converging negotiation at two rounds", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";

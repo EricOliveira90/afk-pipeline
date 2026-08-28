@@ -206,6 +206,10 @@ export class Logger {
       .map((s) => {
         const icon = statusIconFor(s.phase);
         const label = summaryStatusLabel(s.phase);
+        const status =
+          s.phase === "AWAITING-ADJUDICATION"
+            ? `${icon} ${label} — ${s.error}`
+            : `${icon} ${label}`;
         const rounds = roundsCellFor(s);
         const branchInfo = branchInfoFor(s);
         const t = totals.get(s.ghIssue);
@@ -215,7 +219,7 @@ export class Logger {
           runCost += t.costUsd;
           runToolCalls += t.toolCallCount;
         }
-        return `| ${s.ghIssue} ${s.title} | ${icon} ${label} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
+        return `| ${s.ghIssue} ${s.title} | ${status} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
       })
       .join("\n");
 
@@ -468,6 +472,7 @@ function roundsCellFor(s: SliceLifecycle): string {
     case "PASS":
     case "STUCK":
     case "ESCALATE":
+    case "AWAITING-ADJUDICATION":
     case "ERROR":
     case "CONFLICT":
     case "MERGE-PENDING":
