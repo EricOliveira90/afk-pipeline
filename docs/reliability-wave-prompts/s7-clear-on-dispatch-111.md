@@ -4,15 +4,34 @@ You implement one reliability-wave item for the AFK pipeline, by hand, in your
 own worktree. This is the wave half of plan §3 item 11: a previous run's
 error text must not survive into this one.
 
-## Setup
+## Setup — base branch matters here
 
-Create a fresh worktree from main of the pipeline repo:
+#79 (PRD 1 slice 5) rewrote run-state and QA-archive code adjacent to this
+session. Check whether PRD 1's feature branch is on main before you branch:
 
 ```
-git -C C:\Code\afk worktree add ..\wave-s7-clear -b wave/clear-on-dispatch main
+git -C C:\Code\afk merge-base --is-ancestor feat-codex/afk-v2-evidence-backbone main; echo $LASTEXITCODE
 ```
+
+- Exit 0 (PRD 1 merged): base on main —
+  `git -C C:\Code\afk worktree add ..\wave-s7-clear -b wave/clear-on-dispatch main`
+- Otherwise: base on the feature branch —
+  `git -C C:\Code\afk worktree add ..\wave-s7-clear -b wave/clear-on-dispatch feat-codex/afk-v2-evidence-backbone`
+  and confirm the two `followup/s05-*` branches are already merged into it;
+  if they are not, stop and report — assembly is not done and this session
+  would conflict with it.
 
 Work only inside that worktree.
+
+## Related open work — read, do not implement
+
+Issue #123 (`gh issue view 123 --repo EricOliveira90/afk-pipeline`) relocates
+stale `reviews\` archives on restart. It is a PRD 1 assembly follow-up in the
+same behavioral area as this session: both stop stale artifacts from a
+previous attempt from misleading the next one. Read it before you design.
+Do not implement it here, and avoid a clearing design that fights it — your
+scope is run-state records at dispatch; #123's scope is archive directories
+at restart.
 
 ## Read first
 

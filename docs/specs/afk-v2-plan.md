@@ -28,9 +28,22 @@ Three companion documents, each authoritative for its own scope:
 | #76 Every behavior locks with an executable binding | PASS, merged `ab18bc2` | Hand-finished |
 | #77 Contract review fails closed | PASS, merged `d86b8f6` | Hand-finished |
 | #78 Negotiation converges on open findings | PASS, merged `2b8eaa6` | AFK |
-| #79 QA verdicts and retries run on the same rails | 12 commits on branch; QA verdict outstanding | AFK, in flight |
+| #79 QA verdicts and retries run on the same rails | Reviewed: **SHIP-WITH-NOTES**, no blocker (`.afk\artifacts\...\slice-05\independent-review.md`) | AFK + follow-up sessions |
 
-Remaining path: `#79 → assemble PRD 1 into a draft PR → close #69`.
+Remaining path: assemble PRD 1 into a draft PR → close #69. Assembly must
+collect everything that now hangs off the slice-05 branch (head `c4cb48e`):
+
+- `followup/s05-n3-preserve-invoke-error` (`df46f8a`) — review note N3,
+  error-cause chaining in the archive-failure catch
+- `followup/s05-n1-n2-archive-hardening` (`f481faf`) — issue #124, the QA
+  validation archive now fails closed
+- the slice-artifact trail commit (`575bd9b`) — contract, negotiation
+  feedback, QA reports and stuck.md in history, matching slices 02 and 04
+- issue **#123** (relocate stale `reviews\` archives on restart) stays open
+  and lands as a PRD 1 **assembly follow-up, not a wave item**: its code
+  lives on the unmerged slice branch, and it overlaps wave session s7
+  (clear-on-dispatch) — coordinate the two so they do not fight over
+  restart behavior.
 
 Three of five slices needed human hands. That is the headline fact for
 planning PRDs 2–6: **the pipeline could not yet deliver its own evidence
@@ -133,6 +146,9 @@ NOW, four tracks in parallel:
 │    item 7  preflight (detection-only)  item 11 clear-on-dispatch
 │    item 14 bounds + journal event      reader-side budget check
 │    #112 contract-amendment gap (as filed)
+│    NOTE: items 9 and 11 touch files #79 rewrote (orchestrator, artifacts,
+│    run-state). Those two sessions base on the feature branch, or start
+│    after PRD 1 merges. The other sessions base on main.
 ├─ Track 3 (manual)           item 6 ticket lint tool → lint PRDs 2–6 tickets, fix what it flags
 └─ Track 4 (manual, docs)     loaded-in-chain budget ADR (item 12's half) · AGENTS.md
                               launch-command correction (interim until item 2)
@@ -172,6 +188,10 @@ What each stage banks for the runs after it:
   operator is exactly the defect class this plan exists to kill.
 - A stopped run is recoverable; verify the CANCELLED records landed and
   record the commit the slice branch is left at.
+- Review findings below blocker level are filed as issues and scheduled
+  against §3's priorities. They are not worked in the next free session —
+  a MINOR archive gap does not outrank a run-killer fix, however fresh the
+  review is.
 
 ---
 
