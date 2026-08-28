@@ -1,5 +1,12 @@
 # AFK v2 recovery plan — stabilize, speed up, resume the ladder
 
+> **Superseded as the forward plan by `afk-v2-plan.md`** (2026-08-27),
+> which consolidates the PRD 1–6 ladder, the current state of the work,
+> and the proposals the self-runs produced. This document remains
+> authoritative as the **historical record**: Phases A–D, and the
+> run-by-run evidence for runs 3–6. Read it for *why* a decision was
+> made; read `afk-v2-plan.md` for *what happens next*.
+
 Successor plan to the PRD 1 run stoppage (runs `run-20260825-185429`,
 `run-20260825-203430`). Companion to `afk-v2-ladder-runbook.md`, which
 stays the master sequence for PRDs 1–6; this document is what re-enters
