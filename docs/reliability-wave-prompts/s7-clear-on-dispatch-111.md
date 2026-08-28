@@ -23,15 +23,13 @@ git -C C:\Code\afk merge-base --is-ancestor feat-codex/afk-v2-evidence-backbone 
 
 Work only inside that worktree.
 
-## Related open work — read, do not implement
+## Related work — read, do not redo
 
-Issue #123 (`gh issue view 123 --repo EricOliveira90/afk-pipeline`) relocates
-stale `reviews\` archives on restart. It is a PRD 1 assembly follow-up in the
-same behavioral area as this session: both stop stale artifacts from a
-previous attempt from misleading the next one. Read it before you design.
-Do not implement it here, and avoid a clearing design that fights it — your
-scope is run-state records at dispatch; #123's scope is archive directories
-at restart.
+Issue #123 is already fixed: commit `8cccd2d` on the feature branch
+relocates a slice's stale `reviews\` archives before round 1 on restart.
+Read that commit before you design. Your scope is different but adjacent —
+run-state records at dispatch, not archive directories at restart. Do not
+duplicate or fight its behavior.
 
 ## Read first
 

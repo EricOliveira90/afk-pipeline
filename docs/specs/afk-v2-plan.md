@@ -30,20 +30,20 @@ Three companion documents, each authoritative for its own scope:
 | #78 Negotiation converges on open findings | PASS, merged `2b8eaa6` | AFK |
 | #79 QA verdicts and retries run on the same rails | Reviewed: **SHIP-WITH-NOTES**, no blocker (`.afk\artifacts\...\slice-05\independent-review.md`) | AFK + follow-up sessions |
 
-Remaining path: assemble PRD 1 into a draft PR → close #69. Assembly must
-collect everything that now hangs off the slice-05 branch (head `c4cb48e`):
+Remaining path: PR **#125** (draft) assembles PRD 1 → run the full suite
+once on its head `575bd9b` → undraft → merge → close #69. The feature
+branch already contains everything that hung off slice 05:
 
 - `followup/s05-n3-preserve-invoke-error` (`df46f8a`) — review note N3,
   error-cause chaining in the archive-failure catch
-- `followup/s05-n1-n2-archive-hardening` (`f481faf`) — issue #124, the QA
-  validation archive now fails closed
-- the slice-artifact trail commit (`575bd9b`) — contract, negotiation
-  feedback, QA reports and stuck.md in history, matching slices 02 and 04
-- issue **#123** (relocate stale `reviews\` archives on restart) stays open
-  and lands as a PRD 1 **assembly follow-up, not a wave item**: its code
-  lives on the unmerged slice branch, and it overlaps wave session s7
-  (clear-on-dispatch) — coordinate the two so they do not fight over
-  restart behavior.
+- `f481faf` — issue #124 (closed): the QA validation archive fails closed
+- `8cccd2d` — issue #123 (closed): restart relocates stale `reviews\`
+  archives before round 1
+- `575bd9b` — the slice-artifact trail: contract, negotiation feedback, QA
+  reports and stuck.md in history, matching slices 02 and 04
+
+Wave session s7 (clear-on-dispatch) must read the #123 fix (`8cccd2d`)
+before designing — same behavioral area, different scope.
 
 Three of five slices needed human hands. That is the headline fact for
 planning PRDs 2–6: **the pipeline could not yet deliver its own evidence
@@ -139,7 +139,8 @@ ready*.
 
 ```
 NOW, four tracks in parallel:
-├─ Track 1 (AFK, in flight)   #79 → assemble PRD 1 (+ run-ID fields, item 11) → close #69
+├─ Track 1 (manual)           PR #125: full suite on 575bd9b → undraft → merge → close #69
+│                             (run-ID fields, item 11's schema half, ride the merge or the wave)
 ├─ Track 2 (manual wave, parallel worktrees — every item pays from the next run)
 │    item 1  classifier fix + ADR        item 9  QA-dedup + ADR 0012 amendment
 │    item 3  afk stop sentinel           item 4  crash records
