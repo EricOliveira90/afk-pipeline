@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   rmDirWithRetry,
+  writeContractResponse,
   writeContractReview,
   writeQAReview,
 } from "./test-support.js";
@@ -96,6 +97,8 @@ export interface SliceFixture {
    * infrastructure death.
    */
   contractVerdict?: "ACCEPT" | "REVISE";
+  /** Exhaust contract negotiation in round two with a contested finding. */
+  contractImpasse?: boolean;
 }
 
 /**
@@ -223,6 +226,7 @@ export function buildStubProvider(opts: {
 }): AgentProvider {
   const { fixtures, slices, deaths = [], records } = opts;
   const generatorRounds = new Map<string, number>();
+  const contractRounds = new Map<string, number>();
   const roleAttempts = new Map<string, number>();
 
   return {
@@ -260,6 +264,8 @@ export function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {
+        const round = (contractRounds.get(ghIssue) ?? 0) + 1;
+        contractRounds.set(ghIssue, round);
         const filesBlock = fixture.files.map((f) => `- ${f}`).join("\n");
         // The planner leaves the contract in DRAFT: the orchestrator owns
         // the LOCKED transition (ADR 0008), and a planner that pre-locked
@@ -276,14 +282,38 @@ export function buildStubProvider(opts: {
             ? fixture.files
             : fixture.manifestFiles,
         );
+        if (fixture.contractImpasse && round === 2) {
+          writeContractResponse(sliceArtifactDir, ["F-IMPASSE"], "CONTESTED");
+        }
       } else if (role === "evaluator-contract" && sliceArtifactDir) {
-        const verdict = fixture?.contractVerdict ?? "ACCEPT";
+        const impasse = fixture?.contractImpasse === true;
+        const verdict = impasse ? "REVISE" : fixture?.contractVerdict ?? "ACCEPT";
         writeFileSync(
           join(sliceArtifactDir, "feedback-r1.md"),
           `## Evaluator feedback — round 1\n\nProse for ${verdict}.\n`,
           "utf-8",
         );
-        writeContractReview(sliceArtifactDir, verdict);
+        writeContractReview(
+          sliceArtifactDir,
+          verdict,
+          impasse
+            ? [
+                {
+                  id: "F-IMPASSE",
+                  severity: "BLOCKING",
+                  behaviorIds: ["B-01"],
+                  evidence: '"the evaluator-held interpretation"',
+                  expected: "one agreed interpretation",
+                  observed: "the planner contests the evaluator interpretation",
+                  clearCondition: "a human adjudicates the finding",
+                  state:
+                    contractRounds.get(ghIssue) === 2
+                      ? "CONTESTED"
+                      : "OPEN",
+                },
+              ]
+            : undefined,
+        );
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         const round = (generatorRounds.get(ghIssue) ?? 0) + 1;
         generatorRounds.set(ghIssue, round);

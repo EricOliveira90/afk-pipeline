@@ -150,6 +150,76 @@ describe("runWave", () => {
     expect(shared).toContain("ok");
   }, 240_000);
 
+  it("continues a same-file independent sibling after a contract impasse parks", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "311",
+        title: "Parked",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "312",
+        title: "Continues",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "311",
+        {
+          files: ["src/shared-impasse.txt"],
+          qaPasses: true,
+          outputFile: "src/shared-impasse.txt",
+          outputContent: "parked",
+          contractImpasse: true,
+        },
+      ],
+      [
+        "312",
+        {
+          files: ["src/shared-impasse.txt"],
+          qaPasses: true,
+          outputFile: "src/shared-impasse.txt",
+          outputContent: "continued",
+        },
+      ],
+    ]);
+    const { config, dag, logger, featBranch, records } = setupWave(
+      repo,
+      "wave-impasse-continue",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["311", "312"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("311")?.phase).toBe("AWAITING-ADJUDICATION");
+    expect(outcomes.get("312")?.phase).toBe("PASS");
+    expect(records).not.toContain("generator:311");
+    expect(records).toContain("generator:312");
+    git(repo, ["checkout", featBranch]);
+    expect(
+      readFileSync(join(repo, "src", "shared-impasse.txt"), "utf-8"),
+    ).toContain("continued");
+  }, 240_000);
+
   it("runs disjoint slices in parallel lanes", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
