@@ -25,6 +25,15 @@ import { spawn, type ChildProcess } from "node:child_process";
  * before SIGKILL. The grace timer is a plain (ref'd) timer: a kill in
  * progress is precisely the situation where keeping the event loop
  * alive is correct. Nothing here relies on an `unref`'d timer firing.
+ *
+ * This module also hosts AFK's read-only process-table listers —
+ * `listPidPpid` (pid/ppid pairs, used by the busy probe and worktree
+ * quiescing as well as by the kill verifier) and `listProcessPaths`
+ * (pid/name/exe/command line, used by the launch preflight's holder
+ * scan). They live here because they share the spawn-and-collect
+ * plumbing and the platform reasoning above, and because both encode the
+ * same conclusion: PowerShell CIM, never `wmic` (removed) or `tasklist`
+ * (localized). Neither lister terminates anything.
  */
 
 export interface TerminationReport {
@@ -410,6 +419,101 @@ export async function listPidPpid(
   platform: NodeJS.Platform = process.platform,
 ): Promise<Map<number, number> | undefined> {
   return platform === "win32" ? listPidPpidWin32() : listPidPpidPosix();
+}
+
+/**
+ * One process as the launch preflight's holder scan sees it. `Win32_Process`
+ * exposes no working directory and neither does `ps -o args=`, so these
+ * three strings are the whole evidence base — the preflight says so in its
+ * report rather than implying more (see `src/preflight.ts`).
+ */
+export interface ProcessPathRow {
+  pid: number;
+  /** Image name on Windows, `basename(argv[0])` on POSIX. */
+  name: string;
+  /** Absolute path to the image, when the listing exposed one. */
+  executablePath?: string;
+  commandLine?: string;
+}
+
+/** Field separator for the CIM listing: a real tab, stripped from every field. */
+const FIELD_SEP = "\t";
+
+/**
+ * Parse the tab-separated CIM listing. The command line is the last
+ * field and is rejoined, so a stray tab inside it cannot shift columns —
+ * though the PowerShell projection strips tabs and newlines from it
+ * first, since a torn line would desynchronise the whole listing.
+ */
+export function parseProcessPathsWin32(stdout: string): ProcessPathRow[] {
+  const rows: ProcessPathRow[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    const parts = line.split(FIELD_SEP);
+    const pid = Number(parts[0]);
+    if (!Number.isInteger(pid)) continue;
+    rows.push({
+      pid,
+      name: (parts[1] ?? "").trim(),
+      executablePath: emptyToUndefined(parts[2]),
+      commandLine: emptyToUndefined(parts.slice(3).join(FIELD_SEP)),
+    });
+  }
+  return rows;
+}
+
+/**
+ * Parse `ps -A -o pid=,args=`. There is no separate image path, so
+ * `argv[0]` serves as both — as the executable path when it is absolute,
+ * and as the name via its basename either way.
+ */
+export function parseProcessPathsPosix(stdout: string): ProcessPathRow[] {
+  const rows: ProcessPathRow[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    const commandLine = match[2]!.trim();
+    const argv0 = commandLine.split(/\s+/)[0] ?? "";
+    rows.push({
+      pid: Number(match[1]),
+      name: argv0.split("/").pop() ?? argv0,
+      executablePath: argv0.startsWith("/") ? argv0 : undefined,
+      commandLine: emptyToUndefined(commandLine),
+    });
+  }
+  return rows;
+}
+
+function emptyToUndefined(value: string | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/**
+ * Every process with the paths it names, or undefined when the listing
+ * failed. Read-only: the preflight reports PIDs, it does not kill them.
+ */
+export async function listProcessPaths(
+  platform: NodeJS.Platform = process.platform,
+): Promise<ProcessPathRow[] | undefined> {
+  if (platform === "win32") {
+    const result = await runCollect("powershell", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Get-CimInstance Win32_Process | ForEach-Object { " +
+        `'{0}${FIELD_SEP}{1}${FIELD_SEP}{2}${FIELD_SEP}{3}' -f ` +
+        "$_.ProcessId, $_.Name, $_.ExecutablePath, " +
+        "($_.CommandLine -replace '[\\r\\n\\t]', ' ') }",
+    ]);
+    if (!result.ok) return undefined;
+    const rows = parseProcessPathsWin32(result.stdout);
+    return rows.length > 0 ? rows : undefined;
+  }
+  const result = await runCollect("ps", ["-A", "-o", "pid=,args="]);
+  if (!result.ok) return undefined;
+  const rows = parseProcessPathsPosix(result.stdout);
+  return rows.length > 0 ? rows : undefined;
 }
 
 async function defaultKillTree(pid: number): Promise<void> {

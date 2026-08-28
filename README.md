@@ -512,6 +512,43 @@ pre-ship sanity gate and the QA evaluator keep running the full command set, so
 the whole-suite guarantee applies per checkpoint instead of per edit — see
 ADR 0038.
 
+## Launch preflight
+
+Before a run dispatches anything, AFK looks at the machine (ADR 0041). It
+**refuses the launch** on two hard conditions:
+
+- free disk below `--min-free-disk-gb` (default **5**, `0` disables) — a run
+  that starts with 200 KB free does not finish, it crashes mid-QA without a
+  cancellation record;
+- a leftover registered worktree in this run's namespace that no live slice of
+  the PRD owns, or a namespace path the run needs that exists on disk
+  unregistered (`createWorktree` would refuse it mid-run per ADR 0010). Clear
+  both with `afk clean-failed --prd-dir <prd-dir>`. The worktree of *any*
+  incomplete slice in the manifest is live work, not a leftover — including
+  slices outside a narrowed `--slices` re-run, whose preserved trees a later
+  merge-recovery or `--resume-stuck` needs.
+
+It also **reports, without refusing**: live processes whose executable path or
+command line names a path in the run namespace, as a PID list to kill by hand
+(`taskkill /PID <pid> /T /F`), and unregistered namespace directories the run
+will not use. And it **sweeps** empty directory shells inside the run's own
+namespace — teardown residue on Windows, cheap to remove and no longer able to
+trigger a stale-directory refusal.
+
+The preflight never kills a process; the report's receiver is the operator who
+just typed the launch command. It also cannot see a process holding a worktree
+*only* as its working directory — Windows exposes no working directory to a
+process listing — so the report states that gap rather than implying a clean
+scan means a clean machine. If a worktree refresh fails anyway, that is the
+ADR 0035 case: restart to clear the handle.
+
+Anything the preflight could not observe (unreadable worktree listing,
+unmeasurable volume, unlistable process table) is reported as unobserved and
+never converted into a refusal. `--preflight-report-only` runs every check,
+prints every finding and launches anyway; the bypass is recorded in `run.log`.
+
+A clean preflight prints nothing.
+
 ## Development
 
 ```bash
