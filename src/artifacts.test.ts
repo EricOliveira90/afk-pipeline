@@ -285,6 +285,108 @@ describe("archiveArtifactsBeforeRestart (#113)", () => {
     }
   });
 
+  /**
+   * #123: nothing ever cleared `reviews/`, and since #79 a round-1
+   * evidence write that lands on another life's `r1-a1` archive fails
+   * closed — so a restarted slice burned its infrastructure retries on a
+   * deterministic collision. The dir is *moved*, not copied: copying
+   * would leave the slots occupied.
+   */
+  it("moves the prior life's review archives out of round 1's way", () => {
+    const { repoRoot, sliceDir } = makeSliceFixture(["contract.md"]);
+    try {
+      const reviews = join(
+        repoRoot, ".afk", "artifacts", "s", "slice-01", "reviews",
+      );
+      mkdirSync(reviews, { recursive: true });
+      writeFileSync(
+        join(reviews, "qa-review-r1-a1.json"), "prior life\n", "utf-8",
+      );
+      writeFileSync(
+        join(reviews, "qa-review-r1-a1-record.json"), "{}\n", "utf-8",
+      );
+
+      const archiveDir = archiveArtifactsBeforeRestart(
+        repoRoot, "s", "01", sliceDir,
+      )!;
+
+      // The slot round 1 will write to is free again...
+      expect(existsSync(join(reviews, "qa-review-r1-a1.json"))).toBe(false);
+      // ...and the evidence still exists, whole, one level down: a record
+      // and the raw artifact it references travel together.
+      expect(
+        readFileSync(
+          join(archiveDir, "reviews", "qa-review-r1-a1.json"), "utf-8",
+        ),
+      ).toBe("prior life\n");
+      expect(
+        existsSync(join(archiveDir, "reviews", "qa-review-r1-a1-record.json")),
+      ).toBe(true);
+      // And the write that used to hit `errorOnExist` goes through.
+      writeFileSync(join(sliceDir, "qa-review.json"), "new life\n", "utf-8");
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir: reviews,
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+        }),
+      ).toBe("qa-review-r1-a1.json");
+      expect(readFileSync(join(reviews, "qa-review-r1-a1.json"), "utf-8")).toBe(
+        "new life\n",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("relocates stale reviews for a slice whose worktree is already gone", () => {
+    const { repoRoot } = makeSliceFixture([]);
+    try {
+      const reviews = join(
+        repoRoot, ".afk", "artifacts", "s", "slice-01", "reviews",
+      );
+      mkdirSync(reviews, { recursive: true });
+      writeFileSync(
+        join(reviews, "qa-review-r1-a1.json"), "prior life\n", "utf-8",
+      );
+
+      // No spec artifacts to copy — the clean-failed/deleted-branch state
+      // — so the archive dir exists for the relocation alone.
+      const archiveDir = archiveArtifactsBeforeRestart(
+        repoRoot, "s", "01", join(repoRoot, "nope"),
+      );
+
+      expect(archiveDir).toBe(
+        join(repoRoot, ".afk", "artifacts", "s", "slice-01", "pre-restart-1"),
+      );
+      expect(existsSync(join(archiveDir!, "reviews", "qa-review-r1-a1.json")))
+        .toBe(true);
+      expect(existsSync(reviews)).toBe(false);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an empty reviews dir alone rather than numbering a restart for it", () => {
+    const { repoRoot, sliceDir } = makeSliceFixture([]);
+    try {
+      const reviews = join(
+        repoRoot, ".afk", "artifacts", "s", "slice-01", "reviews",
+      );
+      mkdirSync(reviews, { recursive: true });
+
+      expect(archiveArtifactsBeforeRestart(repoRoot, "s", "01", sliceDir))
+        .toBeNull();
+      expect(
+        existsSync(join(repoRoot, ".afk", "artifacts", "s", "slice-01", "pre-restart-1")),
+      ).toBe(false);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("archives nothing, and creates no directory, for a slice with no artifacts", () => {
     const { repoRoot, sliceDir } = makeSliceFixture([]);
     try {

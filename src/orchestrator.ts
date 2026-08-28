@@ -1205,8 +1205,10 @@ function negotiateFailureCauseOf(
  *   touching anything, so the slice ends ERROR with a report naming the
  *   commits and the flags that resolve it (#113). `--force-restart` is
  *   the one route that still discards.
- * - **fresh** — no evidence of a prior attempt: the normal first-run
- *   creation path, unchanged and unlogged.
+ * - **fresh** — no branch and no worktree: the normal first-run creation
+ *   path, unlogged, except that a prior life's review archives left on
+ *   disk by `clean-failed` or a manual branch deletion are moved aside
+ *   first and that move is logged (#123).
  *
  * Every resume/restart decision is announced on console + run.log
  * (`resuming from <n> commits` / `restarting from base (<reason>)`)
@@ -1239,20 +1241,28 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   );
   const plan = decideResume(facts);
 
-  // Restart teardown + bookkeeping shared by the decision's restart
-  // path and the refresh-conflict fallback. The attempt counter resets:
-  // a fresh tree earns a fresh resume budget (#36).
-  const restartFromBase = async (reason: string): Promise<void> => {
-    // The slice's spec artifacts (contract.md, context.md, feedback-r*,
-    // qa-report*, handoff.md, stuck.md) are untracked files inside the
-    // worktree, so recreating it deletes the only copy. Archive them
-    // first — the same `.afk/artifacts/` path the ESCALATE/STUCK preserve
-    // path writes to (#113). Best-effort: a failure to archive warns and
-    // the restart proceeds, because the operator asked for the restart
-    // and a half-copied archive must not strand the run.
-    let archived: string | null = null;
+  /**
+   * Put the previous life's artifacts out of this one's way, for the two
+   * paths that start a slice at round 1 with no resume state.
+   *
+   * The slice's spec artifacts (contract.md, context.md, feedback-r*,
+   * qa-report*, handoff.md, stuck.md) are untracked files inside the
+   * worktree, so recreating it deletes the only copy — they are copied to
+   * the same `.afk/artifacts/` path the ESCALATE/STUCK preserve path
+   * writes to (#113). The `reviews/` archive dir is moved aside, because
+   * the next round-1 evidence write targets the same `r1-a1` names and
+   * fails closed on a collision — burning infrastructure retries and
+   * possibly ending the run ERROR before the next re-launch's resume
+   * self-heals past the occupied rounds (#123).
+   *
+   * Best-effort: a failure warns and the run proceeds, because the
+   * operator asked for the restart and a half-copied archive must not
+   * strand it. A `reviews/` dir left in place then fails closed at round
+   * 1, exactly as it did before this relocation existed.
+   */
+  const archivePriorLife = (): string | null => {
     try {
-      archived = artifacts.archiveArtifactsBeforeRestart(
+      return artifacts.archiveArtifactsBeforeRestart(
         repoRoot,
         runSlug,
         ctx.slice.number,
@@ -1261,9 +1271,17 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.phase(
-        `${ctx.tag}: warning — could not archive slice artifacts before restart: ${message}`,
+        `${ctx.tag}: warning — could not archive the slice's prior-life artifacts: ${message}`,
       );
+      return null;
     }
+  };
+
+  // Restart teardown + bookkeeping shared by the decision's restart
+  // path and the refresh-conflict fallback. The attempt counter resets:
+  // a fresh tree earns a fresh resume budget (#36).
+  const restartFromBase = async (reason: string): Promise<void> => {
+    const archived = archivePriorLife();
     ctx.logger.phase(
       `${ctx.tag}: restarting from base (${reason})` +
         (archived
@@ -1418,6 +1436,20 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   } else if (plan.action === "refuse") {
     refuseRestart(plan.reason, plan.commitsAhead);
   } else {
+    // "Fresh" is fresh in git only. A slice whose branch and worktree are
+    // gone — `clean-failed`, a manual deletion — can still have a prior
+    // life's review archives on disk, and nothing else ever clears them
+    // (#123). Move them aside before round 1 writes over their names.
+    // Logged only when something actually moved, so an ordinary first run
+    // stays unlogged as documented above.
+    const archived = archivePriorLife();
+    if (archived) {
+      ctx.logger.phase(
+        `${ctx.tag}: prior-life artifacts archived to ` +
+          `${relative(repoRoot, archived).replace(/\\/g, "/")} ` +
+          `(no branch or worktree survived)`,
+      );
+    }
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
   }
 

@@ -333,6 +333,77 @@ describe("prepareSliceWorktree", () => {
     );
   }, 240_000);
 
+  /**
+   * #123: nothing ever cleared `.afk/artifacts/<run>/slice-NN/reviews`, so
+   * a restarted slice's round-1 evidence writes landed on the prior life's
+   * `r1-a1` archives and failed closed (#79) — burning infrastructure
+   * retries, and possibly ending the run ERROR, before the next
+   * re-launch's resume could self-heal past the occupied rounds. These two
+   * cases cover the wiring at both entry points; the relocation mechanics
+   * are unit-tested in `artifacts.test.ts`.
+   */
+  function writeStaleReviewArchives(repo: string, slug: string, sliceNumber: string) {
+    const reviews = join(
+      repo, ".afk", "artifacts", `${slug}-stub`, `slice-${sliceNumber}`, "reviews",
+    );
+    mkdirSync(reviews, { recursive: true });
+    writeFileSync(join(reviews, "qa-review-r1-a1.json"), "prior life\n", "utf-8");
+    writeFileSync(join(reviews, "qa-review-r1-a1-record.json"), "{}\n", "utf-8");
+    return reviews;
+  }
+
+  it("--force-restart moves the prior life's review archives aside (#123)", async () => {
+    const repo = makeRepo();
+    const slug = "force-reviews";
+    const ctx = makeCtx(repo, slug, sliceAt("05", "75"), { forceRestart: ["75"] });
+    seedResumableSlice(repo, ctx);
+    writeSliceArtifacts(ctx);
+    const reviews = writeStaleReviewArchives(repo, slug, "05");
+
+    await prepareSliceWorktree(ctx);
+
+    // The slot round 1 writes to is free, so its archive no longer throws.
+    expect(existsSync(join(reviews, "qa-review-r1-a1.json"))).toBe(false);
+    // The prior life's evidence is intact one level down, record and raw
+    // artifact together, beside the spec artifacts from the same life.
+    const archived = join(
+      repo, ".afk", "artifacts", `${slug}-stub`, "slice-05", "pre-restart-1",
+    );
+    expect(readFileSync(join(archived, "reviews", "qa-review-r1-a1.json"), "utf-8"))
+      .toBe("prior life\n");
+    expect(existsSync(join(archived, "reviews", "qa-review-r1-a1-record.json")))
+      .toBe(true);
+    expect(existsSync(join(archived, "contract.md"))).toBe(true);
+  }, 240_000);
+
+  it("a launch with no surviving branch or worktree clears stale reviews too (#123)", async () => {
+    const repo = makeRepo();
+    const slug = "fresh-reviews";
+    const ctx = makeCtx(repo, slug, sliceAt("05", "75"));
+    git(repo, ["branch", ctx.featBranch]);
+    // `clean-failed` (or a manual deletion) took the branch and worktree
+    // and left `.afk/artifacts` alone, so this launch is "fresh" in git
+    // while the prior life's QA archives are still on disk.
+    const reviews = writeStaleReviewArchives(repo, slug, "05");
+
+    await prepareSliceWorktree(ctx);
+
+    expect(ctx.resume).toBeUndefined();
+    expect(existsSync(join(reviews, "qa-review-r1-a1.json"))).toBe(false);
+    expect(
+      readFileSync(
+        join(
+          repo, ".afk", "artifacts", `${slug}-stub`, "slice-05",
+          "pre-restart-1", "reviews", "qa-review-r1-a1.json",
+        ),
+        "utf-8",
+      ),
+    ).toBe("prior life\n");
+    expect(sliceLogLines(repo, `${slug}-stub`, "75")).toMatch(
+      /prior-life artifacts archived to \.afk\/artifacts/,
+    );
+  }, 240_000);
+
   it("a capped slice with no commits beyond base still restarts plainly (#113)", async () => {
     const repo = makeRepo();
     const slug = "cap-no-commits";

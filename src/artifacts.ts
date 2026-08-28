@@ -4,6 +4,8 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
@@ -263,6 +265,12 @@ export function negotiationArchiveDir(
 }
 
 /**
+ * One slice life's review archives, inside its slice archive dir. Named
+ * here because a restart has to move the whole directory aside (#123).
+ */
+const REVIEW_ARCHIVE_DIRNAME = "reviews";
+
+/**
  * Where every contract review attempt is kept. Under the repo root, not
  * the slice worktree: the worktree is torn down, and the audit trail of
  * what each evaluator attempt actually wrote has to outlive it.
@@ -274,7 +282,7 @@ export function contractReviewArchiveDir(
 ): string {
   return join(
     negotiationArchiveDir(repoRoot, runSlug, sliceNumber),
-    "reviews",
+    REVIEW_ARCHIVE_DIRNAME,
   );
 }
 
@@ -437,16 +445,55 @@ export function archiveNegotiationArtifacts(
 }
 
 /**
- * Copy a slice's untracked spec artifacts out of its worktree before a
- * from-base restart force-resets the branch and recreates the worktree
- * (#113). Returns the archive directory, or `null` when the slice dir
- * held nothing worth keeping.
+ * Move a directory, falling back to copy-then-delete when the rename is
+ * refused — on Windows an open handle from an indexer or an editor is
+ * enough for EPERM/EBUSY. A failure here propagates: both callers of the
+ * pre-restart archive treat it as best-effort and warn.
+ */
+function moveDirectory(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+  } catch {
+    cpSync(from, to, { recursive: true });
+    rmSync(from, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
+  }
+}
+
+/**
+ * Put a slice's previous life's artifacts out of the next life's way
+ * before it starts from base. Returns the archive directory, or `null`
+ * when the slice had nothing to move aside.
+ *
+ * Two kinds of artifact, for two reasons:
+ *
+ * - The untracked spec artifacts (contract.md, context.md, feedback-r*,
+ *   qa-report*, handoff.md, stuck.md) are **copied** out of the worktree,
+ *   because a from-base restart recreates the worktree and they are the
+ *   only copy (#113).
+ * - The `reviews/` archive dir is **moved**, because the next life's
+ *   round-1 evidence writes target the same `r1-a1` names and fail closed
+ *   on a collision (#79/#123). Copying would not free the slots. The
+ *   whole directory travels together, so the prior life's records and the
+ *   raw artifacts they reference stay side by side — only their prefix
+ *   changes.
  *
  * Archives land in a numbered `pre-restart-<n>` subdirectory of the
  * slice's usual archive dir, so a second restart cannot overwrite the
  * first one's copies and neither can clobber an ESCALATE/STUCK archive
  * sitting alongside them. The index is the next free one on disk — no
  * clock, so the path is reproducible in tests.
+ *
+ * Callers are the two paths that begin a slice life at round 1 with no
+ * resume state: the from-base restart, and a launch that finds no branch
+ * and no worktree at all (`clean-failed` and manual branch deletion never
+ * touch `.afk/artifacts`, so a stale `reviews/` outlives them). The
+ * resume paths must never call it — their round arithmetic reads exactly
+ * the evidence this moves.
  */
 export function archiveArtifactsBeforeRestart(
   repoRoot: string,
@@ -457,15 +504,21 @@ export function archiveArtifactsBeforeRestart(
   const present = sliceArtifactNames(sliceDir).filter((name) =>
     existsSync(join(sliceDir, name)),
   );
-  if (present.length === 0) return null;
-
   const parent = negotiationArchiveDir(repoRoot, runSlug, sliceNumber);
+  const staleReviews = join(parent, REVIEW_ARCHIVE_DIRNAME);
+  const hasStaleReviews =
+    existsSync(staleReviews) && readdirSync(staleReviews).length > 0;
+  if (present.length === 0 && !hasStaleReviews) return null;
+
   let index = 1;
   while (existsSync(join(parent, `pre-restart-${index}`))) index++;
   const archiveDir = join(parent, `pre-restart-${index}`);
   mkdirSync(archiveDir, { recursive: true });
   for (const name of present) {
     cpSync(join(sliceDir, name), join(archiveDir, name));
+  }
+  if (hasStaleReviews) {
+    moveDirectory(staleReviews, join(archiveDir, REVIEW_ARCHIVE_DIRNAME));
   }
   return archiveDir;
 }
