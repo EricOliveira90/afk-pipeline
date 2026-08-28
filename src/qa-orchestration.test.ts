@@ -15,7 +15,7 @@ import {
   type SpawnOptions,
 } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { lifecycle } from "./slice-lifecycle.js";
 import { RunJournal as Logger } from "./run-journal.js";
@@ -84,7 +84,14 @@ function makeRepo(): string {
   mkdirSync(hooksDir);
   git(repo, ["config", "core.hooksPath", hooksDir]);
   writeFileSync(join(repo, "README.md"), "fixture\n", "utf-8");
-  git(repo, ["add", "README.md"]);
+  // Every real consumer ignores `.afk/`, and this fixture has to as well:
+  // it uses the repo root as the slice worktree, so without the ignore the
+  // run's own journal and gate evidence would land inside the tree being
+  // hashed — and the QA-dedup tree-sha comparison (ADR 0012) would see the
+  // candidate change under it for reasons that have nothing to do with the
+  // candidate.
+  writeFileSync(join(repo, ".gitignore"), ".afk/\nnode_modules/\n", "utf-8");
+  git(repo, ["add", "README.md", ".gitignore"]);
   git(repo, ["commit", "-m", "root"]);
   return repo;
 }
@@ -833,6 +840,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     let evaluators = 0;
     let artifactDir = "";
     const generatorPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -846,6 +854,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           );
         } else if (options.role === "evaluator-qa") {
           evaluators++;
+          evaluatorPrompts.push(options.prompt);
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -905,6 +914,54 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           ).length === 2,
       ),
     ).toBe(true);
+
+    // QA-dedup (ADR 0012, 2026-08-28). Asserted on this scenario rather than
+    // a new one because it is the only fixture that already runs real base
+    // gates to green on a real candidate — which is exactly what the skip
+    // authorization is derived from. The unit tests in
+    // `qa-gate-authorization.test.ts` own the decision table; what only a
+    // spawned run can prove is that the tree sha the orchestrator hashes at
+    // QA dispatch still equals the one the gates ran on, so the grant is
+    // reachable at all and not permanently fail-closed.
+    const passingIndex = attempts.findIndex((attempt) =>
+      attempt.results.every(
+        (gate: { status: string }) => gate.status !== "FAIL",
+      ),
+    );
+    const passingAttempt = attempts[passingIndex];
+    const qaPrompt = evaluatorPrompts[0] ?? "";
+    expect(qaPrompt).toContain("Skip authorization");
+    expect(qaPrompt).toContain(`\`${passingAttempt.treeId}\``);
+    expect(qaPrompt).toContain(`\`${passingAttempt.attemptId}\``);
+    // `lint` has no script in this fixture, so the gate never ran it and the
+    // authorization must not vouch for it.
+    expect(qaPrompt).toContain("- typecheck — `pnpm run typecheck` — PASS at");
+    expect(qaPrompt).toContain("- tests — `pnpm run test` — PASS at");
+    expect(qaPrompt).not.toContain("- lint —");
+
+    const record = JSON.parse(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "reviews",
+          "qa-review-r2-a1-record.json",
+        ),
+        "utf-8",
+      ),
+    );
+    expect(record.baseGateCitation).toEqual({
+      evidenceArtifactId: relative(
+        repo,
+        join(evidenceDir, evidenceFiles[passingIndex]!),
+      ).replace(/\\/g, "/"),
+      attemptId: passingAttempt.attemptId,
+      treeId: passingAttempt.treeId,
+      gateIds: ["typecheck", "tests"],
+    });
   });
 
   it("retries infrastructure without consuming an implementation round", async () => {

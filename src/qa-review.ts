@@ -4,6 +4,7 @@ import {
   requireNonBlankString,
   type ContractFindingSeverity,
 } from "./contract-review.js";
+import type { BaseGateSkipCitation } from "./qa-gate-authorization.js";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -57,6 +58,19 @@ export interface QAReviewAttemptRecord {
   verdict: QAReviewVerdict;
   failureClass: QAReviewFailureClass;
   findings: QAReviewAttemptFinding[];
+  /**
+   * The base-gate skip authorization the orchestrator issued for this
+   * attempt, present only when one was issued (ADR 0012's 2026-08-28
+   * amendment). Absent means the evaluator was told to run the whole sanity
+   * list, which is what every record written before the amendment says by
+   * omission — hence optional rather than nullable: a record from an older
+   * archive still parses on resume.
+   *
+   * This records what the orchestrator *authorized*, on which tree, which is
+   * the fact the orchestrator can actually assert. Whether the evaluator took
+   * the skip is visible in its report's command log, next to this citation.
+   */
+  baseGateCitation?: BaseGateSkipCitation;
 }
 
 export interface QAReviewLifecycleFinding {
@@ -111,6 +125,16 @@ const RECORD_KEYS = [
   "verdict",
   "failureClass",
   "findings",
+] as const;
+const RECORD_KEYS_WITH_CITATION = [
+  ...RECORD_KEYS,
+  "baseGateCitation",
+] as const;
+const CITATION_KEYS = [
+  "evidenceArtifactId",
+  "attemptId",
+  "treeId",
+  "gateIds",
 ] as const;
 const RECORD_FINDING_KEYS = [
   "id",
@@ -395,7 +419,16 @@ function parseQAReviewAttemptRecord(
   }
 
   const input = parsed as Record<string, unknown>;
-  requireExactKeys(input, RECORD_KEYS, "root object", source);
+  requireExactKeys(
+    input,
+    "baseGateCitation" in input ? RECORD_KEYS_WITH_CITATION : RECORD_KEYS,
+    "root object",
+    source,
+  );
+  const baseGateCitation =
+    "baseGateCitation" in input
+      ? parseBaseGateCitation(input.baseGateCitation, source)
+      : undefined;
   if (input.version !== 1) {
     throw new Error(`${source} must declare version 1`);
   }
@@ -523,6 +556,51 @@ function parseQAReviewAttemptRecord(
     verdict,
     failureClass,
     findings,
+    ...(baseGateCitation ? { baseGateCitation } : {}),
+  };
+}
+
+function parseBaseGateCitation(
+  value: unknown,
+  source: string,
+): BaseGateSkipCitation {
+  const field = "baseGateCitation";
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${source} ${field} must be an object`);
+  }
+  const citation = value as Record<string, unknown>;
+  requireExactKeys(citation, CITATION_KEYS, field, source);
+  const evidenceArtifactId = requireNonBlankString(
+    citation.evidenceArtifactId,
+    `${field} evidenceArtifactId`,
+    source,
+  );
+  const attemptId = requireNonBlankString(
+    citation.attemptId,
+    `${field} attemptId`,
+    source,
+  );
+  const treeId = requireNonBlankString(
+    citation.treeId,
+    `${field} treeId`,
+    source,
+  );
+  if (
+    !Array.isArray(citation.gateIds) ||
+    citation.gateIds.length === 0 ||
+    citation.gateIds.some(
+      (gateId) => typeof gateId !== "string" || gateId.trim() === "",
+    )
+  ) {
+    throw new Error(
+      `${source} ${field} gateIds must contain at least one non-blank string`,
+    );
+  }
+  return {
+    evidenceArtifactId,
+    attemptId,
+    treeId,
+    gateIds: [...(citation.gateIds as string[])],
   };
 }
 
@@ -639,6 +717,12 @@ export function buildQAReviewAttemptRecord(details: {
   review: QAReview;
   canonicalArchivePath: string;
   markdownArchivePath: string;
+  /**
+   * The skip authorization issued for this attempt, or `null` when none was.
+   * Recording it here is what makes the skip auditable: the record already
+   * carries the verdict, so citation and verdict cannot be separated later.
+   */
+  baseGateCitation?: BaseGateSkipCitation | null;
 }): QAReviewAttemptRecord {
   const {
     stage,
@@ -647,6 +731,7 @@ export function buildQAReviewAttemptRecord(details: {
     review,
     canonicalArchivePath,
     markdownArchivePath,
+    baseGateCitation,
   } = details;
   const artifactReferences = [
     canonicalArchivePath.replace(/\\/g, "/"),
@@ -659,6 +744,14 @@ export function buildQAReviewAttemptRecord(details: {
     attempt,
     verdict: review.verdict,
     failureClass: review.failureClass,
+    ...(baseGateCitation
+      ? {
+          baseGateCitation: {
+            ...baseGateCitation,
+            gateIds: [...baseGateCitation.gateIds],
+          },
+        }
+      : {}),
     findings: review.findings.map((finding) => ({
       id: finding.id,
       severity: finding.severity,

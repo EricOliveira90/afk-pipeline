@@ -113,28 +113,29 @@ export interface MaterializedCandidateCheckpoint extends CandidateCheckpoint {
 }
 
 /**
- * Capture the current candidate without moving the source branch. A temporary
- * index includes tracked and untracked output while leaving the generator
- * worktree and its real index untouched.
+ * Hash the candidate exactly as {@link createCandidateCheckpoint} would —
+ * tracked plus untracked output, through a throwaway index so the source
+ * worktree's own index is untouched — without materializing anything.
+ *
+ * Two callers need the same answer for opposite reasons: the checkpoint needs
+ * a tree to build a gate worktree from, and the QA-dedup skip authorization
+ * needs to prove the tree it is handing an evaluator is byte-identical to the
+ * one the gates ran on (ADR 0012's 2026-08-28 amendment). Sharing one
+ * implementation is the point: a second way of hashing the candidate would let
+ * the two disagree, and the authorization would then be asserting something
+ * about a tree nobody tested.
  */
-export function createCandidateCheckpoint(
-  cwd: string,
-  worktreeDir: string,
-): MaterializedCandidateCheckpoint;
-export function createCandidateCheckpoint(
-  cwd: string,
-  worktreeDir: string,
-  options: { materialize: false },
-): CandidateCheckpoint;
-export function createCandidateCheckpoint(
-  cwd: string,
-  worktreeDir: string,
-  options: { materialize?: boolean } = {},
-): CandidateCheckpoint | MaterializedCandidateCheckpoint {
-  if (existsSync(worktreeDir)) {
-    throw new Error(`Candidate checkpoint path already exists: ${worktreeDir}`);
-  }
+export function resolveCandidateTreeId(cwd: string): string {
+  return readCandidateTree(cwd).treeId;
+}
 
+interface CandidateTree {
+  baseCommit: string;
+  baseTree: string;
+  treeId: string;
+}
+
+function readCandidateTree(cwd: string): CandidateTree {
   let candidateBase: string[];
   try {
     candidateBase = execFileSync(
@@ -162,25 +163,51 @@ export function createCandidateCheckpoint(
     ...process.env,
     GIT_INDEX_FILE: indexPath,
   };
-  let commitSha = baseCommit;
-  let treeId = baseTree;
   try {
     copyFileSync(resolve(cwd, sourceIndexPath), indexPath);
     execFileSync("git", ["add", "-A"], { cwd, env });
-    treeId = execFileSync("git", ["write-tree"], {
+    const treeId = execFileSync("git", ["write-tree"], {
       cwd,
       env,
       encoding: "utf-8",
     }).trim();
-    if (treeId !== baseTree) {
-      commitSha = execFileSync(
-        "git",
-        ["commit-tree", treeId, "-p", baseCommit, "-m", "AFK candidate checkpoint"],
-        { cwd, encoding: "utf-8" },
-      ).trim();
-    }
+    return { baseCommit, baseTree, treeId };
   } finally {
     rmSync(indexDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Capture the current candidate without moving the source branch. A temporary
+ * index includes tracked and untracked output while leaving the generator
+ * worktree and its real index untouched.
+ */
+export function createCandidateCheckpoint(
+  cwd: string,
+  worktreeDir: string,
+): MaterializedCandidateCheckpoint;
+export function createCandidateCheckpoint(
+  cwd: string,
+  worktreeDir: string,
+  options: { materialize: false },
+): CandidateCheckpoint;
+export function createCandidateCheckpoint(
+  cwd: string,
+  worktreeDir: string,
+  options: { materialize?: boolean } = {},
+): CandidateCheckpoint | MaterializedCandidateCheckpoint {
+  if (existsSync(worktreeDir)) {
+    throw new Error(`Candidate checkpoint path already exists: ${worktreeDir}`);
+  }
+
+  const { baseCommit, baseTree, treeId } = readCandidateTree(cwd);
+  let commitSha = baseCommit;
+  if (treeId !== baseTree) {
+    commitSha = execFileSync(
+      "git",
+      ["commit-tree", treeId, "-p", baseCommit, "-m", "AFK candidate checkpoint"],
+      { cwd, encoding: "utf-8" },
+    ).trim();
   }
 
   if (options.materialize === false) {
