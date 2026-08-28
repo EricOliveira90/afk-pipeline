@@ -20,7 +20,7 @@ import { kiroProvider } from "./kiro.js";
 import type { ProcessPathRow } from "./kill-tree.js";
 
 /**
- * ADR 0041: the launch preflight detects, reports, and refuses — it never
+ * ADR 0042: the launch preflight detects, reports, and refuses — it never
  * kills a process and never deletes anything holding bytes. Every check
  * runs here against fabricated inputs: an injected worktree listing, an
  * injected free-space reading, an injected process table, and a fake

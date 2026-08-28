@@ -514,7 +514,7 @@ ADR 0038.
 
 ## Launch preflight
 
-Before a run dispatches anything, AFK looks at the machine (ADR 0041). It
+Before a run dispatches anything, AFK looks at the machine (ADR 0042). It
 **refuses the launch** on two hard conditions:
 
 - free disk below `--min-free-disk-gb` (default **5**, `0` disables) — a run

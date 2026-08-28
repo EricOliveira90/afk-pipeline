@@ -75,7 +75,7 @@ export interface PipelineRuntimeOptions {
   /**
    * Free-space floor the launch preflight refuses below, in GB. 0
    * disables the floor. Absent leaves the default from
-   * `DEFAULT_MIN_FREE_DISK_GB`. See ADR 0041.
+   * `DEFAULT_MIN_FREE_DISK_GB`. See ADR 0042.
    */
   minFreeDiskGb?: number;
   /**

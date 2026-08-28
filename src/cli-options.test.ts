@@ -90,7 +90,7 @@ describe("parsePipelineRuntimeOptions", () => {
     ).toThrow("--transient-retry-window-ms");
   });
 
-  it("parses the preflight disk floor, allowing decimals and 0 to disable (ADR 0041)", () => {
+  it("parses the preflight disk floor, allowing decimals and 0 to disable (ADR 0042)", () => {
     expect(
       parsePipelineRuntimeOptions(["--min-free-disk-gb", "12"]).minFreeDiskGb,
     ).toBe(12);

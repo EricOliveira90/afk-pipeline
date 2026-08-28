@@ -344,7 +344,7 @@ export interface PipelineConfig {
 
   /**
    * Free-space floor the launch preflight refuses below, in GB. Defaults
-   * to `DEFAULT_MIN_FREE_DISK_GB`; 0 disables the floor. See ADR 0041.
+   * to `DEFAULT_MIN_FREE_DISK_GB`; 0 disables the floor. See ADR 0042.
    */
   minFreeDiskGb?: number;
   /**
@@ -538,7 +538,7 @@ function escapeRegExp(s: string): string {
 
 /**
  * The filesystem region this run owns, for the launch preflight (ADR
- * 0041). Assembled here because this module owns every name in it.
+ * 0042). Assembled here because this module owns every name in it.
  *
  * `intended` is only the slice worktrees this run will actually create or
  * resume; `retained` adds the ones other live slices of the same PRD
@@ -3436,7 +3436,7 @@ export async function runPipeline(
   const dag = buildDAG(scope.selected);
   const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
 
-  // --- Launch preflight (ADR 0041). Runs here: late enough that the run
+  // --- Launch preflight (ADR 0042). Runs here: late enough that the run
   // scope names the exact worktree paths this run will use, early enough
   // that nothing has been created or mutated yet. Detection, report and
   // fail-fast only — it never kills a process.

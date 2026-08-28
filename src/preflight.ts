@@ -7,7 +7,7 @@ import { listProcessPaths, type ProcessPathRow } from "./kill-tree.js";
  * The launch preflight: look at the machine before the run dispatches
  * anything, and refuse rather than discover the problem four hours in.
  * Detection, report, and fail-fast — nothing here kills a process or
- * touches a file that holds bytes. See ADR 0041.
+ * touches a file that holds bytes. See ADR 0042.
  *
  * The three conditions come from three separate run post-mortems:
  *
@@ -28,7 +28,7 @@ import { listProcessPaths, type ProcessPathRow } from "./kill-tree.js";
  *   report names PIDs; the operator kills by hand.
  *
  * **No auto-kill, deliberately.** Both debated forms were cut, and the
- * arguments that killed them are recorded in ADR 0041 and in
+ * arguments that killed them are recorded in ADR 0042 and in
  * `docs/specs/afk-v2-plan-debate.md` §2: a scan-based kill's cwd guard
  * both under- and over-matches, and a record-based kill cannot fire for
  * the crash classes that actually produce leaks (`TerminationReport.survivors`

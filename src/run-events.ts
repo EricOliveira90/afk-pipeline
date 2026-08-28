@@ -146,7 +146,7 @@ export type RunEventPayload =
        * the moment a stop signal fires, naming the slices it marked
        * CANCELLED in run state (#114), and the launch preflight's report
        * — swept shells, reported conditions, and a refusal bypassed with
-       * `--preflight-report-only` (ADR 0041).
+       * `--preflight-report-only` (ADR 0042).
        */
       reason:
         | "cancellation-requested"

@@ -420,7 +420,7 @@ describe("terminatePidTree", () => {
 
 /**
  * The read-only listing the launch preflight's holder scan consumes
- * (ADR 0041). Parsed against real captured output shapes: the CIM
+ * (ADR 0042). Parsed against real captured output shapes: the CIM
  * projection is tab-separated with the command line last, and `ps -o
  * pid=,args=` gives one whitespace-separated pid plus the whole argv.
  */
