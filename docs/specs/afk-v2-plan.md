@@ -30,9 +30,9 @@ Three companion documents, each authoritative for its own scope:
 | #78 Negotiation converges on open findings | PASS, merged `2b8eaa6` | AFK |
 | #79 QA verdicts and retries run on the same rails | Reviewed: **SHIP-WITH-NOTES**, no blocker (`.afk\artifacts\...\slice-05\independent-review.md`) | AFK + follow-up sessions |
 
-Remaining path: PR **#125** (draft) assembles PRD 1 → run the full suite
-once on its head `575bd9b` → undraft → merge → close #69. The feature
-branch already contains everything that hung off slice 05:
+Remaining path: PR **#125** (ready for review — full suite passed on its
+head `575bd9b`, all budgets green, 2026-08-28) → merge → close #69. The
+feature branch already contains everything that hung off slice 05:
 
 - `followup/s05-n3-preserve-invoke-error` (`df46f8a`) — review note N3,
   error-cause chaining in the archive-failure catch
@@ -139,7 +139,7 @@ ready*.
 
 ```
 NOW, four tracks in parallel:
-├─ Track 1 (manual)           PR #125: full suite on 575bd9b → undraft → merge → close #69
+├─ Track 1 (manual)           PR #125 ready for review (suite green on 575bd9b) → merge → close #69
 │                             (run-ID fields, item 11's schema half, ride the merge or the wave)
 ├─ Track 2 (manual wave, parallel worktrees — every item pays from the next run)
 │    item 1  classifier fix + ADR        item 9  QA-dedup + ADR 0012 amendment
