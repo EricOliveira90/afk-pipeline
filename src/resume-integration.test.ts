@@ -79,6 +79,7 @@ describe("retried slice resume (spec #33)", () => {
     let statePath: string;
     /** State after run 1, before run 2 overwrote it. */
     let deathPhases: Record<string, string>;
+    let resumedQAAttempts = 0;
 
     const generatorRecord = (sliceNumber: string): PromptRecord =>
       records.find((r) => r.role === "generator" && r.sliceNumber === sliceNumber)!;
@@ -197,7 +198,17 @@ describe("retried slice resume (spec #33)", () => {
           records,
           qaResult: (sliceNumber) =>
             sliceNumber === "05"
-              ? { verdict: "PASS", findingState: "RESOLVED" }
+              ? ++resumedQAAttempts === 1
+                ? {
+                    verdict: "FAIL",
+                    findingState: "RESOLVED",
+                    additionalFindingState: "OPEN",
+                    error: "provider disconnected after canonical output",
+                  }
+                : {
+                    verdict: "PASS",
+                    additionalFindingState: "RESOLVED",
+                  }
               : undefined,
           generator: (cwd, _options, sliceNumber) => {
             if (sliceNumber === "01") {
@@ -306,13 +317,19 @@ describe("retried slice resume (spec #33)", () => {
       expect(generatorPrompt).toContain("qa-review-r1-a1.json");
       expect(generatorPrompt).toContain("qa-report-r1-a1.md");
 
-      const evaluatorPrompt = records.find(
+      const evaluatorPrompts = records.filter(
         (record) =>
           record.role === "evaluator-qa" && record.sliceNumber === "05",
-      )!.prompt;
-      expect(evaluatorPrompt).toContain("QA-01");
-      expect(evaluatorPrompt).toContain("qa-review-r1-a1.json");
-      expect(evaluatorPrompt).toContain("qa-report-r1-a1.md");
+      ).map((record) => record.prompt);
+      expect(evaluatorPrompts[0]).toContain("QA-01");
+      expect(evaluatorPrompts[0]).toContain("qa-review-r1-a1.json");
+      expect(evaluatorPrompts[0]).toContain("qa-report-r1-a1.md");
+      expect(evaluatorPrompts[1]).toContain("QA-02");
+      expect(evaluatorPrompts[1]).toContain(
+        "Fresh fixture implementation finding",
+      );
+      expect(evaluatorPrompts[1]).toContain("qa-review-r2-a1.json");
+      expect(evaluatorPrompts[1]).toContain("qa-report-r2-a1.md");
 
       const reviewDir = join(
         repo,
@@ -327,16 +344,34 @@ describe("retried slice resume (spec #33)", () => {
         true,
       );
       expect(existsSync(join(reviewDir, "qa-review-r2-a1.json"))).toBe(true);
-      const resumedRecord = JSON.parse(
+      const failedAttemptRecord = JSON.parse(
         readFileSync(
           join(reviewDir, "qa-review-r2-a1-record.json"),
           "utf-8",
         ),
       );
+      expect(failedAttemptRecord).toMatchObject({
+        round: 2,
+        attempt: 1,
+        verdict: "FAIL",
+        findings: [
+          { id: "QA-01", state: "RESOLVED", unresolved: false },
+          { id: "QA-02", state: "OPEN", unresolved: true },
+        ],
+      });
+      const resumedRecord = JSON.parse(
+        readFileSync(
+          join(reviewDir, "qa-review-r2-a2-record.json"),
+          "utf-8",
+        ),
+      );
       expect(resumedRecord).toMatchObject({
         round: 2,
+        attempt: 2,
         verdict: "PASS",
-        findings: [{ id: "QA-01", state: "RESOLVED", unresolved: false }],
+        findings: [
+          { id: "QA-02", state: "RESOLVED", unresolved: false },
+        ],
       });
     });
 

@@ -160,6 +160,8 @@ export function buildProvider(opts: {
   qaResult?: (sliceNumber: string) => {
     verdict: "PASS" | "FAIL";
     findingState?: "OPEN" | "RESOLVED";
+    additionalFindingState?: "OPEN" | "RESOLVED";
+    error?: string;
   } | undefined;
 }): AgentProvider {
   return {
@@ -233,28 +235,47 @@ export function buildProvider(opts: {
           `# QA Report\n\n**Verdict:** ${qaResult.verdict}\n`,
           "utf-8",
         );
+        const findings = [
+          ...(qaResult.findingState
+            ? [
+                {
+                  id: "QA-01",
+                  severity: "BLOCKING" as const,
+                  behaviorIds: [],
+                  summary: "Fixture implementation finding",
+                  evidence:
+                    "The fixture evaluator observed a failing behavior",
+                  expected: "The behavior passes",
+                  observed: "The behavior fails",
+                  clearCondition:
+                    "The fixture evaluator observes the behavior passing",
+                  state: qaResult.findingState,
+                },
+              ]
+            : []),
+          ...(qaResult.additionalFindingState
+            ? [
+                {
+                  id: "QA-02",
+                  severity: "BLOCKING" as const,
+                  behaviorIds: [],
+                  summary: "Fresh fixture implementation finding",
+                  evidence:
+                    "The fixture evaluator observed another failing behavior",
+                  expected: "The additional behavior passes",
+                  observed: "The additional behavior fails",
+                  clearCondition:
+                    "The fixture evaluator observes the additional behavior passing",
+                  state: qaResult.additionalFindingState,
+                },
+              ]
+            : []),
+        ];
         writeQAReview(artifactDir, "deterministic", {
           verdict: qaResult.verdict,
-          ...(qaResult.findingState
-            ? {
-                findings: [
-                  {
-                    id: "QA-01",
-                    severity: "BLOCKING",
-                    behaviorIds: [],
-                    summary: "Fixture implementation finding",
-                    evidence:
-                      "The fixture evaluator observed a failing behavior",
-                    expected: "The behavior passes",
-                    observed: "The behavior fails",
-                    clearCondition:
-                      "The fixture evaluator observes the behavior passing",
-                    state: qaResult.findingState,
-                  },
-                ],
-              }
-            : {}),
+          ...(findings.length > 0 ? { findings } : {}),
         });
+        if (qaResult.error) throw new Error(qaResult.error);
       } else if (role === "generator-stuck" && artifactDir) {
         writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");
       }

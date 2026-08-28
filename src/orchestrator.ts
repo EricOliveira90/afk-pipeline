@@ -2183,6 +2183,8 @@ export async function runQAStage(
   const scope = stage === "deterministic"
     ? "Deterministic slice QA only. Do not access a shared preview database or run remote UAT."
     : "Shared-preview UAT only. Do not repeat deterministic sanity commands.";
+  let currentHistory = history;
+  let currentUnresolved = previousUnresolved;
 
   for (let attempt = 1; attempt <= infrastructureRetries + 1; attempt++) {
     const archiveName = stage === "deterministic"
@@ -2198,6 +2200,13 @@ export async function runQAStage(
             nextHistory: readonly QAReviewLifecycleFinding[];
           }
         | { error: string };
+    };
+    type ValidAttemptEvidence = {
+      review: QAReview;
+      nextHistory: readonly QAReviewLifecycleFinding[];
+      unresolved: QAReviewAttemptFinding[];
+      reportArchived: boolean;
+      archiveDisplayPath: string;
     };
 
     const archiveAttemptEvidence = (): AttemptEvidence => {
@@ -2233,7 +2242,7 @@ export async function runQAStage(
           reportArchived,
           reviewResult: {
             review,
-            nextHistory: advanceQAReviewHistory(history, review),
+            nextHistory: advanceQAReviewHistory(currentHistory, review),
           },
         };
       } catch (error) {
@@ -2271,6 +2280,65 @@ export async function runQAStage(
       }
     };
 
+    const recordValidAttempt = (
+      evidence: AttemptEvidence,
+    ): ValidAttemptEvidence | null => {
+      if ("error" in evidence.reviewResult) return null;
+
+      const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
+      const { review, nextHistory } = evidence.reviewResult;
+      const expectedRawArchiveName =
+        `${stage === "deterministic" ? "qa" : "uat"}-review-r${round}-a${attempt}.json`;
+      const canonicalArchivePath = relative(
+        config.repoRoot,
+        join(
+          reviewArchiveDir,
+          evidence.rawArchiveName ?? expectedRawArchiveName,
+        ),
+      ).replace(/\\/g, "/");
+      const record = buildQAReviewAttemptRecord({
+        stage,
+        round,
+        attempt,
+        review,
+        canonicalArchivePath,
+        markdownArchivePath: archiveDisplayPath,
+      });
+      try {
+        artifacts.archiveQAReviewRecord({
+          archiveDir: reviewArchiveDir,
+          record,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.phase(
+          `${ctx.tag}: Warning: failed to archive ${stage} lifecycle record ` +
+            `for round ${round} attempt ${attempt}: ${message}`,
+          "error",
+          {
+            type: "warn",
+            reason: "qa-review-archive-failed",
+            ghIssue: slice.ghIssue,
+            message,
+          },
+        );
+      }
+      const unresolved =
+        review.failureClass === "INFRASTRUCTURE"
+          ? [...currentUnresolved]
+          : record.findings.filter((finding) => finding.unresolved);
+      currentHistory = nextHistory;
+      currentUnresolved = unresolved;
+      return {
+        review,
+        nextHistory,
+        unresolved,
+        reportArchived: evidence.reportArchived,
+        archiveDisplayPath,
+      };
+    };
+
+    let failedAttemptEvidence: AttemptEvidence | null = null;
     const invokeEvaluator = async (): Promise<AttemptEvidence> => {
       rmSync(reportPath, { force: true });
       rmSync(reviewPath, { force: true });
@@ -2304,7 +2372,7 @@ export async function runQAStage(
             QA_SCOPE: scope,
             REPORT_PATH: reportDisplayPath,
             UNRESOLVED_FINDINGS:
-              formatUnresolvedQAFindings(previousUnresolved),
+              formatUnresolvedQAFindings(currentUnresolved),
             COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
             HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
           }),
@@ -2317,7 +2385,7 @@ export async function runQAStage(
           }),
         }).finally(() => closeAgentLog(evalLog));
       } catch (error) {
-        archiveAttemptEvidence();
+        failedAttemptEvidence = archiveAttemptEvidence();
         throw error;
       }
       return archiveAttemptEvidence();
@@ -2343,6 +2411,9 @@ export async function runQAStage(
       }
     } catch (error) {
       if (isCancelled(error, config.signal)) throw error;
+      if (failedAttemptEvidence) {
+        recordValidAttempt(failedAttemptEvidence);
+      }
       if (attempt <= infrastructureRetries) {
         logger.phase(
           `${ctx.tag}: ${stage} infrastructure retry ${attempt}/${infrastructureRetries}`,
@@ -2361,48 +2432,22 @@ export async function runQAStage(
       );
     }
 
-    const { rawArchiveName, reportArchived, reviewResult } = attemptEvidence;
+    const { reviewResult } = attemptEvidence;
     if ("error" in reviewResult) {
       throw new Error(`${stage} review artifact ERROR: ${reviewResult.error}`);
     }
-    if (!reportArchived) {
+    const validAttempt = recordValidAttempt(attemptEvidence)!;
+    if (!validAttempt.reportArchived) {
       if (attempt <= infrastructureRetries) continue;
       throw new Error(`${stage} evaluator produced no report after ${attempt} attempt(s)`);
     }
 
-    const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
-    const { review, nextHistory } = reviewResult;
-    const expectedRawArchiveName =
-      `${stage === "deterministic" ? "qa" : "uat"}-review-r${round}-a${attempt}.json`;
-    const canonicalArchivePath = relative(
-      config.repoRoot,
-      join(reviewArchiveDir, rawArchiveName ?? expectedRawArchiveName),
-    ).replace(/\\/g, "/");
-    const record = buildQAReviewAttemptRecord({
-      stage,
-      round,
-      attempt,
+    const {
       review,
-      canonicalArchivePath,
-      markdownArchivePath: archiveDisplayPath,
-    });
-    try {
-      artifacts.archiveQAReviewRecord({ archiveDir: reviewArchiveDir, record });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.phase(
-        `${ctx.tag}: Warning: failed to archive ${stage} lifecycle record ` +
-          `for round ${round} attempt ${attempt}: ${message}`,
-        "error",
-        {
-          type: "warn",
-          reason: "qa-review-archive-failed",
-          ghIssue: slice.ghIssue,
-          message,
-        },
-      );
-    }
-    const unresolved = record.findings.filter((finding) => finding.unresolved);
+      nextHistory,
+      unresolved,
+      archiveDisplayPath,
+    } = validAttempt;
 
     if (review.verdict === "PASS") {
       return {
