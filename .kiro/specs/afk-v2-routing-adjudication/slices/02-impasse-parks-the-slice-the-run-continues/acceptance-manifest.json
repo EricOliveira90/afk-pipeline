@@ -1,0 +1,112 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/orchestrator.ts",
+      "src/wave.ts",
+      "src/slice-lifecycle.ts",
+      "src/run-state.ts",
+      "src/run-journal.ts",
+      "src/logger.ts",
+      "src/status-future.ts",
+      "src/status-pipeline.ts",
+      "src/orchestrator.test.ts",
+      "src/orchestrator-runs.test.ts",
+      "src/orchestrator.fixtures.ts",
+      "src/wave.test.ts",
+      "src/wave.fixtures.ts",
+      "src/slice-lifecycle.test.ts",
+      "src/run-state.test.ts",
+      "src/run-journal.test.ts",
+      "src/logger.test.ts",
+      "src/status-future.test.ts",
+      "src/status-pipeline.test.ts",
+      "src/status.test.ts",
+      "src/run-snapshot.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #81 AC1; PRD stories 3 and 10",
+      "given": "round-two exhaustion leaves any unresolved blocking finding CONTESTED",
+      "when": "contract negotiation ends",
+      "then": "the slice parks in AWAITING-ADJUDICATION instead of ESCALATE",
+      "observableResult": "Run state, the slice-outcome event, run-summary.md, and afk status each expose AWAITING-ADJUDICATION, the parked branch, and the impasse reason; any missing branch or reason fails verification.",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #81 AC2; PRD Testing Decisions",
+      "given": "round-two exhaustion produces an impasse with contested findings",
+      "when": "negotiation failure artifacts are preserved",
+      "then": "both working and archived outcome artifacts retain the complete impasse record",
+      "observableResult": "Both contract-negotiation-outcome.json copies match IMPASSE and every contested finding ID, evaluator-held state, planner position, planner evidence, and evaluator evidence verbatim.",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #81 AC1 and AC4; PRD stories 6 and 15",
+      "given": "a parked impasse slice has DAG-independent siblings including a later same-lane member",
+      "when": "the wave runs",
+      "then": "the independent siblings continue under existing lane rules",
+      "observableResult": "The independent siblings are dispatched and may complete normally after the impasse parks.",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #81 AC4; PRD stories 6 and 15",
+      "given": "a slice depends on a parked impasse slice",
+      "when": "the run finishes and afk status reads the run artifacts",
+      "then": "the dependent remains undispatched and visibly blocked by the parked issue",
+      "observableResult": "run-summary.md and afk status name the dependency hold and show the blocker in AWAITING-ADJUDICATION.",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #81 AC5; PRD story 16",
+      "given": "AWAITING-ADJUDICATION is persisted while other work remains active",
+      "when": "the run is cancelled",
+      "then": "only unsettled work becomes CANCELLED",
+      "observableResult": "The parked phase and branch value remain unchanged, and both working and archived impasse artifact copies remain unchanged after cancellation.",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #81 AC3; PRD story 10",
+      "given": "round-two exhaustion has unresolved blocking findings but none is CONTESTED",
+      "when": "contract negotiation ends",
+      "then": "classification remains NON_CONVERGENCE and the slice remains ESCALATE",
+      "observableResult": "Current non-convergence artifacts and reason text remain available.",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-02",
+      "source": "PRD Implementation Decisions",
+      "given": "negotiation ends through malformed artifacts, lock refusal, infrastructure failure, an unlocked contract, or pre-impasse cancellation",
+      "when": "the existing routing path handles the result",
+      "then": "its ERROR, STUCK, ESCALATE, or CANCELLED behavior remains unchanged",
+      "observableResult": "Each existing failure path retains its current terminal phase and artifact behavior.",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #81 lane rule; PRD Implementation Decisions",
+      "given": "ordinary failed, deferred-merge, or passing slices share a wave or lane",
+      "when": "scheduling, cleanup, persistence, and summaries run",
+      "then": "existing PASS, STUCK, MERGE-PENDING, lane-continuation, and branch-preservation semantics remain unchanged",
+      "observableResult": "Existing terminal outcomes, cleanup behavior, lane continuation, and preserved branches remain observable as before.",
+      "preservation": true,
+      "gateIds": ["tests"]
+    }
+  ]
+}

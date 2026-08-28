@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-01 and its matching test-plan scenario now require run state, the slice-outcome event, run-summary.md, and afk status to assert AWAITING-ADJUDICATION, the parked branch, and the impasse reason, and fail when any projection omits the branch or reason."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "The B-02 test-plan scenario now requires both working and archived outcome JSON copies to match IMPASSE and every contested finding ID, evaluator-held state, planner position, planner evidence, and evaluator evidence verbatim."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "B-05 and its matching cancellation scenario now require the parked phase and exact branch to persist, both impasse artifact copies to remain unchanged, and CANCELLED to apply only to unsettled work."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01"],
+      "evidence": "\"run state, the `slice-outcome` event, `run-summary.md`, and `afk status` each expose `AWAITING-ADJUDICATION`, the parked branch, and the impasse reason; omission of the branch or reason from any projection fails verification\"",
+      "expected": "the B-01 acceptance scenario and test plan require the phase, parked branch, and impasse reason in all four projections and fail if any projection omits the branch or reason",
+      "observed": "the revised manifest observable and focused test-plan scenario explicitly assert all three values in run state, the slice-outcome event, run-summary.md, and afk status, including a negative omission condition",
+      "clearCondition": "the B-01 observable result and matching test-plan entry assert AWAITING-ADJUDICATION, the parked branch, and the impasse reason in run state, the slice-outcome event, run-summary.md, and afk status, with omission from any projection failing the scenario",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02"],
+      "evidence": "\"both copies match classification `IMPASSE` and every contested finding ID, evaluator-held state, planner position, planner evidence, and evaluator evidence verbatim\"",
+      "expected": "the B-02 test plan explicitly asserts every promised impasse field in both the working and archived outcome artifacts",
+      "observed": "the revised B-02 scenario names both artifact copies and requires exact assertions for classification, every contested finding ID, evaluator-held state, planner position, planner evidence, and evaluator evidence",
+      "clearCondition": "the B-02 test-plan entry requires both contract-negotiation-outcome.json copies to match IMPASSE and every contested finding ID, evaluator-held state, planner position, planner evidence, and evaluator evidence verbatim",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-05"],
+      "evidence": "\"persisted state retains `AWAITING-ADJUDICATION` and the exact parked branch, both impasse artifact copies are unchanged, and only unsettled work records `CANCELLED`\"",
+      "expected": "the B-05 observable result and cancellation test prove that cancellation preserves the parked phase, exact branch, and both impasse artifacts while cancelling only unsettled work",
+      "observed": "the revised manifest and cancellation fixture require the parked phase and branch to remain unchanged, both working and archived artifacts to remain unchanged, and CANCELLED to apply only to unsettled slices",
+      "clearCondition": "the B-05 observable result and matching cancellation test assert the unchanged parked phase and exact branch, byte-equivalent working and archived impasse artifacts, and CANCELLED only for unsettled work",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}
