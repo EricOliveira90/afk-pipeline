@@ -79,13 +79,65 @@
     "clean-failed": 12.7,
     "_total": "427.8s of suite time, 803 tests"
   },
-  "suites": {
-    "fast": 90,
-    "orchestrator": 205,
-    "wave": 110,
-    "resume-integration": 63,
-    "qa-orchestration": 68,
-    "clean-failed": 13
+  "_measured2026_08_27_feature_branch": {
+    "_note": [
+      "feat-codex/afk-v2-evidence-backbone after merging main (wave-1",
+      "fixes + suite split + hermetic git) into the #75-#77 slice work.",
+      "883 tests, idle machine. The heavy suites cost ~2x main's numbers",
+      "because #76 gave every fixture repo a package.json sanity script",
+      "(test:run) so contracts can bind to an executable gate — scenarios",
+      "that previously skipped the sanity/base gates now spawn pnpm for",
+      "real. Budgets below re-baselined at ~30% above these in-chain",
+      "numbers. When this branch merges to main, re-measure; reducing the",
+      "per-scenario sanity cost is follow-up work, not a test regression."
+    ],
+    "fast": 84.8,
+    "orchestrator": 307.1,
+    "wave": 226.2,
+    "resume-integration": 117.2,
+    "qa-orchestration": 67.0,
+    "clean-failed": 17.7,
+    "_total": "820.0s of suite time, 883 tests"
   },
-  "totalSeconds": 549
+  "_measured2026_08_27_afk_run4_gates": {
+    "_note": [
+      "Three measurements of this same tree inside AFK run 4's gates,",
+      "load rising as agents accumulated: fast 87.5 -> 105.1 -> 130.5s",
+      "(gate r1, gate r2, QA r2's own run) against the 84.8s idle",
+      "baseline and the 110s budget; orchestrator 329.1 -> 382.4s",
+      "against 400. QA r2's 130.5s tripped the fast budget and became a",
+      "blocking Major finding on slice #78 with zero failing tests.",
+      "During an AFK run the resident agents ARE the environment, and",
+      "the budget must cover the in-chain number in that environment:",
+      "fast raised 110 -> 170 (~30% above the 130.5 worst), orchestrator",
+      "400 -> 500 (~30% above 382.4). Operator raise, not a generator",
+      "edit — the ratchet rule reserves this for a recorded measurement."
+    ],
+    "fast": 130.5,
+    "orchestrator": 382.4
+  },
+  "_measured2026_08_27_afk_run5": {
+    "_note": [
+      "AFK run 5. Slice #79's generator measured test:heavy:orchestrator at",
+      "~516s against the 500s budget with zero failing tests, under its own",
+      "load plus a resident babysitter session. Same settled class as run 4:",
+      "wall-clock variance under agent load, not a test regression. Raised",
+      "500 -> 560 pre-emptively, because the consumer of this number is the",
+      "pre-ship gate's test:budgets — which runs with guardian reviews and a",
+      "babysitter resident, and where a red gate on a 3% overshoot would",
+      "block a ship after three-plus hours of work. #78's own base gate ran",
+      "its tests step at 691.9s, under the 820s feature-branch baseline, so",
+      "nothing here indicates the suite itself got slower."
+    ],
+    "orchestrator": 516
+  },
+  "suites": {
+    "fast": 170,
+    "orchestrator": 560,
+    "wave": 295,
+    "resume-integration": 152,
+    "qa-orchestration": 87,
+    "clean-failed": 23
+  },
+  "totalSeconds": 1287
 }

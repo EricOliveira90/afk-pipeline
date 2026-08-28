@@ -33,24 +33,59 @@ Principles:
 3. Single-session feasibility — can one generator session deliver this?
 4. Boundary explicitness — non-goals named, new patterns justified
 
-Append a section to the contract:
+Write `contract-review.json` in the slice directory — the canonical
+verdict artifact, and the only thing the orchestrator reads:
 
+```json
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": []
+}
 ```
-## Evaluator feedback — round N
 
-VERDICT: ACCEPT | REVISE
+On REVISE, every finding carries `id`, `severity`
+(`BLOCKING`/`ADVISORY`), `behaviorIds`, `evidence` (quoted),
+`expected`, `observed`, and `clearCondition` — the observable change
+that resolves it — plus lifecycle `state` and `revisionCitation`.
+ACCEPT cannot coexist with an active BLOCKING finding (`OPEN` or
+`CONTESTED`), and REVISE requires at least one. Reuse a finding's `id`
+across rounds while the same gap stands.
 
-### If REVISE, specific gaps:
-- <gap — quote the problematic line, explain which principle it violates>
+In round 2, disposition every routed planner response: unresolved stays
+OPEN; a claimed clear-condition becomes RESOLVED only when observed;
+contested becomes CONTESTED when held or WITHDRAWN when accepted.
+Only revision-changed contract or acceptance-manifest text can justify a
+fresh round-2 ID; copy exact unequal before/after excerpts into its
+`revisionCitation`. Familiar IDs use `null`, and terminal IDs never
+reactivate.
 
-### If ACCEPT:
-Contract is testable, UAT-verifiable, and feasible in one session.
-Planner: flip to LOCKED.
-```
+Then write the human-readable companion `feedback-rN.md`. It carries no
+verdict marker and no counts; nothing parses it. The orchestrator flips
+**Status:** to LOCKED — never edit Status yourself (ADR 0008).
 
 ## Mode 2 — Slice Evaluation (after generator hands off)
 
 **Triggered when:** generator has written `handoff.md`.
+
+Write two output artifacts in the slice directory:
+- `qa-review.json` for deterministic QA, or `uat-review.json` for
+  shared-preview UAT. This is the canonical verdict.
+- `qa-report.md` or `uat-report.md` as the human-readable companion. Markdown
+  does not control the verdict.
+
+The canonical artifact uses exact root keys `"version"`, `"verdict"`,
+`"failureClass"`, `"infrastructureEvidence"`, and `"findings"`, with
+`"version": 1`. Each finding uses exact keys `"id"`, `"severity"`,
+`"behaviorIds"`, `"summary"`, `"evidence"`, `"expected"`, `"observed"`,
+`"clearCondition"`, and `"state"`. Re-check each routed unresolved finding
+and repeat its ID exactly once as `OPEN` or `RESOLVED`; fresh IDs start
+`OPEN`.
+
+Valid combinations are `PASS/NONE` with null infrastructure evidence and no
+open blocker, `FAIL/IMPLEMENTATION` with null infrastructure evidence and at
+least one open blocker, or `FAIL/INFRASTRUCTURE` with nonblank infrastructure
+evidence and no findings.
 
 Two-pass evaluation:
 
@@ -77,12 +112,13 @@ guard clauses, test quality.
 
 When in doubt, PASS with notes.
 
-### qa-report.md template
+### Markdown companion template
 
 ```
 # QA Report
 
 **Verdict:** PASS | FAIL
+**Failure class:** NONE | IMPLEMENTATION | INFRASTRUCTURE
 
 ## Pass 1: Functional Correctness
 - Test suite: PASS | FAIL (N passed / M failed)

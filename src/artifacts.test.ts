@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  archiveContractReviewRecord,
   archiveArtifactsBeforeRestart,
+  archiveQAReviewAttempt,
+  archiveQAReviewRecord,
+  archiveQAReviewValidation,
   classifyReviewFailure,
   hasStuckFile,
   isFavorableReviewOutcome,
@@ -20,10 +24,13 @@ import {
   readContractFiles,
   readContractStatus,
   preserveNegotiationFailure,
-  readEvaluatorFeedbackMetrics,
-  readEvaluatorVerdict,
   readReviewVerdict,
 } from "./artifacts.js";
+import type {
+  ContractNegotiationOutcome,
+  ContractReviewAttemptRecord,
+} from "./contract-review.js";
+import type { QAReviewAttemptRecord } from "./qa-review.js";
 
 /**
  * Regression tests for the review-verdict parser.
@@ -45,38 +52,169 @@ function withTempFile(content: string, fn: (path: string) => void) {
   }
 }
 
-describe("readEvaluatorVerdict", () => {
-  it("parses both bold-colon spellings from a feedback file", () => {
-    withTempFile("Review prose\n\n**Verdict:** ACCEPT\n", (p) =>
-      expect(readEvaluatorVerdict(p)).toBe("ACCEPT"),
-    );
-    withTempFile("**Verdict: REVISE**\n", (p) =>
-      expect(readEvaluatorVerdict(p)).toBe("REVISE"),
-    );
-  });
-
-  it("parses explicit gap and re-raised-gap counts", () => {
-    withTempFile("VERDICT: REVISE\nGAPS: 3\nRE_RAISED_GAPS: 1\n", (p) => {
-      expect(readEvaluatorFeedbackMetrics(p)).toEqual({
-        gapCount: 3,
-        reRaisedGapCount: 1,
-      });
-    });
-    withTempFile("VERDICT: REVISE\n", (p) => {
-      expect(readEvaluatorFeedbackMetrics(p)).toEqual({
-        gapCount: null,
-        reRaisedGapCount: null,
-      });
-    });
-  });
-
-  it("returns UNKNOWN for missing or garbled feedback without throwing", () => {
-    expect(readEvaluatorVerdict("/nonexistent/feedback-r1.md")).toBe("UNKNOWN");
-    withTempFile("Verdict: looks good\n", (p) =>
-      expect(readEvaluatorVerdict(p)).toBe("UNKNOWN"),
-    );
+describe("archiveContractReviewRecord", () => {
+  it("writes a round-and-attempt-stamped lifecycle record", () => {
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-review-record-"));
+    const record: ContractReviewAttemptRecord = {
+      version: 1,
+      round: 2,
+      attempt: 3,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-01",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the existing gate is sufficient",
+          evaluatorEvidence: "the gate misses the negative path",
+        },
+      ],
+    };
+    try {
+      expect(
+        archiveContractReviewRecord({ archiveDir, record }),
+      ).toBe("contract-review-r2-a3-record.json");
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(archiveDir, "contract-review-r2-a3-record.json"),
+            "utf-8",
+          ),
+        ),
+      ).toEqual(record);
+    } finally {
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
   });
 });
+
+describe("canonical QA review archives", () => {
+  it("copies raw QA and UAT attempts under exact stage-specific names", () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-qa-review-source-"));
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-review-archive-"));
+    try {
+      writeFileSync(join(sliceDir, "qa-review.json"), '{"version":1}', "utf-8");
+      writeFileSync(join(sliceDir, "uat-review.json"), '{"version":1}', "utf-8");
+
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "deterministic",
+          round: 2,
+          attempt: 3,
+        }),
+      ).toBe("qa-review-r2-a3.json");
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "shared-preview",
+          round: 1,
+          attempt: 2,
+        }),
+      ).toBe("uat-review-r1-a2.json");
+      expect(
+        readFileSync(join(archiveDir, "qa-review-r2-a3.json"), "utf-8"),
+      ).toBe('{"version":1}');
+      expect(
+        readFileSync(join(archiveDir, "uat-review-r1-a2.json"), "utf-8"),
+      ).toBe('{"version":1}');
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null and creates no raw archive when canonical JSON is missing", () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-qa-review-source-"));
+    const archiveDir = join(sliceDir, "reviews");
+    try {
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+        }),
+      ).toBeNull();
+      expect(existsSync(archiveDir)).toBe(false);
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes validation evidence without inventing a lifecycle record", () => {
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-validation-"));
+    try {
+      expect(
+        archiveQAReviewValidation({
+          archiveDir,
+          stage: "shared-preview",
+          round: 3,
+          attempt: 1,
+          evidence: "uat-review.json is missing",
+        }),
+      ).toBe("uat-review-r3-a1-validation.txt");
+      expect(
+        readFileSync(
+          join(archiveDir, "uat-review-r3-a1-validation.txt"),
+          "utf-8",
+        ),
+      ).toBe("uat-review.json is missing\n");
+      expect(
+        existsSync(join(archiveDir, "uat-review-r3-a1-record.json")),
+      ).toBe(false);
+    } finally {
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a valid lifecycle record under the exact attempt name", () => {
+    const archiveDir = mkdtempSync(join(tmpdir(), "afk-qa-record-"));
+    const record: QAReviewAttemptRecord = {
+      version: 1,
+      stage: "deterministic",
+      round: 1,
+      attempt: 1,
+      verdict: "FAIL",
+      failureClass: "IMPLEMENTATION",
+      findings: [
+        {
+          id: "QA-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "Retry needed",
+          clearCondition: "The regression test passes",
+          artifactReferences: [
+            "qa-review-r1-a1.json",
+            "qa-report-r1-a1.md",
+          ],
+        },
+      ],
+    };
+    try {
+      expect(archiveQAReviewRecord({ archiveDir, record })).toBe(
+        "qa-review-r1-a1-record.json",
+      );
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(archiveDir, "qa-review-r1-a1-record.json"),
+            "utf-8",
+          ),
+        ),
+      ).toEqual(record);
+    } finally {
+      rmSync(archiveDir, { recursive: true, force: true });
+    }
+  });
+});
+
 
 /**
  * A from-base restart recreates the slice worktree, so the untracked spec
@@ -147,6 +285,108 @@ describe("archiveArtifactsBeforeRestart (#113)", () => {
     }
   });
 
+  /**
+   * #123: nothing ever cleared `reviews/`, and since #79 a round-1
+   * evidence write that lands on another life's `r1-a1` archive fails
+   * closed — so a restarted slice burned its infrastructure retries on a
+   * deterministic collision. The dir is *moved*, not copied: copying
+   * would leave the slots occupied.
+   */
+  it("moves the prior life's review archives out of round 1's way", () => {
+    const { repoRoot, sliceDir } = makeSliceFixture(["contract.md"]);
+    try {
+      const reviews = join(
+        repoRoot, ".afk", "artifacts", "s", "slice-01", "reviews",
+      );
+      mkdirSync(reviews, { recursive: true });
+      writeFileSync(
+        join(reviews, "qa-review-r1-a1.json"), "prior life\n", "utf-8",
+      );
+      writeFileSync(
+        join(reviews, "qa-review-r1-a1-record.json"), "{}\n", "utf-8",
+      );
+
+      const archiveDir = archiveArtifactsBeforeRestart(
+        repoRoot, "s", "01", sliceDir,
+      )!;
+
+      // The slot round 1 will write to is free again...
+      expect(existsSync(join(reviews, "qa-review-r1-a1.json"))).toBe(false);
+      // ...and the evidence still exists, whole, one level down: a record
+      // and the raw artifact it references travel together.
+      expect(
+        readFileSync(
+          join(archiveDir, "reviews", "qa-review-r1-a1.json"), "utf-8",
+        ),
+      ).toBe("prior life\n");
+      expect(
+        existsSync(join(archiveDir, "reviews", "qa-review-r1-a1-record.json")),
+      ).toBe(true);
+      // And the write that used to hit `errorOnExist` goes through.
+      writeFileSync(join(sliceDir, "qa-review.json"), "new life\n", "utf-8");
+      expect(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir: reviews,
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+        }),
+      ).toBe("qa-review-r1-a1.json");
+      expect(readFileSync(join(reviews, "qa-review-r1-a1.json"), "utf-8")).toBe(
+        "new life\n",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("relocates stale reviews for a slice whose worktree is already gone", () => {
+    const { repoRoot } = makeSliceFixture([]);
+    try {
+      const reviews = join(
+        repoRoot, ".afk", "artifacts", "s", "slice-01", "reviews",
+      );
+      mkdirSync(reviews, { recursive: true });
+      writeFileSync(
+        join(reviews, "qa-review-r1-a1.json"), "prior life\n", "utf-8",
+      );
+
+      // No spec artifacts to copy — the clean-failed/deleted-branch state
+      // — so the archive dir exists for the relocation alone.
+      const archiveDir = archiveArtifactsBeforeRestart(
+        repoRoot, "s", "01", join(repoRoot, "nope"),
+      );
+
+      expect(archiveDir).toBe(
+        join(repoRoot, ".afk", "artifacts", "s", "slice-01", "pre-restart-1"),
+      );
+      expect(existsSync(join(archiveDir!, "reviews", "qa-review-r1-a1.json")))
+        .toBe(true);
+      expect(existsSync(reviews)).toBe(false);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an empty reviews dir alone rather than numbering a restart for it", () => {
+    const { repoRoot, sliceDir } = makeSliceFixture([]);
+    try {
+      const reviews = join(
+        repoRoot, ".afk", "artifacts", "s", "slice-01", "reviews",
+      );
+      mkdirSync(reviews, { recursive: true });
+
+      expect(archiveArtifactsBeforeRestart(repoRoot, "s", "01", sliceDir))
+        .toBeNull();
+      expect(
+        existsSync(join(repoRoot, ".afk", "artifacts", "s", "slice-01", "pre-restart-1")),
+      ).toBe(false);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("archives nothing, and creates no directory, for a slice with no artifacts", () => {
     const { repoRoot, sliceDir } = makeSliceFixture([]);
     try {
@@ -184,6 +424,64 @@ describe("preserveNegotiationFailure", () => {
     );
     return { repoRoot, sliceDir };
   }
+
+  it("writes and renders the versioned exhaustion outcome", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    const negotiationOutcome: ContractNegotiationOutcome = {
+      version: 1,
+      classification: "IMPASSE",
+      round: 2,
+      attempt: 1,
+      findings: [
+        {
+          id: "F-CONTEST",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the existing gate is sufficient",
+          evaluatorEvidence: "the gate misses the negative path",
+        },
+      ],
+    };
+    try {
+      preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "impasse-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 2,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        negotiationOutcome,
+      });
+
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(sliceDir, "contract-negotiation-outcome.json"),
+            "utf-8",
+          ),
+        ),
+      ).toEqual(negotiationOutcome);
+      const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
+      expect(stuck).toContain("Exhaustion classification: IMPASSE");
+      expect(stuck).toContain("Planner position: CONTESTED");
+      expect(stuck).toContain(
+        "Planner evidence: the existing gate is sufficient",
+      );
+      expect(stuck).toContain(
+        "Evaluator evidence: the gate misses the negative path",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
 
   it("writes actionable ESCALATE details and archives every negotiation artifact", () => {
     const { repoRoot, sliceDir } = makeFailureFixture();
@@ -245,7 +543,7 @@ describe("preserveNegotiationFailure", () => {
           title: "Notification foundation",
           round: 2,
           outcome: "STUCK",
-          verdict: "UNKNOWN",
+          verdict: "NONE",
           feedbackPath: join(sliceDir, "feedback-r2.md"),
           contractPath: join(sliceDir, "contract.md"),
           contextPath: join(sliceDir, "context.md"),

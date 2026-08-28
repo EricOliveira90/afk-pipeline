@@ -28,7 +28,6 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  assessContractExtension,
   collectRequiredGateFailures,
   isCancelled,
   makeAsyncMutex,

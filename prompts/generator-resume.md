@@ -38,6 +38,13 @@ Before writing any new code:
 If typecheck or the touched tests fail, fix them first — the failure
 marks the boundary between finished and unfinished work.
 
+# Current unresolved findings
+
+The orchestrator restored the latest code-derived lifecycle state from the QA
+stage reached before the prior invocation died. Use only this repair input:
+
+{{UNRESOLVED_FINDINGS}}
+
 # Reconciling the contract with a moved world
 
 Your contract was locked before you died; the world has moved since.

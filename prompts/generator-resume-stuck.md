@@ -28,6 +28,13 @@ You are not starting over. You are finishing.
 
 {{STUCK_NOTE}}
 
+# Current unresolved findings
+
+The orchestrator restored the latest code-derived lifecycle state from the QA
+stage that declared this slice STUCK. Use only this repair input:
+
+{{UNRESOLVED_FINDINGS}}
+
 # Verify, then finish
 
 Before writing any new code:
@@ -108,7 +115,6 @@ Also read:
 - The locked contract at `{{SLICE_DIR}}/contract.md`
 - The slice's `{{SLICE_DIR}}/context.md` (explorer output)
 - The preserved diagnosis at `{{SLICE_DIR}}/stuck.md`
-- Every preserved QA report in `{{SLICE_DIR}}` (`qa-report*.md`)
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}
 

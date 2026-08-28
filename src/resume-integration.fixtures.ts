@@ -22,6 +22,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Slice } from "./issues-parser.js";
+import { writeContractReview, writeQAReview } from "./test-support.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 
 const tempDirs: string[] = [];
@@ -59,7 +60,20 @@ export function makeRepo(opts: { lifetime?: "test" | "describe" } = {}): string 
   if (opts.lifetime !== "describe") tempDirs.push(dir);
   git(dir, ["init", "--initial-branch=main"]);
   writeFileSync(join(dir, "README.md"), "test\n", "utf-8");
-  git(dir, ["add", "README.md"]);
+  // A behavior's gate IDs must name a baseline gate backed by a
+  // discovered command, so the fixture repo needs the one sanity script
+  // the derived catalog reads (`resolveSanityPlan`). Without it no
+  // manifest could bind, and every negotiation here would refuse (#76).
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "resume-fixture",
+      private: true,
+      scripts: { "test:run": "node -e \"process.exit(0)\"" },
+    }),
+    "utf-8",
+  );
+  git(dir, ["add", "README.md", "package.json"]);
   git(dir, ["commit", "-m", "root"]);
   return dir;
 }
@@ -140,6 +154,15 @@ export function buildProvider(opts: {
   records?: PromptRecord[];
   /** Deterministic QA verdict for every evaluator-qa invocation. */
   qaVerdict?: "PASS" | "FAIL";
+  /** Explicit lifecycle disposition for the fixture's deterministic finding. */
+  qaFindingState?: "OPEN" | "RESOLVED";
+  /** Per-slice override for deterministic QA lifecycle fixtures. */
+  qaResult?: (sliceNumber: string) => {
+    verdict: "PASS" | "FAIL";
+    findingState?: "OPEN" | "RESOLVED";
+    additionalFindingState?: "OPEN" | "RESOLVED";
+    error?: string;
+  } | undefined;
 }): AgentProvider {
   return {
     name: "stub",
@@ -172,20 +195,87 @@ export function buildProvider(opts: {
           `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n- src/work-${sliceNumber}.ts\n`,
           "utf-8",
         );
+        writeFileSync(
+          join(artifactDir, "acceptance-manifest.json"),
+          JSON.stringify({
+            version: 2,
+            fileScope: { kind: "paths", paths: [`src/work-${sliceNumber}.ts`] },
+            migrationCount: 0,
+            behaviors: [
+              {
+                id: "B-01",
+                source: "resume fixture",
+                given: "a resumable slice",
+                when: "its contract is negotiated",
+                then: "the behavior lock passes",
+                observableResult: "the slice reaches its own assertions",
+                preservation: false,
+                gateIds: ["tests"],
+              },
+            ],
+          }),
+          "utf-8",
+        );
       } else if (role === "evaluator-contract" && artifactDir) {
         writeFileSync(
           join(artifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+          "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
           "utf-8",
         );
+        writeContractReview(artifactDir, "ACCEPT");
       } else if (role === "generator") {
         await opts.generator(cwd, options, sliceNumber);
       } else if (role === "evaluator-qa" && artifactDir) {
+        const qaResult = opts.qaResult?.(sliceNumber) ?? {
+          verdict: opts.qaVerdict ?? "PASS",
+          findingState: opts.qaFindingState,
+        };
         writeFileSync(
           join(artifactDir, "qa-report.md"),
-          `# QA Report\n\n**Verdict:** ${opts.qaVerdict ?? "PASS"}\n`,
+          `# QA Report\n\n**Verdict:** ${qaResult.verdict}\n`,
           "utf-8",
         );
+        const findings = [
+          ...(qaResult.findingState
+            ? [
+                {
+                  id: "QA-01",
+                  severity: "BLOCKING" as const,
+                  behaviorIds: [],
+                  summary: "Fixture implementation finding",
+                  evidence:
+                    "The fixture evaluator observed a failing behavior",
+                  expected: "The behavior passes",
+                  observed: "The behavior fails",
+                  clearCondition:
+                    "The fixture evaluator observes the behavior passing",
+                  state: qaResult.findingState,
+                },
+              ]
+            : []),
+          ...(qaResult.additionalFindingState
+            ? [
+                {
+                  id: "QA-02",
+                  severity: "BLOCKING" as const,
+                  behaviorIds: [],
+                  summary: "Fresh fixture implementation finding",
+                  evidence:
+                    "The fixture evaluator observed another failing behavior",
+                  expected: "The additional behavior passes",
+                  observed: "The additional behavior fails",
+                  clearCondition:
+                    "The fixture evaluator observes the additional behavior passing",
+                  state: qaResult.additionalFindingState,
+                },
+              ]
+            : []),
+        ];
+        writeQAReview(artifactDir, "deterministic", {
+          verdict: qaResult.verdict,
+          ...(findings.length > 0 ? { findings } : {}),
+        });
+        if (qaResult.error) throw new Error(qaResult.error);
       } else if (role === "generator-stuck" && artifactDir) {
         writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");
       }

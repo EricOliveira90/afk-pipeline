@@ -27,7 +27,7 @@ import {
   type SliceContext,
 } from "./orchestrator.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
-import { rmDirWithRetry } from "./test-support.js";
+import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
 const dirs: string[] = [];
 const fixtureChildren = new Set<ChildProcess>();
@@ -185,6 +185,593 @@ describe("temporary repository isolation", () => {
 });
 
 describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
+  it("archives partial evaluator output before retrying a failed invocation", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        attempts++;
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          `# QA Report\n\nAttempt ${attempts}\n`,
+          "utf-8",
+        );
+        if (attempts === 1) {
+          writeFileSync(
+            join(artifactDir, "qa-review.json"),
+            '{"version":1,"verdict":',
+            "utf-8",
+          );
+          throw new Error("provider disconnected");
+        }
+        writeQAReview(artifactDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      { outcome: "PASS" },
+    );
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(readFileSync(join(artifactDir, "qa-report-r1-a1.md"), "utf-8")).toContain(
+      "Attempt 1",
+    );
+    expect(
+      readFileSync(join(reviewDir, "qa-review-r1-a1.json"), "utf-8"),
+    ).toBe('{"version":1,"verdict":');
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toMatch(/valid JSON/);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("archives canonical validation when the Markdown companion is missing", async () => {
+    const repo = makeRepo();
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing/,
+    );
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toMatch(/qa-review\.json is missing/);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("fails closed when Markdown passes without canonical QA JSON", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing/,
+    );
+    expect(existsSync(join(artifactDir, "qa-report-r1-a1.md"))).toBe(true);
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toMatch(/qa-review\.json is missing/);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("uses canonical PASS even when the Markdown companion says FAIL", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n",
+          "utf-8",
+        );
+        writeFileSync(
+          join(artifactDir, "qa-review.json"),
+          JSON.stringify({
+            version: 1,
+            verdict: "PASS",
+            failureClass: "NONE",
+            infrastructureEvidence: null,
+            findings: [],
+          }),
+          "utf-8",
+        );
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      {
+        outcome: "PASS",
+        report: "specs/slices/01-prd-070-regression/qa-report-r1-a1.md",
+        history: [],
+        unresolved: [],
+      },
+    );
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1.json"))).toBe(true);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      true,
+    );
+  });
+
+  it("deletes stale canonical JSON before an infrastructure retry", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        attempts++;
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          `# QA Report\n\n**Verdict:** ${attempts === 1 ? "FAIL" : "PASS"}\n`,
+          "utf-8",
+        );
+        if (attempts === 1) {
+          writeFileSync(
+            join(artifactDir, "qa-review.json"),
+            JSON.stringify({
+              version: 1,
+              verdict: "FAIL",
+              failureClass: "INFRASTRUCTURE",
+              infrastructureEvidence: "Registry unavailable",
+              findings: [],
+            }),
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+    artifactDir = ctx.absSliceDir;
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing/,
+    );
+    expect(attempts).toBe(2);
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1.json"))).toBe(true);
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      true,
+    );
+    expect(
+      existsSync(join(reviewDir, "qa-review-r1-a2-validation.txt")),
+    ).toBe(true);
+    expect(existsSync(join(artifactDir, "qa-report-r1-a2.md"))).toBe(true);
+  });
+
+  // A resumed run needs archived round evidence on disk before
+  // `runSliceExecute` starts — no existing fixture in this suite reaches
+  // that state, and the resume-integration fixture passes in round 2, so
+  // it can never prove exhaustion (QA slice #79 finding 2).
+  it("caps an ordinary resume at the rounds left under the three-round budget", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const roles: string[] = [];
+    const generatorPrompts: string[] = [];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        roles.push(options.role);
+        if (options.role === "generator") {
+          generatorPrompts.push(options.prompt);
+          writeFileSync(
+            join(repo, "change.txt"),
+            `${generatorPrompts.length}\n`,
+            "utf-8",
+          );
+        } else if (options.role === "evaluator-qa") {
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n",
+            "utf-8",
+          );
+          // Repeats the restored OPEN finding (QA-01) exactly once, so
+          // the lifecycle accepts every resumed attempt — the run stops
+          // because the cap is spent, not because a transition is refused.
+          writeQAReview(artifactDir, "deterministic", { verdict: "FAIL" });
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    // Round 1 already happened in the slice's previous life: its record
+    // and Markdown archive are what `loadQAReviewResumeState` reads.
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-record.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          stage: "deterministic",
+          round: 1,
+          attempt: 1,
+          verdict: "FAIL",
+          failureClass: "IMPLEMENTATION",
+          findings: [
+            {
+              id: "QA-01",
+              severity: "BLOCKING",
+              state: "OPEN",
+              unresolved: true,
+              summary: "Fixture implementation finding",
+              clearCondition:
+                "The fixture evaluator observes the behavior passing",
+              artifactReferences: [
+                ".afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r1-a1.json",
+                "specs/slices/01-prd-070-regression/qa-report-r1-a1.md",
+              ],
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    writeFileSync(
+      join(artifactDir, "qa-report-r1-a1.md"),
+      "# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n",
+      "utf-8",
+    );
+    ctx.resume = {
+      mode: "killed",
+      commitsAhead: 1,
+      commitLog: "abc1234 feat(#70): round-1 work",
+      handoffNote: "",
+    };
+
+    await expect(runSliceExecute(ctx)).resolves.toEqual({
+      phase: "STUCK",
+      error: "QA failed after 3 implementation rounds",
+    });
+    // Rounds 2 and 3 only — the fourth implementation round the QA
+    // finding demonstrated is not reachable through an ordinary resume.
+    expect(roles.filter((role) => role === "generator")).toHaveLength(2);
+    expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(2);
+    expect(roles.filter((role) => role === "generator-stuck")).toHaveLength(1);
+    expect(generatorPrompts[1]).toContain("This is implementation round 3");
+    expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
+    expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
+    expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
+    expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(false);
+  });
+
+  it("fails closed when the raw canonical archive cannot be preserved", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        writeQAReview(artifactDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    // The exact collision QA slice #79 finding 3 names: the archive slot
+    // is already occupied, so the `errorOnExist` copy must throw and the
+    // attempt must not be allowed to PASS over the lost evidence.
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1.json"),
+      "stale archive from another life\n",
+      "utf-8",
+    );
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /could not preserve its raw canonical artifact/,
+    );
+    // The stale archive was refused, not silently overwritten.
+    expect(readFileSync(join(reviewDir, "qa-review-r1-a1.json"), "utf-8")).toBe(
+      "stale archive from another life\n",
+    );
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  // Both failures must survive into the terminal error: the archive
+  // refusal (why the attempt cannot count) and the original invocation
+  // failure (the root cause a reader debugs first). Before the fix the
+  // archive throw replaced the evaluator failure outright.
+  it("keeps the evaluator failure visible when its archive also fails", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        // The evaluator wrote a valid review, then the provider died —
+        // the catch path archives the evidence it left behind.
+        writeQAReview(artifactDir, "deterministic");
+        throw new Error("provider disconnected mid-review");
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1.json"),
+      "stale archive from another life\n",
+      "utf-8",
+    );
+
+    const error = await runQAStage(ctx, 1, "deterministic", []).then(
+      () => {
+        throw new Error("expected runQAStage to reject");
+      },
+      (err) => err as Error,
+    );
+    expect(error.message).toMatch(
+      /could not preserve its raw canonical artifact/,
+    );
+    expect(error.message).toMatch(
+      /while handling evaluator failure: provider disconnected mid-review/,
+    );
+  });
+
+  it("refuses PASS when the lifecycle record cannot be archived", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          writeFileSync(join(repo, "change.txt"), "done\n", "utf-8");
+        } else if (options.role === "evaluator-qa") {
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    // Occupy the record's `wx` slot so the lifecycle write fails after a
+    // valid PASS review — the slice must end ERROR, not merge (#79).
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-record.json"),
+      "{}\n",
+      "utf-8",
+    );
+
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
+      phase: "ERROR",
+      error: expect.stringMatching(/could not preserve its lifecycle record/),
+    });
+  });
+
+  // The cross-attempt hole the #79 fix left open (#124): attempt 1's
+  // refusal evidence cannot be written, the loop infra-retries, and
+  // attempt 2 PASSes — shipping the slice with the refused attempt's
+  // validation file missing. The lost write now ends the slice instead,
+  // because a retry re-invokes the evaluator and can never recover it.
+  it("refuses to retry past an unarchivable validation write", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        attempts++;
+        writeFileSync(
+          join(artifactDir, "qa-report.md"),
+          `# QA Report\n\nAttempt ${attempts}\n`,
+          "utf-8",
+        );
+        if (attempts === 1) {
+          // Truncated canonical output, then a dead provider: exactly the
+          // `failedAttemptEvidence` path that archives validation evidence.
+          writeFileSync(
+            join(artifactDir, "qa-review.json"),
+            '{"version":1,"verdict":',
+            "utf-8",
+          );
+          throw new Error("provider disconnected");
+        }
+        writeQAReview(artifactDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    // Occupy the validation file's `wx` slot the way another life's
+    // archive does after a restart.
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-validation.txt"),
+      "stale validation from another life\n",
+      "utf-8",
+    );
+
+    const error = await runQAStage(ctx, 1, "deterministic", []).then(
+      () => {
+        throw new Error("expected runQAStage to reject");
+      },
+      (err) => err as Error,
+    );
+    expect(error.message).toMatch(
+      /could not preserve its validation evidence/,
+    );
+    // The evaluator failure that produced the evidence stays visible.
+    expect(error.message).toMatch(
+      /while handling evaluator failure: provider disconnected/,
+    );
+    // The retry that would have shipped a PASS over the lost evidence
+    // never ran, and the occupied slot was refused, not overwritten.
+    expect(attempts).toBe(1);
+    expect(
+      readFileSync(
+        join(reviewDir, "qa-review-r1-a1-validation.txt"),
+        "utf-8",
+      ),
+    ).toBe("stale validation from another life\n");
+    expect(existsSync(join(reviewDir, "qa-review-r1-a1-record.json"))).toBe(
+      false,
+    );
+  });
+
+  it("names the lost validation write alongside the artifact ERROR", async () => {
+    const repo = makeRepo();
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    mkdirSync(reviewDir, { recursive: true });
+    writeFileSync(
+      join(reviewDir, "qa-review-r1-a1-validation.txt"),
+      "stale validation from another life\n",
+      "utf-8",
+    );
+
+    // This attempt already ended the slice before #124, so the fix only
+    // has to say what was lost — the operator must not have to infer that
+    // the refusal was never written down.
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /qa-review\.json is missing.*could not preserve its validation evidence/s,
+    );
+  });
+
   it("does not treat the inactivity timeout as the base-gate wall-clock limit", async () => {
     const repo = makeRepo();
     writeFileSync(
@@ -212,6 +799,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic");
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -263,6 +851,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic");
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -337,6 +926,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             `# QA Report\n\n**Verdict:** ${failure ? "FAIL" : "PASS"}\n**Failure class:** ${failure ? "INFRASTRUCTURE" : "NONE"}\n`,
             "utf-8",
           );
+          writeQAReview(artifactDir, "deterministic", failure
+            ? { verdict: "FAIL", failureClass: "INFRASTRUCTURE" }
+            : {});
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -352,9 +944,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(existsSync(join(artifactDir, "qa-report-r1-a2.md"))).toBe(true);
   });
 
-  it("preserves every implementation report and passes all prior reports to retries", async () => {
+  it("routes only the current unresolved findings to QA and generator retries", async () => {
     const repo = makeRepo();
     const generatorPrompts: string[] = [];
+    const evaluatorPrompts: string[] = [];
     let artifactDir = "";
     const provider: AgentProvider = {
       name: "stub",
@@ -363,11 +956,88 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           generatorPrompts.push(options.prompt);
           writeFileSync(join(repo, "change.txt"), `${generatorPrompts.length}\n`, "utf-8");
         } else if (options.role === "evaluator-qa") {
+          evaluatorPrompts.push(options.prompt);
+          const round = evaluatorPrompts.length;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
-            `# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n\n## Findings\nFinding ${generatorPrompts.length}\n`,
+            `# QA Report\n\n**Verdict:** ${round === 3 ? "PASS" : "FAIL"}\n`,
             "utf-8",
           );
+          const finding = (
+            id: string,
+            severity: "BLOCKING" | "ADVISORY",
+            summary: string,
+            clearCondition: string,
+            state: "OPEN" | "RESOLVED" = "OPEN",
+          ) => ({
+            id,
+            severity,
+            behaviorIds: [],
+            summary,
+            evidence: `${id} evidence`,
+            expected: `${id} expected`,
+            observed: `${id} observed`,
+            clearCondition,
+            state,
+          });
+          const findings =
+            round === 1
+              ? [
+                  finding(
+                    "QA-BLOCKING",
+                    "BLOCKING",
+                    "Blocking summary",
+                    "Blocking condition",
+                  ),
+                  finding(
+                    "QA-ADVISORY",
+                    "ADVISORY",
+                    "Advisory summary",
+                    "Advisory condition",
+                  ),
+                ]
+              : round === 2
+                ? [
+                    finding(
+                      "QA-BLOCKING",
+                      "BLOCKING",
+                      "Blocking summary",
+                      "Blocking condition",
+                      "RESOLVED",
+                    ),
+                    finding(
+                      "QA-ADVISORY",
+                      "ADVISORY",
+                      "Advisory summary",
+                      "Advisory condition",
+                    ),
+                    finding(
+                      "QA-FRESH",
+                      "BLOCKING",
+                      "Fresh summary",
+                      "Fresh condition",
+                    ),
+                  ]
+                : [
+                    finding(
+                      "QA-ADVISORY",
+                      "ADVISORY",
+                      "Advisory summary",
+                      "Advisory condition",
+                      "RESOLVED",
+                    ),
+                    finding(
+                      "QA-FRESH",
+                      "BLOCKING",
+                      "Fresh summary",
+                      "Fresh condition",
+                      "RESOLVED",
+                    ),
+                  ];
+          writeQAReview(artifactDir, "deterministic", {
+            verdict: round === 3 ? "PASS" : "FAIL",
+            findings,
+          });
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -375,15 +1045,43 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const ctx = makeContext(repo, provider);
     artifactDir = ctx.absSliceDir;
 
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
-      phase: "STUCK",
-      error: "QA failed after 3 implementation rounds",
-    });
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generatorPrompts).toHaveLength(3);
+    expect(evaluatorPrompts).toHaveLength(3);
+
+    expect(generatorPrompts[1]).toContain("QA-BLOCKING");
+    expect(generatorPrompts[1]).toContain("Blocking summary");
+    expect(generatorPrompts[1]).toContain("Blocking condition");
+    expect(generatorPrompts[1]).toContain("QA-ADVISORY");
+    expect(generatorPrompts[1]).toContain("Advisory summary");
+    expect(generatorPrompts[1]).toContain("Advisory condition");
+    expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
-    expect(generatorPrompts[2]).toContain("qa-report-r1-a1.md");
+
+    expect(evaluatorPrompts[1]).toContain("QA-BLOCKING");
+    expect(evaluatorPrompts[1]).toContain("QA-ADVISORY");
+    expect(evaluatorPrompts[1]).toContain("qa-review-r1-a1.json");
+    expect(evaluatorPrompts[1]).toContain("qa-report-r1-a1.md");
+
+    expect(generatorPrompts[2]).not.toContain("QA-BLOCKING");
+    expect(generatorPrompts[2]).toContain("QA-ADVISORY");
+    expect(generatorPrompts[2]).toContain("Advisory summary");
+    expect(generatorPrompts[2]).toContain("Advisory condition");
+    expect(generatorPrompts[2]).toContain("QA-FRESH");
+    expect(generatorPrompts[2]).toContain("Fresh summary");
+    expect(generatorPrompts[2]).toContain("Fresh condition");
+    expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
-    expect(readFileSync(join(artifactDir, "qa-report-r3-a1.md"), "utf-8")).toContain("Finding 3");
+    expect(generatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
+    expect(generatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
+
+    expect(evaluatorPrompts[2]).not.toContain("QA-BLOCKING");
+    expect(evaluatorPrompts[2]).toContain("QA-ADVISORY");
+    expect(evaluatorPrompts[2]).toContain("QA-FRESH");
+    expect(evaluatorPrompts[2]).toContain("qa-review-r2-a1.json");
+    expect(evaluatorPrompts[2]).toContain("qa-report-r2-a1.md");
+    expect(evaluatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
+    expect(evaluatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
   });
 
   it("cancels a base gate process tree without evaluator or repair", async () => {
@@ -512,6 +1210,7 @@ describe("provider-independent policy-less base gates", () => {
               "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
               "utf-8",
             );
+            writeQAReview(artifactDir, "deterministic");
           }
           return { exitCode: 0, stdout: "", stats: {} };
         },
@@ -641,19 +1340,61 @@ describe("base gate observability", () => {
 });
 
 describe("shared-preview QA", () => {
-  it("verifies and applies migrations centrally before remote UAT", async () => {
+  it("keeps deterministic and UAT findings isolated across a UAT retry", async () => {
     const repo = makeRepo();
     const marker = join(repo, "migration-order.txt").replace(/\\/g, "/");
+    const generatorPrompts: string[] = [];
+    const deterministicPrompts: string[] = [];
+    const uatPrompts: string[] = [];
     let artifactDir = "";
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
-        expect(readFileSync(marker, "utf-8")).toBe("verify\napply\n");
-        expect(options.prompt).toContain("Shared-preview UAT only");
+        if (options.role === "generator") {
+          generatorPrompts.push(options.prompt);
+          writeFileSync(
+            join(repo, "change.txt"),
+            `${generatorPrompts.length}\n`,
+            "utf-8",
+          );
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+
+        const isUAT = options.prompt.includes("Shared-preview UAT only");
+        const prompts = isUAT ? uatPrompts : deterministicPrompts;
+        prompts.push(options.prompt);
+        const state = prompts.length === 1 ? "OPEN" : "RESOLVED";
+        const id = isUAT ? "UAT-OPEN" : "QA-ADVISORY";
+        const severity = isUAT ? "BLOCKING" : "ADVISORY";
+        if (isUAT) {
+          expect(readFileSync(marker, "utf-8")).toBe(
+            "verify\napply\n".repeat(uatPrompts.length),
+          );
+        }
         writeFileSync(
-          join(artifactDir, "uat-report.md"),
-          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          join(artifactDir, isUAT ? "uat-report.md" : "qa-report.md"),
+          `# QA Report\n\n**Verdict:** ${isUAT && state === "OPEN" ? "FAIL" : "PASS"}\n`,
           "utf-8",
+        );
+        writeQAReview(
+          artifactDir,
+          isUAT ? "shared-preview" : "deterministic",
+          {
+            verdict: isUAT && state === "OPEN" ? "FAIL" : "PASS",
+            findings: [
+              {
+                id,
+                severity,
+                behaviorIds: [],
+                summary: `${id} summary`,
+                evidence: `${id} evidence`,
+                expected: `${id} expected`,
+                observed: `${id} observed`,
+                clearCondition: `${id} condition`,
+                state,
+              },
+            ],
+          },
         );
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -668,11 +1409,47 @@ describe("shared-preview QA", () => {
     });
     artifactDir = ctx.absSliceDir;
 
-    await expect(runQAStage(ctx, 1, "shared-preview", [])).resolves.toEqual({
-      outcome: "PASS",
-      report: "specs/slices/01-prd-070-regression/uat-report-r1-a1.md",
-    });
+    await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
+    expect(generatorPrompts).toHaveLength(2);
+    expect(deterministicPrompts).toHaveLength(2);
+    expect(uatPrompts).toHaveLength(2);
+
+    expect(generatorPrompts[1]).toContain("UAT-OPEN");
+    expect(generatorPrompts[1]).toContain("UAT-OPEN summary");
+    expect(generatorPrompts[1]).toContain("UAT-OPEN condition");
+    expect(generatorPrompts[1]).toContain("uat-review-r1-a1.json");
+    expect(generatorPrompts[1]).toContain("uat-report-r1-a1.md");
+    expect(generatorPrompts[1]).not.toContain("QA-ADVISORY");
+
+    expect(deterministicPrompts[1]).toContain("QA-ADVISORY");
+    expect(deterministicPrompts[1]).not.toContain("UAT-OPEN");
+    expect(uatPrompts[1]).toContain("UAT-OPEN");
+    expect(uatPrompts[1]).not.toContain("QA-ADVISORY");
+
+    expect(existsSync(join(artifactDir, "qa-report-r1-a1.md"))).toBe(true);
+    expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "uat-report-r1-a1.md"))).toBe(true);
+    expect(existsSync(join(artifactDir, "uat-report-r2-a1.md"))).toBe(true);
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    for (const stage of ["qa", "uat"]) {
+      for (const round of [1, 2]) {
+        expect(
+          existsSync(join(reviewDir, `${stage}-review-r${round}-a1.json`)),
+        ).toBe(true);
+        expect(
+          existsSync(
+            join(reviewDir, `${stage}-review-r${round}-a1-record.json`),
+          ),
+        ).toBe(true);
+      }
+    }
   });
 });
 

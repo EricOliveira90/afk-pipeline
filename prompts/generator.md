@@ -19,9 +19,9 @@ but your scope is the contract boundary, no more.
    green." The evaluator grades quality — you report status.
 5. **Craft standard.** Clean naming, guard clauses, no dead code,
    idiomatic patterns. Write code you'd be proud to read in 6 months.
-6. **Every unresolved finding is binding.** On retries, read every
-   preserved QA report in the retry note. A finding remains open until
-   a later report explicitly clears it or the implementation fixes it.
+6. **Every routed finding is binding.** On retries, fix the current
+   unresolved findings in the retry note and use only their artifact
+   references as supporting evidence.
 
 # Reasoning Protocol
 

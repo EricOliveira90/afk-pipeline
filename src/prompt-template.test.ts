@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
+import { parseQAReview } from "./qa-review.js";
+import { readFileSync } from "node:fs";
 
 describe("renderPrompt", () => {
   it("substitutes placeholders for the explorer template", () => {
@@ -25,6 +27,8 @@ describe("renderPrompt", () => {
       RELEVANT_FILES: "",
       SLICE_BODY: "Local issue body",
       MIGRATION_RESERVATION: "No claim yet",
+      BASE_GATE_CATALOG: "- tests: pnpm run test:run",
+      CONTRACT_RESPONSE_NOTE: "Write contract-response.json",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).not.toContain("{{");
@@ -50,7 +54,7 @@ describe("renderPrompt", () => {
         SIBLING_HANDOFFS: "(none)",
         QA_SCOPE: "deterministic",
         REPORT_PATH: "d/qa-report.md",
-        PREVIOUS_QA_REPORTS: "(none)",
+        UNRESOLVED_FINDINGS: "(none)",
         COMMAND_TIMEOUT_SECONDS: 600,
         HEARTBEAT_SECONDS: 30,
         EXTRA: "y",
@@ -74,12 +78,58 @@ describe("renderPrompt", () => {
         SIBLING_HANDOFFS: "(none)",
         QA_SCOPE: "deterministic",
         REPORT_PATH: "d/qa-report.md",
-        PREVIOUS_QA_REPORTS: "(none)",
+        UNRESOLVED_FINDINGS: "(none)",
         COMMAND_TIMEOUT_SECONDS: 600,
         HEARTBEAT_SECONDS: 30,
         TEST_COMMAND: "pnpm test:fast",
       }),
     ).toThrow(/TEST_COMMAND/);
+  });
+
+  it("requires canonical QA artifacts and structured retry inputs", () => {
+    const evaluatorPrompt = renderPrompt("evaluator-qa", {
+      SLICE_DIR: "x",
+      RELEVANT_FILES: "",
+      SANITY_COMMANDS: "",
+      SIBLING_HANDOFFS: "(none)",
+      QA_SCOPE: "deterministic",
+      REPORT_PATH: "x/qa-report.md",
+      UNRESOLVED_FINDINGS: "(none)",
+      COMMAND_TIMEOUT_SECONDS: 600,
+      HEARTBEAT_SECONDS: 30,
+    });
+    expect(evaluatorPrompt).toContain("qa-review.json");
+    expect(evaluatorPrompt).toContain("uat-review.json");
+    expect(evaluatorPrompt).toContain('"version": 1');
+    expect(evaluatorPrompt).toContain('"failureClass"');
+    expect(evaluatorPrompt).toContain('"infrastructureEvidence"');
+    expect(evaluatorPrompt).toContain('"clearCondition"');
+    expect(evaluatorPrompt).toContain('"state"');
+    expect(evaluatorPrompt).toMatch(/Markdown.+does not control/s);
+    const canonicalExample = /```json\r?\n([\s\S]*?)\r?\n```/.exec(
+      evaluatorPrompt,
+    )?.[1];
+    expect(canonicalExample).toBeDefined();
+    expect(() =>
+      parseQAReview(canonicalExample!, "evaluator QA prompt example"),
+    ).not.toThrow();
+
+    const evaluatorPersona = readFileSync(
+      new URL("../agents/evaluator.md", import.meta.url),
+      "utf-8",
+    );
+    expect(evaluatorPersona).toContain("qa-review.json");
+    expect(evaluatorPersona).toContain("uat-review.json");
+    expect(evaluatorPersona).toContain('"failureClass"');
+
+    const generatorPersona = readFileSync(
+      new URL("../agents/generator.md", import.meta.url),
+      "utf-8",
+    );
+    expect(generatorPersona).toContain("routed unresolved findings");
+    expect(generatorPersona).not.toContain(
+      "`qa-report.md` in the current slice folder IF this is a retry round",
+    );
   });
 
   it("loads all eight pipeline templates", () => {
@@ -94,13 +144,26 @@ describe("renderPrompt", () => {
         RELEVANT_FILES: "",
         SLICE_BODY: "Fetch with gh",
         MIGRATION_RESERVATION: "No claim yet",
+        BASE_GATE_CATALOG: "- tests: pnpm run test:run",
+        CONTRACT_RESPONSE_NOTE: "Do not write contract-response.json",
       }),
-    ).toBeTruthy();
+    ).toContain("- tests: pnpm run test:run");
     expect(
-      renderPrompt("evaluator-contract", { SPECS_DIR: "s", SLICE_DIR: "d", ROUND: 1, RELEVANT_FILES: "", PREVIOUS_FEEDBACK_NOTE: "No previous round." }),
-    ).toBeTruthy();
+      renderPrompt("evaluator-contract", {
+        SPECS_DIR: "s",
+        SLICE_DIR: "d",
+        ROUND: 1,
+        RELEVANT_FILES: "",
+        PREVIOUS_REVIEW_NOTE: "No previous round.",
+        ACCEPTANCE_MANIFEST: '{"version":2}',
+        BASE_GATE_CATALOG: "- tests: pnpm run test",
+        CONTRACT_REVIEW_FILE: "contract-review.json",
+        PLANNER_RESPONSE: "(first review round; no planner response)",
+        REVISION_CONTEXT: "(first review round; no prior revision)",
+      }),
+    ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", PREVIOUS_QA_REPORTS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
     expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();

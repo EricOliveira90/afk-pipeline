@@ -47,6 +47,7 @@ import {
   type ProviderDeath,
   type SliceFixture,
 } from "./wave.fixtures.js";
+import { writeContractReview, writeQAReview } from "./test-support.js";
 
 afterEach(() => {
   cleanupWaveTempDirs();
@@ -177,6 +178,70 @@ describe("runWave", () => {
     expect(outcomes.get("402")?.phase).toBe("PASS");
   }, 240_000);
 
+  it("partitions normalized concrete and explicit no-change scope from acceptance manifests", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      { number: "01", ghIssue: "411", title: "First", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "02", ghIssue: "412", title: "Second", type: "AFK", blockedBy: [], userStories: "" },
+      { number: "03", ghIssue: "413", title: "No change", type: "AFK", blockedBy: [], userStories: "" },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      ["411", {
+        files: ["src/prose-a.ts"],
+        manifestFiles: ["./SRC/shared.ts"],
+        qaPasses: true,
+        outputFile: "src/first.txt",
+        outputContent: "first",
+      }],
+      ["412", {
+        files: ["src/prose-b.ts"],
+        manifestFiles: ["src/shared.ts"],
+        qaPasses: true,
+        outputFile: "src/second.txt",
+        outputContent: "second",
+      }],
+      ["413", {
+        files: ["src/prose-a.ts"],
+        manifestFiles: null,
+        qaPasses: true,
+        outputFile: "src/no-change-observation.txt",
+        outputContent: "no change fixture",
+      }],
+    ]);
+    const { config, dag, logger, featBranch } = setupWave(
+      repo,
+      "wave-acceptance-scope",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["411", "412", "413"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect([...outcomes.values()].map((outcome) => outcome.phase)).toEqual([
+      "PASS",
+      "PASS",
+      "PASS",
+    ]);
+    const partitioned = readRunEvents(logger.runDir)?.events.find(
+      (event) => event.type === "lanes-partitioned",
+    );
+    expect(
+      partitioned?.type === "lanes-partitioned"
+        ? partitioned.lanes
+        : undefined,
+    ).toEqual([["411", "412"], ["413"]]);
+  }, 240_000);
+
   it("returns CANCELLED for all slices when signal fires during Phase A", async () => {
     const repo = makeRepo();
     const controller = new AbortController();
@@ -240,16 +305,15 @@ describe("runWave", () => {
     expect(outcomes.get("502")?.phase).toBe("CANCELLED");
   }, 240_000);
 
-  it("collapses wave to one lane when a slice has undeclared files", async () => {
+  it("refuses undeclared machine scope instead of treating prose as a lane fallback", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
       { number: "01", ghIssue: "601", title: "Known", type: "AFK", blockedBy: [], userStories: "" },
       { number: "02", ghIssue: "602", title: "Unknown", type: "AFK", blockedBy: [], userStories: "" },
     ];
 
-    // 602 has an empty files list in the fixture — but the provider
-    // won't write "Files expected to change" for it, so
-    // readContractFiles returns undefined → undeclared → collapse.
+    // Neither planner writes acceptance-manifest.json. Prose shape is
+    // irrelevant: both slices must fail before lane partitioning.
     const undeclaredProvider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -282,9 +346,10 @@ describe("runWave", () => {
         } else if (role === "evaluator-contract" && sliceArtifactDir) {
           writeFileSync(
             join(sliceArtifactDir, "feedback-r1.md"),
-            "## Evaluator feedback — round 1\n\n**Verdict:** ACCEPT\n",
+            "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
             "utf-8",
           );
+          writeContractReview(sliceArtifactDir, "ACCEPT");
         } else if (role === "generator" && sliceArtifactDir) {
           const outFile = ghIssue === "601" ? "src/a.txt" : "src/b.txt";
           const outPath = join(cwd, outFile);
@@ -296,6 +361,7 @@ describe("runWave", () => {
             "# QA Report\n\n**Verdict:** PASS\n",
             "utf-8",
           );
+          writeQAReview(sliceArtifactDir, "deterministic");
         }
 
         return { exitCode: 0, stdout: "", stats: {} };
@@ -333,9 +399,15 @@ describe("runWave", () => {
       mergeMutex: makeAsyncMutex(),
     });
 
-    // Both should pass (serial within one lane, no failure).
-    expect(outcomes.get("601")?.phase).toBe("PASS");
-    expect(outcomes.get("602")?.phase).toBe("PASS");
+    // Both should fail closed: no manifest means no machine scope, and
+    // prose never reaches lane partitioning.
+    expect(outcomes.get("601")?.phase).toBe("ESCALATE");
+    expect(outcomes.get("602")?.phase).toBe("ESCALATE");
+    expect(
+      readRunEvents(logger.runDir)?.events.some(
+        (event) => event.type === "lanes-partitioned",
+      ),
+    ).toBe(false);
   }, 240_000);
 
   // Regression for the PRD 024 crash: when one lane's post-merge git
@@ -556,7 +628,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
   function oneSlice(
     slug: string,
     ghIssue: string,
-    opts?: { deaths?: ProviderDeath[]; contractVerdict?: "ACCEPT" | "ESCALATE" },
+    opts?: { deaths?: ProviderDeath[]; contractVerdict?: "ACCEPT" | "REVISE" },
   ) {
     const repo = makeRepo();
     const slices: Slice[] = [
@@ -586,6 +658,10 @@ describe("runWave negotiate failure causes (issue #40)", () => {
     const setup = setupWave(repo, slug, slices, fixtures, {
       ...(opts?.deaths ? { deaths: opts.deaths } : {}),
     });
+    // A REVISE fixture never converges, so cap negotiation at one round:
+    // the first REVISE is also the last, and the wave sees the genuine
+    // verdict rather than three identical rounds of it.
+    if (opts?.contractVerdict === "REVISE") setup.config.maxContractRounds = 1;
     return { repo, slices, ...setup };
   }
 
@@ -675,14 +751,14 @@ describe("runWave negotiate failure causes (issue #40)", () => {
 
   it("labels a genuine evaluator verdict as a verdict, never as an infrastructure death", async () => {
     const setup = oneSlice("neg-verdict", "1301", {
-      contractVerdict: "ESCALATE",
+      contractVerdict: "REVISE",
     });
 
     const outcomes = await dispatch(setup, ["1301"]);
 
     expect(outcomes.get("1301")?.phase).toBe("ESCALATE");
     const reason = reasonOf(outcomes.get("1301"));
-    expect(reason).toContain("evaluator verdict ESCALATE");
+    expect(reason).toContain("evaluator verdict REVISE");
     expect(reason).toContain("not an infrastructure death");
     expect(reason).not.toContain("exit code");
     expect(reason).not.toContain("killed");
@@ -828,7 +904,7 @@ describe("runWave negotiate failure causes (issue #40)", () => {
 
   it("never retries a genuine verdict — it is terminal on the first occurrence", async () => {
     const setup = oneSlice("neg-verdict-terminal", "1501", {
-      contractVerdict: "ESCALATE",
+      contractVerdict: "REVISE",
     });
     setup.config.infrastructureRetries = 2;
 
