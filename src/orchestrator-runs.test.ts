@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -62,6 +62,12 @@ import {
 } from "./command-runtime.js";
 import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
 import { terminateProcessTree } from "./kill-tree.js";
+import {
+  installCancellationSignals,
+  type SignalHost,
+} from "./cancellation.js";
+import { readRunEvents } from "./run-events.js";
+import { readStopAck, writeStopRequest } from "./stop-sentinel.js";
 import {
   buildStubProvider,
   cleanupIntegrationTempDirs,
@@ -219,12 +225,24 @@ describe("runPipeline per-slice state persistence", () => {
  * already PASS — the state it asserts is the state this bug leaves
  * empty. The spawn is short: the run stops during the first slice's first
  * generator round, so no QA, merge or ship gate runs.
+ *
+ * The stop is delivered through the `afk stop` **sentinel** (ADR 0043)
+ * rather than by calling `abort()` directly, and the wiring under test is
+ * the CLI's own: a real `installCancellationSignals` handle whose
+ * `requestStop` the pipeline reaches through `requestCancellation`. That
+ * is the claim worth a spawn — the delivery that could not be trusted was
+ * the delivery, so proving the file reaches ADR 0040's records is proving
+ * the thing. The raw-signal path keeps its own coverage in
+ * `cancellation.test.ts` and in the ship-gate cancellation case. Every
+ * assertion below is the same assertion this block already made; only the
+ * button pressed to reach them changed.
  */
-describe("a cancellation requested mid-slice", () => {
+describe("a cancellation requested mid-slice by the stop sentinel", () => {
   const slug = "cancel-midslice";
   let repo: string;
   let statePath: string;
-  /** Run state as it stood the instant `abort()` returned. */
+  let runDir: string;
+  /** Run state as it stood the instant the run acknowledged the stop. */
   let atAbort: {
     slices: Record<string, { phase?: string; branch?: string; error?: string }>;
   };
@@ -232,6 +250,9 @@ describe("a cancellation requested mid-slice", () => {
     slices: Record<string, { phase?: string; error?: string }>;
   };
   let runLog: string;
+  let ack: ReturnType<typeof readStopAck>;
+  /** Read in `beforeAll`: `afterEach` deletes the fixture repo. */
+  let stopWarnEvents: unknown[];
   let result: Awaited<ReturnType<typeof runPipeline>>;
 
   beforeAll(async () => {
@@ -246,19 +267,44 @@ describe("a cancellation requested mid-slice", () => {
       ["8102", { files: ["src/b.txt"], qaPasses: true, outputFile: "src/b.txt", outputContent: "b" }],
     ]);
     statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const logsDir = join(repo, ".afk", "logs", `${slug}-stub`);
 
-    // Stop the run the way an operator does: while 8101's generator is
-    // the in-flight work, and before anything of its own has landed.
-    const controller = new AbortController();
+    // The CLI's composition, with a fake `process` so the test never
+    // registers real signal handlers: signals and the sentinel share one
+    // AbortController and one escalation counter.
+    const host: SignalHost = {
+      platform: "win32",
+      on: () => host,
+      off: () => host,
+      exit: () => undefined,
+    };
+    const cancellation = installCancellationSignals({ host, log: () => {} });
+
+    // Stop the run the way an operator does with `afk stop`: drop the
+    // sentinel in the run's log directory while 8101's generator is the
+    // in-flight work, before anything of its own has landed.
     const inner = buildStubProvider({ fixtures, slices, records: [] });
     let snapshot: string | null = null;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (options.role === "generator" && snapshot === null) {
-          controller.abort();
-          // Read on the line after abort(): whatever is on disk here is
-          // what a process killed by the stop signal would leave behind.
+          runDir = join(
+            logsDir,
+            readdirSync(logsDir).find((d) => /^run-\d{8}-\d{6}/.test(d))!,
+          );
+          writeStopRequest(runDir, {
+            requestedAt: new Date().toISOString(),
+            source: "afk stop",
+          });
+          // Wait for the run's own acknowledgement rather than for a
+          // duration: the ack is written after the abort path returns, so
+          // whatever is on disk here is what a process killed the instant
+          // the stop landed would leave behind.
+          const deadline = Date.now() + 30_000;
+          while (readStopAck(runDir) === null && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 20));
+          }
           snapshot = existsSync(statePath)
             ? readFileSync(statePath, "utf-8")
             : "{}";
@@ -274,14 +320,21 @@ describe("a cancellation requested mid-slice", () => {
       specsDir,
       dag: buildDAG(slices),
       provider,
-      signal: controller.signal,
+      signal: cancellation.signal,
+      requestCancellation: () => cancellation.requestStop("stop sentinel"),
+      // Poll faster than the 2s production default so the fixture does
+      // not spend two seconds waiting for a tick.
+      stopSentinelIntervalMs: 25,
     });
+    cancellation.dispose();
 
     atAbort = JSON.parse(snapshot ?? "{}");
     finalState = JSON.parse(readFileSync(statePath, "utf-8"));
-    const logsDir = join(repo, ".afk", "logs", `${slug}-stub`);
-    const runDir = readdirSync(logsDir).find((d) => /^run-\d{8}-\d{6}/.test(d))!;
-    runLog = readFileSync(join(logsDir, runDir, "run.log"), "utf-8");
+    ack = readStopAck(runDir);
+    runLog = readFileSync(join(runDir, "run.log"), "utf-8");
+    stopWarnEvents = readRunEvents(runDir)!.events.filter(
+      (event) => event.type === "warn" && event.reason === "stop-requested",
+    );
   }, 240_000);
 
   it("has the in-flight slice CANCELLED in run state before the wave unwinds", () => {
@@ -308,6 +361,33 @@ describe("a cancellation requested mid-slice", () => {
     expect(finalState.slices["8101"]?.phase).toBe("CANCELLED");
     expect(finalState.slices["8102"]?.phase).toBe("CANCELLED");
     expect(result.success).toBe(false);
+  });
+
+  it("says in run.log that the stop came from the sentinel, and who asked", () => {
+    // Two lines, in this order: the sentinel was seen, then the abort
+    // path it pressed recorded what it recorded. An operator reading
+    // run.log after the fact can tell a file-delivered stop from a
+    // Ctrl-Break without consulting their shell history.
+    expect(runLog).toContain("Stop requested via sentinel");
+    expect(runLog).toContain("requested by afk stop");
+    expect(runLog.indexOf("Stop requested via sentinel")).toBeLessThan(
+      runLog.indexOf("Cancellation requested"),
+    );
+  });
+
+  it("acknowledges with the run ID and the slices it marked — the ack `afk stop` reports", () => {
+    // The ack is the whole contract with the writer: it exists only after
+    // the CANCELLED records are on disk, and it names them. That is what
+    // `GenerateConsoleCtrlEvent` returning TRUE never told anyone.
+    expect(ack?.runId).toBe(basename(runDir));
+    expect(ack?.cancelledSlices.sort()).toEqual(["8101", "8102"]);
+    expect(Object.keys(atAbort.slices).sort()).toEqual(
+      ack!.cancelledSlices.sort(),
+    );
+  });
+
+  it("tees the sentinel stop as a typed warn event for `afk status`", () => {
+    expect(stopWarnEvents).toHaveLength(1);
   });
 });
 

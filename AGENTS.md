@@ -89,6 +89,15 @@ assertion up this list — not to raise the number. Raising one is fine
 when the cost is genuinely necessary, but record the measurement in the
 commit message.
 
+Record it in `suite-budgets.json` as well, as a block named
+`_measured<YYYY_MM_DD>[_<qualifier>]@<branch>` — the branch you measured
+on. The check compares a run only against a block carrying the branch you
+are on, refuses the rest, and warns when another worktree holds different
+budgets. It never fails for a labelling problem; a red gate there would
+only teach people to delete the labels. Run 3's babysitter raised a budget
+off a feature-branch measurement while reading main's numbers, with the
+labels already in the file and nothing reading them.
+
 Merging scenarios pays off when it removes whole *pipeline* runs — the
 fixed cost of a run is feature-branch setup, the review phase and the
 sanity gate. Packing more slices into one *wave* was measured on

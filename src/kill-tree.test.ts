@@ -3,6 +3,8 @@ import {
   collectTree,
   formatTerminationWarning,
   parsePidPpidOutput,
+  parseProcessPathsPosix,
+  parseProcessPathsWin32,
   terminatePidTree,
   terminateProcessTree,
 } from "./kill-tree.js";
@@ -413,5 +415,76 @@ describe("terminatePidTree", () => {
       survivors: [],
       verified: false,
     });
+  });
+});
+
+/**
+ * The read-only listing the launch preflight's holder scan consumes
+ * (ADR 0042). Parsed against real captured output shapes: the CIM
+ * projection is tab-separated with the command line last, and `ps -o
+ * pid=,args=` gives one whitespace-separated pid plus the whole argv.
+ */
+describe("parseProcessPathsWin32", () => {
+  const NODE_EXE = String.raw`C:\node\node.exe`;
+  const SCRIPT = String.raw`C:\repo\.afk\worktrees\afk-codex-demo-s01\x.mjs`;
+  const CODEX_EXE = String.raw`C:\bin\codex.exe`;
+  const CIM = [
+    // A protected process CIM reports without paths, a real holder, a
+    // junk line, and the run-3 shape whose argv names no path at all.
+    "4816\tpowershell.exe\t\t",
+    `18440\tnode.exe\t${NODE_EXE}\tnode  "${SCRIPT}" `,
+    "not a row",
+    `9\tcodex.exe\t${CODEX_EXE}\tcodex.exe __otel-server`,
+  ].join("\r\n");
+
+  it("reads pid, image name, executable path and command line", () => {
+    expect(parseProcessPathsWin32(CIM)).toEqual([
+      {
+        pid: 4816,
+        name: "powershell.exe",
+        executablePath: undefined,
+        commandLine: undefined,
+      },
+      {
+        pid: 18440,
+        name: "node.exe",
+        executablePath: NODE_EXE,
+        commandLine: `node  "${SCRIPT}"`,
+      },
+      {
+        pid: 9,
+        name: "codex.exe",
+        executablePath: CODEX_EXE,
+        commandLine: "codex.exe __otel-server",
+      },
+    ]);
+  });
+
+  it("keeps a tabbed command line in one field rather than shifting columns", () => {
+    const rows = parseProcessPathsWin32(`7\tnode.exe\t${NODE_EXE}\tnode\ta\tb`);
+    expect(rows[0]!.commandLine).toBe("node\ta\tb");
+  });
+});
+
+describe("parseProcessPathsPosix", () => {
+  it("derives the name from argv[0] and keeps the full argv", () => {
+    expect(
+      parseProcessPathsPosix(
+        "  123 /usr/bin/node /repo/.afk/worktrees/afk-codex-demo-s01/x.mjs\n456 vitest --run\n",
+      ),
+    ).toEqual([
+      {
+        pid: 123,
+        name: "node",
+        executablePath: "/usr/bin/node",
+        commandLine: "/usr/bin/node /repo/.afk/worktrees/afk-codex-demo-s01/x.mjs",
+      },
+      {
+        pid: 456,
+        name: "vitest",
+        executablePath: undefined,
+        commandLine: "vitest --run",
+      },
+    ]);
   });
 });

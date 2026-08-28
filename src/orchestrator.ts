@@ -1,4 +1,4 @@
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -37,6 +37,20 @@ import {
   type SliceIdentity,
 } from "./slice-lifecycle.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
+import {
+  DEFAULT_MIN_FREE_DISK_GB,
+  formatPreflightRefusal,
+  formatPreflightReport,
+  gbToBytes,
+  runLaunchPreflight,
+  type RunNamespace,
+} from "./preflight.js";
+import {
+  clearStopSentinel,
+  createStopSentinelWatcher,
+  runIdFor,
+  writeStopAck,
+} from "./stop-sentinel.js";
 
 import {
   ProcessTreeTerminationError,
@@ -334,6 +348,19 @@ export interface PipelineConfig {
   /** Enables remote UAT after deterministic QA. */
   sharedPreview?: SharedPreviewConfig;
 
+  /**
+   * Free-space floor the launch preflight refuses below, in GB. Defaults
+   * to `DEFAULT_MIN_FREE_DISK_GB`; 0 disables the floor. See ADR 0042.
+   */
+  minFreeDiskGb?: number;
+  /**
+   * Run the launch preflight but never let it refuse the launch. The
+   * bypass is recorded in `run.log` — a preflight nobody can override
+   * would be disabled permanently, and one nobody records would hide the
+   * state the run started in.
+   */
+  preflightReportOnly?: boolean;
+
   /** Slices forced to restart from base regardless of resume eligibility (#37). */
   forceRestart?: string[];
   /** STUCK slices granted one more attempt on their preserved tree (#49). */
@@ -344,6 +371,18 @@ export interface PipelineConfig {
    * CANCELLED. See ADR 0003.
    */
   signal?: AbortSignal;
+  /**
+   * Fires the same abort path a stop signal fires. Supplied by the CLI,
+   * which owns the `AbortController` behind `signal` — the pipeline only
+   * ever sees the read-only half, so it needs a way to ask.
+   *
+   * Its presence is what enables the `afk stop` sentinel poll: a caller
+   * that cannot be cancelled has nothing to poll for. See
+   * `src/stop-sentinel.ts` and ADR 0043.
+   */
+  requestCancellation?: () => void;
+  /** Sentinel poll interval override. Exists for tests. */
+  stopSentinelIntervalMs?: number;
 }
 
 export interface PipelineResult {
@@ -474,6 +513,83 @@ export function sliceScratchMergeDir(
     ".afk",
     `merge-${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
   );
+}
+
+/**
+ * Throwaway checkout the post-merge guardian reviews read the feature
+ * branch from, when the feature branch has no worktree of its own. Named
+ * here beside the other two worktree-naming functions so the launch
+ * preflight can recognise it as part of the run's namespace.
+ */
+export function reviewWorktreeDir(repoRoot: string, featBranch: string): string {
+  return join(
+    repoRoot,
+    ".afk",
+    "worktrees",
+    `${featBranch.replace(/\//g, "-")}-review`,
+  );
+}
+
+/** Directory names under `.afk/worktrees` that are this run's slice worktrees. */
+export function sliceWorktreeNamePattern(
+  prdSlug: string,
+  provider: AgentProvider,
+): RegExp {
+  return new RegExp(
+    `^${escapeRegExp(`${sliceBranchPrefix(provider)}-${prdSlug}-s`)}\\d+$`,
+  );
+}
+
+/** Directory names under `.afk` that are this run's scratch merge worktrees. */
+export function scratchMergeNamePattern(
+  prdSlug: string,
+  provider: AgentProvider,
+): RegExp {
+  return new RegExp(
+    `^${escapeRegExp(`merge-${sliceBranchPrefix(provider)}-${prdSlug}-s`)}\\d+$`,
+  );
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The filesystem region this run owns, for the launch preflight (ADR
+ * 0042). Assembled here because this module owns every name in it.
+ *
+ * `intended` is only the slice worktrees this run will actually create or
+ * resume; `retained` adds the ones other live slices of the same PRD
+ * still own (a narrowed re-run must not call those leftovers). The
+ * scratch merge worktrees and the review worktree appear in neither: they
+ * are created and removed *within* a run, so one surviving to the next
+ * launch is residue by definition and never something to adopt.
+ */
+export function buildRunNamespace(args: {
+  repoRoot: string;
+  prdSlug: string;
+  provider: AgentProvider;
+  featBranch: string;
+  intended: ReadonlyArray<{ path: string; branch: string }>;
+  retained?: ReadonlyArray<{ path: string; branch: string }>;
+}): RunNamespace {
+  const slicePattern = sliceWorktreeNamePattern(args.prdSlug, args.provider);
+  const scratchPattern = scratchMergeNamePattern(args.prdSlug, args.provider);
+  const reviewName = basename(reviewWorktreeDir(args.repoRoot, args.featBranch));
+  return {
+    roots: [
+      {
+        dir: join(args.repoRoot, ".afk", "worktrees"),
+        owns: (name) => slicePattern.test(name) || name === reviewName,
+      },
+      {
+        dir: join(args.repoRoot, ".afk"),
+        owns: (name) => scratchPattern.test(name),
+      },
+    ],
+    intended: args.intended,
+    retained: args.retained ?? args.intended,
+  };
 }
 
 function featureBranch(prdSlug: string, provider: AgentProvider): string {
@@ -3209,11 +3325,18 @@ export async function runPipeline(
   // The listener's lifetime is the run's — one `AbortController` per CLI
   // invocation — and `once` drops it as soon as it fires.
   let cancellableSlices: () => SliceIdentity[] = () => [];
+  /**
+   * What the abort listener recorded, kept for the sentinel's ack: that
+   * is the whole point of the ack, so it has to report the real ids
+   * rather than a promise that something was written.
+   */
+  let markedAtCancellation: string[] = [];
   const onCancellationRequested = () => {
     const marked = logger.markCancelledInFlight(
       cancellableSlices(),
       CANCELLED_BY_USER,
     );
+    markedAtCancellation = marked;
     const detail =
       marked.length > 0
         ? `marked CANCELLED in run state: ${marked.map((id) => `#${id}`).join(", ")}`
@@ -3228,6 +3351,79 @@ export async function runPipeline(
   else {
     signal?.addEventListener("abort", onCancellationRequested, { once: true });
   }
+
+  // --- `afk stop`: the same abort path, delivered as a file (ADR 0043).
+  //
+  // A signal is the wrong instrument for a detached Windows run:
+  // `CTRL_C_EVENT` reported success twice into a live run without
+  // delivering anything, and the `CTRL_BREAK_EVENT` that did land exited
+  // the process before ADR 0040's record was written. So the run also
+  // watches a file in its own log directory, and a sentinel that appears
+  // there goes through `requestCancellation` — the CLI's own stop button,
+  // the same `AbortController`, the same listener above.
+  //
+  // Cleared first: a run must never inherit a stop. The path is unique
+  // per run (see src/stop-sentinel.ts), so this should find nothing; if
+  // it finds something, that is worth a line rather than a silent delete.
+  const clearedSentinels = clearStopSentinel(logger.runDir);
+  if (clearedSentinels.length > 0) {
+    logger.phase(
+      `[afk] Cleared stale stop sentinel(s) in this run's log dir before launch: ${clearedSentinels.join(", ")}`,
+      "error",
+    );
+  }
+  const requestCancellation = config.requestCancellation;
+  const stopWatcher = requestCancellation
+    ? createStopSentinelWatcher({
+        runDir: logger.runDir,
+        intervalMs: config.stopSentinelIntervalMs,
+        onOtherRun: (targetRunId) => {
+          logger.phase(
+            `[afk] Ignoring a stop sentinel in this run's log dir: it names run ${targetRunId}, not ${runIdFor(logger.runDir)}`,
+            "error",
+          );
+        },
+        onStop: (decision) => {
+          // Already cancelling — a second request must not escalate into
+          // the CLI's hard exit; the ack below still tells `afk stop` the
+          // truth, which is that this run is winding down.
+          const alreadyCancelling = signal?.aborted === true;
+          const detail =
+            decision.reason === "unreadable"
+              ? `sentinel unreadable (${decision.detail}) — stopping anyway`
+              : decision.request.source
+                ? `requested by ${decision.request.source} at ${decision.request.requestedAt}`
+                : `requested at ${decision.request.requestedAt}`;
+          const message =
+            `Stop requested via sentinel (${detail})` +
+            (alreadyCancelling ? " — this run was already cancelling" : "");
+          logger.phase(`[afk] ${message}`, "error", {
+            type: "warn",
+            reason: "stop-requested",
+            message,
+          });
+          // The listener registered above runs synchronously inside
+          // abort(), so by the time this returns the CANCELLED records
+          // are on disk — which is what makes the ack worth writing.
+          if (!alreadyCancelling) requestCancellation();
+          const wrote = writeStopAck(logger.runDir, {
+            runId: runIdFor(logger.runDir),
+            ...(decision.reason === "requested"
+              ? { requestedAt: decision.request.requestedAt }
+              : {}),
+            acknowledgedAt: new Date().toISOString(),
+            cancelledSlices: markedAtCancellation,
+          });
+          if (!wrote) {
+            logger.phase(
+              `[afk] Warning: could not write the stop acknowledgement to ${logger.runDir} — ` +
+                `the cancellation itself is unaffected; 'afk stop' will report it as unacknowledged`,
+              "error",
+            );
+          }
+        },
+      })
+    : null;
 
   const invoke = (opts: Parameters<AgentProvider["invoke"]>[0]) =>
     withTransientRetry(
@@ -3337,6 +3533,76 @@ export async function runPipeline(
   saveRunState(repoRoot, runState);
   const dag = buildDAG(scope.selected);
   const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
+
+  // --- Launch preflight (ADR 0042). Runs here: late enough that the run
+  // scope names the exact worktree paths this run will use, early enough
+  // that nothing has been created or mutated yet. Detection, report and
+  // fail-fast only — it never kills a process.
+  //
+  // `retained` is every incomplete AFK slice in the *manifest*, not just
+  // this invocation's selection: a narrowed re-run leaves the worktrees of
+  // MERGE-PENDING and STUCK slices registered on purpose, and those are
+  // live work a later run recovers from, not previous-run debris. Both the
+  // recorded branch and the derived one count as legitimate, so a slice
+  // whose title changed since its branch was cut is not refused over it.
+  const worktreePathFor = (slice: Slice) => ({
+    path: sliceWorktreeDir(repoRoot, prdSlug, slice, provider),
+    branch: sliceBranch(prdSlug, slice, provider),
+  });
+  const isIncomplete = (slice: Slice) =>
+    slice.type === "AFK" && !isSliceComplete(runState, slice.ghIssue);
+  const preflight = await runLaunchPreflight({
+    repoRoot,
+    namespace: buildRunNamespace({
+      repoRoot,
+      prdSlug,
+      provider,
+      featBranch,
+      intended: scope.selected.filter(isIncomplete).map(worktreePathFor),
+      retained: [...manifestDag.slices.values()]
+        .filter(isIncomplete)
+        .flatMap((slice) => {
+          const derived = worktreePathFor(slice);
+          const recorded = runState.slices[slice.ghIssue]?.branch;
+          return recorded && recorded !== derived.branch
+            ? [derived, { path: derived.path, branch: recorded }]
+            : [derived];
+        }),
+    }),
+    minFreeBytes: gbToBytes(config.minFreeDiskGb ?? DEFAULT_MIN_FREE_DISK_GB),
+    reportOnly: config.preflightReportOnly,
+  });
+  const preflightBlock = formatPreflightReport(preflight);
+  if (preflightBlock) {
+    logger.phase(preflightBlock, "error", {
+      type: "warn",
+      reason: "preflight",
+      message: preflightBlock,
+    });
+  }
+  if (preflight.refuse) {
+    const refusal = formatPreflightRefusal(preflight);
+    logger.phase(`[afk] ${refusal}`);
+    throw new Error(refusal);
+  }
+  if (
+    config.preflightReportOnly &&
+    preflight.findings.some((finding) => finding.severity === "refuse")
+  ) {
+    // The bypass is part of the run's record: the next reader of this
+    // log has to know the launch started over a hard condition.
+    logger.phase(
+      `[afk] --preflight-report-only: launching despite ` +
+        `${preflight.findings.filter((f) => f.severity === "refuse").length} ` +
+        `preflight condition(s) that would otherwise refuse this run`,
+      "error",
+      {
+        type: "warn",
+        reason: "preflight",
+        message: "launch bypassed the preflight refusal (--preflight-report-only)",
+      },
+    );
+  }
 
   // Detect the repo's default branch (main / master / etc.) once so
   // every base reference below — feat-branch init, review-worktree
@@ -3870,12 +4136,7 @@ export async function runPipeline(
       if (existingFeatWorktree) {
         reviewDir = existingFeatWorktree;
       } else {
-        reviewDir = join(
-          repoRoot,
-          ".afk",
-          "worktrees",
-          `${featBranch.replace(/\//g, "-")}-review`,
-        );
+        reviewDir = reviewWorktreeDir(repoRoot, featBranch);
         git.createWorktree(repoRoot, featBranch, reviewDir, defaultBranch);
         git.assertWorktreeRegistered(repoRoot, featBranch, reviewDir);
         cleanupReviewDir = true;
@@ -4008,5 +4269,12 @@ export async function runPipeline(
       consoleSummary,
     };
     throw new PipelineError(err, partial);
+  } finally {
+    // The timer is unref'd, so this is tidiness rather than a
+    // requirement — but a watcher that outlives its run would keep
+    // stat-ing a directory nobody writes to, and in-process callers
+    // (the test suite runs many pipelines per worker) would accumulate
+    // one per run.
+    stopWatcher?.stop();
   }
 }

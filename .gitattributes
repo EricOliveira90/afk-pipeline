@@ -1,0 +1,6 @@
+# .mjs scripts must check out with LF: vitest's module transform fails with
+# "Invalid or unexpected token" on a CRLF .mjs (bare node parses it fine).
+# Found at the s8 wave merge — src/check-suite-budgets.test.ts imports
+# scripts/check-suite-budgets.mjs, which passed in the LF-written session
+# worktree and failed on an autocrlf checkout of the same blob.
+*.mjs text eol=lf

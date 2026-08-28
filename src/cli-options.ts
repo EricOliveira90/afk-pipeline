@@ -72,6 +72,19 @@ export interface PipelineRuntimeOptions {
    * so a stuck.md stays terminal unless the flag is supplied again.
    */
   resumeStuck?: string[];
+  /**
+   * Free-space floor the launch preflight refuses below, in GB. 0
+   * disables the floor. Absent leaves the default from
+   * `DEFAULT_MIN_FREE_DISK_GB`. See ADR 0042.
+   */
+  minFreeDiskGb?: number;
+  /**
+   * Run the launch preflight's checks and print the report, but launch
+   * even when a hard condition is present. The escape hatch for a false
+   * "leftover" reading — recorded in `run.log` so the record shows the
+   * checks were bypassed.
+   */
+  preflightReportOnly?: boolean;
   sharedPreview?: {
     verifyMigrationCommand: string;
     applyMigrationCommand: string;
@@ -119,6 +132,24 @@ function parseIntegerOption(
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || (allowZero ? parsed < 0 : parsed < 1)) {
     throw new Error(`${flag} must be ${allowZero ? "a non-negative" : "a positive"} integer`);
+  }
+  return parsed;
+}
+
+/**
+ * Read a free-space floor in GB. Decimals are allowed — a floor is a
+ * judgement about headroom, and whole gigabytes are too coarse to express
+ * "half a gig is enough on this box". 0 disables the check, matching
+ * `--transient-retry-window-ms`.
+ */
+export function parseMinFreeDiskGb(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+(\.\d+)?$/.test(value)) {
+    throw new Error("--min-free-disk-gb must be a non-negative number of GB (0 disables the check)");
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error("--min-free-disk-gb must be a non-negative number of GB (0 disables the check)");
   }
   return parsed;
 }
@@ -183,6 +214,10 @@ export function parsePipelineRuntimeOptions(
     false,
   );
   const testCommand = parseCommandOption(args, "--test-command");
+  const minFreeDiskGb = parseMinFreeDiskGb(
+    optionValue(args, "--min-free-disk-gb"),
+  );
+  const preflightReportOnly = args.includes("--preflight-report-only");
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
   const forceRestart = parseSliceIdList(args, "--force-restart");
@@ -214,6 +249,8 @@ export function parsePipelineRuntimeOptions(
     transientRetryWindowMs,
     maxAgentDurationMs,
     testCommand,
+    minFreeDiskGb,
+    preflightReportOnly,
     serialLanes,
     openPrOnOverride,
     forceRestart,

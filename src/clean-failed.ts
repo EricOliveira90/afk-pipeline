@@ -3,7 +3,12 @@ import { basename, join, resolve } from "node:path";
 import type { AgentProvider } from "./agent-provider.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
-import { pipelineRunSlug, sliceBranchPrefix } from "./orchestrator.js";
+import {
+  pipelineRunSlug,
+  scratchMergeNamePattern,
+  sliceBranchPrefix,
+  sliceWorktreeNamePattern,
+} from "./orchestrator.js";
 import { loadRunState } from "./run-state.js";
 import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
 
@@ -224,9 +229,7 @@ export async function runCleanFailed(
   // failed on a file lock). Registered worktrees not in a failure phase
   // are left alone. ---
   const worktreesRoot = join(repoRoot, ".afk", "worktrees");
-  const namePattern = new RegExp(
-    `^${escapeRegExp(`${prefix}-${prdSlug}-s`)}\\d+$`,
-  );
+  const namePattern = sliceWorktreeNamePattern(prdSlug, provider);
   if (existsSync(worktreesRoot)) {
     for (const entry of readdirSync(worktreesRoot)) {
       if (!namePattern.test(entry)) continue;
@@ -246,9 +249,7 @@ export async function runCleanFailed(
 
   // --- Pass 3: leftover scratch merge dirs (.afk/merge-<prefix>-<slug>-sNN). ---
   const afkRoot = join(repoRoot, ".afk");
-  const scratchPattern = new RegExp(
-    `^${escapeRegExp(`merge-${prefix}-${prdSlug}-s`)}\\d+$`,
-  );
+  const scratchPattern = scratchMergeNamePattern(prdSlug, provider);
   if (existsSync(afkRoot)) {
     for (const entry of readdirSync(afkRoot)) {
       if (!scratchPattern.test(entry)) continue;
@@ -259,10 +260,6 @@ export async function runCleanFailed(
   if (!dryRun) git.pruneWorktrees(repoRoot);
 
   return report;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Shared CLI entry for the `clean-failed` subcommand of all three bins. */

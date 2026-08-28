@@ -5,6 +5,10 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2022", "DOM"],
     "types": ["node"],
+    // So a test can import the checks that live in `scripts/*.mjs` (they run
+    // on bare node, outside the build) and get their inferred types. Only
+    // this config: `tsconfig.build.json` compiles `src` alone.
+    "allowJs": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

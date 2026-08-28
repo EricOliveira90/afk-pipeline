@@ -90,6 +90,37 @@ describe("parsePipelineRuntimeOptions", () => {
     ).toThrow("--transient-retry-window-ms");
   });
 
+  it("parses the preflight disk floor, allowing decimals and 0 to disable (ADR 0042)", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--min-free-disk-gb", "12"]).minFreeDiskGb,
+    ).toBe(12);
+    expect(
+      parsePipelineRuntimeOptions(["--min-free-disk-gb", "0.5"]).minFreeDiskGb,
+    ).toBe(0.5);
+    expect(
+      parsePipelineRuntimeOptions(["--min-free-disk-gb", "0"]).minFreeDiskGb,
+    ).toBe(0);
+    // Absent leaves the default to DEFAULT_MIN_FREE_DISK_GB at the call site.
+    expect(parsePipelineRuntimeOptions([]).minFreeDiskGb).toBeUndefined();
+  });
+
+  it.each(["-1", "abc", "5gb", ""])(
+    "rejects %s as a disk floor",
+    (value) => {
+      expect(() =>
+        parsePipelineRuntimeOptions(["--min-free-disk-gb", value]),
+      ).toThrow(/--min-free-disk-gb/);
+    },
+  );
+
+  it("keeps the preflight refusal in force unless it is explicitly waived", () => {
+    expect(parsePipelineRuntimeOptions([]).preflightReportOnly).toBe(false);
+    expect(
+      parsePipelineRuntimeOptions(["--preflight-report-only"])
+        .preflightReportOnly,
+    ).toBe(true);
+  });
+
   it("enables serial lane execution explicitly", () => {
     expect(parsePipelineRuntimeOptions(["--serial-lanes"]).serialLanes).toBe(true);
   });

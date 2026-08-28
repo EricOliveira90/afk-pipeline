@@ -343,6 +343,19 @@ conflict a human must resolve.
 _Avoid_: "retryable conflict", "soft conflict" (it is not a conflict at
 all — nothing needs resolving, only re-attempting)
 
+**Stop sentinel**:
+The file `afk stop` writes into a run's own log directory
+(`<runDir>/stop.request`) and the run polls for, every two seconds, while
+it is alive. A request naming this run is routed into the same
+`AbortController` a Ctrl-Break fires, so it produces a **cancellation**
+and nothing else: same records, same wind-down (ADR 0043). Its partner is
+the **stop acknowledgement** (`<runDir>/stop.ack`), written only after the
+CANCELLED records are on disk, which is what lets `afk stop` report
+whether the run actually heard it. Namespaced by run directory, so a
+stale sentinel cannot reach a later run.
+_Avoid_: "kill file", "stop flag" (it requests a cancellation; it does not
+terminate anything), "lock file" (nothing is being held)
+
 **Generator test command**:
 The command the generator is told to verify with while it iterates,
 resolved by `resolveGeneratorTestCommand` from `--test-command`, else the
@@ -474,3 +487,4 @@ _Avoid_: "abort" (overloads with `git merge --abort`), "interrupted"
 - **"Heartbeat"** / **"liveness ping"** — not used. The orchestrator observes stdout silence; the agent doesn't emit a keep-alive. Use **idle warning** (informational, periodic) and **idle timeout** (hard kill).
 - **"Telemetry"** / **"metrics"** — overpromise infrastructure afk doesn't have. Use **invocation stats**, **slice totals**, **run totals**.
 - **"Abort"** — reserved for `git merge --abort`. For pipeline-level termination via `AbortSignal`, use **cancellation** / `CANCELLED`.
+- **"Stop"** — the operator's *request* (a signal, or the **stop sentinel**), never the outcome. The outcome is a **cancellation**; the slices it leaves are `CANCELLED`.

@@ -2,6 +2,13 @@
 
 Amends ADR 0003 (cancellation via `AbortSignal`). Issue #114.
 
+> Amended by ADR 0043: this ADR fixed what happens once a stop arrives
+> and documented Ctrl-Break as the way to deliver one. Whether it arrives
+> at all was the other half — see the `AttachConsole`/`CTRL_C_EVENT`
+> evidence below. `afk stop` now delivers the same stop as a file the run
+> polls for, which is the answer for a run whose console you are not
+> sitting at. Ctrl-Break remains fully supported.
+
 ## What happened
 
 Stopping a live run on Windows (codex provider, orchestrator node PID
