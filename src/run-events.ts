@@ -150,13 +150,15 @@ export type RunEventPayload =
        * which is the last event the run emits before exiting non-zero and
        * is followed only by `run-ended`, the launch preflight's report
        * — swept shells, reported conditions, and a refusal bypassed with
-       * `--preflight-report-only` (ADR 0042) — and the `afk stop`
+       * `--preflight-report-only` (ADR 0042) — the `afk stop`
        * sentinel this run found in its own log directory (ADR 0043),
        * which is immediately followed by the `cancellation-requested`
-       * line it triggers.
+       * line it triggers, and the previous attempt's persisted slice
+       * record dropped when this run dispatched the slice (#111).
        */
       reason:
         | "cancellation-requested"
+        | "stale-record-cleared"
         | "stop-requested"
         | "crashed"
         | "lane-continuation"
@@ -176,9 +178,13 @@ export type RunEventPayload =
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;
-      /** prior-run-state: the phase persisted by the previous run. */
+      /**
+       * prior-run-state / stale-record-cleared: the phase persisted by
+       * the previous run — announced at run start, and again by name when
+       * the dispatch drops it.
+       */
       previousPhase?: string;
-      /** prior-run-state: the failure reason persisted by the previous run. */
+      /** prior-run-state / stale-record-cleared: the reason that record carried. */
       previousError?: string;
       /** not-run-hold: unresolved blockers this slice waits on. */
       blockedBy?: string[];

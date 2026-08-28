@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,6 +19,7 @@ import {
   adaptLoadedState,
   getResumeAttempts,
   recordRetryDecision,
+  clearSliceStateForDispatch,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
@@ -365,5 +367,124 @@ describe("resume-attempt tracking", () => {
     const state = loadRunState(repo, "demo");
     expect(getResumeAttempts(state, "100")).toBe(0);
     expect(getResumeAttempts(state, "200")).toBe(1);
+  });
+});
+
+describe("clearSliceStateForDispatch", () => {
+  /**
+   * The #111 state fixture: a slice whose record carries every field a
+   * previous attempt can leave behind, so a test that only cleared
+   * `error` would still fail here.
+   */
+  function staleStateFile(repo: string): string {
+    const dir = join(repo, ".afk", "state");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "demo.json");
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: 1,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        scope: { members: ["01", "02"] },
+        slices: {
+          "75": {
+            phase: "ERROR",
+            branch: "afk/demo-01",
+            error: "exceeded 100 tool calls",
+          },
+          "76": {
+            phase: "MERGE-PENDING",
+            branch: "afk/demo-02",
+            error: "migration prefix collision",
+            collidingPrefixes: ["0042"],
+          },
+          "77": { phase: "PASS", branch: "afk/demo-03", mergedToFeature: true },
+        },
+        resume: { "75": { attempts: 1, lastDecision: "resumed from 3 commits" } },
+        migrations: { pool: ["0042"], claims: { "76": ["0042"] } },
+      }),
+      "utf-8",
+    );
+    return p;
+  }
+
+  it("removes the dispatched slice's whole record and returns it", () => {
+    const repo = makeRepo();
+    staleStateFile(repo);
+
+    const previous = clearSliceStateForDispatch(repo, "demo", "75");
+
+    expect(previous).toEqual({
+      phase: "ERROR",
+      branch: "afk/demo-01",
+      error: "exceeded 100 tool calls",
+    });
+    const state = loadRunState(repo, "demo");
+    expect(state.slices["75"]).toBeUndefined();
+    expect(Object.keys(state.slices).sort()).toEqual(["76", "77"]);
+  });
+
+  it("clears every field a previous attempt can leave behind, not just error", () => {
+    const repo = makeRepo();
+    staleStateFile(repo);
+
+    // MERGE-PENDING is the widest record: reason text plus the prefixes
+    // that refused the merge, both of which describe the previous
+    // attempt's tree and not the one about to be dispatched (ADR 0029).
+    expect(clearSliceStateForDispatch(repo, "demo", "76")).toMatchObject({
+      collidingPrefixes: ["0042"],
+    });
+
+    const raw = JSON.parse(readFileSync(join(repo, ".afk", "state", "demo.json"), "utf-8"));
+    expect(raw.slices["76"]).toBeUndefined();
+    // Nothing anywhere in the file still names the cleared attempt's
+    // failure — the misleading text is gone, not merely unreferenced.
+    expect(JSON.stringify(raw)).not.toContain("migration prefix collision");
+  });
+
+  it("leaves resume bookkeeping, scope, and migration claims alone", () => {
+    const repo = makeRepo();
+    staleStateFile(repo);
+
+    clearSliceStateForDispatch(repo, "demo", "75");
+
+    const state = loadRunState(repo, "demo");
+    // The resume cap is the poison-tree guard and the dispatch this
+    // clearing accompanies is about to increment it (#36).
+    expect(getResumeAttempts(state, "75")).toBe(1);
+    expect(state.resume?.["75"]?.lastDecision).toBe("resumed from 3 commits");
+    expect(state.scope).toEqual({ members: ["01", "02"] });
+    expect(state.migrations).toEqual({ pool: ["0042"], claims: { "76": ["0042"] } });
+  });
+
+  it("leaves other slices' records untouched", () => {
+    const repo = makeRepo();
+    staleStateFile(repo);
+
+    clearSliceStateForDispatch(repo, "demo", "75");
+
+    const state = loadRunState(repo, "demo");
+    expect(isSliceComplete(state, "77")).toBe(true);
+    expect(state.slices["76"]!.phase).toBe("MERGE-PENDING");
+  });
+
+  it("returns null and writes nothing when the slice has no record", () => {
+    const repo = makeRepo();
+    const p = staleStateFile(repo);
+    const before = readFileSync(p, "utf-8");
+
+    expect(clearSliceStateForDispatch(repo, "demo", "999")).toBeNull();
+    expect(readFileSync(p, "utf-8")).toBe(before);
+  });
+
+  it("returns null without creating a state file on a first run", () => {
+    const repo = makeRepo();
+
+    expect(clearSliceStateForDispatch(repo, "demo", "75")).toBeNull();
+
+    // A first dispatch must not leave a state file behind just to prove
+    // it had nothing to clear.
+    expect(existsSync(join(repo, ".afk", "state", "demo.json"))).toBe(false);
   });
 });

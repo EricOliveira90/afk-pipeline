@@ -15,7 +15,12 @@ import {
   type SliceLifecycle,
   type SliceProgress,
 } from "./slice-lifecycle.js";
-import { projectForPersistence, saveSliceState } from "./run-state.js";
+import {
+  clearSliceStateForDispatch,
+  projectForPersistence,
+  saveSliceState,
+  type PersistedSliceState,
+} from "./run-state.js";
 
 const ZERO_PROGRESS: SliceProgress = { genRounds: 0, evalRounds: 0 };
 
@@ -87,7 +92,64 @@ export class RunJournal {
         `RunJournal.trackSlice: terminal phase ${next.phase} must use recordTerminal`,
       );
     }
+    if (next.phase === "RUNNING") this.clearRecordsOnDispatch(next);
     this.slices.set(next.ghIssue, next);
+  }
+
+  /**
+   * A slice going RUNNING is this run taking ownership of its record, so
+   * the previous attempt's persisted record is dropped here (#111).
+   *
+   * This is the dispatch moment in the journal's own vocabulary, and it
+   * is where ADR 0018's "RUNNING is never persisted" was only half true:
+   * memory said RUNNING while disk still said `ERROR — exceeded 100 tool
+   * calls` from two runs back, and every reader believed the disk. A run
+   * killed mid-round then handed the *next* run a failure story about a
+   * defect that was already fixed. Clearing at dispatch makes disk agree
+   * with memory: a dispatched slice has no persisted outcome until this
+   * run decides one.
+   *
+   * Nothing is cleared for a slice this run has already closed
+   * (`recordTerminal`): a re-dispatch after a decided outcome would
+   * otherwise wipe a record this run is entitled to.
+   *
+   * Best effort. A failed clear warns and the slice runs anyway — the
+   * cost is the misleading record we already live with, and refusing to
+   * dispatch over it would be strictly worse.
+   */
+  private clearRecordsOnDispatch(slice: SliceLifecycle) {
+    if (this.terminalSlices.has(slice.ghIssue)) return;
+    let previous: PersistedSliceState | null;
+    try {
+      previous = clearSliceStateForDispatch(
+        this.repoRoot,
+        this.prdSlug,
+        slice.ghIssue,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.phase(
+        `[afk] Warning: could not clear slice #${slice.ghIssue}'s stale run-state ` +
+          `record at dispatch (${message}) — a reader may still be shown the ` +
+          `previous run's outcome for it`,
+        "warn",
+      );
+      return;
+    }
+    if (!previous) return;
+    const reason = previous.error ? ` — ${previous.error}` : "";
+    const message =
+      `#${slice.ghIssue} ${slice.title}: dispatched — cleared the previous ` +
+      `attempt's persisted record (${previous.phase}${reason}); this run owns ` +
+      `the record from here`;
+    this.phase(`[afk] ${message}`, "log", {
+      type: "warn",
+      reason: "stale-record-cleared",
+      ghIssue: slice.ghIssue,
+      message,
+      previousPhase: previous.phase,
+      ...(previous.error !== undefined ? { previousError: previous.error } : {}),
+    });
   }
 
   /** Restore an already-persisted PASS for this run's summary. */

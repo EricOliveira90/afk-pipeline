@@ -41,6 +41,7 @@ function snapshotFixture(): RunSnapshot {
       contractRoundLimit: 2,
       implementationRoundLimit: 3,
     },
+    outcomeMismatches: [],
     chronology: [],
     slices: {
       "101": {
