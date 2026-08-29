@@ -94,44 +94,57 @@ The Track C/D fixes from this review cycle (lock-gate bypass,
 one-decision-per-finding) stop being special cases: with one lock
 exit there is no second path to bypass.
 
-### 4. A discarded decision log reconciles contract status
+### 4. Every lock names what produced it
 
-ADR 0054 made the log evidence, never authority. This ADR adds the
-contrapositive: **a `LOCKED` status the surviving evidence does not
-witness is not authority either.** When the loader discards the log,
-the transaction immediately reconciles: if `contract.md` reads
-`LOCKED` but no valid, applied, current-impasse decision log witnesses
-that lock, the contract is reopened, and the reopening is announced in
-the run log. ADR 0008 makes the orchestrator the owner of the status
-field; a status line contradicting the structured exhaustion record
-beside it is exactly the disk/orchestrator disagreement that ADR
-exists to prevent, and the owner repairs it.
+Every lock exit of the shared transaction stamps the contract with the
+lock's provenance: the impasse fingerprint it settled, the escalation
+it declared, or the ordinary negotiation round that accepted it. The
+stamp is a separate orchestrator-owned `**Lock-Provenance:**` line;
+the `**Status:** LOCKED` line stays byte-identical, because agent
+prompts read that literal field (ADR 0008) and this ADR does not
+reopen that wound. The orchestrator writes and reads the stamp;
+agents never do.
 
-### 5. The lock carries provenance; the crash window is proved, not presumed
+Provenance is what makes a discarded decision log survivable. ADR 0054
+made the log evidence, never authority; without provenance, a `LOCKED`
+contract found beside a discarded log is undecidable — it could be the
+lock these decisions legitimately produced (the log corrupted
+afterwards) or stale debris from before the impasse (A2). Blanket
+reopening would silently invalidate completed human adjudication
+whenever its receipt got corrupted; blanket trust is A2 itself. With
+the stamp, the transaction reconciles by proof instead of policy:
+
+- **Discarded log + lock stamped with the current impasse
+  fingerprint:** the lock self-certifies — only the transaction's lock
+  exit writes that stamp, and it only locks on a proven-complete
+  decision set. The lock stands; the loss is announced.
+- **Discarded log + unstamped lock, or a stamp for anything other
+  than the current impasse:** provably stale. The contract is
+  reopened, the reopening announced, and the full apply-and-lock runs
+  when replacement decisions arrive. This is A2's fix.
+
+### 5. The crash window is proved, not presumed
 
 ADR 0054's crash window — `lockContract` succeeded, the applied-marker
 write did not — was detected by `readContractStatus === "LOCKED"`
-alone, which cannot distinguish "this lock is the one these decisions
-produced" from "this lock is stale debris a discard left behind" (A2's
-second half).
-
-The transaction therefore writes a **pending-lock witness** into the
-decision log immediately before `lockContract`: a fingerprint of the
-exact decision set (the recorded decisions' raw bytes) plus the
-impasse fingerprint it answers. Marking the log applied clears the
-witness. The already-applied shortcut may then return `LOCKED` without
-re-applying only when the current, validated, complete log is either
-marked applied or carries a pending-lock witness matching its own
-decision set — the provable crash window. A `LOCKED` contract with no
-matching witness is stale: it is reconciled (decision 4) and the full
-apply-and-lock runs.
+alone, which is exactly the shortcut A2 abused. The transaction now
+writes a **pending-lock witness** into the decision log immediately
+before `lockContract`: a fingerprint of the exact decision set (the
+recorded decisions' raw bytes) plus the impasse fingerprint. Marking
+the log applied clears it. The already-applied shortcut may return
+`LOCKED` without re-applying only when the current, validated,
+complete log is marked applied or carries a witness matching its own
+decision set. The provenance stamp is not re-checked here — a valid
+log already binds to this impasse by its own fingerprint, and
+requiring the stamp would wrongly refuse a legacy pre-stamp lock whose
+applied log is intact.
 
 Crash cases: dying between witness and `lockContract` leaves a witness
 over an unlocked contract — harmless, the next dispatch runs the full
 apply and overwrites it. Dying between `lockContract` and the
-applied-mark leaves witness + lock — the shortcut proves it and marks
-applied, ADR 0054's original intent. The lock-then-mark order is
-unchanged; only its evidence improved.
+applied-mark leaves witness + stamped lock — proved, marked applied,
+ADR 0054's original intent. The lock-then-mark order is unchanged;
+only its evidence improved.
 
 ## Decision — Seam 2: a park is durable, replaceable state
 
@@ -171,6 +184,17 @@ re-dispatch is the park replacement of decision 9; an expired wait
 leaves the slice parked for the next run. This is ADR 0024's rule
 applied to parks: dependency safety belongs to the DAG, and a human's
 think-time on one slice is not a dependency of anyone else's.
+
+Two boundary decisions, made explicitly rather than by accident:
+
+- **The idle wait races the abort signal.** Cancellation during the
+  wait ends it immediately; the park is already durable, so nothing is
+  lost (ADR 0003, ADR 0040 unchanged).
+- **The wall-clock ceiling (ADR 0019) keeps running while the
+  pipeline idles on a human.** The bounded wait is already sized by
+  configuration, and the park surviving run death is this seam's whole
+  point; exempting human-wait from the ceiling would let a run live
+  forever.
 
 ### 8. Adoption refuses when it cannot enumerate
 
@@ -230,10 +254,15 @@ structural: `finishStuck` is the only constructor of a STUCK return in
   rule") is closed structurally, not case-by-case. New contract
   mutations get the capture/restore/validate/lock behaviour by calling
   the shared primitive, or they visibly do not exist.
-- The decision log format gains a pending-lock witness field. Existing
-  logs without one are simply pre-witness: a locked-and-applied log is
-  already proven, and an unapplied one now (correctly) re-applies
-  rather than inheriting the lock. Fail-closed either way.
+- The decision log format gains a pending-lock witness field, and the
+  contract gains an orchestrator-owned lock-provenance line. Existing
+  artifacts without them are simply pre-stamp: a locked-and-applied
+  log is already proven, an unapplied one now (correctly) re-applies
+  rather than inheriting the lock, and an unstamped lock beside a
+  discarded log reopens. Fail-closed in every legacy shape. A
+  corrupted *applied* log no longer costs the operator their completed
+  adjudication — the stamped lock self-certifies and only the
+  bookkeeping is lost.
 - Mixed exhaustions stop parking. A slice that previously parked with
   an undecidable OPEN blocker now ends the round as non-convergence
   with both findings preserved in the exhaustion record. That costs a
@@ -256,3 +285,8 @@ structural: `finishStuck` is the only constructor of a STUCK return in
   wait's duration, ADR 0054's one-decision-per-dispatch workflow, the
   decision log's exclusion from the rollback (human input still
   outlives mechanical refusals), and ADR 0050's revision bound.
+- Deferred, filed as follow-up: moving `AWAITING-ADJUDICATION` out of
+  the `failed` *presentation* bucket. Once no logic reads the bucket
+  (decision 6), the remaining harm is a human misled by `afk status`
+  grouping — the same bug class one layer up, but cosmetic, with real
+  rendering ripple, and not required by any blocker.
