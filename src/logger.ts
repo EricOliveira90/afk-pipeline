@@ -325,8 +325,7 @@ Finished: ${finishedAt!.toISOString()}
 |-------|--------|--------|--------|------|------------|
 ${rows}
 ${totalsRow}
-${dependencySection}
-${adoptionSection}
+${dependencySection}${adoptionSection}
 ${gateSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}

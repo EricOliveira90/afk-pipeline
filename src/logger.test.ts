@@ -122,6 +122,36 @@ describe("Logger.bumpGenRound / bumpEvalRound", () => {
 });
 
 describe("Logger.writeSummary (run-summary.md byte stability)", () => {
+  it("preserves every byte of a summary without adopted slices", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-29T12:00:00.000Z"));
+      const repo = makeRepo();
+      const log = new Logger(repo, "ordinary");
+      log.restoreCompleted(id("130", "Pipeline finish", "afk/demo-02"));
+
+      expect(log.writeSummary()).toBe(`# Run Summary — ordinary
+
+Started: 2026-08-29T12:00:00.000Z
+Finished: 2026-08-29T12:00:00.000Z
+
+| Slice | Status | Rounds | Branch | Cost | Tool calls |
+|-------|--------|--------|--------|------|------------|
+| 130 Pipeline finish | ✅ PASS | gen:0 eval:0 | merged | — | — |
+| **Run totals** | | | | **—** | **0** |
+
+
+
+Pre-ship sanity gate: N/A
+Architect review: N/A
+PM review: N/A
+
+`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders provenance for an adopted completed slice only", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "adopted");
