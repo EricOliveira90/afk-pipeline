@@ -2419,6 +2419,7 @@ describe("round-scoped contract feedback", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    const plannerPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -2428,6 +2429,7 @@ describe("round-scoped contract feedback", () => {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
+          plannerPrompts.push(opts.prompt);
           writeFileSync(
             join(artifactDir, "contract.md"),
             "# Contract\n\n**Status:** NEGOTIATING\n",
@@ -2594,6 +2596,47 @@ describe("round-scoped contract feedback", () => {
         /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
         "**Status:** LOCKED",
       ),
+    );
+
+    writeFileSync(contractPath, contractBefore, "utf-8");
+    writeFileSync(manifestPath, manifestBefore, "utf-8");
+    const evaluatorDecisionRaw =
+      '{"version":1,"findingId":"F-01","winningPosition":"EVALUATOR","author":"Ada"}';
+    writeFileSync(decisionPath, evaluatorDecisionRaw, "utf-8");
+    gateObjection = "injected planner-apply lock-gate refusal";
+    const beforeEvaluatorApply = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    const refusedApply = await runSliceNegotiate(ctx);
+
+    expect(refusedApply.phase).toBe("ESCALATE");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(plannerRounds).toBe(beforeEvaluatorApply.planner + 1);
+    expect(evaluatorRounds).toBe(beforeEvaluatorApply.evaluator);
+    expect(plannerPrompts.at(-1)).toContain(evaluatorDecisionRaw);
+    expect(plannerPrompts.at(-1)).toContain(
+      "evaluator evidence alpha, verbatim",
+    );
+
+    writeFileSync(contractPath, contractBefore, "utf-8");
+    writeFileSync(manifestPath, manifestBefore, "utf-8");
+    const instructionDecisionRaw =
+      '{"version":1,"findingId":"F-01","thirdInstruction":"Keep evidence exactly as written.","author":"Ada"}';
+    writeFileSync(decisionPath, instructionDecisionRaw, "utf-8");
+    gateObjection = null;
+    const beforeInstructionApply = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeInstructionApply.planner + 1);
+    expect(evaluatorRounds).toBe(beforeInstructionApply.evaluator);
+    expect(plannerPrompts.at(-1)).toContain(instructionDecisionRaw);
+    expect(plannerPrompts.at(-1)).toContain(
+      "planner evidence alpha, verbatim",
     );
   });
 
