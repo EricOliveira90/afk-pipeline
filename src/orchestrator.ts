@@ -3254,6 +3254,18 @@ export async function runSliceExecute(
     pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
     slice.number,
   );
+  const finishStuck = (): Extract<TerminalOutcome, { phase: "STUCK" }> => {
+    logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
+    artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
+      reviewArchiveDir,
+      additionalArtifactReferences: stuckReferences,
+      commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
+    });
+    return {
+      phase: "STUCK",
+      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+    };
+  };
 
   try {
     if (ctx.resume) {
@@ -3735,22 +3747,10 @@ export async function runSliceExecute(
       }
 
       if (implementationAttempt === implementationAttemptLimit) {
-        logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
-        artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
-          reviewArchiveDir,
-          additionalArtifactReferences: stuckReferences,
-          commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
-        });
-        return {
-          phase: "STUCK",
-          error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-        };
+        return finishStuck();
       }
     }
-    return {
-      phase: "STUCK",
-      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-    };
+    return finishStuck();
   } catch (err) {
     if (isCancelled(err, signal)) {
       return { phase: "CANCELLED", error: CANCELLED_BY_USER };

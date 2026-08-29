@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import {
@@ -576,6 +577,18 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
 (none)
 `,
+    );
+
+    const rolesAfterExhaustion = [...roles];
+    rmSync(join(artifactDir, "stuck.md"));
+
+    await expect(runSliceExecute(ctx)).resolves.toEqual({
+      phase: "STUCK",
+      error: "QA failed after 3 implementation rounds",
+    });
+    expect(roles).toEqual(rolesAfterExhaustion);
+    expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toContain(
+      "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
     );
   });
 
