@@ -27,6 +27,14 @@ import {
   type PipelineConfig,
   type SliceContext,
 } from "./orchestrator.js";
+import * as gitModule from "./git.js";
+import {
+  EXPECTED_STUCK_DIAGNOSIS,
+  seedStuckDiagnosisArchive,
+  STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+  STUCK_DIAGNOSIS_COMMIT_LOG,
+  stuckDiagnosisReviewFindings,
+} from "./stuck-diagnosis.fixtures.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
@@ -432,6 +440,8 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
   it("caps an ordinary resume at the rounds left under the three-round budget", async () => {
     const repo = makeRepo();
     let artifactDir = "";
+    const evaluatorRounds = [2, 3] as const;
+    let evaluatorAttempt = 0;
     const roles: string[] = [];
     const generatorPrompts: string[] = [];
     const provider: AgentProvider = {
@@ -446,15 +456,19 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "utf-8",
           );
         } else if (options.role === "evaluator-qa") {
+          const evaluatorRound = evaluatorRounds[evaluatorAttempt++];
+          if (evaluatorRound === undefined) {
+            throw new Error("fixture dispatched an unexpected evaluator round");
+          }
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n",
             "utf-8",
           );
-          // Repeats the restored OPEN finding (QA-01) exactly once, so
-          // the lifecycle accepts every resumed attempt — the run stops
-          // because the cap is spent, not because a transition is refused.
-          writeQAReview(artifactDir, "deterministic", { verdict: "FAIL" });
+          writeQAReview(artifactDir, "deterministic", {
+            verdict: "FAIL",
+            findings: stuckDiagnosisReviewFindings(evaluatorRound),
+          });
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -472,43 +486,17 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       "slice-01",
       "reviews",
     );
-    mkdirSync(reviewDir, { recursive: true });
-    // Deliberately a version-1 record: a run interrupted before findings
-    // carried a remedy (#112) must still resume from the evidence it has.
-    writeFileSync(
-      join(reviewDir, "qa-review-r1-a1-record.json"),
-      JSON.stringify(
-        {
-          version: 1,
-          stage: "deterministic",
-          round: 1,
-          attempt: 1,
-          verdict: "FAIL",
-          failureClass: "IMPLEMENTATION",
-          findings: [
-            {
-              id: "QA-01",
-              severity: "BLOCKING",
-              state: "OPEN",
-              unresolved: true,
-              summary: "Fixture implementation finding",
-              clearCondition:
-                "The fixture evaluator observes the behavior passing",
-              artifactReferences: [
-                ".afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r1-a1.json",
-                "specs/slices/01-prd-070-regression/qa-report-r1-a1.md",
-              ],
-            },
-          ],
-        },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+    seedStuckDiagnosisArchive(reviewDir, { rounds: [1] });
     writeFileSync(
       join(artifactDir, "qa-report-r1-a1.md"),
       "# QA Report\n\n**Verdict:** FAIL\n**Failure class:** IMPLEMENTATION\n",
+      "utf-8",
+    );
+    writeFileSync(
+      join(artifactDir, "stuck.md"),
+      STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS.map(
+        (path) => `- Additional artifact: \`${path}\``,
+      ).join("\n"),
       "utf-8",
     );
     ctx.resume = {
@@ -517,6 +505,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       commitLog: "abc1234 feat(#70): round-1 work",
       handoffNote: "",
     };
+    vi.spyOn(gitModule, "logCommitsWithStat").mockReturnValue(
+      STUCK_DIAGNOSIS_COMMIT_LOG,
+    );
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({
       phase: "STUCK",
@@ -533,50 +524,11 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
     expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(false);
     expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toBe(
-      `# Stuck diagnosis
-
-## Finding lifecycle
-
-### RESOLVED
-
-(none)
-
-### OPEN
-
-- [QA-01] BLOCKING OPEN
-  - Stage: deterministic
-  - Summary: Fixture implementation finding
-  - Clear condition: The fixture evaluator observes the behavior passing
-  - Artifact references:
-    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r3-a1.json\`
-    - \`specs/slices/01-prd-070-regression/qa-report-r3-a1.md\`
-
-## Scope escalations
-
-(none)
-
-## Round evidence
-
-- Round 1 attempt 1 (deterministic): FAIL / IMPLEMENTATION
-  - Lifecycle record: \`qa-review-r1-a1-record.json\`
-  - Artifact references:
-    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r1-a1.json\`
-    - \`specs/slices/01-prd-070-regression/qa-report-r1-a1.md\`
-- Round 2 attempt 1 (deterministic): FAIL / IMPLEMENTATION
-  - Lifecycle record: \`qa-review-r2-a1-record.json\`
-  - Artifact references:
-    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r2-a1.json\`
-    - \`specs/slices/01-prd-070-regression/qa-report-r2-a1.md\`
-- Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION
-  - Lifecycle record: \`qa-review-r3-a1-record.json\`
-  - Artifact references:
-    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r3-a1.json\`
-    - \`specs/slices/01-prd-070-regression/qa-report-r3-a1.md\`
-
-## Commit evidence
-
-(none)
-`,
+      EXPECTED_STUCK_DIAGNOSIS,
+    );
+    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain("Best guess");
+    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain(
+      "SYNTHESIS-SHOULD-NOT-APPEAR",
     );
 
     const rolesAfterExhaustion = [...roles];

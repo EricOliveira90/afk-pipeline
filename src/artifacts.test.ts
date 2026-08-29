@@ -33,154 +33,25 @@ import type {
   ContractReviewAttemptRecord,
 } from "./contract-review.js";
 import type { QAReviewAttemptRecord } from "./qa-review.js";
-
-const EXPECTED_STUCK_DIAGNOSIS = `# Stuck diagnosis
-
-## Finding lifecycle
-
-### RESOLVED
-
-(none)
-
-### OPEN
-
-- [QA-ALPHA] BLOCKING OPEN
-  - Stage: deterministic
-  - Summary: Alpha summary
-  - Clear condition: Alpha clear condition
-  - Artifact references:
-    - \`.afk/artifacts/run/slice-01/reviews/qa-review-r1-a1.json\`
-    - \`.kiro/specs/demo/slices/01-demo/qa-report-r1-a1.md\`
-- [QA-BETA] ADVISORY OPEN
-  - Stage: deterministic
-  - Summary: Beta summary
-  - Clear condition: Beta clear condition
-  - Artifact references:
-    - \`.afk/artifacts/run/slice-01/reviews/qa-review-r2-a1.json\`
-    - \`.kiro/specs/demo/slices/01-demo/qa-report-r2-a1.md\`
-
-## Scope escalations
-
-- Round 2 attempt 2
-  - Finding IDs: \`ESC-BETA\`, \`ESC-ALPHA\`
-  - Paths: \`src/beta.ts\`, \`src/alpha.ts\`
-  - Reason: Distinct escalation reason
-
-## Round evidence
-
-- Round 1 attempt 1 (deterministic): FAIL / IMPLEMENTATION
-  - Lifecycle record: \`qa-review-r1-a1-record.json\`
-  - Artifact references:
-    - \`.afk/artifacts/run/slice-01/reviews/qa-review-r1-a1.json\`
-    - \`.kiro/specs/demo/slices/01-demo/qa-report-r1-a1.md\`
-- Round 2 attempt 1 (deterministic): FAIL / IMPLEMENTATION
-  - Lifecycle record: \`qa-review-r2-a1-record.json\`
-  - Artifact references:
-    - \`.afk/artifacts/run/slice-01/reviews/qa-review-r2-a1.json\`
-    - \`.kiro/specs/demo/slices/01-demo/qa-report-r2-a1.md\`
-- Additional artifact: \`.afk/gates/s01/ROUND-1-GATE.json\`
-- Additional artifact: \`.afk/gates/s01/ROUND-2-GATE.log\`
-
-## Commit evidence
-
-\`\`\`text
-commit ROUND-2-COMMIT
-    second round marker
-
-commit ROUND-1-COMMIT
-    first round marker
-\`\`\`
-`;
+import {
+  EXPECTED_STUCK_DIAGNOSIS,
+  seedStuckDiagnosisArchive,
+  STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+  STUCK_DIAGNOSIS_COMMIT_LOG,
+} from "./stuck-diagnosis.fixtures.js";
 
 describe("renderStuckDiagnosis", () => {
-  function record(
-    round: number,
-    id: string,
-    severity: "BLOCKING" | "ADVISORY",
-    summary: string,
-    clearCondition: string,
-  ): QAReviewAttemptRecord {
-    const prefix = `.afk/artifacts/run/slice-01/reviews/qa-review-r${round}-a1`;
-    return {
-      version: 2,
-      stage: "deterministic",
-      round,
-      attempt: 1,
-      verdict: "FAIL",
-      failureClass: "IMPLEMENTATION",
-      findings: [
-        {
-          id,
-          severity,
-          state: "OPEN",
-          unresolved: true,
-          summary,
-          clearCondition,
-          artifactReferences: [
-            `${prefix}.json`,
-            `.kiro/specs/demo/slices/01-demo/qa-report-r${round}-a1.md`,
-          ],
-          remedy: "SOURCE_CHANGE",
-        },
-      ],
-    };
-  }
-
   function renderWithDiscoveryOrder(order: "forward" | "reverse"): string {
     const root = mkdtempSync(join(tmpdir(), "afk-stuck-render-"));
     const reviewArchiveDir = join(root, "reviews");
-    mkdirSync(reviewArchiveDir, { recursive: true });
-    const entries: Array<[string, string]> = [
-      [
-        "qa-review-r1-a1-record.json",
-        JSON.stringify(
-          record(
-            1,
-            "QA-ALPHA",
-            "BLOCKING",
-            "Alpha summary",
-            "Alpha clear condition",
-          ),
-        ),
-      ],
-      [
-        "qa-review-r2-a1-record.json",
-        JSON.stringify(
-          record(
-            2,
-            "QA-BETA",
-            "ADVISORY",
-            "Beta summary",
-            "Beta clear condition",
-          ),
-        ),
-      ],
-      [
-        "escalation-r2-a2.md",
-        JSON.stringify({
-          version: 1,
-          findingIds: ["ESC-BETA", "ESC-ALPHA"],
-          paths: ["src/beta.ts", "src/alpha.ts"],
-          reason: "Distinct escalation reason",
-        }),
-      ],
-    ];
-    if (order === "reverse") entries.reverse();
     try {
-      for (const [name, contents] of entries) {
-        writeFileSync(join(reviewArchiveDir, name), contents, "utf-8");
-      }
+      seedStuckDiagnosisArchive(reviewArchiveDir, {
+        reverse: order === "reverse",
+      });
       return renderStuckDiagnosis({
         reviewArchiveDir,
-        additionalArtifactReferences: [
-          ".afk/gates/s01/ROUND-2-GATE.log",
-          ".afk/gates/s01/ROUND-1-GATE.json",
-        ],
-        commitLog:
-          "commit ROUND-2-COMMIT\n" +
-          "    second round marker\n\n" +
-          "commit ROUND-1-COMMIT\n" +
-          "    first round marker",
+        additionalArtifactReferences: STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+        commitLog: STUCK_DIAGNOSIS_COMMIT_LOG,
       });
     } finally {
       rmSync(root, { recursive: true, force: true });
