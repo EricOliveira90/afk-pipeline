@@ -261,4 +261,44 @@ describe("afk adopt", () => {
       git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
     ).toBe(statusBefore);
   });
+
+  it.each([
+    ["missing", []],
+    ["empty", ["--reason", ""]],
+    ["whitespace-only", ["--reason", "   \t"]],
+  ])("refuses a %s reason without changing branches or state", async (_label, reasonArgs) => {
+    const repo = makeRepo();
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const featureBefore = resolveCommit(repo, "feat/demo")!;
+    const sliceBefore = resolveCommit(repo, "manual/demo-01")!;
+    const stateBefore = readFileSync(statePath, "utf-8");
+    let gatesCalled = false;
+
+    const result = await runAdoptCli(
+      [
+        "demo",
+        "129",
+        "--branch",
+        "manual/demo-01",
+        "--adopter",
+        "Ada Lovelace",
+        ...reasonArgs,
+      ],
+      repo,
+      {
+        resolveGatePlan: () => ({ declarations: GATES }),
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      },
+    );
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.output.toLowerCase()).toContain("reason");
+    expect(gatesCalled).toBe(false);
+    expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+    expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
+    expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+  });
 });

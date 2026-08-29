@@ -68,7 +68,13 @@ function parseArgs(args: readonly string[]): ParsedAdoptArgs | null {
   const slice = args[1]?.replace(/^#/, "");
   const branch = option(args, "--branch");
   const reason = option(args, "--reason");
-  if (!prdSlug || !slice || !branch || reason === undefined || reason === "") {
+  if (
+    !prdSlug ||
+    !slice ||
+    !branch ||
+    reason === undefined ||
+    reason.trim() === ""
+  ) {
     return null;
   }
   const adopter = option(args, "--adopter");
