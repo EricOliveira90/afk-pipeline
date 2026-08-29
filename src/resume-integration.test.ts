@@ -517,7 +517,7 @@ describe("retried slice resume (spec #33)", () => {
         n === "01" ? named.ghIssue : n === "02" ? unnamed.ghIssue : failing.ghIssue;
 
       // --- Run 1: both generators commit work every round but QA always
-      // fails — each slice ends STUCK with a generator-stuck stuck.md.
+      // fails — each slice ends STUCK with a code-assembled diagnosis.
       // On its LAST round the named slice also leaves an uncommitted
       // in-flight edit that nothing afterwards commits: run 2 must still
       // see it, which is what "the preserved tree is not reset" means.
@@ -728,12 +728,13 @@ describe("retried slice resume (spec #33)", () => {
     });
 
     it("grants a failing STUCK resume exactly one implementation attempt", () => {
-      const roles = records
-        .filter((record) => record.sliceNumber === "03")
-        .map((record) => record.role);
+      const failingRecords = records.filter(
+        (record) => record.sliceNumber === "03",
+      );
+      const roles = failingRecords.map((record) => record.role);
       expect(roles.filter((role) => role === "generator")).toHaveLength(1);
       expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(1);
-      expect(roles.filter((role) => role === "generator-stuck")).toHaveLength(1);
+      expect(roles.at(-1)).toBe("evaluator-qa");
 
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.slices["4003"].phase).toBe("STUCK");
@@ -751,6 +752,23 @@ describe("retried slice resume (spec #33)", () => {
       expect(existsSync(join(reviewDir, "qa-review-r5-a1-record.json"))).toBe(
         false,
       );
+      const resumedGenerator = failingRecords.find(
+        (record) => record.role === "generator",
+      )!;
+      const rewrittenDiagnosis = readFileSync(
+        join(resumedGenerator.sliceArtifactDir, "stuck.md"),
+        "utf-8",
+      );
+      expect(rewrittenDiagnosis).not.toBe(
+        resumedGenerator.stuckContentsAtInvocation,
+      );
+      expect(rewrittenDiagnosis).toContain(
+        "Round 4 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
+      );
+      expect(rewrittenDiagnosis).toContain(
+        "qa-review-r4-a1-record.json",
+      );
+      expect(rewrittenDiagnosis).toContain("qa-report-r4-a1.md");
     });
 
     it("audits the named slice's resume and never logs a restart for it", () => {
