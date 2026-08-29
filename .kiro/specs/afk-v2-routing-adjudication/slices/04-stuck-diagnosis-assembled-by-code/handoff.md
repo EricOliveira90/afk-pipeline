@@ -12,10 +12,12 @@
 - Attempt evidence sorts numerically by round and attempt; additional artifact references sort lexically and omit references already carried by lifecycle records.
 - Commit evidence uses the existing `git log <feature-branch>..HEAD --stat` representation.
 - The retirement guard records slice base `770bb20eb6c1cae071b88a0596078675c26c86f4`.
+- STUCK-resume assertions inspect the current unresolved-finding block separately from the preserved diagnosis because the diagnosis intentionally contains evidence from every prior round.
 
 ## Gotchas / learnings
 - `stuck.md` is overwritten only after the final evaluator evidence is archived, including the one granted STUCK-resume attempt.
 - Ordinary and STUCK resumes now share one template; their opposite worktree and refresh facts come from explicit situation blocks.
+- Prior-round artifact references are expected inside the preserved diagnosis; only the current unresolved-finding block is latest-state repair input.
 
 ## Status
 Tests passing locally. No regressions.
