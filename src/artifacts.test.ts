@@ -199,6 +199,88 @@ describe("renderStuckDiagnosis", () => {
       "SYNTHESIS-SHOULD-NOT-APPEAR",
     );
   });
+
+  it("partitions the latest lifecycle state into RESOLVED and OPEN", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-lifecycle-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    const artifactReferences = (id: string) => [
+      `.afk/artifacts/lifecycle/${id}.json`,
+      `.kiro/specs/lifecycle/${id}.md`,
+    ];
+    const lifecycleRecord: QAReviewAttemptRecord = {
+      version: 2,
+      stage: "deterministic",
+      round: 3,
+      attempt: 1,
+      verdict: "FAIL",
+      failureClass: "IMPLEMENTATION",
+      findings: [
+        {
+          id: "QA-OPEN-02",
+          severity: "ADVISORY",
+          state: "OPEN",
+          unresolved: true,
+          summary: "Second open summary",
+          clearCondition: "Second open clear condition",
+          artifactReferences: artifactReferences("QA-OPEN-02"),
+          remedy: "SOURCE_CHANGE",
+        },
+        {
+          id: "QA-RESOLVED-01",
+          severity: "BLOCKING",
+          state: "RESOLVED",
+          unresolved: false,
+          summary: "Resolved summary",
+          clearCondition: "Resolved clear condition",
+          artifactReferences: artifactReferences("QA-RESOLVED-01"),
+          remedy: "SOURCE_CHANGE",
+        },
+        {
+          id: "QA-OPEN-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "First open summary",
+          clearCondition: "First open clear condition",
+          artifactReferences: artifactReferences("QA-OPEN-01"),
+          remedy: "SOURCE_CHANGE",
+        },
+      ],
+    };
+    try {
+      writeFileSync(
+        join(reviewArchiveDir, "qa-review-r3-a1-record.json"),
+        JSON.stringify(lifecycleRecord),
+        "utf-8",
+      );
+      const diagnosis = renderStuckDiagnosis({
+        reviewArchiveDir,
+        commitLog: "",
+      });
+      const resolved = diagnosis.split("### RESOLVED\n\n")[1]!
+        .split("\n\n### OPEN")[0]!;
+      const open = diagnosis.split("### OPEN\n\n")[1]!
+        .split("\n\n## Scope escalations")[0]!;
+
+      expect(resolved).toContain("[QA-RESOLVED-01] BLOCKING RESOLVED");
+      expect(resolved).not.toContain("QA-OPEN-01");
+      expect(resolved).not.toContain("QA-OPEN-02");
+      expect(open).not.toContain("QA-RESOLVED-01");
+      expect(open).toContain("[QA-OPEN-01] BLOCKING OPEN");
+      expect(open).toContain("Summary: First open summary");
+      expect(open).toContain("Clear condition: First open clear condition");
+      expect(open).toContain(".afk/artifacts/lifecycle/QA-OPEN-01.json");
+      expect(open).toContain(".kiro/specs/lifecycle/QA-OPEN-01.md");
+      expect(open).toContain("[QA-OPEN-02] ADVISORY OPEN");
+      expect(open).toContain("Summary: Second open summary");
+      expect(open).toContain("Clear condition: Second open clear condition");
+      expect(open).toContain(".afk/artifacts/lifecycle/QA-OPEN-02.json");
+      expect(open).toContain(".kiro/specs/lifecycle/QA-OPEN-02.md");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

@@ -606,6 +606,9 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
   const records = archivedQAReviewRecords(details.reviewArchiveDir);
   const escalations = archivedScopeEscalations(details.reviewArchiveDir);
   const findings = latestFindings(records);
+  const resolvedFindings = findings.filter(
+    (finding) => finding.state === "RESOLVED",
+  );
   const openFindings = findings.filter((finding) => finding.state === "OPEN");
   const escalationBlock =
     escalations.length === 0
@@ -661,7 +664,7 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
     "",
     "### RESOLVED",
     "",
-    "(none)",
+    renderFindingSection(resolvedFindings),
     "",
     "### OPEN",
     "",
