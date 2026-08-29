@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
+import { CONTRACT_NEGOTIATION_OUTCOME_FILENAME } from "./contract-review.js";
 
 export const ADJUDICATION_FILENAME = "adjudication.md";
 
@@ -15,6 +18,11 @@ export type Adjudication =
       thirdInstruction: string;
       author: string;
     };
+
+export type AdjudicationWaitResult =
+  | { status: "accepted" }
+  | { status: "expired"; defect?: string }
+  | { status: "cancelled" };
 
 function requireNonBlankString(
   value: unknown,
@@ -112,4 +120,72 @@ export function parseAdjudication(
     thirdInstruction: input.thirdInstruction,
     author: input.author,
   };
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done();
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function waitForAdjudication(options: {
+  sliceDir: string;
+  waitMs: number;
+  pollMs: number;
+  signal?: AbortSignal;
+  now?: () => number;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}): Promise<AdjudicationWaitResult> {
+  const { sliceDir, waitMs, pollMs, signal } = options;
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0) {
+    throw new Error("adjudication wait must be a non-negative integer");
+  }
+  if (!Number.isSafeInteger(pollMs) || pollMs < 1) {
+    throw new Error("adjudication poll interval must be a positive integer");
+  }
+
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? delay;
+  const deadline = now() + waitMs;
+  const outcomePath = join(
+    sliceDir,
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  );
+  const decisionPath = join(sliceDir, ADJUDICATION_FILENAME);
+  let latestDefect: string | undefined;
+
+  while (true) {
+    if (signal?.aborted) return { status: "cancelled" };
+    if (existsSync(decisionPath)) {
+      try {
+        const outcome = JSON.parse(
+          readFileSync(outcomePath, "utf-8"),
+        ) as ContractNegotiationOutcome;
+        parseAdjudication(readFileSync(decisionPath, "utf-8"), outcome);
+        return { status: "accepted" };
+      } catch (error) {
+        latestDefect = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const remaining = deadline - now();
+    if (remaining <= 0) {
+      return {
+        status: "expired",
+        ...(latestDefect ? { defect: latestDefect } : {}),
+      };
+    }
+    await sleep(Math.min(pollMs, remaining), signal);
+  }
 }

@@ -250,6 +250,20 @@ export class RunJournal {
   }
 
   /**
+   * Reopen this run's adjudication park so a later terminal outcome can
+   * replace it. The next RUNNING transition clears the persisted park.
+   */
+  reopenAdjudication(ghIssue: string): void {
+    const current = this.slices.get(ghIssue);
+    if (current?.phase !== "AWAITING-ADJUDICATION") {
+      throw new Error(
+        `RunJournal.reopenAdjudication: slice ${ghIssue} is not awaiting adjudication`,
+      );
+    }
+    this.terminalSlices.delete(ghIssue);
+  }
+
+  /**
    * Summarize slices left in flight by a pipeline-level exception. This
    * is not a decided slice outcome, so it deliberately does not persist.
    */

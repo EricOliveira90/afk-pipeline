@@ -86,7 +86,7 @@ afterEach(() => {
 });
 
 describe("an impasse parks its slice and holds only DAG dependents", () => {
-  it("continues an independent sibling and names the undispatched dependent in summary and status", async () => {
+  it("resumes from a decision written while a sibling runs, then dispatches its dependent", async () => {
     // This fixture state cannot be reached by an existing pipeline run:
     // negotiation itself parks while a sibling passes and a dependent
     // remains undispatched.
@@ -150,7 +150,34 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       ],
     ]);
     const records: InvocationRecord[] = [];
-    const provider = buildStubProvider({ fixtures, slices, records });
+    const stub = buildStubProvider({ fixtures, slices, records });
+    const provider: AgentProvider = {
+      name: stub.name,
+      async invoke(options) {
+        if (
+          options.role === "generator" &&
+          /-s02$/.test(options.cwd.replace(/\\/g, "/"))
+        ) {
+          const parkedCwd = records.find(
+            (record) => record.ghIssue === "8181",
+          )?.cwd;
+          if (!parkedCwd) throw new Error("parked worktree was not invoked");
+          const parkedDir = findSliceArtifactDir(parkedCwd, "01");
+          if (!parkedDir) throw new Error("parked artifact directory missing");
+          writeFileSync(
+            join(parkedDir, "adjudication.md"),
+            JSON.stringify({
+              version: 1,
+              findingId: "F-IMPASSE",
+              winningPosition: "PLANNER",
+              author: "operator",
+            }),
+            "utf-8",
+          );
+        }
+        return stub.invoke(options);
+      },
+    };
 
     const result = await runPipeline({
       repoRoot: repo,
@@ -159,30 +186,27 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       specsDir,
       dag: buildDAG(slices),
       provider,
+      adjudicationWaitMs: 5_000,
+      adjudicationPollMs: 10,
     });
 
-    expect(records.some((record) => record.ghIssue === "8183")).toBe(false);
-    expect(
-      records.some(
-        (record) =>
-          record.ghIssue === "8182" && record.role === "generator",
+    for (const id of ["8181", "8182", "8183"]) {
+      expect(
+        records.some(
+          (record) => record.ghIssue === id && record.role === "generator",
+        ),
+      ).toBe(true);
+    }
+    const state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
       ),
-    ).toBe(true);
-    expect(result.summary).toContain("#8183 Dependent");
-    expect(result.summary).toContain("#8181 (AWAITING-ADJUDICATION)");
-
-    const runDir = readdirSync(
-      join(repo, ".afk", "logs", `${slug}-stub`),
-      { withFileTypes: true },
-    )
-      .filter((entry) => entry.isDirectory() && /^run-/.test(entry.name))
-      .map((entry) =>
-        join(repo, ".afk", "logs", `${slug}-stub`, entry.name),
-      )[0]!;
-    const status = runStatus(["--run", runDir], repo);
-    expect(status.output).toContain(
-      "waits on #8181 (AWAITING-ADJUDICATION)",
     );
+    expect(state.slices["8181"]?.phase).toBe("PASS");
+    expect(state.slices["8182"]?.phase).toBe("PASS");
+    expect(state.slices["8183"]?.phase).toBe("PASS");
+    expect(result.summary).not.toContain("AWAITING-ADJUDICATION");
   }, 240_000);
 });
 

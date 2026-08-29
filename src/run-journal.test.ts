@@ -175,6 +175,31 @@ describe("RunJournal.recordTerminal", () => {
       expect(projection).toContain(reason);
     }
   });
+
+  it("reopens an adjudication park for a later outcome in the same run", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "adjudication-resume");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: "waiting on F-01",
+    });
+
+    journal.reopenAdjudication(SLICE.ghIssue);
+    journal.trackSlice(lifecycle.running(SLICE));
+    journal.recordTerminal(SLICE, { phase: "PASS" });
+
+    expect(loadRunState(repo, "adjudication-resume").slices["40"]).toMatchObject(
+      {
+        phase: "PASS",
+        mergedToFeature: true,
+      },
+    );
+    expect(
+      eventsOf(journal).filter((event) => event.type === "slice-outcome"),
+    ).toHaveLength(2);
+  });
 });
 
 /**

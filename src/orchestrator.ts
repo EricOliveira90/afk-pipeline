@@ -156,6 +156,7 @@ import {
 import {
   ADJUDICATION_FILENAME,
   parseAdjudication,
+  waitForAdjudication,
 } from "./adjudication.js";
 import {
   advanceQAReviewHistory,
@@ -181,6 +182,8 @@ import {
 } from "./escalation.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
+const DEFAULT_ADJUDICATION_WAIT_MS = 60_000;
+const DEFAULT_ADJUDICATION_POLL_MS = 1_000;
 
 /**
  * Scope amendments granted per QA stage per round (#112).
@@ -429,6 +432,10 @@ export interface PipelineConfig {
   requestCancellation?: () => void;
   /** Sentinel poll interval override. Exists for tests. */
   stopSentinelIntervalMs?: number;
+  /** Bounded adjudication hold. Private test seam; not a CLI option. */
+  adjudicationWaitMs?: number;
+  /** Adjudication filesystem poll interval. Private test seam. */
+  adjudicationPollMs?: number;
   /**
    * The CLI's crash recorder (#121). Supplied only by an entry point that
    * owns the process, because the handlers behind it end the process: the
@@ -1976,6 +1983,32 @@ export async function runSliceNegotiate(
             kind: "verdict",
             verdict: "REVISE",
             summary: `${negotiateImpasseCause(outcome, "REVISE").summary}; ${defect}`,
+          },
+        };
+      }
+
+      logger.trackSlice(
+        lifecycle.running(
+          {
+            ghIssue: ctx.slice.ghIssue,
+            title: ctx.slice.title,
+            branch: ctx.branch,
+          },
+          logger.getSliceProgress(ctx.slice.ghIssue),
+        ),
+      );
+      const refresh = git.mergeBranchIntoWorktree(
+        ctx.worktreeDir,
+        ctx.featBranch,
+      );
+      if (refresh.status === "conflict") {
+        return {
+          phase: "ERROR",
+          cause: {
+            kind: "internal-error",
+            summary:
+              "adjudication: could not refresh the parked branch from " +
+              `${ctx.featBranch} without conflicts; preserved the branch and decision`,
           },
         };
       }
@@ -4446,6 +4479,11 @@ export async function runPipeline(
   // branch. They are naturally re-eligible on the next run, where the
   // merge-only recovery pass tries the merge again before any agent runs.
   const mergePending = new Set<string>();
+  const awaitingAdjudication = new Set<string>();
+  const adjudicationWaits = new Map<
+    string,
+    ReturnType<typeof waitForAdjudication>
+  >();
 
   /**
    * A slice this run will not dispatch again, for any reason short of
@@ -4453,7 +4491,10 @@ export async function runPipeline(
    * three filter sites plus a sweep condition.
    */
   const heldBack = (id: string): boolean =>
-    failed.has(id) || laneCancelled.has(id) || mergePending.has(id);
+    failed.has(id) ||
+    laneCancelled.has(id) ||
+    mergePending.has(id) ||
+    awaitingAdjudication.has(id);
 
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
@@ -4560,7 +4601,13 @@ export async function runPipeline(
   // signal happens to fire.
   cancellableSlices = () =>
     [...dag.slices]
-      .filter(([id, slice]) => slice.type !== "HITL" && !completed.has(id) && !failed.has(id))
+      .filter(
+        ([id, slice]) =>
+          slice.type !== "HITL" &&
+          !completed.has(id) &&
+          !failed.has(id) &&
+          !awaitingAdjudication.has(id),
+      )
       .map(([id, slice]) => ({
         ghIssue: id,
         title: slice.title,
@@ -4600,6 +4647,35 @@ export async function runPipeline(
       },
       outcome,
     );
+    if (
+      outcome.phase === "AWAITING-ADJUDICATION" &&
+      !adjudicationWaits.has(id)
+    ) {
+      awaitingAdjudication.add(id);
+      const sliceContext = makeSliceContext(
+        config,
+        slice,
+        logger,
+        featBranch,
+        relevantFilesBlock,
+        testCommand,
+      );
+      const waitMs =
+        config.adjudicationWaitMs ?? DEFAULT_ADJUDICATION_WAIT_MS;
+      logger.phase(
+        `${sliceContext.tag}: waiting up to ${waitMs}ms for ${ADJUDICATION_FILENAME}`,
+      );
+      adjudicationWaits.set(
+        id,
+        waitForAdjudication({
+          sliceDir: sliceContext.absSliceDir,
+          waitMs,
+          pollMs:
+            config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
+          signal,
+        }),
+      );
+    }
   };
 
   // --- Merge-only recovery, before the first wave dispatches (ADR 0029).
@@ -4762,6 +4838,29 @@ export async function runPipeline(
       dispatched.add(id);
       if (outcome.phase === "PASS") {
         completed.add(id);
+      } else if (outcome.phase === "AWAITING-ADJUDICATION") {
+        const wait = adjudicationWaits.get(id);
+        if (!wait) {
+          throw new Error(`Missing adjudication wait for slice #${id}`);
+        }
+        const result = await wait;
+        adjudicationWaits.delete(id);
+        if (result.status === "accepted" && !signal?.aborted) {
+          awaitingAdjudication.delete(id);
+          logger.reopenAdjudication(id);
+          logger.phase(
+            `[afk] Slice #${id}: valid adjudication received — redispatching`,
+          );
+        } else if (result.status === "expired") {
+          if (result.defect) {
+            logger.phase(
+              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
+            );
+          }
+          logger.phase(
+            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
+          );
+        }
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
       } else if (outcome.phase === "MERGE-PENDING") {
@@ -4778,7 +4877,13 @@ export async function runPipeline(
     if (signal?.aborted) {
       for (const [id, slice] of dag.slices) {
         if (slice.type === "HITL") continue;
-        if (completed.has(id) || failed.has(id)) continue;
+        if (
+          completed.has(id) ||
+          failed.has(id) ||
+          awaitingAdjudication.has(id)
+        ) {
+          continue;
+        }
         const branch = sliceBranch(prdSlug, slice, provider);
         logger.recordTerminal(
           { ghIssue: id, title: slice.title, branch },

@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseAdjudication,
   type Adjudication,
+  waitForAdjudication,
 } from "./adjudication.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
 
@@ -117,5 +121,46 @@ describe("parseAdjudication", () => {
 
   it.each(invalid)("rejects %s", (_name, raw, expected) => {
     expect(() => parseAdjudication(raw, IMPASSE)).toThrow(expected);
+  });
+});
+
+describe("waitForAdjudication", () => {
+  it("accepts a valid decision that appears during the bounded wait", async () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-adjudication-"));
+    try {
+      writeFileSync(
+        join(sliceDir, "contract-negotiation-outcome.json"),
+        JSON.stringify(IMPASSE),
+        "utf-8",
+      );
+      let now = 0;
+      let polls = 0;
+
+      const result = await waitForAdjudication({
+        sliceDir,
+        waitMs: 100,
+        pollMs: 10,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms;
+          polls++;
+          writeFileSync(
+            join(sliceDir, "adjudication.md"),
+            JSON.stringify({
+              version: 1,
+              findingId: "F-01",
+              winningPosition: "PLANNER",
+              author: "Ada",
+            }),
+            "utf-8",
+          );
+        },
+      });
+
+      expect(result).toEqual({ status: "accepted" });
+      expect(polls).toBe(1);
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
   });
 });
