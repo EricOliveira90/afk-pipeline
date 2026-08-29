@@ -4,41 +4,56 @@
 
 ## Scope
 
-This verdict covers only slice 06 (#129), `afk adopt`. Slices 01-05 do not affect it.
+This review judges only slices 01 (#80), 02 (#81), and 06 (#129).
 
 ## Fix Before Ship
 
-### Slice numbers are persisted under the wrong run-state identity
+### 1. Pre-build scope discovery still has no usable escalation identity
 
-The PRD promises that `afk adopt` takes a finished slice and writes its state entry as the pipeline would, so hand-finishing never bypasses gates or state discipline (PRD Solution and story 17; slice-06 behavior B-01).
+The PRD’s original deadlock case is a generator that knows before building that the correct implementation needs an undeclared path (Problem Statement; stories 1 and 2). It promises a structured route to contract revision.
 
 Evidence gathered:
 
-- `.kiro/specs/afk-v2-routing-adjudication/issues.md`, slice table: slice `06` is GitHub issue `129`.
-- `src/adopt-command.ts`, `parseArgs` and `runAdoptCli` state write (lines 74-95 and 295-305): the command accepts the raw `<slice>` argument and passes it unchanged to `saveSliceState`; it never resolves the manifest slice to its GitHub issue ID.
-- `src/run-state.ts`, `isSliceComplete` (lines 492-494), and `src/orchestrator.ts`, completed-slice restoration (lines 4298-4307): pipeline completion is looked up by GitHub issue ID.
-- I ran a focused state check using this PRD's `issues.md`. A PASS record written under the entered slice `06` returned `completeByEnteredSlice: true` but `completeByPipelineKey: false` for issue `129`.
+- `prompts/generator.md`, “Scope escalation” (lines 70-81), authorizes escalation only when a **cited finding** needs an undeclared path and requires cited `findingIds`.
+- `src/orchestrator.ts`, `runSliceExecute` initial-generator prompt construction (lines 3382-3393), supplies no unresolved findings or other finding identity to the initial generator.
+- `src/escalation.ts`, `parseScopeEscalation` (lines 60-103), rejects an artifact without at least one non-blank `findingIds` entry.
+- I read the initial prompt construction and ran the focused prompt/escalation tests. They pass, but preserve this cited-finding-only wording; they do not exercise the PRD’s before-building case without a finding.
 
-An operator following the CLI's `afk adopt <prd-slug> <slice>` wording can receive success after entering `06`, yet AFK will not recognize #129 as complete. A later run can dispatch the slice again, and summary/PR provenance is associated with `#06` instead of `#129`.
+An initial generator that discovers the contract’s file scope is too narrow has no cited finding ID it can legally put in the required artifact. The exact pre-build deadlock named by the PRD therefore remains possible.
 
-Resolve either the manifest slice number or GitHub issue ID to the canonical GitHub issue key before any merge, reject unknown identifiers before mutation, and cover both `06` and `129`.
+Give pre-build scope discoveries a defined identity and prompt contract, or allow a schema-valid escalation without a prior finding. Add an initial-generator scenario that discovers an undeclared required path without receiving QA findings and proves contract revision occurs.
 
-## Delivered Outcomes
+### 2. `afk adopt` cannot adopt Codex or Claude run state
 
-- Candidate merges are built and base gates run before the feature ref moves.
-- Gate and merge-conflict refusals name their cause and preserve refs and state.
-- Missing, empty, whitespace-only, and option-shaped reasons are refused.
-- Successful adoption records adopter, reason, branch, and verified slice-tip commit.
-- Persisted adoption provenance renders in run summaries and draft PR bodies; ordinary summaries retain their prior rendering.
-- Focused verification passed: 4 test files, 43 tests (`adopt-command`, `afk`, `logger`, and `ship-gate`). The already-passed pre-ship full suite was not rerun.
+The PRD promises that a finished slice can be adopted with pipeline-equivalent verification and state discipline (Solution; story 17; slice-06 B-01 and B-05). AFK’s supported non-Kiro providers use provider-qualified run state and feature branches.
+
+Evidence gathered:
+
+- `src/orchestrator.ts`, `pipelineRunSlug` (lines 539-540), stores non-Kiro runs under `<prd-slug>-<provider>`.
+- `src/adopt-command.ts`, `resolveSliceIdentity` and `runAdoptCli` (lines 130-174 and 310-316), use the entered PRD slug for `issues.md` and then load only that unqualified state key.
+- `src/run-state.ts`, `statePath` and `loadRunState` (lines 201-217), therefore look for `<prd-slug>.json` and default to `feat/<prd-slug>` when it is absent.
+- The current run’s actual state is `C:\Code\afk-prd2-run\.afk\state\afk-v2-routing-adjudication-codex.json`, with feature branch `feat-codex/afk-v2-routing-adjudication`; no unqualified state file or feature branch exists.
+- I ran the current command against that run and its finished slice-06 branch. It refused with: `Feature branch not found: feat/afk-v2-routing-adjudication`.
+
+The adoption bypass valve is unusable for a Codex or Claude run and cannot write provenance into the state that the pipeline later reads.
+
+Make the canonical `afk adopt` command select the intended provider-qualified run state, with ambiguity refusal when necessary, and test at least Kiro and Codex state/branch identities.
+
+## Delivered outcomes
+
+- Valid, identified scope escalations are validated, archived, routed through focused revision, and resumed without spending the implementation round; malformed artifacts fail closed.
+- Slice 02 delivers impasse evidence, `AWAITING-ADJUDICATION`, independent-sibling continuation, dependent blocking, and cancellation-safe parked state.
+- The Kiro-style adoption path verifies candidate gates before moving the feature ref, records provenance, names ordinary refusals, and renders adoption details in summaries and draft PR bodies.
+- Focused verification passed: 12 test files, 188 tests. The already-passed full suite was not rerun.
 
 ## Notes
 
-`src/git.ts:updateBranchIfUnchanged` advances the feature ref directly. If that branch is checked out, its worktree and index remain at the old tree even though adoption reports success. The existing `mergeSliceBranch` helper explicitly handles checked-out feature branches. The PRD does not specify successful-worktree behavior, so this is not an additional verdict driver, but it is an operator-visible risk worth resolving or documenting.
+- `afk adopt` refuses an otherwise valid adoption while the feature branch is checked out in any registered worktree. This is a defensible safety choice, but it is an operator-visible restriction not stated in the PRD and should be documented.
 
 ## Out-of-scope PRD gaps
 
-- Slice 03 (#89), human adjudication and bounded resumption (stories 4 and 7-9), was not executed and has no slice implementation directory in this tree.
-- Slice 04 (#82), code-assembled stuck diagnosis and prompt retirement (stories 11-12), was not executed and has no slice implementation directory in this tree.
-- Slice 05 (#94), the manual babysit courier follow-up (story 5; story 14 remains deferred), was not executed.
-- Slices 01 (#80) and 02 (#81) are present on the branch but were narrowed out and were not judged for this verdict.
+- Slice 03 (#89): adjudication validation, bounded waiting, human-decision injection, mechanical apply-and-lock, and resumption.
+- Slice 04 (#82): code-assembled stuck diagnosis and retirement of stuck prompt variants.
+- Slice 05 (#94): babysit courier behavior; story 14 remains deferred.
+
+These skipped slices do not drive this verdict.

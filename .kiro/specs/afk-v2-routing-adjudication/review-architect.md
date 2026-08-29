@@ -1,88 +1,66 @@
 # Architecture Guardian Review
+
 **Verdict:** FIX-BEFORE-SHIP
 
-## Blocking Findings
+## Scope reviewed
 
-### 1. Scope revision has no pipeline-level bound
+Reviewed `git diff main...HEAD`, the PRD, and every `contract.md` and
+`handoff.md` under `.kiro/specs/afk-v2-routing-adjudication/slices/`.
+The pre-ship gate was accepted as already passed. I additionally ran
+`pnpm vitest run src/adopt-command.test.ts src/escalation.test.ts
+--reporter=dot` (37 tests passed) and `git diff --check main...HEAD`.
 
-- **File/location:** `src/orchestrator.ts`, `runSliceExecute`, lines 3294-3424.
-- **Evidence gathered:** I read the implementation and its focused tests. The
-  outer implementation loop is bounded, but the inner `while (true)` repeats
-  generator -> planner -> contract evaluator for every valid `escalation.md`.
-  `generatorAttempt` is only used in archive names and is never checked. The
-  loop exits only when a generator omits the artifact. The test at
-  `src/orchestrator.test.ts:1056-1194` covers one escalation, not repeated valid
-  escalations.
-- **Convention:** ADR 0041, "The rule", requires uncertain routing to choose
-  the branch that cannot loop. ADR 0048, "Decision", applies that rule to scope
-  amendment by allowing one extra same-round attempt because repeated
-  amendments without source change are a loop.
-- **Defect:** A generator that discovers or emits one undeclared path at a time
-  can run an unlimited number of fresh agent invocations without consuming an
-  implementation or contract-round budget. Per-invocation wall-clock limits do
-  not bound the enclosing loop.
-- **Required change:** Give focused scope revision an explicit finite allowance
-  per implementation round (or consume an existing round budget), fail with a
-  persisted reason when exhausted, and cover repeated valid escalations.
+## Blocking finding
 
-### 2. Adoption finalization can split the feature ref, checked-out tree, and run state
+### 1. A failed focused scope revision destroys the last accepted lock before a replacement is accepted
 
-- **File/location:** `src/adopt-command.ts`, `runAdoptCli`, lines 273-305;
-  `src/git.ts`, `updateBranchIfUnchanged`, lines 857-878.
-- **Evidence gathered:** I read the finalization order: `git update-ref` moves
-  the feature branch, then `saveSliceState` writes PASS with no catch or
-  rollback. I also ran an isolated Git fixture with the target feature branch
-  checked out in a linked worktree. The compare-and-swap moved `HEAD` to
-  `66596a4`, while `git status --short` reported widespread staged additions
-  and deletions; `HEAD^{tree}` was `1fff7e8...` and the index tree remained
-  `3e05ad8...`.
-- **Convention:** ADR 0042, "No launch-time state<->branch audit", assigns this
-  invariant to `afk adopt` at write time, where the state write must be
-  refusable. ADR 0010, "Decision", requires Git worktree identity and on-disk
-  state to agree rather than trusting only a ref. ADR 0018, "The post-wave loop
-  becomes reconciliation", requires failed terminal-state writes to have a
-  retry path.
-- **Defect:** A checked-out feature branch is advanced behind its worktree,
-  leaving its index/files inconsistent. Separately, any state-write failure
-  after the ref CAS leaves merged code recorded as incomplete, with no rollback
-  or reconciliation path.
-- **Required change:** Finalization must detect a checked-out target and either
-  update that worktree coherently or refuse. If state persistence fails, roll
-  back the feature ref with a guarded CAS (or provide an equivalent recoverable
-  transaction) and return a named refusal. Add both failure scenarios to the
-  focused adoption tests.
+- **File/location:** `src/orchestrator.ts`,
+  `runFocusedScopeRevision` (especially lines 1064-1091 and 1203-1260),
+  reached from `runSliceExecute` around lines 3427-3452; the enclosing error
+  path is around lines 3824-3835.
+- **Evidence gathered:** I read the complete mutation and failure sequence.
+  The function reads `previousContract` and `previousManifestText`, then
+  immediately calls `reopenContract(contractPath)` and deletes
+  `acceptance-manifest.json` before invoking the planner. Those saved values
+  are used only later to describe a successful revision diff. There is no
+  catch/finally restoration. A planner/provider exception therefore reaches
+  `runSliceExecute`'s generic `ERROR` return with the prior contract reopened
+  and the prior manifest deleted. An evaluator rejection likewise returns
+  `ERROR` while leaving the unaccepted revision on disk. I also searched
+  `src/orchestrator.test.ts`; its escalation failure coverage stops before
+  revision planning and does not exercise planner/evaluator failure after
+  these mutations.
+- **Convention violated:** ADR 0008, **Decision**, makes the on-disk contract
+  the orchestrator-owned single source of truth. ADR 0039, **Decision 2 —
+  every restart archives first**, establishes that slice contract artifacts
+  must survive failure/restart boundaries because the worktree copy may be
+  the only copy. This path replaces or removes that authoritative accepted
+  state before the replacement passes evaluation and without preserving a
+  recoverable copy.
+- **Required fix:** Treat the focused revision as a transaction. Preserve the
+  accepted contract and manifest before mutation, and restore them on every
+  planner, validation, evaluator, malformed-artifact, rejection, or
+  cancellation exit. Add narrow tests for at least planner failure and
+  evaluator rejection, asserting the previous locked files remain
+  byte-identical while the escalation archive survives.
 
-### 3. Adoption discards structured teardown failures
+## Non-blocking notes
 
-- **File/location:** `src/adopt-command.ts`, lines 241-261;
-  `src/git.ts`, `createCandidateMerge`, lines 826-845.
-- **Evidence gathered:** I read every new candidate-worktree teardown call.
-  Each awaits `removeWorktree(...)` but ignores its `RemoveWorktreeResult`;
-  `resolveGatePlan` also runs outside the cleanup `try`, so a thrown plan
-  resolution leaves the detached worktree registered.
-- **Convention:** ADR 0035, Decision 5, says every call site reads
-  `result.removed`, and post-gate teardown uses the shared warning/refusal
-  idiom. ADR 0042, Decision 1, treats surviving scratch/review worktrees as
-  residue that must block a later launch.
-- **Defect:** Adoption can report success or a clean refusal while its detached
-  candidate worktree survives. This recreates the silent worktree-residue class
-  ADR 0035 replaced with structured handling.
-- **Required change:** Put candidate lifetime in `try/finally`, inspect
-  `result.removed` on every path, and surface a classified refusal or warning
-  consistent with ADR 0035. Cover gate-plan throws and teardown survivors.
+1. `runFocusedScopeRevision` duplicates the normal planner/evaluator/archive/
+   lock protocol. ADR 0050, **Consequences**, already records this as a
+   shotgun-surgery risk under ADR 0008. A shared revision protocol would
+   reduce future drift.
 
-## Notes
+2. `src/logger.ts:DependencyBlocker.status` is an unrestricted `string` even
+   though routing depends on the exact lifecycle value
+   `AWAITING-ADJUDICATION`. ADR 0032's single-fold direction favors typing
+   this as `SlicePhase | "UNKNOWN"` rather than introducing another loose
+   status vocabulary.
 
-- `runFocusedScopeRevision` duplicates the planner/evaluator/archive/lock
-  protocol already owned by normal negotiation. This is a future shotgun-
-  surgery risk under ADR 0008's orchestrator-owned contract lifecycle; extract
-  the shared protocol when the blocking bound is added.
-- `DependencyBlocker.status` in `src/logger.ts` is an unconstrained `string`
-  even though it controls lifecycle rendering. Prefer
-  `SlicePhase | "UNKNOWN"` to prevent naming drift.
-
-## Verification
-
-`pnpm vitest run src/escalation.test.ts src/adopt-command.test.ts` passed
-(30 tests). `git diff --check main...HEAD` passed. The pre-ship full suite was
-not rerun, as instructed.
+3. `afk adopt` has a recoverable but incomplete two-resource transaction:
+   it advances the feature ref, writes run state, then attempts a guarded
+   rollback if the state write throws. If both the write and reverse CAS
+   fail, the command explicitly leaves merged code without state. ADR 0042,
+   **No launch-time state↔branch audit**, places this invariant at adopt write
+   time. The explicit refusal is useful, but a durable intent/recovery record
+   would make this failure mechanically repairable.
