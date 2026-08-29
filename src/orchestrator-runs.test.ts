@@ -369,10 +369,7 @@ describe("cancellation after an impasse park", () => {
     let before:
       | {
           parkedState: Record<string, unknown>;
-          workingPath: string;
-          working: string;
-          archivedPath: string;
-          archived: string;
+          files: Array<{ path: string; contents: string }>;
         }
       | undefined;
     const provider: AgentProvider = {
@@ -389,18 +386,28 @@ describe("cancellation after an impasse park", () => {
           if (!parkedCwd) throw new Error("parked worktree was not invoked");
           const parkedDir = findSliceArtifactDir(parkedCwd, "01");
           if (!parkedDir) throw new Error("parked artifact directory missing");
-          const workingPath = join(
-            parkedDir,
-            "contract-negotiation-outcome.json",
-          );
-          const archivedPath = join(
+          const archiveDir = join(
             repo,
             ".afk",
             "artifacts",
             `${slug}-stub`,
             "slice-01",
-            "contract-negotiation-outcome.json",
           );
+          const adjudicationPath = join(parkedDir, "adjudication.md");
+          writeFileSync(
+            adjudicationPath,
+            '{"version":1,"findingId":"F-IMPASSE"}\r\n',
+            "utf-8",
+          );
+          const evidencePaths = [
+            join(parkedDir, "contract.md"),
+            join(parkedDir, "contract-negotiation-outcome.json"),
+            join(parkedDir, "stuck.md"),
+            adjudicationPath,
+            join(archiveDir, "contract.md"),
+            join(archiveDir, "contract-negotiation-outcome.json"),
+            join(archiveDir, "stuck.md"),
+          ];
           const state = JSON.parse(
             readFileSync(
               join(repo, ".afk", "state", `${slug}-stub.json`),
@@ -409,10 +416,10 @@ describe("cancellation after an impasse park", () => {
           );
           before = {
             parkedState: state.slices["8281"],
-            workingPath,
-            working: readFileSync(workingPath, "utf-8"),
-            archivedPath,
-            archived: readFileSync(archivedPath, "utf-8"),
+            files: evidencePaths.map((path) => ({
+              path,
+              contents: readFileSync(path, "utf-8"),
+            })),
           };
           controller.abort();
         }
@@ -428,6 +435,8 @@ describe("cancellation after an impasse park", () => {
       dag: buildDAG(slices),
       provider,
       signal: controller.signal,
+      adjudicationWaitMs: 10_000,
+      adjudicationPollMs: 10_000,
     });
 
     expect(before).toBeDefined();
@@ -443,8 +452,15 @@ describe("cancellation after an impasse park", () => {
       branch: expect.any(String),
     });
     expect(finalState.slices["8282"]?.phase).toBe("CANCELLED");
-    expect(readFileSync(before!.workingPath, "utf-8")).toBe(before!.working);
-    expect(readFileSync(before!.archivedPath, "utf-8")).toBe(before!.archived);
+    for (const file of before!.files) {
+      expect(readFileSync(file.path, "utf-8"), file.path).toBe(file.contents);
+    }
+    expect(
+      records.some(
+        (record) =>
+          record.ghIssue === "8281" && record.role === "generator",
+      ),
+    ).toBe(false);
   }, 240_000);
 });
 

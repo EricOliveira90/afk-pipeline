@@ -125,6 +125,30 @@ describe("parseAdjudication", () => {
 });
 
 describe("waitForAdjudication", () => {
+  it("wakes from its polling delay when cancellation occurs", async () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-adjudication-"));
+    try {
+      writeFileSync(
+        join(sliceDir, "contract-negotiation-outcome.json"),
+        JSON.stringify(IMPASSE),
+        "utf-8",
+      );
+      const controller = new AbortController();
+      const waiting = waitForAdjudication({
+        sliceDir,
+        waitMs: 10_000,
+        pollMs: 10_000,
+        signal: controller.signal,
+      });
+
+      controller.abort();
+
+      await expect(waiting).resolves.toEqual({ status: "cancelled" });
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
+  });
+
   it("accepts a valid decision that appears during the bounded wait", async () => {
     const sliceDir = mkdtempSync(join(tmpdir(), "afk-adjudication-"));
     try {
