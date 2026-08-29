@@ -204,7 +204,10 @@ export async function runAdoptCli(
     };
   }
   if (candidate.status === "conflict") {
-    return { output: "Adoption refused: candidate merge failed.", exitCode: 1 };
+    return {
+      output: `Adoption refused: merge conflict: ${candidate.details}`,
+      exitCode: 1,
+    };
   }
 
   const gatePlan = dependencies.resolveGatePlan(candidate.worktreeDir);
@@ -256,7 +259,10 @@ export async function runAdoptCli(
     scratchMergeDir,
   );
   if (merge.status === "conflict") {
-    return { output: "Adoption refused: candidate merge failed.", exitCode: 1 };
+    return {
+      output: `Adoption refused: merge conflict: ${merge.details}`,
+      exitCode: 1,
+    };
   }
   if (resolveTree(repoRoot, state.featureBranch) !== candidate.treeId) {
     return {

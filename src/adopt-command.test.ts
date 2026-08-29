@@ -49,6 +49,20 @@ function makeRepo(): string {
   return repo;
 }
 
+function makeConflictingRepo(): string {
+  const repo = makeRepo();
+  git(repo, ["checkout", "feat/demo"]);
+  writeFileSync(join(repo, "base.txt"), "feature version\n");
+  git(repo, ["add", "base.txt"]);
+  git(repo, ["commit", "-m", "feature change"]);
+  git(repo, ["checkout", "manual/demo-01"]);
+  writeFileSync(join(repo, "base.txt"), "slice version\n");
+  git(repo, ["add", "base.txt"]);
+  git(repo, ["commit", "-m", "slice conflict"]);
+  git(repo, ["checkout", "main"]);
+  return repo;
+}
+
 const GATES: GateDeclaration[] = [
   {
     id: "typecheck",
@@ -196,6 +210,49 @@ describe("afk adopt", () => {
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("lint");
     expect(observedGates).toEqual(["typecheck", "lint", "tests"]);
+    expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+    expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
+    expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+    expect(git(repo, ["branch", "--show-current"])).toBe(branchBefore);
+    expect(
+      git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
+    ).toBe(statusBefore);
+  });
+
+  it("names a merge conflict and leaves the worktree, both refs, and state unchanged", async () => {
+    const repo = makeConflictingRepo();
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const featureBefore = resolveCommit(repo, "feat/demo")!;
+    const sliceBefore = resolveCommit(repo, "manual/demo-01")!;
+    const stateBefore = readFileSync(statePath, "utf-8");
+    const statusBefore = git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const branchBefore = git(repo, ["branch", "--show-current"]);
+    let gatesCalled = false;
+
+    const result = await runAdoptCli(
+      [
+        "demo",
+        "129",
+        "--branch",
+        "manual/demo-01",
+        "--adopter",
+        "Ada Lovelace",
+        "--reason",
+        "finished the slice manually",
+      ],
+      repo,
+      {
+        resolveGatePlan: () => ({ declarations: GATES }),
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output.toLowerCase()).toContain("conflict");
+    expect(gatesCalled).toBe(false);
     expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
     expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
     expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
