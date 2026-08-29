@@ -118,6 +118,22 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         blockedBy: ["8181"],
         userStories: "",
       },
+      {
+        number: "04",
+        ghIssue: "8184",
+        title: "Preserved park",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "05",
+        ghIssue: "8185",
+        title: "Preserved dependent",
+        type: "AFK",
+        blockedBy: ["8184"],
+        userStories: "",
+      },
     ];
     const fixtures = new Map<string, SliceFixture>([
       [
@@ -146,6 +162,25 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           qaPasses: true,
           outputFile: "src/dependent.txt",
           outputContent: "dependent",
+        },
+      ],
+      [
+        "8184",
+        {
+          files: ["src/preserved-park.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/preserved-park.txt",
+          outputContent: "preserved park",
+        },
+      ],
+      [
+        "8185",
+        {
+          files: ["src/preserved-dependent.txt"],
+          qaPasses: true,
+          outputFile: "src/preserved-dependent.txt",
+          outputContent: "preserved dependent",
         },
       ],
     ]);
@@ -206,7 +241,32 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
     expect(state.slices["8181"]?.phase).toBe("PASS");
     expect(state.slices["8182"]?.phase).toBe("PASS");
     expect(state.slices["8183"]?.phase).toBe("PASS");
-    expect(result.summary).not.toContain("AWAITING-ADJUDICATION");
+    const preservedBranch =
+      "afk-stub/impasse-dependency-slice-04-preserved-park";
+    expect(state.slices["8184"]).toMatchObject({
+      phase: "AWAITING-ADJUDICATION",
+      branch: preservedBranch,
+    });
+    expect(state.slices["8185"]).toBeUndefined();
+    expect(
+      records.some((record) => record.ghIssue === "8185"),
+    ).toBe(false);
+    expect(result.summary).toMatch(
+      new RegExp(
+        String.raw`\| 8184 Preserved park \| [^|]*AWAITING-ADJUDICATION[^|]*\| [^|]*\| ${preservedBranch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \|`,
+      ),
+    );
+    expect(result.summary).toContain(
+      "| #8185 Preserved dependent | #8184 (AWAITING-ADJUDICATION) |",
+    );
+    const status = runStatus([], repo);
+    expect(status.exitCode).toBe(0);
+    expect(status.output).toContain(
+      `#8184 Preserved park: AWAITING-ADJUDICATION — branch preserved: ${preservedBranch}`,
+    );
+    expect(status.output).toContain(
+      "#8185 — explorer → planner → evaluator-contract → generator → evaluator-qa — waits on #8184 (AWAITING-ADJUDICATION)",
+    );
   }, 240_000);
 });
 
