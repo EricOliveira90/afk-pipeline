@@ -15,6 +15,13 @@ const PERSISTED_PHASES = new Set<string>(
   ALL_PHASES.filter((phase) => traitsFor(phase).persisted),
 );
 
+export interface SliceAdoption {
+  adopter: string;
+  reason: string;
+  branch: string;
+  commit: string;
+}
+
 export interface PersistedSliceState {
   phase: PersistedPhase;
   branch?: string;
@@ -29,6 +36,8 @@ export interface PersistedSliceState {
    * anything (ADR 0029).
    */
   collidingPrefixes?: string[];
+  /** Audit trail for a slice completed outside the pipeline and adopted. */
+  adoption?: SliceAdoption;
 }
 
 export interface RunState {
@@ -257,6 +266,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       mergedToFeature?: boolean;
       error?: string;
       collidingPrefixes?: unknown;
+      adoption?: unknown;
     };
     if (typeof v.status !== "string" || !PERSISTED_PHASES.has(v.status)) {
       throw new Error(
@@ -271,6 +281,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         : {}),
       ...(v.error !== undefined ? { error: v.error } : {}),
       ...prefixesOf(v.collidingPrefixes),
+      ...adoptionOf(v.adoption),
     };
   }
   return {
@@ -293,6 +304,31 @@ function prefixesOf(value: unknown): { collidingPrefixes?: string[] } {
   return prefixes.length > 0 ? { collidingPrefixes: prefixes } : {};
 }
 
+function adoptionOf(value: unknown): { adoption?: SliceAdoption } {
+  if (typeof value !== "object" || value === null) return {};
+  const adoption = value as Partial<Record<keyof SliceAdoption, unknown>>;
+  if (
+    typeof adoption.adopter !== "string" ||
+    adoption.adopter.trim() === "" ||
+    typeof adoption.reason !== "string" ||
+    adoption.reason.trim() === "" ||
+    typeof adoption.branch !== "string" ||
+    adoption.branch.trim() === "" ||
+    typeof adoption.commit !== "string" ||
+    adoption.commit.trim() === ""
+  ) {
+    return {};
+  }
+  return {
+    adoption: {
+      adopter: adoption.adopter,
+      reason: adoption.reason,
+      branch: adoption.branch,
+      commit: adoption.commit,
+    },
+  };
+}
+
 function validateV1Slice(id: string, val: unknown): PersistedSliceState {
   const v = (val ?? {}) as {
     phase?: string;
@@ -300,6 +336,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
     mergedToFeature?: boolean;
     error?: string;
     collidingPrefixes?: unknown;
+    adoption?: unknown;
   };
   if (typeof v.phase !== "string" || !PERSISTED_PHASES.has(v.phase)) {
     throw new Error(
@@ -314,6 +351,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
       : {}),
     ...(v.error !== undefined ? { error: v.error } : {}),
     ...prefixesOf(v.collidingPrefixes),
+    ...adoptionOf(v.adoption),
   };
 }
 

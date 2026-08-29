@@ -14,6 +14,17 @@ export type MergeResult =
   | { status: "merged"; cleanupWarning?: string }
   | { status: "conflict"; details: string };
 
+export type CandidateMergeResult =
+  | {
+      status: "merged";
+      featureCommit: string;
+      sliceCommit: string;
+      candidateCommit: string;
+      treeId: string;
+      worktreeDir: string;
+    }
+  | { status: "conflict"; details: string };
+
 function execErrorDetails(err: unknown): string {
   const stderr = (err as { stderr?: string })?.stderr?.trim();
   if (stderr) return stderr;
@@ -790,6 +801,57 @@ export function mergeBranchIntoWorktree(
     }
     return { status: "conflict", details: execErrorDetails(err) };
   }
+}
+
+/**
+ * Materialize the prospective feature+slice merge at a detached HEAD.
+ * No branch ref moves; the caller owns the returned worktree until its
+ * verification is complete.
+ */
+export async function createCandidateMerge(
+  repoRoot: string,
+  sliceBranch: string,
+  featureBranch: string,
+  worktreeDir: string,
+): Promise<CandidateMergeResult> {
+  const featureCommit = resolveCommit(repoRoot, featureBranch);
+  if (!featureCommit) {
+    throw new Error(`Feature branch not found: ${featureBranch}`);
+  }
+  const sliceCommit = resolveCommit(repoRoot, sliceBranch);
+  if (!sliceCommit) {
+    throw new Error(`Slice branch not found: ${sliceBranch}`);
+  }
+
+  git(["worktree", "add", "--detach", worktreeDir, featureCommit], {
+    cwd: repoRoot,
+  });
+  try {
+    git(["merge", sliceCommit, "--no-edit"], { cwd: worktreeDir });
+  } catch (err: unknown) {
+    try {
+      git(["merge", "--abort"], { cwd: worktreeDir });
+    } catch {
+      // Already clean.
+    }
+    await removeWorktree(repoRoot, worktreeDir);
+    return { status: "conflict", details: execErrorDetails(err) };
+  }
+
+  const candidateCommit = resolveCommit(worktreeDir, "HEAD");
+  const treeId = resolveTree(worktreeDir);
+  if (!candidateCommit || !treeId) {
+    await removeWorktree(repoRoot, worktreeDir);
+    throw new Error("Could not resolve the candidate merge commit and tree");
+  }
+  return {
+    status: "merged",
+    featureCommit,
+    sliceCommit,
+    candidateCommit,
+    treeId,
+    worktreeDir,
+  };
 }
 
 /**
