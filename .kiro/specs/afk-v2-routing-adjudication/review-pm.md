@@ -4,56 +4,47 @@
 
 ## Scope
 
-This review judges only slices 01 (#80), 02 (#81), and 06 (#129).
+This review judges only slices 01 (#80), 02 (#81), 03 (#89), 04 (#82), and 06 (#129). Slice 05 (#94) is out of scope.
 
 ## Fix Before Ship
 
-### 1. Pre-build scope discovery still has no usable escalation identity
+### One adjudication can silently settle a multi-finding impasse
 
-The PRD’s original deadlock case is a generator that knows before building that the correct implementation needs an undeclared path (Problem Statement; stories 1 and 2). It promises a structured route to contract revision.
-
-Evidence gathered:
-
-- `prompts/generator.md`, “Scope escalation” (lines 70-81), authorizes escalation only when a **cited finding** needs an undeclared path and requires cited `findingIds`.
-- `src/orchestrator.ts`, `runSliceExecute` initial-generator prompt construction (lines 3382-3393), supplies no unresolved findings or other finding identity to the initial generator.
-- `src/escalation.ts`, `parseScopeEscalation` (lines 60-103), rejects an artifact without at least one non-blank `findingIds` entry.
-- I read the initial prompt construction and ran the focused prompt/escalation tests. They pass, but preserve this cited-finding-only wording; they do not exercise the PRD’s before-building case without a finding.
-
-An initial generator that discovers the contract’s file scope is too narrow has no cited finding ID it can legally put in the required artifact. The exact pre-build deadlock named by the PRD therefore remains possible.
-
-Give pre-build scope discoveries a defined identity and prompt contract, or allow a schema-valid escalation without a prior finding. Add an initial-generator scenario that discovers an undeclared required path without receiving QA findings and proves contract revision occurs.
-
-### 2. `afk adopt` cannot adopt Codex or Claude run state
-
-The PRD promises that a finished slice can be adopted with pipeline-equivalent verification and state discipline (Solution; story 17; slice-06 B-01 and B-05). AFK’s supported non-Kiro providers use provider-qualified run state and feature branches.
+The PRD says the adjudication artifact identifies one finding and that “the human decision resolves a finding, not the contract” (`prd.md`, Solution). A human decision for one contested finding must not silently settle other contested findings.
 
 Evidence gathered:
 
-- `src/orchestrator.ts`, `pipelineRunSlug` (lines 539-540), stores non-Kiro runs under `<prd-slug>-<provider>`.
-- `src/adopt-command.ts`, `resolveSliceIdentity` and `runAdoptCli` (lines 130-174 and 310-316), use the entered PRD slug for `issues.md` and then load only that unqualified state key.
-- `src/run-state.ts`, `statePath` and `loadRunState` (lines 201-217), therefore look for `<prd-slug>.json` and default to `feat/<prd-slug>` when it is absent.
-- The current run’s actual state is `C:\Code\afk-prd2-run\.afk\state\afk-v2-routing-adjudication-codex.json`, with feature branch `feat-codex/afk-v2-routing-adjudication`; no unqualified state file or feature branch exists.
-- I ran the current command against that run and its finished slice-06 branch. It refused with: `Feature branch not found: feat/afk-v2-routing-adjudication`.
+- `src/orchestrator.test.ts`, test `parks a contested round-two exhaustion for adjudication` (lines 2788-2939), creates one impasse containing two contested findings, `F-01` and `F-02`.
+- `src/adjudication.ts`, `parseAdjudication` (lines 81-93), validates only that the chosen `findingId` exists and is contested. It does not account for other contested findings.
+- `src/orchestrator.ts`, `runSliceNegotiate` / `lockAdjudicatedContract` (lines 2123-2184), locks and returns `LOCKED` immediately after applying a valid decision. It does not check whether the impasse still contains another undecided contested finding.
+- `src/orchestrator.test.ts` (lines 2962-2990) writes a decision only for `F-01` and explicitly expects `LOCKED`, although the same impasse still contains contested `F-02`.
+- I ran the focused `src/orchestrator.test.ts` selection. The scenario passed, confirming this is the implemented and asserted behavior rather than a dead branch.
 
-The adoption bypass valve is unusable for a Codex or Claude run and cannot write provenance into the state that the pipeline later reads.
+Observed user outcome: deciding `F-01` can start generation while `F-02` has never been decided by the human.
 
-Make the canonical `afk adopt` command select the intended provider-qualified run state, with ambiguity refusal when necessary, and test at least Kiro and Codex state/branch identities.
+Required outcome: a decision must resolve only its named finding. The slice must not become generator-dispatchable until every remaining contested finding has an explicit human decision and the mechanical lock checks pass.
 
 ## Delivered outcomes
 
-- Valid, identified scope escalations are validated, archived, routed through focused revision, and resumed without spending the implementation round; malformed artifacts fail closed.
-- Slice 02 delivers impasse evidence, `AWAITING-ADJUDICATION`, independent-sibling continuation, dependent blocking, and cancellation-safe parked state.
-- The Kiro-style adoption path verifies candidate gates before moving the feature ref, records provenance, names ordinary refusals, and renders adoption details in summaries and draft PR bodies.
-- Focused verification passed: 12 test files, 188 tests. The already-passed full suite was not rerun.
+- Slice 01: pre-build and finding-backed escalations have a strict schema, immutable attempt archives, focused planner/evaluator revision, rollback on failed revision, and same-implementation-round resumption.
+- Slice 02: impasse evidence preserves both positions, the slice parks as `AWAITING-ADJUDICATION`, independent work continues, dependents remain visibly blocked, and cancellation preserves parked state and evidence.
+- Slice 03: adjudications are schema-validated and fail closed; waits are bounded; valid decisions can resume in-run or on a later run; evaluator and third-instruction decisions pass through one apply-and-lock step; cancellation preserves evidence. The multi-finding defect above prevents this slice from fully delivering its promised outcome.
+- Slice 04: `stuck.md` is assembled deterministically from archived finding, escalation, round, artifact, and commit evidence; resolved and open findings are separated; failed resumes refresh the diagnosis; the retired stuck-specific prompts are no longer active.
+- Slice 06: `afk adopt` verifies the detached candidate merge with all base gates before moving the feature ref, records adopter/reason/branch/commit provenance, refuses conflicts and failed gates without mutation, supports provider-qualified run state, and surfaces adoption in summaries and draft PR bodies.
 
-## Notes
+## Product notes
 
-- `afk adopt` refuses an otherwise valid adoption while the feature branch is checked out in any registered worktree. This is a defensible safety choice, but it is an operator-visible restriction not stated in the PRD and should be documented.
+- Slice 01 caps focused scope revisions at two per implementation round (`src/orchestrator.ts`, `MAX_SCOPE_REVISIONS_PER_ROUND` and `runSliceExecute`). The PRD does not name this cap, so a third otherwise valid escalation requires manual intervention. I treat this as a reasonable anti-loop bound rather than a separate ship blocker, but the operator-facing limit should be documented.
+
+## Verification
+
+- Read the PRD, every available slice contract/acceptance manifest/context/handoff, and the relevant production and test paths.
+- Ran focused unit and integration verification only; the already-passed full suite was not rerun.
+- Focused results: 7 files / 167 tests passed, then 4 files / 34 selected tests passed.
 
 ## Out-of-scope PRD gaps
 
-- Slice 03 (#89): adjudication validation, bounded waiting, human-decision injection, mechanical apply-and-lock, and resumption.
-- Slice 04 (#82): code-assembled stuck diagnosis and retirement of stuck prompt variants.
-- Slice 05 (#94): babysit courier behavior; story 14 remains deferred.
+- Slice 05 (#94), the babysit courier that presents both positions and writes the adjudication artifact, was not executed by this run.
+- Story 14, repository-versioned/global babysit skill packaging, remains explicitly deferred.
 
-These skipped slices do not drive this verdict.
+These gaps do not drive the verdict.

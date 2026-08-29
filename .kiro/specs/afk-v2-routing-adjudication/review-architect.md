@@ -4,63 +4,84 @@
 
 ## Scope reviewed
 
-Reviewed `git diff main...HEAD`, the PRD, and every `contract.md` and
-`handoff.md` under `.kiro/specs/afk-v2-routing-adjudication/slices/`.
-The pre-ship gate was accepted as already passed. I additionally ran
-`pnpm vitest run src/adopt-command.test.ts src/escalation.test.ts
---reporter=dot` (37 tests passed) and `git diff --check main...HEAD`.
+Reviewed `git diff origin/main...HEAD`, the PRD, all slice contracts and
+implementation handoffs under
+`.kiro/specs/afk-v2-routing-adjudication/slices/`, and the production paths
+for escalation, impasse parking, adjudication, stuck diagnosis, adoption,
+persistence, reporting, and Git finalization. The pre-ship gate was accepted
+as already passed. I ran only the focused adjudication scenario:
 
-## Blocking finding
+`pnpm vitest run src/orchestrator.test.ts -t "parks a contested round-two exhaustion for adjudication"`
 
-### 1. A failed focused scope revision destroys the last accepted lock before a replacement is accepted
+It passed and exposed the current multi-finding lock sequence described
+below.
 
-- **File/location:** `src/orchestrator.ts`,
-  `runFocusedScopeRevision` (especially lines 1064-1091 and 1203-1260),
-  reached from `runSliceExecute` around lines 3427-3452; the enclosing error
-  path is around lines 3824-3835.
-- **Evidence gathered:** I read the complete mutation and failure sequence.
-  The function reads `previousContract` and `previousManifestText`, then
-  immediately calls `reopenContract(contractPath)` and deletes
-  `acceptance-manifest.json` before invoking the planner. Those saved values
-  are used only later to describe a successful revision diff. There is no
-  catch/finally restoration. A planner/provider exception therefore reaches
-  `runSliceExecute`'s generic `ERROR` return with the prior contract reopened
-  and the prior manifest deleted. An evaluator rejection likewise returns
-  `ERROR` while leaving the unaccepted revision on disk. I also searched
-  `src/orchestrator.test.ts`; its escalation failure coverage stops before
-  revision planning and does not exercise planner/evaluator failure after
-  these mutations.
-- **Convention violated:** ADR 0008, **Decision**, makes the on-disk contract
-  the orchestrator-owned single source of truth. ADR 0039, **Decision 2 —
-  every restart archives first**, establishes that slice contract artifacts
-  must survive failure/restart boundaries because the worktree copy may be
-  the only copy. This path replaces or removes that authoritative accepted
-  state before the replacement passes evaluation and without preserving a
-  recoverable copy.
-- **Required fix:** Treat the focused revision as a transaction. Preserve the
-  accepted contract and manifest before mutation, and restore them on every
-  planner, validation, evaluator, malformed-artifact, rejection, or
-  cancellation exit. Add narrow tests for at least planner failure and
-  evaluator rejection, asserting the previous locked files remain
-  byte-identical while the escalation archive survives.
+## Blocking findings
+
+### 1. One adjudication resolves one finding but locks a contract with other contested findings still open
+
+- **File/location:** `src/adjudication.ts`, `parseAdjudication` (lines
+  37-123), and `src/orchestrator.ts`, `runSliceNegotiate` (lines
+  2065-2185). The proving fixture is `src/orchestrator.test.ts`, lines
+  2921-2938 and 2962-2997.
+- **Evidence gathered:** I read the parser and lock path, then ran the
+  focused test above. The fixture's IMPASSE contains both `F-01` and `F-02`
+  as `CONTESTED`. Its adjudication names only `F-01`. The run output then
+  reports `accepted adjudication for F-01; contract LOCKED`. The parser
+  checks only that the selected finding exists and is contested; the lock
+  path never checks for remaining contested findings.
+- **Convention violated:** ADR 0008, **Decision**, makes the orchestrator's
+  on-disk `LOCKED` status the single source of truth. Here that status says
+  the contract is settled while the current structured impasse still says
+  another blocking finding is contested. The PRD's adjudication rule also
+  states that a human decision resolves a finding, not the whole contract.
+- **Required fix:** Make the state model honest for multi-finding impasses.
+  Either refuse an impasse/adjudication shape with more than one contested
+  finding, or persist decisions per finding and permit `LOCKED` only after
+  every contested blocking finding has a valid decision applied.
+
+### 2. The apply-and-lock step has no transaction or durable applied state, so rejected and completed decisions can replay
+
+- **File/location:** `src/orchestrator.ts`, `runSliceNegotiate` (lines
+  2065-2248), especially `lockAdjudicatedContract` and the evaluator-winner
+  / third-instruction planner invocation. The revealing assertions are in
+  `src/orchestrator.test.ts`, lines 3007-3041.
+- **Evidence gathered:** I read every exit from the apply path and searched
+  the source for removal, consumption, or an applied marker for
+  `adjudication.md` / `contract-negotiation-outcome.json`; none exists.
+  Validation or lock-gate refusal returns `ESCALATE` without restoring the
+  pre-apply contract and manifest. The focused test manually rewrites both
+  files to `contractBefore` / `manifestBefore` between refusal cases,
+  confirming production performs no rollback. Because the same two working
+  artifacts remain, a later run enters the IMPASSE branch and invokes the
+  apply planner again. Worse, a rejected behavior renumbering becomes the
+  next run's `preApplyManifest`, so the same renumbered result can pass the
+  stability comparison on retry.
+- **Convention violated:** ADR 0008, **Decision**, requires one trustworthy
+  orchestrator-owned contract state. ADR 0051, **Decision**, records the
+  transaction rule already used by the sibling focused-revision path:
+  capture the authoritative contract and manifest before mutation and
+  restore them on every exit that does not reach an accepted lock. The
+  adjudication path mutates the same authoritative pair but omits that
+  guarantee.
+- **Required fix:** Give adjudication application a durable lifecycle:
+  snapshot and restore both files on every non-success exit, and record or
+  consume the applied decision atomically with a successful lock so later
+  implementation retries do not apply it again. Add focused tests proving
+  rollback after planner/validation/lock refusal and no second planner apply
+  after a successful adjudication followed by an implementation retry.
 
 ## Non-blocking notes
 
-1. `runFocusedScopeRevision` duplicates the normal planner/evaluator/archive/
-   lock protocol. ADR 0050, **Consequences**, already records this as a
-   shotgun-surgery risk under ADR 0008. A shared revision protocol would
-   reduce future drift.
+1. `runFocusedScopeRevision` duplicates the ordinary planner/evaluator/
+   archive/validate/lock protocol. ADR 0050 and ADR 0051, **Consequences**,
+   already identify this shotgun-surgery risk. A shared revision protocol
+   would reduce the chance that the transaction, archive, and lock rules
+   diverge again.
 
-2. `src/logger.ts:DependencyBlocker.status` is an unrestricted `string` even
-   though routing depends on the exact lifecycle value
-   `AWAITING-ADJUDICATION`. ADR 0032's single-fold direction favors typing
-   this as `SlicePhase | "UNKNOWN"` rather than introducing another loose
-   status vocabulary.
-
-3. `afk adopt` has a recoverable but incomplete two-resource transaction:
-   it advances the feature ref, writes run state, then attempts a guarded
-   rollback if the state write throws. If both the write and reverse CAS
-   fail, the command explicitly leaves merged code without state. ADR 0042,
-   **No launch-time state↔branch audit**, places this invariant at adopt write
-   time. The explicit refusal is useful, but a durable intent/recovery record
-   would make this failure mechanically repairable.
+2. `RunJournal.reopenAdjudication` deliberately removes a current run's
+   terminal marker so the slice can be dispatched again. That is a practical
+   exception to ADR 0031's single terminal-record seam and ADR 0047's
+   **What is deliberately not cleared** rule. Model the park as a replaceable
+   transition, or amend those ADRs so future journal work does not treat this
+   escape hatch as an accidental invariant breach.
