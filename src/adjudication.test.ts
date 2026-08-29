@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -159,6 +159,34 @@ describe("waitForAdjudication", () => {
 
       expect(result).toEqual({ status: "accepted" });
       expect(polls).toBe(1);
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("expires with the latest validation defect and retains the raw file", async () => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-adjudication-"));
+    try {
+      writeFileSync(
+        join(sliceDir, "contract-negotiation-outcome.json"),
+        JSON.stringify(IMPASSE),
+        "utf-8",
+      );
+      const decisionPath = join(sliceDir, "adjudication.md");
+      const raw = '{"version":1,"findingId":"F-99"}\r\n';
+      writeFileSync(decisionPath, raw, "utf-8");
+
+      const result = await waitForAdjudication({
+        sliceDir,
+        waitMs: 0,
+        pollMs: 10,
+      });
+
+      expect(result).toMatchObject({
+        status: "expired",
+        defect: expect.stringContaining("must contain exactly"),
+      });
+      expect(readFileSync(decisionPath, "utf-8")).toBe(raw);
     } finally {
       rmSync(sliceDir, { recursive: true, force: true });
     }

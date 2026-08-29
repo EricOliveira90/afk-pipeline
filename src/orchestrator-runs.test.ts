@@ -210,6 +210,113 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
   }, 240_000);
 });
 
+describe("adjudication expiry and next-run pickup", () => {
+  it("re-parks without agents, then consumes a pre-existing decision before ordinary negotiation", async () => {
+    // No existing scenario carries one parked worktree through expiry,
+    // a no-file retry, and a later decision, so this needs its own run.
+    const repo = makeRepo();
+    const slug = "adjudication-next-run";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "8191",
+      title: "Parked across runs",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const slices = [slice];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slice.ghIssue,
+        {
+          files: ["src/resumed.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/resumed.txt",
+          outputContent: "resumed",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices, records });
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      adjudicationWaitMs: 0,
+      adjudicationPollMs: 10,
+    };
+
+    await runPipeline(config);
+    const afterInitialNegotiation = records.length;
+    let state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+
+    await runPipeline(config);
+    expect(records).toHaveLength(afterInitialNegotiation);
+    state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+
+    const parkedCwd = records.find(
+      (record) => record.ghIssue === slice.ghIssue,
+    )?.cwd;
+    if (!parkedCwd) throw new Error("parked worktree was not invoked");
+    const parkedDir = findSliceArtifactDir(parkedCwd, slice.number);
+    if (!parkedDir) throw new Error("parked artifact directory missing");
+    writeFileSync(
+      join(parkedDir, "adjudication.md"),
+      JSON.stringify({
+        version: 1,
+        findingId: "F-IMPASSE",
+        winningPosition: "PLANNER",
+        author: "operator",
+      }),
+      "utf-8",
+    );
+    const ordinaryNegotiationBefore = records.filter((record) =>
+      ["explorer", "planner", "evaluator-contract"].includes(record.role),
+    ).length;
+
+    await runPipeline(config);
+
+    const ordinaryNegotiationAfter = records.filter((record) =>
+      ["explorer", "planner", "evaluator-contract"].includes(record.role),
+    ).length;
+    expect(ordinaryNegotiationAfter).toBe(ordinaryNegotiationBefore);
+    expect(
+      records.some(
+        (record) =>
+          record.ghIssue === slice.ghIssue && record.role === "generator",
+      ),
+    ).toBe(true);
+    state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe("PASS");
+  }, 240_000);
+});
+
 describe("cancellation after an impasse park", () => {
   it("cancels only unsettled work and leaves the parked state and artifacts byte-stable", async () => {
     // This state differs from every existing cancellation fixture: one
