@@ -525,12 +525,58 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     // finding demonstrated is not reachable through an ordinary resume.
     expect(roles.filter((role) => role === "generator")).toHaveLength(2);
     expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(2);
-    expect(roles.filter((role) => role === "generator-stuck")).toHaveLength(1);
+    expect(roles.at(-1)).toBe("evaluator-qa");
     expect(generatorPrompts[1]).toContain("This is implementation round 3");
     expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
     expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(false);
+    expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toBe(
+      `# Stuck diagnosis
+
+## Finding lifecycle
+
+### RESOLVED
+
+(none)
+
+### OPEN
+
+- [QA-01] BLOCKING OPEN
+  - Stage: deterministic
+  - Summary: Fixture implementation finding
+  - Clear condition: The fixture evaluator observes the behavior passing
+  - Artifact references:
+    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r3-a1.json\`
+    - \`specs/slices/01-prd-070-regression/qa-report-r3-a1.md\`
+
+## Scope escalations
+
+(none)
+
+## Round evidence
+
+- Round 1 attempt 1 (deterministic): FAIL / IMPLEMENTATION
+  - Lifecycle record: \`qa-review-r1-a1-record.json\`
+  - Artifact references:
+    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r1-a1.json\`
+    - \`specs/slices/01-prd-070-regression/qa-report-r1-a1.md\`
+- Round 2 attempt 1 (deterministic): FAIL / IMPLEMENTATION
+  - Lifecycle record: \`qa-review-r2-a1-record.json\`
+  - Artifact references:
+    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r2-a1.json\`
+    - \`specs/slices/01-prd-070-regression/qa-report-r2-a1.md\`
+- Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION
+  - Lifecycle record: \`qa-review-r3-a1-record.json\`
+  - Artifact references:
+    - \`.afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-r3-a1.json\`
+    - \`specs/slices/01-prd-070-regression/qa-report-r3-a1.md\`
+
+## Commit evidence
+
+(none)
+`,
+    );
   });
 
   it("fails closed when the raw canonical archive cannot be preserved", async () => {

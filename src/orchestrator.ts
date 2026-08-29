@@ -3250,14 +3250,14 @@ export async function runSliceExecute(
   let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
   let firstRound = 1;
   let retryNote = "";
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
 
   try {
     if (ctx.resume) {
-      const reviewArchiveDir = artifacts.contractReviewArchiveDir(
-        config.repoRoot,
-        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
-        slice.number,
-      );
       const restored = loadQAReviewResumeState(
         reviewArchiveDir,
         ctx.absSliceDir,
@@ -3393,14 +3393,6 @@ export async function runSliceExecute(
 
         if (!existsSync(escalationPath)) break;
 
-        const reviewArchiveDir = artifacts.contractReviewArchiveDir(
-          config.repoRoot,
-          pipelineRunSlug(
-            config.prdSlug,
-            config.provider ?? kiroProvider,
-          ),
-          slice.number,
-        );
         artifacts.archiveScopeEscalationAttempt({
           sliceDir: ctx.absSliceDir,
           archiveDir: reviewArchiveDir,
@@ -3751,30 +3743,11 @@ export async function runSliceExecute(
       }
 
       if (implementationAttempt === implementationAttemptLimit) {
-        logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
-          type: "phase-started",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "generator-stuck",
-        });
-        const stuckLog = logger.agentLog(slice.number, "generator-stuck");
-        await invoke({
-          role: "generator-stuck",
-          prompt: renderPrompt("generator-stuck", {
-            SLICE_DIR: ctx.relSliceDir,
-            QA_REPORTS: stuckReferences
-              .map((path) => `- \`${path}\``)
-              .join("\n"),
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: stuckLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(stuckLog));
-        logger.event({
-          type: "phase-ended",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "generator-stuck",
+        logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
+        artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
+          reviewArchiveDir,
+          additionalArtifactReferences: stuckReferences,
+          commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
         });
         return {
           phase: "STUCK",
