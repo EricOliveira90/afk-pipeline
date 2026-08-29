@@ -263,6 +263,33 @@ describe("adjudication expiry and next-run pickup", () => {
       "AWAITING-ADJUDICATION",
     );
 
+    const parkedCwd = records.find(
+      (record) => record.ghIssue === slice.ghIssue,
+    )?.cwd;
+    if (!parkedCwd) throw new Error("parked worktree was not invoked");
+    const parkedDir = findSliceArtifactDir(parkedCwd, slice.number);
+    if (!parkedDir) throw new Error("parked artifact directory missing");
+    const decisionPath = join(parkedDir, "adjudication.md");
+    const malformedDecision = '{"version":1,\r\n';
+    writeFileSync(decisionPath, malformedDecision, "utf-8");
+
+    await runPipeline(config);
+    expect(records).toHaveLength(afterInitialNegotiation);
+    state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+    expect(state.slices[slice.ghIssue]?.error).toContain(
+      "adjudication.md is not valid JSON",
+    );
+    expect(readFileSync(decisionPath, "utf-8")).toBe(malformedDecision);
+
+    rmSync(decisionPath);
     await runPipeline(config);
     expect(records).toHaveLength(afterInitialNegotiation);
     state = JSON.parse(
@@ -275,14 +302,8 @@ describe("adjudication expiry and next-run pickup", () => {
       "AWAITING-ADJUDICATION",
     );
 
-    const parkedCwd = records.find(
-      (record) => record.ghIssue === slice.ghIssue,
-    )?.cwd;
-    if (!parkedCwd) throw new Error("parked worktree was not invoked");
-    const parkedDir = findSliceArtifactDir(parkedCwd, slice.number);
-    if (!parkedDir) throw new Error("parked artifact directory missing");
     writeFileSync(
-      join(parkedDir, "adjudication.md"),
+      decisionPath,
       JSON.stringify({
         version: 1,
         findingId: "F-IMPASSE",
