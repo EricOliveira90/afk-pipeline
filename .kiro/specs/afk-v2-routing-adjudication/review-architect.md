@@ -4,84 +4,142 @@
 
 ## Scope reviewed
 
-Reviewed `git diff origin/main...HEAD`, the PRD, all slice contracts and
-implementation handoffs under
-`.kiro/specs/afk-v2-routing-adjudication/slices/`, and the production paths
-for escalation, impasse parking, adjudication, stuck diagnosis, adoption,
-persistence, reporting, and Git finalization. The pre-ship gate was accepted
-as already passed. I ran only the focused adjudication scenario:
+Reviewed `git diff main...HEAD`, the PRD and slice index, every slice
+contract and implementation handoff under
+`.kiro/specs/afk-v2-routing-adjudication/slices/`, and the merged production
+paths for escalation, impasse classification, adjudication, wave scheduling,
+cleanup, stuck diagnosis, adoption, persistence, and Git finalization.
 
-`pnpm vitest run src/orchestrator.test.ts -t "parks a contested round-two exhaustion for adjudication"`
-
-It passed and exposed the current multi-finding lock sequence described
-below.
+The pre-ship gate was accepted as already passed; I did not rerun the full
+suite. For fresh evidence I used source reads/searches and two pure probes:
+one confirmed `AWAITING-ADJUDICATION` is assigned the `failed` lifecycle
+bucket, and one confirmed a mixed `CONTESTED` + `OPEN` exhaustion is classified
+`IMPASSE` with no undecided findings after only the contested finding is
+decided.
 
 ## Blocking findings
 
-### 1. One adjudication resolves one finding but locks a contract with other contested findings still open
+### 1. A mixed exhaustion can lock while an OPEN blocking finding remains unresolved
 
-- **File/location:** `src/adjudication.ts`, `parseAdjudication` (lines
-  37-123), and `src/orchestrator.ts`, `runSliceNegotiate` (lines
-  2065-2185). The proving fixture is `src/orchestrator.test.ts`, lines
-  2921-2938 and 2962-2997.
-- **Evidence gathered:** I read the parser and lock path, then ran the
-  focused test above. The fixture's IMPASSE contains both `F-01` and `F-02`
-  as `CONTESTED`. Its adjudication names only `F-01`. The run output then
-  reports `accepted adjudication for F-01; contract LOCKED`. The parser
-  checks only that the selected finding exists and is contested; the lock
-  path never checks for remaining contested findings.
+- **File/location:** `src/contract-review.ts`,
+  `buildContractNegotiationOutcome` (lines 718-735);
+  `src/adjudication.ts`, `contestedFindingIds` and
+  `undecidedContestedFindingIds` (lines 197-204 and 341-350);
+  `src/orchestrator.ts`, `runImpasseAdjudication` (lines 2185-2222).
+- **Evidence gathered:** I read the classification and completion predicates,
+  then ran a pure TypeScript probe with one `F-C/CONTESTED` blocker and one
+  `F-O/OPEN` blocker. The outcome was `IMPASSE`, retained both findings, and
+  reported `undecided: []` after a decision only for `F-C`. The orchestrator
+  therefore reaches the lock path while `F-O` is still unresolved.
 - **Convention violated:** ADR 0008, **Decision**, makes the orchestrator's
-  on-disk `LOCKED` status the single source of truth. Here that status says
-  the contract is settled while the current structured impasse still says
-  another blocking finding is contested. The PRD's adjudication rule also
-  states that a human decision resolves a finding, not the whole contract.
-- **Required fix:** Make the state model honest for multi-finding impasses.
-  Either refuse an impasse/adjudication shape with more than one contested
-  finding, or persist decisions per finding and permit `LOCKED` only after
-  every contested blocking finding has a valid decision applied.
+  on-disk `LOCKED` status the trustworthy source of contract state. ADR 0054,
+  **Decision**, says a decision resolves one finding rather than the contract
+  and permits locking only after the complete required decision set is in.
+  Locking with an `OPEN` blocking finding makes `LOCKED` contradict the
+  structured exhaustion record.
+- **Required fix:** Define mixed exhaustion explicitly. Either classify it as
+  non-convergence until every OPEN blocker is resolved, or keep it parked but
+  prohibit locking while any unresolved blocking finding remains. Add a pure
+  mixed-state test and an orchestration assertion that generation never
+  dispatches from this shape.
 
-### 2. The apply-and-lock step has no transaction or durable applied state, so rejected and completed decisions can replay
+### 2. Discarding a decision log can leave a false LOCKED contract and later bypass application
 
-- **File/location:** `src/orchestrator.ts`, `runSliceNegotiate` (lines
-  2065-2248), especially `lockAdjudicatedContract` and the evaluator-winner
-  / third-instruction planner invocation. The revealing assertions are in
-  `src/orchestrator.test.ts`, lines 3007-3041.
-- **Evidence gathered:** I read every exit from the apply path and searched
-  the source for removal, consumption, or an applied marker for
-  `adjudication.md` / `contract-negotiation-outcome.json`; none exists.
-  Validation or lock-gate refusal returns `ESCALATE` without restoring the
-  pre-apply contract and manifest. The focused test manually rewrites both
-  files to `contractBefore` / `manifestBefore` between refusal cases,
-  confirming production performs no rollback. Because the same two working
-  artifacts remain, a later run enters the IMPASSE branch and invokes the
-  apply planner again. Worse, a rejected behavior renumbering becomes the
-  next run's `preApplyManifest`, so the same renumbered result can pass the
-  stability comparison on retry.
-- **Convention violated:** ADR 0008, **Decision**, requires one trustworthy
-  orchestrator-owned contract state. ADR 0051, **Decision**, records the
-  transaction rule already used by the sibling focused-revision path:
-  capture the authoritative contract and manifest before mutation and
-  restore them on every exit that does not reach an accepted lock. The
-  adjudication path mutates the same authoritative pair but omits that
-  guarantee.
-- **Required fix:** Give adjudication application a durable lifecycle:
-  snapshot and restore both files on every non-success exit, and record or
-  consume the applied decision atomically with a successful lock so later
-  implementation retries do not apply it again. Add focused tests proving
-  rollback after planner/validation/lock refusal and no second planner apply
-  after a successful adjudication followed by an implementation retry.
+- **File/location:** `src/adjudication.ts`,
+  `loadAdjudicationDecisionLog` (lines 219-298);
+  `src/orchestrator.ts`, `runImpasseAdjudication` (lines 2132-2183 and
+  2203-2222).
+- **Evidence gathered:** I read the fail-closed loader and its existing focused
+  tests. A malformed, stale, or invalid log becomes an empty log plus a
+  `discarded` reason. The orchestrator logs that every finding must be decided
+  again and parks, but it does not reopen a contract that is already
+  `LOCKED`. Once replacement decisions are collected, the
+  `readContractStatus(contractPath) === "LOCKED"` shortcut marks them applied
+  without running their mechanical apply-and-lock step.
+- **Convention violated:** ADR 0054, **Decision** steps 1 and 3, says a
+  discarded log is evidence rather than authority and that only a valid
+  complete record permits locking. ADR 0008, **Decision**, forbids the disk
+  saying `LOCKED` while the orchestrator says every contested finding needs a
+  new decision.
+- **Required fix:** Reconcile contract status when the log is discarded, and
+  make the crash-window shortcut prove that the existing lock corresponds to
+  the same validated complete decision set. A replacement decision set must
+  be applied and pass the lock gate rather than inherit an unrelated
+  `LOCKED` line.
+
+### 3. The bounded adjudication wait blocks unrelated later waves
+
+- **File/location:** `src/orchestrator.ts`, wave reconciliation in
+  `runPipeline` (lines 5106-5164), especially the `await wait` at line 5138.
+- **Evidence gathered:** I traced the scheduling sets and loop order. After
+  `runWave` returns, outcomes are reconciled serially. Encountering one
+  `AWAITING-ADJUDICATION` outcome awaits its human timer before reconciliation
+  finishes and before the next `dag.ready(completed)` call. Thus a dependent
+  of an unrelated PASS slice cannot enter its next wave until the decision
+  arrives or the wait expires.
+- **Convention violated:** ADR 0024, **Decision**, requires independent work to
+  continue after a member needs human attention; dependency safety belongs to
+  the DAG, not incidental lane or outcome ordering. The PRD's routing decision
+  likewise permits waiting at idle, not before checking whether another wave
+  is ready.
+- **Required fix:** Reconcile all outcomes and dispatch all newly ready work
+  before awaiting adjudication promises. Wait only when no runnable work
+  remains, while still allowing a valid decision to re-enqueue its slice.
+  Cover a parked slice plus an unrelated PASS whose dependent must start
+  before the adjudication timeout.
+
+### 4. `clean-failed` treats a parked slice as disposable failure debris
+
+- **File/location:** `src/slice-lifecycle.ts`, `PHASE_TRAITS` for
+  `AWAITING-ADJUDICATION` (lines 240-247); `src/clean-failed.ts`,
+  `isCleanupTarget`/`mustPreserveBranch` (lines 47-61) and the removal/deletion
+  pass (lines 153-223).
+- **Evidence gathered:** I read the cleanup predicate and ran
+  `traitsFor("AWAITING-ADJUDICATION")`; it returned `bucket: "failed"`.
+  `clean-failed` therefore removes the parked worktree. Because the phase is
+  not `deferred`, it also deletes the branch when it has no commits ahead,
+  which is the normal pre-generation impasse shape. Searches found no
+  `AWAITING-ADJUDICATION` coverage in `src/clean-failed.test.ts`.
+- **Convention violated:** ADR 0023, **Decision**, scopes the command to dead
+  failure phases and preserved debris; a parked external dependency is not
+  one of those phases. ADR 0054, **Decision**, requires the impasse and durable
+  human decision record to survive across dispatches and runs.
+- **Required fix:** Separate cleanup eligibility from the presentation bucket.
+  `AWAITING-ADJUDICATION` must preserve its worktree and branch, and
+  `clean-failed` must report/skip it. Add a focused cleanup test proving the
+  impasse, adjudication file/log, branch, and worktree remain intact.
+
+### 5. `afk adopt` fails open when Git worktree enumeration fails
+
+- **File/location:** `src/adopt-command.ts`, `worktreesHolding` (lines
+  259-278) and its caller in `runAdoptCli` (lines 404-416);
+  `src/git.ts`, `listWorktrees` (lines 906-921) and
+  `updateBranchIfUnchanged` (lines 882-899).
+- **Evidence gathered:** I read the worktree guard and finalization path.
+  `worktreesHolding` catches every `git worktree list` failure and returns
+  `[]`, which is indistinguishable from a proved absence. Adoption then
+  continues to an `update-ref` that can move a checked-out feature branch
+  behind its worktree. The focused tests cover a successfully enumerated
+  holder, but not enumeration failure.
+- **Convention violated:** ADR 0010, **Decision**, requires worktree identity
+  to be verified rather than trusted. ADR 0053, **Operator-visible
+  refusals** item 5, specifically requires adoption to refuse when the feature
+  branch is checked out because moving only its ref corrupts the worktree's
+  index/tree relationship.
+- **Required fix:** Make enumeration failure a named refusal before candidate
+  creation or ref mutation. Inject the worktree lister at the command seam and
+  test that a thrown enumeration leaves refs and run state unchanged.
 
 ## Non-blocking notes
 
-1. `runFocusedScopeRevision` duplicates the ordinary planner/evaluator/
-   archive/validate/lock protocol. ADR 0050 and ADR 0051, **Consequences**,
-   already identify this shotgun-surgery risk. A shared revision protocol
-   would reduce the chance that the transaction, archive, and lock rules
-   diverge again.
+1. `runFocusedScopeRevision` and `runImpasseAdjudication` still duplicate the
+   capture/restore/validate/lock transaction. ADR 0050, ADR 0051, and ADR
+   0054, **Consequences**, already identify this shotgun-surgery risk; the
+   defects fixed during this review cycle demonstrate that it is active debt.
 
-2. `RunJournal.reopenAdjudication` deliberately removes a current run's
-   terminal marker so the slice can be dispatched again. That is a practical
-   exception to ADR 0031's single terminal-record seam and ADR 0047's
-   **What is deliberately not cleared** rule. Model the park as a replaceable
-   transition, or amend those ADRs so future journal work does not treat this
-   escape hatch as an accidental invariant breach.
+2. `RunJournal.reopenAdjudication` deliberately removes terminal idempotency
+   so a parked slice can receive a later outcome in the same run. That is a
+   necessary workflow seam, but it is an undocumented exception to ADR 0031,
+   **Decision**, and ADR 0047, **What is deliberately not cleared**. Model a
+   park as a replaceable transition or amend those ADRs before future journal
+   work treats the exception as accidental corruption.
