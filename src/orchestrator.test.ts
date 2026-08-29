@@ -2554,6 +2554,47 @@ describe("round-scoped contract feedback", () => {
     ).toContain("F-99 is absent from the current IMPASSE");
     expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
     expect(readFileSync(decisionPath, "utf-8")).toBe(rawDecision);
+
+    const contractPath = join(ctx.absSliceDir, "contract.md");
+    const manifestPath = join(ctx.absSliceDir, "acceptance-manifest.json");
+    const contractBefore = readFileSync(contractPath, "utf-8");
+    const manifestBefore = readFileSync(manifestPath, "utf-8");
+    writeFileSync(
+      decisionPath,
+      JSON.stringify({
+        version: 1,
+        findingId: "F-01",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+      "utf-8",
+    );
+    let lockGateCalls = 0;
+    let gateObjection: string | null =
+      "injected adjudication lock-gate refusal";
+    ctx.onContractLocked = () => {
+      lockGateCalls++;
+      return gateObjection;
+    };
+
+    const refusedLock = await runSliceNegotiate(ctx);
+    expect(refusedLock.phase).toBe("ESCALATE");
+    expect(
+      refusedLock.phase === "ESCALATE" ? refusedLock.cause.summary : "",
+    ).toContain("injected adjudication lock-gate refusal");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+
+    gateObjection = null;
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(lockGateCalls).toBe(2);
+    expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    expect(readFileSync(contractPath, "utf-8")).toBe(
+      contractBefore.replace(
+        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
+        "**Status:** LOCKED",
+      ),
+    );
   });
 
   it("caps a converging negotiation at two rounds", async () => {

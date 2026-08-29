@@ -1961,7 +1961,65 @@ export async function runSliceNegotiate(
         };
       }
       try {
-        parseAdjudication(readFileSync(decisionPath, "utf-8"), outcome);
+        const decision = parseAdjudication(
+          readFileSync(decisionPath, "utf-8"),
+          outcome,
+        );
+        if (
+          "winningPosition" in decision &&
+          decision.winningPosition === "PLANNER"
+        ) {
+          const contractPath = join(ctx.absSliceDir, "contract.md");
+          try {
+            const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+            validateAcceptanceManifestCoverage(
+              readFileSync(contractPath, "utf-8"),
+              manifest,
+              contractPath,
+            );
+            validateAcceptanceManifestBindings(
+              manifest,
+              resolveBaseGateDeclarations(ctx.worktreeDir),
+            );
+          } catch (error) {
+            const defect =
+              error instanceof Error ? error.message : String(error);
+            logger.phase(
+              `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
+              "error",
+            );
+            return {
+              phase: "ESCALATE",
+              cause: {
+                kind: "verdict",
+                verdict: "REVISE",
+                summary: `adjudication: contract lock refused — ${defect}`,
+              },
+            };
+          }
+
+          artifacts.lockContract(contractPath);
+          const objection = ctx.onContractLocked?.(contractPath) ?? null;
+          if (objection !== null) {
+            artifacts.reopenContract(contractPath);
+            logger.phase(
+              `${ctx.tag}: adjudicated contract lock refused — ${objection}`,
+              "error",
+            );
+            return {
+              phase: "ESCALATE",
+              cause: {
+                kind: "verdict",
+                verdict: "REVISE",
+                summary: `adjudication: contract lock refused — ${objection}`,
+              },
+            };
+          }
+          logger.phase(
+            `${ctx.tag}: accepted PLANNER adjudication for ${decision.findingId}; contract LOCKED`,
+          );
+          return { phase: "LOCKED" };
+        }
       } catch (error) {
         const defect = error instanceof Error ? error.message : String(error);
         logger.phase(
