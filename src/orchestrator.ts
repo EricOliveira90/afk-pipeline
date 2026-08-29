@@ -9,6 +9,7 @@ import {
   readSync,
   rmSync,
   statSync,
+  writeFileSync,
   type WriteStream,
 } from "node:fs";
 import { finished } from "node:stream/promises";
@@ -537,7 +538,19 @@ function featureBranchPrefix(provider: AgentProvider): string {
 }
 
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
-  return provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
+  return runSlugForProviderName(prdSlug, provider.name);
+}
+
+/**
+ * `pipelineRunSlug` for a caller that has a provider *name* and no
+ * provider object — `afk adopt --provider codex`, which never constructs
+ * one. Same rule, one place, so the two cannot drift.
+ */
+export function runSlugForProviderName(
+  prdSlug: string,
+  providerName: string,
+): string {
+  return providerName === "kiro" ? prdSlug : `${prdSlug}-${providerName}`;
 }
 
 export function sliceBranch(
@@ -1048,6 +1061,27 @@ function archiveContractReviewAttempt(
   return { record, review };
 }
 
+/**
+ * A focused scope revision replaces the slice's *accepted* lock — the
+ * contract and its acceptance manifest — and ADR 0008 makes those files
+ * the orchestrator-owned single source of truth for the slice. So the
+ * revision is a transaction: nothing but an ACCEPTed, re-locked
+ * replacement is allowed to be what the operator finds on disk.
+ *
+ * `reopenContract` and the manifest delete happen before the planner
+ * runs, because the planner is what writes the replacement. Every exit
+ * short of success — a planner or provider throw, a stability/coverage/
+ * binding validation failure, an undeclared-path refusal, a malformed
+ * review artifact, an evaluator REVISE, a cancellation — therefore has to
+ * put the accepted pair back byte-for-byte. ADR 0039 decision 2 is the
+ * reason it matters: the worktree copy of a slice's contract may be the
+ * only copy, so a failure that leaves the contract reopened and the
+ * manifest deleted has destroyed the state a restart would archive.
+ *
+ * The escalation artifact is archived by the caller *before* this runs
+ * (see `runSliceExecute`), so the evidence for a hand-declaration
+ * survives the rollback either way.
+ */
 async function runFocusedScopeRevision(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
@@ -1055,7 +1089,6 @@ async function runFocusedScopeRevision(
   | { phase: "LOCKED"; manifest: AcceptanceManifest }
   | { phase: "ERROR"; error: string }
 > {
-  const { config, slice, logger, invoke } = ctx;
   const contractPath = join(ctx.absSliceDir, "contract.md");
   const manifestPath = join(
     ctx.absSliceDir,
@@ -1063,6 +1096,50 @@ async function runFocusedScopeRevision(
   );
   const previousContract = readFileSync(contractPath, "utf-8");
   const previousManifestText = readFileSync(manifestPath, "utf-8");
+  let accepted = false;
+  try {
+    return await reviseAcceptedContract(ctx, escalation, {
+      contractPath,
+      manifestPath,
+      previousContract,
+      previousManifestText,
+      onAccepted: () => {
+        accepted = true;
+      },
+    });
+  } finally {
+    if (!accepted) {
+      writeFileSync(contractPath, previousContract, "utf-8");
+      writeFileSync(manifestPath, previousManifestText, "utf-8");
+      ctx.logger.phase(
+        `${ctx.tag}: focused scope revision did not complete — restored the ` +
+          `previously accepted contract.md and ${ACCEPTANCE_MANIFEST_FILENAME}`,
+      );
+    }
+  }
+}
+
+async function reviseAcceptedContract(
+  ctx: SliceContext,
+  escalation: import("./escalation.js").ScopeEscalation,
+  lock: {
+    contractPath: string;
+    manifestPath: string;
+    previousContract: string;
+    previousManifestText: string;
+    onAccepted: () => void;
+  },
+): Promise<
+  | { phase: "LOCKED"; manifest: AcceptanceManifest }
+  | { phase: "ERROR"; error: string }
+> {
+  const { config, slice, logger, invoke } = ctx;
+  const {
+    contractPath,
+    manifestPath,
+    previousContract,
+    previousManifestText,
+  } = lock;
   const previousManifest = loadAcceptanceManifest(ctx.absSliceDir);
   const reviewArchiveDir = artifacts.contractReviewArchiveDir(
     config.repoRoot,
@@ -1256,6 +1333,7 @@ async function runFocusedScopeRevision(
   }
 
   artifacts.lockContract(contractPath);
+  lock.onAccepted();
   logger.phase(`${ctx.tag}: focused scope revision LOCKED`);
   return { phase: "LOCKED", manifest: revisedManifest };
 }

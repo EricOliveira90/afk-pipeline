@@ -1,4 +1,10 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import {
   ALL_PHASES,
@@ -200,6 +206,24 @@ function sanitizeMigrationClaims(value: unknown): MigrationClaimState | undefine
 
 function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
+}
+
+/**
+ * Every run-state key with a file on disk.
+ *
+ * The key is a *run slug*, not a PRD slug: `pipelineRunSlug` appends the
+ * provider name for every non-kiro provider, so one PRD can have several.
+ * Callers that only know the PRD slug (`afk adopt`) need to discover which
+ * ones exist rather than assume the bare name. Sorted for a stable
+ * refusal message.
+ */
+export function listRunStateSlugs(repoRoot: string): string[] {
+  const dir = join(repoRoot, ".afk", "state");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => name.slice(0, -".json".length))
+    .sort();
 }
 
 /**

@@ -118,7 +118,8 @@ Also read:
 
 # Scope escalation
 
-If a cited finding's correct fix requires an undeclared file path:
+If the correct implementation requires a file path the locked contract and
+its acceptance manifest do not declare:
 1. Stop before making the undeclared edit.
 2. Write `escalation.md` in the slice directory with exactly this JSON:
    `{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}`.
@@ -126,8 +127,24 @@ If a cited finding's correct fix requires an undeclared file path:
    or its acceptance manifest.
 
 The payload contains no fields other than `version`, `findingIds`, `paths`,
-and `reason`. Use the cited finding IDs, list every needed undeclared path,
-and give a non-blank reason that explains why those paths are required.
+and `reason`. List every needed undeclared path, and give a non-blank reason
+that explains why those paths are required.
+
+`findingIds` is always required, and which identity belongs in it is decided
+by whether this invocation was handed findings:
+
+- **Findings were cited to you** above — unresolved QA findings, base-gate
+  failures, a stuck diagnosis, or contract-review findings. Cite the IDs of
+  the ones whose correct fix needs the undeclared paths, and only those:
+  `["QA-03"]`, `["F-01","F-02"]`.
+- **Nothing was cited to you** — this is a first attempt with no findings to
+  fix, so you discovered before building that the locked file scope is too
+  narrow. Use the reserved pre-build scope identity, alone:
+  `{"version":1,"findingIds":["PRE-BUILD-SCOPE"],"paths":["src/file.ts"],"reason":"..."}`.
+
+Never mix `PRE-BUILD-SCOPE` with a real finding ID — the escalation is
+refused. If you were given findings, cite them; the reserved identity is for
+the case where there is nothing to cite.
 
 # Task
 
