@@ -280,3 +280,122 @@ Filed rather than fixed, as the reviews allow:
   both the state write and the reverse CAS fail, merged code is left with no
   state. The refusal names both commits, so it is repairable by hand but not
   mechanically. Recorded in ADR 0053's consequences as a follow-up.
+
+# Round 3
+
+Both blockers are the same defect seen from two sides, and both live in
+slice 03 (#89)'s adjudication path — never in guardian scope before, because
+the three prior gate passes were narrowed to slices that excluded it. Nothing
+Track A / A2 / B fixed regressed.
+
+The fix is one lifecycle, recorded in
+`docs/adr/0054-one-adjudication-decides-one-finding.md`: a durable
+per-finding decision record that gates the lock (blocker 1) and is also the
+consume/applied marker the transaction needed (blocker 2).
+
+## Architect 1 == PM 1 — one adjudication locked a contract with other contested findings still open
+
+**Fixed by recording decisions per finding and gating the lock on all of
+them.** `adjudication.md` still names exactly one finding, as the PRD
+requires. What changed is what happens to it:
+`src/adjudication.ts` gained `adjudication-decisions.json` — each accepted
+decision's verbatim bytes plus a fingerprint of the impasse it answers
+(round, attempt, and every finding's id/severity/state).
+
+Per dispatch, `runImpasseAdjudication` (extracted from `runSliceNegotiate`,
+`src/orchestrator.ts`):
+
+1. loads the record, discarding it whole — with the reason on `run.log` — if
+   it is malformed, another version, fingerprinted to a different impasse, or
+   carries a decision that no longer parses. The record is evidence, never
+   authority;
+2. validates any new `adjudication.md` against the impasse *and* the
+   already-decided findings, records it, then deletes the file;
+3. parks again as `AWAITING-ADJUDICATION`, naming the contested findings
+   still undecided, unless the record now covers every one of them.
+
+So the fixture the reviews cite inverts: deciding `F-01` on a two-contested
+impasse now returns `AWAITING-ADJUDICATION` naming `F-02`, with the contract
+still `NEGOTIATING`, no lock gate called, no agent invoked and no generator
+dispatched. `parseAdjudication` also refuses a second decision for an
+already-decided finding, and `waitForAdjudication` refuses to treat one as
+progress — otherwise a re-written duplicate would redispatch a slice that can
+only park again.
+
+A refused decision is *not* consumed: the human's bytes stay where they can
+be read and corrected in place.
+
+## Architect 2 — the apply-and-lock step had no transaction or durable applied state
+
+**Fixed by giving it ADR 0051's transaction and the applied marker.** The
+apply step captures `contract.md` and `acceptance-manifest.json` before the
+planner runs and restores them byte-for-byte on every exit that is not an
+accepted lock — planner throw, cancellation, stability/coverage/binding
+refusal, lock-gate objection. The local `reopenContract` after a gate
+objection is gone: restoring the pre-apply bytes is strictly more than
+rewriting the status line of a contract the planner may also have edited.
+
+A successful lock marks the record applied. A later re-entry into the IMPASSE
+branch — an implementation retry, a resumed run — returns `LOCKED` without a
+second planner apply. A `LOCKED` contract found beside a complete but unmarked
+record is the crash window between the two writes: it is marked, not
+re-applied.
+
+Two consequences worth stating:
+
+- The record is deliberately **not** part of the transaction. Like ADR 0051's
+  escalation archive, human input must outlive a mechanical refusal, so a
+  rolled-back apply retries from the same decisions rather than from a fresh
+  interrogation of the human. A deterministic refusal therefore repeats until
+  the round budget stops it, each `ESCALATE` naming its defect on `run.log`.
+- Decisions the contract already satisfies (every `winningPosition: PLANNER`)
+  lock with no invocation at all; one planner invocation applies all the
+  others together, every decision passed verbatim.
+
+## Coverage
+
+- `src/adjudication.test.ts`, "the adjudication decision log" — 7 unit cases:
+  undecided-finding accounting across append/reload, the applied marker
+  surviving a reload, and four discard paths (malformed, wrong version, other
+  impasse, a recorded decision that no longer parses or is duplicated). Plus
+  a `waitForAdjudication` case proving an already-decided finding expires
+  instead of redispatching.
+- `src/orchestrator.test.ts`, "parks a contested round-two exhaustion for
+  adjudication" — the fixture the reviews cite, now asserting the fixed
+  behaviour on its two-contested impasse: one decision parks naming `F-02`
+  (nothing locked, invoked or dispatched, decision recorded and file
+  consumed); a duplicate is refused; the completing decision applies both;
+  the stability refusal and the lock-gate refusal each leave `contract.md`
+  and `acceptance-manifest.json` byte-identical to the pre-apply pair with
+  the decisions preserved unapplied; the accepted lock marks them applied;
+  and a re-entry returns `LOCKED` with no further planner, evaluator or lock
+  gate. Two further phases keep the third-instruction and all-`PLANNER`
+  routes covered, reusing the same fixture rather than spawning more.
+- `src/orchestrator-runs.test.ts`'s impasse run needed two fixture edits, not
+  production changes: it used `adjudication.md`'s presence as "this is an
+  apply round" to inject its refusals, and that file is now consumed before
+  the planner runs. Both signals moved to `adjudication-decisions.json`.
+
+Verification: `pnpm typecheck` clean, `pnpm test:fast` 1214 passed (99.2s),
+`pnpm run test:heavy:orchestrator` 175 passed (385.6s, budget 560). The full
+suite was deliberately not run — the reopened pre-ship gate runs it on the
+merged branch.
+
+## Round 3 notes not acted on
+
+Filed rather than fixed, as the reviews allow:
+
+- `runFocusedScopeRevision` and `runImpasseAdjudication` now each carry their
+  own copy of the capture/restore rule. That duplication is what let the two
+  drift apart in the first place; a shared revision protocol remains the
+  standing follow-up, recorded again in ADR 0054's consequences alongside
+  ADR 0050/0051's.
+- `RunJournal.reopenAdjudication` still removes a current run's terminal
+  marker deliberately — a practical exception to ADR 0031's single
+  terminal-record seam and ADR 0047's "what is deliberately not cleared".
+  Unchanged by this fix, and now exercised more often: a multi-finding impasse
+  reopens once per decision.
+- The focused-revision cap `MAX_SCOPE_REVISIONS_PER_ROUND` (2 per
+  implementation round) is still not named in the PRD. A third otherwise-valid
+  escalation needs manual intervention; the operator-facing limit wants
+  documenting.

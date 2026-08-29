@@ -155,9 +155,15 @@ import {
   validateRound2ContractReview,
 } from "./contract-review.js";
 import {
+  ADJUDICATION_DECISIONS_FILENAME,
   ADJUDICATION_FILENAME,
+  appendAdjudicationDecision,
+  loadAdjudicationDecisionLog,
+  markAdjudicationDecisionsApplied,
   parseAdjudication,
+  undecidedContestedFindingIds,
   waitForAdjudication,
+  type Adjudication,
 } from "./adjudication.js";
 import {
   advanceQAReviewHistory,
@@ -2066,131 +2072,251 @@ export async function runSliceNegotiate(
     const rawOutcome = readFileSync(outcomePath, "utf-8");
     const outcome = JSON.parse(rawOutcome) as ContractNegotiationOutcome;
     if (outcome.classification === "IMPASSE") {
-      const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
-      if (!existsSync(decisionPath)) {
-        return {
-          phase: "AWAITING-ADJUDICATION",
-          cause: negotiateImpasseCause(outcome, "REVISE"),
-        };
-      }
+      return await runImpasseAdjudication(ctx, { rawOutcome, outcome });
+    }
+  }
 
-      const rawDecision = readFileSync(decisionPath, "utf-8");
-      let decision;
-      try {
-        decision = parseAdjudication(rawDecision, outcome);
-      } catch (error) {
-        const defect = error instanceof Error ? error.message : String(error);
-        logger.phase(
-          `${ctx.tag}: adjudication refused — ${defect}; slice remains parked`,
-          "error",
-        );
-        return {
-          phase: "AWAITING-ADJUDICATION",
-          cause: {
-            kind: "verdict",
-            verdict: "REVISE",
-            summary: `${negotiateImpasseCause(outcome, "REVISE").summary}; ${defect}`,
-          },
-        };
-      }
+  return negotiateAttempt(ctx, infrastructureRetries);
+}
 
-      logger.trackSlice(
-        lifecycle.running(
-          {
-            ghIssue: ctx.slice.ghIssue,
-            title: ctx.slice.title,
-            branch: ctx.branch,
-          },
-          logger.getSliceProgress(ctx.slice.ghIssue),
-        ),
+/**
+ * The IMPASSE branch of Phase A: collect human adjudications, then apply
+ * them in one transaction (ADR 0054).
+ *
+ * Two rules the ordinary negotiate path does not need:
+ *
+ * 1. **A decision resolves a finding, not the contract.** One
+ *    `adjudication.md` names one finding, so a multi-finding impasse needs
+ *    one decision per contested finding. Each valid decision is recorded in
+ *    `adjudication-decisions.json` and its file consumed; the slice parks
+ *    again until every contested finding has one. Only then may the
+ *    contract lock, so an on-disk `LOCKED` never claims a contract is
+ *    settled while the structured impasse still records an undecided
+ *    contested finding (ADR 0008).
+ *
+ * 2. **Applying the decisions is a transaction.** The apply step mutates
+ *    the same authoritative `contract.md` + `acceptance-manifest.json` pair
+ *    as `runFocusedScopeRevision`, so it owes the same guarantee (ADR
+ *    0051): both files are captured before the planner runs and restored
+ *    byte-for-byte on every exit that is not an accepted lock. A successful
+ *    lock marks the record applied, so a later implementation retry that
+ *    re-enters this branch does not apply the same decisions a second time.
+ *
+ * The decision record itself is *not* part of the transaction — like the
+ * escalation archive in ADR 0051, human input must outlive a mechanical
+ * refusal. A rolled-back apply is retried from the same decisions, not
+ * from a fresh interrogation of the human.
+ */
+async function runImpasseAdjudication(
+  ctx: SliceContext,
+  impasse: { rawOutcome: string; outcome: ContractNegotiationOutcome },
+): Promise<NegotiateOutcome> {
+  const { config, logger } = ctx;
+  const { rawOutcome, outcome } = impasse;
+  const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
+  const contractPath = join(ctx.absSliceDir, "contract.md");
+  const manifestPath = join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME);
+  const parkedCause = negotiateImpasseCause(outcome, "REVISE");
+
+  const loaded = loadAdjudicationDecisionLog(ctx.absSliceDir, outcome);
+  let decisionLog = loaded.log;
+  if (loaded.discarded) {
+    logger.phase(
+      `${ctx.tag}: discarded ${ADJUDICATION_DECISIONS_FILENAME} — ` +
+        `${loaded.discarded}; every contested finding must be adjudicated again`,
+      "error",
+    );
+  }
+
+  // --- Consume whatever the human has written since the last dispatch.
+  if (existsSync(decisionPath)) {
+    const rawDecision = readFileSync(decisionPath, "utf-8");
+    let decision: Adjudication;
+    try {
+      decision = parseAdjudication(
+        rawDecision,
+        outcome,
+        ADJUDICATION_FILENAME,
+        decisionLog.decisions.map((recorded) => recorded.decision.findingId),
       );
-      const refresh = git.mergeBranchIntoWorktree(
-        ctx.worktreeDir,
-        ctx.featBranch,
+    } catch (error) {
+      const defect = error instanceof Error ? error.message : String(error);
+      logger.phase(
+        `${ctx.tag}: adjudication refused — ${defect}; slice remains parked`,
+        "error",
       );
-      if (refresh.status === "conflict") {
-        return {
-          phase: "ERROR",
-          cause: {
-            kind: "internal-error",
-            summary:
-              "adjudication: could not refresh the parked branch from " +
-              `${ctx.featBranch} without conflicts; preserved the branch and decision`,
-          },
-        };
-      }
-
-      const contractPath = join(ctx.absSliceDir, "contract.md");
-      const lockAdjudicatedContract = (
-        previousManifest?: AcceptanceManifest,
-      ): NegotiateOutcome => {
-        try {
-          const manifest = loadAcceptanceManifest(ctx.absSliceDir);
-          if (previousManifest) {
-            validateAcceptanceManifestStability(previousManifest, manifest);
-          }
-          validateAcceptanceManifestCoverage(
-            readFileSync(contractPath, "utf-8"),
-            manifest,
-            contractPath,
-          );
-          validateAcceptanceManifestBindings(
-            manifest,
-            resolveBaseGateDeclarations(ctx.worktreeDir),
-          );
-        } catch (error) {
-          const defect = error instanceof Error ? error.message : String(error);
-          logger.phase(
-            `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
-            "error",
-          );
-          return {
-            phase: "ESCALATE",
-            cause: {
-              kind: "verdict",
-              verdict: "REVISE",
-              summary: `adjudication: contract lock refused — ${defect}`,
-            },
-          };
-        }
-
-        artifacts.lockContract(contractPath);
-        const objection = ctx.onContractLocked?.(contractPath) ?? null;
-        if (objection !== null) {
-          artifacts.reopenContract(contractPath);
-          logger.phase(
-            `${ctx.tag}: adjudicated contract lock refused — ${objection}`,
-            "error",
-          );
-          return {
-            phase: "ESCALATE",
-            cause: {
-              kind: "verdict",
-              verdict: "REVISE",
-              summary: `adjudication: contract lock refused — ${objection}`,
-            },
-          };
-        }
-        logger.phase(
-          `${ctx.tag}: accepted adjudication for ${decision.findingId}; contract LOCKED`,
-        );
-        return { phase: "LOCKED" };
+      return {
+        phase: "AWAITING-ADJUDICATION",
+        cause: {
+          kind: "verdict",
+          verdict: "REVISE",
+          summary: `${parkedCause.summary}; ${defect}`,
+        },
       };
+    }
+    // Record before consuming: a crash between the two costs a re-write of
+    // one decision, never a decision recorded nowhere.
+    decisionLog = appendAdjudicationDecision(ctx.absSliceDir, decisionLog, {
+      raw: rawDecision,
+      decision,
+    });
+    rmSync(decisionPath, { force: true });
+    logger.phase(
+      `${ctx.tag}: recorded the human decision for ${decision.findingId} in ` +
+        `${ADJUDICATION_DECISIONS_FILENAME} and consumed ${ADJUDICATION_FILENAME}`,
+    );
+  }
 
-      if (
-        "winningPosition" in decision &&
-        decision.winningPosition === "PLANNER"
-      ) {
-        return lockAdjudicatedContract();
+  if (decisionLog.decisions.length === 0) {
+    return { phase: "AWAITING-ADJUDICATION", cause: parkedCause };
+  }
+
+  const decidedIds = decisionLog.decisions.map(
+    (recorded) => recorded.decision.findingId,
+  );
+  const undecided = undecidedContestedFindingIds(outcome, decisionLog);
+  if (undecided.length > 0) {
+    const summary =
+      `${parkedCause.summary}; decided ${decidedIds.join(", ")} — ` +
+      `contested blocking finding${undecided.length === 1 ? "" : "s"} ` +
+      `${undecided.join(", ")} still ` +
+      `${undecided.length === 1 ? "requires" : "require"} human adjudication ` +
+      `before the contract can lock`;
+    logger.phase(`${ctx.tag}: ${summary}`, "error");
+    return {
+      phase: "AWAITING-ADJUDICATION",
+      cause: { kind: "verdict", verdict: "REVISE", summary },
+    };
+  }
+
+  // --- Every contested finding is decided. Apply once, ever.
+  //
+  // A LOCKED contract with a complete record and no applied marker is the
+  // crash window between `lockContract` and the marker write: the decisions
+  // did reach an accepted lock, so it is marked rather than re-applied.
+  if (
+    decisionLog.applied ||
+    artifacts.readContractStatus(contractPath) === "LOCKED"
+  ) {
+    if (!decisionLog.applied) {
+      decisionLog = markAdjudicationDecisionsApplied(
+        ctx.absSliceDir,
+        decisionLog,
+      );
+    }
+    logger.phase(
+      `${ctx.tag}: adjudication for ${decidedIds.join(", ")} already applied; ` +
+        `contract LOCKED`,
+    );
+    return { phase: "LOCKED" };
+  }
+
+  logger.trackSlice(
+    lifecycle.running(
+      {
+        ghIssue: ctx.slice.ghIssue,
+        title: ctx.slice.title,
+        branch: ctx.branch,
+      },
+      logger.getSliceProgress(ctx.slice.ghIssue),
+    ),
+  );
+  const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
+  if (refresh.status === "conflict") {
+    return {
+      phase: "ERROR",
+      cause: {
+        kind: "internal-error",
+        summary:
+          "adjudication: could not refresh the parked branch from " +
+          `${ctx.featBranch} without conflicts; preserved the branch and decisions`,
+      },
+    };
+  }
+
+  const lockAdjudicatedContract = (
+    previousManifest?: AcceptanceManifest,
+  ): NegotiateOutcome => {
+    try {
+      const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+      if (previousManifest) {
+        validateAcceptanceManifestStability(previousManifest, manifest);
       }
+      validateAcceptanceManifestCoverage(
+        readFileSync(contractPath, "utf-8"),
+        manifest,
+        contractPath,
+      );
+      validateAcceptanceManifestBindings(
+        manifest,
+        resolveBaseGateDeclarations(ctx.worktreeDir),
+      );
+    } catch (error) {
+      const defect = error instanceof Error ? error.message : String(error);
+      logger.phase(
+        `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
+        "error",
+      );
+      return {
+        phase: "ESCALATE",
+        cause: {
+          kind: "verdict",
+          verdict: "REVISE",
+          summary: `adjudication: contract lock refused — ${defect}`,
+        },
+      };
+    }
 
+    artifacts.lockContract(contractPath);
+    const objection = ctx.onContractLocked?.(contractPath) ?? null;
+    if (objection !== null) {
+      // No local reopen: the transaction below restores the pre-apply
+      // contract byte-for-byte, which is strictly more than reopening the
+      // status line of a contract the planner may also have rewritten.
+      logger.phase(
+        `${ctx.tag}: adjudicated contract lock refused — ${objection}`,
+        "error",
+      );
+      return {
+        phase: "ESCALATE",
+        cause: {
+          kind: "verdict",
+          verdict: "REVISE",
+          summary: `adjudication: contract lock refused — ${objection}`,
+        },
+      };
+    }
+    logger.phase(
+      `${ctx.tag}: accepted adjudication for ${decidedIds.join(", ")}; ` +
+        `contract LOCKED`,
+    );
+    return { phase: "LOCKED" };
+  };
+
+  // A decision the planner has nothing to do for — the contract already
+  // states the planner's position — locks without an invocation. One
+  // invocation applies every other decision together.
+  const plannerApplied = decisionLog.decisions.filter(
+    (recorded) =>
+      !("winningPosition" in recorded.decision) ||
+      recorded.decision.winningPosition !== "PLANNER",
+  );
+
+  const contractBefore = readFileSync(contractPath, "utf-8");
+  const manifestBefore = existsSync(manifestPath)
+    ? readFileSync(manifestPath, "utf-8")
+    : null;
+  let accepted = false;
+  try {
+    if (plannerApplied.length > 0) {
       const localSliceContent = readSliceFile(config.prdDir, ctx.slice.number);
       const sliceBodyNote = localSliceContent
         ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
         : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
       const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
       logger.phase(
-        `${ctx.tag}: applying human adjudication with one planner invocation...`,
+        `${ctx.tag}: applying ${decisionLog.decisions.length} human ` +
+          `adjudication(s) with one planner invocation...`,
         "error",
         {
           type: "phase-started",
@@ -2213,12 +2339,13 @@ export async function runSliceNegotiate(
               SLICE_BODY: sliceBodyNote,
               REVISION_NOTE: [
                 "A human has adjudicated the current contract impasse.",
-                "Apply this decision exactly once. Do not re-adjudicate it.",
+                "Apply every decision below exactly once, and only to the",
+                "finding each one names. Do not re-adjudicate any of them.",
                 "",
                 "Current IMPASSE record (verbatim):",
                 rawOutcome,
-                "Human adjudication (verbatim):",
-                rawDecision,
+                "Human adjudications (verbatim, one per decided finding):",
+                ...decisionLog.decisions.map((recorded) => recorded.raw),
               ].join("\n"),
               CONTRACT_RESPONSE_NOTE:
                 `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
@@ -2245,11 +2372,35 @@ export async function runSliceNegotiate(
         sliceNumber: ctx.slice.number,
         agent: "planner",
       });
-      return lockAdjudicatedContract(preApplyManifest);
+      const locked = lockAdjudicatedContract(preApplyManifest);
+      if (locked.phase === "LOCKED") {
+        markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
+        accepted = true;
+      }
+      return locked;
+    }
+
+    const locked = lockAdjudicatedContract();
+    if (locked.phase === "LOCKED") {
+      markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
+      accepted = true;
+    }
+    return locked;
+  } finally {
+    if (!accepted) {
+      writeFileSync(contractPath, contractBefore, "utf-8");
+      if (manifestBefore === null) {
+        rmSync(manifestPath, { force: true });
+      } else {
+        writeFileSync(manifestPath, manifestBefore, "utf-8");
+      }
+      logger.phase(
+        `${ctx.tag}: adjudication was not applied — restored the pre-apply ` +
+          `contract.md and ${ACCEPTANCE_MANIFEST_FILENAME}; the recorded ` +
+          `decisions for ${decidedIds.join(", ")} are preserved`,
+      );
     }
   }
-
-  return negotiateAttempt(ctx, infrastructureRetries);
 }
 
 async function negotiateAttempt(

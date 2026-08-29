@@ -392,7 +392,10 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
               `lock-refusal artifact directory #${invokedSlice.ghIssue} missing`,
             );
           }
-          if (existsSync(join(artifactDir, "adjudication.md"))) {
+          // The apply planner runs after the decision has been recorded
+          // and `adjudication.md` consumed (ADR 0054), so the recorded
+          // decisions are what identify an apply round here.
+          if (existsSync(join(artifactDir, "adjudication-decisions.json"))) {
             renumberAppliedManifestBehavior(artifactDir);
           }
         }
@@ -410,7 +413,11 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       adjudicationWaitMs: 5_000,
       adjudicationPollMs: 10,
       onContractLocked(ghIssue, contractPath) {
-        if (!existsSync(join(dirname(contractPath), "adjudication.md"))) {
+        if (
+          !existsSync(
+            join(dirname(contractPath), "adjudication-decisions.json"),
+          )
+        ) {
           return null;
         }
         return contractLockRefusals.get(ghIssue) ?? null;
@@ -596,7 +603,7 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         '"evaluatorEvidence": "\\"the evaluator-held interpretation\\""',
       );
       expect(applyPlanner.prompt).toContain(
-        "Apply this decision exactly once. Do not re-adjudicate it.",
+        "Apply every decision below exactly once, and only to the",
       );
 
       // The revised artifacts are what shipped — the post-apply scope,

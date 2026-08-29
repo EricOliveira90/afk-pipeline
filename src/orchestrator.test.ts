@@ -2941,6 +2941,7 @@ describe("round-scoped contract feedback", () => {
     const rawDecision =
       '{"version":1,"findingId":"F-99","winningPosition":"PLANNER","author":"Ada"}\r\n';
     const decisionPath = join(ctx.absSliceDir, "adjudication.md");
+    const recordPath = join(ctx.absSliceDir, "adjudication-decisions.json");
     writeFileSync(decisionPath, rawDecision, "utf-8");
     const invocationsBeforeRetry = plannerRounds + evaluatorRounds;
 
@@ -2953,58 +2954,92 @@ describe("round-scoped contract feedback", () => {
         : "",
     ).toContain("F-99 is absent from the current IMPASSE");
     expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    // A refused decision is not consumed: the human's bytes stay put so the
+    // defect can be read and corrected in place.
     expect(readFileSync(decisionPath, "utf-8")).toBe(rawDecision);
+    expect(existsSync(recordPath)).toBe(false);
 
     const contractPath = join(ctx.absSliceDir, "contract.md");
     const manifestPath = join(ctx.absSliceDir, "acceptance-manifest.json");
     const contractBefore = readFileSync(contractPath, "utf-8");
     const manifestBefore = readFileSync(manifestPath, "utf-8");
-    writeFileSync(
-      decisionPath,
-      JSON.stringify({
-        version: 1,
-        findingId: "F-01",
-        winningPosition: "PLANNER",
-        author: "Ada",
-      }),
-      "utf-8",
-    );
     let lockGateCalls = 0;
-    let gateObjection: string | null =
-      "injected adjudication lock-gate refusal";
+    let gateObjection: string | null = null;
     ctx.onContractLocked = () => {
       lockGateCalls++;
       return gateObjection;
     };
+    const decide = async (decision: Record<string, unknown>) => {
+      writeFileSync(decisionPath, JSON.stringify(decision), "utf-8");
+      return runSliceNegotiate(ctx);
+    };
+    /**
+     * Put the slice back where the parked negotiation left it, with no
+     * recorded decisions — the same starting state a fresh impasse gives
+     * the apply step, so the phases below each exercise it from scratch
+     * without paying for another spawned fixture.
+     */
+    const forgetRecordedDecisions = () => {
+      rmSync(recordPath, { force: true });
+      writeFileSync(contractPath, contractBefore, "utf-8");
+      writeFileSync(manifestPath, manifestBefore, "utf-8");
+    };
 
-    const refusedLock = await runSliceNegotiate(ctx);
-    expect(refusedLock.phase).toBe("ESCALATE");
+    // --- One decision does not settle a two-finding impasse (ADR 0054).
+    const partiallyDecided = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+
+    expect(partiallyDecided.phase).toBe("AWAITING-ADJUDICATION");
     expect(
-      refusedLock.phase === "ESCALATE" ? refusedLock.cause.summary : "",
-    ).toContain("injected adjudication lock-gate refusal");
+      partiallyDecided.phase === "AWAITING-ADJUDICATION"
+        ? partiallyDecided.cause.summary
+        : "",
+    ).toContain("F-02 still requires human adjudication");
+    // Nothing dispatched, nothing locked, nothing invoked; the decision is
+    // recorded and its file consumed so the next one is distinguishable.
     expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
-
-    gateObjection = null;
-    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
-    expect(lockGateCalls).toBe(2);
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(0);
     expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
-    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
-    expect(readFileSync(contractPath, "utf-8")).toBe(
-      contractBefore.replace(
-        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
-        "**Status:** LOCKED",
-      ),
-    );
+    expect(existsSync(decisionPath)).toBe(false);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8"))).toMatchObject({
+      version: 1,
+      applied: false,
+      decisions: [{ decision: { findingId: "F-01" } }],
+    });
 
-    writeFileSync(contractPath, contractBefore, "utf-8");
-    writeFileSync(manifestPath, manifestBefore, "utf-8");
-    const evaluatorDecisionRaw =
-      '{"version":1,"findingId":"F-01","winningPosition":"EVALUATOR","author":"Ada"}';
-    writeFileSync(decisionPath, evaluatorDecisionRaw, "utf-8");
+    // Re-deciding an already-decided finding is refused rather than
+    // recorded twice — it is not progress towards the undecided one.
+    const duplicate = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "EVALUATOR",
+      author: "Ada",
+    });
+    expect(duplicate.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      duplicate.phase === "AWAITING-ADJUDICATION" ? duplicate.cause.summary : "",
+    ).toContain("F-01 was already adjudicated");
+    expect(
+      JSON.parse(readFileSync(recordPath, "utf-8")).decisions,
+    ).toHaveLength(1);
+
+    // --- The completing decision applies both, and every refusal rolls the
+    // authoritative pair back byte-for-byte (ADR 0051).
+    const evaluatorDecisionRaw = JSON.stringify({
+      version: 1,
+      findingId: "F-02",
+      winningPosition: "EVALUATOR",
+      author: "Ada",
+    });
     renumberManifestOnPlannerApply = true;
-    gateObjection = null;
+    const beforeRenumbering = plannerRounds;
 
-    const refusedRenumbering = await runSliceNegotiate(ctx);
+    const refusedRenumbering = await decide(JSON.parse(evaluatorDecisionRaw));
 
     expect(refusedRenumbering.phase).toBe("ESCALATE");
     expect(
@@ -3014,47 +3049,129 @@ describe("round-scoped contract feedback", () => {
     ).toContain(
       "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
     );
-    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(plannerRounds).toBe(beforeRenumbering + 1);
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
     expect(generatorRounds).toBe(0);
+    // The human decisions survive the mechanical refusal, unapplied.
+    expect(JSON.parse(readFileSync(recordPath, "utf-8"))).toMatchObject({
+      applied: false,
+      decisions: [
+        { decision: { findingId: "F-01" } },
+        { decision: { findingId: "F-02" } },
+      ],
+    });
 
-    writeFileSync(contractPath, contractBefore, "utf-8");
-    writeFileSync(manifestPath, manifestBefore, "utf-8");
     renumberManifestOnPlannerApply = false;
-    gateObjection = "injected planner-apply lock-gate refusal";
-    const beforeEvaluatorApply = {
+    gateObjection = "injected adjudication lock-gate refusal";
+    const beforeGateRefusal = {
       planner: plannerRounds,
       evaluator: evaluatorRounds,
     };
 
-    const refusedApply = await runSliceNegotiate(ctx);
+    const refusedLock = await runSliceNegotiate(ctx);
 
-    expect(refusedApply.phase).toBe("ESCALATE");
-    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
-    expect(plannerRounds).toBe(beforeEvaluatorApply.planner + 1);
-    expect(evaluatorRounds).toBe(beforeEvaluatorApply.evaluator);
+    expect(refusedLock.phase).toBe("ESCALATE");
+    expect(
+      refusedLock.phase === "ESCALATE" ? refusedLock.cause.summary : "",
+    ).toContain("injected adjudication lock-gate refusal");
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    expect(plannerRounds).toBe(beforeGateRefusal.planner + 1);
+    expect(evaluatorRounds).toBe(beforeGateRefusal.evaluator);
     expect(plannerPrompts.at(-1)).toContain(evaluatorDecisionRaw);
     expect(plannerPrompts.at(-1)).toContain(
       "evaluator evidence alpha, verbatim",
     );
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(false);
 
-    writeFileSync(contractPath, contractBefore, "utf-8");
-    writeFileSync(manifestPath, manifestBefore, "utf-8");
-    const instructionDecisionRaw =
-      '{"version":1,"findingId":"F-01","thirdInstruction":"Keep evidence exactly as written.","author":"Ada"}';
-    writeFileSync(decisionPath, instructionDecisionRaw, "utf-8");
     gateObjection = null;
+    const beforeAcceptedLock = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeAcceptedLock.planner + 1);
+    expect(evaluatorRounds).toBe(beforeAcceptedLock.evaluator);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    expect(readFileSync(contractPath, "utf-8")).toBe(
+      contractBefore.replace(
+        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
+        "**Status:** LOCKED",
+      ),
+    );
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
+
+    // --- An implementation retry re-enters the IMPASSE branch. The applied
+    // decisions are not applied a second time.
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeAcceptedLock.planner + 1);
+    expect(evaluatorRounds).toBe(beforeAcceptedLock.evaluator);
+    expect(lockGateCalls).toBe(beforeAcceptedLock.gateCalls + 1);
+
+    // --- A third instruction reaches the planner verbatim alongside the
+    // other finding's decision.
+    forgetRecordedDecisions();
+    const instructionDecisionRaw = JSON.stringify({
+      version: 1,
+      findingId: "F-01",
+      thirdInstruction: "Keep evidence exactly as written.",
+      author: "Ada",
+    });
     const beforeInstructionApply = {
       planner: plannerRounds,
       evaluator: evaluatorRounds,
     };
 
-    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(
+      (await decide(JSON.parse(instructionDecisionRaw))).phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    expect(
+      await decide({
+        version: 1,
+        findingId: "F-02",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+    ).toEqual({ phase: "LOCKED" });
     expect(plannerRounds).toBe(beforeInstructionApply.planner + 1);
     expect(evaluatorRounds).toBe(beforeInstructionApply.evaluator);
     expect(plannerPrompts.at(-1)).toContain(instructionDecisionRaw);
     expect(plannerPrompts.at(-1)).toContain(
       "planner evidence alpha, verbatim",
     );
+
+    // --- Decisions the planner already satisfies lock without an
+    // invocation at all.
+    forgetRecordedDecisions();
+    const beforePlannerWins = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    expect(
+      (
+        await decide({
+          version: 1,
+          findingId: "F-01",
+          winningPosition: "PLANNER",
+          author: "Ada",
+        })
+      ).phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    expect(
+      await decide({
+        version: 1,
+        findingId: "F-02",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+    ).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforePlannerWins.planner);
+    expect(evaluatorRounds).toBe(beforePlannerWins.evaluator);
+    expect(generatorRounds).toBe(0);
   });
 
   it("caps a converging negotiation at two rounds", async () => {
