@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -241,26 +241,10 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
     ]);
     const records: InvocationRecord[] = [];
     const stub = buildStubProvider({ fixtures, slices, records });
-    const injectLockRefusal = (
-      artifactDir: string,
-      refusal: string,
-    ) => {
-      const manifestPath = join(
-        artifactDir,
-        "acceptance-manifest.json",
-      );
-      const manifest = JSON.parse(
-        readFileSync(manifestPath, "utf-8"),
-      ) as {
-        behaviors: Array<{ gateIds: string[] }>;
-      };
-      manifest.behaviors[0]!.gateIds = [refusal];
-      writeFileSync(
-        manifestPath,
-        JSON.stringify(manifest),
-        "utf-8",
-      );
-    };
+    const contractLockRefusals = new Map([
+      ["8186", "injected adjudication lock-gate refusal"],
+      ["8187", "injected planner-apply lock-gate refusal"],
+    ]);
     const renumberAppliedManifestBehavior = (artifactDir: string) => {
       const manifestPath = join(artifactDir, "acceptance-manifest.json");
       const manifest = JSON.parse(
@@ -283,25 +267,21 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
               ghIssue: "8181",
               number: "01",
               winningPosition: "PLANNER",
-              refusal: null,
             },
             {
               ghIssue: "8186",
               number: "06",
               winningPosition: "PLANNER",
-              refusal: "injected adjudication lock-gate refusal",
             },
             {
               ghIssue: "8187",
               number: "07",
               winningPosition: "EVALUATOR",
-              refusal: "injected planner-apply lock-gate refusal",
             },
             {
               ghIssue: "8188",
               number: "08",
               winningPosition: "EVALUATOR",
-              refusal: null,
             },
           ]) {
             const parkedCwd = records.find(
@@ -331,17 +311,13 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
               }),
               "utf-8",
             );
-            if (decision.refusal) {
-              injectLockRefusal(parkedDir, decision.refusal);
-            }
           }
         }
         const result = await stub.invoke(options);
         const invokedSlice = sliceFromCwd(options.cwd, slices);
         if (
           options.role === "planner" &&
-          (invokedSlice?.ghIssue === "8187" ||
-            invokedSlice?.ghIssue === "8188")
+          invokedSlice?.ghIssue === "8188"
         ) {
           const artifactDir = findSliceArtifactDir(
             options.cwd,
@@ -353,14 +329,7 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
             );
           }
           if (existsSync(join(artifactDir, "adjudication.md"))) {
-            if (invokedSlice.ghIssue === "8187") {
-              injectLockRefusal(
-                artifactDir,
-                "injected planner-apply lock-gate refusal",
-              );
-            } else {
-              renumberAppliedManifestBehavior(artifactDir);
-            }
+            renumberAppliedManifestBehavior(artifactDir);
           }
         }
         return result;
@@ -376,6 +345,12 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       provider,
       adjudicationWaitMs: 5_000,
       adjudicationPollMs: 10,
+      onContractLocked(ghIssue, contractPath) {
+        if (!existsSync(join(dirname(contractPath), "adjudication.md"))) {
+          return null;
+        }
+        return contractLockRefusals.get(ghIssue) ?? null;
+      },
     });
 
     for (const id of ["8181", "8182", "8183"]) {

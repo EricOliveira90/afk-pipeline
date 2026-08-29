@@ -437,6 +437,14 @@ export interface PipelineConfig {
   /** Adjudication filesystem poll interval. Private test seam. */
   adjudicationPollMs?: number;
   /**
+   * Post-lock refusal injected by orchestration tests. The wave composes
+   * this after its production migration-prefix gate.
+   */
+  onContractLocked?: (
+    ghIssue: string,
+    contractPath: string,
+  ) => string | null;
+  /**
    * The CLI's crash recorder (#121). Supplied only by an entry point that
    * owns the process, because the handlers behind it end the process: the
    * pipeline registers what to write, never when to die. In-process
