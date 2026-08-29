@@ -51,6 +51,8 @@ Route a round-two contract `IMPASSE` to a persisted `AWAITING-ADJUDICATION` slic
 - src/status-pipeline.test.ts
 - src/status.test.ts
 - src/run-snapshot.test.ts
+- src/status.ts (added by scope amendment for QA finding QA-01)
+- src/artifacts.test.ts (added by scope amendment for QA finding QA-01)
 
 ## Migration requirements
 - New migration files: 0

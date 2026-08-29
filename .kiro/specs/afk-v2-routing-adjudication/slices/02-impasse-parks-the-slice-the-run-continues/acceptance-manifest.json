@@ -23,7 +23,9 @@
       "src/status-future.test.ts",
       "src/status-pipeline.test.ts",
       "src/status.test.ts",
-      "src/run-snapshot.test.ts"
+      "src/run-snapshot.test.ts",
+      "src/status.ts",
+      "src/artifacts.test.ts"
     ]
   },
   "migrationCount": 0,
@@ -36,7 +38,10 @@
       "then": "the slice parks in AWAITING-ADJUDICATION instead of ESCALATE",
       "observableResult": "Run state, the slice-outcome event, run-summary.md, and afk status each expose AWAITING-ADJUDICATION, the parked branch, and the impasse reason; any missing branch or reason fails verification.",
       "preservation": false,
-      "gateIds": ["typecheck", "tests"]
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
     },
     {
       "id": "B-02",
@@ -46,7 +51,9 @@
       "then": "both working and archived outcome artifacts retain the complete impasse record",
       "observableResult": "Both contract-negotiation-outcome.json copies match IMPASSE and every contested finding ID, evaluator-held state, planner position, planner evidence, and evaluator evidence verbatim.",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-03",
@@ -56,7 +63,9 @@
       "then": "the independent siblings continue under existing lane rules",
       "observableResult": "The independent siblings are dispatched and may complete normally after the impasse parks.",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-04",
@@ -66,7 +75,9 @@
       "then": "the dependent remains undispatched and visibly blocked by the parked issue",
       "observableResult": "run-summary.md and afk status name the dependency hold and show the blocker in AWAITING-ADJUDICATION.",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-05",
@@ -76,7 +87,10 @@
       "then": "only unsettled work becomes CANCELLED",
       "observableResult": "The parked phase and branch value remain unchanged, and both working and archived impasse artifact copies remain unchanged after cancellation.",
       "preservation": false,
-      "gateIds": ["typecheck", "tests"]
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
     },
     {
       "id": "P-01",
@@ -86,7 +100,9 @@
       "then": "classification remains NON_CONVERGENCE and the slice remains ESCALATE",
       "observableResult": "Current non-convergence artifacts and reason text remain available.",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-02",
@@ -96,7 +112,9 @@
       "then": "its ERROR, STUCK, ESCALATE, or CANCELLED behavior remains unchanged",
       "observableResult": "Each existing failure path retains its current terminal phase and artifact behavior.",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-03",
@@ -106,7 +124,9 @@
       "then": "existing PASS, STUCK, MERGE-PENDING, lane-continuation, and branch-preservation semantics remain unchanged",
       "observableResult": "Existing terminal outcomes, cleanup behavior, lane continuation, and preserved branches remain observable as before.",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     }
   ]
 }
