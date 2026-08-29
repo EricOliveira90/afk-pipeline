@@ -135,6 +135,7 @@ import {
 import {
   CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
+  CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
   buildContractNegotiationOutcome,
   buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
@@ -152,6 +153,10 @@ import {
   validateRound1ContractReview,
   validateRound2ContractReview,
 } from "./contract-review.js";
+import {
+  ADJUDICATION_FILENAME,
+  parseAdjudication,
+} from "./adjudication.js";
 import {
   advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
@@ -1929,7 +1934,7 @@ export function reportSliceBounds(ctx: SliceContext): void {
 export async function runSliceNegotiate(
   ctx: SliceContext,
 ): Promise<NegotiateOutcome> {
-  const { config, slice, logger } = ctx;
+  const { config, logger } = ctx;
   const infrastructureRetries =
     config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
   if (
@@ -1937,6 +1942,42 @@ export async function runSliceNegotiate(
     infrastructureRetries < 0
   ) {
     throw new Error("infrastructureRetries must be a non-negative integer");
+  }
+
+  const outcomePath = join(
+    ctx.absSliceDir,
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  );
+  if (existsSync(outcomePath)) {
+    const outcome = JSON.parse(
+      readFileSync(outcomePath, "utf-8"),
+    ) as ContractNegotiationOutcome;
+    if (outcome.classification === "IMPASSE") {
+      const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
+      if (!existsSync(decisionPath)) {
+        return {
+          phase: "AWAITING-ADJUDICATION",
+          cause: negotiateImpasseCause(outcome, "REVISE"),
+        };
+      }
+      try {
+        parseAdjudication(readFileSync(decisionPath, "utf-8"), outcome);
+      } catch (error) {
+        const defect = error instanceof Error ? error.message : String(error);
+        logger.phase(
+          `${ctx.tag}: adjudication refused — ${defect}; slice remains parked`,
+          "error",
+        );
+        return {
+          phase: "AWAITING-ADJUDICATION",
+          cause: {
+            kind: "verdict",
+            verdict: "REVISE",
+            summary: `${negotiateImpasseCause(outcome, "REVISE").summary}; ${defect}`,
+          },
+        };
+      }
+    }
   }
 
   return negotiateAttempt(ctx, infrastructureRetries);

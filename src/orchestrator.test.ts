@@ -2537,6 +2537,23 @@ describe("round-scoped contract feedback", () => {
         },
       ],
     });
+
+    const rawDecision =
+      '{"version":1,"findingId":"F-99","winningPosition":"PLANNER","author":"Ada"}\r\n';
+    const decisionPath = join(ctx.absSliceDir, "adjudication.md");
+    writeFileSync(decisionPath, rawDecision, "utf-8");
+    const invocationsBeforeRetry = plannerRounds + evaluatorRounds;
+
+    const refused = await runSliceNegotiate(ctx);
+
+    expect(refused.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      refused.phase === "AWAITING-ADJUDICATION"
+        ? refused.cause.summary
+        : "",
+    ).toContain("F-99 is absent from the current IMPASSE");
+    expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    expect(readFileSync(decisionPath, "utf-8")).toBe(rawDecision);
   });
 
   it("caps a converging negotiation at two rounds", async () => {
