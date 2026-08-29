@@ -150,4 +150,58 @@ describe("afk adopt", () => {
       },
     });
   });
+
+  it("names a failing base gate and leaves the worktree, refs, and state unchanged", async () => {
+    const repo = makeRepo();
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const featureBefore = resolveCommit(repo, "feat/demo")!;
+    const sliceBefore = resolveCommit(repo, "manual/demo-01")!;
+    const stateBefore = readFileSync(statePath, "utf-8");
+    const statusBefore = git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const branchBefore = git(repo, ["branch", "--show-current"]);
+    const observedGates: string[] = [];
+
+    const result = await runAdoptCli(
+      [
+        "demo",
+        "129",
+        "--branch",
+        "manual/demo-01",
+        "--adopter",
+        "Ada Lovelace",
+        "--reason",
+        "finished the slice manually",
+      ],
+      repo,
+      {
+        resolveGatePlan: () => ({ declarations: GATES }),
+        runBaseGates: async ({ cwd, treeId, declarations }) => {
+          expect(resolveTree(cwd)).toBe(treeId);
+          expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+          observedGates.push(...declarations.map((gate) => gate.id));
+          return declarations.map((gate) => ({
+            ...passingResult(gate, treeId),
+            ...(gate.id === "lint"
+              ? {
+                  status: "FAIL" as const,
+                  failureKind: "COMMAND" as const,
+                  exitCode: 1,
+                }
+              : {}),
+          }));
+        },
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("lint");
+    expect(observedGates).toEqual(["typecheck", "lint", "tests"]);
+    expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+    expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
+    expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+    expect(git(repo, ["branch", "--show-current"])).toBe(branchBefore);
+    expect(
+      git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
+    ).toBe(statusBefore);
+  });
 });

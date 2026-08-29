@@ -138,20 +138,20 @@ const DEFAULT_DEPS: AdoptDependencies = {
   runBaseGates: defaultRunBaseGates,
 };
 
-function gatesPassed(
+function firstFailedGate(
   declarations: readonly GateDeclaration[],
   results: readonly GateResult[],
-): boolean {
-  return declarations.every((declaration) => {
+): { declaration: GateDeclaration; result?: GateResult } | undefined {
+  for (const declaration of declarations) {
     const result = results.find(
       (candidate) => candidate.gateId === declaration.id,
     );
-    if (!result) return false;
-    return (
-      result.status === "PASS" ||
-      (!declaration.required && result.status === "SKIPPED")
-    );
-  });
+    const passed =
+      result?.status === "PASS" ||
+      (!declaration.required && result?.status === "SKIPPED");
+    if (!passed) return { declaration, ...(result ? { result } : {}) };
+  }
+  return undefined;
 }
 
 export async function runAdoptCli(
@@ -229,8 +229,14 @@ export async function runAdoptCli(
   }
   await removeWorktree(repoRoot, candidate.worktreeDir);
 
-  if (!gatesPassed(gatePlan.declarations, gateResults)) {
-    return { output: "Adoption refused: base gates failed.", exitCode: 1 };
+  const failedGate = firstFailedGate(gatePlan.declarations, gateResults);
+  if (failedGate) {
+    return {
+      output:
+        `Adoption refused: base gate ${failedGate.declaration.id} failed` +
+        `${failedGate.result ? ` (${failedGate.result.status})` : " (no result)"}.`,
+      exitCode: 1,
+    };
   }
 
   if (
