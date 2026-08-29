@@ -188,6 +188,28 @@ const MAX_GENERATOR_ROUNDS = 3;
  * generator work earns a fresh grant.
  */
 const MAX_SCOPE_AMENDMENTS_PER_ROUND = 1;
+
+/**
+ * Focused scope revisions granted per implementation round (ADR 0050).
+ *
+ * The generator's escalation loop deliberately does not spend an
+ * implementation round: the generator stopped *before* an undeclared
+ * edit, so re-dispatching it under a widened contract is the same round's
+ * work continuing. That is what made it unbounded — a generator that
+ * discovers one undeclared path at a time could run fresh generator,
+ * planner and contract-evaluator invocations forever without consuming
+ * any budget, which is the loop ADR 0041 says an uncertain branch must
+ * not take.
+ *
+ * Two, not one: unlike a QA scope amendment (ADR 0048), the tree *does*
+ * change between escalations here — the generator commits work, then
+ * stops at the next boundary — so a second genuinely distinct discovery
+ * is honest work rather than a re-report of what the first pass should
+ * have seen. A third in the same round is a generator trickling paths
+ * instead of declaring the scope it needs; the round ends with a
+ * persisted reason and the next round's escalations earn a fresh grant.
+ */
+const MAX_SCOPE_REVISIONS_PER_ROUND = 2;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 /**
  * Persisted reason on every slice a cancellation stops, whether it was
@@ -3303,6 +3325,7 @@ export async function runSliceExecute(
         config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
       const escalationPath = join(ctx.absSliceDir, ESCALATION_FILENAME);
       let generatorAttempt = 0;
+      let scopeRevisions = 0;
       let scopeRevisionNote = "";
       while (true) {
         generatorAttempt++;
@@ -3413,8 +3436,20 @@ export async function runSliceExecute(
           { migrationPathPattern: config.migrationPathPattern },
           escalationPath,
         );
+        if (scopeRevisions >= MAX_SCOPE_REVISIONS_PER_ROUND) {
+          throw new Error(
+            `Focused scope revision refused in round ${round}: round ` +
+              `${round} already spent its ${MAX_SCOPE_REVISIONS_PER_ROUND} ` +
+              `revision(s). Requested: [${escalation.paths.join(", ")}] ` +
+              `(${escalation.reason}). The escalation is archived and the ` +
+              `contract is unchanged; declare the remaining path(s) in the ` +
+              `contract by hand, or resume the slice so the next round ` +
+              `earns a fresh grant.`,
+          );
+        }
         const revision = await runFocusedScopeRevision(ctx, escalation);
         if (revision.phase === "ERROR") return revision;
+        scopeRevisions++;
         scopeRevisionNote =
           "# Focused scope revision accepted\n\n" +
           "The contract was revised and re-locked without spending this " +

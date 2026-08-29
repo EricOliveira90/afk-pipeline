@@ -1051,6 +1051,97 @@ describe("generator scope escalation", () => {
       ).toEqual(Buffer.from(raw));
     }
   }, 60_000);
+
+  // A new spawned scenario, because the bound under test is the escalation
+  // loop's own exit condition: only a real run drives generator -> planner
+  // -> contract-evaluator repeatedly, and the shared "focused generator
+  // scope revision" fixture escalates exactly once by construction.
+  it("refuses a third escalation in one round instead of looping", async () => {
+    const repo = makeRepo();
+    const slug = "repeated-generator-escalation";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1132",
+      title: "Escalates every attempt",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    // One new path at a time — each escalation is individually valid, so
+    // the loop is bounded by the round's allowance and nothing else.
+    const escalations = ["a", "b", "c"].map((suffix, index) =>
+      JSON.stringify({
+        version: 1,
+        findingIds: [`F-1${index}`],
+        paths: [`src/extra-${suffix}.ts`],
+        reason: `module ${suffix} must change too`,
+      }),
+    );
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({
+        slices: [slice],
+        records,
+        fixtures: new Map<string, SliceFixture>([
+          [
+            slice.ghIssue,
+            {
+              files: ["src/declared.ts"],
+              revisionFileScopes: [
+                ["src/declared.ts", "src/extra-a.ts"],
+                ["src/declared.ts", "src/extra-a.ts", "src/extra-b.ts"],
+              ],
+              qaPasses: true,
+              outputFile: "src/declared.ts",
+              outputContent: "declared work",
+              escalations,
+            },
+          ],
+        ]),
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /Focused scope revision refused in round 1/,
+    );
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /already spent its 2 revision\(s\)/,
+    );
+
+    // Two revisions granted, the third refused: the loop stopped rather
+    // than spawning a fourth generator on an unspent budget.
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(3);
+    expect(
+      records.filter(({ role }) => role === "evaluator-contract"),
+    ).toHaveLength(3);
+    expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
+
+    const reviews = join(
+      repo,
+      ".afk",
+      "artifacts",
+      `${slug}-stub`,
+      "slice-01",
+      "reviews",
+    );
+    for (const [index, raw] of escalations.entries()) {
+      expect(
+        readFileSync(join(reviews, `escalation-r1-a${index + 1}.md`), "utf-8"),
+      ).toBe(raw);
+    }
+  }, 120_000);
 });
 
 describe("focused generator scope revision", () => {

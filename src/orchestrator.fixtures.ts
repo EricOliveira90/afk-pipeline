@@ -91,6 +91,21 @@ export interface SliceFixture {
   escalation?: string;
   /** One-based generator invocation that emits `escalation`. Defaults to 1. */
   escalationGeneratorInvocation?: number;
+  /**
+   * Raw escalation artifacts for successive generator invocations from
+   * `escalationGeneratorInvocation` onward, so a test can drive a
+   * generator that keeps escalating (#132). Each must name a path the
+   * locked scope does not have yet — an escalation for an already
+   * declared path is refused by validation, not by the round bound.
+   * Takes precedence over `escalation`.
+   */
+  escalations?: string[];
+  /**
+   * File scope the planner writes on revision rounds 2, 3, ... Lets a
+   * test widen the contract one escalation at a time. Falls back to
+   * `revisedFiles`.
+   */
+  revisionFileScopes?: string[][];
   /** Exhaust contract negotiation in round two with a contested finding. */
   contractImpasse?: boolean;
 }
@@ -268,8 +283,10 @@ export function buildStubProvider(opts: {
         const plannerRound = (plannerRounds.get(ghIssue) ?? 0) + 1;
         plannerRounds.set(ghIssue, plannerRound);
         const files =
-          plannerRound > 1 && fixture.revisedFiles
-            ? fixture.revisedFiles
+          plannerRound > 1
+            ? (fixture.revisionFileScopes?.[plannerRound - 2] ??
+              fixture.revisedFiles ??
+              fixture.files)
             : fixture.files;
         const filesBlock = files.map((f) => `- ${f}`).join("\n");
         writeFileSync(
@@ -332,13 +349,15 @@ export function buildStubProvider(opts: {
           `${fixture.outputContent}\n// generator round ${round} for #${ghIssue}\n`,
           "utf-8",
         );
-        if (
-          round === (fixture.escalationGeneratorInvocation ?? 1) &&
-          fixture.escalation !== undefined
-        ) {
+        const firstEscalation = fixture.escalationGeneratorInvocation ?? 1;
+        const escalations =
+          fixture.escalations ??
+          (fixture.escalation !== undefined ? [fixture.escalation] : []);
+        const raw = escalations[round - firstEscalation];
+        if (round >= firstEscalation && raw !== undefined) {
           writeFileSync(
             join(sliceArtifactDir, "escalation.md"),
-            fixture.escalation,
+            raw,
             "utf-8",
           );
         }

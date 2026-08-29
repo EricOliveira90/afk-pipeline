@@ -826,6 +826,22 @@ export async function createCandidateMerge(
   git(["worktree", "add", "--detach", worktreeDir, featureCommit], {
     cwd: repoRoot,
   });
+  // Both abandon paths below tear the candidate down, and neither may
+  // discard the teardown outcome: a surviving directory is residue that
+  // refuses the next launch (ADR 0035 decision 5, ADR 0042 decision 1),
+  // so it is named in the message the caller reports rather than
+  // swallowed behind a conflict or a resolve failure.
+  const teardown = async (): Promise<string> => {
+    const result = await removeWorktree(repoRoot, worktreeDir);
+    return result.removed
+      ? ""
+      : `; ${formatWorktreeSurvivorWarning(
+          "candidate merge worktree",
+          worktreeDir,
+          result,
+        )}`;
+  };
+
   try {
     git(["merge", sliceCommit, "--no-edit"], { cwd: worktreeDir });
   } catch (err: unknown) {
@@ -834,15 +850,20 @@ export async function createCandidateMerge(
     } catch {
       // Already clean.
     }
-    await removeWorktree(repoRoot, worktreeDir);
-    return { status: "conflict", details: execErrorDetails(err) };
+    const survivor = await teardown();
+    return {
+      status: "conflict",
+      details: `${execErrorDetails(err)}${survivor}`,
+    };
   }
 
   const candidateCommit = resolveCommit(worktreeDir, "HEAD");
   const treeId = resolveTree(worktreeDir);
   if (!candidateCommit || !treeId) {
-    await removeWorktree(repoRoot, worktreeDir);
-    throw new Error("Could not resolve the candidate merge commit and tree");
+    const survivor = await teardown();
+    throw new Error(
+      `Could not resolve the candidate merge commit and tree${survivor}`,
+    );
   }
   return {
     status: "merged",

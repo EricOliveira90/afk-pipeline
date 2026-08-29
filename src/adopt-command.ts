@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
   GateDeclaration,
@@ -9,12 +10,18 @@ import type {
 import { runGates } from "./gate-runner.js";
 import {
   createCandidateMerge,
+  formatWorktreeSurvivorWarning,
+  listWorktrees,
   removeWorktree,
+  type RemoveWorktreeResult,
   resolveCommit,
   updateBranchIfUnchanged,
 } from "./git.js";
+import type { Slice } from "./issues-parser.js";
+import { parseIssuesMd } from "./issues-parser.js";
 import { resolveBaseGateDeclarations } from "./orchestrator.js";
 import { resolveSanityPlan } from "./preship.js";
+import { matchesSliceSelector } from "./resume.js";
 import { loadRunState, saveSliceState } from "./run-state.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 600_000;
@@ -46,6 +53,18 @@ export interface AdoptDependencies {
   resolveGatePlan(cwd: string): GatePlan;
   runBaseGates(options: BaseGateRun): Promise<readonly GateResult[]>;
   finalizeCandidate?(options: CandidateFinalization): boolean;
+  /** Candidate teardown. Seam for the survivor path (ADR 0035). */
+  removeWorktree?(
+    repoRoot: string,
+    worktreeDir: string,
+  ): Promise<RemoveWorktreeResult>;
+  /** The second half of the finalization transaction. */
+  persistSliceState?(
+    repoRoot: string,
+    prdSlug: string,
+    ghIssue: string,
+    result: Parameters<typeof saveSliceState>[3],
+  ): void;
 }
 
 export interface AdoptCliResult {
@@ -93,6 +112,88 @@ function parseArgs(args: readonly string[]): ParsedAdoptArgs | null {
     reason,
     ...(adopter !== undefined ? { adopter } : {}),
   };
+}
+
+/**
+ * Resolve whatever the operator typed for `<slice>` to the identity the
+ * pipeline is keyed on.
+ *
+ * `saveSliceState` and `isSliceComplete` key on the GitHub issue ID, but
+ * `afk adopt <prd-slug> <slice>` invites a manifest slice number — and
+ * the two differ for every PRD whose slices are not numbered by issue.
+ * A PASS written under `06` leaves `#129` incomplete, so a later run
+ * re-dispatches an already-adopted slice and its provenance names a
+ * slice number no issue tracker knows. Resolution happens before any
+ * mutation: an identifier the manifest does not declare is refused with
+ * every ref and the state file untouched.
+ */
+function resolveSliceIdentity(
+  repoRoot: string,
+  prdSlug: string,
+  entered: string,
+): { slice: Slice } | { refusal: string } {
+  const issuesPath = join(repoRoot, ".kiro", "specs", prdSlug, "issues.md");
+  if (!existsSync(issuesPath)) {
+    return {
+      refusal:
+        `cannot resolve slice ${entered} to a GitHub issue: ${issuesPath} ` +
+        `not found. Adoption writes run state under the issue ID the ` +
+        `pipeline is keyed on, so the slice manifest must be readable.`,
+    };
+  }
+  let slices: Slice[];
+  try {
+    slices = parseIssuesMd(issuesPath);
+  } catch (error) {
+    return {
+      refusal: `cannot read ${issuesPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  const matches = slices.filter((slice) =>
+    matchesSliceSelector([entered], slice),
+  );
+  if (matches.length === 0) {
+    return {
+      refusal:
+        `slice ${entered} is not declared in ${issuesPath}. Pass a slice ` +
+        `number or GitHub issue ID from its slice table.`,
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      refusal:
+        `slice ${entered} is ambiguous in ${issuesPath}: it names ` +
+        matches
+          .map((slice) => `${slice.number} (#${slice.ghIssue})`)
+          .join(", ") +
+        `. Pass the GitHub issue ID.`,
+    };
+  }
+  return { slice: matches[0]! };
+}
+
+/**
+ * Registered worktrees that have `branch` checked out.
+ *
+ * `updateBranchIfUnchanged` moves a ref, and a ref is only half of a
+ * checked-out branch's identity: advancing it behind a worktree leaves
+ * that worktree's index and files at the old tree while `git status`
+ * reports the whole difference as staged work (ADR 0010). Adoption
+ * refuses rather than guessing which of the two the operator meant.
+ */
+function worktreesHolding(repoRoot: string, branch: string): string[] {
+  const name = branch.replace(/^refs\/heads\//, "");
+  try {
+    return listWorktrees(repoRoot)
+      .filter((worktree) => worktree.branch === name)
+      .map((worktree) => worktree.path);
+  } catch {
+    // A repo git cannot enumerate cannot be adopted into either; the
+    // candidate merge below reports the underlying problem.
+    return [];
+  }
 }
 
 function resolveAdopter(repoRoot: string, explicit: string | undefined): string {
@@ -151,6 +252,9 @@ const DEFAULT_DEPS: AdoptDependencies = {
   resolveGatePlan: defaultGatePlan,
   runBaseGates: defaultRunBaseGates,
   finalizeCandidate: (options) => defaultFinalizeCandidate(options),
+  removeWorktree: (repoRoot, worktreeDir) =>
+    removeWorktree(repoRoot, worktreeDir),
+  persistSliceState: saveSliceState,
 };
 
 function defaultFinalizeCandidate({
@@ -203,7 +307,26 @@ export async function runAdoptCli(
     };
   }
 
+  const identity = resolveSliceIdentity(repoRoot, parsed.prdSlug, parsed.slice);
+  if ("refusal" in identity) {
+    return { output: `Adoption refused: ${identity.refusal}`, exitCode: 1 };
+  }
+  const { slice } = identity;
+
   const state = loadRunState(repoRoot, parsed.prdSlug);
+
+  const holders = worktreesHolding(repoRoot, state.featureBranch);
+  if (holders.length > 0) {
+    return {
+      output:
+        `Adoption refused: ${state.featureBranch} is checked out in ` +
+        `${holders.join(", ")}. Advancing the ref would leave that ` +
+        `worktree's index and files at the old tree. Check out another ` +
+        `branch there, then run adopt again.`,
+      exitCode: 1,
+    };
+  }
+
   const attemptId = randomUUID();
   const candidateDir = join(repoRoot, ".afk", "adopt", attemptId, "candidate");
   const evidenceDir = join(
@@ -238,9 +361,19 @@ export async function runAdoptCli(
     };
   }
 
-  const gatePlan = dependencies.resolveGatePlan(candidate.worktreeDir);
-  let gateResults: readonly GateResult[];
+  // The candidate worktree's lifetime is this block, so teardown runs on
+  // every exit — including a `resolveGatePlan` throw, which used to
+  // escape before any cleanup and leave the detached worktree registered
+  // (ADR 0035 decision 5, ADR 0042 decision 1). The teardown *result* is
+  // then inspected: a surviving directory is residue that refuses the
+  // next launch, so adoption reports it and stops rather than moving the
+  // feature ref behind a host that still needs cleaning.
+  let gatePlan: GatePlan | undefined;
+  let gateResults: readonly GateResult[] | undefined;
+  let verificationError: string | undefined;
+  let survivor: string | undefined;
   try {
+    gatePlan = dependencies.resolveGatePlan(candidate.worktreeDir);
     gateResults = await dependencies.runBaseGates({
       cwd: candidate.worktreeDir,
       treeId: candidate.treeId,
@@ -250,15 +383,34 @@ export async function runAdoptCli(
       onOutput: (_gateId, text) => process.stderr.write(text),
     });
   } catch (error) {
-    await removeWorktree(repoRoot, candidate.worktreeDir);
+    verificationError =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    const teardown = await (dependencies.removeWorktree ?? removeWorktree)(
+      repoRoot,
+      candidate.worktreeDir,
+    );
+    if (!teardown.removed) {
+      survivor = formatWorktreeSurvivorWarning(
+        "candidate merge worktree",
+        candidate.worktreeDir,
+        teardown,
+      );
+    }
+  }
+  if (verificationError !== undefined || survivor !== undefined) {
+    const parts = [verificationError, survivor].filter(
+      (part): part is string => part !== undefined,
+    );
+    return { output: `Adoption refused: ${parts.join("; ")}`, exitCode: 1 };
+  }
+
+  if (gatePlan === undefined || gateResults === undefined) {
     return {
-      output: `Adoption refused: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      output: "Adoption refused: base gate verification produced no result.",
       exitCode: 1,
     };
   }
-  await removeWorktree(repoRoot, candidate.worktreeDir);
 
   const failedGate = firstFailedGate(gatePlan.declarations, gateResults);
   if (failedGate) {
@@ -292,20 +444,54 @@ export async function runAdoptCli(
     };
   }
 
-  saveSliceState(repoRoot, parsed.prdSlug, parsed.slice, {
-    phase: "PASS",
-    mergedToFeature: true,
-    branch: parsed.branch,
-    adoption: {
-      adopter,
-      reason: parsed.reason,
-      branch: parsed.branch,
-      commit: candidate.sliceCommit,
-    },
-  });
+  // The ref has moved; the state write is the other half of the same
+  // transaction (ADR 0042 puts the state<->branch invariant here, at
+  // write time). A throw between them would record merged code as
+  // incomplete with no reconciliation path, so the ref is put back with
+  // a guarded CAS and the refusal names both outcomes.
+  try {
+    (dependencies.persistSliceState ?? saveSliceState)(
+      repoRoot,
+      parsed.prdSlug,
+      slice.ghIssue,
+      {
+        phase: "PASS",
+        mergedToFeature: true,
+        branch: parsed.branch,
+        adoption: {
+          adopter,
+          reason: parsed.reason,
+          branch: parsed.branch,
+          commit: candidate.sliceCommit,
+        },
+      },
+    );
+  } catch (error) {
+    const rolledBack = updateBranchIfUnchanged(
+      repoRoot,
+      state.featureBranch,
+      candidate.featureCommit,
+      candidate.candidateCommit,
+    );
+    return {
+      output:
+        `Adoption refused: recording slice #${slice.ghIssue} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }. ` +
+        (rolledBack
+          ? `${state.featureBranch} was rolled back to ` +
+            `${candidate.featureCommit}; nothing was adopted.`
+          : `${state.featureBranch} could NOT be rolled back from ` +
+            `${candidate.candidateCommit} to ${candidate.featureCommit} ` +
+            `— the merge is on the branch but no state records it; ` +
+            `reset the branch or re-run adopt once the state file is ` +
+            `writable.`),
+      exitCode: 1,
+    };
+  }
   return {
     output:
-      `Adopted slice #${parsed.slice} from ${parsed.branch} into ` +
+      `Adopted slice #${slice.ghIssue} from ${parsed.branch} into ` +
       `${state.featureBranch} (verified commit ${candidate.sliceCommit}).`,
     exitCode: 0,
   };
