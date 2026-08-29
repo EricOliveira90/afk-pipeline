@@ -645,6 +645,9 @@ describe("retried slice resume (spec #33)", () => {
 
     it("hands the named slice the STUCK-resume prompt, not the #33 one", () => {
       const prompt = generatorRecord("01").prompt;
+      const unresolvedFindings = prompt.match(
+        /# Current unresolved findings\r?\n\r?\n([\s\S]*?)\r?\n# Reconciling the contract/,
+      )?.[1];
       expect(prompt).toContain("Your worktree was not touched.");
       expect(prompt).not.toMatch(/anything after your last commit is gone/i);
       // Its own commit log across all three dead rounds.
@@ -659,8 +662,16 @@ describe("retried slice resume (spec #33)", () => {
       );
       expect(prompt).toContain("qa-review-r3-a1.json");
       expect(prompt).toContain("qa-report-r3-a1.md");
-      expect(prompt).not.toContain("qa-review-r1-a1.json");
-      expect(prompt).not.toContain("`qa-report-r2-a1.md`");
+      expect(unresolvedFindings).toBeDefined();
+      expect(unresolvedFindings).toContain("QA-01");
+      expect(unresolvedFindings).toContain("Fixture implementation finding");
+      expect(unresolvedFindings).toContain(
+        "The fixture evaluator observes the behavior passing",
+      );
+      expect(unresolvedFindings).toContain("qa-review-r3-a1.json");
+      expect(unresolvedFindings).toContain("qa-report-r3-a1.md");
+      expect(unresolvedFindings).not.toContain("qa-review-r1-a1.json");
+      expect(unresolvedFindings).not.toContain("`qa-report-r2-a1.md`");
     });
 
     it("continues the deterministic lifecycle in the resumed evaluator", () => {
