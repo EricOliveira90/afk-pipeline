@@ -1,11 +1,25 @@
 ---
 name: afk
-description: Run the AFK Pipeline to autonomously implement PRD slices as draft PRs. Orchestrates explorer, planner, evaluator, and generator agents per slice with DAG-based parallelism. Use when user wants to run AFK, set up AFK in a project, create issues.md for the pipeline, or asks about the AFK pipeline workflow.
+description: Run the AFK v2 pipeline to autonomously implement PRD slices as verified draft PRs, and organize a repository so AFK works well in it. Use when the user wants to run AFK, set up or onboard a project for AFK, prepare issues.md or afk.json, add ARCHITECTURE.md or afk.config.json for the pipeline, understand contracts, gates, escalations, or adjudication, or asks anything about the AFK pipeline workflow — even if they only say "run the pipeline on this PRD" or "make this repo agent-ready".
 ---
 
-# AFK Pipeline
+# AFK Pipeline (v2)
 
-Autonomous multi-agent orchestration: PRD → sliced issues → draft PR. You define the work, kick off the pipeline, walk away, come back to a PR.
+Autonomous multi-agent orchestration: PRD → sliced issues → contract-locked,
+gate-proven implementation → verified draft PR. You define the work, launch,
+walk away, come back to a PR whose every claim carries machine-checkable
+evidence.
+
+Two jobs this skill covers:
+
+1. **Run AFK** — launch, monitor, adjudicate, adopt.
+2. **Organize the repo** — the files and conventions that make runs fast,
+   parallel, and evidence-rich.
+
+Related skills: `to-spec` → `to-tickets` → `to-afk` is the planning path;
+`to-afk` prepares a ticketed PRD (slice selection, migration-prefix
+reservation, committed `afk.json`) and hands you a `$babysit-afk` prompt.
+Use this skill when you need to understand or operate the pipeline itself.
 
 ## Quick Start
 
@@ -13,65 +27,119 @@ Autonomous multi-agent orchestration: PRD → sliced issues → draft PR. You de
 # Install
 pnpm add -D git+https://github.com/EricOliveira90/afk-pipeline.git
 
-# Preview execution plan
+# Preview the execution plan (waves, lanes, bounds)
 npx afk --prd-dir .kiro/specs/<prd-slug> --dry-run
 
-# Run (Kiro backend)
-npx afk --prd-dir .kiro/specs/<prd-slug>
-
-# Run (Claude Code backend)
+# Run (Kiro / Claude Code / Codex backends)
+npx afk        --prd-dir .kiro/specs/<prd-slug>
 npx afk-claude --prd-dir .kiro/specs/<prd-slug>
+npx afk-codex  --prd-dir .kiro/specs/<prd-slug>
 
-# Run (Codex backend)
-npx afk-codex --prd-dir .kiro/specs/<prd-slug>
+# Stop a live run cleanly (routes through the abort path, records CANCELLED)
+npx afk stop --prd-dir .kiro/specs/<prd-slug>
 
-# Run an explicit AFK-only scope
-npx afk-codex --prd-dir .kiro/specs/<prd-slug> --slices 01,02,03,04
+# Inspect a run
+npx afk status --prd-dir .kiro/specs/<prd-slug> [--json]
+
+# Adopt a slice you finished by hand (verifies merge + gates, records who/why)
+npx afk adopt --prd-dir .kiro/specs/<prd-slug> --slice <nn>
 ```
 
-## Prerequisites
+## Repo Organization — what AFK reads, and why each file earns its place
 
-- Node.js 22+
-- GitHub CLI authenticated (`gh auth login`)
-- Agent provider authenticated: `kiro-cli login` (Kiro), `claude login` (Claude Code), or existing Codex CLI managed authentication
-- `git`, `pnpm` on PATH
-- Project conventions: `CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/CONVENTIONS.md`, `docs/PRODUCT.md`
-- For Kiro guardian reviews: `.kiro/agents/{architect-review,pm-review}.md`. Claude Code and Codex guardians use complete bundled prompts.
+| File | Read by | What it buys you |
+|---|---|---|
+| `.kiro/specs/<slug>/prd.md` | planner, evaluators | The spec. Escalations cite it; contradicting it routes to a human. |
+| `.kiro/specs/<slug>/issues.md` | orchestrator | Slice table → DAG. Drives waves, lanes, and scope. |
+| `.kiro/specs/<slug>/afk.json` | orchestrator | Run scope + migration-prefix reservation pool (written by `to-afk`). Omit it only for repos without migrations. |
+| `afk.config.json` (repo root) | lane partitioner | Project policy: `resourceKeys` (hub files, shared resources) and the architecture doc path. Two slices touching the same key serialize into one lane instead of colliding at merge. |
+| `ARCHITECTURE.md` | explorer, planner envelopes | Modules, hubs, seams, placement rules. This is how the planner declares seams instead of hubs — the single biggest lever on parallelism. |
+| `docs/adr/` | explorer (via an ADR title index) | Recorded decisions. Agents get the index (numbers + titles) and pull full texts on demand; a slice that must contradict an ADR escalates instead of overriding it. |
+| `CONTEXT.md` | all roles | Glossary and domain terms. |
+| Gate scripts in `package.json` | gate runner | `typecheck`, `test:related`, `test:full` (or `test`), `lint`. PASS is auditable only for gates the orchestrator can execute. |
 
-## Input Format (issues.md)
+Authoring rules that pay off every run:
 
-```markdown
-| Slice | GH Issue | Title              | Type | Blocked by | User stories covered |
-|-------|----------|--------------------|------|------------|----------------------|
-| 01    | #41      | Contact list CRUD  | AFK  | —          | US-1, US-2           |
-| 02    | #42      | Contact detail     | AFK  | —          | US-3                 |
-| 03    | #43      | Contact search     | AFK  | #41        | US-4                 |
-| 04    | #44      | Contact CSV import | AFK  | #41, #42   | US-6                 |
-| 05    | #45      | LGPD delete flow   | HITL | #41        | US-7                 |
-```
+- **Slices are vertical** (end-to-end behavior, independently verifiable) but
+  **siblings in one wave declare disjoint files**. When two slices need the
+  same seam, add a tiny "seam slice" first that lands the interface, types,
+  and stubs — then the implementations parallelize. Vertical for testability,
+  seams for parallelism; never horizontal layers (they can't be verified
+  independently, and verification is the only trust mechanism here).
+- **Name hub files in `afk.config.json`** (`resourceKeys`) and keep them in
+  `ARCHITECTURE.md`'s Hubs section. The partitioner serializes contenders;
+  the authoring goal is not to touch hubs at all — extract instead.
+- **ADR titles should be sentences that carry the rule** ("restart never
+  destroys unmerged commits"). The index is all agents see by default; a
+  title like "Miscellaneous" buys nothing.
+- **Lint tickets before they enter AFK.** A criterion that names a
+  state/field absent from schemas, or a recording obligation without a named
+  channel, burns bounded rounds on defects a human reads past.
 
-- **AFK** = pipeline runs it. **HITL** = skipped (needs human).
-- `--slices` accepts comma-separated manifest slice numbers. It rejects HITL slices.
-- **Blocked by** = `—` for none, or comma-separated issue numbers for DAG deps.
+See [REFERENCE.md](REFERENCE.md) for the exact `issues.md`, `afk.json`, and
+`afk.config.json` formats.
 
 ## Pipeline Flow (per slice)
 
 ```
-explorer → context.md (codebase search, read-only)
-planner  → contract.md (scope + acceptance criteria, max 3 rounds with evaluator)
-generator → implements + tests as verification, commits (max 3 rounds with evaluator-qa)
-  PASS  → merge into feature branch
-  STUCK → stuck.md written, worktree preserved
+explorer → evidence map (four sections, cited facts, named unknowns)
+planner ⇄ contract evaluator → contract.md + acceptance manifest
+        every behavior locks with an executable binding (a test the gate
+        runner can execute); undeclared scope cannot lock; review fails closed
+generator ⇄ deterministic gates + QA evaluator
+        gates first (typecheck, behavior coverage, file scope, related tests)
+        — a mechanical failure returns to the generator without spending a
+        review round; the candidate evaluator judges only gate-green trees,
+        from a disposable read-only worktree
+  PASS     → merge into feature branch (serialized under a mutex)
+  CONFLICT → one agent merge-resolution round, re-proven by gates, then
+             terminal CONFLICT only if that fails (both branches preserved)
+  STUCK    → code-assembled diagnosis from archived findings; worktree kept
 ```
+
+Waves and lanes: independent slices run in parallel; slices whose declared
+files or resource keys overlap serialize into a lane, where each successor
+re-plans on its predecessor's merged result. The full suite runs once per
+slice at the merge boundary and once at the aggregate pre-ship gate — not at
+every checkpoint.
+
+## Escalation and Adjudication — what reaches a human
+
+Agents decide and record most judgment calls. A slice escalates only on:
+
+1. **Spec contradiction** — the correct fix contradicts the PRD or a
+   recorded ADR.
+2. **Load-bearing silence** — the spec says nothing and the choice creates
+   something others will build on.
+3. **Declared risk class** — the change touches a catalog-declared risky
+   path (schema history, auth, deletion of tests or gates).
+
+An escalated slice **parks; the run continues** with everything that doesn't
+depend on it. The babysit agent couriers the contested question to you
+verbatim and writes your decision back as an adjudication artifact; the
+parked slice resumes in the live run. Nothing merges on an unresolved
+escalation.
 
 ## Key Behaviors
 
-- **Resumable**: resolved scope is persisted; re-run to skip completed slices without expanding scope
-- **Terminal handoff**: `.afk/logs/<run-slug>/handoff.json` records branch/SHA, migrations, closing issues, skips, and draft PR metadata
-- **Parallel**: independent slices run concurrently; file-overlap slices serialized in lanes
-- **Post-merge gates**: `pnpm typecheck && pnpm lint && pnpm test` → architect + PM reviews (concurrent; serial under `--serial-lanes`) → draft PR. Review failures are classified per ADR 0015: NEVER_RAN / DIED_MID_RUN retry within the run, UNPARSEABLE is terminal; all gate the PR off without aborting the pipeline. Sanity gate and favorable verdicts are cached for cheap re-entry; `--open-pr-on-override` opens the PR despite a PM FIX-BEFORE-SHIP and records the override in the PR body.
-- **Cancellation**: Ctrl-C kills agents cleanly; second Ctrl-C hard-exits
+- **Evidence over claims**: gate results carry exit status, duration, tree
+  identity, and log artifacts; evaluator verdicts cite them. Nothing PASSes
+  on an agent's say-so.
+- **Resumable**: per-slice state persists; re-run to continue. Restarts never
+  destroy unmerged commits; crashes write the same records a clean stop does.
+- **Bounded**: contract and repair rounds are capped; remaining bounds are
+  visible at dispatch in `run.log` and `afk status`.
+- **Ship gate**: full suite on the merged feature branch → guardian reviews
+  → draft PR. Environment-sensitive gates (declared in the catalog) report
+  at PR review instead of blocking rounds.
+- **Concurrent PRDs**: two runs may share a machine — one clone per run,
+  prefixes reserved per PRD via `afk.json`, ticket file-overlap checked
+  first. Details in REFERENCE.md.
+- **Cancellation**: `afk stop` or Ctrl-C lands CANCELLED records; a second
+  Ctrl-C hard-exits.
 
 ## Detailed Reference
 
-See [REFERENCE.md](REFERENCE.md) for: artifact locations, branch strategy, error handling, backend comparison, guardian agent setup, and convenience scripts.
+See [REFERENCE.md](REFERENCE.md) for: file formats, artifact locations,
+branch strategy, gate catalog and quality policy, error handling, backend
+comparison, adjudication artifacts, `afk adopt`, and concurrent-run setup.
