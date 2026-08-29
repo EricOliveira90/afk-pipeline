@@ -41,6 +41,29 @@ import type {
 
 const integrationTempDirs: string[] = [];
 
+/** Message the `revisionPlannerThrows` fixture fails with. */
+export const REVISION_PLANNER_FAILURE =
+  "stub planner refused the focused revision";
+
+/** Finding ID the `revisionRejected` fixture's REVISE verdict carries. */
+export const REVISION_REJECTION_FINDING = "F-REVISION";
+
+/**
+ * Whether a planner or contract-evaluator prompt is the focused
+ * scope-revision one. Read off the notes `runFocusedScopeRevision`
+ * interpolates rather than an invocation counter: a lane successor
+ * re-negotiates from scratch, which bumps every counter without a
+ * revision having happened.
+ */
+function isFocusedRevision(prompt: string): boolean {
+  return (
+    prompt.includes("This is a focused revision of the already accepted") ||
+    prompt.includes(
+      "This is a fresh evaluation of one focused generator scope revision",
+    )
+  );
+}
+
 /**
  * Removes every test-lifetime repo `makeRepo` created since the last
  * call. Each test file registers this in its own `afterEach` — a hook
@@ -106,6 +129,20 @@ export interface SliceFixture {
    * `revisedFiles`.
    */
   revisionFileScopes?: string[][];
+  /**
+   * Throw from the second (revision) planner invocation instead of
+   * writing a revised contract — the provider-exception half of the
+   * focused-revision rollback (ADR 0051). The message is asserted, so it
+   * is fixed here rather than per test.
+   */
+  revisionPlannerThrows?: boolean;
+  /**
+   * Make the *revision* contract evaluator return REVISE, so the focused
+   * revision is planned and then rejected — the other half of ADR 0051's
+   * rollback. Distinct from `contractImpasse`, which rejects during
+   * ordinary negotiation before any revision exists.
+   */
+  revisionRejected?: boolean;
   /** Exhaust contract negotiation in round two with a contested finding. */
   contractImpasse?: boolean;
 }
@@ -282,6 +319,17 @@ export function buildStubProvider(opts: {
       } else if (role === "planner" && sliceArtifactDir && fixture) {
         const plannerRound = (plannerRounds.get(ghIssue) ?? 0) + 1;
         plannerRounds.set(ghIssue, plannerRound);
+        if (fixture.revisionPlannerThrows && isFocusedRevision(options.prompt)) {
+          records.push({
+            role,
+            prompt: options.prompt,
+            cwd,
+            startedAt,
+            finishedAt: Date.now(),
+            ghIssue,
+          });
+          throw new Error(REVISION_PLANNER_FAILURE);
+        }
         const files =
           plannerRound > 1
             ? (fixture.revisionFileScopes?.[plannerRound - 2] ??
@@ -305,35 +353,56 @@ export function buildStubProvider(opts: {
       ) {
         const feedbackRound =
           /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "1";
+        const rejectRevision =
+          fixture.revisionRejected === true &&
+          isFocusedRevision(options.prompt);
         const impasse = fixture.contractImpasse === true;
         writeFileSync(
           join(sliceArtifactDir, `feedback-r${feedbackRound}.md`),
           `## Evaluator feedback — round ${feedbackRound}\n\n${
-            impasse ? "The contract interpretation remains disputed." : "The contract is testable."
+            impasse || rejectRevision
+              ? "The contract interpretation remains disputed."
+              : "The contract is testable."
           }\n`,
           "utf-8",
         );
-        writeContractReview(
-          sliceArtifactDir,
-          impasse ? "REVISE" : "ACCEPT",
-          impasse
-            ? [
-                {
-                  id: "F-IMPASSE",
-                  severity: "BLOCKING",
-                  behaviorIds: ["B-01"],
-                  evidence: '"the evaluator-held interpretation"',
-                  expected: "one agreed interpretation",
-                  observed: "the planner contests the evaluator interpretation",
-                  clearCondition: "a human adjudicates the finding",
-                  state:
-                    plannerRounds.get(ghIssue) === 2
-                      ? "CONTESTED"
-                      : "OPEN",
-                },
-              ]
-            : undefined,
-        );
+        if (rejectRevision) {
+          writeContractReview(sliceArtifactDir, "REVISE", [
+            {
+              id: REVISION_REJECTION_FINDING,
+              severity: "BLOCKING",
+              behaviorIds: ["B-01"],
+              evidence: '"the revised file scope"',
+              expected: "a revision that keeps every locked term",
+              observed: "the revision changes an accepted behavior",
+              clearCondition: "the planner re-revises the contract",
+              state: "OPEN",
+            },
+          ]);
+        } else {
+          writeContractReview(
+            sliceArtifactDir,
+            impasse ? "REVISE" : "ACCEPT",
+            impasse
+              ? [
+                  {
+                    id: "F-IMPASSE",
+                    severity: "BLOCKING",
+                    behaviorIds: ["B-01"],
+                    evidence: '"the evaluator-held interpretation"',
+                    expected: "one agreed interpretation",
+                    observed:
+                      "the planner contests the evaluator interpretation",
+                    clearCondition: "a human adjudicates the finding",
+                    state:
+                      plannerRounds.get(ghIssue) === 2
+                        ? "CONTESTED"
+                        : "OPEN",
+                  },
+                ]
+              : undefined,
+          );
+        }
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         if (fixture.simulateIdleDeferral) {
           options.onIdleDeferral?.({ silentSeconds: 600, busyProcesses: 2 });

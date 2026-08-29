@@ -7,6 +7,29 @@ import { migrationPathsIn, type LaneResourceOptions } from "./lanes.js";
 
 export const ESCALATION_FILENAME = "escalation.md";
 
+/**
+ * The reserved `findingIds` identity for a **pre-build scope discovery**:
+ * a generator that learns the locked file scope is too narrow *before* it
+ * has any finding to cite.
+ *
+ * `findingIds` stays mandatory and an empty list stays a refusal — that
+ * fail-closed check is what stops a generator from widening its own scope
+ * on an unexplained whim (story 13). But the first generator invocation of
+ * a round-1 slice is handed no QA findings at all, so a real finding ID is
+ * an identity it cannot honestly produce. Without a reserved value the
+ * only schema-valid escalations were the QA-driven ones, and the PRD's
+ * original pre-build deadlock — discover the scope is wrong, have no legal
+ * way to say so — remained reachable. See ADR 0052.
+ *
+ * It is an identity, not an escape hatch: `reason` is still required, the
+ * paths are still validated against the locked manifest, and it may not be
+ * mixed with real finding IDs. An escalation is either a pre-build
+ * discovery or a cited-finding fix; claiming both describes no single
+ * event, and accepting the mixture would let a QA-driven generator launder
+ * an uncited path in beside a cited one.
+ */
+export const PRE_BUILD_SCOPE_FINDING_ID = "PRE-BUILD-SCOPE";
+
 export interface ScopeEscalation {
   version: 1;
   findingIds: string[];
@@ -94,6 +117,18 @@ export function parseScopeEscalation(
   );
   if (new Set(findingIds).size !== findingIds.length) {
     throw new Error(`${source} findingIds must be unique`);
+  }
+  if (
+    findingIds.includes(PRE_BUILD_SCOPE_FINDING_ID) &&
+    findingIds.length > 1
+  ) {
+    throw new Error(
+      `${source} findingIds must not mix ${PRE_BUILD_SCOPE_FINDING_ID} with ` +
+        `cited finding IDs (${findingIds
+          .filter((id) => id !== PRE_BUILD_SCOPE_FINDING_ID)
+          .join(", ")}); an escalation is either a pre-build scope ` +
+        `discovery or a cited-finding fix`,
+    );
   }
 
   const rawPaths = parseNonBlankStrings(input.paths, "paths", source);

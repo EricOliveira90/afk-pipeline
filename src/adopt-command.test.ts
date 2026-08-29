@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -51,7 +52,33 @@ function writeIssuesMd(repo: string, prdSlug: string): void {
   );
 }
 
-function makeRepo(): string {
+/**
+ * The run-state key and feature branch a provider's run of PRD `demo`
+ * uses — `pipelineRunSlug` / `featureBranchPrefix`. Kiro keeps the bare
+ * names; every other provider is qualified.
+ */
+function runIdentity(provider: string): {
+  runSlug: string;
+  featureBranch: string;
+} {
+  return provider === "kiro"
+    ? { runSlug: "demo", featureBranch: "feat/demo" }
+    : { runSlug: `demo-${provider}`, featureBranch: `feat-${provider}/demo` };
+}
+
+/** Add one more provider's run state and feature branch to a repo. */
+function addRun(repo: string, provider: string): void {
+  const { runSlug, featureBranch } = runIdentity(provider);
+  git(repo, ["branch", featureBranch, "main"]);
+  saveRunState(repo, {
+    version: 1,
+    prdSlug: runSlug,
+    featureBranch,
+    slices: {},
+  });
+}
+
+function makeRepo(provider = "kiro"): string {
   const repo = mkdtempSync(join(tmpdir(), "afk-adopt-"));
   tempDirs.push(repo);
   git(repo, ["init", "--initial-branch=main"]);
@@ -61,18 +88,12 @@ function makeRepo(): string {
   writeFileSync(join(repo, "base.txt"), "base\n");
   git(repo, ["add", "."]);
   git(repo, ["commit", "-m", "base"]);
-  git(repo, ["branch", "feat/demo"]);
   git(repo, ["checkout", "-b", "manual/demo-01"]);
   writeFileSync(join(repo, "slice.txt"), "finished manually\n");
   git(repo, ["add", "."]);
   git(repo, ["commit", "-m", "finish slice"]);
   git(repo, ["checkout", "main"]);
-  saveRunState(repo, {
-    version: 1,
-    prdSlug: "demo",
-    featureBranch: "feat/demo",
-    slices: {},
-  });
+  addRun(repo, provider);
   return repo;
 }
 
@@ -161,7 +182,7 @@ describe("afk adopt", () => {
       exitCode: 2,
       output:
         "Usage: afk adopt <prd-slug> <slice> --branch <branch> " +
-        "--reason <reason> [--adopter <name>]",
+        "--reason <reason> [--adopter <name>] [--provider <name>]",
     });
     expect(gatesCalled).toBe(false);
   });
@@ -667,5 +688,179 @@ describe("afk adopt", () => {
     expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
     expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
     expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+  });
+
+  /**
+   * The PM ran `afk adopt` against a real Codex run and got
+   * `Feature branch not found: feat/afk-v2-routing-adjudication` — the
+   * bare PRD slug was used for the state key, so the command was unusable
+   * for every non-kiro provider. ADR 0053 makes the run discovered.
+   */
+  describe("provider-qualified run state", () => {
+    const PASSING = {
+      resolveGatePlan: () => ({ declarations: GATES }),
+      runBaseGates: async ({
+        treeId,
+        declarations,
+      }: {
+        treeId: string;
+        declarations: readonly GateDeclaration[];
+      }) => declarations.map((gate) => passingResult(gate, treeId)),
+    };
+
+    it.each(["kiro", "codex", "claude"])(
+      "adopts into the %s run's own state and feature branch",
+      async (provider) => {
+        const repo = makeRepo(provider);
+        const { runSlug, featureBranch } = runIdentity(provider);
+        const featureBefore = resolveCommit(repo, featureBranch)!;
+        const sliceTip = resolveCommit(repo, "manual/demo-01")!;
+
+        const result = await runAdoptCli(
+          [
+            "demo",
+            "129",
+            "--branch",
+            "manual/demo-01",
+            "--adopter",
+            "Ada Lovelace",
+            "--reason",
+            "finished the slice manually",
+          ],
+          repo,
+          PASSING,
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.output).toContain(featureBranch);
+        expect(resolveCommit(repo, featureBranch)).not.toBe(featureBefore);
+        const state = loadRunState(repo, runSlug);
+        expect(state.featureBranch).toBe(featureBranch);
+        expect(isSliceComplete(state, "129")).toBe(true);
+        expect(state.slices["129"]!.adoption!.commit).toBe(sliceTip);
+        // No unqualified sidecar left behind for a non-kiro run.
+        expect(existsSync(join(repo, ".afk", "state", "demo.json"))).toBe(
+          provider === "kiro",
+        );
+      },
+    );
+
+    it("refuses when two providers ran the same PRD, naming both", async () => {
+      const repo = makeRepo("kiro");
+      addRun(repo, "codex");
+      const kiroBefore = resolveCommit(repo, "feat/demo")!;
+      const codexBefore = resolveCommit(repo, "feat-codex/demo")!;
+      let gatesCalled = false;
+
+      const result = await runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+        ],
+        repo,
+        {
+          resolveGatePlan: () => {
+            gatesCalled = true;
+            return { declarations: GATES };
+          },
+          runBaseGates: async () => {
+            gatesCalled = true;
+            return [];
+          },
+        },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("more than one run state");
+      expect(result.output).toContain("demo, demo-codex");
+      expect(result.output).toContain("--provider");
+      expect(gatesCalled).toBe(false);
+      expect(resolveCommit(repo, "feat/demo")).toBe(kiroBefore);
+      expect(resolveCommit(repo, "feat-codex/demo")).toBe(codexBefore);
+    });
+
+    it("resolves the ambiguity when --provider names the run", async () => {
+      const repo = makeRepo("kiro");
+      addRun(repo, "codex");
+      const kiroBefore = resolveCommit(repo, "feat/demo")!;
+
+      const result = await runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+          "--provider",
+          "codex",
+        ],
+        repo,
+        PASSING,
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(isSliceComplete(loadRunState(repo, "demo-codex"), "129")).toBe(
+        true,
+      );
+      expect(Object.keys(loadRunState(repo, "demo").slices)).toEqual([]);
+      expect(resolveCommit(repo, "feat/demo")).toBe(kiroBefore);
+    });
+
+    it("refuses a --provider with no run state, naming what is present", async () => {
+      const repo = makeRepo("codex");
+
+      const result = await runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+          "--provider",
+          "kiro",
+        ],
+        repo,
+        PASSING,
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain(".afk/state/demo.json");
+      expect(result.output).toContain("demo-codex");
+    });
+
+    it("refuses a PRD with no run state at all", async () => {
+      const repo = makeRepo("codex");
+      rmSync(join(repo, ".afk", "state"), { recursive: true, force: true });
+
+      const result = await runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+        ],
+        repo,
+        PASSING,
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("no run state for 'demo'");
+    });
   });
 });

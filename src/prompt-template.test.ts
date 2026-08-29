@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
 import { parseQAReview } from "./qa-review.js";
+import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -181,7 +182,7 @@ describe("renderPrompt", () => {
 
     expect(new Set(escalationSections)).toHaveLength(1);
     expect(escalationSections[0]).toContain(
-      "a cited finding's correct fix requires an undeclared file path",
+      "the correct implementation requires a file path the locked contract",
     );
     expect(escalationSections[0]).toContain(
       "Stop before making the undeclared edit",
@@ -191,6 +192,16 @@ describe("renderPrompt", () => {
     );
     expect(escalationSections[0]).toMatch(
       /contains no fields other than `version`, `findingIds`, `paths`,\s+and `reason`/,
+    );
+    // Both identities, and the rule that picks between them (ADR 0052).
+    // The pre-build case is the one the PRD's deadlock lives in, so it has
+    // to be authorized in the *same* canonical section every invocation
+    // gets — not only in the initial-generator template.
+    expect(escalationSections[0]).toContain(PRE_BUILD_SCOPE_FINDING_ID);
+    expect(escalationSections[0]).toContain("Nothing was cited to you");
+    expect(escalationSections[0]).toContain("Findings were cited to you");
+    expect(escalationSections[0]).toMatch(
+      /Never mix `PRE-BUILD-SCOPE` with a real finding ID/,
     );
   });
 

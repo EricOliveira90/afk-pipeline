@@ -19,10 +19,17 @@ import {
 } from "./git.js";
 import type { Slice } from "./issues-parser.js";
 import { parseIssuesMd } from "./issues-parser.js";
-import { resolveBaseGateDeclarations } from "./orchestrator.js";
+import {
+  resolveBaseGateDeclarations,
+  runSlugForProviderName,
+} from "./orchestrator.js";
 import { resolveSanityPlan } from "./preship.js";
 import { matchesSliceSelector } from "./resume.js";
-import { loadRunState, saveSliceState } from "./run-state.js";
+import {
+  listRunStateSlugs,
+  loadRunState,
+  saveSliceState,
+} from "./run-state.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 600_000;
 const DEFAULT_GATE_WALL_CLOCK_TIMEOUT_MS = 7_200_000;
@@ -58,10 +65,14 @@ export interface AdoptDependencies {
     repoRoot: string,
     worktreeDir: string,
   ): Promise<RemoveWorktreeResult>;
-  /** The second half of the finalization transaction. */
+  /**
+   * The second half of the finalization transaction. Keyed on the *run*
+   * slug (`resolveRunSlug`), which is provider-qualified — not the PRD
+   * slug the operator typed.
+   */
   persistSliceState?(
     repoRoot: string,
-    prdSlug: string,
+    runSlug: string,
     ghIssue: string,
     result: Parameters<typeof saveSliceState>[3],
   ): void;
@@ -78,11 +89,12 @@ interface ParsedAdoptArgs {
   branch: string;
   adopter?: string;
   reason: string;
+  provider?: string;
 }
 
 const USAGE =
   "Usage: afk adopt <prd-slug> <slice> --branch <branch> " +
-  "--reason <reason> [--adopter <name>]";
+  "--reason <reason> [--adopter <name>] [--provider <name>]";
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -105,13 +117,83 @@ function parseArgs(args: readonly string[]): ParsedAdoptArgs | null {
     return null;
   }
   const adopter = option(args, "--adopter");
+  const provider = option(args, "--provider");
   return {
     prdSlug,
     slice,
     branch,
     reason,
     ...(adopter !== undefined ? { adopter } : {}),
+    ...(provider !== undefined ? { provider } : {}),
   };
+}
+
+/**
+ * Which run state this adoption writes into.
+ *
+ * `pipelineRunSlug` keys a non-kiro run's state and feature branch on
+ * `<prd-slug>-<provider>` / `feat-<provider>/<prd-slug>`, and adoption used
+ * the bare PRD slug for both. `loadRunState` on a missing file returns a
+ * fresh record defaulting to `feat/<prd-slug>`, so adopting a Codex or
+ * Claude run refused with `Feature branch not found: feat/<prd-slug>` —
+ * unusable for exactly the runs most likely to need the bypass valve, and
+ * unable to write provenance into the state the pipeline later reads.
+ *
+ * So the run is *discovered* rather than assumed. `--provider` names it
+ * outright; otherwise the state directory is matched the way
+ * `logSlugMatches` matches log directories — the slug itself (kiro keeps
+ * the bare name) or the slug plus a suffix. One candidate is the answer,
+ * several is a refusal naming them, none is a refusal too: adoption needs
+ * a real feature branch to move, and inventing `feat/<prd-slug>` for a run
+ * that never existed only defers the failure to a worse place.
+ *
+ * The prefix match can also catch a PRD slug that starts with this one —
+ * the same caveat `afk stop` carries. That surfaces as the ambiguity
+ * refusal, which names every candidate, rather than as a silent wrong pick.
+ */
+function resolveRunSlug(
+  repoRoot: string,
+  prdSlug: string,
+  provider: string | undefined,
+): { runSlug: string } | { refusal: string } {
+  const present = listRunStateSlugs(repoRoot);
+  if (provider !== undefined) {
+    const runSlug = runSlugForProviderName(prdSlug, provider);
+    if (!present.includes(runSlug)) {
+      return {
+        refusal:
+          `no run state for provider '${provider}': expected ` +
+          `.afk/state/${runSlug}.json` +
+          (present.length > 0
+            ? `. Run state present: ${present.join(", ")}`
+            : ` and .afk/state holds no run state at all`),
+      };
+    }
+    return { runSlug };
+  }
+
+  const candidates = present.filter(
+    (slug) => slug === prdSlug || slug.startsWith(`${prdSlug}-`),
+  );
+  if (candidates.length === 0) {
+    return {
+      refusal:
+        `no run state for '${prdSlug}' under .afk/state` +
+        (present.length > 0
+          ? `. Run state present: ${present.join(", ")}`
+          : "") +
+        `. Adoption moves an existing run's feature branch, so the run it ` +
+        `adopts into must have state on disk.`,
+    };
+  }
+  if (candidates.length > 1) {
+    return {
+      refusal:
+        `'${prdSlug}' has more than one run state: ${candidates.join(", ")}. ` +
+        `Pass --provider <name> to name the run being adopted into.`,
+    };
+  }
+  return { runSlug: candidates[0]! };
 }
 
 /**
@@ -313,7 +395,13 @@ export async function runAdoptCli(
   }
   const { slice } = identity;
 
-  const state = loadRunState(repoRoot, parsed.prdSlug);
+  const run = resolveRunSlug(repoRoot, parsed.prdSlug, parsed.provider);
+  if ("refusal" in run) {
+    return { output: `Adoption refused: ${run.refusal}`, exitCode: 1 };
+  }
+  const { runSlug } = run;
+
+  const state = loadRunState(repoRoot, runSlug);
 
   const holders = worktreesHolding(repoRoot, state.featureBranch);
   if (holders.length > 0) {
@@ -329,11 +417,14 @@ export async function runAdoptCli(
 
   const attemptId = randomUUID();
   const candidateDir = join(repoRoot, ".afk", "adopt", attemptId, "candidate");
+  // Under the run slug, alongside the pipeline's own log directory for the
+  // same run — provider-qualified, so two providers' adoptions of one PRD
+  // do not land in the same tree.
   const evidenceDir = join(
     repoRoot,
     ".afk",
     "logs",
-    parsed.prdSlug,
+    runSlug,
     "adoptions",
     attemptId,
   );
@@ -452,7 +543,7 @@ export async function runAdoptCli(
   try {
     (dependencies.persistSliceState ?? saveSliceState)(
       repoRoot,
-      parsed.prdSlug,
+      runSlug,
       slice.ghIssue,
       {
         phase: "PASS",

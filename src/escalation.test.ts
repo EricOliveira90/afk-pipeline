@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { parseAcceptanceManifest } from "./acceptance-manifest.js";
-import { parseScopeEscalation } from "./escalation.js";
+import {
+  PRE_BUILD_SCOPE_FINDING_ID,
+  parseScopeEscalation,
+} from "./escalation.js";
 
 const MANIFEST = parseAcceptanceManifest({
   version: 1,
@@ -144,6 +147,69 @@ describe("parseScopeEscalation", () => {
       findingIds: ["F-17"],
       paths: ["src/Extra.ts"],
       reason: "required by the parser",
+    });
+  });
+
+  // The pre-build identity (ADR 0052). It exists so an initial generator
+  // handed no findings has a legal identity to cite; it must not become a
+  // way to widen scope with no reason, and it must not become a way to
+  // slip an uncited path in beside a cited one.
+  describe(`the reserved ${PRE_BUILD_SCOPE_FINDING_ID} identity`, () => {
+    it("is accepted alone, as a pre-build scope discovery", () => {
+      const artifact = {
+        ...VALID,
+        findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+      };
+      expect(parseScopeEscalation(JSON.stringify(artifact), MANIFEST)).toEqual(
+        artifact,
+      );
+    });
+
+    it("is refused alongside a cited finding ID", () => {
+      expect(() =>
+        parseScopeEscalation(
+          JSON.stringify({
+            ...VALID,
+            findingIds: [PRE_BUILD_SCOPE_FINDING_ID, "F-17"],
+          }),
+          MANIFEST,
+        ),
+      ).toThrow(/must not mix PRE-BUILD-SCOPE with cited finding IDs \(F-17\)/);
+    });
+
+    it("does not relax the empty-findingIds refusal", () => {
+      expect(() =>
+        parseScopeEscalation(
+          JSON.stringify({ ...VALID, findingIds: [] }),
+          MANIFEST,
+        ),
+      ).toThrow(/findingIds must be a non-empty array/);
+    });
+
+    it("does not relax the blank-reason refusal", () => {
+      expect(() =>
+        parseScopeEscalation(
+          JSON.stringify({
+            ...VALID,
+            findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+            reason: "   ",
+          }),
+          MANIFEST,
+        ),
+      ).toThrow(/reason must be a non-blank string/);
+    });
+
+    it("does not relax the already-declared-path refusal", () => {
+      expect(() =>
+        parseScopeEscalation(
+          JSON.stringify({
+            ...VALID,
+            findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+            paths: ["src/declared.ts"],
+          }),
+          MANIFEST,
+        ),
+      ).toThrow(/paths already on the locked file scope/);
     });
   });
 });

@@ -68,6 +68,8 @@ import {
   findSliceArtifactDir,
   git,
   makeRepo,
+  REVISION_PLANNER_FAILURE,
+  REVISION_REJECTION_FINDING,
   sliceFromCwd,
   writePrdFixture,
   type InvocationRecord,
@@ -79,6 +81,7 @@ import {
   writeContractReview,
 } from "./test-support.js";
 import { readContractStatus } from "./artifacts.js";
+import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -1142,6 +1145,292 @@ describe("generator scope escalation", () => {
       ).toBe(raw);
     }
   }, 120_000);
+
+  // A new spawned scenario, because the claim is about what the *initial*
+  // generator can do: the shared "focused generator scope revision"
+  // fixture escalates on invocation 2, after a QA round has produced
+  // findings to cite, and that is the only half #80 shipped. Nothing
+  // cheaper reaches a round-1 attempt-1 generator with no findings and an
+  // escalation that has to be honoured anyway (ADR 0052).
+  it("revises the contract for a pre-build discovery with no findings to cite", async () => {
+    const repo = makeRepo();
+    const slug = "pre-build-scope";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1150",
+      title: "Discovers the scope is too narrow before building",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const escalation = JSON.stringify({
+      version: 1,
+      findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+      paths: ["src/extra.ts"],
+      reason:
+        "the declared entry point cannot be implemented without its helper",
+    });
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({
+        slices: [slice],
+        records,
+        fixtures: new Map<string, SliceFixture>([
+          [
+            slice.ghIssue,
+            {
+              files: ["src/declared.ts"],
+              revisedFiles: ["src/declared.ts", "src/extra.ts"],
+              qaPasses: true,
+              outputFile: "src/declared.ts",
+              outputContent: "declared work",
+              // Invocation 1 — round 1, attempt 1, before any QA has run.
+              escalation,
+            },
+          ],
+        ]),
+      }),
+    });
+
+    // The premise: this generator was handed no finding identity at all,
+    // which is why a real finding ID was not an option.
+    const generators = records.filter(({ role }) => role === "generator");
+    expect(generators[0]!.prompt!).not.toContain("This is implementation round");
+    expect(generators[0]!.prompt!).not.toContain("Fix every");
+    // ...and the prompt it was handed names the identity it may use.
+    expect(generators[0]!.prompt!).toContain(PRE_BUILD_SCOPE_FINDING_ID);
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("PASS");
+
+    // The revision happened: a second planner ran on the escalation
+    // evidence, the revised contract was re-evaluated and re-locked, and
+    // the generator resumed in the same round rather than spending it.
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(2);
+    expect(records[records.length - 1]!.prompt).not.toBe(undefined);
+    expect(
+      records.filter(({ role }) => role === "evaluator-contract"),
+    ).toHaveLength(2);
+    expect(records.filter(({ role }) => role === "evaluator-qa")).toHaveLength(
+      1,
+    );
+    expect(generators).toHaveLength(2);
+    expect(generators[1]!.prompt!).toContain("src/extra.ts");
+
+    // Read off the feature branch: a PASS removes the slice worktree, and
+    // the merged commit is where the revised lock actually has to land.
+    const feature = `feat-stub/${slug}`;
+    const tracked = git(repo, ["ls-tree", "-r", "--name-only", feature]).split(
+      /\r?\n/,
+    );
+    const show = (suffix: string): string =>
+      git(repo, ["show", `${feature}:${tracked.find((p) => p.endsWith(suffix))!}`]);
+    const contract = show("/contract.md");
+    expect(contract).toContain("**Status:** LOCKED");
+    expect(contract).toContain("- src/extra.ts");
+    expect(
+      (
+        JSON.parse(show("/acceptance-manifest.json")) as {
+          fileScope: { paths: string[] };
+        }
+      ).fileScope.paths,
+    ).toEqual(["src/declared.ts", "src/extra.ts"]);
+
+    // The escalation evidence is archived under round 1 — the round it was
+    // raised in, before any implementation round was spent.
+    expect(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "reviews",
+          "escalation-r1-a1.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe(escalation);
+  }, 60_000);
+
+  // A new spawned scenario, because the state under test only exists
+  // *inside* a focused revision: the accepted contract has been reopened
+  // and its manifest deleted, and nothing short of a real run reaches
+  // that window. One run covers both failure halves as two independent
+  // slices in the same wave (ADR 0051).
+  describe("a failed focused revision restores the accepted lock", () => {
+    let repo: string;
+    const slug = "focused-revision-rollback";
+    // Disjoint declared scopes, so the two slices land in different lanes
+    // and each negotiates its contract exactly once. Sharing a file puts
+    // the successor behind a lane re-negotiation, which is a different
+    // scenario than the one under test.
+    const declared = (slice: Slice): string =>
+      `src/declared-${slice.number}.ts`;
+    // What negotiation locked, before any revision touched it. The
+    // rollback has to reproduce this byte-for-byte: the LOCKED status
+    // *and* the unwidened file scope.
+    const lockedContract = (slice: Slice): string =>
+      "# Slice Contract\n\n**Status:** LOCKED\n\n" +
+      `## Files expected to change\n- ${declared(slice)}\n`;
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "1140",
+        title: "Revision planner throws",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "1141",
+        title: "Revision evaluator rejects",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const escalation = (slice: Slice): string =>
+      JSON.stringify({
+        version: 1,
+        findingIds: ["F-40"],
+        paths: [`src/extra-${slice.number}.ts`],
+        reason: "the declared module delegates to an undeclared one",
+      });
+    let state: {
+      slices: Record<string, { phase: string; error?: string }>;
+    };
+    /** The slice artifact dir inside the preserved slice worktree. */
+    const sliceDir = (slice: Slice): string =>
+      findSliceArtifactDir(
+        join(repo, ".afk", "worktrees", `afk-stub-${slug}-s${slice.number}`),
+        slice.number,
+      )!;
+    const manifestBefore = (slice: Slice): string =>
+      readFileSync(join(sliceDir(slice), "acceptance-manifest.json"), "utf-8");
+
+    beforeAll(async () => {
+      repo = makeRepo({ lifetime: "describe" });
+      const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      const fixture = (slice: Slice): SliceFixture => ({
+        files: [declared(slice)],
+        revisedFiles: [declared(slice), `src/extra-${slice.number}.ts`],
+        qaPasses: true,
+        outputFile: declared(slice),
+        outputContent: "declared work",
+        escalation: escalation(slice),
+      });
+
+      await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: buildStubProvider({
+          slices,
+          records: [],
+          fixtures: new Map<string, SliceFixture>([
+            [
+              slices[0]!.ghIssue,
+              { ...fixture(slices[0]!), revisionPlannerThrows: true },
+            ],
+            [
+              slices[1]!.ghIssue,
+              { ...fixture(slices[1]!), revisionRejected: true },
+            ],
+          ]),
+        }),
+      });
+
+      state = JSON.parse(
+        readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+      );
+    }, 120_000);
+
+    afterAll(() => {
+      rmSync(repo, { recursive: true, force: true });
+    });
+
+    it("ends the slice ERROR naming the planner failure", () => {
+      expect(state.slices[slices[0]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[0]!.ghIssue]!.error).toContain(
+        REVISION_PLANNER_FAILURE,
+      );
+    });
+
+    it("ends the slice ERROR naming the rejected revision", () => {
+      expect(state.slices[slices[1]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[1]!.ghIssue]!.error).toMatch(
+        /Focused scope revision was not accepted/,
+      );
+      expect(state.slices[slices[1]!.ghIssue]!.error).toContain(
+        REVISION_REJECTION_FINDING,
+      );
+    });
+
+    it.each([
+      ["a planner throw", 0],
+      ["an evaluator rejection", 1],
+    ])(
+      "leaves the accepted contract byte-identical after %s",
+      (_label, index) => {
+        const slice = slices[index]!;
+        expect(readFileSync(join(sliceDir(slice), "contract.md"), "utf-8")).toBe(
+          lockedContract(slice),
+        );
+        expect(readContractStatus(join(sliceDir(slice), "contract.md"))).toBe(
+          "LOCKED",
+        );
+      },
+    );
+
+    it.each([
+      ["a planner throw", 0],
+      ["an evaluator rejection", 1],
+    ])(
+      "restores the accepted acceptance manifest after %s, unwidened",
+      (_label, index) => {
+        const slice = slices[index]!;
+        const manifest = JSON.parse(manifestBefore(slice)) as {
+          fileScope: { paths: string[] };
+        };
+        expect(manifest.fileScope.paths).toEqual([declared(slice)]);
+      },
+    );
+
+    it.each([
+      ["a planner throw", 0],
+      ["an evaluator rejection", 1],
+    ])("keeps the escalation archive after %s", (_label, index) => {
+      const slice = slices[index]!;
+      expect(
+        readFileSync(
+          join(
+            repo,
+            ".afk",
+            "artifacts",
+            `${slug}-stub`,
+            `slice-${slice.number}`,
+            "reviews",
+            "escalation-r1-a1.md",
+          ),
+          "utf-8",
+        ),
+      ).toBe(escalation(slice));
+    });
+  });
 });
 
 describe("focused generator scope revision", () => {
