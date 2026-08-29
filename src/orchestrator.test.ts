@@ -2419,6 +2419,8 @@ describe("round-scoped contract feedback", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    let generatorRounds = 0;
+    let renumberManifestOnPlannerApply = false;
     const plannerPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
@@ -2436,6 +2438,20 @@ describe("round-scoped contract feedback", () => {
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (renumberManifestOnPlannerApply) {
+            writeAcceptanceManifest(artifactDir, ["src/example.ts"], [
+              {
+                id: "B-02",
+                source: "test fixture",
+                given: "a contract",
+                when: "it is negotiated",
+                then: "it reaches review",
+                observableResult: "the evaluator receives the contract",
+                preservation: false,
+                gateIds: ["tests"],
+              },
+            ]);
+          }
           if (plannerRounds === 2) {
             writeFileSync(
               join(artifactDir, "contract-response.json"),
@@ -2477,6 +2493,8 @@ describe("round-scoped contract feedback", () => {
                   : ("CONTESTED" as const),
             })),
           );
+        } else if (opts.role === "generator") {
+          generatorRounds++;
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -2603,6 +2621,25 @@ describe("round-scoped contract feedback", () => {
     const evaluatorDecisionRaw =
       '{"version":1,"findingId":"F-01","winningPosition":"EVALUATOR","author":"Ada"}';
     writeFileSync(decisionPath, evaluatorDecisionRaw, "utf-8");
+    renumberManifestOnPlannerApply = true;
+    gateObjection = null;
+
+    const refusedRenumbering = await runSliceNegotiate(ctx);
+
+    expect(refusedRenumbering.phase).toBe("ESCALATE");
+    expect(
+      refusedRenumbering.phase === "ESCALATE"
+        ? refusedRenumbering.cause.summary
+        : "",
+    ).toContain(
+      "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
+    );
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+
+    writeFileSync(contractPath, contractBefore, "utf-8");
+    writeFileSync(manifestPath, manifestBefore, "utf-8");
+    renumberManifestOnPlannerApply = false;
     gateObjection = "injected planner-apply lock-gate refusal";
     const beforeEvaluatorApply = {
       planner: plannerRounds,

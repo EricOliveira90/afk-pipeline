@@ -2014,9 +2014,14 @@ export async function runSliceNegotiate(
       }
 
       const contractPath = join(ctx.absSliceDir, "contract.md");
-      const lockAdjudicatedContract = (): NegotiateOutcome => {
+      const lockAdjudicatedContract = (
+        previousManifest?: AcceptanceManifest,
+      ): NegotiateOutcome => {
         try {
           const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+          if (previousManifest) {
+            validateAcceptanceManifestStability(previousManifest, manifest);
+          }
           validateAcceptanceManifestCoverage(
             readFileSync(contractPath, "utf-8"),
             manifest,
@@ -2076,6 +2081,7 @@ export async function runSliceNegotiate(
       const sliceBodyNote = localSliceContent
         ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
         : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
+      const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
       logger.phase(
         `${ctx.tag}: applying human adjudication with one planner invocation...`,
         "error",
@@ -2132,7 +2138,7 @@ export async function runSliceNegotiate(
         sliceNumber: ctx.slice.number,
         agent: "planner",
       });
-      return lockAdjudicatedContract();
+      return lockAdjudicatedContract(preApplyManifest);
     }
   }
 
