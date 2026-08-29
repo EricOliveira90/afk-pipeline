@@ -462,11 +462,23 @@ interface ArchivedQAReviewRecord {
   record: QAReviewAttemptRecord;
 }
 
-interface ArchivedScopeEscalation {
+interface ValidArchivedScopeEscalation {
   round: number;
   attempt: number;
+  name: string;
   escalation: ScopeEscalation;
 }
+
+interface InvalidArchivedScopeEscalation {
+  round: number;
+  attempt: number;
+  name: string;
+  invalid: true;
+}
+
+type ArchivedScopeEscalation =
+  | ValidArchivedScopeEscalation
+  | InvalidArchivedScopeEscalation;
 
 export interface StuckDiagnosisDetails {
   reviewArchiveDir: string;
@@ -533,24 +545,32 @@ function archivedScopeEscalations(
     .flatMap((name): ArchivedScopeEscalation[] => {
       const match = ESCALATION_RECORD_NAME.exec(name);
       if (!match) return [];
-      const parsed = JSON.parse(
-        readFileSync(join(reviewArchiveDir, name), "utf-8"),
-      ) as ScopeEscalation;
-      if (
-        parsed.version !== 1 ||
-        !Array.isArray(parsed.findingIds) ||
-        !Array.isArray(parsed.paths) ||
-        typeof parsed.reason !== "string"
-      ) {
-        throw new Error(`${name} is not a valid archived scope escalation`);
+      const attempt = {
+        round: Number(match[1]),
+        attempt: Number(match[2]),
+        name,
+      };
+      try {
+        const parsed = JSON.parse(
+          readFileSync(join(reviewArchiveDir, name), "utf-8"),
+        ) as ScopeEscalation;
+        if (
+          !parsed ||
+          typeof parsed !== "object" ||
+          parsed.version !== 1 ||
+          !Array.isArray(parsed.findingIds) ||
+          !Array.isArray(parsed.paths) ||
+          typeof parsed.reason !== "string"
+        ) {
+          return [{ ...attempt, invalid: true }];
+        }
+        return [{ ...attempt, escalation: parsed }];
+      } catch {
+        // Story 13 retains malformed generator bytes as evidence. A later
+        // STUCK diagnosis must isolate that invalid artifact rather than
+        // letting one failed parse erase the rest of the diagnosis.
+        return [{ ...attempt, invalid: true }];
       }
-      return [
-        {
-          round: Number(match[1]),
-          attempt: Number(match[2]),
-          escalation: parsed,
-        },
-      ];
     })
     .sort(compareAttempt);
 }
@@ -630,14 +650,20 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
     escalations.length === 0
       ? "(none)"
       : escalations
-          .map(({ round, attempt, escalation }) =>
-            [
-              `- Round ${round} attempt ${attempt}`,
-              `  - Finding IDs: ${escalation.findingIds.map((id) => `\`${id}\``).join(", ")}`,
-              `  - Paths: ${escalation.paths.map((path) => `\`${path}\``).join(", ")}`,
-              `  - Reason: ${escalation.reason}`,
-            ].join("\n"),
-          )
+          .map((record) => {
+            if ("invalid" in record) {
+              return [
+                `- Round ${record.round} attempt ${record.attempt}`,
+                `  - Invalid artifact: \`${record.name}\` is not a valid version 1 scope escalation`,
+              ].join("\n");
+            }
+            return [
+              `- Round ${record.round} attempt ${record.attempt}`,
+              `  - Finding IDs: ${record.escalation.findingIds.map((id) => `\`${id}\``).join(", ")}`,
+              `  - Paths: ${record.escalation.paths.map((path) => `\`${path}\``).join(", ")}`,
+              `  - Reason: ${record.escalation.reason}`,
+            ].join("\n");
+          })
           .join("\n");
   const roundEvidence = records.map(({ name, record }) => {
     const references = [

@@ -399,3 +399,82 @@ Filed rather than fixed, as the reviews allow:
   implementation round) is still not named in the PRD. A third otherwise-valid
   escalation needs manual intervention; the operator-facing limit wants
   documenting.
+
+# Round 4
+
+This round acts only on the three fresh PM blockers. The committed architect
+review is byte-identical to round 3 and describes the pre-Track-C code, so its
+two repeated findings were treated as a review-integrity defect rather than
+fresh implementation work.
+
+## PM 1 — malformed retained escalation aborts stuck diagnosis
+
+**Fixed by making retained malformed evidence renderable rather than
+parse-fatal.** `archivedScopeEscalations` now returns a discriminated invalid
+artifact entry when an archived escalation is malformed or no longer matches
+the version-1 shape. `renderStuckDiagnosis` emits a deterministic line naming
+that retained filename and continues rendering the open QA findings. The raw
+artifact remains untouched for operator inspection.
+
+Coverage: `src/artifacts.test.ts`, "renders a malformed retained scope
+escalation without losing the diagnosis" — an OPEN finding plus malformed
+`escalation-r1-a1.md` still produces the diagnosis, including both the finding
+and the invalid-artifact entry.
+
+## PM 2 — focused revision bypasses the lock-time safety gate
+
+**Fixed by routing focused-revision acceptance through the same
+orchestrator-owned lock callback as ordinary negotiation and adjudication.**
+After the revised contract is mechanically locked, `reviseAcceptedContract`
+calls `onContractLocked`; an objection returns `ERROR` before the transaction
+is accepted. ADR 0051's existing `finally` path then restores both
+`contract.md` and `acceptance-manifest.json` byte-for-byte, while the archived
+escalation evidence survives. The generator is not resumed.
+
+Coverage extends `src/orchestrator.test.ts`, "a failed focused revision
+restores the accepted lock", with a third slice whose first lock is accepted
+and whose focused-revision lock is refused. It asserts the objection, the
+original lock and manifest restored, the escalation archived, and exactly one
+generator dispatch.
+
+## PM 3 — lane refresh erases an accepted human decision (#133)
+
+**Fixed together with defect #133 for adjudicated lane successors.** A lane
+successor carrying `adjudication-decisions.json` no longer enters the
+position-only destructive branch/worktree recreation path. Instead the wave
+merges the predecessor's new feature tip into the existing slice worktree,
+preserving the slice branch, decision record, and accepted lock, then calls
+`runSliceNegotiate` to revalidate and reuse the applied adjudication before
+generation. If that refresh conflicts, the merge is aborted and the accepted
+human state remains on the slice branch for recovery.
+
+Ordinary, non-adjudicated successors retain the existing recreate-and-
+renegotiate behavior.
+
+Coverage: `src/wave.test.ts`, "keeps an adjudicated lane successor's decision
+and lock through refresh (#133)" — the successor reaches an impasse, accepts a
+human decision, waits behind a same-file predecessor, refreshes onto the new
+feature tip, and starts generation with the same applied decision and LOCKED
+contract.
+
+## Verification
+
+- `pnpm typecheck` — clean.
+- `pnpm run test:heavy:orchestrator` — 180 passed (669.8s).
+- `pnpm run test:heavy:wave` — 45 passed (343.9s).
+- `pnpm test:fast` — 1,215 tests passed on both runs. Vitest emitted the same
+  post-completion worker RPC timeout (`onTaskUpdate`) under machine load and
+  exited 0; no assertion failed. No suite budget was changed.
+- The full suite was deliberately not run; the reopened gate owns that run.
+
+## Round 4 notes not acted on
+
+Filed rather than fixed:
+
+- The duplicated focused-revision protocol remains the ADR 0050/0051
+  shotgun-surgery risk; a shared protocol would have prevented PM blocker 2.
+- `RunJournal.reopenAdjudication` remains the ADR 0031/0047 exception that
+  removes a terminal marker; the park should become a replaceable transition
+  or the ADRs should document the exception.
+- `MAX_SCOPE_REVISIONS_PER_ROUND` remains undocumented in the PRD as an
+  operator-facing limit.

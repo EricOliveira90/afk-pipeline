@@ -1358,6 +1358,17 @@ async function reviseAcceptedContract(
   }
 
   artifacts.lockContract(contractPath);
+  const objection = ctx.onContractLocked?.(contractPath) ?? null;
+  if (objection !== null) {
+    logger.phase(
+      `${ctx.tag}: focused scope revision lock refused — ${objection}`,
+      "error",
+    );
+    return {
+      phase: "ERROR",
+      error: `Focused scope revision lock refused: ${objection}`,
+    };
+  }
   lock.onAccepted();
   logger.phase(`${ctx.tag}: focused scope revision LOCKED`);
   return { phase: "LOCKED", manifest: revisedManifest };

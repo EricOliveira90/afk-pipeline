@@ -1,5 +1,5 @@
 import { dirname, join, posix } from "node:path";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import type { AgentProvider } from "./agent-provider.js";
@@ -29,6 +29,7 @@ import {
   acceptanceManifestPaths,
   loadAcceptanceManifest,
 } from "./acceptance-manifest.js";
+import { ADJUDICATION_DECISIONS_FILENAME } from "./adjudication.js";
 
 export type WaveOutcomePhase =
   | "PASS"
@@ -322,16 +323,25 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         serial: config.serialLanes ? true : undefined,
       },
     );
-    // Make lane queueing explicit: a successor's artifacts (context.md,
-    // contract.md) will be DELETED and re-negotiated after its
-    // predecessor merges. Without this line, a successor sitting at
-    // `**Status:** NEGOTIATING` is indistinguishable from a slice the
-    // pipeline dropped. See ADR 0017.
+    // Make lane queueing explicit. An ordinary successor is recreated and
+    // re-negotiated after its predecessor merges. An adjudicated successor
+    // preserves its accepted decision and lock while merging the refreshed
+    // feature tip into its branch (#133).
     for (const lane of lanesToRun) {
       for (let i = 1; i < lane.length; i++) {
+        const successor = lane[i]!;
+        const successorCtx = ctxById.get(successor.ghIssue)!;
+        const hasAdjudication = existsSync(
+          join(
+            successorCtx.absSliceDir,
+            ADJUDICATION_DECISIONS_FILENAME,
+          ),
+        );
         logger.phase(
-          `[afk] Slice #${lane[i]!.ghIssue} queued behind #${lane[i - 1]!.ghIssue} in its lane — ` +
-            `waiting to re-negotiate on the refreshed base after the predecessor completes (not dropped)`,
+          `[afk] Slice #${successor.ghIssue} queued behind #${lane[i - 1]!.ghIssue} in its lane — ` +
+            (hasAdjudication
+              ? `waiting to refresh the accepted adjudication on the predecessor's feature tip (not dropped)`
+              : `waiting to re-negotiate on the refreshed base after the predecessor completes (not dropped)`),
         );
       }
     }
@@ -391,23 +401,45 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
             logger.phase(
               `[afk] Refreshing slice #${id} for lane successor on new base`,
             );
-            await git.recreateWorktreeFromBase(
-              repoRoot,
-              ctx.branch,
-              ctx.worktreeDir,
-              featBranch,
+            const adjudicationRecord = join(
+              ctx.absSliceDir,
+              ADJUDICATION_DECISIONS_FILENAME,
             );
-            git.assertWorktreeRegistered(
-              repoRoot,
-              ctx.branch,
-              ctx.worktreeDir,
-            );
-            mkdirSync(ctx.absSliceDir, { recursive: true });
-            for (const f of ["context.md", "contract.md"]) {
-              try {
-                rmSync(join(ctx.absSliceDir, f), { force: true });
-              } catch {
-                // best effort
+            if (existsSync(adjudicationRecord)) {
+              logger.phase(
+                `[afk] Slice #${id} has accepted adjudication state — ` +
+                  `preserving its branch and lock while refreshing the feature tip (#133)`,
+              );
+              const refresh = git.mergeBranchIntoWorktree(
+                ctx.worktreeDir,
+                featBranch,
+              );
+              if (refresh.status === "conflict") {
+                throw new Error(
+                  `Could not refresh adjudicated lane successor #${id} from ` +
+                    `${featBranch} without conflicts; preserved its branch, ` +
+                    `decision record, and accepted lock`,
+                );
+              }
+            } else {
+              await git.recreateWorktreeFromBase(
+                repoRoot,
+                ctx.branch,
+                ctx.worktreeDir,
+                featBranch,
+              );
+              git.assertWorktreeRegistered(
+                repoRoot,
+                ctx.branch,
+                ctx.worktreeDir,
+              );
+              mkdirSync(ctx.absSliceDir, { recursive: true });
+              for (const f of ["context.md", "contract.md"]) {
+                try {
+                  rmSync(join(ctx.absSliceDir, f), { force: true });
+                } catch {
+                  // best effort
+                }
               }
             }
             const negotiate = await runSliceNegotiate(ctx);

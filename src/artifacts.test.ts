@@ -175,6 +175,57 @@ describe("renderStuckDiagnosis", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("renders a malformed retained scope escalation without losing the diagnosis", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-malformed-escalation-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    const lifecycleRecord: QAReviewAttemptRecord = {
+      version: 2,
+      stage: "deterministic",
+      round: 3,
+      attempt: 1,
+      verdict: "FAIL",
+      failureClass: "IMPLEMENTATION",
+      findings: [
+        {
+          id: "QA-OPEN-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "The implementation is still incomplete",
+          clearCondition: "Complete the implementation",
+          artifactReferences: [".kiro/specs/demo/qa-report.md"],
+          remedy: "SOURCE_CHANGE",
+        },
+      ],
+    };
+    try {
+      writeFileSync(
+        join(reviewArchiveDir, "qa-review-r3-a1-record.json"),
+        JSON.stringify(lifecycleRecord),
+        "utf-8",
+      );
+      writeFileSync(
+        join(reviewArchiveDir, "escalation-r1-a1.md"),
+        "{not-json",
+        "utf-8",
+      );
+
+      const diagnosis = renderStuckDiagnosis({
+        reviewArchiveDir,
+        commitLog: "",
+      });
+
+      expect(diagnosis).toContain("[QA-OPEN-01] BLOCKING OPEN");
+      expect(diagnosis).toContain("- Round 1 attempt 1");
+      expect(diagnosis).toContain(
+        "Invalid artifact: `escalation-r1-a1.md` is not a valid version 1 scope escalation",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

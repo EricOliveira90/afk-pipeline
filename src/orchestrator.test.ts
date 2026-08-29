@@ -1270,8 +1270,9 @@ describe("generator scope escalation", () => {
   // slices in the same wave (ADR 0051).
   describe("a failed focused revision restores the accepted lock", () => {
     let repo: string;
+    let records: InvocationRecord[];
     const slug = "focused-revision-rollback";
-    // Disjoint declared scopes, so the two slices land in different lanes
+    // Disjoint declared scopes, so the three slices land in different lanes
     // and each negotiates its contract exactly once. Sharing a file puts
     // the successor behind a lane re-negotiation, which is a different
     // scenario than the one under test.
@@ -1300,6 +1301,14 @@ describe("generator scope escalation", () => {
         blockedBy: [],
         userStories: "",
       },
+      {
+        number: "03",
+        ghIssue: "1142",
+        title: "Revision lock gate refuses",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const escalation = (slice: Slice): string =>
       JSON.stringify({
@@ -1323,6 +1332,7 @@ describe("generator scope escalation", () => {
     beforeAll(async () => {
       repo = makeRepo({ lifetime: "describe" });
       const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      records = [];
       const fixture = (slice: Slice): SliceFixture => ({
         files: [declared(slice)],
         revisedFiles: [declared(slice), `src/extra-${slice.number}.ts`],
@@ -1340,7 +1350,7 @@ describe("generator scope escalation", () => {
         dag: buildDAG(slices),
         provider: buildStubProvider({
           slices,
-          records: [],
+          records,
           fixtures: new Map<string, SliceFixture>([
             [
               slices[0]!.ghIssue,
@@ -1350,8 +1360,19 @@ describe("generator scope escalation", () => {
               slices[1]!.ghIssue,
               { ...fixture(slices[1]!), revisionRejected: true },
             ],
+            [slices[2]!.ghIssue, fixture(slices[2]!)],
           ]),
         }),
+        onContractLocked: (() => {
+          const calls = new Map<string, number>();
+          return (ghIssue) => {
+            const count = (calls.get(ghIssue) ?? 0) + 1;
+            calls.set(ghIssue, count);
+            return ghIssue === slices[2]!.ghIssue && count === 2
+              ? "injected focused-revision lock-gate refusal"
+              : null;
+          };
+        })(),
       });
 
       state = JSON.parse(
@@ -1380,9 +1401,17 @@ describe("generator scope escalation", () => {
       );
     });
 
+    it("ends the slice ERROR naming a focused-revision lock-gate refusal", () => {
+      expect(state.slices[slices[2]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[2]!.ghIssue]!.error).toContain(
+        "injected focused-revision lock-gate refusal",
+      );
+    });
+
     it.each([
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
+      ["a lock-gate refusal", 2],
     ])(
       "leaves the accepted contract byte-identical after %s",
       (_label, index) => {
@@ -1399,6 +1428,7 @@ describe("generator scope escalation", () => {
     it.each([
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
+      ["a lock-gate refusal", 2],
     ])(
       "restores the accepted acceptance manifest after %s, unwidened",
       (_label, index) => {
@@ -1413,6 +1443,7 @@ describe("generator scope escalation", () => {
     it.each([
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
+      ["a lock-gate refusal", 2],
     ])("keeps the escalation archive after %s", (_label, index) => {
       const slice = slices[index]!;
       expect(
@@ -1429,6 +1460,15 @@ describe("generator scope escalation", () => {
           "utf-8",
         ),
       ).toBe(escalation(slice));
+    });
+
+    it("does not resume generation after the focused-revision gate refuses", () => {
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "generator" && ghIssue === slices[2]!.ghIssue,
+        ),
+      ).toHaveLength(1);
     });
   });
 });
