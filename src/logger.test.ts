@@ -202,6 +202,24 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
     expect(md).toContain("#82 Dependent");
     expect(md).toContain("#81 (AWAITING-ADJUDICATION)");
   });
+
+  it("omits dependency holds for ordinary failures", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "ordinary-failure");
+    recordTerminal(log, id("81", "Failed", "afk/81"), {
+      phase: "STUCK",
+      error: "QA failed",
+    });
+    log.recordDependencyHold(
+      id("82", "Dependent", "afk/82"),
+      [{ ghIssue: "81", status: "STUCK" }],
+    );
+
+    const md = log.writeSummary();
+
+    expect(md).not.toContain("## Dependency Holds");
+    expect(md).not.toContain("#82 Dependent");
+  });
 });
 
 

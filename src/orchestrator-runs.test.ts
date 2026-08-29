@@ -952,6 +952,7 @@ describe("events.jsonl tee (spec #26)", () => {
     let lines: any[];
     let warns: any[];
     let priorWarns: any[];
+    let firstSummary: string;
 
     beforeAll(async () => {
       repo = makeRepo({ lifetime: "describe" });
@@ -1010,7 +1011,11 @@ describe("events.jsonl tee (spec #26)", () => {
         transientRetrySleep: async () => {},
       };
 
-      await runPipeline({ ...config, dag: buildDAG(slices) });
+      const firstResult = await runPipeline({
+        ...config,
+        dag: buildDAG(slices),
+      });
+      firstSummary = firstResult.summary;
       const [firstDir] = runDirsOf(repo, slug);
       lines = eventsOf(firstDir!);
       warns = lines.filter((l) => l.type === "warn");
@@ -1119,6 +1124,11 @@ describe("events.jsonl tee (spec #26)", () => {
       expect(holdWarn).toBeDefined();
       expect(holdWarn!.ghIssue).toBe(HELD);
       expect(holdWarn!.blockedBy).toContain(LEAD);
+    });
+
+    it("does not add dependency-hold summary rows for ordinary failures", () => {
+      expect(firstSummary).not.toContain("## Dependency Holds");
+      expect(firstSummary).not.toContain(`#${HELD} Dependent`);
     });
 
     it("warns on an infrastructure QA retry that consumed no round (#29)", () => {

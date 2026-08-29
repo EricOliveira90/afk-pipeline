@@ -196,6 +196,13 @@ export class Logger {
     slice: Pick<SliceLifecycle, "ghIssue" | "title">,
     blockers: DependencyBlocker[],
   ) {
+    if (
+      !blockers.some(
+        (blocker) => blocker.status === "AWAITING-ADJUDICATION",
+      )
+    ) {
+      return;
+    }
     this.dependencyHolds.push({
       ghIssue: slice.ghIssue,
       title: slice.title,
