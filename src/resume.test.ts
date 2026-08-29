@@ -13,6 +13,8 @@ import {
   type ResumeFacts,
 } from "./resume.js";
 import { renderPrompt } from "./prompt-template.js";
+import { formatUnresolvedQAFindings } from "./orchestrator.js";
+import type { QAReviewAttemptFinding } from "./qa-review.js";
 
 /**
  * Unit tests for the pure resume-eligibility decision (spec #33,
@@ -547,5 +549,63 @@ describe("shared generator-resume prompt rendering", () => {
     expect(prompt).toContain("UNRESOLVED-SUMMARY-MARKER");
     expect(prompt).toContain("UNRESOLVED-CLEAR-MARKER");
     expect(prompt).toContain("UNRESOLVED-ARTIFACT-MARKER");
+  });
+});
+
+/**
+ * The repair input itself, rather than the template that carries it. The
+ * template test above supplies its own `UNRESOLVED_FINDINGS` string, so a
+ * formatter that quietly drops fields stays invisible there — this is the
+ * case that fails when one goes missing (#82 B-03).
+ */
+describe("formatUnresolvedQAFindings", () => {
+  const finding: QAReviewAttemptFinding = {
+    id: "QA-OPEN-01",
+    severity: "ADVISORY",
+    state: "OPEN",
+    unresolved: true,
+    summary: "SUMMARY-MARKER",
+    clearCondition: "CLEAR-MARKER",
+    artifactReferences: ["ARTIFACT-MARKER"],
+    remedy: "SCOPE_AMENDMENT",
+  };
+
+  it("renders every field of an unresolved finding", () => {
+    expect(formatUnresolvedQAFindings([finding])).toBe(
+      [
+        "- Finding ID: `QA-OPEN-01`",
+        "  Severity: ADVISORY",
+        "  State: OPEN",
+        "  Unresolved: yes",
+        "  Remedy: SCOPE_AMENDMENT",
+        "  Summary: SUMMARY-MARKER",
+        "  Clear condition: CLEAR-MARKER",
+        "  Artifact references:",
+        "  - `ARTIFACT-MARKER`",
+      ].join("\n"),
+    );
+  });
+
+  it("covers every declared field of the record type", () => {
+    const rendered = formatUnresolvedQAFindings([finding]);
+    for (const value of [
+      finding.id,
+      finding.severity,
+      finding.state,
+      "Unresolved: yes",
+      finding.remedy,
+      finding.summary,
+      finding.clearCondition,
+      ...finding.artifactReferences,
+    ]) {
+      expect(rendered).toContain(value);
+    }
+    // Guards the loop above against a new field arriving unrendered:
+    // eight declared keys, eight values checked.
+    expect(Object.keys(finding)).toHaveLength(8);
+  });
+
+  it("says so plainly when nothing is unresolved", () => {
+    expect(formatUnresolvedQAFindings([])).toBe("(none)");
   });
 });

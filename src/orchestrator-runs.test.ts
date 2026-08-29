@@ -159,6 +159,26 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         blockedBy: [],
         userStories: "",
       },
+      // The two successful apply routes. Both are lanes of this wave
+      // rather than runs of their own: the state they need — a parked
+      // slice with a valid decision — is exactly what this fixture
+      // already builds, and only the decision form differs.
+      {
+        number: "09",
+        ghIssue: "8189",
+        title: "Evaluator winner applied",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "10",
+        ghIssue: "8190",
+        title: "Third instruction applied",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const fixtures = new Map<string, SliceFixture>([
       [
@@ -238,8 +258,41 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           outputContent: "must not generate",
         },
       ],
+      // `revisedFiles` differs from `files`, so the apply round's
+      // contract and manifest are observably the revised ones and not
+      // the pre-apply proposal carried through.
+      [
+        "8189",
+        {
+          files: ["src/evaluator-winner.txt"],
+          revisedFiles: [
+            "src/evaluator-winner.txt",
+            "src/evaluator-winner-applied.txt",
+          ],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/evaluator-winner.txt",
+          outputContent: "evaluator winner",
+        },
+      ],
+      [
+        "8190",
+        {
+          files: ["src/third-instruction.txt"],
+          revisedFiles: [
+            "src/third-instruction.txt",
+            "src/third-instruction-applied.txt",
+          ],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/third-instruction.txt",
+          outputContent: "third instruction",
+        },
+      ],
     ]);
     const records: InvocationRecord[] = [];
+    /** Decision bytes the fixture wrote, per slice, for verbatim checks. */
+    const writtenDecisions = new Map<string, string>();
     const stub = buildStubProvider({ fixtures, slices, records });
     const contractLockRefusals = new Map([
       ["8186", "injected adjudication lock-gate refusal"],
@@ -283,6 +336,17 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
               number: "08",
               winningPosition: "EVALUATOR",
             },
+            {
+              ghIssue: "8189",
+              number: "09",
+              winningPosition: "EVALUATOR",
+            },
+            {
+              ghIssue: "8190",
+              number: "10",
+              thirdInstruction:
+                "Neither position stands: split the disputed behavior in two.",
+            },
           ]) {
             const parkedCwd = records.find(
               (record) => record.ghIssue === decision.ghIssue,
@@ -301,16 +365,16 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
                 `parked artifact directory #${decision.ghIssue} missing`,
               );
             }
-            writeFileSync(
-              join(parkedDir, "adjudication.md"),
-              JSON.stringify({
-                version: 1,
-                findingId: "F-IMPASSE",
-                winningPosition: decision.winningPosition,
-                author: "operator",
-              }),
-              "utf-8",
-            );
+            const raw = JSON.stringify({
+              version: 1,
+              findingId: "F-IMPASSE",
+              ...("winningPosition" in decision
+                ? { winningPosition: decision.winningPosition }
+                : { thirdInstruction: decision.thirdInstruction }),
+              author: "operator",
+            });
+            writtenDecisions.set(decision.ghIssue, raw);
+            writeFileSync(join(parkedDir, "adjudication.md"), raw, "utf-8");
           }
         }
         const result = await stub.invoke(options);
@@ -460,6 +524,121 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         error: expect.stringContaining(refusal.text),
       });
       expect(runLog).toContain(refusal.text);
+    }
+
+    // The two successful apply routes. The refusal lanes above prove the
+    // gates can stop generation; these prove the same code path reaches
+    // generation once the gates pass — which is the half B-03 asks for
+    // and the half a refusal case cannot show.
+    const featBranch = `feat-stub/${slug}`;
+    const trackedPaths = git(repo, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      featBranch,
+    ]).split(/\r?\n/);
+    const committedArtifact = (sliceNumber: string, name: string): string => {
+      const path = trackedPaths.find(
+        (entry) =>
+          entry.includes(`/slices/${sliceNumber}-`) &&
+          entry.endsWith(`/${name}`),
+      );
+      if (!path) {
+        throw new Error(`${name} for slice ${sliceNumber} is not on ${featBranch}`);
+      }
+      return git(repo, ["show", `${featBranch}:${path}`]);
+    };
+    for (const applied of [
+      {
+        ghIssue: "8189",
+        number: "09",
+        revisedFiles: [
+          "src/evaluator-winner.txt",
+          "src/evaluator-winner-applied.txt",
+        ],
+      },
+      {
+        ghIssue: "8190",
+        number: "10",
+        revisedFiles: [
+          "src/third-instruction.txt",
+          "src/third-instruction-applied.txt",
+        ],
+      },
+    ]) {
+      const sliceRecords = records.filter(
+        (record) => record.ghIssue === applied.ghIssue,
+      );
+      // Exactly one apply invocation: rounds 1 and 2 are the ordinary
+      // negotiation that deadlocked, the third is the apply.
+      const plannerRecords = sliceRecords.filter(
+        (record) => record.role === "planner",
+      );
+      expect(plannerRecords).toHaveLength(3);
+      // ...and the human never goes back to the contract evaluator.
+      expect(
+        sliceRecords.filter(
+          (record) => record.role === "evaluator-contract",
+        ),
+      ).toHaveLength(2);
+
+      // The decision and the contested finding reach the apply planner
+      // byte-for-byte, not paraphrased.
+      const applyPlanner = plannerRecords.at(-1)!;
+      expect(applyPlanner.prompt).toContain(
+        writtenDecisions.get(applied.ghIssue)!,
+      );
+      expect(applyPlanner.prompt).toContain("F-IMPASSE");
+      expect(applyPlanner.prompt).toContain(
+        '"plannerEvidence": "planner evidence for F-IMPASSE"',
+      );
+      expect(applyPlanner.prompt).toContain(
+        '"evaluatorEvidence": "\\"the evaluator-held interpretation\\""',
+      );
+      expect(applyPlanner.prompt).toContain(
+        "Apply this decision exactly once. Do not re-adjudicate it.",
+      );
+
+      // The revised artifacts are what shipped — the post-apply scope,
+      // not the pre-apply proposal carried through.
+      expect(committedArtifact(applied.number, "contract.md")).toBe(
+        [
+          "# Slice Contract",
+          "",
+          "**Status:** LOCKED",
+          "",
+          "## Files expected to change",
+          ...applied.revisedFiles.map((file) => `- ${file}`),
+        ].join("\n"),
+      );
+      expect(
+        JSON.parse(committedArtifact(applied.number, "acceptance-manifest.json")),
+      ).toMatchObject({
+        version: 2,
+        fileScope: { kind: "paths", paths: applied.revisedFiles },
+        behaviors: [{ id: "B-01" }],
+      });
+
+      // Generation happened, and only after the lock gates passed.
+      const generatorRecords = sliceRecords.filter(
+        (record) => record.role === "generator",
+      );
+      expect(generatorRecords).toHaveLength(1);
+      expect(generatorRecords[0]!.startedAt).toBeGreaterThanOrEqual(
+        applyPlanner.finishedAt,
+      );
+      expect(state.slices[applied.ghIssue]?.phase).toBe("PASS");
+      const sliceLog = runLog
+        .split(/\r?\n/)
+        .filter((line) => line.includes(`#${applied.ghIssue}`));
+      const lockedAt = sliceLog.findIndex((line) =>
+        line.includes("accepted adjudication for F-IMPASSE; contract LOCKED"),
+      );
+      const implementingAt = sliceLog.findIndex((line) =>
+        line.includes("implementing (round 1"),
+      );
+      expect(lockedAt).toBeGreaterThanOrEqual(0);
+      expect(implementingAt).toBeGreaterThan(lockedAt);
     }
   }, 240_000);
 });

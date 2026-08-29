@@ -82,6 +82,10 @@ Your contract was locked before you died; the world has moved since.
   the pipeline's idle-timeout watchdog; streaming output is what keeps
   the idle timer reset.
 - If `contract.md` Status is not `LOCKED`, stop and report immediately.
+- **`{{SLICE_DIR}}/stuck.md` is read-only evidence.** When it exists it is
+  the audit record of why this attempt was granted. Never delete, move,
+  rewrite, or edit it — the pipeline owns that file and rewrites it itself
+  if this attempt fails.
 
 # Required reading
 
@@ -90,6 +94,8 @@ Your contract was locked before you died; the world has moved since.
 Also read:
 - The locked contract at `{{SLICE_DIR}}/contract.md`
 - The slice's `{{SLICE_DIR}}/context.md` (explorer output)
+- `{{SLICE_DIR}}/stuck.md`, when it exists — the preserved diagnosis of
+  why the slice was declared STUCK (read it; do not change it)
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}
 

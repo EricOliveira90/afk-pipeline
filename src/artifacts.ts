@@ -708,6 +708,29 @@ export function writeStuckDiagnosis(
   return diagnosis;
 }
 
+/** The stuck diagnosis exactly as it sits on disk, or `null` when absent. */
+export function readStuckDiagnosis(sliceDir: string): string | null {
+  const stuckPath = join(sliceDir, "stuck.md");
+  if (!existsSync(stuckPath)) return null;
+  return readFileSync(stuckPath, "utf-8");
+}
+
+/**
+ * Put a captured diagnosis back byte-for-byte, and report whether that
+ * changed anything. Used to hold `stuck.md` stable across a STUCK
+ * resume's granted attempt (#82 AC3): the file is the operator's audit
+ * record of why the attempt was granted, and a generator that deletes or
+ * edits it destroys evidence the run is supposed to keep.
+ */
+export function restoreStuckDiagnosis(
+  sliceDir: string,
+  contents: string,
+): boolean {
+  if (readStuckDiagnosis(sliceDir) === contents) return false;
+  writeFileSync(join(sliceDir, "stuck.md"), contents, "utf-8");
+  return true;
+}
+
 /**
  * Untracked slice spec artifacts, in archive order: the fixed set plus
  * every round-numbered file the slice actually produced.

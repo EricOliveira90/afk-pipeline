@@ -2865,7 +2865,14 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
     };
 
-function formatUnresolvedQAFindings(
+/**
+ * The repair input a retry or resume round is handed for each finding it
+ * must clear. Exported so the field set can be asserted without spawning
+ * a pipeline: the contract is that *every* `QAReviewAttemptFinding` field
+ * reaches the generator (#82 B-03), and a silently shrinking subset here
+ * is invisible to a template test that supplies its own string.
+ */
+export function formatUnresolvedQAFindings(
   findings: readonly QAReviewAttemptFinding[],
 ): string {
   if (findings.length === 0) return "(none)";
@@ -2874,6 +2881,10 @@ function formatUnresolvedQAFindings(
       (finding) =>
         [
           `- Finding ID: \`${finding.id}\``,
+          `  Severity: ${finding.severity}`,
+          `  State: ${finding.state}`,
+          `  Unresolved: ${finding.unresolved ? "yes" : "no"}`,
+          `  Remedy: ${finding.remedy}`,
           `  Summary: ${finding.summary}`,
           `  Clear condition: ${finding.clearCondition}`,
           "  Artifact references:",
@@ -3501,6 +3512,28 @@ export async function runSliceExecute(
       error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
     };
   };
+  /**
+   * A STUCK resume's `stuck.md` is the operator's audit record of why the
+   * extra attempt was granted, so it must read the same after the attempt
+   * as before it (#82 AC3). The shared resume prompt tells the generator
+   * to leave it alone, but a prompt is guidance, not a guarantee: capture
+   * the bytes at entry and put them back on the way out.
+   *
+   * Only on success. A failed attempt legitimately rewrites the diagnosis
+   * from the new round's evidence, which is `finishStuck`'s job (B-04).
+   */
+  const stuckDiagnosisAtEntry =
+    ctx.resume?.mode === "stuck"
+      ? artifacts.readStuckDiagnosis(ctx.absSliceDir)
+      : null;
+  const restoreStuckDiagnosis = (): void => {
+    if (stuckDiagnosisAtEntry === null) return;
+    if (artifacts.restoreStuckDiagnosis(ctx.absSliceDir, stuckDiagnosisAtEntry))
+      logger.phase(
+        `${ctx.tag}: restored the preserved stuck.md diagnosis the resumed generator changed`,
+        "error",
+      );
+  };
 
   try {
     if (ctx.resume) {
@@ -3961,6 +3994,9 @@ export async function runSliceExecute(
             declarations,
             checkpoint.treeId,
           );
+          // Before the commit, so the diagnosis this slice ships is the
+          // one the operator read, not whatever the generator left.
+          restoreStuckDiagnosis();
           if (git.hasUncommittedChanges(ctx.worktreeDir)) {
             git.commitAll(
               ctx.worktreeDir,
