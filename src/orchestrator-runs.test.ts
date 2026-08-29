@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -69,6 +69,7 @@ import {
 import { readRunEvents } from "./run-events.js";
 import { readStopAck, writeStopRequest } from "./stop-sentinel.js";
 import { runStatus } from "./status.js";
+import { readContractStatus } from "./artifacts.js";
 import {
   buildStubProvider,
   cleanupIntegrationTempDirs,
@@ -86,7 +87,7 @@ afterEach(() => {
 });
 
 describe("an impasse parks its slice and holds only DAG dependents", () => {
-  it("continues an independent sibling and names the undispatched dependent in summary and status", async () => {
+  it("resumes from a decision written while a sibling runs, then dispatches its dependent", async () => {
     // This fixture state cannot be reached by an existing pipeline run:
     // negotiation itself parks while a sibling passes and a dependent
     // remains undispatched.
@@ -116,6 +117,46 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         title: "Dependent",
         type: "AFK",
         blockedBy: ["8181"],
+        userStories: "",
+      },
+      {
+        number: "04",
+        ghIssue: "8184",
+        title: "Preserved park",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "05",
+        ghIssue: "8185",
+        title: "Preserved dependent",
+        type: "AFK",
+        blockedBy: ["8184"],
+        userStories: "",
+      },
+      {
+        number: "06",
+        ghIssue: "8186",
+        title: "Planner lock refusal",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "07",
+        ghIssue: "8187",
+        title: "Applied lock refusal",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "08",
+        ghIssue: "8188",
+        title: "Applied stability refusal",
+        type: "AFK",
+        blockedBy: [],
         userStories: "",
       },
     ];
@@ -148,9 +189,152 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           outputContent: "dependent",
         },
       ],
+      [
+        "8184",
+        {
+          files: ["src/preserved-park.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/preserved-park.txt",
+          outputContent: "preserved park",
+        },
+      ],
+      [
+        "8185",
+        {
+          files: ["src/preserved-dependent.txt"],
+          qaPasses: true,
+          outputFile: "src/preserved-dependent.txt",
+          outputContent: "preserved dependent",
+        },
+      ],
+      [
+        "8186",
+        {
+          files: ["src/planner-lock-refusal.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/planner-lock-refusal.txt",
+          outputContent: "must not generate",
+        },
+      ],
+      [
+        "8187",
+        {
+          files: ["src/applied-lock-refusal.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/applied-lock-refusal.txt",
+          outputContent: "must not generate",
+        },
+      ],
+      [
+        "8188",
+        {
+          files: ["src/applied-stability-refusal.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/applied-stability-refusal.txt",
+          outputContent: "must not generate",
+        },
+      ],
     ]);
     const records: InvocationRecord[] = [];
-    const provider = buildStubProvider({ fixtures, slices, records });
+    const stub = buildStubProvider({ fixtures, slices, records });
+    const contractLockRefusals = new Map([
+      ["8186", "injected adjudication lock-gate refusal"],
+      ["8187", "injected planner-apply lock-gate refusal"],
+    ]);
+    const renumberAppliedManifestBehavior = (artifactDir: string) => {
+      const manifestPath = join(artifactDir, "acceptance-manifest.json");
+      const manifest = JSON.parse(
+        readFileSync(manifestPath, "utf-8"),
+      ) as {
+        behaviors: Array<{ id: string }>;
+      };
+      manifest.behaviors[0]!.id = "B-02";
+      writeFileSync(manifestPath, JSON.stringify(manifest), "utf-8");
+    };
+    const provider: AgentProvider = {
+      name: stub.name,
+      async invoke(options) {
+        if (
+          options.role === "generator" &&
+          /-s02$/.test(options.cwd.replace(/\\/g, "/"))
+        ) {
+          for (const decision of [
+            {
+              ghIssue: "8181",
+              number: "01",
+              winningPosition: "PLANNER",
+            },
+            {
+              ghIssue: "8186",
+              number: "06",
+              winningPosition: "PLANNER",
+            },
+            {
+              ghIssue: "8187",
+              number: "07",
+              winningPosition: "EVALUATOR",
+            },
+            {
+              ghIssue: "8188",
+              number: "08",
+              winningPosition: "EVALUATOR",
+            },
+          ]) {
+            const parkedCwd = records.find(
+              (record) => record.ghIssue === decision.ghIssue,
+            )?.cwd;
+            if (!parkedCwd) {
+              throw new Error(
+                `parked worktree #${decision.ghIssue} was not invoked`,
+              );
+            }
+            const parkedDir = findSliceArtifactDir(
+              parkedCwd,
+              decision.number,
+            );
+            if (!parkedDir) {
+              throw new Error(
+                `parked artifact directory #${decision.ghIssue} missing`,
+              );
+            }
+            writeFileSync(
+              join(parkedDir, "adjudication.md"),
+              JSON.stringify({
+                version: 1,
+                findingId: "F-IMPASSE",
+                winningPosition: decision.winningPosition,
+                author: "operator",
+              }),
+              "utf-8",
+            );
+          }
+        }
+        const result = await stub.invoke(options);
+        const invokedSlice = sliceFromCwd(options.cwd, slices);
+        if (
+          options.role === "planner" &&
+          invokedSlice?.ghIssue === "8188"
+        ) {
+          const artifactDir = findSliceArtifactDir(
+            options.cwd,
+            invokedSlice.number,
+          );
+          if (!artifactDir) {
+            throw new Error(
+              `lock-refusal artifact directory #${invokedSlice.ghIssue} missing`,
+            );
+          }
+          if (existsSync(join(artifactDir, "adjudication.md"))) {
+            renumberAppliedManifestBehavior(artifactDir);
+          }
+        }
+        return result;
+      },
+    };
 
     const result = await runPipeline({
       repoRoot: repo,
@@ -159,30 +343,252 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       specsDir,
       dag: buildDAG(slices),
       provider,
+      adjudicationWaitMs: 5_000,
+      adjudicationPollMs: 10,
+      onContractLocked(ghIssue, contractPath) {
+        if (!existsSync(join(dirname(contractPath), "adjudication.md"))) {
+          return null;
+        }
+        return contractLockRefusals.get(ghIssue) ?? null;
+      },
     });
 
-    expect(records.some((record) => record.ghIssue === "8183")).toBe(false);
+    for (const id of ["8181", "8182", "8183"]) {
+      expect(
+        records.some(
+          (record) => record.ghIssue === id && record.role === "generator",
+        ),
+      ).toBe(true);
+    }
+    const state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices["8181"]?.phase).toBe("PASS");
+    expect(state.slices["8182"]?.phase).toBe("PASS");
+    expect(state.slices["8183"]?.phase).toBe("PASS");
+    const preservedBranch =
+      "afk-stub/impasse-dependency-slice-04-preserved-park";
+    expect(state.slices["8184"]).toMatchObject({
+      phase: "AWAITING-ADJUDICATION",
+      branch: preservedBranch,
+    });
+    expect(state.slices["8185"]).toBeUndefined();
+    expect(
+      records.some((record) => record.ghIssue === "8185"),
+    ).toBe(false);
+    expect(result.summary).toMatch(
+      new RegExp(
+        String.raw`\| 8184 Preserved park \| [^|]*AWAITING-ADJUDICATION[^|]*\| [^|]*\| ${preservedBranch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \|`,
+      ),
+    );
+    expect(result.summary).toContain(
+      "| #8185 Preserved dependent | #8184 (AWAITING-ADJUDICATION) |",
+    );
+    const status = runStatus([], repo);
+    expect(status.exitCode).toBe(0);
+    expect(status.output).toContain(
+      `#8184 Preserved park: AWAITING-ADJUDICATION — branch preserved: ${preservedBranch}`,
+    );
+    expect(status.output).toContain(
+      "#8185 — explorer → planner → evaluator-contract → generator → evaluator-qa — waits on #8184 (AWAITING-ADJUDICATION)",
+    );
+
+    const lockRefusals = [
+      {
+        ghIssue: "8186",
+        number: "06",
+        text: "injected adjudication lock-gate refusal",
+        plannerInvocations: 2,
+      },
+      {
+        ghIssue: "8187",
+        number: "07",
+        text: "injected planner-apply lock-gate refusal",
+        plannerInvocations: 3,
+      },
+      {
+        ghIssue: "8188",
+        number: "08",
+        text: "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
+        plannerInvocations: 3,
+      },
+    ];
+    const runParent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const latestRunDir = readdirSync(runParent)
+      .filter((entry) => /^run-\d{8}-\d{6}/.test(entry))
+      .sort()
+      .at(-1)!;
+    const runLog = readFileSync(
+      join(runParent, latestRunDir, "run.log"),
+      "utf-8",
+    );
+    for (const refusal of lockRefusals) {
+      expect(
+        records.some(
+          (record) =>
+            record.ghIssue === refusal.ghIssue &&
+            record.role === "generator",
+        ),
+      ).toBe(false);
+      expect(
+        records.filter(
+          (record) =>
+            record.ghIssue === refusal.ghIssue &&
+            record.role === "planner",
+        ),
+      ).toHaveLength(refusal.plannerInvocations);
+      const worktree = records.find(
+        (record) => record.ghIssue === refusal.ghIssue,
+      )?.cwd;
+      if (!worktree) {
+        throw new Error(`lock-refusal worktree #${refusal.ghIssue} missing`);
+      }
+      const artifactDir = findSliceArtifactDir(worktree, refusal.number);
+      if (!artifactDir) {
+        throw new Error(
+          `lock-refusal artifact directory #${refusal.ghIssue} missing`,
+        );
+      }
+      expect(
+        readContractStatus(join(artifactDir, "contract.md")),
+      ).not.toBe("LOCKED");
+      expect(state.slices[refusal.ghIssue]).toMatchObject({
+        phase: "ESCALATE",
+        error: expect.stringContaining(refusal.text),
+      });
+      expect(runLog).toContain(refusal.text);
+    }
+  }, 240_000);
+});
+
+describe("adjudication expiry and next-run pickup", () => {
+  it("re-parks without agents, then consumes a pre-existing decision before ordinary negotiation", async () => {
+    // No existing scenario carries one parked worktree through expiry,
+    // a no-file retry, and a later decision, so this needs its own run.
+    const repo = makeRepo();
+    const slug = "adjudication-next-run";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "8191",
+      title: "Parked across runs",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const slices = [slice];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slice.ghIssue,
+        {
+          files: ["src/resumed.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/resumed.txt",
+          outputContent: "resumed",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices, records });
+    const config = {
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      adjudicationWaitMs: 0,
+      adjudicationPollMs: 10,
+    };
+
+    await runPipeline(config);
+    const afterInitialNegotiation = records.length;
+    let state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+
+    const parkedCwd = records.find(
+      (record) => record.ghIssue === slice.ghIssue,
+    )?.cwd;
+    if (!parkedCwd) throw new Error("parked worktree was not invoked");
+    const parkedDir = findSliceArtifactDir(parkedCwd, slice.number);
+    if (!parkedDir) throw new Error("parked artifact directory missing");
+    const decisionPath = join(parkedDir, "adjudication.md");
+    const malformedDecision = '{"version":1,\r\n';
+    writeFileSync(decisionPath, malformedDecision, "utf-8");
+
+    await runPipeline(config);
+    expect(records).toHaveLength(afterInitialNegotiation);
+    state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+    expect(state.slices[slice.ghIssue]?.error).toContain(
+      "adjudication.md is not valid JSON",
+    );
+    expect(readFileSync(decisionPath, "utf-8")).toBe(malformedDecision);
+
+    rmSync(decisionPath);
+    await runPipeline(config);
+    expect(records).toHaveLength(afterInitialNegotiation);
+    state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+
+    writeFileSync(
+      decisionPath,
+      JSON.stringify({
+        version: 1,
+        findingId: "F-IMPASSE",
+        winningPosition: "PLANNER",
+        author: "operator",
+      }),
+      "utf-8",
+    );
+    const ordinaryNegotiationBefore = records.filter((record) =>
+      ["explorer", "planner", "evaluator-contract"].includes(record.role),
+    ).length;
+
+    await runPipeline(config);
+
+    const ordinaryNegotiationAfter = records.filter((record) =>
+      ["explorer", "planner", "evaluator-contract"].includes(record.role),
+    ).length;
+    expect(ordinaryNegotiationAfter).toBe(ordinaryNegotiationBefore);
     expect(
       records.some(
         (record) =>
-          record.ghIssue === "8182" && record.role === "generator",
+          record.ghIssue === slice.ghIssue && record.role === "generator",
       ),
     ).toBe(true);
-    expect(result.summary).toContain("#8183 Dependent");
-    expect(result.summary).toContain("#8181 (AWAITING-ADJUDICATION)");
-
-    const runDir = readdirSync(
-      join(repo, ".afk", "logs", `${slug}-stub`),
-      { withFileTypes: true },
-    )
-      .filter((entry) => entry.isDirectory() && /^run-/.test(entry.name))
-      .map((entry) =>
-        join(repo, ".afk", "logs", `${slug}-stub`, entry.name),
-      )[0]!;
-    const status = runStatus(["--run", runDir], repo);
-    expect(status.output).toContain(
-      "waits on #8181 (AWAITING-ADJUDICATION)",
+    state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
     );
+    expect(state.slices[slice.ghIssue]?.phase).toBe("PASS");
   }, 240_000);
 });
 
@@ -238,10 +644,7 @@ describe("cancellation after an impasse park", () => {
     let before:
       | {
           parkedState: Record<string, unknown>;
-          workingPath: string;
-          working: string;
-          archivedPath: string;
-          archived: string;
+          files: Array<{ path: string; contents: string }>;
         }
       | undefined;
     const provider: AgentProvider = {
@@ -258,18 +661,28 @@ describe("cancellation after an impasse park", () => {
           if (!parkedCwd) throw new Error("parked worktree was not invoked");
           const parkedDir = findSliceArtifactDir(parkedCwd, "01");
           if (!parkedDir) throw new Error("parked artifact directory missing");
-          const workingPath = join(
-            parkedDir,
-            "contract-negotiation-outcome.json",
-          );
-          const archivedPath = join(
+          const archiveDir = join(
             repo,
             ".afk",
             "artifacts",
             `${slug}-stub`,
             "slice-01",
-            "contract-negotiation-outcome.json",
           );
+          const adjudicationPath = join(parkedDir, "adjudication.md");
+          writeFileSync(
+            adjudicationPath,
+            '{"version":1,"findingId":"F-IMPASSE"}\r\n',
+            "utf-8",
+          );
+          const evidencePaths = [
+            join(parkedDir, "contract.md"),
+            join(parkedDir, "contract-negotiation-outcome.json"),
+            join(parkedDir, "stuck.md"),
+            adjudicationPath,
+            join(archiveDir, "contract.md"),
+            join(archiveDir, "contract-negotiation-outcome.json"),
+            join(archiveDir, "stuck.md"),
+          ];
           const state = JSON.parse(
             readFileSync(
               join(repo, ".afk", "state", `${slug}-stub.json`),
@@ -278,10 +691,10 @@ describe("cancellation after an impasse park", () => {
           );
           before = {
             parkedState: state.slices["8281"],
-            workingPath,
-            working: readFileSync(workingPath, "utf-8"),
-            archivedPath,
-            archived: readFileSync(archivedPath, "utf-8"),
+            files: evidencePaths.map((path) => ({
+              path,
+              contents: readFileSync(path, "utf-8"),
+            })),
           };
           controller.abort();
         }
@@ -297,6 +710,8 @@ describe("cancellation after an impasse park", () => {
       dag: buildDAG(slices),
       provider,
       signal: controller.signal,
+      adjudicationWaitMs: 10_000,
+      adjudicationPollMs: 10_000,
     });
 
     expect(before).toBeDefined();
@@ -312,8 +727,15 @@ describe("cancellation after an impasse park", () => {
       branch: expect.any(String),
     });
     expect(finalState.slices["8282"]?.phase).toBe("CANCELLED");
-    expect(readFileSync(before!.workingPath, "utf-8")).toBe(before!.working);
-    expect(readFileSync(before!.archivedPath, "utf-8")).toBe(before!.archived);
+    for (const file of before!.files) {
+      expect(readFileSync(file.path, "utf-8"), file.path).toBe(file.contents);
+    }
+    expect(
+      records.some(
+        (record) =>
+          record.ghIssue === "8281" && record.role === "generator",
+      ),
+    ).toBe(false);
   }, 240_000);
 });
 

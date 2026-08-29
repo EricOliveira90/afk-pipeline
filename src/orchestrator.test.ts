@@ -2510,6 +2510,9 @@ describe("round-scoped contract feedback", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    let generatorRounds = 0;
+    let renumberManifestOnPlannerApply = false;
+    const plannerPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -2519,12 +2522,27 @@ describe("round-scoped contract feedback", () => {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
+          plannerPrompts.push(opts.prompt);
           writeFileSync(
             join(artifactDir, "contract.md"),
             "# Contract\n\n**Status:** NEGOTIATING\n",
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
+          if (renumberManifestOnPlannerApply) {
+            writeAcceptanceManifest(artifactDir, ["src/example.ts"], [
+              {
+                id: "B-02",
+                source: "test fixture",
+                given: "a contract",
+                when: "it is negotiated",
+                then: "it reaches review",
+                observableResult: "the evaluator receives the contract",
+                preservation: false,
+                gateIds: ["tests"],
+              },
+            ]);
+          }
           if (plannerRounds === 2) {
             writeFileSync(
               join(artifactDir, "contract-response.json"),
@@ -2566,6 +2584,8 @@ describe("round-scoped contract feedback", () => {
                   : ("CONTESTED" as const),
             })),
           );
+        } else if (opts.role === "generator") {
+          generatorRounds++;
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -2628,6 +2648,124 @@ describe("round-scoped contract feedback", () => {
         },
       ],
     });
+
+    const rawDecision =
+      '{"version":1,"findingId":"F-99","winningPosition":"PLANNER","author":"Ada"}\r\n';
+    const decisionPath = join(ctx.absSliceDir, "adjudication.md");
+    writeFileSync(decisionPath, rawDecision, "utf-8");
+    const invocationsBeforeRetry = plannerRounds + evaluatorRounds;
+
+    const refused = await runSliceNegotiate(ctx);
+
+    expect(refused.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      refused.phase === "AWAITING-ADJUDICATION"
+        ? refused.cause.summary
+        : "",
+    ).toContain("F-99 is absent from the current IMPASSE");
+    expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    expect(readFileSync(decisionPath, "utf-8")).toBe(rawDecision);
+
+    const contractPath = join(ctx.absSliceDir, "contract.md");
+    const manifestPath = join(ctx.absSliceDir, "acceptance-manifest.json");
+    const contractBefore = readFileSync(contractPath, "utf-8");
+    const manifestBefore = readFileSync(manifestPath, "utf-8");
+    writeFileSync(
+      decisionPath,
+      JSON.stringify({
+        version: 1,
+        findingId: "F-01",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+      "utf-8",
+    );
+    let lockGateCalls = 0;
+    let gateObjection: string | null =
+      "injected adjudication lock-gate refusal";
+    ctx.onContractLocked = () => {
+      lockGateCalls++;
+      return gateObjection;
+    };
+
+    const refusedLock = await runSliceNegotiate(ctx);
+    expect(refusedLock.phase).toBe("ESCALATE");
+    expect(
+      refusedLock.phase === "ESCALATE" ? refusedLock.cause.summary : "",
+    ).toContain("injected adjudication lock-gate refusal");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+
+    gateObjection = null;
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(lockGateCalls).toBe(2);
+    expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    expect(readFileSync(contractPath, "utf-8")).toBe(
+      contractBefore.replace(
+        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
+        "**Status:** LOCKED",
+      ),
+    );
+
+    writeFileSync(contractPath, contractBefore, "utf-8");
+    writeFileSync(manifestPath, manifestBefore, "utf-8");
+    const evaluatorDecisionRaw =
+      '{"version":1,"findingId":"F-01","winningPosition":"EVALUATOR","author":"Ada"}';
+    writeFileSync(decisionPath, evaluatorDecisionRaw, "utf-8");
+    renumberManifestOnPlannerApply = true;
+    gateObjection = null;
+
+    const refusedRenumbering = await runSliceNegotiate(ctx);
+
+    expect(refusedRenumbering.phase).toBe("ESCALATE");
+    expect(
+      refusedRenumbering.phase === "ESCALATE"
+        ? refusedRenumbering.cause.summary
+        : "",
+    ).toContain(
+      "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
+    );
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+
+    writeFileSync(contractPath, contractBefore, "utf-8");
+    writeFileSync(manifestPath, manifestBefore, "utf-8");
+    renumberManifestOnPlannerApply = false;
+    gateObjection = "injected planner-apply lock-gate refusal";
+    const beforeEvaluatorApply = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    const refusedApply = await runSliceNegotiate(ctx);
+
+    expect(refusedApply.phase).toBe("ESCALATE");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(plannerRounds).toBe(beforeEvaluatorApply.planner + 1);
+    expect(evaluatorRounds).toBe(beforeEvaluatorApply.evaluator);
+    expect(plannerPrompts.at(-1)).toContain(evaluatorDecisionRaw);
+    expect(plannerPrompts.at(-1)).toContain(
+      "evaluator evidence alpha, verbatim",
+    );
+
+    writeFileSync(contractPath, contractBefore, "utf-8");
+    writeFileSync(manifestPath, manifestBefore, "utf-8");
+    const instructionDecisionRaw =
+      '{"version":1,"findingId":"F-01","thirdInstruction":"Keep evidence exactly as written.","author":"Ada"}';
+    writeFileSync(decisionPath, instructionDecisionRaw, "utf-8");
+    gateObjection = null;
+    const beforeInstructionApply = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeInstructionApply.planner + 1);
+    expect(evaluatorRounds).toBe(beforeInstructionApply.evaluator);
+    expect(plannerPrompts.at(-1)).toContain(instructionDecisionRaw);
+    expect(plannerPrompts.at(-1)).toContain(
+      "planner evidence alpha, verbatim",
+    );
   });
 
   it("caps a converging negotiation at two rounds", async () => {

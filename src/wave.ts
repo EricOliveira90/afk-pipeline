@@ -214,6 +214,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   const ctxById = new Map<string, SliceContext>();
   for (const id of readyIds) {
     const slice = dag.slices.get(id)!;
+    const migrationGate = migrationPrefixGate(config, featBranch, id);
     ctxById.set(id, {
       ...makeSliceContext(
         config,
@@ -223,7 +224,11 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         relevantFilesBlock,
         testCommand,
       ),
-      onContractLocked: migrationPrefixGate(config, featBranch, id),
+      onContractLocked(contractPath) {
+        const migrationObjection = migrationGate(contractPath);
+        if (migrationObjection !== null) return migrationObjection;
+        return config.onContractLocked?.(id, contractPath) ?? null;
+      },
     });
   }
 

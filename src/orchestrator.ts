@@ -135,6 +135,7 @@ import {
 import {
   CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
+  CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
   buildContractNegotiationOutcome,
   buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
@@ -152,6 +153,11 @@ import {
   validateRound1ContractReview,
   validateRound2ContractReview,
 } from "./contract-review.js";
+import {
+  ADJUDICATION_FILENAME,
+  parseAdjudication,
+  waitForAdjudication,
+} from "./adjudication.js";
 import {
   advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
@@ -176,6 +182,8 @@ import {
 } from "./escalation.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
+const DEFAULT_ADJUDICATION_WAIT_MS = 60_000;
+const DEFAULT_ADJUDICATION_POLL_MS = 1_000;
 
 /**
  * Scope amendments granted per QA stage per round (#112).
@@ -446,6 +454,18 @@ export interface PipelineConfig {
   requestCancellation?: () => void;
   /** Sentinel poll interval override. Exists for tests. */
   stopSentinelIntervalMs?: number;
+  /** Bounded adjudication hold. Private test seam; not a CLI option. */
+  adjudicationWaitMs?: number;
+  /** Adjudication filesystem poll interval. Private test seam. */
+  adjudicationPollMs?: number;
+  /**
+   * Post-lock refusal injected by orchestration tests. The wave composes
+   * this after its production migration-prefix gate.
+   */
+  onContractLocked?: (
+    ghIssue: string,
+    contractPath: string,
+  ) => string | null;
   /**
    * The CLI's crash recorder (#121). Supplied only by an entry point that
    * owns the process, because the handlers behind it end the process: the
@@ -1951,7 +1971,7 @@ export function reportSliceBounds(ctx: SliceContext): void {
 export async function runSliceNegotiate(
   ctx: SliceContext,
 ): Promise<NegotiateOutcome> {
-  const { config, slice, logger } = ctx;
+  const { config, logger } = ctx;
   const infrastructureRetries =
     config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
   if (
@@ -1959,6 +1979,197 @@ export async function runSliceNegotiate(
     infrastructureRetries < 0
   ) {
     throw new Error("infrastructureRetries must be a non-negative integer");
+  }
+
+  const outcomePath = join(
+    ctx.absSliceDir,
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  );
+  if (existsSync(outcomePath)) {
+    const rawOutcome = readFileSync(outcomePath, "utf-8");
+    const outcome = JSON.parse(rawOutcome) as ContractNegotiationOutcome;
+    if (outcome.classification === "IMPASSE") {
+      const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
+      if (!existsSync(decisionPath)) {
+        return {
+          phase: "AWAITING-ADJUDICATION",
+          cause: negotiateImpasseCause(outcome, "REVISE"),
+        };
+      }
+
+      const rawDecision = readFileSync(decisionPath, "utf-8");
+      let decision;
+      try {
+        decision = parseAdjudication(rawDecision, outcome);
+      } catch (error) {
+        const defect = error instanceof Error ? error.message : String(error);
+        logger.phase(
+          `${ctx.tag}: adjudication refused — ${defect}; slice remains parked`,
+          "error",
+        );
+        return {
+          phase: "AWAITING-ADJUDICATION",
+          cause: {
+            kind: "verdict",
+            verdict: "REVISE",
+            summary: `${negotiateImpasseCause(outcome, "REVISE").summary}; ${defect}`,
+          },
+        };
+      }
+
+      logger.trackSlice(
+        lifecycle.running(
+          {
+            ghIssue: ctx.slice.ghIssue,
+            title: ctx.slice.title,
+            branch: ctx.branch,
+          },
+          logger.getSliceProgress(ctx.slice.ghIssue),
+        ),
+      );
+      const refresh = git.mergeBranchIntoWorktree(
+        ctx.worktreeDir,
+        ctx.featBranch,
+      );
+      if (refresh.status === "conflict") {
+        return {
+          phase: "ERROR",
+          cause: {
+            kind: "internal-error",
+            summary:
+              "adjudication: could not refresh the parked branch from " +
+              `${ctx.featBranch} without conflicts; preserved the branch and decision`,
+          },
+        };
+      }
+
+      const contractPath = join(ctx.absSliceDir, "contract.md");
+      const lockAdjudicatedContract = (
+        previousManifest?: AcceptanceManifest,
+      ): NegotiateOutcome => {
+        try {
+          const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+          if (previousManifest) {
+            validateAcceptanceManifestStability(previousManifest, manifest);
+          }
+          validateAcceptanceManifestCoverage(
+            readFileSync(contractPath, "utf-8"),
+            manifest,
+            contractPath,
+          );
+          validateAcceptanceManifestBindings(
+            manifest,
+            resolveBaseGateDeclarations(ctx.worktreeDir),
+          );
+        } catch (error) {
+          const defect = error instanceof Error ? error.message : String(error);
+          logger.phase(
+            `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
+            "error",
+          );
+          return {
+            phase: "ESCALATE",
+            cause: {
+              kind: "verdict",
+              verdict: "REVISE",
+              summary: `adjudication: contract lock refused — ${defect}`,
+            },
+          };
+        }
+
+        artifacts.lockContract(contractPath);
+        const objection = ctx.onContractLocked?.(contractPath) ?? null;
+        if (objection !== null) {
+          artifacts.reopenContract(contractPath);
+          logger.phase(
+            `${ctx.tag}: adjudicated contract lock refused — ${objection}`,
+            "error",
+          );
+          return {
+            phase: "ESCALATE",
+            cause: {
+              kind: "verdict",
+              verdict: "REVISE",
+              summary: `adjudication: contract lock refused — ${objection}`,
+            },
+          };
+        }
+        logger.phase(
+          `${ctx.tag}: accepted adjudication for ${decision.findingId}; contract LOCKED`,
+        );
+        return { phase: "LOCKED" };
+      };
+
+      if (
+        "winningPosition" in decision &&
+        decision.winningPosition === "PLANNER"
+      ) {
+        return lockAdjudicatedContract();
+      }
+
+      const localSliceContent = readSliceFile(config.prdDir, ctx.slice.number);
+      const sliceBodyNote = localSliceContent
+        ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
+        : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
+      const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
+      logger.phase(
+        `${ctx.tag}: applying human adjudication with one planner invocation...`,
+        "error",
+        {
+          type: "phase-started",
+          ghIssue: ctx.slice.ghIssue,
+          sliceNumber: ctx.slice.number,
+          agent: "planner",
+        },
+      );
+      const plannerLog = logger.agentLog(ctx.slice.number, "planner");
+      try {
+        await ctx
+          .invoke({
+            role: "planner",
+            prompt: renderPrompt("planner", {
+              GH_ISSUE: ctx.slice.ghIssue,
+              SPECS_DIR: ctx.relSpecsDir,
+              SLICE_DIR: ctx.relSliceDir,
+              ROUND: 2,
+              RELEVANT_FILES: ctx.relevantFilesBlock,
+              SLICE_BODY: sliceBodyNote,
+              REVISION_NOTE: [
+                "A human has adjudicated the current contract impasse.",
+                "Apply this decision exactly once. Do not re-adjudicate it.",
+                "",
+                "Current IMPASSE record (verbatim):",
+                rawOutcome,
+                "Human adjudication (verbatim):",
+                rawDecision,
+              ].join("\n"),
+              CONTRACT_RESPONSE_NOTE:
+                `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
+              MIGRATION_RESERVATION: migrationReservationBlock(
+                config,
+                ctx.slice.ghIssue,
+              ),
+              BASE_GATE_CATALOG: formatBaseGateCatalog(
+                resolveBaseGateDeclarations(ctx.worktreeDir),
+              ),
+            }),
+            cwd: ctx.worktreeDir,
+            maxDurationMs: config.maxAgentDurationMs,
+            logStream: plannerLog,
+          })
+          .finally(() => closeAgentLog(plannerLog));
+      } catch (error) {
+        if (isCancelled(error, config.signal)) return { phase: "CANCELLED" };
+        return { phase: "ERROR", cause: internalNegotiateCause(error) };
+      }
+      logger.event({
+        type: "phase-ended",
+        ghIssue: ctx.slice.ghIssue,
+        sliceNumber: ctx.slice.number,
+        agent: "planner",
+      });
+      return lockAdjudicatedContract(preApplyManifest);
+    }
   }
 
   return negotiateAttempt(ctx, infrastructureRetries);
@@ -4317,6 +4528,11 @@ export async function runPipeline(
   // branch. They are naturally re-eligible on the next run, where the
   // merge-only recovery pass tries the merge again before any agent runs.
   const mergePending = new Set<string>();
+  const awaitingAdjudication = new Set<string>();
+  const adjudicationWaits = new Map<
+    string,
+    ReturnType<typeof waitForAdjudication>
+  >();
 
   /**
    * A slice this run will not dispatch again, for any reason short of
@@ -4324,7 +4540,10 @@ export async function runPipeline(
    * three filter sites plus a sweep condition.
    */
   const heldBack = (id: string): boolean =>
-    failed.has(id) || laneCancelled.has(id) || mergePending.has(id);
+    failed.has(id) ||
+    laneCancelled.has(id) ||
+    mergePending.has(id) ||
+    awaitingAdjudication.has(id);
 
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
@@ -4431,7 +4650,13 @@ export async function runPipeline(
   // signal happens to fire.
   cancellableSlices = () =>
     [...dag.slices]
-      .filter(([id, slice]) => slice.type !== "HITL" && !completed.has(id) && !failed.has(id))
+      .filter(
+        ([id, slice]) =>
+          slice.type !== "HITL" &&
+          !completed.has(id) &&
+          !failed.has(id) &&
+          !awaitingAdjudication.has(id),
+      )
       .map(([id, slice]) => ({
         ghIssue: id,
         title: slice.title,
@@ -4471,6 +4696,35 @@ export async function runPipeline(
       },
       outcome,
     );
+    if (
+      outcome.phase === "AWAITING-ADJUDICATION" &&
+      !adjudicationWaits.has(id)
+    ) {
+      awaitingAdjudication.add(id);
+      const sliceContext = makeSliceContext(
+        config,
+        slice,
+        logger,
+        featBranch,
+        relevantFilesBlock,
+        testCommand,
+      );
+      const waitMs =
+        config.adjudicationWaitMs ?? DEFAULT_ADJUDICATION_WAIT_MS;
+      logger.phase(
+        `${sliceContext.tag}: waiting up to ${waitMs}ms for ${ADJUDICATION_FILENAME}`,
+      );
+      adjudicationWaits.set(
+        id,
+        waitForAdjudication({
+          sliceDir: sliceContext.absSliceDir,
+          waitMs,
+          pollMs:
+            config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
+          signal,
+        }),
+      );
+    }
   };
 
   // --- Merge-only recovery, before the first wave dispatches (ADR 0029).
@@ -4633,6 +4887,29 @@ export async function runPipeline(
       dispatched.add(id);
       if (outcome.phase === "PASS") {
         completed.add(id);
+      } else if (outcome.phase === "AWAITING-ADJUDICATION") {
+        const wait = adjudicationWaits.get(id);
+        if (!wait) {
+          throw new Error(`Missing adjudication wait for slice #${id}`);
+        }
+        const result = await wait;
+        adjudicationWaits.delete(id);
+        if (result.status === "accepted" && !signal?.aborted) {
+          awaitingAdjudication.delete(id);
+          logger.reopenAdjudication(id);
+          logger.phase(
+            `[afk] Slice #${id}: valid adjudication received — redispatching`,
+          );
+        } else if (result.status === "expired") {
+          if (result.defect) {
+            logger.phase(
+              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
+            );
+          }
+          logger.phase(
+            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
+          );
+        }
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
       } else if (outcome.phase === "MERGE-PENDING") {
@@ -4649,7 +4926,13 @@ export async function runPipeline(
     if (signal?.aborted) {
       for (const [id, slice] of dag.slices) {
         if (slice.type === "HITL") continue;
-        if (completed.has(id) || failed.has(id)) continue;
+        if (
+          completed.has(id) ||
+          failed.has(id) ||
+          awaitingAdjudication.has(id)
+        ) {
+          continue;
+        }
         const branch = sliceBranch(prdSlug, slice, provider);
         logger.recordTerminal(
           { ghIssue: id, title: slice.title, branch },
