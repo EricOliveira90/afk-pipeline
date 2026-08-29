@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { WriteStream } from "node:fs";
+import { readFileSync, writeFileSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
 import { finished } from "node:stream/promises";
 import type {
@@ -23,10 +23,75 @@ import {
 } from "./run-state.js";
 import type { ResolvedRunScope } from "./slice-scope.js";
 
+/**
+ * The review artifact a guardian left behind, read the moment its invocation
+ * returned. See `restoreCapturedReviewArtifacts` for why this is captured
+ * rather than re-read at commit time.
+ */
+export interface CapturedReviewArtifact {
+  label: string;
+  path: string;
+  /** `null` when the agent wrote no file at all. */
+  content: string | null;
+}
+
 /** Outcome of one guardian review run, with failure detail when it died. */
 export interface ReviewRunResult {
   outcome: artifacts.ReviewOutcome;
   detail?: string;
+  /** Absent for a cached verdict and for an infrastructure failure. */
+  captured?: CapturedReviewArtifact;
+}
+
+/** File seam so the restore step is unit-testable without a worktree. */
+export interface ReviewArtifactIo {
+  read(path: string): string | null;
+  write(path: string, content: string): void;
+}
+
+const defaultReviewArtifactIo: ReviewArtifactIo = {
+  read(path) {
+    try {
+      return readFileSync(path, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+  write(path, content) {
+    writeFileSync(path, content, "utf-8");
+  },
+};
+
+/**
+ * Put each guardian's own output back at its review path before the artifact
+ * commit.
+ *
+ * Both guardians run concurrently in one shared review worktree, and each is a
+ * general-purpose agent with a shell. In issue #136 the PM guardian ran
+ * `git checkout-index --force` over `review-architect.md` while investigating a
+ * line-ending warning, which silently reverted the architect's freshly written
+ * review to the *previous* round's committed content. The commit then shipped a
+ * byte-identical stale review, and a FIX-BEFORE-SHIP verdict was attributed to
+ * code that no longer existed at the cited lines.
+ *
+ * The verdict is already classified from the captured string, so this restores
+ * the *content* backing that verdict: a committed `review-<role>.md` is always
+ * the artifact this run's agent authored against this tree.
+ *
+ * @returns the labels whose artifact had diverged and was restored.
+ */
+export function restoreCapturedReviewArtifacts(
+  captured: readonly (CapturedReviewArtifact | undefined)[],
+  io: ReviewArtifactIo = defaultReviewArtifactIo,
+): string[] {
+  const restored: string[] = [];
+  for (const artifact of captured) {
+    if (!artifact || artifact.content === null) continue;
+    if (io.read(artifact.path) === artifact.content) continue;
+    io.write(artifact.path, artifact.content);
+    restored.push(artifact.label);
+  }
+  return restored;
 }
 
 /**
@@ -202,6 +267,8 @@ export interface RunShipGateArgs {
    * subprocesses, so no suite pays a real dependency install.
    */
   sanityRunCommand?: SanityCommandRunner;
+  /** Internal file seam used by direct tests for review-artifact capture. */
+  reviewArtifactIo?: ReviewArtifactIo;
 }
 
 function blocked(
@@ -262,6 +329,7 @@ export async function runShipGate(
   } = args;
   const runCommand = args.runCommand ?? defaultRunCommand;
   const sanityRunCommand = args.sanityRunCommand;
+  const reviewArtifactIo = args.reviewArtifactIo ?? defaultReviewArtifactIo;
 
   if (signal?.aborted) {
     return blocked(
@@ -401,7 +469,16 @@ export async function runShipGate(
         await closeAgentLog(log);
       }
       const reviewPath = join(reviewDir, specsDir, reviewFileName);
-      const verdict = artifacts.readReviewVerdict(reviewPath);
+      // Capture the artifact now, while it is still exactly what this agent
+      // wrote. The other guardian shares this worktree and is still running
+      // (issue #136), so both the verdict and the committed content come from
+      // this snapshot rather than from a later re-read of the path.
+      const captured: CapturedReviewArtifact = {
+        label,
+        path: reviewPath,
+        content: reviewArtifactIo.read(reviewPath),
+      };
+      const verdict = artifacts.parseReviewVerdict(captured.content);
       if (verdict === "UNPARSEABLE") {
         journal.phase(
           `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
@@ -414,7 +491,7 @@ export async function runShipGate(
         attempt,
         verdict,
       });
-      return { outcome: verdict };
+      return { outcome: verdict, captured };
     }
     return lastFailure;
   };
@@ -479,6 +556,17 @@ export async function runShipGate(
   }
 
   journal.setReviewOutcomes(architectResult, pmResult);
+
+  const restored = restoreCapturedReviewArtifacts(
+    [architectResult.captured, pmResult.captured],
+    reviewArtifactIo,
+  );
+  for (const label of restored) {
+    journal.phase(
+      `  ⚠️  ${label} review artifact was changed in the review worktree after the agent finished — restored the agent's own output before committing (#136).`,
+      "warn",
+    );
+  }
 
   if (git.hasUncommittedChanges(reviewDir)) {
     try {

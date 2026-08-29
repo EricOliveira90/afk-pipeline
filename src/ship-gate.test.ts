@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvokeOptions, InvokeResult } from "./agent-provider.js";
 import type { SanityCommandRunner } from "./preship.js";
 import {
+  restoreCapturedReviewArtifacts,
   runShipGate,
   type RunShipGateArgs,
   type ShipCommandRunner,
@@ -204,8 +206,8 @@ describe("runShipGate", () => {
     expect(architectAttempts).toBe(2);
     expect(runCommand).not.toHaveBeenCalled();
     expect(fixture.setReviewOutcomes).toHaveBeenCalledWith(
-      { outcome: "SHIP" },
-      { outcome: "FIX-BEFORE-SHIP" },
+      expect.objectContaining({ outcome: "SHIP" }),
+      expect.objectContaining({ outcome: "FIX-BEFORE-SHIP" }),
     );
     expect(
       fixture.phase.mock.calls.some(([message]) =>
@@ -502,5 +504,104 @@ describe("runShipGate", () => {
         failureKind: "CONFIGURATION",
       }),
     );
+  });
+
+  // Issue #136: both guardians share one review worktree, so one agent's
+  // shell can revert the other's freshly written review to the version
+  // committed by the previous gate round. A new spawned scenario is
+  // deliberate here — no existing fixture commits a prior round's review.
+  it("commits the architect's own review after the PM agent reverts it in the shared worktree (#136)", async () => {
+    const repo = makeRepo();
+    const slug = "stale-review";
+    const specsDir = join(repo, ".kiro", "specs", slug);
+    const architectPath = join(specsDir, "review-architect.md");
+    const stale =
+      "# Architecture Guardian Review\n\n**Verdict:** FIX-BEFORE-SHIP\n\nlockAdjudicatedContract at lines 2065-2185.\n";
+    const fresh =
+      "# Architecture Guardian Review\n\n**Verdict:** SHIP\n\nrunImpasseAdjudication at line 2237.\n";
+    // The previous gate round's review, already on the branch.
+    mkdirSync(specsDir, { recursive: true });
+    writeFileSync(architectPath, stale, "utf-8");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "round 3 reviews"]);
+
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      if (options.role === "architect-review") {
+        writeFileSync(architectPath, fresh, "utf-8");
+      } else {
+        writeReview(options, slug, "pm", "SHIP");
+        // What the PM guardian actually ran in run-20260829-161928.
+        git(repo, [
+          "checkout-index",
+          "--force",
+          "--",
+          `.kiro/specs/${slug}/review-architect.md`,
+        ]);
+      }
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) =>
+      command === "gh" && args[1] === "create"
+        ? "https://github.com/acme/repo/pull/136\n"
+        : "",
+    );
+
+    const result = await runShipGate(
+      makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+    );
+
+    expect(result.verdict).toBe("SHIP");
+    expect(
+      git(repo, ["show", `HEAD:.kiro/specs/${slug}/review-architect.md`]),
+    ).toContain("runImpasseAdjudication at line 2237");
+    expect(readFileSync(architectPath, "utf-8")).toBe(fresh);
+    expect(
+      fixture.phase.mock.calls.some(([message]) =>
+        String(message).includes(
+          "Architect review artifact was changed in the review worktree",
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("restoreCapturedReviewArtifacts", () => {
+  it("rewrites only the artifacts that diverged since capture", () => {
+    const disk = new Map<string, string>([
+      ["a.md", "reverted"],
+      ["b.md", "untouched"],
+    ]);
+    const io = {
+      read: (path: string) => disk.get(path) ?? null,
+      write: (path: string, content: string) => void disk.set(path, content),
+    };
+
+    const restored = restoreCapturedReviewArtifacts(
+      [
+        { label: "Architect", path: "a.md", content: "authored" },
+        { label: "PM", path: "b.md", content: "untouched" },
+      ],
+      io,
+    );
+
+    expect(restored).toEqual(["Architect"]);
+    expect(disk.get("a.md")).toBe("authored");
+  });
+
+  it("leaves the path alone when the agent wrote no file and skips cached verdicts", () => {
+    const writes: string[] = [];
+    const io = {
+      read: () => null,
+      write: (path: string) => void writes.push(path),
+    };
+
+    expect(
+      restoreCapturedReviewArtifacts(
+        [undefined, { label: "PM", path: "b.md", content: null }],
+        io,
+      ),
+    ).toEqual([]);
+    expect(writes).toEqual([]);
   });
 });

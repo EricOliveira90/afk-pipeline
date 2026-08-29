@@ -69,3 +69,10 @@ REVIEW_EOF
 After writing, verify with `cat {{SPECS_DIR}}/review-architect.md | head -5`
 to confirm the verdict line is present. Do not repeat the review body in your
 final message — only confirm the file was written and state the verdict.
+
+`{{SPECS_DIR}}/review-architect.md` is the only file you may write. The PM
+guardian is running concurrently in this same worktree and is writing
+`{{SPECS_DIR}}/review-pm.md`; you may read it, but never write, delete, stage,
+or restore it, and never run a command that rewrites tracked files in bulk
+(`git checkout`/`checkout-index`/`restore`/`stash`/`reset`/`clean`). Such a
+command destroyed a guardian's review mid-run once (issue #136).
