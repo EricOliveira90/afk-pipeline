@@ -103,6 +103,42 @@ function passingResult(gate: GateDeclaration, treeId: string): GateResult {
 }
 
 describe("afk adopt", () => {
+  it("refuses --reason followed by another option before repository access", async () => {
+    const missingRepo = join(tmpdir(), `afk-adopt-missing-${Date.now()}`);
+    let gatesCalled = false;
+
+    const result = await runAdoptCli(
+      [
+        "demo",
+        "129",
+        "--branch",
+        "manual/demo-01",
+        "--reason",
+        "--adopter",
+        "Ada Lovelace",
+      ],
+      missingRepo,
+      {
+        resolveGatePlan: () => {
+          gatesCalled = true;
+          return { declarations: GATES };
+        },
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      },
+    );
+
+    expect(result).toEqual({
+      exitCode: 2,
+      output:
+        "Usage: afk adopt <prd-slug> <slice> --branch <branch> " +
+        "--reason <reason> [--adopter <name>]",
+    });
+    expect(gatesCalled).toBe(false);
+  });
+
   it("verifies the candidate tree before merging and persists adoption provenance", async () => {
     const repo = makeRepo();
     const featureBefore = resolveCommit(repo, "feat/demo")!;
