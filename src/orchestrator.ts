@@ -4301,7 +4301,10 @@ export async function runPipeline(
       alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
-      logger.restoreCompleted({ ghIssue: id, title: slice.title, branch });
+      logger.restoreCompleted(
+        { ghIssue: id, title: slice.title, branch },
+        runState.slices[id]!.adoption,
+      );
       logger.phase(
         `  Skipping #${id} ${slice.title} (already completed)`,
         "log",
@@ -4690,6 +4693,12 @@ export async function runPipeline(
   const readyForShipGate = allPassed && afkSlices.length > 0;
 
   if (readyForShipGate) {
+    const adoptions = Object.entries(runState.slices).flatMap(
+      ([ghIssue, sliceState]) =>
+        sliceState.adoption
+          ? [{ ghIssue, ...sliceState.adoption }]
+          : [],
+    );
     const invokeShipGate = (reviewDir: string) =>
       runShipGate({
         repoRoot,
@@ -4702,6 +4711,7 @@ export async function runPipeline(
         relevantFilesBlock,
         reviewScope: buildReviewScopeBlock(scope!),
         closesIssues: scope!.selected.map((slice) => slice.ghIssue),
+        adoptions,
         cachedReviewPhase: runState.reviewPhase,
         invoke,
         journal: logger,

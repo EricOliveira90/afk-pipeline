@@ -20,6 +20,13 @@ export interface SliceProgress {
   evalRounds: number;
 }
 
+export interface SliceAdoption {
+  adopter: string;
+  reason: string;
+  branch: string;
+  commit: string;
+}
+
 /** Phases that carry an `error` payload. Used to widen union helpers. */
 export type FailurePhase =
   | "STUCK"
@@ -36,6 +43,7 @@ export type SliceLifecycle =
   | ({ phase: "PASS" } & SliceIdentity & {
       progress: SliceProgress;
       mergedToFeature: boolean;
+      adoption?: SliceAdoption;
     })
   | ({ phase: FailurePhase } & SliceIdentity & {
       progress: SliceProgress;
@@ -90,11 +98,13 @@ export const lifecycle = {
     id: SliceIdentity,
     progress: SliceProgress,
     mergedToFeature: boolean,
+    adoption?: SliceAdoption,
   ): SliceLifecycle => ({
     phase: "PASS",
     ...id,
     progress,
     mergedToFeature,
+    ...(adoption ? { adoption } : {}),
   }),
   stuck: (id: SliceIdentity, progress: SliceProgress, error: string): SliceLifecycle => ({
     phase: "STUCK",

@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import {
   ALL_PHASES,
   traitsFor,
+  type SliceAdoption,
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
@@ -14,13 +15,6 @@ export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
 const PERSISTED_PHASES = new Set<string>(
   ALL_PHASES.filter((phase) => traitsFor(phase).persisted),
 );
-
-export interface SliceAdoption {
-  adopter: string;
-  reason: string;
-  branch: string;
-  commit: string;
-}
 
 export interface PersistedSliceState {
   phase: PersistedPhase;
@@ -371,6 +365,7 @@ export function projectForPersistence(
         phase: "PASS",
         ...(s.branch ? { branch: s.branch } : {}),
         mergedToFeature: s.mergedToFeature,
+        ...(s.adoption ? { adoption: s.adoption } : {}),
       };
     case "SKIPPED":
       return {

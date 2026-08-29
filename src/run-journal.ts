@@ -20,6 +20,7 @@ import {
 } from "./stage-durations.js";
 import {
   lifecycle,
+  type SliceAdoption,
   type FailurePhase,
   type SliceIdentity,
   type SliceLifecycle,
@@ -241,10 +242,10 @@ export class RunJournal {
   }
 
   /** Restore an already-persisted PASS for this run's summary. */
-  restoreCompleted(sliceId: SliceIdentity) {
+  restoreCompleted(sliceId: SliceIdentity, adoption?: SliceAdoption) {
     this.slices.set(
       sliceId.ghIssue,
-      lifecycle.pass(sliceId, ZERO_PROGRESS, true),
+      lifecycle.pass(sliceId, ZERO_PROGRESS, true, adoption),
     );
   }
 

@@ -22,6 +22,7 @@ import {
   type PersistedReviewPhase,
 } from "./run-state.js";
 import type { ResolvedRunScope } from "./slice-scope.js";
+import type { SliceAdoption } from "./slice-lifecycle.js";
 
 /** Outcome of one guardian review run, with failure detail when it died. */
 export interface ReviewRunResult {
@@ -81,6 +82,10 @@ export interface PrCreationPlan {
   overrideNote?: string;
 }
 
+export interface AdoptedSlice extends SliceAdoption {
+  ghIssue: string;
+}
+
 /**
  * Decide whether the draft PR opens and build its content. An override records
  * disagreement with a real PM judgment; it never replaces a missing verdict.
@@ -92,6 +97,7 @@ export function buildPrCreationPlan(args: {
   pm: artifacts.ReviewOutcome;
   openPrOnOverride: boolean;
   closesIssues: readonly string[];
+  adoptions?: readonly AdoptedSlice[];
 }): PrCreationPlan {
   const architectOk = artifacts.isFavorableReviewOutcome(args.architect);
   const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
@@ -119,6 +125,24 @@ export function buildPrCreationPlan(args: {
         "",
         `Read ${specsPath}/review-pm.md for the blocking findings before merging.`,
       ].join("\n"),
+    );
+  }
+  if (args.adoptions && args.adoptions.length > 0) {
+    sections.push(
+      [
+        "## Adopted Slices",
+        "",
+        ...args.adoptions.map((adoption) =>
+          [
+            `### #${adoption.ghIssue}`,
+            "",
+            `- Adopter: ${inlineMarkdown(adoption.adopter)}`,
+            `- Reason: ${inlineMarkdown(adoption.reason)}`,
+            `- Branch: ${inlineMarkdown(adoption.branch)}`,
+            `- Commit: ${inlineMarkdown(adoption.commit)}`,
+          ].join("\n"),
+        ),
+      ].join("\n\n"),
     );
   }
   sections.push(
@@ -190,6 +214,7 @@ export interface RunShipGateArgs {
   relevantFilesBlock: string;
   reviewScope: string;
   closesIssues: readonly string[];
+  adoptions?: readonly AdoptedSlice[];
   cachedReviewPhase?: PersistedReviewPhase;
   invoke: ShipGateInvoke;
   journal: ShipGateJournal;
@@ -236,6 +261,10 @@ function isCancelled(error: unknown, signal?: AbortSignal): boolean {
 const defaultRunCommand: ShipCommandRunner = (command, args, options) =>
   execFileSync(command, [...args], options);
 
+function inlineMarkdown(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Run every post-wave shipping decision through one interface: sanity,
  * guardian reviews, review caching, artifact commit, and draft PR handling.
@@ -254,6 +283,7 @@ export async function runShipGate(
     relevantFilesBlock,
     reviewScope,
     closesIssues,
+    adoptions,
     cachedReviewPhase,
     invoke,
     journal,
@@ -529,6 +559,7 @@ export async function runShipGate(
     pm: pmResult.outcome,
     openPrOnOverride: options.openPrOnOverride,
     closesIssues,
+    adoptions,
   });
   journal.event({ type: "run-phase-started", phase: "draft-pr" });
   let prUrl: string | null = null;
