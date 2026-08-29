@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
 import { parseQAReview } from "./qa-review.js";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const SLICE_BASE_COMMIT = "770bb20eb6c1cae071b88a0596078675c26c86f4";
 
 describe("renderPrompt", () => {
   it("substitutes placeholders for the explorer template", () => {
@@ -145,7 +149,6 @@ describe("renderPrompt", () => {
       new URL("../agents/generator.md", import.meta.url),
       new URL("../prompts/generator.md", import.meta.url),
       new URL("../prompts/generator-resume.md", import.meta.url),
-      new URL("../prompts/generator-resume-stuck.md", import.meta.url),
     ];
     const escalationSections = sources.map((source) => {
       const content = readFileSync(source, "utf-8");
@@ -203,8 +206,76 @@ describe("renderPrompt", () => {
     ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
-    expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
+    expect(renderPrompt("generator-resume", {
+      SLICE_DIR: "d",
+      RELEVANT_FILES: "",
+      SIBLING_HANDOFFS: "(none)",
+      TEST_COMMAND: "pnpm test",
+      COMMITS_AHEAD: 1,
+      COMMIT_LOG: "abc123 feat: work",
+      WORKTREE_STATE: "preserved state",
+      BASE_REFRESH_NOTE: "base refreshed",
+      STUCK_NOTE: "",
+      UNRESOLVED_FINDINGS: "(none)",
+      HANDOFF_NOTE: "",
+      MIGRATION_RESERVATION: "none",
+    })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
+  });
+
+  it("keeps retired STUCK prompts and historical docs absent from this slice diff", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const retiredRole = ["generator", "stuck"].join("-");
+    const retiredResume = ["generator", "resume", "stuck"].join("-");
+    for (const name of [`${retiredRole}.md`, `${retiredResume}.md`]) {
+      expect(
+        existsSync(new URL(`../prompts/${name}`, import.meta.url)),
+      ).toBe(false);
+    }
+
+    expect(() =>
+      execFileSync(
+        "git",
+        [
+          "grep",
+          "-n",
+          "-e",
+          retiredRole,
+          "-e",
+          retiredResume,
+          "--",
+          "src",
+          "prompts",
+        ],
+        { cwd: repoRoot, stdio: "pipe" },
+      ),
+    ).toThrow();
+
+    const generatorPersona = readFileSync(
+      new URL("../agents/generator.md", import.meta.url),
+      "utf-8",
+    );
+    expect(generatorPersona).not.toMatch(
+      /(?:write|guess)[^\n]*stuck\.md/i,
+    );
+    expect(generatorPersona).not.toMatch(/best guess/i);
+
+    expect(() =>
+      execFileSync(
+        "git",
+        [
+          "diff",
+          "--exit-code",
+          "--find-renames",
+          SLICE_BASE_COMMIT,
+          "HEAD",
+          "--",
+          "docs/adr",
+          "docs/specs",
+        ],
+        { cwd: repoRoot, stdio: "pipe" },
+      ),
+    ).not.toThrow();
   });
 });

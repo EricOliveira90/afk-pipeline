@@ -21,9 +21,11 @@ import {
 import {
   QA_REVIEW_FILENAME,
   UAT_REVIEW_FILENAME,
+  type QAReviewAttemptFinding,
   type QAReviewAttemptRecord,
   type QAReviewStage,
 } from "./qa-review.js";
+import type { ScopeEscalation } from "./escalation.js";
 import type { ScopeAmendmentRecord } from "./scope-amendment.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
@@ -453,6 +455,257 @@ export function archiveScopeAmendment(details: {
     flag: "wx",
   });
   return name;
+}
+
+interface ArchivedQAReviewRecord {
+  name: string;
+  record: QAReviewAttemptRecord;
+}
+
+interface ArchivedScopeEscalation {
+  round: number;
+  attempt: number;
+  escalation: ScopeEscalation;
+}
+
+export interface StuckDiagnosisDetails {
+  reviewArchiveDir: string;
+  additionalArtifactReferences?: readonly string[];
+  commitLog: string;
+}
+
+const QA_RECORD_NAME =
+  /^(qa|uat)-review-r(\d+)-a(\d+)-record\.json$/;
+const ESCALATION_RECORD_NAME = /^escalation-r(\d+)-a(\d+)\.md$/;
+const ADDITIONAL_ARTIFACT_LINE =
+  /^- Additional artifact: `([^`\r\n]+)`$/gm;
+
+function compareAttempt(
+  left: { round: number; attempt: number },
+  right: { round: number; attempt: number },
+): number {
+  return left.round - right.round || left.attempt - right.attempt;
+}
+
+function archivedQAReviewRecords(
+  reviewArchiveDir: string,
+): ArchivedQAReviewRecord[] {
+  if (!existsSync(reviewArchiveDir)) return [];
+  return readdirSync(reviewArchiveDir)
+    .flatMap((name): ArchivedQAReviewRecord[] => {
+      const match = QA_RECORD_NAME.exec(name);
+      if (!match) return [];
+      const record = JSON.parse(
+        readFileSync(join(reviewArchiveDir, name), "utf-8"),
+      ) as QAReviewAttemptRecord;
+      if (
+        !record ||
+        typeof record !== "object" ||
+        !Array.isArray(record.findings)
+      ) {
+        throw new Error(`${name} is not a valid archived QA lifecycle record`);
+      }
+      const expectedStage =
+        match[1] === "qa" ? "deterministic" : "shared-preview";
+      if (
+        record.stage !== expectedStage ||
+        record.round !== Number(match[2]) ||
+        record.attempt !== Number(match[3])
+      ) {
+        throw new Error(
+          `${name} contents must match its stage, round, and attempt filename`,
+        );
+      }
+      return [{ name, record }];
+    })
+    .sort(
+      (left, right) =>
+        compareAttempt(left.record, right.record) ||
+        left.record.stage.localeCompare(right.record.stage),
+    );
+}
+
+function archivedScopeEscalations(
+  reviewArchiveDir: string,
+): ArchivedScopeEscalation[] {
+  if (!existsSync(reviewArchiveDir)) return [];
+  return readdirSync(reviewArchiveDir)
+    .flatMap((name): ArchivedScopeEscalation[] => {
+      const match = ESCALATION_RECORD_NAME.exec(name);
+      if (!match) return [];
+      const parsed = JSON.parse(
+        readFileSync(join(reviewArchiveDir, name), "utf-8"),
+      ) as ScopeEscalation;
+      if (
+        parsed.version !== 1 ||
+        !Array.isArray(parsed.findingIds) ||
+        !Array.isArray(parsed.paths) ||
+        typeof parsed.reason !== "string"
+      ) {
+        throw new Error(`${name} is not a valid archived scope escalation`);
+      }
+      return [
+        {
+          round: Number(match[1]),
+          attempt: Number(match[2]),
+          escalation: parsed,
+        },
+      ];
+    })
+    .sort(compareAttempt);
+}
+
+function latestFindings(
+  records: readonly ArchivedQAReviewRecord[],
+): Array<QAReviewAttemptFinding & { stage: QAReviewStage }> {
+  const latest = new Map<
+    string,
+    QAReviewAttemptFinding & { stage: QAReviewStage }
+  >();
+  for (const { record } of records) {
+    for (const finding of record.findings) {
+      latest.set(`${record.stage}:${finding.id}`, {
+        ...finding,
+        artifactReferences: [...finding.artifactReferences],
+        stage: record.stage,
+      });
+    }
+  }
+  return [...latest.values()].sort(
+    (left, right) =>
+      left.id.localeCompare(right.id) ||
+      left.stage.localeCompare(right.stage),
+  );
+}
+
+function renderFinding(
+  finding: QAReviewAttemptFinding & { stage: QAReviewStage },
+): string {
+  return [
+    `- [${finding.id}] ${finding.severity} ${finding.state}`,
+    `  - Stage: ${finding.stage}`,
+    `  - Summary: ${finding.summary}`,
+    `  - Clear condition: ${finding.clearCondition}`,
+    "  - Artifact references:",
+    ...finding.artifactReferences.map((path) => `    - \`${path}\``),
+  ].join("\n");
+}
+
+function renderFindingSection(
+  findings: readonly (QAReviewAttemptFinding & { stage: QAReviewStage })[],
+): string {
+  return findings.length === 0
+    ? "(none)"
+    : findings.map(renderFinding).join("\n");
+}
+
+export function readStuckDiagnosisAdditionalArtifactReferences(
+  sliceDir: string,
+): string[] {
+  const stuckPath = join(sliceDir, "stuck.md");
+  if (!existsSync(stuckPath)) return [];
+  return [
+    ...new Set(
+      [...readFileSync(stuckPath, "utf-8").matchAll(ADDITIONAL_ARTIFACT_LINE)]
+        .map((match) => match[1])
+        .filter((path): path is string => path !== undefined),
+    ),
+  ].sort();
+}
+
+/**
+ * Assemble the terminal implementation diagnosis from archived evidence.
+ * File discovery is never presentation order: attempts and findings are
+ * sorted explicitly so identical archives always produce identical bytes.
+ */
+export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
+  const records = archivedQAReviewRecords(details.reviewArchiveDir);
+  const escalations = archivedScopeEscalations(details.reviewArchiveDir);
+  const findings = latestFindings(records);
+  const resolvedFindings = findings.filter(
+    (finding) => finding.state === "RESOLVED",
+  );
+  const openFindings = findings.filter((finding) => finding.state === "OPEN");
+  const escalationBlock =
+    escalations.length === 0
+      ? "(none)"
+      : escalations
+          .map(({ round, attempt, escalation }) =>
+            [
+              `- Round ${round} attempt ${attempt}`,
+              `  - Finding IDs: ${escalation.findingIds.map((id) => `\`${id}\``).join(", ")}`,
+              `  - Paths: ${escalation.paths.map((path) => `\`${path}\``).join(", ")}`,
+              `  - Reason: ${escalation.reason}`,
+            ].join("\n"),
+          )
+          .join("\n");
+  const roundEvidence = records.map(({ name, record }) => {
+    const references = [
+      ...new Set(
+        record.findings.flatMap(
+          (finding) => finding.artifactReferences,
+        ),
+      ),
+    ].sort();
+    return [
+      `- Round ${record.round} attempt ${record.attempt} (${record.stage}): ${record.verdict} / ${record.failureClass}`,
+      `  - Lifecycle record: \`${name}\``,
+      "  - Artifact references:",
+      ...(references.length === 0
+        ? ["    - (none)"]
+        : references.map((path) => `    - \`${path}\``)),
+    ].join("\n");
+  });
+  const recordedArtifactReferences = new Set(
+    records.flatMap(({ record }) =>
+      record.findings.flatMap((finding) => finding.artifactReferences),
+    ),
+  );
+  for (const path of [...new Set(details.additionalArtifactReferences ?? [])]
+    .filter((path) => !recordedArtifactReferences.has(path))
+    .sort()) {
+    roundEvidence.push(`- Additional artifact: \`${path}\``);
+  }
+  if (roundEvidence.length === 0) roundEvidence.push("(none)");
+  const commitEvidence = details.commitLog.trim()
+    ? `\`\`\`text\n${details.commitLog.trimEnd()}\n\`\`\``
+    : "(none)";
+
+  return [
+    "# Stuck diagnosis",
+    "",
+    "## Finding lifecycle",
+    "",
+    "### RESOLVED",
+    "",
+    renderFindingSection(resolvedFindings),
+    "",
+    "### OPEN",
+    "",
+    renderFindingSection(openFindings),
+    "",
+    "## Scope escalations",
+    "",
+    escalationBlock,
+    "",
+    "## Round evidence",
+    "",
+    ...roundEvidence,
+    "",
+    "## Commit evidence",
+    "",
+    commitEvidence,
+    "",
+  ].join("\n");
+}
+
+export function writeStuckDiagnosis(
+  sliceDir: string,
+  details: StuckDiagnosisDetails,
+): string {
+  const diagnosis = renderStuckDiagnosis(details);
+  writeFileSync(join(sliceDir, "stuck.md"), diagnosis, "utf-8");
+  return diagnosis;
 }
 
 /**

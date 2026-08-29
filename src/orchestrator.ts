@@ -744,10 +744,9 @@ export interface SliceContext {
      *   from the feature branch before the generator was handed
      *   `generator-resume`.
      * - `stuck` — the operator opted in with `--resume-stuck` (#49): the
-     *   tree was left untouched, the stuck.md diagnosis survives, and
-     *   the generator is handed `generator-resume-stuck`. The two are
-     *   distinct templates because their situation sections state
-     *   opposite facts about the worktree.
+     *   tree was left untouched and the stuck.md diagnosis survives.
+     *   Both modes use `generator-resume`; explicit situation blocks
+     *   carry their opposite worktree facts without template drift.
      */
     mode: "killed" | "stuck";
     /** Commits on the slice branch beyond the feature-branch base. */
@@ -1809,8 +1808,8 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   } else if (plan.action === "resume-stuck") {
     // No resetWorktreeToHead here, deliberately: the operator opted in
     // to keep this tree exactly as they inspected it, uncommitted edits
-    // included. The generator-resume-stuck prompt tells the generator to
-    // read `git status` first rather than assuming a clean tip.
+    // included. The shared resume prompt's worktree situation block tells
+    // the generator to inspect it rather than assuming a clean tip.
     const commitLog = git.logCommitsWithStat(ctx.worktreeDir, ctx.featBranch);
     const handoffNote = buildResumeHandoffNote(
       join(ctx.absSliceDir, "handoff.md"),
@@ -3474,7 +3473,9 @@ export async function runSliceExecute(
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
-  const stuckReferences: string[] = [];
+  const stuckReferences = ctx.resume
+    ? artifacts.readStuckDiagnosisAdditionalArtifactReferences(ctx.absSliceDir)
+    : [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
   let deterministicHistory: readonly QAReviewLifecycleFinding[] = [];
   let deterministicUnresolved: readonly QAReviewAttemptFinding[] = [];
@@ -3483,14 +3484,26 @@ export async function runSliceExecute(
   let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
   let firstRound = 1;
   let retryNote = "";
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
+  const finishStuck = (): Extract<TerminalOutcome, { phase: "STUCK" }> => {
+    logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
+    artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
+      reviewArchiveDir,
+      additionalArtifactReferences: stuckReferences,
+      commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
+    });
+    return {
+      phase: "STUCK",
+      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+    };
+  };
 
   try {
     if (ctx.resume) {
-      const reviewArchiveDir = artifacts.contractReviewArchiveDir(
-        config.repoRoot,
-        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
-        slice.number,
-      );
       const restored = loadQAReviewResumeState(
         reviewArchiveDir,
         ctx.absSliceDir,
@@ -3553,27 +3566,7 @@ export async function runSliceExecute(
         );
         const genLog = logger.agentLog(slice.number, "generator", round);
         const generatorPromptBase =
-          implementationAttempt === 1 && ctx.resume?.mode === "stuck"
-            ? renderPrompt("generator-resume-stuck", {
-                SLICE_DIR: ctx.relSliceDir,
-                RELEVANT_FILES: ctx.relevantFilesBlock,
-                SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-                TEST_COMMAND: ctx.testCommand,
-                COMMITS_AHEAD: ctx.resume.commitsAhead,
-                COMMIT_LOG: ctx.resume.commitLog,
-                BASE_REFRESH_NOTE: ctx.resume.baseRefreshed
-                  ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
-                  : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`,
-                STUCK_NOTE: ctx.resume.stuckNote ?? "",
-                UNRESOLVED_FINDINGS:
-                  formatUnresolvedQAFindings(resumedUnresolved),
-                HANDOFF_NOTE: ctx.resume.handoffNote,
-                MIGRATION_RESERVATION: migrationReservationBlock(
-                  config,
-                  slice.ghIssue,
-                ),
-              })
-            : implementationAttempt === 1 && ctx.resume
+          implementationAttempt === 1 && ctx.resume
               ? renderPrompt("generator-resume", {
                   SLICE_DIR: ctx.relSliceDir,
                   RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -3581,7 +3574,20 @@ export async function runSliceExecute(
                   TEST_COMMAND: ctx.testCommand,
                   COMMITS_AHEAD: ctx.resume.commitsAhead,
                   COMMIT_LOG: ctx.resume.commitLog,
-                  FEAT_BRANCH: featBranch,
+                  WORKTREE_STATE:
+                    ctx.resume.mode === "stuck"
+                      ? "**Your worktree was not touched.** Nothing was reset, cleaned, or dropped. Every committed change and uncommitted edit remains exactly where the previous attempt left it. Treat dirty-tree state as real work-in-progress."
+                      : "Your worktree was reset to your last commit. Uncommitted changes were discarded; anything after your last commit is gone and must be redone.",
+                  BASE_REFRESH_NOTE:
+                    ctx.resume.mode === "stuck"
+                      ? ctx.resume.baseRefreshed
+                        ? `The feature branch \`${featBranch}\` was merged into your branch just before this run, so your verification world is current.`
+                        : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`
+                      : `The feature branch \`${featBranch}\` was merged into your branch just before this run. Your verification world is current: work merged by sibling slices while you were away is now part of your tree.`,
+                  STUCK_NOTE:
+                    ctx.resume.mode === "stuck"
+                      ? ctx.resume.stuckNote ?? ""
+                      : "",
                   UNRESOLVED_FINDINGS:
                     formatUnresolvedQAFindings(resumedUnresolved),
                   HANDOFF_NOTE: ctx.resume.handoffNote,
@@ -3627,14 +3633,6 @@ export async function runSliceExecute(
 
         if (!existsSync(escalationPath)) break;
 
-        const reviewArchiveDir = artifacts.contractReviewArchiveDir(
-          config.repoRoot,
-          pipelineRunSlug(
-            config.prdSlug,
-            config.provider ?? kiroProvider,
-          ),
-          slice.number,
-        );
         artifacts.archiveScopeEscalationAttempt({
           sliceDir: ctx.absSliceDir,
           archiveDir: reviewArchiveDir,
@@ -3997,41 +3995,10 @@ export async function runSliceExecute(
       }
 
       if (implementationAttempt === implementationAttemptLimit) {
-        logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
-          type: "phase-started",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "generator-stuck",
-        });
-        const stuckLog = logger.agentLog(slice.number, "generator-stuck");
-        await invoke({
-          role: "generator-stuck",
-          prompt: renderPrompt("generator-stuck", {
-            SLICE_DIR: ctx.relSliceDir,
-            QA_REPORTS: stuckReferences
-              .map((path) => `- \`${path}\``)
-              .join("\n"),
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: stuckLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(stuckLog));
-        logger.event({
-          type: "phase-ended",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "generator-stuck",
-        });
-        return {
-          phase: "STUCK",
-          error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-        };
+        return finishStuck();
       }
     }
-    return {
-      phase: "STUCK",
-      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-    };
+    return finishStuck();
   } catch (err) {
     if (isCancelled(err, signal)) {
       return { phase: "CANCELLED", error: CANCELLED_BY_USER };

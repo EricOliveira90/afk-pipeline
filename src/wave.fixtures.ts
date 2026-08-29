@@ -332,12 +332,6 @@ export function buildStubProvider(opts: {
           "utf-8",
         );
         writeQAReview(sliceArtifactDir, "deterministic", { verdict });
-      } else if (role === "generator-stuck" && sliceArtifactDir) {
-        writeFileSync(
-          join(sliceArtifactDir, "stuck.md"),
-          "# Stuck\n",
-          "utf-8",
-        );
       }
 
       return { exitCode: 0, stdout: "", stats: {} };
