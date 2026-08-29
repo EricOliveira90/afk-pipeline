@@ -151,6 +151,14 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         blockedBy: [],
         userStories: "",
       },
+      {
+        number: "08",
+        ghIssue: "8188",
+        title: "Applied stability refusal",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const fixtures = new Map<string, SliceFixture>([
       [
@@ -220,6 +228,16 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           outputContent: "must not generate",
         },
       ],
+      [
+        "8188",
+        {
+          files: ["src/applied-stability-refusal.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/applied-stability-refusal.txt",
+          outputContent: "must not generate",
+        },
+      ],
     ]);
     const records: InvocationRecord[] = [];
     const stub = buildStubProvider({ fixtures, slices, records });
@@ -242,6 +260,16 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         JSON.stringify(manifest),
         "utf-8",
       );
+    };
+    const renumberAppliedManifestBehavior = (artifactDir: string) => {
+      const manifestPath = join(artifactDir, "acceptance-manifest.json");
+      const manifest = JSON.parse(
+        readFileSync(manifestPath, "utf-8"),
+      ) as {
+        behaviors: Array<{ id: string }>;
+      };
+      manifest.behaviors[0]!.id = "B-02";
+      writeFileSync(manifestPath, JSON.stringify(manifest), "utf-8");
     };
     const provider: AgentProvider = {
       name: stub.name,
@@ -268,6 +296,12 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
               number: "07",
               winningPosition: "EVALUATOR",
               refusal: "injected planner-apply lock-gate refusal",
+            },
+            {
+              ghIssue: "8188",
+              number: "08",
+              winningPosition: "EVALUATOR",
+              refusal: null,
             },
           ]) {
             const parkedCwd = records.find(
@@ -306,7 +340,8 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         const invokedSlice = sliceFromCwd(options.cwd, slices);
         if (
           options.role === "planner" &&
-          invokedSlice?.ghIssue === "8187"
+          (invokedSlice?.ghIssue === "8187" ||
+            invokedSlice?.ghIssue === "8188")
         ) {
           const artifactDir = findSliceArtifactDir(
             options.cwd,
@@ -318,10 +353,14 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
             );
           }
           if (existsSync(join(artifactDir, "adjudication.md"))) {
-            injectLockRefusal(
-              artifactDir,
-              "injected planner-apply lock-gate refusal",
-            );
+            if (invokedSlice.ghIssue === "8187") {
+              injectLockRefusal(
+                artifactDir,
+                "injected planner-apply lock-gate refusal",
+              );
+            } else {
+              renumberAppliedManifestBehavior(artifactDir);
+            }
           }
         }
         return result;
@@ -393,6 +432,12 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         ghIssue: "8187",
         number: "07",
         text: "injected planner-apply lock-gate refusal",
+        plannerInvocations: 3,
+      },
+      {
+        ghIssue: "8188",
+        number: "08",
+        text: "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
         plannerInvocations: 3,
       },
     ];
