@@ -74,16 +74,21 @@ misleads the next actor.**
 |---|---|---|---|---|
 | 1 (#69) | Evidence backbone | — | #75–#79 | run-ID provenance fields land at assembly (§3 item 11) |
 | 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #129 (AFK) + #94 (manual courier follow-up after #89) | carries `afk adopt` (§3 item 10, ticket #129); **defer story 14** (babysit-skill packaging; #94 rescoped to courier-only, manual) |
-| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5); **defer story 16** (cross-provider parity matrix) with the fence: envelope *assembly* stays provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it) |
-| 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86 | carries §3 items 2, 5 (artifact), 12; **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
+| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5), the ADR-index envelope entry, the `ARCHITECTURE.md` envelope entry, and the §3c escalation-criteria prompt text; **defer story 16** (cross-provider parity matrix) with the fence: envelope *assembly* stays provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it) |
+| 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86, #132 | carries §3 items 2, 5 (artifact), 12, and item 15 (#132); **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
 | 5 (#73) | Quality loops | 4 | #87, #92, #97 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20 |
 | 6 (#74) | Aggregate: guardians and remediator | 4 | #88, #93, #98 | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13) |
 
 Why this order holds, unchanged: PRD 1 makes control-plane facts
 machine-readable; PRD 3 shapes what each role receives before PRD 4 adds
-roles; PRD 4 establishes the baseline PRDs 5–6 preserve. Note PRDs 2 and 3
-depend only on PRD 1 and are **dependency-independent of each other**, and
-PRDs 5 and 6 both hang off PRD 4 — §4 exploits both facts.
+roles; PRD 4 establishes the baseline PRDs 5–6 preserve. PRDs 2 and 3 are
+dependency-independent **at the contract level only**: in practice they
+serialize, because PRD 3's tickets consume PRD 2 outputs (#83 assumes
+PRDs 1–2 landed; #71 names PRD 2's escalation instruction and computed
+unresolved sets as inputs) and the two PRDs overlap maximally on prompts
+and orchestrator files, so a concurrent launch fails §3c policy 5's
+overlap condition. The first true concurrent pair is **PRDs 5 and 6**,
+which both hang off PRD 4 — §4 exploits that.
 
 ---
 
@@ -121,6 +126,98 @@ ping, auto-kill (both forms), the launch-time state audit, the mandatory
 `rejection-cases` ticket field, the keyed measurement store, the general
 finding rule. Each carries a re-open trigger; do not re-propose without it.
 
+### 3b. Parallelism additions (2026-08-28, outside the debate)
+
+Two items from the PRD 2 lane-collapse discussion. They did not pass
+through the debate; the ratings are the proposer's own, recorded in the
+same L/C/E/R form for comparability. Both keep the debate's constraint:
+nothing here adds minutes to the happy path.
+
+| # | Item | Placement | L/C/E/R | Recurring cost | Failure mode |
+|---|---|---|---|---|---|
+| 15 | **Merge-resolution round on CONFLICT** (extends ADR 0029): a real git merge conflict at the mutex dispatches one scoped resolution round *before* recording `CONFLICT`. The slice's generator, in its worktree on the current feature-branch tip, receives the conflict hunks plus the already-merged sibling diffs, resolves, and re-runs the slice's QA gates and bindings on the resolved tree; the merge retries inside the same mutex. One round; failure falls back to today's terminal `CONFLICT` with both branches preserved. | PRD 4 slice **#132** | 4/2/3/4 | zero — runs only on CONFLICT | a plausible-but-wrong resolution — bounded by the slice's own gates re-run on the resolved tree and by the pre-ship full suite |
+| 16 | **Optimistic lanes, opt-in** (`--optimistic-lanes`, default off): lane-mates run Phase B in parallel from the same base; merges still serialize under the mutex; after each merge the orchestrator re-executes the union of the wave's executable bindings (#76) on the merged tip. A textual conflict routes through item 15. A binding failure on the merged tip demotes the losing slice to today's serial path (re-negotiate on the real base) — worst case is serial behaviour plus one wasted generator run. Fails closed to serial when any wave slice's contract lacks bindings. Enable/disable recorded in run evidence, under item 8's governance pattern. | flag + ADR, after item 15 ships | 3/3/2/5 | zero when off; one binding re-run per merge when on | a semantic duplicate outside binding coverage survives to the pre-ship gate — the ADR 0005 incident class, and the reason for default-off and the §6 trigger |
+
+Evidence base, thin and stated as such: the PRD 076 session discarded
+passed-QA work at a merge refusal (ADR 0029's motivating incident); the
+PRD 1 reliability wave resolved cross-prompt conflicts with an agent,
+attended, and it worked. External: co-active agent PRs conflict textually
+at 20–42% measured rates (arXiv:2607.04697) — which argues for default-off,
+not for abandoning the idea; advisory self-repair beats discard-and-retry
+on cost because agent work-in-progress is expensive to throw away
+(CoAgent, arXiv:2606.15376). A survey of shipped agent products
+(2026-08-28) found none that documents re-verifying the *merged* output of
+parallel agents as a distinct gate — AFK already owns both mechanisms this
+needs (the merge mutex and the pre-ship gate), which is the case for
+attempting it here at all.
+
+### 3c. Agreed policies from the parallelism discussion (2026-08-28)
+
+Follow-up agreements, same provenance note as §3b: agreed in discussion,
+not debate-rated.
+
+1. **Escalation rule — critical judgment only.** An agent decides and
+   records, without asking, when the call is inside the locked contract,
+   or reversible before merge, or a gap-fill nothing else will build on.
+   It escalates when any one of these holds: **spec contradiction** (the
+   correct implementation needs a behavior the PRD states differently);
+   **load-bearing silence** (the spec says nothing and the choice creates
+   something others will build on — a public interface, a data format, a
+   security posture); **declared risk class** (a short catalog-declared
+   list — schema history, auth, deletion of tests or gates, destructive
+   git — structural, not agent-judged, for the same reason item 12's
+   corollary was cut). A recorded ADR counts as spec for this rule:
+   a slice whose correct implementation contradicts one escalates as a
+   spec contradiction rather than silently overriding it. Every
+   non-escalated call is recorded in a named
+   channel with the alternative and the reversal cost; escalations are
+   couriered and never block the DAG — only dependents wait. Placement,
+   split three ways: the *plumbing* is PRD 2's in-flight slices (#80
+   scope escalation, #81 park-and-continue, #89 resume, #94 courier);
+   the *criteria* (the three tests, as prompt text) land with PRD 3's
+   prompts v2; the *risk-class catalog* rides PRD 4's item 12
+   declarations.
+2. **Hub and seam declarations — `afk.config.json`, repo root, new.**
+   Project policy, deliberately not the per-PRD `afk.json`: hubs are a
+   property of the repository, and two concurrent PRDs must see the same
+   lane semantics. Format: `version: 1` required; `resourceKeys` maps a
+   key name to a regex matched against the partitioner's normalized path
+   form (forward slashes, lowercase, no leading `./`); a `migrations`
+   key, when present, **replaces** the built-in default (ADR 0027's
+   replace-not-extend rule); every value must compile as a regex;
+   optional `architectureDoc` names the architecture file. Two wave
+   slices whose declared paths match the same key union into one lane,
+   reported via the existing `sharedResources` channel. Extends
+   ADR 0027; the partitioner semantics are otherwise unchanged.
+3. **`ARCHITECTURE.md` — four sections, each with a named reader.**
+   Modules (name, one-line purpose, public seam, internals), Hubs
+   (do not grow; extract instead), Seams (extension points), Placement
+   rules. Readers: the explorer and planner receive it in their
+   envelopes; ticket authors read Hubs when applying the seam-slice
+   rule. Two honesty guards: every named path must exist (cheap lint),
+   and every listed hub must have a matching `resourceKeys` entry —
+   prose and enforcement cross-check each other. Hard cap ~150 lines:
+   it rides in every planner envelope and PRD 3 makes envelope cost a
+   first-class measurement.
+4. **`test:budgets` is declared environment-sensitive under item 12.**
+   Wall clock conflates suite cost with machine load; under concurrent
+   runs the gate false-fails, and a false red teaches people to raise
+   numbers. In pipeline context it reports, never blocks, never costs a
+   round; the report surfaces at PR review, where a human distinguishes
+   "machine was loaded" from "someone added an expensive test". The
+   numbers remain first-class measurements (item 13's pattern). The
+   budget stays blocking for plain developer runs of `pnpm test`.
+5. **Concurrent AFK runs — four conditions, no suite lock.** Two PRDs
+   may run at once when: one clone per run (two orchestrator processes
+   hold in-process merge mutexes that cannot see each other; separate
+   clones make cross-run git races impossible by construction);
+   migration prefixes reserved per PRD at prep time (ADR 0034 claims);
+   the second merger pays a rebase — check the two ticket sets'
+   file-hint overlap before launch; tickets linted (item 6, unchanged).
+   The cross-process suite lock was considered and deferred: with
+   budgets advisory (policy 4), its only remaining job is protecting
+   per-test timeouts from contention flakes — see the §6 trigger.
+
 ---
 
 ## 4. Sequencing — pay the next runs first, in parallel tracks
@@ -129,9 +226,10 @@ Ordering principle: **an item's priority is how soon the *next* AFK run
 collects its benefit.** Everything in Track 2 pays from the very next run
 onward; PRD-embedded items pay from their PRD's run onward. Parallelism is
 real for manual sessions (separate worktrees, the proven #113/#114
-pattern); AFK runs themselves serialize on this machine (one full suite at
-a time), so "parallel" for PRDs means *prep in parallel, run whichever is
-ready*.
+pattern). AFK runs may also run concurrently under §3c policy 5's four
+conditions — this revises the earlier one-suite-at-a-time rule, which
+existed for the `test:budgets` gate that §3c policy 4 makes advisory in
+pipeline context.
 
 ```
 NOW, three tracks in parallel (Track 1 — PRD 1 / PR #125 — DONE, merged 2026-08-28):
@@ -153,9 +251,12 @@ NOW, three tracks in parallel (Track 1 — PRD 1 / PR #125 — DONE, merged 2026
 GATE: PRD 1 closed + wave merged + tickets linted
   → AFK: PRD 2 (item 10 afk adopt; story 14 deferred)
   → AFK: PRD 3 (item 5 manifest entry, item 13; story 16 deferred, assembly fence kept)
-       PRDs 2 and 3 are dependency-independent: prep both, launch in order,
-       and if one stalls on a human decision, start the other.
+       PRDs 2 and 3 are contract-independent but serialize in practice
+       (ticket inputs + maximal file overlap — see §2): prep PRD 3 during
+       PRD 2's run, launch it when PRD 2 merges. First true concurrent
+       pair under §3c policy 5 is PRD 5 ∥ PRD 6.
   → AFK: PRD 4 (item 2, item 5 artifact, item 12 attribute, provenance story 1;
+                item 15 merge-resolution round (#132);
                 stories 9 and 15 deferred)
   → AFK: PRD 5 (cleaner only, default-off, story 17 ROI experiment)  ∥  PRD 6
        both depend only on PRD 4 — parallel-eligible, serialized only by the machine.
@@ -177,8 +278,9 @@ What each stage banks for the runs after it:
 
 - Budget a prep-chain refresh as its own task, not a step; expect conflicts
   whenever main restructures a file a slice branch touches.
-- One full test suite at a time on this machine; prefer the pipeline's
-  gates to own it.
+- One full test suite at a time per *manual* session remains the norm;
+  concurrent AFK runs may overlap suites once `test:budgets` is advisory
+  in pipeline context (§3c policies 4–5).
 - Every launch passes the verification command explicitly **including
   typecheck** until item 2 lands — and Track 4 corrects the stale
   `AGENTS.md` guidance now, since a document that misleads the next
@@ -240,3 +342,11 @@ What remains is not open questions but **standing triggers**:
   re-enter only when an incident or the ROI evidence demands them; the
   PRD 3 assembly fence (provider-agnostic envelope interface) holds
   regardless.
+- **Optimistic lanes (item 16)** stay opt-in until at least two opted-in
+  waves show zero merge regressions that only the pre-ship gate caught,
+  plus a wall-clock win worth the extra compute. Default-on is decided by
+  that run evidence, not by argument.
+- **The cross-process suite lock** (cut from §3c policy 5) builds only
+  after a per-test timeout flake attributable to cross-run contention.
+- **PRDs 5 and 6** run concurrently under the same §3c policy 5
+  conditions once PRD 4 merges; nothing further needs to be true.
