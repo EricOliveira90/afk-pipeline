@@ -69,6 +69,7 @@ import {
 import { readRunEvents } from "./run-events.js";
 import { readStopAck, writeStopRequest } from "./stop-sentinel.js";
 import { runStatus } from "./status.js";
+import { readContractStatus } from "./artifacts.js";
 import {
   buildStubProvider,
   cleanupIntegrationTempDirs,
@@ -134,6 +135,22 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         blockedBy: ["8184"],
         userStories: "",
       },
+      {
+        number: "06",
+        ghIssue: "8186",
+        title: "Planner lock refusal",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "07",
+        ghIssue: "8187",
+        title: "Applied lock refusal",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const fixtures = new Map<string, SliceFixture>([
       [
@@ -183,9 +200,49 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           outputContent: "preserved dependent",
         },
       ],
+      [
+        "8186",
+        {
+          files: ["src/planner-lock-refusal.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/planner-lock-refusal.txt",
+          outputContent: "must not generate",
+        },
+      ],
+      [
+        "8187",
+        {
+          files: ["src/applied-lock-refusal.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/applied-lock-refusal.txt",
+          outputContent: "must not generate",
+        },
+      ],
     ]);
     const records: InvocationRecord[] = [];
     const stub = buildStubProvider({ fixtures, slices, records });
+    const injectLockRefusal = (
+      artifactDir: string,
+      refusal: string,
+    ) => {
+      const manifestPath = join(
+        artifactDir,
+        "acceptance-manifest.json",
+      );
+      const manifest = JSON.parse(
+        readFileSync(manifestPath, "utf-8"),
+      ) as {
+        behaviors: Array<{ gateIds: string[] }>;
+      };
+      manifest.behaviors[0]!.gateIds = [refusal];
+      writeFileSync(
+        manifestPath,
+        JSON.stringify(manifest),
+        "utf-8",
+      );
+    };
     const provider: AgentProvider = {
       name: stub.name,
       async invoke(options) {
@@ -193,24 +250,81 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           options.role === "generator" &&
           /-s02$/.test(options.cwd.replace(/\\/g, "/"))
         ) {
-          const parkedCwd = records.find(
-            (record) => record.ghIssue === "8181",
-          )?.cwd;
-          if (!parkedCwd) throw new Error("parked worktree was not invoked");
-          const parkedDir = findSliceArtifactDir(parkedCwd, "01");
-          if (!parkedDir) throw new Error("parked artifact directory missing");
-          writeFileSync(
-            join(parkedDir, "adjudication.md"),
-            JSON.stringify({
-              version: 1,
-              findingId: "F-IMPASSE",
+          for (const decision of [
+            {
+              ghIssue: "8181",
+              number: "01",
               winningPosition: "PLANNER",
-              author: "operator",
-            }),
-            "utf-8",
-          );
+              refusal: null,
+            },
+            {
+              ghIssue: "8186",
+              number: "06",
+              winningPosition: "PLANNER",
+              refusal: "injected adjudication lock-gate refusal",
+            },
+            {
+              ghIssue: "8187",
+              number: "07",
+              winningPosition: "EVALUATOR",
+              refusal: "injected planner-apply lock-gate refusal",
+            },
+          ]) {
+            const parkedCwd = records.find(
+              (record) => record.ghIssue === decision.ghIssue,
+            )?.cwd;
+            if (!parkedCwd) {
+              throw new Error(
+                `parked worktree #${decision.ghIssue} was not invoked`,
+              );
+            }
+            const parkedDir = findSliceArtifactDir(
+              parkedCwd,
+              decision.number,
+            );
+            if (!parkedDir) {
+              throw new Error(
+                `parked artifact directory #${decision.ghIssue} missing`,
+              );
+            }
+            writeFileSync(
+              join(parkedDir, "adjudication.md"),
+              JSON.stringify({
+                version: 1,
+                findingId: "F-IMPASSE",
+                winningPosition: decision.winningPosition,
+                author: "operator",
+              }),
+              "utf-8",
+            );
+            if (decision.refusal) {
+              injectLockRefusal(parkedDir, decision.refusal);
+            }
+          }
         }
-        return stub.invoke(options);
+        const result = await stub.invoke(options);
+        const invokedSlice = sliceFromCwd(options.cwd, slices);
+        if (
+          options.role === "planner" &&
+          invokedSlice?.ghIssue === "8187"
+        ) {
+          const artifactDir = findSliceArtifactDir(
+            options.cwd,
+            invokedSlice.number,
+          );
+          if (!artifactDir) {
+            throw new Error(
+              `lock-refusal artifact directory #${invokedSlice.ghIssue} missing`,
+            );
+          }
+          if (existsSync(join(artifactDir, "adjudication.md"))) {
+            injectLockRefusal(
+              artifactDir,
+              "injected planner-apply lock-gate refusal",
+            );
+          }
+        }
+        return result;
       },
     };
 
@@ -267,6 +381,66 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
     expect(status.output).toContain(
       "#8185 — explorer → planner → evaluator-contract → generator → evaluator-qa — waits on #8184 (AWAITING-ADJUDICATION)",
     );
+
+    const lockRefusals = [
+      {
+        ghIssue: "8186",
+        number: "06",
+        text: "injected adjudication lock-gate refusal",
+        plannerInvocations: 2,
+      },
+      {
+        ghIssue: "8187",
+        number: "07",
+        text: "injected planner-apply lock-gate refusal",
+        plannerInvocations: 3,
+      },
+    ];
+    const runParent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const latestRunDir = readdirSync(runParent)
+      .filter((entry) => /^run-\d{8}-\d{6}/.test(entry))
+      .sort()
+      .at(-1)!;
+    const runLog = readFileSync(
+      join(runParent, latestRunDir, "run.log"),
+      "utf-8",
+    );
+    for (const refusal of lockRefusals) {
+      expect(
+        records.some(
+          (record) =>
+            record.ghIssue === refusal.ghIssue &&
+            record.role === "generator",
+        ),
+      ).toBe(false);
+      expect(
+        records.filter(
+          (record) =>
+            record.ghIssue === refusal.ghIssue &&
+            record.role === "planner",
+        ),
+      ).toHaveLength(refusal.plannerInvocations);
+      const worktree = records.find(
+        (record) => record.ghIssue === refusal.ghIssue,
+      )?.cwd;
+      if (!worktree) {
+        throw new Error(`lock-refusal worktree #${refusal.ghIssue} missing`);
+      }
+      const artifactDir = findSliceArtifactDir(worktree, refusal.number);
+      if (!artifactDir) {
+        throw new Error(
+          `lock-refusal artifact directory #${refusal.ghIssue} missing`,
+        );
+      }
+      expect(
+        readContractStatus(join(artifactDir, "contract.md")),
+      ).not.toBe("LOCKED");
+      expect(state.slices[refusal.ghIssue]).toMatchObject({
+        phase: "ESCALATE",
+        error: expect.stringContaining(refusal.text),
+      });
+      expect(runLog).toContain(refusal.text);
+    }
   }, 240_000);
 });
 
