@@ -186,15 +186,15 @@ alone. Its opening condition also changed from "if a cited finding's correct
 fix requires" to "if the correct implementation requires" — that wording was
 what made the pre-build case unauthorized in the first place.
 
-The section is byte-identical across `agents/generator.md`,
-`prompts/generator.md`, `prompts/generator-resume.md` and
-`prompts/generator-resume-stuck.md`; `prompt-template.test.ts` already
-enforced that invariant, and it is the right one, so all four changed
-together and the branch is phrased in terms they share rather than naming
-`RETRY_NOTE` or `UNRESOLVED_FINDINGS`. (`generator-resume-stuck.md` is also
-slice 04's (#82) to retire — if Track B deletes it the merge just drops the
-file.) That test gained assertions for both identities and the rule between
-them.
+The section is byte-identical across every generator source;
+`prompt-template.test.ts` already enforced that invariant, and it is the
+right one, so all of them changed together and the branch is phrased in
+terms they share rather than naming `RETRY_NOTE` or `UNRESOLVED_FINDINGS`.
+That test gained assertions for both identities and the rule between them.
+Four sources were edited; `prompts/generator-resume-stuck.md` was then
+deleted when slice 04 (#82) merged and retired the stuck variants, leaving
+`agents/generator.md`, `prompts/generator.md` and
+`prompts/generator-resume.md`.
 
 `docs/adr/0052-pre-build-scope-discovery-cites-a-reserved-identity.md`
 records the decision, the rejected schema relaxation and why (fail-closed

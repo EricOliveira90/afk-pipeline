@@ -67,15 +67,17 @@ its own prompt, not a judgement call.
   slice can spend two revisions before writing anything (ADR 0050's
   allowance is per round, not per phase). That is the intended trade: the
   alternative is the deadlock.
-- The section is byte-identical across `agents/generator.md`,
-  `prompts/generator.md`, `prompts/generator-resume.md` and
-  `prompts/generator-resume-stuck.md`, which
-  `prompt-template.test.ts` already enforces ("gives every generator
-  invocation the canonical scope-escalation contract"). So the branch is
-  written in terms the four share — *were findings cited to you?* — rather
-  than naming `RETRY_NOTE` or `UNRESOLVED_FINDINGS`, and a resumed
-  generator that arrives with neither findings nor a diagnosis gets the
-  same legal identity as an initial one.
+- The section is byte-identical across every generator source —
+  `agents/generator.md`, `prompts/generator.md` and
+  `prompts/generator-resume.md` — which `prompt-template.test.ts` already
+  enforces ("gives every generator invocation the canonical
+  scope-escalation contract"). So the branch is written in terms they all
+  share — *were findings cited to you?* — rather than naming `RETRY_NOTE`
+  or `UNRESOLVED_FINDINGS`, and a resumed generator that arrives with
+  neither findings nor a diagnosis gets the same legal identity as an
+  initial one. `prompts/generator-resume-stuck.md` carried it too until
+  slice 04 (#82) retired the stuck variants; the test's source list is the
+  thing to keep in step, not this list.
 - Nothing validates that a generator citing `PRE-BUILD-SCOPE` really had no
   findings, or that a cited ID names a real finding — the parser has never
   seen the finding set and cannot. The check that exists is the exclusivity
