@@ -855,6 +855,30 @@ export async function createCandidateMerge(
 }
 
 /**
+ * Move a local branch only when it still has the tip the caller verified.
+ * `git update-ref` holds the ref lock across the comparison and update.
+ */
+export function updateBranchIfUnchanged(
+  repoRoot: string,
+  branch: string,
+  newCommit: string,
+  expectedCommit: string,
+): boolean {
+  const branchRef = branch.startsWith("refs/heads/")
+    ? branch
+    : `refs/heads/${branch}`;
+  try {
+    git(["update-ref", branchRef, newCommit, expectedCommit], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * All registered worktrees with the branch each has checked out (null
  * for detached HEAD). Parses `git worktree list --porcelain`.
  */

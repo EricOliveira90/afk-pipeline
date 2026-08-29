@@ -10,7 +10,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runAdoptCli } from "./adopt-command.js";
 import type { GateDeclaration, GateResult } from "./gate-runner.js";
-import { resolveCommit, resolveTree } from "./git.js";
+import {
+  resolveCommit,
+  resolveTree,
+  updateBranchIfUnchanged,
+} from "./git.js";
 import { loadRunState, saveRunState } from "./run-state.js";
 
 const tempDirs: string[] = [];
@@ -199,6 +203,80 @@ describe("afk adopt", () => {
         commit: sliceTip,
       },
     });
+  });
+
+  it("refuses when a competing update wins the feature ref at finalization", async () => {
+    const repo = makeRepo();
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const featureBefore = resolveCommit(repo, "feat/demo")!;
+    const sliceBefore = resolveCommit(repo, "manual/demo-01")!;
+    const stateBefore = readFileSync(statePath, "utf-8");
+
+    git(repo, ["checkout", "-b", "concurrent-update", "feat/demo"]);
+    writeFileSync(join(repo, "concurrent.txt"), "unverified change\n");
+    git(repo, ["add", "concurrent.txt"]);
+    git(repo, ["commit", "-m", "competing feature update"]);
+    const competingCommit = resolveCommit(repo, "concurrent-update")!;
+    git(repo, ["checkout", "main"]);
+
+    let finalizationCalled = false;
+    const dependencies = {
+      resolveGatePlan: () => ({ declarations: GATES }),
+      runBaseGates: async ({
+        treeId,
+        declarations,
+      }: {
+        treeId: string;
+        declarations: readonly GateDeclaration[];
+      }) => declarations.map((gate) => passingResult(gate, treeId)),
+      finalizeCandidate: ({
+        candidateCommit,
+        expectedFeatureCommit,
+        featureBranch,
+      }: {
+        candidateCommit: string;
+        expectedFeatureCommit: string;
+        featureBranch: string;
+      }) => {
+        finalizationCalled = true;
+        const featureRef = `refs/heads/${featureBranch}`;
+        git(repo, [
+          "update-ref",
+          featureRef,
+          competingCommit,
+          expectedFeatureCommit,
+        ]);
+        return updateBranchIfUnchanged(
+          repo,
+          featureBranch,
+          candidateCommit,
+          expectedFeatureCommit,
+        );
+      },
+    };
+
+    const result = await runAdoptCli(
+      [
+        "demo",
+        "129",
+        "--branch",
+        "manual/demo-01",
+        "--adopter",
+        "Ada Lovelace",
+        "--reason",
+        "finished the slice manually",
+      ],
+      repo,
+      dependencies,
+    );
+
+    expect(finalizationCalled).toBe(true);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("branch changed");
+    expect(resolveCommit(repo, "feat/demo")).toBe(competingCommit);
+    expect(resolveCommit(repo, "feat/demo")).not.toBe(featureBefore);
+    expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
+    expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
   });
 
   it("names a failing base gate and leaves the worktree, refs, and state unchanged", async () => {

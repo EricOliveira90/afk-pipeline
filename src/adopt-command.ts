@@ -9,10 +9,9 @@ import type {
 import { runGates } from "./gate-runner.js";
 import {
   createCandidateMerge,
-  mergeSliceBranch,
   removeWorktree,
   resolveCommit,
-  resolveTree,
+  updateBranchIfUnchanged,
 } from "./git.js";
 import { resolveBaseGateDeclarations } from "./orchestrator.js";
 import { resolveSanityPlan } from "./preship.js";
@@ -36,9 +35,17 @@ interface BaseGateRun {
   onOutput?: (gateId: string, text: string) => void;
 }
 
+interface CandidateFinalization {
+  repoRoot: string;
+  featureBranch: string;
+  candidateCommit: string;
+  expectedFeatureCommit: string;
+}
+
 export interface AdoptDependencies {
   resolveGatePlan(cwd: string): GatePlan;
   runBaseGates(options: BaseGateRun): Promise<readonly GateResult[]>;
+  finalizeCandidate?(options: CandidateFinalization): boolean;
 }
 
 export interface AdoptCliResult {
@@ -143,7 +150,22 @@ async function defaultRunBaseGates(
 const DEFAULT_DEPS: AdoptDependencies = {
   resolveGatePlan: defaultGatePlan,
   runBaseGates: defaultRunBaseGates,
+  finalizeCandidate: (options) => defaultFinalizeCandidate(options),
 };
+
+function defaultFinalizeCandidate({
+  repoRoot,
+  featureBranch,
+  candidateCommit,
+  expectedFeatureCommit,
+}: CandidateFinalization): boolean {
+  return updateBranchIfUnchanged(
+    repoRoot,
+    featureBranch,
+    candidateCommit,
+    expectedFeatureCommit,
+  );
+}
 
 function firstFailedGate(
   declarations: readonly GateDeclaration[],
@@ -184,7 +206,6 @@ export async function runAdoptCli(
   const state = loadRunState(repoRoot, parsed.prdSlug);
   const attemptId = randomUUID();
   const candidateDir = join(repoRoot, ".afk", "adopt", attemptId, "candidate");
-  const scratchMergeDir = join(repoRoot, ".afk", "adopt", attemptId, "merge");
   const evidenceDir = join(
     repoRoot,
     ".afk",
@@ -249,32 +270,24 @@ export async function runAdoptCli(
     };
   }
 
-  if (
-    resolveCommit(repoRoot, state.featureBranch) !== candidate.featureCommit ||
-    resolveCommit(repoRoot, parsed.branch) !== candidate.sliceCommit
-  ) {
+  if (resolveCommit(repoRoot, parsed.branch) !== candidate.sliceCommit) {
     return {
       output: "Adoption refused: a branch changed during verification.",
       exitCode: 1,
     };
   }
 
-  const merge = await mergeSliceBranch(
+  const finalized = (
+    dependencies.finalizeCandidate ?? defaultFinalizeCandidate
+  )({
     repoRoot,
-    candidate.sliceCommit,
-    state.featureBranch,
-    scratchMergeDir,
-  );
-  if (merge.status === "conflict") {
+    featureBranch: state.featureBranch,
+    candidateCommit: candidate.candidateCommit,
+    expectedFeatureCommit: candidate.featureCommit,
+  });
+  if (!finalized) {
     return {
-      output: `Adoption refused: merge conflict: ${merge.details}`,
-      exitCode: 1,
-    };
-  }
-  if (resolveTree(repoRoot, state.featureBranch) !== candidate.treeId) {
-    return {
-      output:
-        "Adoption refused: merged tree differs from the verified candidate.",
+      output: "Adoption refused: a branch changed during verification.",
       exitCode: 1,
     };
   }
