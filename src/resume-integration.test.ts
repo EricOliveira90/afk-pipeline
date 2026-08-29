@@ -496,7 +496,9 @@ describe("retried slice resume (spec #33)", () => {
       number: "03", ghIssue: "4003", title: "Still failing",
       type: "AFK", blockedBy: [], userStories: "",
     };
+    const priorAdditionalArtifact = ".afk/gates/s03/ROUND-3-GATE.json";
     const namedBranch = `afk-stub/${slug}-slice-01-named`;
+    const firstRunRecords: PromptRecord[] = [];
     const records: PromptRecord[] = [];
     let repo: string;
     let statePath: string;
@@ -526,6 +528,7 @@ describe("retried slice resume (spec #33)", () => {
         ...runConfig,
         dag,
         provider: buildProvider({
+          records: firstRunRecords,
           qaVerdict: "FAIL",
           generator: (cwd, _options, sliceNumber) => {
             const round = (rounds.get(sliceNumber) ?? 0) + 1;
@@ -560,6 +563,21 @@ describe("retried slice resume (spec #33)", () => {
         "4003": afterRun1.slices["4003"].phase,
       };
       stuckTip = git(repo, ["rev-parse", namedBranch]);
+
+      const failingArtifactDir = firstRunRecords.find(
+        (record) =>
+          record.role === "generator" && record.sliceNumber === "03",
+      )!.sliceArtifactDir;
+      const failingDiagnosisPath = join(failingArtifactDir, "stuck.md");
+      const failingDiagnosis = readFileSync(failingDiagnosisPath, "utf-8");
+      writeFileSync(
+        failingDiagnosisPath,
+        failingDiagnosis.replace(
+          "\n## Commit evidence",
+          `- Additional artifact: \`${priorAdditionalArtifact}\`\n\n## Commit evidence`,
+        ),
+        "utf-8",
+      );
 
       // --- Run 2: the operator read slice 01's diagnosis and granted it
       // one more attempt on the same tree. Slice 02 they left alone. QA
@@ -773,6 +791,10 @@ describe("retried slice resume (spec #33)", () => {
       expect(rewrittenDiagnosis).not.toBe(
         resumedGenerator.stuckContentsAtInvocation,
       );
+      expect(resumedGenerator.stuckContentsAtInvocation).toContain(
+        priorAdditionalArtifact,
+      );
+      expect(rewrittenDiagnosis).toContain(priorAdditionalArtifact);
       expect(rewrittenDiagnosis).toContain(
         "Round 4 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
       );
@@ -780,6 +802,10 @@ describe("retried slice resume (spec #33)", () => {
         "qa-review-r4-a1-record.json",
       );
       expect(rewrittenDiagnosis).toContain("qa-report-r4-a1.md");
+      const roundEvidence = rewrittenDiagnosis
+        .split("## Round evidence\n\n")[1]!
+        .split("\n\n## Commit evidence")[0]!;
+      expect(roundEvidence).not.toContain("(none)");
     });
 
     it("audits the named slice's resume and never logs a restart for it", () => {

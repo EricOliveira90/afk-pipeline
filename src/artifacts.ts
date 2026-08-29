@@ -477,6 +477,8 @@ export interface StuckDiagnosisDetails {
 const QA_RECORD_NAME =
   /^(qa|uat)-review-r(\d+)-a(\d+)-record\.json$/;
 const ESCALATION_RECORD_NAME = /^escalation-r(\d+)-a(\d+)\.md$/;
+const ADDITIONAL_ARTIFACT_LINE =
+  /^- Additional artifact: `([^`\r\n]+)`$/gm;
 
 function compareAttempt(
   left: { round: number; attempt: number },
@@ -597,6 +599,20 @@ function renderFindingSection(
     : findings.map(renderFinding).join("\n");
 }
 
+export function readStuckDiagnosisAdditionalArtifactReferences(
+  sliceDir: string,
+): string[] {
+  const stuckPath = join(sliceDir, "stuck.md");
+  if (!existsSync(stuckPath)) return [];
+  return [
+    ...new Set(
+      [...readFileSync(stuckPath, "utf-8").matchAll(ADDITIONAL_ARTIFACT_LINE)]
+        .map((match) => match[1])
+        .filter((path): path is string => path !== undefined),
+    ),
+  ].sort();
+}
+
 /**
  * Assemble the terminal implementation diagnosis from archived evidence.
  * File discovery is never presentation order: attempts and findings are
@@ -623,26 +639,23 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
             ].join("\n"),
           )
           .join("\n");
-  const roundEvidence =
-    records.length === 0
-      ? ["(none)"]
-      : records.map(({ name, record }) => {
-          const references = [
-            ...new Set(
-              record.findings.flatMap(
-                (finding) => finding.artifactReferences,
-              ),
-            ),
-          ].sort();
-          return [
-            `- Round ${record.round} attempt ${record.attempt} (${record.stage}): ${record.verdict} / ${record.failureClass}`,
-            `  - Lifecycle record: \`${name}\``,
-            "  - Artifact references:",
-            ...(references.length === 0
-              ? ["    - (none)"]
-              : references.map((path) => `    - \`${path}\``)),
-          ].join("\n");
-        });
+  const roundEvidence = records.map(({ name, record }) => {
+    const references = [
+      ...new Set(
+        record.findings.flatMap(
+          (finding) => finding.artifactReferences,
+        ),
+      ),
+    ].sort();
+    return [
+      `- Round ${record.round} attempt ${record.attempt} (${record.stage}): ${record.verdict} / ${record.failureClass}`,
+      `  - Lifecycle record: \`${name}\``,
+      "  - Artifact references:",
+      ...(references.length === 0
+        ? ["    - (none)"]
+        : references.map((path) => `    - \`${path}\``)),
+    ].join("\n");
+  });
   const recordedArtifactReferences = new Set(
     records.flatMap(({ record }) =>
       record.findings.flatMap((finding) => finding.artifactReferences),
@@ -653,6 +666,7 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
     .sort()) {
     roundEvidence.push(`- Additional artifact: \`${path}\``);
   }
+  if (roundEvidence.length === 0) roundEvidence.push("(none)");
   const commitEvidence = details.commitLog.trim()
     ? `\`\`\`text\n${details.commitLog.trimEnd()}\n\`\`\``
     : "(none)";

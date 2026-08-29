@@ -3240,7 +3240,9 @@ export async function runSliceExecute(
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
-  const stuckReferences: string[] = [];
+  const stuckReferences = ctx.resume
+    ? artifacts.readStuckDiagnosisAdditionalArtifactReferences(ctx.absSliceDir)
+    : [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
   let deterministicHistory: readonly QAReviewLifecycleFinding[] = [];
   let deterministicUnresolved: readonly QAReviewAttemptFinding[] = [];

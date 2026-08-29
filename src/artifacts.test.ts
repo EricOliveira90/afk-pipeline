@@ -200,6 +200,29 @@ describe("renderStuckDiagnosis", () => {
     );
   });
 
+  it("does not label additional-only round evidence as empty", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-additional-only-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    try {
+      const diagnosis = renderStuckDiagnosis({
+        reviewArchiveDir,
+        additionalArtifactReferences: [".afk/gates/s01/ROUND-1-GATE.json"],
+        commitLog: "",
+      });
+      const roundEvidence = diagnosis
+        .split("## Round evidence\n\n")[1]!
+        .split("\n\n## Commit evidence")[0]!;
+
+      expect(roundEvidence).toBe(
+        "- Additional artifact: `.afk/gates/s01/ROUND-1-GATE.json`",
+      );
+      expect(roundEvidence).not.toContain("(none)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("partitions the latest lifecycle state into RESOLVED and OPEN", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-stuck-lifecycle-"));
     const reviewArchiveDir = join(root, "reviews");
