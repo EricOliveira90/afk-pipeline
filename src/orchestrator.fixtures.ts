@@ -388,12 +388,6 @@ export function buildStubProvider(opts: {
             findings: resolvedFixtureFinding,
           });
         }
-      } else if (role === "generator-stuck" && sliceArtifactDir) {
-        writeFileSync(
-          join(sliceArtifactDir, "stuck.md"),
-          "# Stuck\n",
-          "utf-8",
-        );
       }
       // architect-review / pm-review are no-ops; verdicts will be
       // UNKNOWN, blocking PR creation. That path is fine for our tests.

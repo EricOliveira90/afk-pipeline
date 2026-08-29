@@ -88,13 +88,8 @@ If the retry note contains routed unresolved findings:
 4. Rewrite `handoff.md` with "Round N" header listing what changed.
 5. Invoke `@evaluator` again.
 
-**Max 3 rounds total** (first implementation + 2 retries). After round 3,
-stop and write a `stuck.md` in the slice folder with:
-- What the evaluator wants
-- What you tried
-- Your best guess at the blocker
-
-Return to human for escalation. Do not loop further.
+The orchestrator owns the implementation-round limit and terminal
+diagnosis. Complete only the current routed attempt, then return control.
 
 # Hard rules
 

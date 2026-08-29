@@ -67,7 +67,7 @@ export type RunEventPayload =
        * can `stat` the active log for liveness without the DAG.
        */
       sliceNumber?: string;
-      /** Agent role for this invocation (explorer, planner, evaluator-contract, generator, evaluator-qa, evaluator-uat, generator-stuck). */
+      /** Agent role for this invocation (explorer, planner, evaluator-contract, generator, evaluator-qa, evaluator-uat). */
       agent: string;
       round?: number;
     }

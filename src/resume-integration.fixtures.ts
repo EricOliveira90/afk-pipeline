@@ -284,8 +284,6 @@ export function buildProvider(opts: {
           ...(findings.length > 0 ? { findings } : {}),
         });
         if (qaResult.error) throw new Error(qaResult.error);
-      } else if (role === "generator-stuck" && artifactDir) {
-        writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");
       }
       return { exitCode: 0, stdout: "", stats: {} };
     },
