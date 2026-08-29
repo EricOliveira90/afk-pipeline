@@ -46,6 +46,7 @@ Deliver the thin `afk adopt` subcommand for a manually finished slice: verify a 
 - src/orchestrator.test.ts
 - src/ship-gate.ts
 - src/ship-gate.test.ts
+- src/slice-lifecycle.ts (added by scope amendment for QA finding QA-04)
 
 ## Migration requirements
 - New migration files: 0

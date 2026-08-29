@@ -18,7 +18,8 @@
       "src/orchestrator.ts",
       "src/orchestrator.test.ts",
       "src/ship-gate.ts",
-      "src/ship-gate.test.ts"
+      "src/ship-gate.test.ts",
+      "src/slice-lifecycle.ts"
     ]
   },
   "migrationCount": 0,
@@ -31,7 +32,9 @@
       "then": "it merges the slice into the state's feature branch and writes the slice as PASS and merged with its adoption record",
       "observableResult": "the feature branch moves once after gate success and state contains phase PASS, mergedToFeature true, branch, and adopter, reason, branch, and verified slice-tip commit provenance",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-02",
@@ -41,7 +44,9 @@
       "then": "the command exits unsuccessfully, names the failing gate, and leaves the working tree, branch refs, and run-state file unchanged",
       "observableResult": "gate identity logs show the candidate tree and original feature ref, the refusal names the gate, and byte and ref snapshots are unchanged",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-03",
@@ -51,7 +56,9 @@
       "then": "the command exits unsuccessfully, names the merge conflict, and leaves the working tree, both branch refs, and run-state file unchanged",
       "observableResult": "the refusal names the conflict and worktree, ref, and state snapshots remain unchanged",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-04",
@@ -61,7 +68,9 @@
       "then": "it is refused without a merge, adoption record, branch change, or state change",
       "observableResult": "the command refuses each invalid reason and ref and state snapshots remain unchanged",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "B-05",
@@ -71,7 +80,9 @@
       "then": "each output identifies the adopted slice and shows adopter, reason, branch, and commit",
       "observableResult": "both rendered reporting surfaces contain all four adoption fields for the adopted slice",
       "preservation": false,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-01",
@@ -81,7 +92,9 @@
       "then": "its routing, provider selection, output channel, and exit behavior remain available",
       "observableResult": "entrypoint cases prove the dispatch target and provider and capture the expected stdout or stderr destination and exit result",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-02",
@@ -91,7 +104,9 @@
       "then": "v0 adaptation, optional state fields, parallel slice updates, and the PASS-plus-merged completion rule remain unchanged",
       "observableResult": "legacy and current state fixtures retain their fields and existing completion decisions",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-03",
@@ -101,7 +116,9 @@
       "then": "current scratch and registered-worktree handling and conflict cleanup remain unchanged for pipeline merges",
       "observableResult": "existing merge-helper fixtures retain successful merge and clean conflict outcomes",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-04",
@@ -111,7 +128,9 @@
       "then": "lifecycle labels, branch dispositions, dependency holds, base-gate attempts, totals, and both output locations retain their current rendering",
       "observableResult": "ordinary summary fixtures keep their existing content and both files are written",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     },
     {
       "id": "P-05",
@@ -121,7 +140,9 @@
       "then": "open or refuse behavior, override disclosure, artifact links, and Closes lines remain unchanged",
       "observableResult": "ordinary draft-PR fixtures retain their current decision and body projections",
       "preservation": true,
-      "gateIds": ["tests"]
+      "gateIds": [
+        "tests"
+      ]
     }
   ]
 }
