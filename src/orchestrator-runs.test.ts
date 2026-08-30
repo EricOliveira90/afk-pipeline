@@ -607,12 +607,15 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       );
 
       // The revised artifacts are what shipped — the post-apply scope,
-      // not the pre-apply proposal carried through.
-      expect(committedArtifact(applied.number, "contract.md")).toBe(
+      // not the pre-apply proposal carried through. The lock carries its
+      // provenance stamp (ADR 0055): an impasse-adjudication lock names
+      // the impasse fingerprint it settled.
+      const committedContract = committedArtifact(applied.number, "contract.md");
+      expect(committedContract).toMatch(
+        /^# Slice Contract\n\n\*\*Status:\*\* LOCKED\n\n\*\*Lock-Provenance:\*\* impasse-adjudication [0-9a-f]{64}\n/,
+      );
+      expect(committedContract.split("\n").slice(5).join("\n")).toBe(
         [
-          "# Slice Contract",
-          "",
-          "**Status:** LOCKED",
           "",
           "## Files expected to change",
           ...applied.revisedFiles.map((file) => `- ${file}`),
