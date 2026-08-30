@@ -146,6 +146,41 @@ applied-mark leaves witness + stamped lock — proved, marked applied,
 ADR 0054's original intent. The lock-then-mark order is unchanged;
 only its evidence improved.
 
+**Amended (adjudication gate round, architect blocker 1).** As first
+shipped this section left the mechanical lock gate *after*
+`lockContract`, and cleared the witness only at a lock exit that did not
+lock. Both leaked, in the same way: persisted state claiming an
+invariant the responsible operation had not established. Two rules
+close it, and they are the ordering this ADR now mandates —
+**witness → gate → `lockContract` → applied-mark**:
+
+- **The gate runs before `LOCKED` is written.** With the gate after the
+  lock, a process stop between the two left a stamped `LOCKED` contract
+  beside a witness proving the decision set, and nothing recording that
+  the gate had never run. `adjudicatedLockIsProven` reads exactly that
+  pair as proof, so the next dispatch short-circuited and the gate was
+  skipped for good — a `LOCKED` contract that had passed no
+  migration-prefix check, which is what ADR 0008 makes the on-disk lock
+  status authoritative *against*. Nothing about the gate needs a locked
+  contract: it reads the declared file scope, never the status line.
+  Running it first makes `LOCKED` on disk the gate's own attestation,
+  and no crash window can forge one. This does not weaken decision 5's
+  witness-first rule — a witness must still precede the lock it
+  explains — it only settles where the third operation goes.
+- **The witness is cleared on every exit that did not reach
+  `onAccepted`, not merely on a refused lock.** The remaining hole was
+  the asymmetric exit: the lock succeeded, the caller's applied-marker
+  write then threw, so `onAccepted` was never called and the outer
+  rollback restored the pre-transaction contract — while the witness
+  survived. Where that restored contract was stale `LOCKED` debris, the
+  witness certified the rolled-back lock on the next dispatch. The
+  clear therefore belongs to the transaction's own exit, beside the
+  restore it has to accompany, not to the lock call. It is best effort
+  with a named warning: the exit it defends is usually "writes to the
+  decision log are failing", so the clear can fail with it, and an
+  operator told which artifact to inspect is strictly better than a
+  masked original error.
+
 ## Decision — Seam 2: a park is durable, replaceable state
 
 One invariant, stated once and consulted by every lifecycle operation:
@@ -157,6 +192,28 @@ One invariant, stated once and consulted by every lifecycle operation:
 > preserves the estate refuses by name; nothing derives disposability
 > from a presentation bucket, and nothing treats an enumeration
 > failure as proved absence.**
+
+**Amended (adjudication gate round, architect blocker 2): the ownership
+check belongs before the dispatch routes, not inside one arm of it.**
+ADR 0010 item 3 requires `assertWorktreeRegistered` immediately before
+every agent dispatch, and the only call sat at the end of
+`prepareSliceWorktree` — which only the *ordinary* negotiate path
+reaches. A slice arriving with a persisted `IMPASSE` routes straight to
+the adjudication branch, and an adjudicated lane successor routes
+straight to a merge into its parked worktree; both then run git in
+`ctx.worktreeDir` and can invoke the planner there, unchecked. A leaked
+directory git no longer registers sends those commands up to the parent
+repository — the corruption mode the invariant exists to prevent, and a
+routine Windows leftover after a failed cleanup.
+
+One shared check therefore runs ahead of the ordinary-versus-`IMPASSE`
+fork, and again in the adjudicated lane-successor branch that preserves
+its worktree instead of recreating it. It is deliberately narrower than
+`prepareSliceWorktree`: it creates, resets and deletes nothing, because
+its two new callers must preserve the parked estate byte-for-byte, and
+per ADR 0010 a stale directory is left for the operator either way. An
+absent directory is not a violation — that is the ordinary first
+dispatch, and creating it is the ordinary path's job.
 
 ### 6. Cleanup eligibility is a trait, not a bucket
 
@@ -222,10 +279,29 @@ becomes the model:
   (ADR 0031's retry rule). Recording a *different* terminal for a
   parked slice without an intervening dispatch throws (ADR 0031's
   protection, kept).
+
+  **Amended (adjudication gate round, architect blocker 3): "the same
+  park" is the whole record, phase and reason alike.** Keying
+  idempotency on the phase alone looked like the retry rule and behaved
+  like data loss. A partial adjudication parks again with the same phase
+  and a *different* reason — the findings still undecided, which ADR
+  0054 item 3 requires it to name — and the phase check silently kept the
+  stale reason listing findings the human had already decided. A changed
+  park with no intervening dispatch is a missing reopen in the caller,
+  so it throws like any other undispatched replacement rather than being
+  absorbed (issue #141).
 - **Re-dispatch is the reopen.** `trackSlice` on a parked slice clears
   the parked mark and, per ADR 0047, clears the persisted record —
   that is the one legal path from parked to a new outcome.
   `reopenAdjudication` is deleted; the wave loop simply re-dispatches.
+
+  **Amended: the reopen belongs at the entry to the adjudication
+  branch, not behind its completion check.** Reaching that branch *is*
+  the re-dispatch, and every arm of it can produce a new outcome —
+  a refused decision, a partial one, a lock refusal. Placing the
+  `trackSlice` after the all-decided check reopened the park only for
+  the dispatch that completed the adjudication, which is precisely the
+  dispatch that does not need it.
 - **ADR 0047 needs no exception**, only this note: clearing the
   persisted park record at dispatch loses nothing durable, because the
   park's estate (decisions log, impasse record, worktree, branch)
