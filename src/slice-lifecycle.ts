@@ -193,6 +193,13 @@ export interface SlicePhaseTraits {
   summaryLabel: string;
   persisted: boolean;
   terminalThisRun: boolean;
+  /**
+   * A phase that is recorded like a terminal — persisted, projected, logged
+   * — but that a later dispatch in the same run may replace (ADR 0055 §9,
+   * the journal's third transition class). Absent means "immutable once
+   * recorded this run", which is every phase but the adjudication park.
+   */
+  replaceableThisRun?: true;
   branchDisposition: BranchDisposition;
 }
 
@@ -243,6 +250,9 @@ export const PHASE_TRAITS = {
     summaryLabel: "AWAITING-ADJUDICATION",
     persisted: true,
     terminalThisRun: true,
+    // The park: durable, but a human decision plus a re-dispatch replaces
+    // it within this run.
+    replaceableThisRun: true,
     branchDisposition: "branch",
   },
   ERROR: {

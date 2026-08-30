@@ -5183,8 +5183,10 @@ export async function runPipeline(
         const result = await wait;
         adjudicationWaits.delete(id);
         if (result.status === "accepted" && !signal?.aborted) {
+          // Dropping the hold-back is the whole reopen: the next wave
+          // dispatches the slice, and that dispatch clears the park's mark
+          // and persisted record in the journal (ADR 0055 §9).
           awaitingAdjudication.delete(id);
-          logger.reopenAdjudication(id);
           logger.phase(
             `[afk] Slice #${id}: valid adjudication received — redispatching`,
           );
