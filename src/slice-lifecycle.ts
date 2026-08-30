@@ -187,6 +187,27 @@ export type SliceBucket =
 
 export type BranchDisposition = "branch" | "merged" | "preserved" | "none";
 
+/**
+ * What `afk clean-failed` may dispose of when a slice sits in this phase
+ * (ADR 0055 Seam 2 §6). Deliberately its own axis: `bucket` is about
+ * rendering, and deriving disposability from it is what let the command
+ * delete an adjudication park's estate.
+ *
+ * - `disposable` — the worktree is debris, and so is the branch once the
+ *   command's own guard proves it holds nothing unmerged.
+ * - `preserve-branch` — the worktree is debris, the branch is the next
+ *   run's input (MERGE-PENDING, ADR 0029).
+ * - `preserve-all` — nothing is debris: the estate is a human's pending
+ *   input, and only the slice's own re-dispatch replaces it. Skipped, and
+ *   reported by name, so the operator learns why.
+ * - `out-of-scope` — cleanup never considers this slice; nothing failed.
+ */
+export type DebrisDisposition =
+  | "disposable"
+  | "preserve-branch"
+  | "preserve-all"
+  | "out-of-scope";
+
 export interface SlicePhaseTraits {
   bucket: SliceBucket;
   icon: string;
@@ -200,6 +221,13 @@ export interface SlicePhaseTraits {
    * recorded this run", which is every phase but the adjudication park.
    */
   replaceableThisRun?: true;
+  /**
+   * Cleanup eligibility. Independent of `replaceableThisRun` above (the
+   * journal's axis) and of `bucket` (the renderer's): the park happens to
+   * be the one phase that is both replaceable and fully preserved, and
+   * nothing should read either fact off the other.
+   */
+  debris: DebrisDisposition;
   branchDisposition: BranchDisposition;
 }
 
@@ -210,6 +238,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "PENDING",
     persisted: false,
     terminalThisRun: false,
+    debris: "out-of-scope",
     branchDisposition: "branch",
   },
   RUNNING: {
@@ -218,6 +247,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "RUNNING",
     persisted: false,
     terminalThisRun: false,
+    debris: "out-of-scope",
     branchDisposition: "branch",
   },
   PASS: {
@@ -226,6 +256,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "PASS",
     persisted: true,
     terminalThisRun: true,
+    debris: "out-of-scope",
     branchDisposition: "merged",
   },
   STUCK: {
@@ -234,6 +265,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "STUCK",
     persisted: true,
     terminalThisRun: true,
+    debris: "disposable",
     branchDisposition: "preserved",
   },
   ESCALATE: {
@@ -242,6 +274,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "STUCK",
     persisted: true,
     terminalThisRun: true,
+    debris: "disposable",
     branchDisposition: "branch",
   },
   "AWAITING-ADJUDICATION": {
@@ -253,6 +286,7 @@ export const PHASE_TRAITS = {
     // The park: durable, but a human decision plus a re-dispatch replaces
     // it within this run.
     replaceableThisRun: true,
+    debris: "preserve-all",
     branchDisposition: "branch",
   },
   ERROR: {
@@ -261,6 +295,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "STUCK",
     persisted: true,
     terminalThisRun: true,
+    debris: "disposable",
     branchDisposition: "branch",
   },
   CONFLICT: {
@@ -269,6 +304,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "CONFLICT",
     persisted: true,
     terminalThisRun: true,
+    debris: "disposable",
     branchDisposition: "preserved",
   },
   "MERGE-PENDING": {
@@ -277,6 +313,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "MERGE-PENDING",
     persisted: true,
     terminalThisRun: true,
+    debris: "preserve-branch",
     branchDisposition: "preserved",
   },
   CANCELLED: {
@@ -285,6 +322,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "CANCELLED",
     persisted: true,
     terminalThisRun: true,
+    debris: "disposable",
     branchDisposition: "branch",
   },
   "LANE-CANCELLED": {
@@ -293,6 +331,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "LANE-CANCELLED",
     persisted: true,
     terminalThisRun: true,
+    debris: "disposable",
     branchDisposition: "branch",
   },
   SKIPPED: {
@@ -301,6 +340,7 @@ export const PHASE_TRAITS = {
     summaryLabel: "SKIPPED",
     persisted: true,
     terminalThisRun: true,
+    debris: "out-of-scope",
     branchDisposition: "none",
   },
 } as const satisfies Record<SlicePhase, SlicePhaseTraits>;

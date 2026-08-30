@@ -21,6 +21,11 @@ import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
  * issue #19 and ADR 0023.
  *
  * Scope guarantees:
+ * - Targets are the slices whose phase declares its debris disposable.
+ *   ADR 0055 Seam 2 §6 narrows ADR 0023's "every slice in a failure
+ *   phase" to exactly that: an AWAITING-ADJUDICATION slice renders as a
+ *   failure but its estate is a human's pending input, so it is skipped
+ *   and named in the report. Everything below is unchanged.
  * - Only targets identified by this PRD's run state, plus on-disk
  *   leftovers matching this PRD's exact worktree/scratch naming
  *   (`<prefix>-<prdSlug>-s<NN>`) — other PRDs' and other providers'
@@ -45,20 +50,22 @@ import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
  */
 
 /**
- * Phases whose worktree is disposable but whose branch is not. Read off
- * the lifecycle's own bucketing rather than a second list here, so a new
- * deferred phase never has to be remembered in two places. Distinct from
- * `FAILURE_PHASES`: nothing deferred awaits operator repair, so its
- * branch is reported as deliberately preserved rather than assessed for
- * deletion.
+ * Every question this command asks about a phase comes off one trait —
+ * the lifecycle's cleanup-disposition axis (ADR 0055 Seam 2 §6) — and not
+ * off the presentation bucket, which is about rendering. A phase that
+ * declares its debris undisposable is undisposable here by construction,
+ * so a new preserved phase never has to be remembered in two places.
  */
-const isCleanupTarget = (phase: SlicePhase): boolean => {
-  const bucket = traitsFor(phase).bucket;
-  return bucket === "failed" || bucket === "cancelled" || bucket === "deferred";
-};
+const isCleanupTarget = (phase: SlicePhase): boolean =>
+  traitsFor(phase).debris !== "out-of-scope";
 
+/** Worktree is debris, branch is the next run's input (MERGE-PENDING). */
 const mustPreserveBranch = (phase: SlicePhase): boolean =>
-  traitsFor(phase).bucket === "deferred";
+  traitsFor(phase).debris === "preserve-branch";
+
+/** Nothing is debris — the estate belongs to a human's pending decision. */
+const mustPreserveEstate = (phase: SlicePhase): boolean =>
+  traitsFor(phase).debris === "preserve-all";
 
 export interface CleanFailedOptions {
   repoRoot: string;
@@ -168,6 +175,26 @@ export async function runCleanFailed(
       registeredDir && computed && normalise(registeredDir) === normalise(computed)
         ? computed
         : (registeredDir ?? computed);
+
+    // A parked slice's estate is not debris: the impasse record, the
+    // decision log, the in-flight adjudication.md, the worktree they live
+    // in and the branch under it are a human's pending input, and only the
+    // slice's own re-dispatch replaces them (ADR 0055 Seam 2). Say so —
+    // an operator who ran clean-failed to clear the way for a re-run has
+    // to be able to tell a deliberate skip from a command that missed one.
+    if (mustPreserveEstate(slice.phase)) {
+      if (dir) handledDirs.add(normalise(dir));
+      report.skipped.push({
+        target: dir ?? slice.branch ?? `#${ghIssue}`,
+        reason:
+          `${slice.phase} — preserving the adjudication estate (impasse record, ` +
+          `decision log, worktree, branch): it is the operator's pending input, ` +
+          `and only this slice's own re-dispatch replaces it`,
+      });
+      log(`  kept the whole estate — ${slice.phase}, awaiting a human decision`);
+      continue;
+    }
+
     if (dir) {
       // Refuse anything outside this PRD's worktree namespace — a
       // registered worktree at an unexpected path is operator territory.

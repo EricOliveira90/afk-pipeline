@@ -104,14 +104,43 @@ function setUp(repo: string, slices: SliceFixture[]): void {
 }
 
 describe("runCleanFailed", () => {
-  it("removes the worktree and deletes the branch of an ERRORed slice with no unmerged commits", async () => {
+  /**
+   * The ERROR slice is the command's bread and butter. The parked slice
+   * rides along in the same fixture rather than paying for a second temp
+   * git repo (AGENTS.md: put a new assertion in a fixture that already
+   * runs), and it earns its place here — the two together are the
+   * distinction ADR 0055 Seam 2 §6 draws. Both phases render in the
+   * `failed` bucket; only one is debris.
+   */
+  it("removes an ERRORed slice's estate while leaving a parked slice's untouched", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "101", number: "01", phase: "ERROR", materialise: true },
+      {
+        ghIssue: "111",
+        number: "11",
+        phase: "AWAITING-ADJUDICATION",
+        materialise: true,
+      },
     ]);
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s01`);
     const branch = `afk/${SLUG}-slice-01-fixture`;
     expect(existsSync(dir)).toBe(true);
+
+    // The park's estate as the run left it: the impasse record and the
+    // decision log live in the slice directory *inside the worktree*, so
+    // removing the worktree destroys the operator's pending input.
+    const parkedDir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s11`);
+    const parkedBranch = `afk/${SLUG}-slice-11-fixture`;
+    const parkedSliceDir = join(parkedDir, "specs", "slices", "11-parked");
+    mkdirSync(parkedSliceDir, { recursive: true });
+    const impasseRecord = join(
+      parkedSliceDir,
+      "contract-negotiation-outcome.json",
+    );
+    const decisionLog = join(parkedSliceDir, "adjudication-decisions.json");
+    writeFileSync(impasseRecord, JSON.stringify({ outcome: "IMPASSE" }), "utf-8");
+    writeFileSync(decisionLog, JSON.stringify({ version: 1 }), "utf-8");
 
     const report = await runCleanFailed({
       repoRoot: repo,
@@ -124,6 +153,20 @@ describe("runCleanFailed", () => {
     expect(report.removedWorktrees).toEqual([dir]);
     expect(report.deletedBranches).toEqual([branch]);
     expect(report.keptBranches).toEqual([]);
+
+    // Nothing of the park is debris — not the worktree, not the branch,
+    // and above all not the two files a human is being asked to decide on.
+    expect(existsSync(parkedDir)).toBe(true);
+    expect(existsSync(impasseRecord)).toBe(true);
+    expect(existsSync(decisionLog)).toBe(true);
+    expect(git.branchExists(repo, parkedBranch)).toBe(true);
+
+    // And the operator is told WHY the slice still has a worktree — a
+    // silent skip reads as a bug in the command.
+    const parkSkip = report.skipped.find((s) => s.target === parkedDir);
+    expect(parkSkip).toBeDefined();
+    expect(parkSkip!.reason).toContain("AWAITING-ADJUDICATION");
+    expect(parkSkip!.reason).toMatch(/adjudication estate|re-dispatch/);
   });
 
   it("keeps a branch with commits ahead of the feature branch but still removes its worktree", async () => {
