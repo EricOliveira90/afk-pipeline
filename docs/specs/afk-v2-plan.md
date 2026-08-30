@@ -217,6 +217,20 @@ not debate-rated.
    The cross-process suite lock was considered and deferred: with
    budgets advisory (policy 4), its only remaining job is protecting
    per-test timeouts from contention flakes — see the §6 trigger.
+6. **Deterministic in-round checks belong in the gate catalog, not in
+   provider hook config** — one implementation, three backends, the
+   existing evidence trail. Provenance: the 2026-08-29 hooks review
+   (`docs/research/2026-08-29-hooks-in-ai-pipelines.md` plus two
+   adversarial reviews), which evaluated six in-session hook proposals
+   and adopted none — no recorded incident (#111–#121) would have been
+   prevented by any of them, and hook enforcement is unreliable under
+   the trust flags AFK actually passes to its providers. The named
+   first candidate under this policy, if a consuming project ever
+   handles credentials: a gitleaks-style changed-tree secret-scan gate
+   riding item 2's derivation. The review's one uncovered finding —
+   provider processes inherit the operator's full environment under
+   trust flags — is filed as #135, unscheduled, competing on §3 terms.
+   Re-opening hooks themselves is governed by the §6 trigger.
 
 ---
 
@@ -348,5 +362,20 @@ What remains is not open questions but **standing triggers**:
   that run evidence, not by argument.
 - **The cross-process suite lock** (cut from §3c policy 5) builds only
   after a per-test timeout flake attributable to cross-run contention.
+- **Per-tool-call gating (in-session hooks)** — all six proposals from
+  the 2026-08-29 hooks review were cut — re-opens only when *all* of
+  these hold: (a) an observed in-session incident (destructive git,
+  guardrail/config tamper, secret exposure) that reached a merge or
+  burned a round; (b) at least two active backends guarantee deny
+  semantics under AFK's actual invocation flags
+  (`--dangerously-skip-permissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `--trust-all-tools`);
+  (c) policy and hook scripts can live outside the agent-writable
+  worktree; (d) the mechanism verifiably fails closed; (e) measured
+  happy-path overhead is below an agreed threshold. If reopened,
+  prefer structural options — command allowlist, sandbox, the
+  ADR 0016 action-space-reduction pattern — over hooks, and start
+  deterministic deny-only: no `ask`, no LLM-evaluated policy, no stop
+  loops, no per-edit test runs.
 - **PRDs 5 and 6** run concurrently under the same §3c policy 5
   conditions once PRD 4 merges; nothing further needs to be true.

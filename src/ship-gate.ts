@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { WriteStream } from "node:fs";
+import { readFileSync, writeFileSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
 import { finished } from "node:stream/promises";
 import type {
@@ -23,10 +23,191 @@ import {
 } from "./run-state.js";
 import type { ResolvedRunScope } from "./slice-scope.js";
 
+/**
+ * The review artifact a guardian left behind, read the moment its invocation
+ * returned. See `restoreCapturedReviewArtifacts` for why this is captured
+ * rather than re-read at commit time.
+ */
+export interface CapturedReviewArtifact {
+  label: string;
+  path: string;
+  /** `null` when the agent wrote no file at all. */
+  content: string | null;
+}
+
 /** Outcome of one guardian review run, with failure detail when it died. */
 export interface ReviewRunResult {
   outcome: artifacts.ReviewOutcome;
   detail?: string;
+  /** Absent for a cached verdict and for an infrastructure failure. */
+  captured?: CapturedReviewArtifact;
+}
+
+/** File seam so the restore step is unit-testable without a worktree. */
+export interface ReviewArtifactIo {
+  read(path: string): string | null;
+  write(path: string, content: string): void;
+}
+
+const defaultReviewArtifactIo: ReviewArtifactIo = {
+  read(path) {
+    try {
+      return readFileSync(path, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+  write(path, content) {
+    writeFileSync(path, content, "utf-8");
+  },
+};
+
+/** One review path this run rewrote, or tried to and could not. */
+export interface ReviewArtifactRestoreEntry {
+  label: string;
+  path: string;
+  /** Present only on `failed` entries: why the write did not happen. */
+  error?: string;
+}
+
+/** What `restoreCapturedReviewArtifacts` did, per artifact. */
+export interface ReviewArtifactRestoreReport {
+  restored: ReviewArtifactRestoreEntry[];
+  failed: ReviewArtifactRestoreEntry[];
+}
+
+/**
+ * Put each guardian's own output back at its review path before the artifact
+ * commit.
+ *
+ * Both guardians run concurrently in one shared review worktree, and each is a
+ * general-purpose agent with a shell. In issue #136 the PM guardian's editor
+ * deleted and re-wrote `review-architect.md` — and then, separately, ran
+ * `git checkout-index --force` over it while investigating a line-ending
+ * warning. Either way the architect's freshly written review was replaced by
+ * the *previous* round's committed content, the commit shipped a byte-identical
+ * stale review, and a FIX-BEFORE-SHIP verdict was attributed to code that no
+ * longer existed at the cited lines. This step is deliberately
+ * mechanism-agnostic: it compares content, so it does not care which write
+ * clobbered the file.
+ *
+ * The verdict is already classified from the captured string, so this restores
+ * the *content* backing that verdict: a committed `review-<role>.md` is always
+ * the artifact this run's agent authored against this tree.
+ *
+ * Never throws. The i/o here is one write into a worktree a shell-holding agent
+ * has just been running in — the path can be gone (`git clean -fd`), read-only,
+ * or on a full disk. A restore that cannot happen is an anomaly to shout about,
+ * not a reason to lose a three-hour gate's reviews, so each artifact is
+ * attempted independently and failures come back as data.
+ */
+export function restoreCapturedReviewArtifacts(
+  captured: readonly (CapturedReviewArtifact | undefined)[],
+  io: ReviewArtifactIo = defaultReviewArtifactIo,
+): ReviewArtifactRestoreReport {
+  const report: ReviewArtifactRestoreReport = { restored: [], failed: [] };
+  for (const artifact of captured) {
+    if (!artifact || artifact.content === null) continue;
+    const { label, path } = artifact;
+    try {
+      if (io.read(path) === artifact.content) continue;
+      io.write(path, artifact.content);
+      report.restored.push({ label, path });
+    } catch (error) {
+      report.failed.push({
+        label,
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return report;
+}
+
+/** A review worktree that moved under the gate between review and commit. */
+export interface ReviewWorktreeDrift {
+  /** Set when HEAD is not the commit the reviews were written against. */
+  headMoved?: { before: string; after: string };
+  /** Tracked paths dirty at commit time that are not this run's reviews. */
+  changedPaths: string[];
+  /** Untracked paths outside the review artifacts — reported, not fatal. */
+  untrackedPaths: string[];
+}
+
+function parseStatusEntry(line: string): { code: string; path: string } | null {
+  if (line.length < 4) return null;
+  const code = line.slice(0, 2);
+  // `XY orig -> new` for a rename/copy; the destination is the live path.
+  const rest = line.slice(3);
+  const arrow = rest.lastIndexOf(" -> ");
+  const raw = arrow === -1 ? rest : rest.slice(arrow + 4);
+  return { code, path: raw.replace(/^"|"$/g, "").replace(/\\/g, "/") };
+}
+
+/**
+ * Residual insurance for the shared review worktree (#136 review follow-up).
+ *
+ * `restoreCapturedReviewArtifacts` covers the two review files by content, but
+ * a guardian's shell reaches the whole worktree. Immediately before the
+ * artifact commit the gate re-reads HEAD and the porcelain status: the only
+ * things allowed to have moved since the reviews started are the two
+ * `review-<role>.md` artifacts. A moved HEAD (`git reset`, a branch checkout)
+ * or a dirty tracked source file means the tree being committed — and the tree
+ * the guardians reviewed — is not the tree the wave produced, and the gate must
+ * say so rather than commit over it.
+ *
+ * Untracked additions are separated out and never fatal: guardian scratch
+ * output has always been swept into the review commit by `git add -A`, and
+ * blocking on a stray log file would trade a silent-staleness bug for a
+ * spurious three-hour loss.
+ *
+ * @returns `null` when nothing beyond the review artifacts moved.
+ */
+export function detectReviewWorktreeDrift(args: {
+  headShaBefore: string | null;
+  headShaNow: string | null;
+  statusPorcelain: string;
+  specsDir: string;
+}): ReviewWorktreeDrift | null {
+  const specsPath = args.specsDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const allowed = new Set([
+    `${specsPath}/review-architect.md`,
+    `${specsPath}/review-pm.md`,
+  ]);
+  const changedPaths: string[] = [];
+  const untrackedPaths: string[] = [];
+  for (const line of args.statusPorcelain.split("\n")) {
+    if (line.trim() === "") continue;
+    const entry = parseStatusEntry(line);
+    if (!entry || allowed.has(entry.path)) continue;
+    if (entry.code === "??") untrackedPaths.push(entry.path);
+    else changedPaths.push(`${entry.code.trim()} ${entry.path}`);
+  }
+  const headMoved =
+    args.headShaBefore && args.headShaNow && args.headShaBefore !== args.headShaNow
+      ? { before: args.headShaBefore, after: args.headShaNow }
+      : undefined;
+  if (!headMoved && changedPaths.length === 0 && untrackedPaths.length === 0) {
+    return null;
+  }
+  return { headMoved, changedPaths, untrackedPaths };
+}
+
+/** One line naming everything the drift check saw move. */
+export function formatReviewWorktreeDrift(drift: ReviewWorktreeDrift): string {
+  const parts: string[] = [];
+  if (drift.headMoved) {
+    parts.push(
+      `HEAD moved ${drift.headMoved.before.slice(0, 12)} → ${drift.headMoved.after.slice(0, 12)}`,
+    );
+  }
+  if (drift.changedPaths.length > 0) {
+    parts.push(`tracked changes outside the reviews: ${drift.changedPaths.join(", ")}`);
+  }
+  if (drift.untrackedPaths.length > 0) {
+    parts.push(`untracked: ${drift.untrackedPaths.join(", ")}`);
+  }
+  return parts.join("; ");
 }
 
 /**
@@ -401,7 +582,16 @@ export async function runShipGate(
         await closeAgentLog(log);
       }
       const reviewPath = join(reviewDir, specsDir, reviewFileName);
-      const verdict = artifacts.readReviewVerdict(reviewPath);
+      // Capture the artifact now, while it is still exactly what this agent
+      // wrote. The other guardian shares this worktree and is still running
+      // (issue #136), so both the verdict and the committed content come from
+      // this snapshot rather than from a later re-read of the path.
+      const captured: CapturedReviewArtifact = {
+        label,
+        path: reviewPath,
+        content: defaultReviewArtifactIo.read(reviewPath),
+      };
+      const verdict = artifacts.parseReviewVerdict(captured.content);
       if (verdict === "UNPARSEABLE") {
         journal.phase(
           `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
@@ -414,7 +604,7 @@ export async function runShipGate(
         attempt,
         verdict,
       });
-      return { outcome: verdict };
+      return { outcome: verdict, captured };
     }
     return lastFailure;
   };
@@ -480,7 +670,75 @@ export async function runShipGate(
 
   journal.setReviewOutcomes(architectResult, pmResult);
 
-  if (git.hasUncommittedChanges(reviewDir)) {
+  const restore = restoreCapturedReviewArtifacts([
+    architectResult.captured,
+    pmResult.captured,
+  ]);
+  for (const { label, path } of restore.restored) {
+    const message =
+      `${label} review artifact was changed in the review worktree after the ` +
+      `agent finished — restored the agent's own output before committing: ${path} (#136).`;
+    journal.phase(`  ⚠️  ${message}`, "warn");
+    journal.event({
+      type: "warn",
+      reason: "review-artifact-restored",
+      message,
+    });
+  }
+  for (const { label, path, error } of restore.failed) {
+    const message =
+      `${label} review artifact could not be restored at ${path}: ${error}. ` +
+      "The committed review may not be the artifact this run's agent wrote — " +
+      "read it before trusting its verdict (#136).";
+    journal.phase(`  ⚠️  ${message}`, "warn");
+    journal.event({
+      type: "warn",
+      reason: "review-artifact-restore-failed",
+      message,
+    });
+  }
+
+  // Residual insurance: the restore above covers the two review files by
+  // content, but a guardian's shell reaches the whole worktree. Nothing else
+  // is allowed to have moved since the reviews started (#136 follow-up).
+  // One `git status --porcelain` serves both this check and the
+  // is-there-anything-to-commit question below: `hasUncommittedChanges` runs
+  // the identical command, so re-reading it would spawn a second git for an
+  // answer already in hand.
+  const statusBeforeCommit = git.statusPorcelain(reviewDir);
+  const drift = detectReviewWorktreeDrift({
+    headShaBefore,
+    headShaNow: git.resolveCommit(reviewDir, "HEAD"),
+    statusPorcelain: statusBeforeCommit,
+    specsDir,
+  });
+  if (drift) {
+    const detail = formatReviewWorktreeDrift(drift);
+    if (drift.headMoved || drift.changedPaths.length > 0) {
+      const message =
+        "review worktree moved between the guardian reviews and the artifact " +
+        `commit — ${detail}. Refusing to commit over it: the reviewed tree is ` +
+        "not the tree the wave produced (#136).";
+      journal.phase(`  ❌ ${message}`, "warn");
+      journal.event({
+        type: "warn",
+        reason: "review-worktree-drift",
+        message,
+      });
+      return blocked(message);
+    }
+    journal.phase(
+      `  ⚠️  Review worktree holds files outside this run's reviews — ${detail}. Committing them with the reviews.`,
+      "warn",
+    );
+    journal.event({
+      type: "warn",
+      reason: "review-worktree-drift",
+      message: `untracked files beside the review artifacts — ${detail}`,
+    });
+  }
+
+  if (statusBeforeCommit !== "") {
     try {
       git.commitAll(
         reviewDir,

@@ -137,7 +137,18 @@ export function readQARound(qaReportPath: string): number {
 }
 
 export function readReviewVerdict(reviewPath: string): ReviewVerdict {
-  const content = readIfExists(reviewPath);
+  return parseReviewVerdict(readIfExists(reviewPath));
+}
+
+/**
+ * Classify a guardian verdict from review content already in hand. The ship
+ * gate captures each guardian's artifact the moment its invocation returns and
+ * classifies that string, so a later write by the concurrent guardian sharing
+ * the review worktree cannot change the verdict it reports (issue #136).
+ */
+export function parseReviewVerdict(
+  content: string | null,
+): ReviewVerdict {
   if (!content) return "UNPARSEABLE";
   // Accept several formats seen in the wild from guardian agents:
   //   **Verdict:** SHIP
