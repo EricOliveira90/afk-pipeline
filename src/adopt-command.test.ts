@@ -539,6 +539,54 @@ describe("afk adopt", () => {
     git(repo, ["worktree", "remove", linked, "--force"]);
   });
 
+  it("refuses by name when worktree enumeration fails, before any ref mutation", async () => {
+    const repo = makeRepo();
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const featureBefore = resolveCommit(repo, "feat/demo")!;
+    const sliceBefore = resolveCommit(repo, "manual/demo-01")!;
+    const stateBefore = readFileSync(statePath, "utf-8");
+    let gatesCalled = false;
+
+    const result = await runAdoptCli(
+      [
+        "demo",
+        "129",
+        "--branch",
+        "manual/demo-01",
+        "--adopter",
+        "Ada Lovelace",
+        "--reason",
+        "finished the slice manually",
+      ],
+      repo,
+      {
+        listWorktrees: () => {
+          throw new Error("fatal: not a git repository");
+        },
+        resolveGatePlan: () => {
+          gatesCalled = true;
+          return { declarations: GATES };
+        },
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toBe(
+      "Adoption refused: could not enumerate worktrees — " +
+        "fatal: not a git repository",
+    );
+    // No candidate merge, so no ref moved and no state was written.
+    expect(gatesCalled).toBe(false);
+    expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+    expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
+    expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+    expect(existsSync(join(repo, ".afk", "adopt"))).toBe(false);
+  });
+
   it("rolls the feature ref back when the state write fails", async () => {
     const repo = makeRepo();
     const featureBefore = resolveCommit(repo, "feat/demo")!;
