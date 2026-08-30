@@ -235,7 +235,7 @@ describe("RunJournal park transition", () => {
     const journal = parkedJournal(repo, "no-dispatch");
 
     expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
-      /slice 40 is parked \(AWAITING-ADJUDICATION\); PASS may only follow a trackSlice dispatch/,
+      /slice 40 is parked \(lifecycle shows AWAITING-ADJUDICATION\); PASS may only follow a trackSlice dispatch/,
     );
     expect(loadRunState(repo, "no-dispatch").slices["40"]).toMatchObject({
       phase: "AWAITING-ADJUDICATION",

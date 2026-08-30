@@ -351,8 +351,8 @@ export class RunJournal {
       if (existing.phase === outcome.phase) return existing;
       throw new Error(
         `RunJournal.recordTerminal: slice ${sliceId.ghIssue} is parked ` +
-          `(${existing.phase}); ${outcome.phase} may only follow a ` +
-          `trackSlice dispatch that reopens it`,
+          `(lifecycle shows ${existing.phase}); ${outcome.phase} may only ` +
+          `follow a trackSlice dispatch that reopens the park`,
       );
     }
 
