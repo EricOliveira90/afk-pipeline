@@ -210,14 +210,11 @@ describe("RunJournal park transition", () => {
       .filter((line) => line.includes("AWAITING-ADJUDICATION"));
   }
 
-  it("re-recording the same park changes nothing observable", () => {
+  it("re-recording the identical park changes nothing observable", () => {
     const repo = makeRepo();
     const journal = parkedJournal(repo, "re-park");
 
-    const again = journal.recordTerminal(SLICE, {
-      ...PARK,
-      error: "waiting on F-01 (retried write)",
-    });
+    const again = journal.recordTerminal(SLICE, { ...PARK });
 
     expect(again).toEqual(journal.getSlice("40"));
     expect(again.phase).toBe("AWAITING-ADJUDICATION");
@@ -228,6 +225,61 @@ describe("RunJournal park transition", () => {
       branch: SLICE.branch,
       error: PARK.error,
     });
+  });
+
+  /**
+   * Idempotency is over the whole record, not the phase. A partial
+   * adjudication parks again with the same phase and a *different* reason —
+   * the findings still undecided (ADR 0054 item 3) — and phase-only
+   * idempotency silently kept the stale reason, which is issue #141. It is
+   * the caller's missing reopen that is the defect, so the journal raises
+   * it instead of absorbing it.
+   */
+  it("refuses a changed park with no dispatch between, rather than discarding it", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "changed-park");
+
+    expect(() =>
+      journal.recordTerminal(SLICE, {
+        ...PARK,
+        error: "waiting on F-02 (F-01 decided)",
+      }),
+    ).toThrow(
+      /slice 40 is parked \(lifecycle shows AWAITING-ADJUDICATION\); a changed AWAITING-ADJUDICATION may only follow a trackSlice dispatch/,
+    );
+    expect(outcomeEvents(journal)).toHaveLength(1);
+    expect(loadRunState(repo, "changed-park").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: PARK.error,
+    });
+  });
+
+  /**
+   * The shape the orchestrator now produces for a partial adjudication: the
+   * re-dispatch reopens the park, so the replacement reason — naming only
+   * what remains undecided — reaches state, events and the run log.
+   */
+  it("persists the replacement park after the re-dispatch reopens it", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "partial-park");
+    const remaining = "waiting on F-02 (F-01 decided)";
+
+    journal.trackSlice(lifecycle.running(SLICE));
+    expect(loadRunState(repo, "partial-park").slices["40"]).toBeUndefined();
+    journal.recordTerminal(SLICE, { ...PARK, error: remaining });
+
+    expect(loadRunState(repo, "partial-park").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: remaining,
+    });
+    expect(outcomeEvents(journal)).toHaveLength(2);
+    expect(parkLines(journal).at(-1)).toContain(remaining);
+    // Still parked, not terminal: the replacement is replaceable too.
+    expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+      /is parked/,
+    );
   });
 
   it("refuses a different terminal for a parked slice with no dispatch between", () => {

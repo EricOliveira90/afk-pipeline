@@ -31,11 +31,26 @@
  *   `artifacts.lockContract`, and it runs the completion predicate
  *   (ADR 0055 §2) and the mechanical lock gate before it does. With one
  *   lock exit there is no second path for a lock-gate bypass to live in.
+ * - **Nothing writes `LOCKED` before its gate passed.** The mechanical
+ *   gate runs *before* `lockContract`, not after it (ADR 0055 §5 as
+ *   amended). The old order left a window — a process stop between the
+ *   lock and the gate — whose on-disk residue was a stamped `LOCKED`
+ *   contract beside a witness proving the decisions, with no record that
+ *   the gate had never run; the next dispatch read that pair as a proven
+ *   lock and skipped the gate for good. With the gate first, `LOCKED` on
+ *   disk *is* the gate's attestation, and no crash window can forge one.
  * - **Every lock names what produced it.** The lock exit stamps the
  *   contract's `**Lock-Provenance:**` line and, for an adjudication, writes
  *   the pending-lock witness that proves the crash window before it locks
  *   (ADR 0055 §4–5). Provenance is a required argument, so a future caller
  *   cannot lock anonymously.
+ * - **The witness never outlives the transaction that wrote it.** Any
+ *   exit that did not reach `onAccepted` clears the pending-lock witness,
+ *   including a lock that succeeded and then had its caller's bookkeeping
+ *   fail. Otherwise the rollback restores the pre-transaction contract
+ *   while the witness survives, and if that contract is stale `LOCKED`
+ *   debris the witness proves it on the next dispatch (ADR 0055 §5 as
+ *   amended).
  *
  * What is deliberately *outside* the transaction: the escalation archive
  * (written by the caller before a revision starts, ADR 0050/0051) and
@@ -48,6 +63,7 @@ import { join } from "node:path";
 import * as artifacts from "./artifacts.js";
 import { ACCEPTANCE_MANIFEST_FILENAME } from "./acceptance-manifest.js";
 import {
+  ADJUDICATION_DECISIONS_FILENAME,
   recordPendingLock,
   clearPendingLock,
   unresolvedBlockingFindingIds,
@@ -124,11 +140,11 @@ export interface ContractTransaction {
   readonly previousManifestText: string | null;
   /**
    * The single lock exit: completion predicate, then the pending-lock
-   * witness, then the stamped `lockContract`, then the mechanical lock
-   * gate. Does *not* signal acceptance — a caller with bookkeeping to
-   * finish after the lock (marking a decision log applied) must still be
-   * rolled back if that bookkeeping fails, so `onAccepted` stays a
-   * separate, explicit call.
+   * witness, then the mechanical lock gate, then the stamped
+   * `lockContract`. Does *not* signal acceptance — a caller with
+   * bookkeeping to finish after the lock (marking a decision log applied)
+   * must still be rolled back if that bookkeeping fails, so `onAccepted`
+   * stays a separate, explicit call.
    */
   lock(request: ContractLockRequest): ContractLockResult;
   /**
@@ -156,6 +172,15 @@ export async function withContractTransaction<T>(
     : null;
 
   let accepted = false;
+  /**
+   * The log a lock exit wrote a pending-lock witness into, or `null` when
+   * no witness is outstanding. Held at transaction scope, not lock scope:
+   * the witness has to be cleared on *every* exit that did not reach
+   * `onAccepted`, and one of those exits is "the lock succeeded and the
+   * caller's applied-marker write then threw" — a lock-scoped `finally`
+   * cannot see that one.
+   */
+  let outstandingWitness: AdjudicationDecisionLog | null = null;
   const tx: ContractTransaction = {
     contractPath,
     manifestPath,
@@ -184,39 +209,38 @@ export async function withContractTransaction<T>(
           };
         }
       }
-      // Witness first, lock second, applied-mark third (ADR 0055 §5). Only
-      // this order makes the crash window provable: a witness over an
-      // unlocked contract proves nothing and is overwritten by the next
-      // apply, while a witness beside a lock proves the lock is this
-      // decision set's.
+      // Witness first, gate second, lock third, applied-mark fourth
+      // (ADR 0055 §5 as amended). Two orderings are load-bearing here:
       //
-      // The witness must not outlive a lock exit that did not lock: the
-      // rollback restores the pre-transaction contract, and if that
-      // restored contract is itself stale LOCKED debris, a surviving
-      // witness would prove the *refused* lock on the next dispatch and
-      // bypass the gate re-run. Cleared in the finally for every
-      // non-locked exit, including a thrown lockContract or gate.
+      // - **Witness before the lock.** A witness over an unlocked contract
+      //   proves nothing and is overwritten by the next apply, while a
+      //   witness beside a lock proves the lock is this decision set's. The
+      //   reverse order would leave a lock no witness could ever explain.
+      // - **Gate before the lock.** The gate ran *after* `lockContract`
+      //   until this amendment, which meant a process stop between the two
+      //   left witness + stamped LOCKED on disk with the gate never run —
+      //   and `adjudicatedLockIsProven` reads exactly that pair as a proven
+      //   lock, so the next dispatch skipped the gate permanently. Nothing
+      //   about the gate needs a locked contract: it reads the declared
+      //   file scope, not the status line. With the gate first, a `LOCKED`
+      //   contract on disk is itself the attestation that the gate passed,
+      //   and the crash window can no longer forge one.
       if (request.completion) {
-        recordPendingLock(ctx.absSliceDir, request.completion.log);
+        outstandingWitness = recordPendingLock(
+          ctx.absSliceDir,
+          request.completion.log,
+        );
       }
-      let lockAccepted = false;
-      try {
-        artifacts.lockContract(contractPath, request.provenance);
-        const objection = ctx.onContractLocked?.(contractPath) ?? null;
-        if (objection !== null) {
-          // No local reopen: the rollback below restores the pre-mutation
-          // contract byte-for-byte, which is strictly more than reopening
-          // the status line of a contract the planner may also have
-          // rewritten.
-          return { locked: false, refusal: objection };
-        }
-        lockAccepted = true;
-        return { locked: true };
-      } finally {
-        if (!lockAccepted && request.completion) {
-          clearPendingLock(ctx.absSliceDir, request.completion.log);
-        }
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection !== null) {
+        // No local reopen: the rollback below restores the pre-mutation
+        // contract byte-for-byte, which is strictly more than reopening
+        // the status line of a contract the planner may also have
+        // rewritten. The witness goes with it, in the outer finally.
+        return { locked: false, refusal: objection };
       }
+      artifacts.lockContract(contractPath, request.provenance);
+      return { locked: true };
     },
     onAccepted() {
       accepted = true;
@@ -227,6 +251,26 @@ export async function withContractTransaction<T>(
     return await fn(tx);
   } finally {
     if (!accepted) {
+      if (outstandingWitness) {
+        // Best effort, and loudly so. The exit this exists for is "the
+        // applied-marker write threw", which usually means writes to this
+        // very file are failing — so the clear can fail with it. A warning
+        // is then the only thing left, and it has to name the consequence,
+        // because the surviving witness will prove whatever LOCKED contract
+        // the restore below puts back.
+        try {
+          clearPendingLock(ctx.absSliceDir, outstandingWitness);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.logger.phase(
+            `${ctx.tag}: warning — could not clear the pending-lock witness in ` +
+              `${ADJUDICATION_DECISIONS_FILENAME} after a rolled-back lock ` +
+              `(${message}); a stale LOCKED contract could be proven by it on ` +
+              `the next dispatch — inspect the decision record before re-running`,
+            "warn",
+          );
+        }
+      }
       writeFileSync(contractPath, previousContract, "utf-8");
       if (previousManifestText === null) {
         rmSync(manifestPath, { force: true });

@@ -70,8 +70,12 @@ shape.
   `pendingLock` witness (fingerprint of decision-set raw bytes +
   impasse fingerprint); `markAdjudicationDecisionsApplied` clears it.
   Loader validates it like everything else (fail-closed).
-- Transaction lock exit (step 2): write witness → stamped
-  `lockContract` → mark applied.
+- Transaction lock exit (step 2): write witness → mechanical lock gate
+  → stamped `lockContract` → mark applied, and clear the witness on
+  every transaction exit that did not reach `onAccepted`. Amended after
+  the gate round's architect blocker 1; see ADR 0055 §5 for why the gate
+  moved ahead of the lock and why the clear moved out to the
+  transaction's own exit.
 - `runImpasseAdjudication` (~2132–2183): on `loaded.discarded` with a
   `LOCKED` contract, reconcile by stamp — matching current impasse
   fingerprint ⇒ lock stands, loss announced; unstamped or mismatched ⇒
@@ -98,10 +102,13 @@ shape.
   `replaceableThisRun: true` for `AWAITING-ADJUDICATION` only.
 - `src/run-journal.ts`: `recordTerminal` routes replaceable phases
   into a `parkedSlices` set (same persist/project/emit ordering);
-  same-park re-record is idempotent; different terminal without an
+  same-park re-record is idempotent over the *whole* record (phase and
+  reason); a different terminal, or a changed park, without an
   intervening `trackSlice` throws; `trackSlice` clears the parked mark
   (and the persisted record, per ADR 0047). Delete
-  `reopenAdjudication`.
+  `reopenAdjudication`. `runImpasseAdjudication` takes the reopen at its
+  entry, so a partial or refused decision persists its replacement park
+  (gate round, architect blocker 3; closes #141).
 - **Failing tests:** unit, `src/run-journal.test.ts` — the park state
   machine directly: park → re-park idempotent; park → terminal without
   dispatch throws; park → `trackSlice` → terminal succeeds and clears
@@ -208,6 +215,15 @@ than a silent new scenario.
 | P1 migration-sync STUCK has no stuck.md | shared finalizer (step 8) | `stuck.md` written with migration-sync reason |
 | 0031/0047 exception (`reopenAdjudication`) | Seam 2 §9 (step 4) | park state machine asserted at journal interface |
 | A6 (the one nobody has found yet) | Seam 2 invariant audit (step 9) | every estate-touching lifecycle op has a preserve-or-refuse assertion |
+
+Found by the gate round's architect review of this plan's own
+implementation, and fixed on `design/gate-blockers`:
+
+| Blocker | Eliminated by | Probe that must stay green |
+|---|---|---|
+| Witness certifies an ungated or rolled-back lock | Seam 1 §5 amendment | gate observes a non-LOCKED contract; a lock whose bookkeeping throws leaves no witness |
+| Resumed IMPASSE / adjudicated successor dispatch skips `assertWorktreeRegistered` | Seam 2 amendment (shared check ahead of the routing fork) | redispatch into a stale unregistered parked dir refuses before any git mutation or agent |
+| Partial adjudication redispatch does not reopen its park (#141) | Seam 2 §9 amendment | persisted park reason changes from all findings to the remaining set; a changed park with no dispatch throws |
 
 ## Non-goals
 

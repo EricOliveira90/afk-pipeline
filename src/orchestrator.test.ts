@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -35,7 +35,11 @@ import {
   resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
+  assertSliceWorktreeOwnership,
 } from "./orchestrator.js";
+import type { NegotiateOutcome } from "./orchestrator.js";
+import { loadRunState } from "./run-state.js";
+import { createWorktree } from "./git.js";
 import {
   buildPrCreationPlan,
   buildReviewScopeBlock,
@@ -583,6 +587,76 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
  * Tests for `makeAsyncMutex`. The mutex serialises lane merges across
  * concurrently-running lanes; correctness here pins that contract.
  */
+/**
+ * The ownership check both dispatch entry points share (ADR 0010 item 3).
+ * Unit-level because both callers — `runSliceNegotiate`'s routing fork and
+ * the wave's adjudicated lane-successor refresh — reach it before any agent
+ * runs, so there is nothing a spawned pipeline would add here that the
+ * spawned redispatch assertion in the impasse scenario does not already
+ * cover.
+ */
+describe("assertSliceWorktreeOwnership", () => {
+  function contextFor(repo: string) {
+    const slug = "ownership";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "7001",
+      title: "Owned worktree",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    return makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG([slice]),
+        provider: { name: "stub", async invoke() { return { exitCode: 0, stdout: "", stats: {} }; } },
+      },
+      slice,
+      new Logger(repo, `${slug}-stub`),
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+  }
+
+  it("passes for a registered worktree and is silent when nothing is on disk yet", () => {
+    const repo = makeRepo();
+    const ctx = contextFor(repo);
+
+    // First dispatch: no directory yet, and creating one is the ordinary
+    // path's job — so this is not a violation.
+    expect(() => assertSliceWorktreeOwnership(ctx)).not.toThrow();
+
+    createWorktree(repo, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+    expect(() => assertSliceWorktreeOwnership(ctx)).not.toThrow();
+  });
+
+  it("refuses a directory git no longer registers for the branch", () => {
+    const repo = makeRepo();
+    const ctx = contextFor(repo);
+    createWorktree(repo, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+    // The ADR 0010 leftover: git's admin entry is gone, the tree is not.
+    // Running git in there walks up to the parent repository.
+    rmSync(join(repo, ".git", "worktrees", basename(ctx.worktreeDir)), {
+      recursive: true,
+      force: true,
+    });
+
+    expect(() => assertSliceWorktreeOwnership(ctx)).toThrow(
+      /is not registered with git/,
+    );
+    // Never deletes: ADR 0010 leaves a stale directory for the operator.
+    expect(existsSync(ctx.worktreeDir)).toBe(true);
+  });
+});
+
 describe("makeAsyncMutex", () => {
   it("serialises two concurrent acquirers in submission order", async () => {
     const lock = makeAsyncMutex();
@@ -2955,6 +3029,36 @@ describe("round-scoped contract feedback", () => {
     expect(outcome.cause.summary).toContain("F-01");
     expect(outcome.cause.summary).toContain("F-02");
 
+    // Record the park through the journal, the way the pipeline's outcome
+    // reconciliation does. Carried through the phases below so the park's
+    // *persisted* projection is asserted end to end, not just the returned
+    // outcome — that projection is what a human reads to know which
+    // findings still need them (issue #141).
+    const sliceId = {
+      ghIssue: slice.ghIssue,
+      title: slice.title,
+      branch: ctx.branch,
+    };
+    const persistPark = (parked: NegotiateOutcome): string => {
+      if (parked.phase !== "AWAITING-ADJUDICATION") {
+        throw new Error(`expected a park, got ${parked.phase}`);
+      }
+      logger.recordTerminal(sliceId, {
+        phase: "AWAITING-ADJUDICATION",
+        error: parked.cause.summary,
+      });
+      const persisted = loadRunState(repo, `${slug}-stub`).slices[
+        slice.ghIssue
+      ];
+      if (!persisted?.error) {
+        throw new Error("park was not persisted with a reason");
+      }
+      return persisted.error;
+    };
+    const firstParkReason = persistPark(outcome);
+    expect(firstParkReason).toContain("F-01");
+    expect(firstParkReason).toContain("F-02");
+
     const working = readFileSync(
       join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
       "utf-8",
@@ -3064,6 +3168,16 @@ describe("round-scoped contract feedback", () => {
       applied: false,
       decisions: [{ decision: { findingId: "F-01" } }],
     });
+    // The replacement park reaches the persisted record: same phase, new
+    // reason, naming only what is still undecided (ADR 0054 item 3). It gets
+    // there because arriving at the adjudication branch *is* the re-dispatch
+    // and reopens the park (ADR 0055 §9) — without that reopen the journal
+    // refuses a changed park outright, which is how this stays honest rather
+    // than silently keeping the stale reason (issue #141).
+    const partialParkReason = persistPark(partiallyDecided);
+    expect(partialParkReason).toContain("F-02 still requires human adjudication");
+    expect(partialParkReason).toContain("decided F-01");
+    expect(partialParkReason).not.toBe(firstParkReason);
 
     // Re-deciding an already-decided finding is refused rather than
     // recorded twice — it is not progress towards the undecided one.
@@ -3420,6 +3534,44 @@ describe("round-scoped contract feedback", () => {
     expect(lockGateCalls).toBe(beforeReapply.gateCalls + 1);
     expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
     expect(generatorRounds).toBe(0);
+
+    // --- A redispatch into a stale unregistered parked directory refuses
+    // before it touches git or an agent (ADR 0010 item 3).
+    //
+    // Last phase of this fixture, deliberately: it unregisters the worktree
+    // for good. Deleting git's admin entry while the directory stays on disk
+    // is the ADR 0010 stale shape — a leftover a failed cleanup produces on
+    // Windows every time. The persisted IMPASSE means this dispatch routes
+    // to the adjudication branch, which merges into `ctx.worktreeDir` and can
+    // invoke the planner there; `prepareSliceWorktree`'s assertion sits in
+    // the *other* arm of that fork, so the check has to happen before it.
+    const adminDir = join(
+      repo,
+      ".git",
+      "worktrees",
+      basename(ctx.worktreeDir),
+    );
+    expect(existsSync(adminDir)).toBe(true);
+    rmSync(adminDir, { recursive: true, force: true });
+    const beforeStaleDir = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      generator: generatorRounds,
+      contract: readFileSync(contractPath, "utf-8"),
+    };
+
+    await expect(runSliceNegotiate(ctx)).rejects.toThrow(
+      /is not registered with git/,
+    );
+    expect(plannerRounds).toBe(beforeStaleDir.planner);
+    expect(evaluatorRounds).toBe(beforeStaleDir.evaluator);
+    expect(generatorRounds).toBe(beforeStaleDir.generator);
+    // Nothing was mutated on the way to the refusal, so the operator can
+    // still inspect the parked estate ADR 0055 Seam 2 preserves.
+    expect(readFileSync(contractPath, "utf-8")).toBe(beforeStaleDir.contract);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).decisions).toHaveLength(
+      2,
+    );
   });
 
   it("caps a converging negotiation at two rounds", async () => {
