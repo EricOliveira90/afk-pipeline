@@ -3,16 +3,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  adjudicatedLockIsProven,
   appendAdjudicationDecision,
+  decisionSetFingerprint,
   impasseFingerprint,
   loadAdjudicationDecisionLog,
   markAdjudicationDecisionsApplied,
   parseAdjudication,
+  pendingLockWitnessProves,
+  reconcileDiscardedDecisionLog,
+  recordPendingLock,
   type Adjudication,
   undecidedContestedFindingIds,
   unresolvedBlockingFindingIds,
   waitForAdjudication,
 } from "./adjudication.js";
+import type { ContractLockProvenance } from "./artifacts.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
 
 const IMPASSE: ContractNegotiationOutcome = {
@@ -302,6 +308,206 @@ describe("the adjudication decision log", () => {
         "F-01",
       ]),
     ).toThrow(/F-01 was already adjudicated in the current IMPASSE/);
+  });
+});
+
+/**
+ * ADR 0055 Seam 1 decisions 4–5. Two questions, asked of the same pair of
+ * artifacts, that used to be answered by `readContractStatus === "LOCKED"`
+ * alone — which is what let a stale lock be inherited (A2):
+ *
+ * - The log had to be discarded. Was the lock beside it the one those
+ *   decisions produced? Answered by the lock's provenance stamp.
+ * - The log is valid and complete but unapplied, over a `LOCKED` contract.
+ *   Is that the crash window between the lock and the applied mark?
+ *   Answered by the log's own pending-lock witness.
+ */
+describe("reconciling a lock against the decision log", () => {
+  const OUTCOME: ContractNegotiationOutcome = {
+    ...IMPASSE,
+    findings: [IMPASSE.findings[0]!, { ...IMPASSE.findings[0]!, id: "F-02" }],
+  };
+  const OTHER: ContractNegotiationOutcome = { ...OUTCOME, round: 3 };
+  const decisionFor = (findingId: string) =>
+    JSON.stringify({
+      version: 1,
+      findingId,
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+  const withSliceDir = (body: (sliceDir: string) => void) => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-adjudication-"));
+    try {
+      body(sliceDir);
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
+  };
+  /** A log with `ids` decided, written to disk exactly as the apply path leaves it. */
+  const logWith = (sliceDir: string, ...ids: string[]) => {
+    let log = loadAdjudicationDecisionLog(sliceDir, OUTCOME).log;
+    for (const id of ids) {
+      const raw = decisionFor(id);
+      log = appendAdjudicationDecision(sliceDir, log, {
+        raw,
+        decision: parseAdjudication(raw, OUTCOME, undefined, ids.slice(0, ids.indexOf(id))),
+      });
+    }
+    return log;
+  };
+
+  it("proves the crash window with a witness over its own decision set", () => {
+    withSliceDir((sliceDir) => {
+      const complete = logWith(sliceDir, "F-01", "F-02");
+      expect(pendingLockWitnessProves(complete)).toBe(false);
+
+      const witnessed = recordPendingLock(sliceDir, complete);
+      expect(witnessed.pendingLock).toEqual({
+        impasse: impasseFingerprint(OUTCOME),
+        decisions: decisionSetFingerprint(complete.decisions),
+      });
+      // The witness survives a reload — the loader validates it like
+      // everything else rather than dropping the field.
+      const reloaded = loadAdjudicationDecisionLog(sliceDir, OUTCOME);
+      expect(reloaded.discarded).toBeNull();
+      expect(pendingLockWitnessProves(reloaded.log)).toBe(true);
+
+      // The applied mark is the stronger proof, so it clears the witness.
+      const applied = markAdjudicationDecisionsApplied(sliceDir, reloaded.log);
+      expect(applied.pendingLock).toBeUndefined();
+      expect(
+        readFileSync(join(sliceDir, "adjudication-decisions.json"), "utf-8"),
+      ).not.toContain("pendingLock");
+      expect(pendingLockWitnessProves(applied)).toBe(false);
+    });
+  });
+
+  it("does not let a witness prove a decision set it was not written for", () => {
+    withSliceDir((sliceDir) => {
+      const partial = recordPendingLock(sliceDir, logWith(sliceDir, "F-01"));
+      const raw = decisionFor("F-02");
+      const grown = appendAdjudicationDecision(sliceDir, partial, {
+        raw,
+        decision: parseAdjudication(raw, OUTCOME, undefined, ["F-01"]),
+      });
+
+      expect(pendingLockWitnessProves(grown)).toBe(false);
+      expect(adjudicatedLockIsProven({ locked: true, log: grown })).toBe(false);
+    });
+  });
+
+  const badWitnesses: Array<[string, unknown, RegExp]> = [
+    ["a non-object witness", "yes", /must be an object when present/],
+    [
+      "a witness missing a field",
+      { impasse: "x" },
+      /must contain exactly decisions and impasse/,
+    ],
+    [
+      "a witness for another impasse",
+      { decisions: "d", impasse: "stale" },
+      /recorded against a different IMPASSE/,
+    ],
+  ];
+
+  it.each(badWitnesses)(
+    "discards the whole log for %s",
+    (_name, pendingLock, expected) => {
+      withSliceDir((sliceDir) => {
+        writeFileSync(
+          join(sliceDir, "adjudication-decisions.json"),
+          JSON.stringify({
+            version: 1,
+            impasse: impasseFingerprint(OUTCOME),
+            applied: false,
+            decisions: [{ raw: decisionFor("F-01") }],
+            pendingLock,
+          }),
+          "utf-8",
+        );
+        // Fail-closed: the witness is the one field a lock can be inherited
+        // on, so a malformed one costs the log, not just the field.
+        const loaded = loadAdjudicationDecisionLog(sliceDir, OUTCOME);
+        expect(loaded.discarded).toMatch(expected);
+        expect(loaded.log.decisions).toEqual([]);
+      });
+    },
+  );
+
+  it("returns LOCKED without re-applying only on proof", () => {
+    withSliceDir((sliceDir) => {
+      const complete = logWith(sliceDir, "F-01", "F-02");
+      const witnessed = recordPendingLock(sliceDir, complete);
+      const applied = { ...complete, applied: true };
+
+      // The crash window: LOCKED, complete, unapplied, witnessed.
+      expect(adjudicatedLockIsProven({ locked: true, log: witnessed })).toBe(
+        true,
+      );
+      expect(adjudicatedLockIsProven({ locked: true, log: applied })).toBe(true);
+      // A bare LOCKED beside an unproven log is A2: no shortcut.
+      expect(adjudicatedLockIsProven({ locked: true, log: complete })).toBe(
+        false,
+      );
+      // And nothing is "already applied" while no lock is on disk.
+      expect(adjudicatedLockIsProven({ locked: false, log: applied })).toBe(
+        false,
+      );
+    });
+  });
+
+  it("keeps a legitimate lock when the discarded log's own stamp certifies it", () => {
+    // Scenario Y: the human's adjudication completed and locked; only its
+    // receipt got corrupted. Blanket reopening would silently invalidate
+    // completed human work every time a file got mangled.
+    expect(
+      reconcileDiscardedDecisionLog({
+        locked: true,
+        provenance: {
+          kind: "impasse-adjudication",
+          impasse: impasseFingerprint(OUTCOME),
+        },
+        outcome: OUTCOME,
+      }),
+    ).toEqual({
+      action: "lock-stands",
+      because: "the lock is stamped with the current IMPASSE",
+    });
+  });
+
+  const reopens: Array<[string, ContractLockProvenance | null, string]> = [
+    ["an unstamped lock", null, "the lock carries no provenance stamp"],
+    [
+      "an ordinary negotiation's lock",
+      { kind: "negotiation", round: 2 },
+      "the lock was produced by negotiation round 2",
+    ],
+    [
+      "a focused revision's lock",
+      { kind: "focused-scope-revision", round: 3 },
+      "the lock was produced by focused-scope-revision round 3",
+    ],
+    [
+      "another impasse's lock",
+      { kind: "impasse-adjudication", impasse: impasseFingerprint(OTHER) },
+      "the lock is stamped with a different IMPASSE",
+    ],
+  ];
+
+  it.each(reopens)("reopens %s", (_name, provenance, because) => {
+    expect(
+      reconcileDiscardedDecisionLog({ locked: true, provenance, outcome: OUTCOME }),
+    ).toEqual({ action: "reopen", because });
+  });
+
+  it("has nothing to reconcile when no lock is claimed", () => {
+    expect(
+      reconcileDiscardedDecisionLog({
+        locked: false,
+        provenance: null,
+        outcome: OUTCOME,
+      }),
+    ).toEqual({ action: "none" });
   });
 });
 

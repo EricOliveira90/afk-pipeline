@@ -161,10 +161,13 @@ import {
 import {
   ADJUDICATION_DECISIONS_FILENAME,
   ADJUDICATION_FILENAME,
+  adjudicatedLockIsProven,
   appendAdjudicationDecision,
+  impasseFingerprint,
   loadAdjudicationDecisionLog,
   markAdjudicationDecisionsApplied,
   parseAdjudication,
+  reconcileDiscardedDecisionLog,
   undecidedContestedFindingIds,
   unresolvedBlockingFindingIds,
   waitForAdjudication,
@@ -1339,7 +1342,9 @@ async function reviseAcceptedContract(
     };
   }
 
-  const locked = tx.lock();
+  const locked = tx.lock({
+    provenance: { kind: "focused-scope-revision", round: revisionRound },
+  });
   if (!locked.locked) {
     logger.phase(
       `${ctx.tag}: focused scope revision lock refused — ${locked.refusal}`,
@@ -2117,11 +2122,41 @@ async function runImpasseAdjudication(
   const loaded = loadAdjudicationDecisionLog(ctx.absSliceDir, outcome);
   let decisionLog = loaded.log;
   if (loaded.discarded) {
-    logger.phase(
+    // The log is gone either way. What a `LOCKED` contract beside it means
+    // is decided by the lock's own provenance stamp, not by policy
+    // (ADR 0055 §4): blanket trust is the A2 defect, and blanket reopening
+    // would throw away a human's completed adjudication every time its
+    // receipt got corrupted.
+    const reconciliation = reconcileDiscardedDecisionLog({
+      locked: artifacts.readContractStatus(contractPath) === "LOCKED",
+      provenance: artifacts.readContractLockProvenance(contractPath),
+      outcome,
+    });
+    const discarded =
       `${ctx.tag}: discarded ${ADJUDICATION_DECISIONS_FILENAME} — ` +
-        `${loaded.discarded}; every contested finding must be adjudicated again`,
-      "error",
-    );
+      `${loaded.discarded}`;
+    if (reconciliation.action === "lock-stands") {
+      logger.phase(
+        `${discarded}; ${reconciliation.because}, so the lock stands — only ` +
+          `the record of which decisions produced it is lost`,
+        "error",
+      );
+      return { phase: "LOCKED" };
+    }
+    if (reconciliation.action === "reopen") {
+      artifacts.reopenContract(contractPath);
+      logger.phase(
+        `${discarded}; ${reconciliation.because}, so the LOCKED contract is ` +
+          `provably stale and has been reopened; every contested finding must ` +
+          `be adjudicated again`,
+        "error",
+      );
+    } else {
+      logger.phase(
+        `${discarded}; every contested finding must be adjudicated again`,
+        "error",
+      );
+    }
   }
 
   // --- Consume whatever the human has written since the last dispatch.
@@ -2201,11 +2236,15 @@ async function runImpasseAdjudication(
   // --- Every unresolved blocking finding is decided. Apply once, ever.
   //
   // A LOCKED contract with a complete record and no applied marker is the
-  // crash window between `lockContract` and the marker write: the decisions
-  // did reach an accepted lock, so it is marked rather than re-applied.
+  // crash window between `lockContract` and the marker write — but only if
+  // the record's pending-lock witness proves it (ADR 0055 §5). A bare
+  // LOCKED is what let a stale lock be inherited (A2), so it no longer
+  // shortcuts anything: without proof the decisions are applied in full.
   if (
-    decisionLog.applied ||
-    artifacts.readContractStatus(contractPath) === "LOCKED"
+    adjudicatedLockIsProven({
+      locked: artifacts.readContractStatus(contractPath) === "LOCKED",
+      log: decisionLog,
+    })
   ) {
     if (!decisionLog.applied) {
       decisionLog = markAdjudicationDecisionsApplied(
@@ -2286,7 +2325,13 @@ async function runImpasseAdjudication(
           };
         }
 
-        const locked = tx.lock({ completion: { outcome, log: decisionLog } });
+        const locked = tx.lock({
+          provenance: {
+            kind: "impasse-adjudication",
+            impasse: impasseFingerprint(outcome),
+          },
+          completion: { outcome, log: decisionLog },
+        });
         if (!locked.locked) {
           logger.phase(
             `${ctx.tag}: adjudicated contract lock refused — ${locked.refusal}`,
@@ -2326,6 +2371,15 @@ async function runImpasseAdjudication(
           ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
           : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
         const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        // An unproven LOCKED contract reaching here is stale debris the
+        // reconciliation above could not clear (its log validated, so the
+        // discard path never ran). The planner must not be handed a
+        // contract still claiming LOCKED while its impasse is being
+        // settled (ADR 0008); the rollback restores these bytes if the
+        // apply fails, so nothing is lost by reopening now.
+        if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+          artifacts.reopenContract(contractPath);
+        }
         logger.phase(
           `${ctx.tag}: applying ${decisionLog.decisions.length} human ` +
             `adjudication(s) with one planner invocation...`,
@@ -2981,7 +3035,10 @@ async function negotiateAttempt(
         lastVerdict = verdict;
         lastFindings = review.findings;
         if (verdict === "ACCEPT") {
-          artifacts.lockContract(contractPath);
+          artifacts.lockContract(contractPath, {
+            kind: "negotiation",
+            round,
+          });
           contractStatus = "LOCKED";
         } else {
           contractStatus = artifacts.readContractStatus(contractPath);

@@ -7,6 +7,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import {
+  formatContractLockProvenance,
+  type ContractLockProvenance,
+} from "./artifacts.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
 import { CONTRACT_NEGOTIATION_OUTCOME_FILENAME } from "./contract-review.js";
 
@@ -160,6 +164,19 @@ export interface RecordedAdjudication {
   decision: Adjudication;
 }
 
+/**
+ * The witness that proves the crash window (ADR 0055 Seam 1 decision 5).
+ * Written immediately before `lockContract`, cleared by the applied mark:
+ * finding it beside a `LOCKED` contract proves the lock is the one *these*
+ * decisions produced, where a bare `LOCKED` proved nothing at all.
+ */
+export interface AdjudicationPendingLock {
+  /** Fingerprint of the exact decision set, over the recorded raw bytes. */
+  decisions: string;
+  /** The impasse those decisions settle. */
+  impasse: string;
+}
+
 export interface AdjudicationDecisionLog {
   version: 1;
   /** Fingerprint of the impasse these decisions were made against. */
@@ -167,6 +184,8 @@ export interface AdjudicationDecisionLog {
   decisions: RecordedAdjudication[];
   /** True once the decisions reached an accepted contract lock. */
   applied: boolean;
+  /** Present only between the lock attempt and the applied mark. */
+  pendingLock?: AdjudicationPendingLock;
 }
 
 /**
@@ -281,12 +300,14 @@ export function loadAdjudicationDecisionLog(
       );
       decisions.push({ raw, decision });
     }
+    const pendingLock = parsePendingLock(input.pendingLock, input.impasse);
     return {
       log: {
         version: 1,
         impasse: input.impasse,
         decisions,
         applied: input.applied,
+        ...(pendingLock ? { pendingLock } : {}),
       },
       discarded: null,
     };
@@ -296,6 +317,35 @@ export function loadAdjudicationDecisionLog(
       discarded: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Validate the pending-lock witness like everything else in the log: a
+ * malformed one throws, which discards the whole log rather than quietly
+ * ignoring the one field a lock might be inherited on (fail-closed). A
+ * witness for another impasse is a defect, not a witness — the log already
+ * declares which impasse it belongs to.
+ */
+function parsePendingLock(
+  value: unknown,
+  impasse: unknown,
+): AdjudicationPendingLock | null {
+  if (value === undefined) return null;
+  const source = `${ADJUDICATION_DECISIONS_FILENAME} pendingLock`;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${source} must be an object when present`);
+  }
+  const input = value as Record<string, unknown>;
+  const keys = Object.keys(input);
+  if (keys.length !== 2 || !("decisions" in input) || !("impasse" in input)) {
+    throw new Error(`${source} must contain exactly decisions and impasse`);
+  }
+  requireNonBlankString(input.decisions, "decisions", source);
+  requireNonBlankString(input.impasse, "impasse", source);
+  if (input.impasse !== impasse) {
+    throw new Error(`${source} was recorded against a different IMPASSE`);
+  }
+  return { decisions: input.decisions, impasse: input.impasse };
 }
 
 /**
@@ -330,12 +380,127 @@ export function appendAdjudicationDecision(
   });
 }
 
-/** Mark the recorded decisions as applied to an accepted contract lock. */
+/**
+ * Fingerprint of a decision set, over the humans' raw bytes in recorded
+ * order — the same thing the planner was shown. A set that gained,
+ * lost, or reordered a decision is a different set, so a witness for the
+ * old one proves nothing about the new one.
+ */
+export function decisionSetFingerprint(
+  decisions: readonly RecordedAdjudication[],
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(decisions.map((recorded) => recorded.raw)))
+    .digest("hex");
+}
+
+/**
+ * Record the pending-lock witness, immediately before the lock attempt
+ * (ADR 0055 §5). Dying after this and before the lock leaves a witness
+ * over an unlocked contract, which proves nothing and costs nothing: the
+ * next dispatch runs the full apply and overwrites it.
+ */
+export function recordPendingLock(
+  sliceDir: string,
+  log: AdjudicationDecisionLog,
+): AdjudicationDecisionLog {
+  return writeAdjudicationDecisionLog(sliceDir, {
+    ...log,
+    pendingLock: {
+      decisions: decisionSetFingerprint(log.decisions),
+      impasse: log.impasse,
+    },
+  });
+}
+
+/**
+ * Mark the recorded decisions as applied to an accepted contract lock, and
+ * clear the witness — the applied mark is the stronger proof, and a
+ * witness left behind would outlive the window it describes.
+ */
 export function markAdjudicationDecisionsApplied(
   sliceDir: string,
   log: AdjudicationDecisionLog,
 ): AdjudicationDecisionLog {
-  return writeAdjudicationDecisionLog(sliceDir, { ...log, applied: true });
+  const { pendingLock: _cleared, ...rest } = log;
+  return writeAdjudicationDecisionLog(sliceDir, { ...rest, applied: true });
+}
+
+/**
+ * Does this log's own witness describe this log's own decision set? Only
+ * then does it prove the lock beside it was produced by these decisions.
+ */
+export function pendingLockWitnessProves(
+  log: AdjudicationDecisionLog,
+): boolean {
+  const witness = log.pendingLock;
+  if (!witness) return false;
+  return (
+    witness.impasse === log.impasse &&
+    witness.decisions === decisionSetFingerprint(log.decisions)
+  );
+}
+
+/**
+ * May a `LOCKED` contract be returned as the adjudicated lock without
+ * applying the decisions again (ADR 0055 §5)?
+ *
+ * Only with proof: the log is marked applied, or it carries a witness
+ * matching its own decision set. A bare `LOCKED` is deliberately not
+ * enough — that shortcut is what let a stale lock be inherited (A2). The
+ * provenance stamp is deliberately *not* re-checked here: a valid log
+ * already binds to this impasse by its own fingerprint, and requiring the
+ * stamp would wrongly refuse a legacy pre-stamp lock whose applied log is
+ * intact.
+ */
+export function adjudicatedLockIsProven(input: {
+  locked: boolean;
+  log: AdjudicationDecisionLog;
+}): boolean {
+  if (!input.locked) return false;
+  return input.log.applied || pendingLockWitnessProves(input.log);
+}
+
+/**
+ * What to do with the contract when the decision log had to be discarded
+ * (ADR 0055 §4). The log is gone either way; the question is whether the
+ * lock beside it was the one those decisions produced.
+ */
+export type DiscardedDecisionLogReconciliation =
+  /** The lock self-certifies: only a proven-complete decision set for this
+   * impasse can carry this stamp. It stands; the loss is announced. */
+  | { action: "lock-stands"; because: string }
+  /** Provably stale, or unprovable — which is the same thing here. */
+  | { action: "reopen"; because: string }
+  /** Nothing is claiming to be settled, so there is nothing to reconcile. */
+  | { action: "none" };
+
+export function reconcileDiscardedDecisionLog(input: {
+  locked: boolean;
+  provenance: ContractLockProvenance | null;
+  outcome: ContractNegotiationOutcome;
+}): DiscardedDecisionLogReconciliation {
+  if (!input.locked) return { action: "none" };
+  const { provenance } = input;
+  if (provenance === null) {
+    return { action: "reopen", because: "the lock carries no provenance stamp" };
+  }
+  if (provenance.kind !== "impasse-adjudication") {
+    return {
+      action: "reopen",
+      because: `the lock was produced by ${formatContractLockProvenance(provenance)}`,
+    };
+  }
+  if (provenance.impasse !== impasseFingerprint(input.outcome)) {
+    return {
+      action: "reopen",
+      because: "the lock is stamped with a different IMPASSE",
+    };
+  }
+  return {
+    action: "lock-stands",
+    because: "the lock is stamped with the current IMPASSE",
+  };
 }
 
 function decidedFindingIds(log: AdjudicationDecisionLog): Set<string> {

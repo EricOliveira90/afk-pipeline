@@ -31,6 +31,11 @@
  *   `artifacts.lockContract`, and it runs the completion predicate
  *   (ADR 0055 §2) and the mechanical lock gate before it does. With one
  *   lock exit there is no second path for a lock-gate bypass to live in.
+ * - **Every lock names what produced it.** The lock exit stamps the
+ *   contract's `**Lock-Provenance:**` line and, for an adjudication, writes
+ *   the pending-lock witness that proves the crash window before it locks
+ *   (ADR 0055 §4–5). Provenance is a required argument, so a future caller
+ *   cannot lock anonymously.
  *
  * What is deliberately *outside* the transaction: the escalation archive
  * (written by the caller before a revision starts, ADR 0050/0051) and
@@ -43,9 +48,11 @@ import { join } from "node:path";
 import * as artifacts from "./artifacts.js";
 import { ACCEPTANCE_MANIFEST_FILENAME } from "./acceptance-manifest.js";
 import {
+  recordPendingLock,
   unresolvedBlockingFindingIds,
   type AdjudicationDecisionLog,
 } from "./adjudication.js";
+import type { ContractLockProvenance } from "./artifacts.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
 
 /**
@@ -73,12 +80,19 @@ export interface ContractRollbackNotice {
   note?: string;
 }
 
-/** The lock exit's request. Step 3 (ADR 0055 §4) adds provenance here. */
+/** The lock exit's request. */
 export interface ContractLockRequest {
   /**
-   * The adjudication shape to check the completion predicate against.
-   * Omitted by mutation paths with no impasse to complete (an ordinary
-   * focused revision), where the predicate is vacuous.
+   * What produced this lock (ADR 0055 §4). Required: "every lock exit
+   * stamps, no special cases" is only true if there is no way to reach the
+   * lock exit without saying why.
+   */
+  provenance: ContractLockProvenance;
+  /**
+   * The adjudication shape to check the completion predicate against, and
+   * the log the pending-lock witness is written into. Omitted by mutation
+   * paths with no impasse to complete (an ordinary focused revision),
+   * where the predicate is vacuous and there is no crash window to prove.
    */
   completion?: {
     outcome: ContractNegotiationOutcome;
@@ -108,13 +122,14 @@ export interface ContractTransaction {
    */
   readonly previousManifestText: string | null;
   /**
-   * The single lock exit: completion predicate, then `lockContract`, then
-   * the mechanical lock gate. Does *not* signal acceptance — a caller
-   * with bookkeeping to finish after the lock (marking a decision log
-   * applied) must still be rolled back if that bookkeeping fails, so
-   * `onAccepted` stays a separate, explicit call.
+   * The single lock exit: completion predicate, then the pending-lock
+   * witness, then the stamped `lockContract`, then the mechanical lock
+   * gate. Does *not* signal acceptance — a caller with bookkeeping to
+   * finish after the lock (marking a decision log applied) must still be
+   * rolled back if that bookkeeping fails, so `onAccepted` stays a
+   * separate, explicit call.
    */
-  lock(request?: ContractLockRequest): ContractLockResult;
+  lock(request: ContractLockRequest): ContractLockResult;
   /**
    * Signals an accepted lock. Nothing is restored after this. Per
    * ADR 0051 this is the only way out of the transaction that keeps the
@@ -152,7 +167,7 @@ export async function withContractTransaction<T>(
       // here because ADR 0055 §2 puts the question at the lock exit, so a
       // future caller that forgets the earlier check still cannot lock
       // over an unresolved blocking finding.
-      if (request?.completion) {
+      if (request.completion) {
         const undecided = unresolvedBlockingFindingIds(
           request.completion.outcome,
           request.completion.log,
@@ -168,7 +183,15 @@ export async function withContractTransaction<T>(
           };
         }
       }
-      artifacts.lockContract(contractPath);
+      // Witness first, lock second, applied-mark third (ADR 0055 §5). Only
+      // this order makes the crash window provable: a witness over an
+      // unlocked contract proves nothing and is overwritten by the next
+      // apply, while a witness beside a lock proves the lock is this
+      // decision set's.
+      if (request.completion) {
+        recordPendingLock(ctx.absSliceDir, request.completion.log);
+      }
+      artifacts.lockContract(contractPath, request.provenance);
       const objection = ctx.onContractLocked?.(contractPath) ?? null;
       if (objection !== null) {
         // No local reopen: the rollback below restores the pre-mutation
