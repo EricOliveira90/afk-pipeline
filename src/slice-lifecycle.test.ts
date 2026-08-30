@@ -112,6 +112,46 @@ describe("phase traits", () => {
       summaryLabel: "MERGE-PENDING",
     });
   });
+
+  /**
+   * ADR 0055 Seam 2 §6: cleanup eligibility is a trait, not a bucket. The
+   * park renders as a failure (that is what an operator needs to see in
+   * the status table) but its estate is a human's pending input, so the
+   * two axes must be able to disagree — and here they do.
+   */
+  it("declares the adjudication park's whole estate off limits to cleanup", () => {
+    expect(traitsFor("AWAITING-ADJUDICATION").debris).toBe("preserve-all");
+    expect(traitsFor("AWAITING-ADJUDICATION").bucket).toBe("failed");
+  });
+
+  it("keeps the cleanup axis independent of the presentation bucket", () => {
+    // The disposition every other failure/cancellation phase carries —
+    // clean-failed's whole reason to exist.
+    expect(traitsFor("STUCK").debris).toBe("disposable");
+    expect(traitsFor("ERROR").debris).toBe("disposable");
+    expect(traitsFor("CONFLICT").debris).toBe("disposable");
+    expect(traitsFor("CANCELLED").debris).toBe("disposable");
+    expect(traitsFor("LANE-CANCELLED").debris).toBe("disposable");
+    // The worktree is debris, the branch is the next run's input.
+    expect(traitsFor("MERGE-PENDING").debris).toBe("preserve-branch");
+    // Nothing failed, so cleanup never considers these at all.
+    expect(traitsFor("PASS").debris).toBe("out-of-scope");
+    expect(traitsFor("PENDING").debris).toBe("out-of-scope");
+    expect(traitsFor("RUNNING").debris).toBe("out-of-scope");
+    expect(traitsFor("SKIPPED").debris).toBe("out-of-scope");
+  });
+
+  it("keeps the cleanup axis separate from the journal's replaceability axis", () => {
+    // Step 4 put `replaceableThisRun` on these same traits. Both are
+    // properties of the park, and neither implies the other.
+    expect(traitsFor("AWAITING-ADJUDICATION").replaceableThisRun).toBe(true);
+    expect(
+      ALL_PHASES.filter((phase) => traitsFor(phase).replaceableThisRun),
+    ).toEqual(["AWAITING-ADJUDICATION"]);
+    expect(
+      ALL_PHASES.filter((phase) => traitsFor(phase).debris === "preserve-all"),
+    ).toEqual(["AWAITING-ADJUDICATION"]);
+  });
 });
 
 describe("projectForPersistence + adaptLoadedState round-trip", () => {

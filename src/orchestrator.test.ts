@@ -80,7 +80,16 @@ import {
   writeContractResponse,
   writeContractReview,
 } from "./test-support.js";
-import { readContractStatus } from "./artifacts.js";
+import {
+  readContractLockProvenance,
+  readContractStatus,
+} from "./artifacts.js";
+import {
+  decisionSetFingerprint,
+  impasseFingerprint,
+  type AdjudicationDecisionLog,
+} from "./adjudication.js";
+import type { ContractNegotiationOutcome } from "./contract-review.js";
 import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 
 /**
@@ -1279,10 +1288,14 @@ describe("generator scope escalation", () => {
     const declared = (slice: Slice): string =>
       `src/declared-${slice.number}.ts`;
     // What negotiation locked, before any revision touched it. The
-    // rollback has to reproduce this byte-for-byte: the LOCKED status
-    // *and* the unwidened file scope.
+    // rollback has to reproduce this byte-for-byte: the LOCKED status, the
+    // provenance stamp naming the round that accepted it (ADR 0055 §4),
+    // *and* the unwidened file scope. A failed revision therefore restores
+    // the previous lock's provenance too, rather than leaving the contract
+    // claiming it was produced by the revision that did not happen.
     const lockedContract = (slice: Slice): string =>
       "# Slice Contract\n\n**Status:** LOCKED\n\n" +
+      "**Lock-Provenance:** negotiation round 1\n\n" +
       `## Files expected to change\n- ${declared(slice)}\n`;
     const slices: Slice[] = [
       {
@@ -3136,13 +3149,28 @@ describe("round-scoped contract feedback", () => {
     expect(plannerRounds).toBe(beforeAcceptedLock.planner + 1);
     expect(evaluatorRounds).toBe(beforeAcceptedLock.evaluator);
     expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    // The lock names the impasse it settled, on its own line: the
+    // `**Status:** LOCKED` line agent prompts read is byte-identical to the
+    // one every other lock writes (ADR 0055 §4, ADR 0008).
+    const impasseFor = (raw: string) =>
+      impasseFingerprint(JSON.parse(raw) as ContractNegotiationOutcome);
+    const outcomePath = join(
+      ctx.absSliceDir,
+      "contract-negotiation-outcome.json",
+    );
+    const outcomeBefore = readFileSync(outcomePath, "utf-8");
     expect(readFileSync(contractPath, "utf-8")).toBe(
       contractBefore.replace(
         /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
-        "**Status:** LOCKED",
+        `**Status:** LOCKED\n\n**Lock-Provenance:** impasse-adjudication ` +
+          `${impasseFor(outcomeBefore)}`,
       ),
     );
-    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
+    // The applied mark supersedes the pending-lock witness the lock exit
+    // wrote, so the witness does not outlive the window it describes.
+    const appliedRecord = readFileSync(recordPath, "utf-8");
+    expect(JSON.parse(appliedRecord).applied).toBe(true);
+    expect(appliedRecord).not.toContain("pendingLock");
 
     // --- An implementation retry re-enters the IMPASSE branch. The applied
     // decisions are not applied a second time.
@@ -3211,6 +3239,186 @@ describe("round-scoped contract feedback", () => {
     ).toEqual({ phase: "LOCKED" });
     expect(plannerRounds).toBe(beforePlannerWins.planner);
     expect(evaluatorRounds).toBe(beforePlannerWins.evaluator);
+    expect(generatorRounds).toBe(0);
+
+    // --- A mixed exhaustion never reaches Phase B (ADR 0055 §1–2).
+    //
+    // Under §1 the classifier no longer produces this shape, so the record
+    // is planted: a stale or hostile artifact claiming IMPASSE over one
+    // contested and one OPEN blocker. The single completion predicate is
+    // the last line of defence — the contested finding is decidable and
+    // gets decided, the OPEN one cannot be, so the contract never locks
+    // and nothing is dispatched from it.
+    forgetRecordedDecisions();
+    const mixed = JSON.parse(outcomeBefore) as {
+      findings: Array<{ id: string; state: string; plannerPosition: unknown }>;
+    };
+    mixed.findings[1]!.state = "OPEN";
+    mixed.findings[1]!.plannerPosition = "UNRESOLVED";
+    writeFileSync(outcomePath, JSON.stringify(mixed), "utf-8");
+    const beforeMixed = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    const mixedParked = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+
+    expect(mixedParked.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      mixedParked.phase === "AWAITING-ADJUDICATION"
+        ? mixedParked.cause.summary
+        : "",
+    ).toContain("F-02");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(beforeMixed.gateCalls);
+    expect(plannerRounds).toBe(beforeMixed.planner);
+    expect(evaluatorRounds).toBe(beforeMixed.evaluator);
+    // The OPEN blocker is not adjudicable, so no human decision can move
+    // this shape on: the park is refused, not merely delayed.
+    const mixedRefused = await decide({
+      version: 1,
+      findingId: "F-02",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+    expect(mixedRefused.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      mixedRefused.phase === "AWAITING-ADJUDICATION"
+        ? mixedRefused.cause.summary
+        : "",
+    ).toContain("F-02 is not CONTESTED in the current IMPASSE");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(beforeMixed.gateCalls);
+
+    writeFileSync(outcomePath, outcomeBefore, "utf-8");
+
+    // --- A stale LOCKED contract is never inherited (A2, ADR 0055 §4–5).
+    //
+    // The shape the round-5 architect found: a `LOCKED` contract from
+    // before this impasse, beside a decision log that has to be discarded.
+    // The old crash-window shortcut read the bare `LOCKED` as "already
+    // applied" and dispatched generation from a contract no human decision
+    // had ever reached.
+    forgetRecordedDecisions();
+    // The mixed phase's refused decision is still on disk — a refusal
+    // deliberately leaves the human's bytes in place — and it is valid
+    // against the restored IMPASSE. Clear it so this phase starts from a
+    // genuinely undecided park.
+    rmSync(decisionPath, { force: true });
+    writeFileSync(
+      contractPath,
+      contractBefore.replace(
+        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
+        "**Status:** LOCKED",
+      ),
+      "utf-8",
+    );
+    writeFileSync(recordPath, "{ this log is not JSON", "utf-8");
+    const beforeStaleLock = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    const staleReopened = await runSliceNegotiate(ctx);
+
+    expect(staleReopened.phase).toBe("AWAITING-ADJUDICATION");
+    // Unstamped, so provably stale: reopened rather than trusted, and the
+    // slice parks for the decisions it never had.
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+    expect(plannerRounds).toBe(beforeStaleLock.planner);
+    expect(lockGateCalls).toBe(beforeStaleLock.gateCalls);
+
+    // Replacement decisions drive the full apply-and-lock — planner
+    // invoked, lock gate run — not an inheritance of the stale lock.
+    expect(
+      (
+        await decide({
+          version: 1,
+          findingId: "F-01",
+          winningPosition: "EVALUATOR",
+          author: "Ada",
+        })
+      ).phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    expect(
+      await decide({
+        version: 1,
+        findingId: "F-02",
+        winningPosition: "EVALUATOR",
+        author: "Ada",
+      }),
+    ).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeStaleLock.planner + 1);
+    expect(lockGateCalls).toBe(beforeStaleLock.gateCalls + 1);
+    expect(readContractLockProvenance(contractPath)).toEqual({
+      kind: "impasse-adjudication",
+      impasse: impasseFor(outcomeBefore),
+    });
+    const provenLock = readFileSync(contractPath, "utf-8");
+    const provenRecord = readFileSync(recordPath, "utf-8");
+    expect(JSON.parse(provenRecord).applied).toBe(true);
+
+    // --- Scenario Y: a corrupted receipt does not destroy a real lock.
+    //
+    // The same discarded log, but this time the lock is stamped with the
+    // current impasse — only the transaction's lock exit writes that, and
+    // only over a proven-complete decision set. The lock stands and the
+    // operator keeps their completed adjudication.
+    writeFileSync(recordPath, "{ the receipt got mangled", "utf-8");
+    const beforeLockStands = {
+      planner: plannerRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
+    expect(plannerRounds).toBe(beforeLockStands.planner);
+    expect(lockGateCalls).toBe(beforeLockStands.gateCalls);
+
+    // --- The crash window is proved by the witness, not by LOCKED.
+    //
+    // `lockContract` succeeded, the applied-marker write did not. The log
+    // is valid, complete and unapplied, and its witness matches its own
+    // decision set: the decisions did reach this lock, so it is marked
+    // rather than applied a second time (ADR 0055 §5).
+    const witnessed = JSON.parse(provenRecord) as AdjudicationDecisionLog;
+    witnessed.applied = false;
+    witnessed.pendingLock = {
+      decisions: decisionSetFingerprint(witnessed.decisions),
+      impasse: witnessed.impasse,
+    };
+    writeFileSync(recordPath, JSON.stringify(witnessed), "utf-8");
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
+    expect(plannerRounds).toBe(beforeLockStands.planner);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
+
+    // Without a matching witness the same shape is A2 again: the bare
+    // LOCKED proves nothing, so the decisions are applied in full.
+    const unwitnessed = { ...witnessed, applied: false };
+    delete unwitnessed.pendingLock;
+    writeFileSync(recordPath, JSON.stringify(unwitnessed), "utf-8");
+    const beforeReapply = {
+      planner: plannerRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeReapply.planner + 1);
+    expect(lockGateCalls).toBe(beforeReapply.gateCalls + 1);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
     expect(generatorRounds).toBe(0);
   });
 

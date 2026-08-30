@@ -28,6 +28,7 @@ import {
   type SliceContext,
 } from "./orchestrator.js";
 import * as gitModule from "./git.js";
+import * as migrationGate from "./migration-gate.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
@@ -1012,6 +1013,78 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(ctx.logger.getSliceProgress("70")).toEqual({ genRounds: 1, evalRounds: 1 });
     expect(existsSync(join(artifactDir, "qa-report-r1-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r1-a2.md"))).toBe(true);
+  });
+
+  /**
+   * ADR 0055 P1: `finishStuck` is the only constructor of a STUCK return
+   * in `runSliceExecute`, so every STUCK outcome ships a diagnosis. The
+   * migration-sync branch is the one that used to return STUCK inline and
+   * so shipped no `stuck.md` at all.
+   *
+   * New spawned scenario, deliberately: no existing fixture reaches the
+   * post-commit migration gate (the default validation mode is `skip`),
+   * and the state under test is exactly that late one — QA has passed and
+   * the work is already committed when the gate refuses. Kept to the
+   * cheapest shape that gets there: one generator round, one PASS review,
+   * no package.json so no gate subprocess.
+   */
+  it("ships a diagnosis when the post-commit migration gate refuses", async () => {
+    const repo = makeRepo();
+    // The feature branch sits behind the slice's work, which is what makes
+    // the migration diff — and the commit evidence in the diagnosis —
+    // non-empty. `makeContext` otherwise runs the slice on `main` itself.
+    git(repo, ["branch", "base", "main"]);
+    const migration = join("supabase", "migrations", "001_orders.sql");
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
+          writeFileSync(join(repo, migration), "-- orders\n", "utf-8");
+        } else if (options.role === "evaluator-qa") {
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = {
+      ...makeContext(repo, provider, { migrationValidation: "linked" }),
+      featBranch: "base",
+    };
+    artifactDir = ctx.absSliceDir;
+    vi.spyOn(migrationGate, "verifyMigrationSync").mockReturnValue({
+      ok: false,
+      error: "local migrations not applied to remote: 001",
+    });
+
+    await expect(runSliceExecute(ctx)).resolves.toEqual({
+      phase: "STUCK",
+      error:
+        "Migration sync check failed: local migrations not applied to remote: 001",
+    });
+
+    // The whole point: the outcome carries a diagnosis, and the diagnosis
+    // says which check refused rather than blaming exhausted rounds.
+    const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
+    expect(diagnosis).toContain(
+      "Migration sync check failed: local migrations not applied to remote: 001",
+    );
+    expect(diagnosis).not.toContain("implementation rounds");
+    // The gate runs after the commit, so the diagnosis has to describe a
+    // slice whose work is already on the branch — and it does: the commit
+    // evidence names it.
+    const tracked = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd: repo,
+      encoding: "utf-8",
+    });
+    expect(tracked).toContain("supabase/migrations/001_orders.sql");
+    expect(diagnosis).toContain("feat(#70): PRD 070 regression");
   });
 
   it("routes only the current unresolved findings to QA and generator retries", async () => {

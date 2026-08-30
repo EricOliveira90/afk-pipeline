@@ -74,6 +74,11 @@ the candidate merge exists, so no ref and no state file is touched:
    to such a worktree, so adoption refuses and names the paths rather than
    updating a tree it half-understands. Check out another branch there and
    run adopt again.
+6. **Worktree enumeration failed.** `Adoption refused: could not enumerate
+   worktrees — <error>`. Refusal 5 needs a *proved* absence, and an empty
+   list used to double as one, so a git that could not answer let the
+   `update-ref` through. The lister is injected at the command seam so this
+   path is tested (ADR 0055 seam 2 decision 8).
 
 Later refusals — a merge conflict, a failing base gate, a branch that moved
 during verification, a candidate worktree that survived teardown — are

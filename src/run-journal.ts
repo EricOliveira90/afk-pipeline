@@ -20,6 +20,7 @@ import {
 } from "./stage-durations.js";
 import {
   lifecycle,
+  traitsFor,
   type SliceAdoption,
   type FailurePhase,
   type SliceIdentity,
@@ -51,6 +52,12 @@ export type TerminalOutcome =
 export class RunJournal {
   private readonly slices = new Map<string, SliceLifecycle>();
   private readonly terminalSlices = new Set<string>();
+  /**
+   * Slices closed by a *replaceable* outcome — the adjudication park (ADR
+   * 0055 §9). Recorded exactly like a terminal, but a dispatch may replace
+   * it, so it is marked here instead of in `terminalSlices`.
+   */
+  private readonly parkedSlices = new Set<string>();
   private readonly logger: Logger;
   private featureBranch?: string;
   private fatalStreamError?: (error: unknown, origin: string) => void;
@@ -181,7 +188,12 @@ export class RunJournal {
         `RunJournal.trackSlice: terminal phase ${next.phase} must use recordTerminal`,
       );
     }
-    if (next.phase === "RUNNING") this.clearRecordsOnDispatch(next);
+    if (next.phase === "RUNNING") {
+      // Re-dispatch is the reopen (ADR 0055 §9): the parked mark goes here,
+      // and `clearRecordsOnDispatch` takes the persisted park with it.
+      this.parkedSlices.delete(next.ghIssue);
+      this.clearRecordsOnDispatch(next);
+    }
     this.slices.set(next.ghIssue, next);
   }
 
@@ -200,7 +212,11 @@ export class RunJournal {
    *
    * Nothing is cleared for a slice this run has already closed
    * (`recordTerminal`): a re-dispatch after a decided outcome would
-   * otherwise wipe a record this run is entitled to.
+   * otherwise wipe a record this run is entitled to. An adjudication park
+   * is not closed in that sense and *is* cleared here: per ADR 0055 §9 the
+   * park's durable estate is the slice directory and its branch, and the
+   * state record is only the announcement, so a dispatch that supersedes
+   * the park supersedes its record too.
    *
    * Best effort. A failed clear warns and the slice runs anyway — the
    * cost is the misleading record we already live with, and refusing to
@@ -247,20 +263,6 @@ export class RunJournal {
       sliceId.ghIssue,
       lifecycle.pass(sliceId, ZERO_PROGRESS, true, adoption),
     );
-  }
-
-  /**
-   * Reopen this run's adjudication park so a later terminal outcome can
-   * replace it. The next RUNNING transition clears the persisted park.
-   */
-  reopenAdjudication(ghIssue: string): void {
-    const current = this.slices.get(ghIssue);
-    if (current?.phase !== "AWAITING-ADJUDICATION") {
-      throw new Error(
-        `RunJournal.reopenAdjudication: slice ${ghIssue} is not awaiting adjudication`,
-      );
-    }
-    this.terminalSlices.delete(ghIssue);
   }
 
   /**
@@ -328,9 +330,16 @@ export class RunJournal {
   }
 
   /**
-   * Persist one terminal outcome. State lands first (ADR 0018), then the
-   * in-memory lifecycle, run.log line, and unchanged slice-outcome event.
-   * A completed call is idempotent for the rest of this run.
+   * Persist one terminal or parked outcome. State lands first (ADR 0018),
+   * then the in-memory lifecycle, run.log line, and unchanged
+   * slice-outcome event — one ordering for both classes.
+   *
+   * A completed terminal call is idempotent for the rest of this run. A
+   * park (ADR 0055 §9) is idempotent the same way for a re-record of the
+   * same park, but it is replaceable: a *different* outcome may only
+   * follow an intervening `trackSlice` dispatch, and asking for one
+   * without that dispatch throws rather than silently overwriting the
+   * record a human is being asked to act on (ADR 0031's protection).
    */
   recordTerminal(
     sliceId: SliceIdentity,
@@ -338,6 +347,14 @@ export class RunJournal {
   ): SliceLifecycle {
     const existing = this.slices.get(sliceId.ghIssue);
     if (this.terminalSlices.has(sliceId.ghIssue) && existing) return existing;
+    if (this.parkedSlices.has(sliceId.ghIssue) && existing) {
+      if (existing.phase === outcome.phase) return existing;
+      throw new Error(
+        `RunJournal.recordTerminal: slice ${sliceId.ghIssue} is parked ` +
+          `(lifecycle shows ${existing.phase}); ${outcome.phase} may only ` +
+          `follow a trackSlice dispatch that reopens the park`,
+      );
+    }
 
     const progress = progressOf(existing);
     const next = terminalLifecycle(sliceId, progress, outcome);
@@ -361,7 +378,11 @@ export class RunJournal {
       "error",
       { type: "slice-outcome", slice: next },
     );
-    this.terminalSlices.add(sliceId.ghIssue);
+    if (traitsFor(next.phase).replaceableThisRun) {
+      this.parkedSlices.add(sliceId.ghIssue);
+    } else {
+      this.terminalSlices.add(sliceId.ghIssue);
+    }
     return next;
   }
 

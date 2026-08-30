@@ -23,6 +23,7 @@ import {
   lockContract,
   reopenContract,
   readContractFiles,
+  readContractLockProvenance,
   readContractStatus,
   preserveNegotiationFailure,
   readReviewVerdict,
@@ -37,6 +38,7 @@ import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
   STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+  STUCK_DIAGNOSIS_REASON,
   STUCK_DIAGNOSIS_COMMIT_LOG,
 } from "./stuck-diagnosis.fixtures.js";
 
@@ -49,6 +51,7 @@ describe("renderStuckDiagnosis", () => {
         reverse: order === "reverse",
       });
       return renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         additionalArtifactReferences: STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
         commitLog: STUCK_DIAGNOSIS_COMMIT_LOG,
@@ -71,12 +74,28 @@ describe("renderStuckDiagnosis", () => {
     );
   });
 
+  it("leads with the reason the caller gave, not the round-exhaustion default", () => {
+    // ADR 0055 P1: the reason is the finalizer's parameter, so a late
+    // refusal (the post-commit migration gate) reads as itself.
+    const diagnosis = renderStuckDiagnosis({
+      reason: "Migration sync check failed: local migrations not applied",
+      reviewArchiveDir: join(tmpdir(), "afk-stuck-reviews-that-do-not-exist"),
+      commitLog: "",
+    });
+
+    expect(diagnosis).toContain(
+      "# Stuck diagnosis\n\n## Reason\n\nMigration sync check failed: local migrations not applied\n",
+    );
+    expect(diagnosis).not.toContain("implementation rounds");
+  });
+
   it("does not label additional-only round evidence as empty", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-stuck-additional-only-"));
     const reviewArchiveDir = join(root, "reviews");
     mkdirSync(reviewArchiveDir, { recursive: true });
     try {
       const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         additionalArtifactReferences: [".afk/gates/s01/ROUND-1-GATE.json"],
         commitLog: "",
@@ -149,6 +168,7 @@ describe("renderStuckDiagnosis", () => {
         "utf-8",
       );
       const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         commitLog: "",
       });
@@ -213,6 +233,7 @@ describe("renderStuckDiagnosis", () => {
       );
 
       const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         commitLog: "",
       });
@@ -1100,12 +1121,15 @@ describe("readContractStatus", () => {
   });
 });
 
+const NEGOTIATION_LOCK = { kind: "negotiation", round: 2 } as const;
+const IMPASSE = "a".repeat(64);
+
 describe("lockContract", () => {
   it("flips **Status:** NEGOTIATING to LOCKED in place", () => {
     withContractFile(
       `# Slice\n\n**Status:** NEGOTIATING\n**Negotiation round:** 1\n\n## Scope lock\nFoo.\n`,
       (p) => {
-        lockContract(p);
+        lockContract(p, NEGOTIATION_LOCK);
         expect(readContractStatus(p)).toBe("LOCKED");
         const content = readFileSync(p, "utf-8");
         expect(content).toContain("**Status:** LOCKED");
@@ -1121,7 +1145,7 @@ describe("lockContract", () => {
     withContractFile(
       `# Slice\n\n**Status:** LOCKED\n\n## Scope lock\nFoo.\n`,
       (p) => {
-        lockContract(p);
+        lockContract(p, NEGOTIATION_LOCK);
         const content = readFileSync(p, "utf-8");
         expect(content.match(/\*\*Status:\*\*/g)?.length).toBe(1);
       },
@@ -1130,8 +1154,70 @@ describe("lockContract", () => {
 
   it("inserts the Status field if absent (defensive — should never happen in prod)", () => {
     withContractFile(`# Slice Contract\n\n## Scope lock\nFoo.\n`, (p) => {
-      lockContract(p);
+      lockContract(p, NEGOTIATION_LOCK);
       expect(readContractStatus(p)).toBe("LOCKED");
+    });
+  });
+});
+
+/**
+ * The lock's provenance stamp (ADR 0055 Seam 1 decision 4). The whole
+ * point of the separate line is that the `**Status:** LOCKED` line agent
+ * prompts read (ADR 0008) stays byte-identical, so that is what these
+ * assert first.
+ */
+describe("lock provenance", () => {
+  it("stamps a separate line, leaving the Status line byte-identical", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n\n## Scope\nFoo.\n`, (p) => {
+      lockContract(p, { kind: "impasse-adjudication", impasse: IMPASSE });
+      expect(readFileSync(p, "utf-8")).toBe(
+        `# Slice\n\n**Status:** LOCKED\n\n` +
+          `**Lock-Provenance:** impasse-adjudication ${IMPASSE}\n\n` +
+          `## Scope\nFoo.\n`,
+      );
+      expect(readFileSync(p, "utf-8")).toMatch(/^\*\*Status:\*\* LOCKED$/m);
+    });
+  });
+
+  it("round-trips each provenance kind", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n`, (p) => {
+      for (const provenance of [
+        { kind: "impasse-adjudication", impasse: IMPASSE },
+        { kind: "focused-scope-revision", round: 3 },
+        { kind: "negotiation", round: 1 },
+      ] as const) {
+        lockContract(p, provenance);
+        expect(readContractLockProvenance(p)).toEqual(provenance);
+        // Relocking replaces the stamp rather than accumulating stamps.
+        expect(
+          readFileSync(p, "utf-8").match(/\*\*Lock-Provenance:\*\*/g)?.length,
+        ).toBe(1);
+      }
+    });
+  });
+
+  it("reads no provenance from an unstamped or unparseable lock", () => {
+    withContractFile(`# Slice\n\n**Status:** LOCKED\n`, (p) => {
+      expect(readContractLockProvenance(p)).toBeNull();
+    });
+    // Fail-closed: a stamp nothing here wrote proves nothing, so it reads
+    // exactly like no stamp at all.
+    withContractFile(
+      `# Slice\n\n**Status:** LOCKED\n\n**Lock-Provenance:** trust me\n`,
+      (p) => expect(readContractLockProvenance(p)).toBeNull(),
+    );
+    expect(readContractLockProvenance("/nonexistent/contract.md")).toBeNull();
+  });
+
+  it("takes the stamp back with the lock", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n\n## Scope\nFoo.\n`, (p) => {
+      const before = readFileSync(p, "utf-8");
+      lockContract(p, NEGOTIATION_LOCK);
+      reopenContract(p);
+      // A reopened contract has no current lock, so a line naming what
+      // produced the last one could only mislead the reconciliation.
+      expect(readContractLockProvenance(p)).toBeNull();
+      expect(readFileSync(p, "utf-8")).toBe(before);
     });
   });
 });
@@ -1160,9 +1246,9 @@ describe("reopenContract", () => {
 
   it("round-trips with lockContract", () => {
     withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n`, (p) => {
-      lockContract(p);
+      lockContract(p, NEGOTIATION_LOCK);
       reopenContract(p);
-      lockContract(p);
+      lockContract(p, NEGOTIATION_LOCK);
       expect(readContractStatus(p)).toBe("LOCKED");
       expect(
         readFileSync(p, "utf-8").match(/\*\*Status:\*\*/g)?.length,

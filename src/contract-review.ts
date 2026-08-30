@@ -715,7 +715,23 @@ export function buildContractReviewAttemptRecord(
   };
 }
 
-/** Classify final unresolved BLOCKING records at negotiation exhaustion. */
+/**
+ * Classify final unresolved BLOCKING records at negotiation exhaustion.
+ *
+ * Adjudicability decides the classification (ADR 0055 §1): an `IMPASSE` is
+ * an exhaustion a human can settle, so **every** unresolved blocker must be
+ * `CONTESTED` — two held positions to choose between. A single unresolved
+ * `OPEN` blocker makes it `NON_CONVERGENCE`, because no decision a human
+ * can record resolves an open finding: a park containing one satisfies no
+ * honest completion predicate and would park forever. ADR 0041 settles the
+ * choice between "park that cannot unlock" and "non-convergence that routes
+ * to the operator" — take the branch that cannot loop. The resumed slice
+ * renegotiates; if the open findings clear and the contests survive, that
+ * fresh exhaustion is a pure impasse and parks adjudicably.
+ *
+ * The record keeps every unresolved blocker either way: it is the audit of
+ * what the exhaustion contained, not only of what a human could decide.
+ */
 export function buildContractNegotiationOutcome(
   record: ContractReviewAttemptRecord,
 ): ContractNegotiationOutcome | undefined {
@@ -726,7 +742,7 @@ export function buildContractNegotiationOutcome(
 
   return {
     version: 1,
-    classification: findings.some((finding) => finding.state === "CONTESTED")
+    classification: findings.every((finding) => finding.state === "CONTESTED")
       ? "IMPASSE"
       : "NON_CONVERGENCE",
     round: record.round,

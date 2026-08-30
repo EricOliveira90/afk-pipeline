@@ -176,29 +176,139 @@ describe("RunJournal.recordTerminal", () => {
     }
   });
 
-  it("reopens an adjudication park for a later outcome in the same run", () => {
-    const repo = makeRepo();
-    const journal = new RunJournal(repo, "adjudication-resume");
+});
+
+/**
+ * The park is the journal's third transition class (ADR 0055 §9): recorded
+ * exactly like a terminal, but replaceable — and only by a dispatch.
+ * PENDING → RUNNING → parked; parked → RUNNING (re-dispatch) → terminal.
+ * These assert the machine at the journal's own interface, which is where
+ * the ADR 0031/0047 exception used to live as `reopenAdjudication`.
+ */
+describe("RunJournal park transition", () => {
+  const PARK = {
+    phase: "AWAITING-ADJUDICATION",
+    error: "waiting on F-01",
+  } as const;
+
+  function parkedJournal(repo: string, slug: string): RunJournal {
+    const journal = new RunJournal(repo, slug);
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "log").mockImplementation(() => {});
-    journal.recordTerminal(SLICE, {
-      phase: "AWAITING-ADJUDICATION",
-      error: "waiting on F-01",
+    journal.trackSlice(lifecycle.running(SLICE));
+    journal.recordTerminal(SLICE, PARK);
+    return journal;
+  }
+
+  function outcomeEvents(journal: RunJournal) {
+    return eventsOf(journal).filter((event) => event.type === "slice-outcome");
+  }
+
+  function parkLines(journal: RunJournal): string[] {
+    return readFileSync(join(journal.runDir, "run.log"), "utf-8")
+      .split("\n")
+      .filter((line) => line.includes("AWAITING-ADJUDICATION"));
+  }
+
+  it("re-recording the same park changes nothing observable", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "re-park");
+
+    const again = journal.recordTerminal(SLICE, {
+      ...PARK,
+      error: "waiting on F-01 (retried write)",
     });
 
-    journal.reopenAdjudication(SLICE.ghIssue);
+    expect(again).toEqual(journal.getSlice("40"));
+    expect(again.phase).toBe("AWAITING-ADJUDICATION");
+    expect(outcomeEvents(journal)).toHaveLength(1);
+    expect(parkLines(journal)).toHaveLength(1);
+    expect(loadRunState(repo, "re-park").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: PARK.error,
+    });
+  });
+
+  it("refuses a different terminal for a parked slice with no dispatch between", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "no-dispatch");
+
+    expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+      /slice 40 is parked \(lifecycle shows AWAITING-ADJUDICATION\); PASS may only follow a trackSlice dispatch/,
+    );
+    expect(loadRunState(repo, "no-dispatch").slices["40"]).toMatchObject({
+      phase: "AWAITING-ADJUDICATION",
+    });
+    expect(outcomeEvents(journal)).toHaveLength(1);
+  });
+
+  it("accepts a terminal after a dispatch, which cleared the persisted park", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "redispatch");
+
     journal.trackSlice(lifecycle.running(SLICE));
+    // ADR 0047: the dispatch owns the record from here, so the park's
+    // announcement is gone before this run's next outcome lands.
+    expect(loadRunState(repo, "redispatch").slices["40"]).toBeUndefined();
+
     journal.recordTerminal(SLICE, { phase: "PASS" });
 
-    expect(loadRunState(repo, "adjudication-resume").slices["40"]).toMatchObject(
-      {
-        phase: "PASS",
-        mergedToFeature: true,
-      },
-    );
-    expect(
-      eventsOf(journal).filter((event) => event.type === "slice-outcome"),
-    ).toHaveLength(2);
+    expect(loadRunState(repo, "redispatch").slices["40"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(outcomeEvents(journal)).toHaveLength(2);
+  });
+
+  /**
+   * Estate audit (plan step 9). The park-mark clear lives in `trackSlice`'s
+   * RUNNING branch alone, so "re-dispatch is the reopen" holds only while
+   * no other tracked phase clears it. PENDING and SKIPPED are tracking
+   * states, not dispatches: a slice queued or skipped after a park is
+   * still parked, and a terminal after one of them must still be refused.
+   * Pinned here rather than left to inspection — a future `trackSlice`
+   * caller that reached for PENDING would otherwise silently reopen a park
+   * that no run has re-dispatched.
+   */
+  it("only a RUNNING dispatch reopens a park — PENDING and SKIPPED leave the mark standing", () => {
+    for (const [phase, tracked] of [
+      ["PENDING", lifecycle.pending(SLICE)],
+      ["SKIPPED", lifecycle.skipped(SLICE)],
+    ] as const) {
+      const repo = makeRepo();
+      const journal = parkedJournal(repo, `non-running-${phase}`);
+
+      journal.trackSlice(tracked);
+
+      // The persisted park survives: only a dispatch clears the record.
+      expect(loadRunState(repo, `non-running-${phase}`).slices["40"]).toMatchObject({
+        phase: "AWAITING-ADJUDICATION",
+      });
+      // And the in-memory mark survives, so ADR 0031's protection still
+      // refuses a terminal that no dispatch earned. Matched loosely: the
+      // message renders the phase `trackSlice` last set, so it reads
+      // "parked (PENDING)" here — the refusal is the invariant, its
+      // wording is not.
+      expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+        /slice 40 is parked .*PASS may only follow a trackSlice dispatch/,
+      );
+    }
+  });
+
+  it("keeps a terminal after re-dispatch immutable — the park was the only replaceable class", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "terminal-final");
+    journal.trackSlice(lifecycle.running(SLICE));
+    journal.recordTerminal(SLICE, { phase: "STUCK", error: "still stuck" });
+
+    const again = journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: "second park attempt",
+    });
+
+    expect(again).toMatchObject({ phase: "STUCK", error: "still stuck" });
+    expect(outcomeEvents(journal)).toHaveLength(2);
   });
 });
 

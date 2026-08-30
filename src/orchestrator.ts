@@ -20,6 +20,10 @@ import type { AgentProvider, InvokeOptions } from "./agent-provider.js";
 import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
+import {
+  withContractTransaction,
+  type ContractTransaction,
+} from "./contract-transaction.js";
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
@@ -157,13 +161,18 @@ import {
 import {
   ADJUDICATION_DECISIONS_FILENAME,
   ADJUDICATION_FILENAME,
+  adjudicatedLockIsProven,
   appendAdjudicationDecision,
+  impasseFingerprint,
   loadAdjudicationDecisionLog,
   markAdjudicationDecisionsApplied,
   parseAdjudication,
+  reconcileDiscardedDecisionLog,
   undecidedContestedFindingIds,
+  unresolvedBlockingFindingIds,
   waitForAdjudication,
   type Adjudication,
+  type AdjudicationWaitResult,
 } from "./adjudication.js";
 import {
   advanceQAReviewHistory,
@@ -1103,6 +1112,11 @@ function archiveContractReviewAttempt(
  * only copy, so a failure that leaves the contract reopened and the
  * manifest deleted has destroyed the state a restart would archive.
  *
+ * The capture/restore/announce mechanics and the lock exit are
+ * `withContractTransaction`'s, shared with the adjudication apply path
+ * (ADR 0055 Seam 1 decision 3). This function is what is left once they
+ * are factored out: the revision protocol itself.
+ *
  * The escalation artifact is archived by the caller *before* this runs
  * (see `runSliceExecute`), so the evidence for a hand-declaration
  * survives the rollback either way.
@@ -1114,58 +1128,30 @@ async function runFocusedScopeRevision(
   | { phase: "LOCKED"; manifest: AcceptanceManifest }
   | { phase: "ERROR"; error: string }
 > {
-  const contractPath = join(ctx.absSliceDir, "contract.md");
-  const manifestPath = join(
-    ctx.absSliceDir,
-    ACCEPTANCE_MANIFEST_FILENAME,
+  return await withContractTransaction(
+    ctx,
+    {
+      reason: "focused scope revision did not complete",
+      qualifier: "the previously accepted",
+    },
+    (tx) => reviseAcceptedContract(ctx, escalation, tx),
   );
-  const previousContract = readFileSync(contractPath, "utf-8");
-  const previousManifestText = readFileSync(manifestPath, "utf-8");
-  let accepted = false;
-  try {
-    return await reviseAcceptedContract(ctx, escalation, {
-      contractPath,
-      manifestPath,
-      previousContract,
-      previousManifestText,
-      onAccepted: () => {
-        accepted = true;
-      },
-    });
-  } finally {
-    if (!accepted) {
-      writeFileSync(contractPath, previousContract, "utf-8");
-      writeFileSync(manifestPath, previousManifestText, "utf-8");
-      ctx.logger.phase(
-        `${ctx.tag}: focused scope revision did not complete — restored the ` +
-          `previously accepted contract.md and ${ACCEPTANCE_MANIFEST_FILENAME}`,
-      );
-    }
-  }
 }
 
 async function reviseAcceptedContract(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
-  lock: {
-    contractPath: string;
-    manifestPath: string;
-    previousContract: string;
-    previousManifestText: string;
-    onAccepted: () => void;
-  },
+  tx: ContractTransaction,
 ): Promise<
   | { phase: "LOCKED"; manifest: AcceptanceManifest }
   | { phase: "ERROR"; error: string }
 > {
   const { config, slice, logger, invoke } = ctx;
-  const {
-    contractPath,
-    manifestPath,
-    previousContract,
-    previousManifestText,
-  } = lock;
+  const { contractPath, manifestPath, previousContract } = tx;
   const previousManifest = loadAcceptanceManifest(ctx.absSliceDir);
+  // `loadAcceptanceManifest` just proved the accepted manifest exists, so
+  // the transaction captured its bytes before the reopen below.
+  const previousManifestText = tx.previousManifestText ?? "";
   const reviewArchiveDir = artifacts.contractReviewArchiveDir(
     config.repoRoot,
     pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
@@ -1357,19 +1343,20 @@ async function reviseAcceptedContract(
     };
   }
 
-  artifacts.lockContract(contractPath);
-  const objection = ctx.onContractLocked?.(contractPath) ?? null;
-  if (objection !== null) {
+  const locked = tx.lock({
+    provenance: { kind: "focused-scope-revision", round: revisionRound },
+  });
+  if (!locked.locked) {
     logger.phase(
-      `${ctx.tag}: focused scope revision lock refused — ${objection}`,
+      `${ctx.tag}: focused scope revision lock refused — ${locked.refusal}`,
       "error",
     );
     return {
       phase: "ERROR",
-      error: `Focused scope revision lock refused: ${objection}`,
+      error: `Focused scope revision lock refused: ${locked.refusal}`,
     };
   }
-  lock.onAccepted();
+  tx.onAccepted();
   logger.phase(`${ctx.tag}: focused scope revision LOCKED`);
   return { phase: "LOCKED", manifest: revisedManifest };
 }
@@ -1626,7 +1613,8 @@ function negotiateImpasseCause(
     summary:
       `negotiate: contract negotiation reached IMPASSE after ${outcome.round} round(s) — ` +
       `contested blocking finding${contestedIds.length === 1 ? "" : "s"} ` +
-      `${contestedIds.join(", ")} require human adjudication`,
+      `${contestedIds.join(", ")} ` +
+      `${contestedIds.length === 1 ? "requires" : "require"} human adjudication`,
   };
 }
 
@@ -2109,9 +2097,13 @@ export async function runSliceNegotiate(
  *    the same authoritative `contract.md` + `acceptance-manifest.json` pair
  *    as `runFocusedScopeRevision`, so it owes the same guarantee (ADR
  *    0051): both files are captured before the planner runs and restored
- *    byte-for-byte on every exit that is not an accepted lock. A successful
- *    lock marks the record applied, so a later implementation retry that
- *    re-enters this branch does not apply the same decisions a second time.
+ *    byte-for-byte on every exit that is not an accepted lock. It is
+ *    literally the same transaction now — `withContractTransaction`, shared
+ *    with the revision path (ADR 0055 Seam 1 decision 3), including the one
+ *    lock exit that runs the completion predicate and the mechanical lock
+ *    gate. A successful lock marks the record applied, so a later
+ *    implementation retry that re-enters this branch does not apply the same
+ *    decisions a second time.
  *
  * The decision record itself is *not* part of the transaction — like the
  * escalation archive in ADR 0051, human input must outlive a mechanical
@@ -2126,17 +2118,46 @@ async function runImpasseAdjudication(
   const { rawOutcome, outcome } = impasse;
   const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
   const contractPath = join(ctx.absSliceDir, "contract.md");
-  const manifestPath = join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME);
   const parkedCause = negotiateImpasseCause(outcome, "REVISE");
 
   const loaded = loadAdjudicationDecisionLog(ctx.absSliceDir, outcome);
   let decisionLog = loaded.log;
   if (loaded.discarded) {
-    logger.phase(
+    // The log is gone either way. What a `LOCKED` contract beside it means
+    // is decided by the lock's own provenance stamp, not by policy
+    // (ADR 0055 §4): blanket trust is the A2 defect, and blanket reopening
+    // would throw away a human's completed adjudication every time its
+    // receipt got corrupted.
+    const reconciliation = reconcileDiscardedDecisionLog({
+      locked: artifacts.readContractStatus(contractPath) === "LOCKED",
+      provenance: artifacts.readContractLockProvenance(contractPath),
+      outcome,
+    });
+    const discarded =
       `${ctx.tag}: discarded ${ADJUDICATION_DECISIONS_FILENAME} — ` +
-        `${loaded.discarded}; every contested finding must be adjudicated again`,
-      "error",
-    );
+      `${loaded.discarded}`;
+    if (reconciliation.action === "lock-stands") {
+      logger.phase(
+        `${discarded}; ${reconciliation.because}, so the lock stands — only ` +
+          `the record of which decisions produced it is lost`,
+        "error",
+      );
+      return { phase: "LOCKED" };
+    }
+    if (reconciliation.action === "reopen") {
+      artifacts.reopenContract(contractPath);
+      logger.phase(
+        `${discarded}; ${reconciliation.because}, so the LOCKED contract is ` +
+          `provably stale and has been reopened; every contested finding must ` +
+          `be adjudicated again`,
+        "error",
+      );
+    } else {
+      logger.phase(
+        `${discarded}; every contested finding must be adjudicated again`,
+        "error",
+      );
+    }
   }
 
   // --- Consume whatever the human has written since the last dispatch.
@@ -2185,14 +2206,27 @@ async function runImpasseAdjudication(
   const decidedIds = decisionLog.decisions.map(
     (recorded) => recorded.decision.findingId,
   );
-  const undecided = undecidedContestedFindingIds(outcome, decisionLog);
+  // The single completion predicate (ADR 0055 §2) is the only thing the lock
+  // path consults: every unresolved blocking finding, not just the contested
+  // ones. The contested subset is rendered alongside it because that is what
+  // the courier can still act on — and, when the two disagree, saying so is
+  // the whole point of keeping the predicate wider than the classifier.
+  const undecided = unresolvedBlockingFindingIds(outcome, decisionLog);
   if (undecided.length > 0) {
+    const contested = undecidedContestedFindingIds(outcome, decisionLog);
+    const inadjudicable = undecided.filter((id) => !contested.includes(id));
     const summary =
       `${parkedCause.summary}; decided ${decidedIds.join(", ")} — ` +
-      `contested blocking finding${undecided.length === 1 ? "" : "s"} ` +
+      `unresolved blocking finding${undecided.length === 1 ? "" : "s"} ` +
       `${undecided.join(", ")} still ` +
       `${undecided.length === 1 ? "requires" : "require"} human adjudication ` +
-      `before the contract can lock`;
+      `before the contract can lock` +
+      (inadjudicable.length > 0
+        ? `; ${inadjudicable.join(", ")} ` +
+          `${inadjudicable.length === 1 ? "is" : "are"} not CONTESTED, so no ` +
+          `decision can settle ${inadjudicable.length === 1 ? "it" : "them"} ` +
+          `— this exhaustion should not have been classified IMPASSE`
+        : "");
     logger.phase(`${ctx.tag}: ${summary}`, "error");
     return {
       phase: "AWAITING-ADJUDICATION",
@@ -2200,14 +2234,18 @@ async function runImpasseAdjudication(
     };
   }
 
-  // --- Every contested finding is decided. Apply once, ever.
+  // --- Every unresolved blocking finding is decided. Apply once, ever.
   //
   // A LOCKED contract with a complete record and no applied marker is the
-  // crash window between `lockContract` and the marker write: the decisions
-  // did reach an accepted lock, so it is marked rather than re-applied.
+  // crash window between `lockContract` and the marker write — but only if
+  // the record's pending-lock witness proves it (ADR 0055 §5). A bare
+  // LOCKED is what let a stale lock be inherited (A2), so it no longer
+  // shortcuts anything: without proof the decisions are applied in full.
   if (
-    decisionLog.applied ||
-    artifacts.readContractStatus(contractPath) === "LOCKED"
+    adjudicatedLockIsProven({
+      locked: artifacts.readContractStatus(contractPath) === "LOCKED",
+      log: decisionLog,
+    })
   ) {
     if (!decisionLog.applied) {
       decisionLog = markAdjudicationDecisionsApplied(
@@ -2245,173 +2283,178 @@ async function runImpasseAdjudication(
     };
   }
 
-  const lockAdjudicatedContract = (
-    previousManifest?: AcceptanceManifest,
-  ): NegotiateOutcome => {
-    try {
-      const manifest = loadAcceptanceManifest(ctx.absSliceDir);
-      if (previousManifest) {
-        validateAcceptanceManifestStability(previousManifest, manifest);
-      }
-      validateAcceptanceManifestCoverage(
-        readFileSync(contractPath, "utf-8"),
-        manifest,
-        contractPath,
-      );
-      validateAcceptanceManifestBindings(
-        manifest,
-        resolveBaseGateDeclarations(ctx.worktreeDir),
-      );
-    } catch (error) {
-      const defect = error instanceof Error ? error.message : String(error);
-      logger.phase(
-        `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
-        "error",
-      );
-      return {
-        phase: "ESCALATE",
-        cause: {
-          kind: "verdict",
-          verdict: "REVISE",
-          summary: `adjudication: contract lock refused — ${defect}`,
-        },
+  return await withContractTransaction(
+    ctx,
+    {
+      reason: "adjudication was not applied",
+      qualifier: "the pre-apply",
+      note:
+        `the recorded decisions for ${decidedIds.join(", ")} are ` +
+        `preserved`,
+    },
+    async (tx): Promise<NegotiateOutcome> => {
+      const lockAdjudicatedContract = (
+        previousManifest?: AcceptanceManifest,
+      ): NegotiateOutcome => {
+        try {
+          const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+          if (previousManifest) {
+            validateAcceptanceManifestStability(previousManifest, manifest);
+          }
+          validateAcceptanceManifestCoverage(
+            readFileSync(contractPath, "utf-8"),
+            manifest,
+            contractPath,
+          );
+          validateAcceptanceManifestBindings(
+            manifest,
+            resolveBaseGateDeclarations(ctx.worktreeDir),
+          );
+        } catch (error) {
+          const defect = error instanceof Error ? error.message : String(error);
+          logger.phase(
+            `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
+            "error",
+          );
+          return {
+            phase: "ESCALATE",
+            cause: {
+              kind: "verdict",
+              verdict: "REVISE",
+              summary: `adjudication: contract lock refused — ${defect}`,
+            },
+          };
+        }
+
+        const locked = tx.lock({
+          provenance: {
+            kind: "impasse-adjudication",
+            impasse: impasseFingerprint(outcome),
+          },
+          completion: { outcome, log: decisionLog },
+        });
+        if (!locked.locked) {
+          logger.phase(
+            `${ctx.tag}: adjudicated contract lock refused — ${locked.refusal}`,
+            "error",
+          );
+          return {
+            phase: "ESCALATE",
+            cause: {
+              kind: "verdict",
+              verdict: "REVISE",
+              summary: `adjudication: contract lock refused — ${locked.refusal}`,
+            },
+          };
+        }
+        logger.phase(
+          `${ctx.tag}: accepted adjudication for ${decidedIds.join(", ")}; ` +
+            `contract LOCKED`,
+        );
+        return { phase: "LOCKED" };
       };
-    }
 
-    artifacts.lockContract(contractPath);
-    const objection = ctx.onContractLocked?.(contractPath) ?? null;
-    if (objection !== null) {
-      // No local reopen: the transaction below restores the pre-apply
-      // contract byte-for-byte, which is strictly more than reopening the
-      // status line of a contract the planner may also have rewritten.
-      logger.phase(
-        `${ctx.tag}: adjudicated contract lock refused — ${objection}`,
-        "error",
+      // A decision the planner has nothing to do for — the contract already
+      // states the planner's position — locks without an invocation. One
+      // invocation applies every other decision together.
+      const plannerApplied = decisionLog.decisions.filter(
+        (recorded) =>
+          !("winningPosition" in recorded.decision) ||
+          recorded.decision.winningPosition !== "PLANNER",
       );
-      return {
-        phase: "ESCALATE",
-        cause: {
-          kind: "verdict",
-          verdict: "REVISE",
-          summary: `adjudication: contract lock refused — ${objection}`,
-        },
-      };
-    }
-    logger.phase(
-      `${ctx.tag}: accepted adjudication for ${decidedIds.join(", ")}; ` +
-        `contract LOCKED`,
-    );
-    return { phase: "LOCKED" };
-  };
 
-  // A decision the planner has nothing to do for — the contract already
-  // states the planner's position — locks without an invocation. One
-  // invocation applies every other decision together.
-  const plannerApplied = decisionLog.decisions.filter(
-    (recorded) =>
-      !("winningPosition" in recorded.decision) ||
-      recorded.decision.winningPosition !== "PLANNER",
-  );
-
-  const contractBefore = readFileSync(contractPath, "utf-8");
-  const manifestBefore = existsSync(manifestPath)
-    ? readFileSync(manifestPath, "utf-8")
-    : null;
-  let accepted = false;
-  try {
-    if (plannerApplied.length > 0) {
-      const localSliceContent = readSliceFile(config.prdDir, ctx.slice.number);
-      const sliceBodyNote = localSliceContent
-        ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
-        : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
-      const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
-      logger.phase(
-        `${ctx.tag}: applying ${decisionLog.decisions.length} human ` +
-          `adjudication(s) with one planner invocation...`,
-        "error",
-        {
-          type: "phase-started",
+      if (plannerApplied.length > 0) {
+        const localSliceContent = readSliceFile(
+          config.prdDir,
+          ctx.slice.number,
+        );
+        const sliceBodyNote = localSliceContent
+          ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
+          : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
+        const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        // An unproven LOCKED contract reaching here is stale debris the
+        // reconciliation above could not clear (its log validated, so the
+        // discard path never ran). The planner must not be handed a
+        // contract still claiming LOCKED while its impasse is being
+        // settled (ADR 0008); the rollback restores these bytes if the
+        // apply fails, so nothing is lost by reopening now.
+        if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+          artifacts.reopenContract(contractPath);
+        }
+        logger.phase(
+          `${ctx.tag}: applying ${decisionLog.decisions.length} human ` +
+            `adjudication(s) with one planner invocation...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: ctx.slice.ghIssue,
+            sliceNumber: ctx.slice.number,
+            agent: "planner",
+          },
+        );
+        const plannerLog = logger.agentLog(ctx.slice.number, "planner");
+        try {
+          await ctx
+            .invoke({
+              role: "planner",
+              prompt: renderPrompt("planner", {
+                GH_ISSUE: ctx.slice.ghIssue,
+                SPECS_DIR: ctx.relSpecsDir,
+                SLICE_DIR: ctx.relSliceDir,
+                ROUND: 2,
+                RELEVANT_FILES: ctx.relevantFilesBlock,
+                SLICE_BODY: sliceBodyNote,
+                REVISION_NOTE: [
+                  "A human has adjudicated the current contract impasse.",
+                  "Apply every decision below exactly once, and only to the",
+                  "finding each one names. Do not re-adjudicate any of them.",
+                  "",
+                  "Current IMPASSE record (verbatim):",
+                  rawOutcome,
+                  "Human adjudications (verbatim, one per decided finding):",
+                  ...decisionLog.decisions.map((recorded) => recorded.raw),
+                ].join("\n"),
+                CONTRACT_RESPONSE_NOTE:
+                  `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
+                MIGRATION_RESERVATION: migrationReservationBlock(
+                  config,
+                  ctx.slice.ghIssue,
+                ),
+                BASE_GATE_CATALOG: formatBaseGateCatalog(
+                  resolveBaseGateDeclarations(ctx.worktreeDir),
+                ),
+              }),
+              cwd: ctx.worktreeDir,
+              maxDurationMs: config.maxAgentDurationMs,
+              logStream: plannerLog,
+            })
+            .finally(() => closeAgentLog(plannerLog));
+        } catch (error) {
+          if (isCancelled(error, config.signal)) return { phase: "CANCELLED" };
+          return { phase: "ERROR", cause: internalNegotiateCause(error) };
+        }
+        logger.event({
+          type: "phase-ended",
           ghIssue: ctx.slice.ghIssue,
           sliceNumber: ctx.slice.number,
           agent: "planner",
-        },
-      );
-      const plannerLog = logger.agentLog(ctx.slice.number, "planner");
-      try {
-        await ctx
-          .invoke({
-            role: "planner",
-            prompt: renderPrompt("planner", {
-              GH_ISSUE: ctx.slice.ghIssue,
-              SPECS_DIR: ctx.relSpecsDir,
-              SLICE_DIR: ctx.relSliceDir,
-              ROUND: 2,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SLICE_BODY: sliceBodyNote,
-              REVISION_NOTE: [
-                "A human has adjudicated the current contract impasse.",
-                "Apply every decision below exactly once, and only to the",
-                "finding each one names. Do not re-adjudicate any of them.",
-                "",
-                "Current IMPASSE record (verbatim):",
-                rawOutcome,
-                "Human adjudications (verbatim, one per decided finding):",
-                ...decisionLog.decisions.map((recorded) => recorded.raw),
-              ].join("\n"),
-              CONTRACT_RESPONSE_NOTE:
-                `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
-              MIGRATION_RESERVATION: migrationReservationBlock(
-                config,
-                ctx.slice.ghIssue,
-              ),
-              BASE_GATE_CATALOG: formatBaseGateCatalog(
-                resolveBaseGateDeclarations(ctx.worktreeDir),
-              ),
-            }),
-            cwd: ctx.worktreeDir,
-            maxDurationMs: config.maxAgentDurationMs,
-            logStream: plannerLog,
-          })
-          .finally(() => closeAgentLog(plannerLog));
-      } catch (error) {
-        if (isCancelled(error, config.signal)) return { phase: "CANCELLED" };
-        return { phase: "ERROR", cause: internalNegotiateCause(error) };
+        });
+        const locked = lockAdjudicatedContract(preApplyManifest);
+        if (locked.phase === "LOCKED") {
+          markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
+          tx.onAccepted();
+        }
+        return locked;
       }
-      logger.event({
-        type: "phase-ended",
-        ghIssue: ctx.slice.ghIssue,
-        sliceNumber: ctx.slice.number,
-        agent: "planner",
-      });
-      const locked = lockAdjudicatedContract(preApplyManifest);
+
+      const locked = lockAdjudicatedContract();
       if (locked.phase === "LOCKED") {
         markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
-        accepted = true;
+        tx.onAccepted();
       }
       return locked;
-    }
-
-    const locked = lockAdjudicatedContract();
-    if (locked.phase === "LOCKED") {
-      markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
-      accepted = true;
-    }
-    return locked;
-  } finally {
-    if (!accepted) {
-      writeFileSync(contractPath, contractBefore, "utf-8");
-      if (manifestBefore === null) {
-        rmSync(manifestPath, { force: true });
-      } else {
-        writeFileSync(manifestPath, manifestBefore, "utf-8");
-      }
-      logger.phase(
-        `${ctx.tag}: adjudication was not applied — restored the pre-apply ` +
-          `contract.md and ${ACCEPTANCE_MANIFEST_FILENAME}; the recorded ` +
-          `decisions for ${decidedIds.join(", ")} are preserved`,
-      );
-    }
-  }
+    },
+  );
 }
 
 async function negotiateAttempt(
@@ -2993,7 +3036,16 @@ async function negotiateAttempt(
         lastVerdict = verdict;
         lastFindings = review.findings;
         if (verdict === "ACCEPT") {
-          artifacts.lockContract(contractPath);
+          // Deliberately not withContractTransaction: ordinary negotiation
+          // has no previously-accepted contract/manifest pair to capture
+          // and restore — the pair being written IS the first accepted
+          // one. The stamp keeps lock provenance uniform (ADR 0055 §4);
+          // the two revision paths, which do mutate an accepted pair, go
+          // through the shared transaction's single lock exit.
+          artifacts.lockContract(contractPath, {
+            kind: "negotiation",
+            round,
+          });
           contractStatus = "LOCKED";
         } else {
           contractStatus = artifacts.readContractStatus(contractPath);
@@ -3740,17 +3792,23 @@ export async function runSliceExecute(
     pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
     slice.number,
   );
-  const finishStuck = (): Extract<TerminalOutcome, { phase: "STUCK" }> => {
+  /**
+   * The only constructor of a STUCK return in this function (ADR 0055 P1).
+   * Every reason routes through here, so every STUCK outcome ships the
+   * code-assembled `stuck.md` slice 04 promised — including the ones that
+   * refuse late, after QA passed and the work was committed.
+   */
+  const finishStuck = (
+    reason = `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+  ): Extract<TerminalOutcome, { phase: "STUCK" }> => {
     logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
     artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
+      reason,
       reviewArchiveDir,
       additionalArtifactReferences: stuckReferences,
       commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
     });
-    return {
-      phase: "STUCK",
-      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-    };
+    return { phase: "STUCK", error: reason };
   };
   /**
    * A STUCK resume's `stuck.md` is the operator's audit record of why the
@@ -4256,10 +4314,12 @@ export async function runSliceExecute(
               migrationMode,
             );
             if (!migrationCheck.ok) {
-              return {
-                phase: "STUCK",
-                error: `Migration sync check failed: ${migrationCheck.error}`,
-              };
+              // Late refusal: QA passed and the work is already committed,
+              // so the diagnosis describes a slice whose branch holds
+              // finished work that one check would not certify.
+              return finishStuck(
+                `Migration sync check failed: ${migrationCheck.error}`,
+              );
             }
           }
 
@@ -4772,10 +4832,18 @@ export async function runPipeline(
   // merge-only recovery pass tries the merge again before any agent runs.
   const mergePending = new Set<string>();
   const awaitingAdjudication = new Set<string>();
+  // Live bounded waits, one per parked slice. Recording a park starts the
+  // wait; nothing awaits it until the scheduler runs out of runnable work
+  // (ADR 0055 §7) — a human's think-time on one slice is not a dependency
+  // of anyone else's (ADR 0024).
   const adjudicationWaits = new Map<
     string,
     ReturnType<typeof waitForAdjudication>
   >();
+  // Results of waits that have already resolved. The idle wait races the
+  // live set, then drains everything settled by then, so a wave picks up
+  // every decision that arrived rather than one per idle round-trip.
+  const settledAdjudications = new Map<string, AdjudicationWaitResult>();
 
   /**
    * A slice this run will not dispatch again, for any reason short of
@@ -4957,15 +5025,25 @@ export async function runPipeline(
       logger.phase(
         `${sliceContext.tag}: waiting up to ${waitMs}ms for ${ADJUDICATION_FILENAME}`,
       );
-      adjudicationWaits.set(
-        id,
-        waitForAdjudication({
-          sliceDir: sliceContext.absSliceDir,
-          waitMs,
-          pollMs:
-            config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
-          signal,
-        }),
+      const wait = waitForAdjudication({
+        sliceDir: sliceContext.absSliceDir,
+        waitMs,
+        pollMs:
+          config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
+        signal,
+      });
+      adjudicationWaits.set(id, wait);
+      // Record the result as it lands so the idle wait can drain every
+      // decision that arrived, not just the one that won its race. The
+      // rejection arm is deliberately empty: the idle wait awaits the same
+      // promise and re-throws there, and a wait the run never reaches
+      // (abort, or an exit before idle) must not become an unhandled
+      // rejection that takes the process down after the summary.
+      void wait.then(
+        (result) => {
+          settledAdjudications.set(id, result);
+        },
+        () => {},
       );
     }
   };
@@ -5075,15 +5153,12 @@ export async function runPipeline(
     recoveredMerges.add(id);
   }
 
-  let waveNumber = 0;
-  while (true) {
-    waveNumber++;
-
-    // Wave-transition watchdog: race the readiness check against a
-    // timeout. If the event loop is blocked (dangling promise,
-    // unresolved stream), the timeout rejects and we crash with
-    // diagnostics.
-    const readyResult = await Promise.race([
+  // Wave-transition watchdog: race the readiness check against a
+  // timeout. If the event loop is blocked (dangling promise,
+  // unresolved stream), the timeout rejects and we crash with
+  // diagnostics.
+  const readyOrHang = (waveNumber: number): Promise<string[]> =>
+    Promise.race([
       Promise.resolve().then(() => {
         const ready = dag.ready(completed);
         return ready.filter((id) => !heldBack(id));
@@ -5100,8 +5175,133 @@ export async function runPipeline(
       }),
     ]);
 
-    const toRun = readyResult;
-    if (toRun.length === 0) break;
+  // One abort promise for the whole run, created the first time the
+  // pipeline actually idles on a human. The idle wait races it so
+  // cancellation ends the wait immediately (ADR 0003, ADR 0055 §7);
+  // nothing is lost, because the park is durable on disk.
+  let abortSignalled: Promise<"aborted"> | undefined;
+  const abortRace = (): Promise<"aborted"> => {
+    if (!signal) {
+      // No signal to race: a promise that never settles leaves the live
+      // waits as the only arms of the race.
+      abortSignalled ??= new Promise<"aborted">(() => {});
+      return abortSignalled;
+    }
+    abortSignalled ??= new Promise<"aborted">((resolve) => {
+      if (signal.aborted) {
+        resolve("aborted");
+        return;
+      }
+      signal.addEventListener("abort", () => resolve("aborted"), {
+        once: true,
+      });
+    });
+    return abortSignalled;
+  };
+
+  /**
+   * Wait for a human decision — but only once there is nothing else to
+   * run. Every ready wave has already been dispatched by the time this is
+   * called, so the only thing a park can delay is its own dependents
+   * (ADR 0055 §7; ADR 0024's rule applied to parks).
+   *
+   * The wall-clock ceiling (ADR 0019) deliberately keeps running while the
+   * pipeline idles here: the bounded wait is already sized by
+   * configuration, and a park surviving run death is the point of the
+   * durable park — exempting human think-time from the ceiling would let a
+   * run live forever.
+   *
+   * - `"progress"` — at least one slice left `awaitingAdjudication`; its
+   *   re-dispatch on the next loop turn is the park's reopen (step 4:
+   *   `trackSlice` clears the mark and the persisted record).
+   * - `"aborted"` — cancellation won the race; the caller runs the normal
+   *   sweep and leaves every park untouched.
+   * - `"exhausted"` — no live wait remains and nothing became runnable.
+   */
+  const awaitAdjudicationAtIdle = async (): Promise<
+    "progress" | "aborted" | "exhausted"
+  > => {
+    while (adjudicationWaits.size > 0) {
+      if (signal?.aborted) return "aborted";
+      logger.phase(
+        `[afk] No runnable slices; waiting on ${adjudicationWaits.size} ` +
+          `adjudication decision(s): ` +
+          `${[...adjudicationWaits.keys()].map((id) => `#${id}`).join(", ")}`,
+      );
+      await Promise.race([...adjudicationWaits.values(), abortRace()]);
+      if (signal?.aborted) return "aborted";
+
+      // Drain everything that resolved by now, not just the race winner:
+      // several decisions can land while one wave runs, and each should
+      // reach the same next wave.
+      let progressed = false;
+      for (const [id, result] of settledAdjudications) {
+        settledAdjudications.delete(id);
+        adjudicationWaits.delete(id);
+        if (result.status === "accepted") {
+          // Dropping the hold-back is the whole reopen: the next wave
+          // dispatches the slice, and that dispatch clears the park's mark
+          // and persisted record in the journal (ADR 0055 §9).
+          awaitingAdjudication.delete(id);
+          logger.phase(
+            `[afk] Slice #${id}: valid adjudication received — redispatching`,
+          );
+          progressed = true;
+        } else if (result.status === "expired") {
+          if (result.defect) {
+            logger.phase(
+              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
+            );
+          }
+          logger.phase(
+            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
+          );
+        }
+      }
+      if (progressed) return "progress";
+    }
+    return "exhausted";
+  };
+
+  // Mark anything not yet completed/failed as CANCELLED. Worktrees are
+  // preserved on disk so a re-run resumes from the artifact state, and a
+  // parked slice keeps its own phase — its estate is durable (ADR 0003,
+  // ADR 0055 Seam 2).
+  const sweepCancelled = (): void => {
+    for (const [id, slice] of dag.slices) {
+      if (slice.type === "HITL") continue;
+      if (
+        completed.has(id) ||
+        failed.has(id) ||
+        awaitingAdjudication.has(id)
+      ) {
+        continue;
+      }
+      const branch = sliceBranch(prdSlug, slice, provider);
+      logger.recordTerminal(
+        { ghIssue: id, title: slice.title, branch },
+        { phase: "CANCELLED", error: CANCELLED_BY_USER },
+      );
+      failed.add(id);
+    }
+  };
+
+  let waveNumber = 0;
+  waves: while (true) {
+    waveNumber++;
+
+    // Nothing ready is not necessarily the end: a parked slice may be one
+    // human decision away from being runnable again. Only idle waits.
+    let toRun = await readyOrHang(waveNumber);
+    while (toRun.length === 0) {
+      const idle = await awaitAdjudicationAtIdle();
+      if (idle === "aborted") {
+        sweepCancelled();
+        break waves;
+      }
+      if (idle === "exhausted") break waves;
+      toRun = await readyOrHang(waveNumber);
+    }
 
     // Run the wave: Phase A (negotiate) → lane partition → Phase B
     // (execute + merge). Returns per-slice outcomes for persistence.
@@ -5131,27 +5331,13 @@ export async function runPipeline(
       if (outcome.phase === "PASS") {
         completed.add(id);
       } else if (outcome.phase === "AWAITING-ADJUDICATION") {
-        const wait = adjudicationWaits.get(id);
-        if (!wait) {
+        // The park is recorded and its bounded wait is already running
+        // (persistOutcome). Reconciliation does NOT await it: the rest of
+        // this wave's outcomes, and every wave they make ready, come first
+        // (ADR 0055 §7). `awaitAdjudicationAtIdle` collects the decision
+        // once there is nothing else to run.
+        if (!adjudicationWaits.has(id) && !settledAdjudications.has(id)) {
           throw new Error(`Missing adjudication wait for slice #${id}`);
-        }
-        const result = await wait;
-        adjudicationWaits.delete(id);
-        if (result.status === "accepted" && !signal?.aborted) {
-          awaitingAdjudication.delete(id);
-          logger.reopenAdjudication(id);
-          logger.phase(
-            `[afk] Slice #${id}: valid adjudication received — redispatching`,
-          );
-        } else if (result.status === "expired") {
-          if (result.defect) {
-            logger.phase(
-              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
-            );
-          }
-          logger.phase(
-            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
-          );
         }
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
@@ -5164,32 +5350,15 @@ export async function runPipeline(
     logger.event({ type: "wave-completed", wave: waveNumber });
 
     // If cancelled, mark anything not yet completed/failed as CANCELLED
-    // and exit the wave loop. Worktrees are preserved on disk so a
-    // re-run resumes from the artifact state. See ADR 0003.
+    // and exit the wave loop. See ADR 0003.
     if (signal?.aborted) {
-      for (const [id, slice] of dag.slices) {
-        if (slice.type === "HITL") continue;
-        if (
-          completed.has(id) ||
-          failed.has(id) ||
-          awaitingAdjudication.has(id)
-        ) {
-          continue;
-        }
-        const branch = sliceBranch(prdSlug, slice, provider);
-        logger.recordTerminal(
-          { ghIssue: id, title: slice.title, branch },
-          { phase: "CANCELLED", error: CANCELLED_BY_USER },
-        );
-        failed.add(id);
-      }
+      sweepCancelled();
       break;
     }
 
-    // If no progress was made this round, we're stuck.
-    const newReady = dag.ready(completed);
-    const newToRun = newReady.filter((id) => !heldBack(id));
-    if (newToRun.length === 0) break;
+    // No early exit when nothing is ready: the top of the loop decides
+    // that, because "nothing ready" now has a second answer — idle on the
+    // live adjudication waits before concluding the run is done.
   }
 
   // Any selected slice that never received an outcome was held back by

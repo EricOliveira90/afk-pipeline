@@ -58,6 +58,11 @@ interface CandidateFinalization {
 
 export interface AdoptDependencies {
   resolveGatePlan(cwd: string): GatePlan;
+  /**
+   * Worktree enumeration. Seam for the failure path: a lister that throws
+   * must produce refusal 6, not a guess (ADR 0055 seam 2 decision 8).
+   */
+  listWorktrees?(repoRoot: string): ReturnType<typeof listWorktrees>;
   runBaseGates(options: BaseGateRun): Promise<readonly GateResult[]>;
   finalizeCandidate?(options: CandidateFinalization): boolean;
   /** Candidate teardown. Seam for the survivor path (ADR 0035). */
@@ -264,18 +269,34 @@ function resolveSliceIdentity(
  * that worktree's index and files at the old tree while `git status`
  * reports the whole difference as staged work (ADR 0010). Adoption
  * refuses rather than guessing which of the two the operator meant.
+ *
+ * Enumeration failure is its own refusal, not an empty list: `[]` said
+ * "no worktree holds this branch", so a git that could not answer read
+ * as a proof of absence and let the `update-ref` through — the one
+ * mutation that can corrupt a checked-out worktree. Fail closed
+ * instead (ADR 0055 seam 2 decision 8; refusal 6 in ADR 0053).
  */
-function worktreesHolding(repoRoot: string, branch: string): string[] {
+function worktreesHolding(
+  repoRoot: string,
+  branch: string,
+  list: (repoRoot: string) => ReturnType<typeof listWorktrees>,
+): { holders: string[] } | { refusal: string } {
   const name = branch.replace(/^refs\/heads\//, "");
+  let worktrees: ReturnType<typeof listWorktrees>;
   try {
-    return listWorktrees(repoRoot)
-      .filter((worktree) => worktree.branch === name)
-      .map((worktree) => worktree.path);
-  } catch {
-    // A repo git cannot enumerate cannot be adopted into either; the
-    // candidate merge below reports the underlying problem.
-    return [];
+    worktrees = list(repoRoot);
+  } catch (error) {
+    return {
+      refusal: `could not enumerate worktrees — ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
   }
+  return {
+    holders: worktrees
+      .filter((worktree) => worktree.branch === name)
+      .map((worktree) => worktree.path),
+  };
 }
 
 function resolveAdopter(repoRoot: string, explicit: string | undefined): string {
@@ -332,6 +353,7 @@ async function defaultRunBaseGates(
 
 const DEFAULT_DEPS: AdoptDependencies = {
   resolveGatePlan: defaultGatePlan,
+  listWorktrees,
   runBaseGates: defaultRunBaseGates,
   finalizeCandidate: (options) => defaultFinalizeCandidate(options),
   removeWorktree: (repoRoot, worktreeDir) =>
@@ -403,7 +425,15 @@ export async function runAdoptCli(
 
   const state = loadRunState(repoRoot, runSlug);
 
-  const holders = worktreesHolding(repoRoot, state.featureBranch);
+  const enumeration = worktreesHolding(
+    repoRoot,
+    state.featureBranch,
+    dependencies.listWorktrees ?? listWorktrees,
+  );
+  if ("refusal" in enumeration) {
+    return { output: `Adoption refused: ${enumeration.refusal}`, exitCode: 1 };
+  }
+  const { holders } = enumeration;
   if (holders.length > 0) {
     return {
       output:

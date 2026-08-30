@@ -481,6 +481,13 @@ type ArchivedScopeEscalation =
   | InvalidArchivedScopeEscalation;
 
 export interface StuckDiagnosisDetails {
+  /**
+   * Why this slice is stuck, in the words of whatever refused — round
+   * exhaustion, a failed migration-sync check, anything a later STUCK
+   * outcome adds. Required: a diagnosis that does not say what refused
+   * makes the operator infer it from the evidence below (ADR 0055 P1).
+   */
+  reason: string;
   reviewArchiveDir: string;
   additionalArtifactReferences?: readonly string[];
   commitLog: string;
@@ -699,6 +706,10 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
 
   return [
     "# Stuck diagnosis",
+    "",
+    "## Reason",
+    "",
+    details.reason,
     "",
     "## Finding lifecycle",
     "",
@@ -1020,17 +1031,108 @@ export function hasStuckFile(sliceDir: string): boolean {
 }
 
 /**
- * Write `**Status:** LOCKED` into `contract.md`. Replaces the first
- * matching `**Status:**` line in document order — including one nested
- * in a fenced code block, though contracts in production format have
- * exactly one Status line at the top. Inserts a Status line after the
+ * What produced a lock (ADR 0055 Seam 1 decision 4). Every lock names one
+ * of these, and the name is what lets a later dispatch tell "the lock
+ * these human decisions produced" from "debris from before the impasse"
+ * when the decision log beside it cannot be trusted.
+ */
+export type ContractLockProvenance =
+  /** The impasse this lock settled, by `impasseFingerprint`. */
+  | { kind: "impasse-adjudication"; impasse: string }
+  /** A focused scope revision of an already accepted lock (ADR 0051). */
+  | { kind: "focused-scope-revision"; round: number }
+  /** An ordinary negotiation round the contract evaluator accepted. */
+  | { kind: "negotiation"; round: number };
+
+/**
+ * The orchestrator-owned field naming the current lock's provenance. It is
+ * deliberately *not* part of the `**Status:**` line: agent prompts read
+ * that literal field (ADR 0008), and ADR 0055 does not reopen that wound.
+ */
+export const LOCK_PROVENANCE_FIELD = "**Lock-Provenance:**";
+
+const LOCK_PROVENANCE_LINE = /^\*\*Lock-Provenance:\*\*[ \t]*(.*)$/i;
+
+/** The stamp's on-disk text. One line, parseable back by the orchestrator. */
+export function formatContractLockProvenance(
+  provenance: ContractLockProvenance,
+): string {
+  switch (provenance.kind) {
+    case "impasse-adjudication":
+      return `impasse-adjudication ${provenance.impasse}`;
+    case "focused-scope-revision":
+      return `focused-scope-revision round ${provenance.round}`;
+    case "negotiation":
+      return `negotiation round ${provenance.round}`;
+  }
+}
+
+/**
+ * The provenance of the lock currently on disk, or `null` when the
+ * contract carries no stamp this orchestrator wrote — a pre-stamp lock, a
+ * hand-edited one, or a field nothing here can parse. `null` is the
+ * fail-closed answer: an unrecognised stamp proves nothing, so callers
+ * treat it exactly as they treat no stamp at all.
+ */
+export function readContractLockProvenance(
+  contractPath: string,
+): ContractLockProvenance | null {
+  const content = readIfExists(contractPath);
+  if (!content) return null;
+  for (const raw of content.split(/\r?\n/)) {
+    const match = raw.match(LOCK_PROVENANCE_LINE);
+    if (!match) continue;
+    return parseContractLockProvenance(match[1]!.trim());
+  }
+  return null;
+}
+
+function parseContractLockProvenance(
+  value: string,
+): ContractLockProvenance | null {
+  const impasse = value.match(/^impasse-adjudication[ \t]+([0-9a-f]{64})$/i);
+  if (impasse) {
+    return { kind: "impasse-adjudication", impasse: impasse[1]!.toLowerCase() };
+  }
+  const revision = value.match(/^focused-scope-revision[ \t]+round[ \t]+(\d+)$/i);
+  if (revision) {
+    return {
+      kind: "focused-scope-revision",
+      round: parseInt(revision[1]!, 10),
+    };
+  }
+  const negotiation = value.match(/^negotiation[ \t]+round[ \t]+(\d+)$/i);
+  if (negotiation) {
+    return { kind: "negotiation", round: parseInt(negotiation[1]!, 10) };
+  }
+  return null;
+}
+
+/**
+ * Write `**Status:** LOCKED` into `contract.md`, plus the
+ * `**Lock-Provenance:**` line naming what produced this lock. Replaces the
+ * first matching `**Status:**` line in document order — including one
+ * nested in a fenced code block, though contracts in production format
+ * have exactly one Status line at the top. Inserts a Status line after the
  * H1 heading if none is present.
+ *
+ * The Status line's bytes are the same ones this function has always
+ * written; the provenance travels on its own line immediately after it
+ * (ADR 0055 §4). Provenance is required, not optional: "every lock exit
+ * stamps" is only true if there is no way to lock without saying why.
  *
  * Owned by the orchestrator: callers run this after the contract
  * evaluator returns `ACCEPT`. Agents do not edit Status. See ADR 0008.
  */
-export function lockContract(contractPath: string): void {
-  writeContractStatus(contractPath, "LOCKED");
+export function lockContract(
+  contractPath: string,
+  provenance: ContractLockProvenance,
+): void {
+  writeContractStatus(
+    contractPath,
+    "LOCKED",
+    formatContractLockProvenance(provenance),
+  );
 }
 
 /**
@@ -1045,23 +1147,28 @@ export function lockContract(contractPath: string): void {
  * LOCKED, stop"), so a stale LOCKED is exactly the disk-versus-
  * orchestrator divergence ADR 0008 exists to prevent — and it would let
  * a contract the pipeline already rejected reach generation.
+ *
+ * The provenance stamp goes with the lock: after a reopen there is no
+ * current lock, so a line still naming what produced the last one could
+ * only mislead the reconciliation that reads it (ADR 0055 §4).
  */
 export function reopenContract(contractPath: string): void {
-  writeContractStatus(contractPath, "NEGOTIATING");
+  writeContractStatus(contractPath, "NEGOTIATING", null);
 }
 
 /**
- * Set the contract's Status line. Replaces the first matching
- * `**Status:**` line in document order — including one nested in a
- * fenced code block, though contracts in production format have exactly
- * one Status line at the top. Inserts a Status line after the H1
- * heading if none is present.
+ * Set the contract's Status line, and the lock-provenance line that goes
+ * with it (`null` removes it). Replaces the first matching `**Status:**`
+ * line in document order — including one nested in a fenced code block,
+ * though contracts in production format have exactly one Status line at
+ * the top. Inserts a Status line after the H1 heading if none is present.
  *
  * Owned by the orchestrator; agents do not edit Status. See ADR 0008.
  */
 function writeContractStatus(
   contractPath: string,
   status: "LOCKED" | "NEGOTIATING",
+  provenance: string | null,
 ): void {
   const content = existsSync(contractPath)
     ? readFileSync(contractPath, "utf-8")
@@ -1086,5 +1193,42 @@ function writeContractStatus(
     next = `${line}\n`;
   }
 
-  writeFileSync(contractPath, next, "utf-8");
+  writeFileSync(
+    contractPath,
+    setLockProvenanceLine(
+      next,
+      provenance === null ? null : `${LOCK_PROVENANCE_FIELD} ${provenance}`,
+    ),
+    "utf-8",
+  );
+}
+
+/**
+ * Put `stamp` on the contract's own provenance line, or remove the line
+ * when `stamp` is `null`. Line-based rather than one regex because the
+ * removal has to take the blank line it sat behind with it — a contract
+ * that accumulates blank lines every time it is reopened and relocked is
+ * a diff nobody can read.
+ */
+function setLockProvenanceLine(content: string, stamp: string | null): string {
+  const lines = content.split(/\r?\n/);
+  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const at = lines.findIndex((line) => LOCK_PROVENANCE_LINE.test(line));
+
+  if (at >= 0) {
+    if (stamp === null) {
+      lines.splice(at, 1);
+      if (at > 0 && lines[at - 1] === "" && lines[at] === "") {
+        lines.splice(at, 1);
+      }
+    } else {
+      lines[at] = stamp;
+    }
+    return lines.join(eol);
+  }
+  if (stamp === null) return content;
+
+  const statusAt = lines.findIndex((line) => /^\*\*Status:\*\*/i.test(line));
+  lines.splice(statusAt >= 0 ? statusAt + 1 : 0, 0, "", stamp);
+  return lines.join(eol);
 }

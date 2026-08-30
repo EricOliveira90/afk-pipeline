@@ -179,6 +179,18 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         blockedBy: [],
         userStories: "",
       },
+      // Depends on the PASS sibling, not on any park. Its wave is the one
+      // a park must never stall (ADR 0055 §7): the fixture already runs
+      // #8184's bounded wait to expiry, so one more slice here buys the
+      // scheduling probe without another spawned run.
+      {
+        number: "11",
+        ghIssue: "8192",
+        title: "Unrelated dependent",
+        type: "AFK",
+        blockedBy: ["8182"],
+        userStories: "",
+      },
     ];
     const fixtures = new Map<string, SliceFixture>([
       [
@@ -287,6 +299,15 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           qaPasses: true,
           outputFile: "src/third-instruction.txt",
           outputContent: "third instruction",
+        },
+      ],
+      [
+        "8192",
+        {
+          files: ["src/unrelated-dependent.txt"],
+          qaPasses: true,
+          outputFile: "src/unrelated-dependent.txt",
+          outputContent: "unrelated dependent",
         },
       ],
     ]);
@@ -496,6 +517,24 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       join(runParent, latestRunDir, "run.log"),
       "utf-8",
     );
+
+    // A park holds its own dependents and nobody else's (ADR 0024 applied
+    // to parks; ADR 0055 §7). #8192 depends only on the PASS sibling
+    // #8182, so its wave is dispatched while #8184 is still parked with a
+    // live bounded wait — its first log line precedes that wait's expiry.
+    // Before the scheduler waited only at idle, reconciliation awaited
+    // #8184's full 5s wait inline and this order was reversed.
+    const logLines = runLog.split(/\r?\n/);
+    const unrelatedDispatchedAt = logLines.findIndex((line) =>
+      line.includes("#8192"),
+    );
+    const parkExpiredAt = logLines.findIndex((line) =>
+      line.includes("#8184: adjudication wait expired"),
+    );
+    expect(unrelatedDispatchedAt).toBeGreaterThanOrEqual(0);
+    expect(parkExpiredAt).toBeGreaterThan(unrelatedDispatchedAt);
+    expect(state.slices["8192"]?.phase).toBe("PASS");
+
     for (const refusal of lockRefusals) {
       expect(
         records.some(
@@ -607,12 +646,15 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       );
 
       // The revised artifacts are what shipped — the post-apply scope,
-      // not the pre-apply proposal carried through.
-      expect(committedArtifact(applied.number, "contract.md")).toBe(
+      // not the pre-apply proposal carried through. The lock carries its
+      // provenance stamp (ADR 0055): an impasse-adjudication lock names
+      // the impasse fingerprint it settled.
+      const committedContract = committedArtifact(applied.number, "contract.md");
+      expect(committedContract).toMatch(
+        /^# Slice Contract\n\n\*\*Status:\*\* LOCKED\n\n\*\*Lock-Provenance:\*\* impasse-adjudication [0-9a-f]{64}\n/,
+      );
+      expect(committedContract.split("\n").slice(5).join("\n")).toBe(
         [
-          "# Slice Contract",
-          "",
-          "**Status:** LOCKED",
           "",
           "## Files expected to change",
           ...applied.revisedFiles.map((file) => `- ${file}`),
@@ -730,17 +772,45 @@ describe("adjudication expiry and next-run pickup", () => {
     expect(readFileSync(decisionPath, "utf-8")).toBe(malformedDecision);
 
     rmSync(decisionPath);
+    // Crash after re-dispatch (ADR 0055 Seam 2 §9, plan step 9). `trackSlice`
+    // clears the persisted park the moment a run takes the slice back, so a
+    // run killed before its next outcome lands leaves no record at all —
+    // exactly this shape. The park's substance is its estate on disk, not
+    // the state file's announcement of it, so this run must re-read the
+    // persisted exhaustion outcome and re-park from it. If it instead read
+    // "no record" as a fresh slice, it would restart from base and the
+    // whole estate would go with the worktree.
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const crashed = JSON.parse(readFileSync(statePath, "utf-8"));
+    delete crashed.slices[slice.ghIssue];
+    writeFileSync(statePath, JSON.stringify(crashed), "utf-8");
+    const impasseRecord = join(parkedDir, "contract-negotiation-outcome.json");
+    const impasseRecordBefore = readFileSync(impasseRecord, "utf-8");
+
     await runPipeline(config);
     expect(records).toHaveLength(afterInitialNegotiation);
-    state = JSON.parse(
-      readFileSync(
-        join(repo, ".afk", "state", `${slug}-stub.json`),
-        "utf-8",
-      ),
-    );
+    state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.slices[slice.ghIssue]?.phase).toBe(
       "AWAITING-ADJUDICATION",
     );
+    // The exhaustion outcome it re-parked from is byte-identical, and no
+    // restart touched the tree it lives in — the negotiate entry returns
+    // into adjudication before `prepareSliceWorktree` is ever reached, so
+    // `decideResume` never gets an opinion about a parked slice.
+    expect(readFileSync(impasseRecord, "utf-8")).toBe(impasseRecordBefore);
+    const crashRunParent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const crashRunLog = readFileSync(
+      join(
+        crashRunParent,
+        readdirSync(crashRunParent)
+          .filter((entry) => /^run-\d{8}-\d{6}/.test(entry))
+          .sort()
+          .at(-1)!,
+        "run.log",
+      ),
+      "utf-8",
+    );
+    expect(crashRunLog).not.toContain("restarting from base");
 
     writeFileSync(
       decisionPath,
@@ -916,10 +986,142 @@ describe("cancellation after an impasse park", () => {
     for (const file of before!.files) {
       expect(readFileSync(file.path, "utf-8"), file.path).toBe(file.contents);
     }
+    // The estate is the files *and* what holds them (ADR 0055 Seam 2, plan
+    // step 9). The mid-wave sweep skips parked slices for their phase; this
+    // asserts it also leaves the worktree registered and the branch present,
+    // which is what the next run's re-dispatch reads the estate out of.
+    const parkedWorktree = records.find(
+      (record) => record.ghIssue === "8281",
+    )!.cwd;
+    expect(existsSync(parkedWorktree)).toBe(true);
+    const parkedBranch = finalState.slices["8281"].branch as string;
+    expect(git(repo, ["branch", "--list", parkedBranch]).trim()).not.toBe("");
+    expect(
+      git(repo, ["worktree", "list", "--porcelain"]).replace(/\\/g, "/"),
+    ).toContain(parkedWorktree.replace(/\\/g, "/"));
     expect(
       records.some(
         (record) =>
           record.ghIssue === "8281" && record.role === "generator",
+      ),
+    ).toBe(false);
+  }, 240_000);
+
+  it("returns promptly when cancelled during the idle adjudication wait, park intact", async () => {
+    // The sibling above aborts while a wave is still running, so it never
+    // reaches the state this asserts: the pipeline out of runnable work,
+    // parked on a live bounded wait, with nothing but the abort signal to
+    // end it (ADR 0055 §7 — the idle wait races the abort). One slice and
+    // no dependents keeps this the cheapest spawn that reaches idle.
+    const repo = makeRepo();
+    const slug = "cancel-during-idle-wait";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "8291",
+      title: "Parked at idle",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const slices = [slice];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slice.ghIssue,
+        {
+          files: ["src/idle-park.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/idle-park.txt",
+          outputContent: "idle park",
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const stub = buildStubProvider({ fixtures, slices, records });
+    const controller = new AbortController();
+    let contractReviews = 0;
+    const provider: AgentProvider = {
+      name: stub.name,
+      async invoke(options) {
+        const result = await stub.invoke(options);
+        // Round 2's contract review is the last agent of the run: the
+        // impasse it reports parks the slice, and the pipeline then has
+        // nothing to run. Cancel a beat later, from inside the idle wait.
+        if (options.role === "evaluator-contract") {
+          contractReviews++;
+          if (contractReviews === 2) {
+            setTimeout(() => controller.abort(), 2_000).unref();
+          }
+        }
+        return result;
+      },
+    };
+
+    const startedAt = Date.now();
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+      signal: controller.signal,
+      // Long enough that only the abort can end the wait: if the race
+      // regressed, this run would take a full minute.
+      adjudicationWaitMs: 60_000,
+      adjudicationPollMs: 50,
+    });
+    const elapsed = Date.now() - startedAt;
+
+    const runParent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const latestRunDir = readdirSync(runParent)
+      .filter((entry) => /^run-\d{8}-\d{6}/.test(entry))
+      .sort()
+      .at(-1)!;
+    const runLog = readFileSync(
+      join(runParent, latestRunDir, "run.log"),
+      "utf-8",
+    );
+    // Proof the run really idled rather than exiting before the wait.
+    expect(runLog).toContain(
+      "No runnable slices; waiting on 1 adjudication decision(s): #8291",
+    );
+    expect(elapsed).toBeLessThan(45_000);
+
+    const finalState = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    // The park is durable: cancellation neither reclassifies it nor
+    // touches its estate (ADR 0055 Seam 2).
+    expect(finalState.slices["8291"]).toMatchObject({
+      phase: "AWAITING-ADJUDICATION",
+      branch: `afk-stub/${slug}-slice-01-parked-at-idle`,
+    });
+    expect(
+      git(repo, ["branch", "--list", finalState.slices["8291"].branch]).trim(),
+    ).not.toBe("");
+    const parkedCwd = records.find(
+      (record) => record.ghIssue === "8291",
+    )?.cwd;
+    if (!parkedCwd) throw new Error("parked worktree was not invoked");
+    expect(existsSync(parkedCwd)).toBe(true);
+    const parkedDir = findSliceArtifactDir(parkedCwd, "01");
+    if (!parkedDir) throw new Error("parked artifact directory missing");
+    for (const name of [
+      "contract.md",
+      "contract-negotiation-outcome.json",
+      "stuck.md",
+    ]) {
+      expect(existsSync(join(parkedDir, name)), name).toBe(true);
+    }
+    expect(
+      records.some(
+        (record) =>
+          record.ghIssue === "8291" && record.role === "generator",
       ),
     ).toBe(false);
   }, 240_000);
