@@ -4,142 +4,100 @@
 
 ## Scope reviewed
 
-Reviewed `git diff main...HEAD`, the PRD and slice index, every slice
-contract and implementation handoff under
-`.kiro/specs/afk-v2-routing-adjudication/slices/`, and the merged production
-paths for escalation, impasse classification, adjudication, wave scheduling,
-cleanup, stuck diagnosis, adoption, persistence, and Git finalization.
+Reviewed the feature diff from merge base
+`8f97ce6b34e5c268f159d7a48d3d28af83d4c542`, all slice contracts and
+implementations under `.kiro/specs/afk-v2-routing-adjudication/slices/`, and
+the merged transaction, adjudication, worktree, scheduler, journal, cleanup,
+adoption, and finalization paths.
 
-The pre-ship gate was accepted as already passed; I did not rerun the full
-suite. For fresh evidence I used source reads/searches and two pure probes:
-one confirmed `AWAITING-ADJUDICATION` is assigned the `failed` lifecycle
-bucket, and one confirmed a mixed `CONTESTED` + `OPEN` exhaustion is classified
-`IMPASSE` with no undecided findings after only the contested finding is
-decided.
+The pre-ship gate already passed this tree, so I did not rerun the full suite.
+Fresh evidence below comes from direct source and ADR reads; I also ran
+`git diff --check` against the feature diff.
 
 ## Blocking findings
 
-### 1. A mixed exhaustion can lock while an OPEN blocking finding remains unresolved
+### 1. The pending-lock witness can certify a lock that never passed its gate or was rolled back
 
-- **File/location:** `src/contract-review.ts`,
-  `buildContractNegotiationOutcome` (lines 718-735);
-  `src/adjudication.ts`, `contestedFindingIds` and
-  `undecidedContestedFindingIds` (lines 197-204 and 341-350);
-  `src/orchestrator.ts`, `runImpasseAdjudication` (lines 2185-2222).
-- **Evidence gathered:** I read the classification and completion predicates,
-  then ran a pure TypeScript probe with one `F-C/CONTESTED` blocker and one
-  `F-O/OPEN` blocker. The outcome was `IMPASSE`, retained both findings, and
-  reported `undecided: []` after a decision only for `F-C`. The orchestrator
-  therefore reaches the lock path while `F-O` is still unresolved.
-- **Convention violated:** ADR 0008, **Decision**, makes the orchestrator's
-  on-disk `LOCKED` status the trustworthy source of contract state. ADR 0054,
-  **Decision**, says a decision resolves one finding rather than the contract
-  and permits locking only after the complete required decision set is in.
-  Locking with an `OPEN` blocking finding makes `LOCKED` contradict the
-  structured exhaustion record.
-- **Required fix:** Define mixed exhaustion explicitly. Either classify it as
-  non-convergence until every OPEN blocker is resolved, or keep it parked but
-  prohibit locking while any unresolved blocking finding remains. Add a pure
-  mixed-state test and an orchestration assertion that generation never
-  dispatches from this shape.
+- **File/location:** `src/contract-transaction.ts`,
+  `withContractTransaction` and `tx.lock` (lines 158-241);
+  `src/orchestrator.ts`, `applyAdjudicationDecisions` (lines 2442-2453);
+  `src/adjudication.ts`, `adjudicatedLockIsProven` (lines 461-479).
+- **Evidence gathered:** I read the complete transaction and shortcut control
+  flow. `tx.lock` writes the witness, calls `lockContract`, and only then calls
+  `onContractLocked`. A process stop between the latter two operations leaves
+  witness plus stamped `LOCKED` contract even though the mechanical gate never
+  ran; `adjudicatedLockIsProven` accepts that pair. Separately,
+  `lockAccepted = true` preserves the witness before the caller writes the
+  applied marker. If that marker write throws, the outer transaction restores
+  the old contract because `onAccepted` was not called but leaves the witness.
+  When the restored contract was stale `LOCKED`, the next dispatch accepts the
+  surviving witness and skips both application and the gate.
+- **Convention violated:** ADR 0055, **Decision - Seam 1**, section 2 permits
+  `LOCKED` only after the mechanical gate passes; section 3 requires restoration
+  on every exit not explicitly accepted through `onAccepted`; section 5 permits
+  the crash shortcut only for proof of the completed lock operation. This also
+  breaks ADR 0008, **Decision**, which makes orchestrator-owned on-disk lock
+  status authoritative.
+- **Required fix:** Run the mechanical gate before writing `LOCKED`, and clear
+  the pending witness on every transaction exit that did not reach
+  `onAccepted`. Add focused fault-injection coverage for a stop before the gate
+  and for an applied-marker write failure over a previously locked contract.
 
-### 2. Discarding a decision log can leave a false LOCKED contract and later bypass application
+### 2. Resumed IMPASSE dispatch bypasses the worktree ownership assertion
 
-- **File/location:** `src/adjudication.ts`,
-  `loadAdjudicationDecisionLog` (lines 219-298);
-  `src/orchestrator.ts`, `runImpasseAdjudication` (lines 2132-2183 and
-  2203-2222).
-- **Evidence gathered:** I read the fail-closed loader and its existing focused
-  tests. A malformed, stale, or invalid log becomes an empty log plus a
-  `discarded` reason. The orchestrator logs that every finding must be decided
-  again and parks, but it does not reopen a contract that is already
-  `LOCKED`. Once replacement decisions are collected, the
-  `readContractStatus(contractPath) === "LOCKED"` shortcut marks them applied
-  without running their mechanical apply-and-lock step.
-- **Convention violated:** ADR 0054, **Decision** steps 1 and 3, says a
-  discarded log is evidence rather than authority and that only a valid
-  complete record permits locking. ADR 0008, **Decision**, forbids the disk
-  saying `LOCKED` while the orchestrator says every contested finding needs a
-  new decision.
-- **Required fix:** Reconcile contract status when the log is discarded, and
-  make the crash-window shortcut prove that the existing lock corresponds to
-  the same validated complete decision set. A replacement decision set must
-  be applied and pass the lock gate rather than inherit an unrelated
-  `LOCKED` line.
+- **File/location:** `src/orchestrator.ts`, `runSliceNegotiate`
+  (lines 2053-2078), `runImpasseAdjudication` (lines 2113-2274),
+  `prepareSliceWorktree` (lines 1698-1979), and `negotiateAttempt`
+  (lines 2520-2529).
+- **Evidence gathered:** I traced both branches from `runSliceNegotiate`.
+  Finding an existing IMPASSE calls `runImpasseAdjudication` immediately.
+  The only shared call to `prepareSliceWorktree`, whose final operation is
+  `git.assertWorktreeRegistered`, is inside `negotiateAttempt` and is therefore
+  skipped. The IMPASSE path later merges into `ctx.worktreeDir` and can invoke
+  agents from it. A leaked directory no longer registered with Git can
+  consequently make Git walk up to the parent repository, the corruption mode
+  this invariant exists to prevent.
+- **Convention violated:** ADR 0010, **Decision**, item 3 requires
+  `assertWorktreeRegistered` immediately before every agent dispatch. ADR 0055,
+  **Decision - Seam 2**, requires lifecycle operations to prove preservation
+  of the parked worktree and branch.
+- **Required fix:** Put shared worktree ownership and registration validation
+  before ordinary-versus-IMPASSE routing, so every dispatch validates the same
+  boundary before Git mutation or agent invocation. Cover redispatch from a
+  stale unregistered parked directory.
 
-### 3. The bounded adjudication wait blocks unrelated later waves
+### 3. Partial adjudication redispatch does not reopen its persisted park
 
-- **File/location:** `src/orchestrator.ts`, wave reconciliation in
-  `runPipeline` (lines 5106-5164), especially the `await wait` at line 5138.
-- **Evidence gathered:** I traced the scheduling sets and loop order. After
-  `runWave` returns, outcomes are reconciled serially. Encountering one
-  `AWAITING-ADJUDICATION` outcome awaits its human timer before reconciliation
-  finishes and before the next `dag.ready(completed)` call. Thus a dependent
-  of an unrelated PASS slice cannot enter its next wave until the decision
-  arrives or the wait expires.
-- **Convention violated:** ADR 0024, **Decision**, requires independent work to
-  continue after a member needs human attention; dependency safety belongs to
-  the DAG, not incidental lane or outcome ordering. The PRD's routing decision
-  likewise permits waiting at idle, not before checking whether another wave
-  is ready.
-- **Required fix:** Reconcile all outcomes and dispatch all newly ready work
-  before awaiting adjudication promises. Wait only when no runnable work
-  remains, while still allowing a valid decision to re-enqueue its slice.
-  Cover a parked slice plus an unrelated PASS whose dependent must start
-  before the adjudication timeout.
+- **File/location:** `src/orchestrator.ts`, `runImpasseAdjudication`
+  (lines 2202-2234 and 2263-2272), and scheduler redispatch
+  (lines 5234-5249); `src/run-journal.ts`, `RunJournal.recordTerminal`
+  (lines 332-357); `src/run-journal.test.ts`, same-phase park case
+  (lines 213-230).
+- **Evidence gathered:** I traced an IMPASSE with multiple findings through a
+  valid first decision. The scheduler removes the hold-back and redispatches,
+  but no `trackSlice` occurs before `runImpasseAdjudication` returns a new
+  `AWAITING-ADJUDICATION` outcome naming the remaining findings; its only
+  `trackSlice` call is after the all-decided check. `recordTerminal` sees the
+  existing parked phase and returns it unchanged solely because the phase
+  matches. The test explicitly confirms that even a changed error is discarded.
+  State, events, and summary therefore retain the prior park instead of the
+  replacement that names what remains undecided.
+- **Convention violated:** ADR 0054, **Decision**, item 3 requires each partial
+  adjudication to park again naming the findings still undecided. ADR 0055,
+  **Decision - Seam 2**, section 9 defines redispatch as the reopen and requires
+  `trackSlice` to clear the parked mark and persisted record before a new
+  outcome.
+- **Required fix:** Reopen every actual parked redispatch with `trackSlice`
+  before processing its decision, including partial and refused decisions, then
+  persist the replacement park. Add a journal-level or existing orchestration
+  assertion that the persisted reason changes from all findings to the
+  remaining set.
 
-### 4. `clean-failed` treats a parked slice as disposable failure debris
+## Architecture assessment
 
-- **File/location:** `src/slice-lifecycle.ts`, `PHASE_TRAITS` for
-  `AWAITING-ADJUDICATION` (lines 240-247); `src/clean-failed.ts`,
-  `isCleanupTarget`/`mustPreserveBranch` (lines 47-61) and the removal/deletion
-  pass (lines 153-223).
-- **Evidence gathered:** I read the cleanup predicate and ran
-  `traitsFor("AWAITING-ADJUDICATION")`; it returned `bucket: "failed"`.
-  `clean-failed` therefore removes the parked worktree. Because the phase is
-  not `deferred`, it also deletes the branch when it has no commits ahead,
-  which is the normal pre-generation impasse shape. Searches found no
-  `AWAITING-ADJUDICATION` coverage in `src/clean-failed.test.ts`.
-- **Convention violated:** ADR 0023, **Decision**, scopes the command to dead
-  failure phases and preserved debris; a parked external dependency is not
-  one of those phases. ADR 0054, **Decision**, requires the impasse and durable
-  human decision record to survive across dispatches and runs.
-- **Required fix:** Separate cleanup eligibility from the presentation bucket.
-  `AWAITING-ADJUDICATION` must preserve its worktree and branch, and
-  `clean-failed` must report/skip it. Add a focused cleanup test proving the
-  impasse, adjudication file/log, branch, and worktree remain intact.
-
-### 5. `afk adopt` fails open when Git worktree enumeration fails
-
-- **File/location:** `src/adopt-command.ts`, `worktreesHolding` (lines
-  259-278) and its caller in `runAdoptCli` (lines 404-416);
-  `src/git.ts`, `listWorktrees` (lines 906-921) and
-  `updateBranchIfUnchanged` (lines 882-899).
-- **Evidence gathered:** I read the worktree guard and finalization path.
-  `worktreesHolding` catches every `git worktree list` failure and returns
-  `[]`, which is indistinguishable from a proved absence. Adoption then
-  continues to an `update-ref` that can move a checked-out feature branch
-  behind its worktree. The focused tests cover a successfully enumerated
-  holder, but not enumeration failure.
-- **Convention violated:** ADR 0010, **Decision**, requires worktree identity
-  to be verified rather than trusted. ADR 0053, **Operator-visible
-  refusals** item 5, specifically requires adoption to refuse when the feature
-  branch is checked out because moving only its ref corrupts the worktree's
-  index/tree relationship.
-- **Required fix:** Make enumeration failure a named refusal before candidate
-  creation or ref mutation. Inject the worktree lister at the command seam and
-  test that a thrown enumeration leaves refs and run state unchanged.
-
-## Non-blocking notes
-
-1. `runFocusedScopeRevision` and `runImpasseAdjudication` still duplicate the
-   capture/restore/validate/lock transaction. ADR 0050, ADR 0051, and ADR
-   0054, **Consequences**, already identify this shotgun-surgery risk; the
-   defects fixed during this review cycle demonstrate that it is active debt.
-
-2. `RunJournal.reopenAdjudication` deliberately removes terminal idempotency
-   so a parked slice can receive a later outcome in the same run. That is a
-   necessary workflow seam, but it is an undocumented exception to ADR 0031,
-   **Decision**, and ADR 0047, **What is deliberately not cleared**. Model a
-   park as a replaceable transition or amend those ADRs before future journal
-   work treats the exception as accidental corruption.
+The merged design otherwise establishes the intended shared contract
+transaction, full-blocker completion predicate, durable cleanup trait,
+idle-only scheduler wait, fail-closed adoption guard, and single STUCK
+finalizer. The blockers are boundary-ordering defects in those abstractions,
+not style differences: each permits persisted state to claim an invariant that
+the responsible operation did not establish.
