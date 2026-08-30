@@ -11,6 +11,7 @@ import {
 } from "./lanes.js";
 import type { NegotiateOutcome, PipelineConfig } from "./orchestrator.js";
 import {
+  assertSliceWorktreeOwnership,
   makeSliceContext,
   pipelineRunSlug,
   type SliceContext,
@@ -410,6 +411,13 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
                 `[afk] Slice #${id} has accepted adjudication state — ` +
                   `preserving its branch and lock while refreshing the feature tip (#133)`,
               );
+              // This branch preserves the parked worktree instead of
+              // recreating it, so it never reaches the ownership assertion
+              // the `else` arm gets from `recreateWorktreeFromBase`. Assert
+              // before the merge: the merge is a git mutation inside that
+              // directory, and an unregistered one sends it up to the
+              // parent repository (ADR 0010 item 3).
+              assertSliceWorktreeOwnership(ctx);
               const refresh = git.mergeBranchIntoWorktree(
                 ctx.worktreeDir,
                 featBranch,

@@ -1980,6 +1980,38 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
 }
 
 /**
+ * The worktree-ownership check every dispatch owes, wherever it routes
+ * afterwards (ADR 0010 decision item 3; ADR 0055 Seam 2).
+ *
+ * `prepareSliceWorktree` ends with `assertWorktreeRegistered`, but it is
+ * only reached by the *ordinary* negotiate path. A slice that arrives with
+ * a persisted IMPASSE goes straight to the adjudication branch, and an
+ * adjudicated lane successor goes straight to a merge into its parked
+ * worktree — both then run git commands, and can invoke the planner, in a
+ * directory nobody proved git still owns. That is precisely the ADR 0010
+ * corruption mode: a leaked directory no longer registered as a worktree
+ * makes git walk up to the parent repository and commit onto whatever
+ * branch the operator has checked out there.
+ *
+ * The check is deliberately narrower than `prepareSliceWorktree`: it
+ * never creates, recreates, resets or deletes anything, because the two
+ * callers that need it must preserve the parked estate byte-for-byte.
+ *
+ * A directory that does not exist at all is not a violation here — it is
+ * the ordinary first-dispatch state, and creating it is the ordinary
+ * path's job. Every state where something *is* on disk (or a branch
+ * survives without its worktree) must prove registration, and today every
+ * such state that cannot is a refusal in `prepareSliceWorktree` too; this
+ * moves the refusal ahead of the routing fork instead of behind one arm
+ * of it.
+ */
+export function assertSliceWorktreeOwnership(ctx: SliceContext): void {
+  const { repoRoot } = ctx.config;
+  if (!existsSync(ctx.worktreeDir)) return;
+  git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
+}
+
+/**
  * Report this dispatch's budgets — one `run.log` line and one typed
  * `slice-bounds` event (plan §3.9, wave item 14). See `bounds.ts` for
  * why: these four numbers decide what a struggling slice may still do,
@@ -2063,6 +2095,14 @@ export async function runSliceNegotiate(
     throw new Error("infrastructureRetries must be a non-negative integer");
   }
 
+  // Before the routing fork, not inside one arm of it: whichever branch
+  // this dispatch takes, it may run git commands and invoke agents in
+  // `ctx.worktreeDir`, so the same ownership boundary is proved for both
+  // (ADR 0010 item 3). The ordinary path re-asserts at the end of
+  // `prepareSliceWorktree` — that assertion covers the worktree it just
+  // created or recreated, which is a different claim from this one.
+  assertSliceWorktreeOwnership(ctx);
+
   const outcomePath = join(
     ctx.absSliceDir,
     CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
@@ -2119,6 +2159,26 @@ async function runImpasseAdjudication(
   const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
   const contractPath = join(ctx.absSliceDir, "contract.md");
   const parkedCause = negotiateImpasseCause(outcome, "REVISE");
+
+  // Re-dispatch is the reopen (ADR 0055 §9), and reaching this function *is*
+  // the re-dispatch — so the reopen belongs here, before the decision is
+  // read, not after the all-decided check. Behind that check it only fired
+  // for the dispatch that completed the adjudication; a partial decision or
+  // a refused one returned a fresh AWAITING-ADJUDICATION while the slice was
+  // still marked parked, and `recordTerminal` kept the previous park because
+  // the phase matched. The persisted reason then went on naming every
+  // finding when only some were still undecided, which is the one thing
+  // ADR 0054 item 3 requires each partial adjudication to update.
+  logger.trackSlice(
+    lifecycle.running(
+      {
+        ghIssue: ctx.slice.ghIssue,
+        title: ctx.slice.title,
+        branch: ctx.branch,
+      },
+      logger.getSliceProgress(ctx.slice.ghIssue),
+    ),
+  );
 
   const loaded = loadAdjudicationDecisionLog(ctx.absSliceDir, outcome);
   let decisionLog = loaded.log;
@@ -2260,16 +2320,8 @@ async function runImpasseAdjudication(
     return { phase: "LOCKED" };
   }
 
-  logger.trackSlice(
-    lifecycle.running(
-      {
-        ghIssue: ctx.slice.ghIssue,
-        title: ctx.slice.title,
-        branch: ctx.branch,
-      },
-      logger.getSliceProgress(ctx.slice.ghIssue),
-    ),
-  );
+  // No `trackSlice` here — the dispatch already reopened the park at the
+  // top of this function, which is where every arm of it gets the reopen.
   const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
   if (refresh.status === "conflict") {
     return {
