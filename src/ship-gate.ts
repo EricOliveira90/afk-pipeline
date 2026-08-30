@@ -701,10 +701,15 @@ export async function runShipGate(
   // Residual insurance: the restore above covers the two review files by
   // content, but a guardian's shell reaches the whole worktree. Nothing else
   // is allowed to have moved since the reviews started (#136 follow-up).
+  // One `git status --porcelain` serves both this check and the
+  // is-there-anything-to-commit question below: `hasUncommittedChanges` runs
+  // the identical command, so re-reading it would spawn a second git for an
+  // answer already in hand.
+  const statusBeforeCommit = git.statusPorcelain(reviewDir);
   const drift = detectReviewWorktreeDrift({
     headShaBefore,
     headShaNow: git.resolveCommit(reviewDir, "HEAD"),
-    statusPorcelain: git.statusPorcelain(reviewDir),
+    statusPorcelain: statusBeforeCommit,
     specsDir,
   });
   if (drift) {
@@ -733,7 +738,7 @@ export async function runShipGate(
     });
   }
 
-  if (git.hasUncommittedChanges(reviewDir)) {
+  if (statusBeforeCommit !== "") {
     try {
       git.commitAll(
         reviewDir,

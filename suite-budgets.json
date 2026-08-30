@@ -177,6 +177,33 @@
     "clean-failed": 15.9,
     "_total": "961.7s of suite time"
   },
+  "_measured2026_08_30@fix/136-stale-review-artifact": {
+    "_note": [
+      "Full chain on the #136 PR head, exit 0, every suite inside budget",
+      "with headroom. Recorded because an earlier alone-run pair on this",
+      "branch (qa 148.8s vs the 87s budget, resume-integration 216.2s vs",
+      "152s) read as a regression from the new review-worktree drift gate",
+      "and was not one. Traced git invocations prove why: the drift check",
+      "runs once per ship gate, and the ship gate is reached 0 times in",
+      "qa-orchestration and exactly 1 time in resume-integration — one",
+      "153ms `git status --porcelain` for the whole suite. Same-clone A/B,",
+      "minutes apart: qa main 79.6s vs PR head 86.6s; resume main 108.4s",
+      "vs PR head 105.1s. The spread was background load: the identical",
+      "commit in the identical directory measured qa 176.9s then 85.2s,",
+      "and resume 260.9s, 249.2s, then 123.6s and 106.1s. Alone-runs on",
+      "this machine are only stable when msedgewebview2 + MSPCManagerCore",
+      "are idle; they were burning ~1.3 cores during the high readings.",
+      "No budget raised — there was no cost to cover."
+    ],
+    "fast": 89.5,
+    "orchestrator": 287.2,
+    "wave": 155.5,
+    "resume-integration": 92.5,
+    "qa-orchestration": 55.5,
+    "clean-failed": 11.6,
+    "_total": "691.7s of suite time, 1287s budget",
+    "_alone": "Post-fix alone-runs, same machine: qa 71.7s, resume 106.1s"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
