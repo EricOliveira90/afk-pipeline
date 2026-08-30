@@ -1034,6 +1034,71 @@ describe("buildContractNegotiationOutcome", () => {
       ],
     });
   });
+
+  /**
+   * ADR 0055 §1: adjudicability decides the classification. A park is only
+   * escapable when every unresolved blocker is a held contest a human can
+   * choose between; an unresolved OPEN blocker has no decision that
+   * resolves it, so the exhaustion routes to non-convergence and the slice
+   * renegotiates instead of parking forever.
+   */
+  it("classifies a contest mixed with an OPEN blocker as NON_CONVERGENCE", () => {
+    expect(
+      buildContractNegotiationOutcome({
+        version: 1,
+        round: 2,
+        attempt: 1,
+        verdict: "REVISE",
+        findings: [
+          {
+            id: "F-C",
+            severity: "BLOCKING",
+            state: "CONTESTED",
+            unresolved: true,
+            plannerPosition: "CONTESTED",
+            plannerEvidence: "the gate already covers this path",
+            evaluatorEvidence: "the gate omits the negative case",
+          },
+          {
+            id: "F-O",
+            severity: "BLOCKING",
+            state: "OPEN",
+            unresolved: true,
+            plannerPosition: "UNRESOLVED",
+            plannerEvidence: null,
+            evaluatorEvidence: "the migration prefix is still unstated",
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 1,
+      classification: "NON_CONVERGENCE",
+      round: 2,
+      attempt: 1,
+      // Both blockers are retained: the record is the audit of what the
+      // exhaustion contained, not only of what a human could decide.
+      findings: [
+        {
+          id: "F-C",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the gate already covers this path",
+          evaluatorEvidence: "the gate omits the negative case",
+        },
+        {
+          id: "F-O",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          plannerPosition: "UNRESOLVED",
+          plannerEvidence: null,
+          evaluatorEvidence: "the migration prefix is still unstated",
+        },
+      ],
+    });
+  });
 });
 
 /**

@@ -3212,6 +3212,71 @@ describe("round-scoped contract feedback", () => {
     expect(plannerRounds).toBe(beforePlannerWins.planner);
     expect(evaluatorRounds).toBe(beforePlannerWins.evaluator);
     expect(generatorRounds).toBe(0);
+
+    // --- A mixed exhaustion never reaches Phase B (ADR 0055 §1–2).
+    //
+    // Under §1 the classifier no longer produces this shape, so the record
+    // is planted: a stale or hostile artifact claiming IMPASSE over one
+    // contested and one OPEN blocker. The single completion predicate is
+    // the last line of defence — the contested finding is decidable and
+    // gets decided, the OPEN one cannot be, so the contract never locks
+    // and nothing is dispatched from it.
+    forgetRecordedDecisions();
+    const outcomePath = join(
+      ctx.absSliceDir,
+      "contract-negotiation-outcome.json",
+    );
+    const outcomeBefore = readFileSync(outcomePath, "utf-8");
+    const mixed = JSON.parse(outcomeBefore) as {
+      findings: Array<{ id: string; state: string; plannerPosition: unknown }>;
+    };
+    mixed.findings[1]!.state = "OPEN";
+    mixed.findings[1]!.plannerPosition = "UNRESOLVED";
+    writeFileSync(outcomePath, JSON.stringify(mixed), "utf-8");
+    const beforeMixed = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    const mixedParked = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+
+    expect(mixedParked.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      mixedParked.phase === "AWAITING-ADJUDICATION"
+        ? mixedParked.cause.summary
+        : "",
+    ).toContain("F-02");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(beforeMixed.gateCalls);
+    expect(plannerRounds).toBe(beforeMixed.planner);
+    expect(evaluatorRounds).toBe(beforeMixed.evaluator);
+    // The OPEN blocker is not adjudicable, so no human decision can move
+    // this shape on: the park is refused, not merely delayed.
+    const mixedRefused = await decide({
+      version: 1,
+      findingId: "F-02",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+    expect(mixedRefused.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      mixedRefused.phase === "AWAITING-ADJUDICATION"
+        ? mixedRefused.cause.summary
+        : "",
+    ).toContain("F-02 is not CONTESTED in the current IMPASSE");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(beforeMixed.gateCalls);
+
+    writeFileSync(outcomePath, outcomeBefore, "utf-8");
   });
 
   it("caps a converging negotiation at two rounds", async () => {

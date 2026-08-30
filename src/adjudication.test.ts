@@ -10,6 +10,7 @@ import {
   parseAdjudication,
   type Adjudication,
   undecidedContestedFindingIds,
+  unresolvedBlockingFindingIds,
   waitForAdjudication,
 } from "./adjudication.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
@@ -153,11 +154,11 @@ describe("the adjudication decision log", () => {
     }
   };
 
-  it("reports the contested findings a log has no decision for", () => {
+  it("reports the blocking findings a log has no decision for", () => {
     withSliceDir((sliceDir) => {
       const empty = loadAdjudicationDecisionLog(sliceDir, CONTESTED_PAIR);
       expect(empty.discarded).toBeNull();
-      expect(undecidedContestedFindingIds(CONTESTED_PAIR, empty.log)).toEqual([
+      expect(unresolvedBlockingFindingIds(CONTESTED_PAIR, empty.log)).toEqual([
         "F-01",
         "F-02",
       ]);
@@ -167,7 +168,7 @@ describe("the adjudication decision log", () => {
         raw,
         decision: parseAdjudication(raw, CONTESTED_PAIR),
       });
-      expect(undecidedContestedFindingIds(CONTESTED_PAIR, one)).toEqual([
+      expect(unresolvedBlockingFindingIds(CONTESTED_PAIR, one)).toEqual([
         "F-02",
       ]);
 
@@ -185,6 +186,43 @@ describe("the adjudication decision log", () => {
       expect(
         loadAdjudicationDecisionLog(sliceDir, CONTESTED_PAIR).log.applied,
       ).toBe(true);
+    });
+  });
+
+  /**
+   * ADR 0055 §2: the completion predicate spans every unresolved BLOCKING
+   * finding, contested and open alike. Under §1 an impasse never contains
+   * an OPEN blocker, so this shape only reaches the lock path when the
+   * classifier and the predicate have drifted apart — which is exactly
+   * what A1 was. The predicate is the last line of defence: the lock is
+   * refused and the disagreement is visible, rather than the contract
+   * locking over an unresolved blocker.
+   */
+  it("refuses to call a mixed exhaustion complete when only the contest is decided", () => {
+    withSliceDir((sliceDir) => {
+      const empty = loadAdjudicationDecisionLog(sliceDir, IMPASSE);
+      expect(unresolvedBlockingFindingIds(IMPASSE, empty.log)).toEqual([
+        "F-01",
+        "F-OPEN",
+      ]);
+
+      const raw = decisionFor("F-01");
+      const decided = appendAdjudicationDecision(sliceDir, empty.log, {
+        raw,
+        decision: parseAdjudication(raw, IMPASSE),
+      });
+
+      // The contested subset is settled — what the courier's park message
+      // renders — yet the exhaustion is not complete.
+      expect(undecidedContestedFindingIds(IMPASSE, decided)).toEqual([]);
+      expect(unresolvedBlockingFindingIds(IMPASSE, decided)).toEqual([
+        "F-OPEN",
+      ]);
+      // And no decision can ever settle it: an OPEN finding is not
+      // adjudicable, so the park would never unlock.
+      expect(() => parseAdjudication(decisionFor("F-OPEN"), IMPASSE)).toThrow(
+        /F-OPEN is not CONTESTED/,
+      );
     });
   });
 

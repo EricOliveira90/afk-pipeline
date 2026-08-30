@@ -162,6 +162,7 @@ import {
   markAdjudicationDecisionsApplied,
   parseAdjudication,
   undecidedContestedFindingIds,
+  unresolvedBlockingFindingIds,
   waitForAdjudication,
   type Adjudication,
 } from "./adjudication.js";
@@ -1626,7 +1627,8 @@ function negotiateImpasseCause(
     summary:
       `negotiate: contract negotiation reached IMPASSE after ${outcome.round} round(s) — ` +
       `contested blocking finding${contestedIds.length === 1 ? "" : "s"} ` +
-      `${contestedIds.join(", ")} require human adjudication`,
+      `${contestedIds.join(", ")} ` +
+      `${contestedIds.length === 1 ? "requires" : "require"} human adjudication`,
   };
 }
 
@@ -2185,14 +2187,27 @@ async function runImpasseAdjudication(
   const decidedIds = decisionLog.decisions.map(
     (recorded) => recorded.decision.findingId,
   );
-  const undecided = undecidedContestedFindingIds(outcome, decisionLog);
+  // The single completion predicate (ADR 0055 §2) is the only thing the lock
+  // path consults: every unresolved blocking finding, not just the contested
+  // ones. The contested subset is rendered alongside it because that is what
+  // the courier can still act on — and, when the two disagree, saying so is
+  // the whole point of keeping the predicate wider than the classifier.
+  const undecided = unresolvedBlockingFindingIds(outcome, decisionLog);
   if (undecided.length > 0) {
+    const contested = undecidedContestedFindingIds(outcome, decisionLog);
+    const inadjudicable = undecided.filter((id) => !contested.includes(id));
     const summary =
       `${parkedCause.summary}; decided ${decidedIds.join(", ")} — ` +
-      `contested blocking finding${undecided.length === 1 ? "" : "s"} ` +
+      `unresolved blocking finding${undecided.length === 1 ? "" : "s"} ` +
       `${undecided.join(", ")} still ` +
       `${undecided.length === 1 ? "requires" : "require"} human adjudication ` +
-      `before the contract can lock`;
+      `before the contract can lock` +
+      (inadjudicable.length > 0
+        ? `; ${inadjudicable.join(", ")} ` +
+          `${inadjudicable.length === 1 ? "is" : "are"} not CONTESTED, so no ` +
+          `decision can settle ${inadjudicable.length === 1 ? "it" : "them"} ` +
+          `— this exhaustion should not have been classified IMPASSE`
+        : "");
     logger.phase(`${ctx.tag}: ${summary}`, "error");
     return {
       phase: "AWAITING-ADJUDICATION",
@@ -2200,7 +2215,7 @@ async function runImpasseAdjudication(
     };
   }
 
-  // --- Every contested finding is decided. Apply once, ever.
+  // --- Every unresolved blocking finding is decided. Apply once, ever.
   //
   // A LOCKED contract with a complete record and no applied marker is the
   // crash window between `lockContract` and the marker write: the decisions

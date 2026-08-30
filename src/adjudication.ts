@@ -338,15 +338,50 @@ export function markAdjudicationDecisionsApplied(
   return writeAdjudicationDecisionLog(sliceDir, { ...log, applied: true });
 }
 
-/** Contested findings this impasse still has no human decision for. */
+function decidedFindingIds(log: AdjudicationDecisionLog): Set<string> {
+  return new Set(log.decisions.map((recorded) => recorded.decision.findingId));
+}
+
+/**
+ * Contested findings this impasse still has no human decision for — the
+ * subset a courier can act on. Presentation only: it is deliberately *not*
+ * the lock predicate, because it cannot see an unresolved OPEN blocker.
+ */
 export function undecidedContestedFindingIds(
   outcome: ContractNegotiationOutcome,
   log: AdjudicationDecisionLog,
 ): string[] {
-  const decided = new Set(
-    log.decisions.map((recorded) => recorded.decision.findingId),
-  );
+  const decided = decidedFindingIds(log);
   return contestedFindingIds(outcome).filter((id) => !decided.has(id));
+}
+
+/**
+ * The completion predicate: every unresolved BLOCKING finding in this
+ * exhaustion — `CONTESTED` and `OPEN` alike — that has no valid recorded
+ * decision (ADR 0055 §2). `LOCKED` is permitted only when this is empty and
+ * the mechanical lock gate passes. One function owns the question, so the
+ * classifier and the lock path cannot disagree about which findings matter.
+ *
+ * Under ADR 0055 §1 the `OPEN` clause is unreachable — an impasse contains
+ * only contested findings. It spans the full set anyway: A1 existed
+ * precisely because the classifier and the predicate could drift apart, and
+ * this is the last line of defence. If they drift again the failure mode is
+ * "the lock is refused and the disagreement is visible", not "the contract
+ * locks over an unresolved blocker".
+ */
+export function unresolvedBlockingFindingIds(
+  outcome: ContractNegotiationOutcome,
+  log: AdjudicationDecisionLog,
+): string[] {
+  const decided = decidedFindingIds(log);
+  return outcome.findings
+    .filter(
+      (finding) =>
+        finding.severity === "BLOCKING" &&
+        finding.unresolved &&
+        !decided.has(finding.id),
+    )
+    .map((finding) => finding.id);
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
