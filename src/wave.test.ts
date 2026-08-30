@@ -313,8 +313,29 @@ describe("runWave", () => {
       decisions: [{ decision: { findingId: "F-IMPASSE" } }],
     });
 
+    // The estate as it stands before the lane refresh, file by file. The
+    // audit assertion is byte-identity rather than mere presence (ADR 0055
+    // Seam 2, plan step 9): lane refresh is the one operation that reaches
+    // a slice's worktree while the slice itself is not being dispatched,
+    // and `recreateWorktreeFromBase` + the stale-artifact `rmSync` beside
+    // it are what #133 aimed at these exact paths.
+    const ESTATE = [
+      "contract-negotiation-outcome.json",
+      "adjudication-decisions.json",
+      "contract.md",
+    ] as const;
+    const estateBefore = new Map(
+      ESTATE.map((name) => [
+        name,
+        readFileSync(join(successorCtx.absSliceDir, name), "utf-8"),
+      ]),
+    );
+    const branchTipBefore = git(repo, ["rev-parse", successorCtx.branch]);
+
     let decisionPresentAtGenerator = false;
     let acceptedLockPresentAtGenerator = false;
+    /** Estate names whose bytes changed between negotiation and generation. */
+    let estateDriftAtGenerator: string[] | undefined;
     config.provider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -332,6 +353,12 @@ describe("runWave", () => {
             join(artifactDir, "contract.md"),
             "utf-8",
           ).includes("**Status:** LOCKED");
+          estateDriftAtGenerator = [...estateBefore]
+            .filter(([name, contents]) => {
+              const path = join(artifactDir, name);
+              return !existsSync(path) || readFileSync(path, "utf-8") !== contents;
+            })
+            .map(([name]) => name);
         }
         return provider.invoke(options);
       },
@@ -353,6 +380,18 @@ describe("runWave", () => {
     expect(outcomes.get("322")?.phase).toBe("PASS");
     expect(decisionPresentAtGenerator).toBe(true);
     expect(acceptedLockPresentAtGenerator).toBe(true);
+    // Named, not incidental: every estate file reached generation with the
+    // bytes negotiation left, and the branch was refreshed by merge rather
+    // than deleted and recreated at the feature tip.
+    expect(estateDriftAtGenerator).toEqual([]);
+    expect(() =>
+      git(repo, [
+        "merge-base",
+        "--is-ancestor",
+        branchTipBefore,
+        successorCtx.branch,
+      ]),
+    ).not.toThrow();
   }, 240_000);
 
   it("runs disjoint slices in parallel lanes", async () => {

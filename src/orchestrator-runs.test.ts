@@ -772,17 +772,45 @@ describe("adjudication expiry and next-run pickup", () => {
     expect(readFileSync(decisionPath, "utf-8")).toBe(malformedDecision);
 
     rmSync(decisionPath);
+    // Crash after re-dispatch (ADR 0055 Seam 2 §9, plan step 9). `trackSlice`
+    // clears the persisted park the moment a run takes the slice back, so a
+    // run killed before its next outcome lands leaves no record at all —
+    // exactly this shape. The park's substance is its estate on disk, not
+    // the state file's announcement of it, so this run must re-read the
+    // persisted exhaustion outcome and re-park from it. If it instead read
+    // "no record" as a fresh slice, it would restart from base and the
+    // whole estate would go with the worktree.
+    const statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
+    const crashed = JSON.parse(readFileSync(statePath, "utf-8"));
+    delete crashed.slices[slice.ghIssue];
+    writeFileSync(statePath, JSON.stringify(crashed), "utf-8");
+    const impasseRecord = join(parkedDir, "contract-negotiation-outcome.json");
+    const impasseRecordBefore = readFileSync(impasseRecord, "utf-8");
+
     await runPipeline(config);
     expect(records).toHaveLength(afterInitialNegotiation);
-    state = JSON.parse(
-      readFileSync(
-        join(repo, ".afk", "state", `${slug}-stub.json`),
-        "utf-8",
-      ),
-    );
+    state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.slices[slice.ghIssue]?.phase).toBe(
       "AWAITING-ADJUDICATION",
     );
+    // The exhaustion outcome it re-parked from is byte-identical, and no
+    // restart touched the tree it lives in — the negotiate entry returns
+    // into adjudication before `prepareSliceWorktree` is ever reached, so
+    // `decideResume` never gets an opinion about a parked slice.
+    expect(readFileSync(impasseRecord, "utf-8")).toBe(impasseRecordBefore);
+    const crashRunParent = join(repo, ".afk", "logs", `${slug}-stub`);
+    const crashRunLog = readFileSync(
+      join(
+        crashRunParent,
+        readdirSync(crashRunParent)
+          .filter((entry) => /^run-\d{8}-\d{6}/.test(entry))
+          .sort()
+          .at(-1)!,
+        "run.log",
+      ),
+      "utf-8",
+    );
+    expect(crashRunLog).not.toContain("restarting from base");
 
     writeFileSync(
       decisionPath,
@@ -958,6 +986,19 @@ describe("cancellation after an impasse park", () => {
     for (const file of before!.files) {
       expect(readFileSync(file.path, "utf-8"), file.path).toBe(file.contents);
     }
+    // The estate is the files *and* what holds them (ADR 0055 Seam 2, plan
+    // step 9). The mid-wave sweep skips parked slices for their phase; this
+    // asserts it also leaves the worktree registered and the branch present,
+    // which is what the next run's re-dispatch reads the estate out of.
+    const parkedWorktree = records.find(
+      (record) => record.ghIssue === "8281",
+    )!.cwd;
+    expect(existsSync(parkedWorktree)).toBe(true);
+    const parkedBranch = finalState.slices["8281"].branch as string;
+    expect(git(repo, ["branch", "--list", parkedBranch]).trim()).not.toBe("");
+    expect(
+      git(repo, ["worktree", "list", "--porcelain"]).replace(/\\/g, "/"),
+    ).toContain(parkedWorktree.replace(/\\/g, "/"));
     expect(
       records.some(
         (record) =>

@@ -139,8 +139,18 @@ describe("runCleanFailed", () => {
       "contract-negotiation-outcome.json",
     );
     const decisionLog = join(parkedSliceDir, "adjudication-decisions.json");
+    // The fourth estate file: a decision the human has written but that no
+    // dispatch has consumed yet. It is the only member of the estate that
+    // exists nowhere else — the log has not recorded it, so deleting it
+    // loses the operator's answer outright (ADR 0055 Seam 2 invariant).
+    const inFlight = join(parkedSliceDir, "adjudication.md");
     writeFileSync(impasseRecord, JSON.stringify({ outcome: "IMPASSE" }), "utf-8");
     writeFileSync(decisionLog, JSON.stringify({ version: 1 }), "utf-8");
+    writeFileSync(
+      inFlight,
+      JSON.stringify({ version: 1, findingId: "F-02" }),
+      "utf-8",
+    );
 
     const report = await runCleanFailed({
       repoRoot: repo,
@@ -159,7 +169,13 @@ describe("runCleanFailed", () => {
     expect(existsSync(parkedDir)).toBe(true);
     expect(existsSync(impasseRecord)).toBe(true);
     expect(existsSync(decisionLog)).toBe(true);
+    expect(existsSync(inFlight)).toBe(true);
     expect(git.branchExists(repo, parkedBranch)).toBe(true);
+    // The worktree is still git's, not just a surviving directory: pass 2
+    // sweeps unregistered namespace leftovers, and a park that pass 1
+    // skipped but pass 2 deleted would be preserved in name only.
+    expect(git.findWorktreeForBranch(repo, parkedBranch)).not.toBeNull();
+    expect(report.removedWorktrees).not.toContain(parkedDir);
 
     // And the operator is told WHY the slice still has a worktree — a
     // silent skip reads as a bug in the command.

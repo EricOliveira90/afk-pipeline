@@ -168,6 +168,25 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     expect(onDisk.slices["300"].error).toBe("boom");
   });
 
+  /**
+   * Estate audit (ADR 0055 Seam 2, plan step 9). Two lifecycle operations
+   * derive their treatment of a slice's worktree from this one predicate:
+   * `--only-failed` selects every scope member that is not complete, and
+   * launch preflight retains the worktree of every incomplete manifest
+   * slice instead of refusing over it as a leftover. A park reading
+   * "complete" would strand it in both — never re-dispatched, and its
+   * worktree reported as debris to clear with `clean-failed`.
+   */
+  it("never reads a parked slice as complete — the predicate --only-failed and preflight retention share", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "parked", "8181", {
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/parked-slice-01",
+      error: "contract negotiation reached IMPASSE on F-01",
+    });
+    expect(isSliceComplete(loadRunState(repo, "parked"), "8181")).toBe(false);
+  });
+
   it("returns a fresh v1 state when no file exists", () => {
     const repo = makeRepo();
     const loaded = loadRunState(repo, "fresh");

@@ -261,6 +261,41 @@ describe("RunJournal park transition", () => {
     expect(outcomeEvents(journal)).toHaveLength(2);
   });
 
+  /**
+   * Estate audit (plan step 9). The park-mark clear lives in `trackSlice`'s
+   * RUNNING branch alone, so "re-dispatch is the reopen" holds only while
+   * no other tracked phase clears it. PENDING and SKIPPED are tracking
+   * states, not dispatches: a slice queued or skipped after a park is
+   * still parked, and a terminal after one of them must still be refused.
+   * Pinned here rather than left to inspection — a future `trackSlice`
+   * caller that reached for PENDING would otherwise silently reopen a park
+   * that no run has re-dispatched.
+   */
+  it("only a RUNNING dispatch reopens a park — PENDING and SKIPPED leave the mark standing", () => {
+    for (const [phase, tracked] of [
+      ["PENDING", lifecycle.pending(SLICE)],
+      ["SKIPPED", lifecycle.skipped(SLICE)],
+    ] as const) {
+      const repo = makeRepo();
+      const journal = parkedJournal(repo, `non-running-${phase}`);
+
+      journal.trackSlice(tracked);
+
+      // The persisted park survives: only a dispatch clears the record.
+      expect(loadRunState(repo, `non-running-${phase}`).slices["40"]).toMatchObject({
+        phase: "AWAITING-ADJUDICATION",
+      });
+      // And the in-memory mark survives, so ADR 0031's protection still
+      // refuses a terminal that no dispatch earned. Matched loosely: the
+      // message renders the phase `trackSlice` last set, so it reads
+      // "parked (PENDING)" here — the refusal is the invariant, its
+      // wording is not.
+      expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+        /slice 40 is parked .*PASS may only follow a trackSlice dispatch/,
+      );
+    }
+  });
+
   it("keeps a terminal after re-dispatch immutable — the park was the only replaceable class", () => {
     const repo = makeRepo();
     const journal = parkedJournal(repo, "terminal-final");
