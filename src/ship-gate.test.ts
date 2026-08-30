@@ -13,7 +13,10 @@ import { rmDirWithRetry } from "./test-support.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvokeOptions, InvokeResult } from "./agent-provider.js";
 import type { SanityCommandRunner } from "./preship.js";
+import type { RunEventPayload } from "./run-events.js";
 import {
+  detectReviewWorktreeDrift,
+  formatReviewWorktreeDrift,
   restoreCapturedReviewArtifacts,
   runShipGate,
   type RunShipGateArgs,
@@ -46,6 +49,7 @@ function makeRepo(): string {
 
 interface JournalFixture {
   journal: ShipGateJournal;
+  event: ReturnType<typeof vi.fn>;
   phase: ReturnType<typeof vi.fn>;
   setReviewOutcomes: ReturnType<typeof vi.fn>;
   setPrOverrideNote: ReturnType<typeof vi.fn>;
@@ -55,11 +59,13 @@ interface JournalFixture {
 function makeJournal(): JournalFixture {
   const logDir = mkdtempSync(join(tmpdir(), "afk-ship-logs-"));
   tempDirs.push(logDir);
+  const event = vi.fn();
   const phase = vi.fn();
   const setReviewOutcomes = vi.fn();
   const setPrOverrideNote = vi.fn();
   const setPrUrl = vi.fn();
   return {
+    event,
     phase,
     setReviewOutcomes,
     setPrOverrideNote,
@@ -71,7 +77,7 @@ function makeJournal(): JournalFixture {
           join(logDir, `${sliceId}-${agent}${suffix}.log`),
         );
       },
-      event: vi.fn(),
+      event,
       phase,
       setPrOverrideNote,
       setPrUrl,
@@ -510,7 +516,15 @@ describe("runShipGate", () => {
   // shell can revert the other's freshly written review to the version
   // committed by the previous gate round. A new spawned scenario is
   // deliberate here — no existing fixture commits a prior round's review.
-  it("commits the architect's own review after the PM agent reverts it in the shared worktree (#136)", async () => {
+  //
+  // Deliberately `serialReviews: false`, the production default
+  // (`serialLanes === true` is off in every shipped config), so the half of
+  // the fix that classifies the verdict from the snapshot is exercised on the
+  // path runs actually take. The PM's revert is gated on the architect's
+  // `run-phase-ended` event, which fires *after* the capture read — that is
+  // the boundary the fix claims, and the ordering has to be pinned rather
+  // than raced or the test would be flaky about which invariant it proves.
+  it("commits the architect's own review after the PM agent reverts it in the shared worktree, reviews concurrent (#136)", async () => {
     const repo = makeRepo();
     const slug = "stale-review";
     const specsDir = join(repo, ".kiro", "specs", slug);
@@ -526,12 +540,31 @@ describe("runShipGate", () => {
     git(repo, ["commit", "-m", "round 3 reviews"]);
 
     const fixture = makeJournal();
+    let architectCaptured!: () => void;
+    const architectSettled = new Promise<void>((resolve) => {
+      architectCaptured = resolve;
+    });
+    const journal: ShipGateJournal = {
+      ...fixture.journal,
+      event: (payload: RunEventPayload) => {
+        fixture.event(payload);
+        if (
+          payload.type === "run-phase-ended" &&
+          payload.phase === "architect-review"
+        ) {
+          architectCaptured();
+        }
+      },
+    };
     const invoke = vi.fn(async (options: InvokeOptions) => {
       if (options.role === "architect-review") {
         writeFileSync(architectPath, fresh, "utf-8");
       } else {
+        await architectSettled;
         writeReview(options, slug, "pm", "SHIP");
-        // What the PM guardian actually ran in run-20260829-161928.
+        // What the PM guardian actually ran in run-20260829-161928 (item_70);
+        // its editor's delete-and-re-add of the same file, four minutes after
+        // the architect finished, had the identical effect.
         git(repo, [
           "checkout-index",
           "--force",
@@ -547,22 +580,139 @@ describe("runShipGate", () => {
         : "",
     );
 
-    const result = await runShipGate(
-      makeArgs(repo, slug, fixture.journal, invoke, runCommand),
-    );
+    const args = makeArgs(repo, slug, journal, invoke, runCommand);
+    const result = await runShipGate({
+      ...args,
+      options: { ...args.options, serialReviews: false },
+    });
 
-    expect(result.verdict).toBe("SHIP");
+    expect(result).toMatchObject({ verdict: "SHIP" });
     expect(
       git(repo, ["show", `HEAD:.kiro/specs/${slug}/review-architect.md`]),
     ).toContain("runImpasseAdjudication at line 2237");
     expect(readFileSync(architectPath, "utf-8")).toBe(fresh);
-    expect(
-      fixture.phase.mock.calls.some(([message]) =>
-        String(message).includes(
-          "Architect review artifact was changed in the review worktree",
-        ),
+    // The verdict came from the snapshot, not from the reverted file — the
+    // stale blob says FIX-BEFORE-SHIP, which would have kept the PR closed.
+    expect(fixture.setReviewOutcomes).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "SHIP" }),
+      expect.objectContaining({ outcome: "SHIP" }),
+    );
+    const restoreWarning = fixture.phase.mock.calls.find(([message]) =>
+      String(message).includes(
+        "Architect review artifact was changed in the review worktree",
       ),
-    ).toBe(true);
+    );
+    expect(restoreWarning).toBeDefined();
+    // F6: the warning names the file, not just the role.
+    expect(String(restoreWarning![0])).toContain("review-architect.md");
+    expect(fixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "warn",
+        reason: "review-artifact-restored",
+      }),
+    );
+  });
+
+  // Residual insurance (#136 review follow-up): the restore step covers the
+  // two review files, so a guardian shell that moves anything else has to be
+  // caught by the pre-commit HEAD/status check instead.
+  it("blocks the gate when a guardian moves HEAD in the review worktree", async () => {
+    const repo = makeRepo();
+    const slug = "drift-head";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      if (kind === "pm") {
+        // A rogue commit in the shared worktree: HEAD is no longer the tree
+        // the guardians reviewed.
+        writeFileSync(join(repo, "README.md"), "rogue\n", "utf-8");
+        git(repo, ["commit", "-am", "rogue guardian commit"]);
+      }
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+
+    const result = await runShipGate(
+      makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+    );
+
+    expect(result.verdict).toBe("BLOCKED");
+    expect(result.failureReason).toContain("HEAD moved");
+    expect(result.pr.requested).toBe(false);
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "warn",
+        reason: "review-worktree-drift",
+      }),
+    );
+  });
+});
+
+describe("detectReviewWorktreeDrift", () => {
+  const specsDir = ".kiro/specs/slug";
+
+  it("passes a worktree dirty only with this run's review artifacts", () => {
+    expect(
+      detectReviewWorktreeDrift({
+        headShaBefore: "abc",
+        headShaNow: "abc",
+        statusPorcelain: [
+          ` M ${specsDir}/review-architect.md`,
+          `A  ${specsDir}/review-pm.md`,
+        ].join("\n"),
+        specsDir,
+      }),
+    ).toBeNull();
+  });
+
+  it("separates tracked source changes from untracked scratch", () => {
+    const drift = detectReviewWorktreeDrift({
+      headShaBefore: "abc",
+      headShaNow: "abc",
+      statusPorcelain: [
+        ` M ${specsDir}/review-pm.md`,
+        " M src/orchestrator.ts",
+        " D src/git.ts",
+        "R  src/old.ts -> src/new.ts",
+        "?? guardian-scratch.log",
+      ].join("\n"),
+      specsDir,
+    });
+
+    expect(drift).toEqual({
+      headMoved: undefined,
+      changedPaths: ["M src/orchestrator.ts", "D src/git.ts", "R src/new.ts"],
+      untrackedPaths: ["guardian-scratch.log"],
+    });
+    expect(formatReviewWorktreeDrift(drift!)).toContain("src/orchestrator.ts");
+  });
+
+  it("reports a moved HEAD even with a clean tree", () => {
+    const drift = detectReviewWorktreeDrift({
+      headShaBefore: "a".repeat(40),
+      headShaNow: "b".repeat(40),
+      statusPorcelain: "",
+      specsDir,
+    });
+
+    expect(drift?.headMoved).toEqual({
+      before: "a".repeat(40),
+      after: "b".repeat(40),
+    });
+    expect(formatReviewWorktreeDrift(drift!)).toContain("HEAD moved");
+  });
+
+  it("stays silent when HEAD could not be resolved on either side", () => {
+    expect(
+      detectReviewWorktreeDrift({
+        headShaBefore: null,
+        headShaNow: "b".repeat(40),
+        statusPorcelain: "",
+        specsDir,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -577,7 +727,7 @@ describe("restoreCapturedReviewArtifacts", () => {
       write: (path: string, content: string) => void disk.set(path, content),
     };
 
-    const restored = restoreCapturedReviewArtifacts(
+    const report = restoreCapturedReviewArtifacts(
       [
         { label: "Architect", path: "a.md", content: "authored" },
         { label: "PM", path: "b.md", content: "untouched" },
@@ -585,8 +735,67 @@ describe("restoreCapturedReviewArtifacts", () => {
       io,
     );
 
-    expect(restored).toEqual(["Architect"]);
+    expect(report).toEqual({
+      restored: [{ label: "Architect", path: "a.md" }],
+      failed: [],
+    });
     expect(disk.get("a.md")).toBe("authored");
+  });
+
+  // The review worktree still belongs to a shell-holding agent when this
+  // runs: the path can be gone, read-only, or on a full disk. Losing a
+  // three-hour gate to a failed one-file write is the worse outcome.
+  it("reports a throwing io as a failure instead of crashing the gate", () => {
+    const writes: string[] = [];
+    const io = {
+      read: (path: string) => (path === "a.md" ? null : "on disk"),
+      write: (path: string, content: string) => {
+        if (path === "a.md") {
+          throw Object.assign(new Error("ENOENT: no such file or directory"), {
+            code: "ENOENT",
+          });
+        }
+        writes.push(`${path}:${content}`);
+      },
+    };
+
+    const report = restoreCapturedReviewArtifacts(
+      [
+        { label: "Architect", path: "a.md", content: "authored" },
+        { label: "PM", path: "b.md", content: "pm authored" },
+      ],
+      io,
+    );
+
+    expect(report.restored).toEqual([{ label: "PM", path: "b.md" }]);
+    expect(report.failed).toEqual([
+      {
+        label: "Architect",
+        path: "a.md",
+        error: "ENOENT: no such file or directory",
+      },
+    ]);
+    // The sibling artifact is still restored: one failure is not a bail-out.
+    expect(writes).toEqual(["b.md:pm authored"]);
+  });
+
+  it("reports a throwing read as a failure", () => {
+    const report = restoreCapturedReviewArtifacts(
+      [{ label: "PM", path: "b.md", content: "authored" }],
+      {
+        read: () => {
+          throw new Error("EACCES: permission denied");
+        },
+        write: () => {
+          throw new Error("write must not be attempted after a failed read");
+        },
+      },
+    );
+
+    expect(report.restored).toEqual([]);
+    expect(report.failed).toEqual([
+      { label: "PM", path: "b.md", error: "EACCES: permission denied" },
+    ]);
   });
 
   it("leaves the path alone when the agent wrote no file and skips cached verdicts", () => {
@@ -601,7 +810,7 @@ describe("restoreCapturedReviewArtifacts", () => {
         [undefined, { label: "PM", path: "b.md", content: null }],
         io,
       ),
-    ).toEqual([]);
+    ).toEqual({ restored: [], failed: [] });
     expect(writes).toEqual([]);
   });
 });

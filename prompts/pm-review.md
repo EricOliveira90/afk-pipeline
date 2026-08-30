@@ -92,5 +92,8 @@ final message — only confirm the file was written and state the verdict.
 guardian is running concurrently in this same worktree and is writing
 `{{SPECS_DIR}}/review-architect.md`; you may read it, but never write, delete,
 stage, or restore it, and never run a command that rewrites tracked files in
-bulk (`git checkout`/`checkout-index`/`restore`/`stash`/`reset`/`clean`). Such a
-command destroyed a guardian's review mid-run once (issue #136).
+bulk (`git checkout`/`checkout-index`/`restore`/`stash`/`reset`/`clean`). This is not
+hypothetical: in one run a guardian's editor deleted and re-wrote the
+sibling's review, and the same agent later ran `git checkout-index --force`
+over it. Both replaced that review with the previous round's content (issue
+#136).

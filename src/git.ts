@@ -430,6 +430,25 @@ export function hasUncommittedChanges(cwd: string): boolean {
   return status.length > 0;
 }
 
+/**
+ * Raw `git status --porcelain` for a worktree, one entry per line.
+ *
+ * `--porcelain` (v1) rather than `--short`: identical field layout, but it is
+ * the format git contracts to keep stable for scripts. The ship gate parses
+ * this to tell "only the two review artifacts changed" from "something moved
+ * the source tree" before it commits (#136).
+ */
+export function statusPorcelain(cwd: string): string {
+  // Deliberately not through `git()`: that helper trims, and porcelain v1 is
+  // column-significant — a leading space is the "unstaged" half of the XY
+  // status code, so trimming shifts every path by one character.
+  const out = execFileSync("git", ["status", "--porcelain"], {
+    cwd,
+    encoding: "utf-8",
+  }) as string;
+  return out.replace(/\n+$/, "");
+}
+
 export function commitAll(cwd: string, message: string) {
   git(["add", "-A"], { cwd });
   git(["commit", "-m", message, "--no-verify"], { cwd });
