@@ -1,5 +1,6 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -352,5 +353,123 @@ describe("withContractTransaction", () => {
     expect(reloaded.pendingLock).toBeUndefined();
     expect(reloaded.decisions).toHaveLength(1);
     expect(reloaded.applied).toBe(false);
+  });
+
+  /**
+   * Fault injection for the crash window the gate used to sit inside.
+   * `lockContract` and the gate are two writes/reads apart; before this
+   * ordering change a process stop between them left witness + stamped
+   * LOCKED on disk with the gate never run, and `adjudicatedLockIsProven`
+   * reads that exact pair as proof. Simulating the stop is unnecessary
+   * once the gate runs first: what the stop would have left behind cannot
+   * exist, because nothing writes LOCKED until the gate has passed. That
+   * is the assertion.
+   */
+  it("does not write LOCKED until the gate has passed, so no stop can leave a witnessed ungated lock", async () => {
+    const observed: (string | null)[] = [];
+    const harness = makeHarness({
+      gate: (contractPath) => {
+        observed.push(readContractStatus(contractPath));
+        return null;
+      },
+    });
+    const log = decisionLog([DECIDED_F01]);
+    // The mutation reopens the contract, so LOCKED at gate time could only
+    // come from `lockContract` having already run.
+    await withContractTransaction(harness.ctx, NOTICE, async (tx) => {
+      mutate(harness);
+      expect(
+        tx.lock({
+          provenance: ADJUDICATION_LOCK,
+          completion: { outcome: IMPASSE_OUTCOME, log },
+        }),
+      ).toEqual({ locked: true });
+      tx.onAccepted();
+    });
+
+    expect(harness.gateCalls).toBe(1);
+    expect(observed).toEqual(["NEGOTIATING"]);
+    // The witness is still written before the lock, so the window it does
+    // cover — lock to applied-mark — stays provable.
+    expect(
+      JSON.parse(readFileSync(join(harness.ctx.absSliceDir, DECISIONS), "utf-8"))
+        .pendingLock,
+    ).toEqual({
+      impasse: log.impasse,
+      decisions: decisionSetFingerprint([DECIDED_F01]),
+    });
+    expect(readContractStatus(harness.contractPath)).toBe("LOCKED");
+  });
+
+  /**
+   * The other half of finding 1: an *accepted* lock whose caller then fails
+   * its bookkeeping. `onAccepted` was never reached, so the rollback puts
+   * the pre-transaction contract back — and when that contract is stale
+   * LOCKED debris, a surviving witness proves the rolled-back lock on the
+   * next dispatch and skips both the apply and the gate. The witness has to
+   * go with the rollback, not merely with a refused lock.
+   */
+  it("clears the witness when the lock succeeded but the caller's bookkeeping threw", async () => {
+    const harness = makeHarness({ gate: () => null });
+    const log = decisionLog([DECIDED_F01]);
+
+    await expect(
+      withContractTransaction(harness.ctx, NOTICE, async (tx) => {
+        mutate(harness);
+        expect(
+          tx.lock({
+            provenance: ADJUDICATION_LOCK,
+            completion: { outcome: IMPASSE_OUTCOME, log },
+          }),
+        ).toEqual({ locked: true });
+        // Stand-in for `markAdjudicationDecisionsApplied` failing: the lock
+        // landed, the applied marker did not, so `tx.onAccepted()` is never
+        // reached.
+        throw new Error("injected applied-marker write failure");
+      }),
+    ).rejects.toThrow("injected applied-marker write failure");
+
+    // The pre-transaction contract is back — and it is LOCKED, which is
+    // exactly the stale-debris shape the surviving witness would have
+    // certified.
+    expect(readFileSync(harness.contractPath, "utf-8")).toBe(ACCEPTED_CONTRACT);
+    expect(readContractStatus(harness.contractPath)).toBe("LOCKED");
+    const reloaded = JSON.parse(
+      readFileSync(join(harness.ctx.absSliceDir, DECISIONS), "utf-8"),
+    );
+    expect(reloaded.pendingLock).toBeUndefined();
+    // The human's decisions still outlive the mechanical failure (ADR 0054).
+    expect(reloaded.decisions).toHaveLength(1);
+    expect(reloaded.applied).toBe(false);
+  });
+
+  it("warns instead of masking the caller's error when the witness cannot be cleared", async () => {
+    const harness = makeHarness({ gate: () => null });
+    const log = decisionLog([DECIDED_F01]);
+
+    await expect(
+      withContractTransaction(harness.ctx, NOTICE, async (tx) => {
+        mutate(harness);
+        tx.lock({
+          provenance: ADJUDICATION_LOCK,
+          completion: { outcome: IMPASSE_OUTCOME, log },
+        });
+        // The exit this defends is "writes to the decision log are failing",
+        // so the clear fails with it. The log is written through
+        // `<name>.tmp` + rename, so a directory squatting on that temp path
+        // makes every write to it throw, on every platform, without
+        // disturbing the contract files the rollback still has to restore.
+        mkdirSync(join(harness.ctx.absSliceDir, `${DECISIONS}.tmp`));
+        throw new Error("injected applied-marker write failure");
+      }),
+    ).rejects.toThrow("injected applied-marker write failure");
+
+    expect(
+      harness.phases.some(
+        (line) =>
+          line.includes("could not clear the pending-lock witness") &&
+          line.includes("stale LOCKED contract could be proven by it"),
+      ),
+    ).toBe(true);
   });
 });
