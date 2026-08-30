@@ -3786,17 +3786,23 @@ export async function runSliceExecute(
     pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
     slice.number,
   );
-  const finishStuck = (): Extract<TerminalOutcome, { phase: "STUCK" }> => {
+  /**
+   * The only constructor of a STUCK return in this function (ADR 0055 P1).
+   * Every reason routes through here, so every STUCK outcome ships the
+   * code-assembled `stuck.md` slice 04 promised — including the ones that
+   * refuse late, after QA passed and the work was committed.
+   */
+  const finishStuck = (
+    reason = `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+  ): Extract<TerminalOutcome, { phase: "STUCK" }> => {
     logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
     artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
+      reason,
       reviewArchiveDir,
       additionalArtifactReferences: stuckReferences,
       commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
     });
-    return {
-      phase: "STUCK",
-      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-    };
+    return { phase: "STUCK", error: reason };
   };
   /**
    * A STUCK resume's `stuck.md` is the operator's audit record of why the
@@ -4302,10 +4308,12 @@ export async function runSliceExecute(
               migrationMode,
             );
             if (!migrationCheck.ok) {
-              return {
-                phase: "STUCK",
-                error: `Migration sync check failed: ${migrationCheck.error}`,
-              };
+              // Late refusal: QA passed and the work is already committed,
+              // so the diagnosis describes a slice whose branch holds
+              // finished work that one check would not certify.
+              return finishStuck(
+                `Migration sync check failed: ${migrationCheck.error}`,
+              );
             }
           }
 

@@ -18,7 +18,18 @@ export const STUCK_DIAGNOSIS_COMMIT_LOG =
   "commit ROUND-1-COMMIT\n" +
   "    first round marker";
 
+/**
+ * `finishStuck`'s default reason — round exhaustion. Every other STUCK
+ * outcome passes its own (ADR 0055 P1).
+ */
+export const STUCK_DIAGNOSIS_REASON =
+  "QA failed after 3 implementation rounds";
+
 export const EXPECTED_STUCK_DIAGNOSIS = `# Stuck diagnosis
+
+## Reason
+
+${STUCK_DIAGNOSIS_REASON}
 
 ## Finding lifecycle
 

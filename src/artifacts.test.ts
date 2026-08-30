@@ -38,6 +38,7 @@ import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
   STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+  STUCK_DIAGNOSIS_REASON,
   STUCK_DIAGNOSIS_COMMIT_LOG,
 } from "./stuck-diagnosis.fixtures.js";
 
@@ -50,6 +51,7 @@ describe("renderStuckDiagnosis", () => {
         reverse: order === "reverse",
       });
       return renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         additionalArtifactReferences: STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
         commitLog: STUCK_DIAGNOSIS_COMMIT_LOG,
@@ -72,12 +74,28 @@ describe("renderStuckDiagnosis", () => {
     );
   });
 
+  it("leads with the reason the caller gave, not the round-exhaustion default", () => {
+    // ADR 0055 P1: the reason is the finalizer's parameter, so a late
+    // refusal (the post-commit migration gate) reads as itself.
+    const diagnosis = renderStuckDiagnosis({
+      reason: "Migration sync check failed: local migrations not applied",
+      reviewArchiveDir: join(tmpdir(), "afk-stuck-reviews-that-do-not-exist"),
+      commitLog: "",
+    });
+
+    expect(diagnosis).toContain(
+      "# Stuck diagnosis\n\n## Reason\n\nMigration sync check failed: local migrations not applied\n",
+    );
+    expect(diagnosis).not.toContain("implementation rounds");
+  });
+
   it("does not label additional-only round evidence as empty", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-stuck-additional-only-"));
     const reviewArchiveDir = join(root, "reviews");
     mkdirSync(reviewArchiveDir, { recursive: true });
     try {
       const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         additionalArtifactReferences: [".afk/gates/s01/ROUND-1-GATE.json"],
         commitLog: "",
@@ -150,6 +168,7 @@ describe("renderStuckDiagnosis", () => {
         "utf-8",
       );
       const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         commitLog: "",
       });
@@ -214,6 +233,7 @@ describe("renderStuckDiagnosis", () => {
       );
 
       const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
         reviewArchiveDir,
         commitLog: "",
       });

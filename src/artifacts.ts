@@ -481,6 +481,13 @@ type ArchivedScopeEscalation =
   | InvalidArchivedScopeEscalation;
 
 export interface StuckDiagnosisDetails {
+  /**
+   * Why this slice is stuck, in the words of whatever refused — round
+   * exhaustion, a failed migration-sync check, anything a later STUCK
+   * outcome adds. Required: a diagnosis that does not say what refused
+   * makes the operator infer it from the evidence below (ADR 0055 P1).
+   */
+  reason: string;
   reviewArchiveDir: string;
   additionalArtifactReferences?: readonly string[];
   commitLog: string;
@@ -699,6 +706,10 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
 
   return [
     "# Stuck diagnosis",
+    "",
+    "## Reason",
+    "",
+    details.reason,
     "",
     "## Finding lifecycle",
     "",
