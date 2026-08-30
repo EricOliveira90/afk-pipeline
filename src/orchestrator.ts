@@ -172,6 +172,7 @@ import {
   unresolvedBlockingFindingIds,
   waitForAdjudication,
   type Adjudication,
+  type AdjudicationWaitResult,
 } from "./adjudication.js";
 import {
   advanceQAReviewHistory,
@@ -4817,10 +4818,18 @@ export async function runPipeline(
   // merge-only recovery pass tries the merge again before any agent runs.
   const mergePending = new Set<string>();
   const awaitingAdjudication = new Set<string>();
+  // Live bounded waits, one per parked slice. Recording a park starts the
+  // wait; nothing awaits it until the scheduler runs out of runnable work
+  // (ADR 0055 §7) — a human's think-time on one slice is not a dependency
+  // of anyone else's (ADR 0024).
   const adjudicationWaits = new Map<
     string,
     ReturnType<typeof waitForAdjudication>
   >();
+  // Results of waits that have already resolved. The idle wait races the
+  // live set, then drains everything settled by then, so a wave picks up
+  // every decision that arrived rather than one per idle round-trip.
+  const settledAdjudications = new Map<string, AdjudicationWaitResult>();
 
   /**
    * A slice this run will not dispatch again, for any reason short of
@@ -5002,15 +5011,25 @@ export async function runPipeline(
       logger.phase(
         `${sliceContext.tag}: waiting up to ${waitMs}ms for ${ADJUDICATION_FILENAME}`,
       );
-      adjudicationWaits.set(
-        id,
-        waitForAdjudication({
-          sliceDir: sliceContext.absSliceDir,
-          waitMs,
-          pollMs:
-            config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
-          signal,
-        }),
+      const wait = waitForAdjudication({
+        sliceDir: sliceContext.absSliceDir,
+        waitMs,
+        pollMs:
+          config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
+        signal,
+      });
+      adjudicationWaits.set(id, wait);
+      // Record the result as it lands so the idle wait can drain every
+      // decision that arrived, not just the one that won its race. The
+      // rejection arm is deliberately empty: the idle wait awaits the same
+      // promise and re-throws there, and a wait the run never reaches
+      // (abort, or an exit before idle) must not become an unhandled
+      // rejection that takes the process down after the summary.
+      void wait.then(
+        (result) => {
+          settledAdjudications.set(id, result);
+        },
+        () => {},
       );
     }
   };
@@ -5120,15 +5139,12 @@ export async function runPipeline(
     recoveredMerges.add(id);
   }
 
-  let waveNumber = 0;
-  while (true) {
-    waveNumber++;
-
-    // Wave-transition watchdog: race the readiness check against a
-    // timeout. If the event loop is blocked (dangling promise,
-    // unresolved stream), the timeout rejects and we crash with
-    // diagnostics.
-    const readyResult = await Promise.race([
+  // Wave-transition watchdog: race the readiness check against a
+  // timeout. If the event loop is blocked (dangling promise,
+  // unresolved stream), the timeout rejects and we crash with
+  // diagnostics.
+  const readyOrHang = (waveNumber: number): Promise<string[]> =>
+    Promise.race([
       Promise.resolve().then(() => {
         const ready = dag.ready(completed);
         return ready.filter((id) => !heldBack(id));
@@ -5145,8 +5161,133 @@ export async function runPipeline(
       }),
     ]);
 
-    const toRun = readyResult;
-    if (toRun.length === 0) break;
+  // One abort promise for the whole run, created the first time the
+  // pipeline actually idles on a human. The idle wait races it so
+  // cancellation ends the wait immediately (ADR 0003, ADR 0055 §7);
+  // nothing is lost, because the park is durable on disk.
+  let abortSignalled: Promise<"aborted"> | undefined;
+  const abortRace = (): Promise<"aborted"> => {
+    if (!signal) {
+      // No signal to race: a promise that never settles leaves the live
+      // waits as the only arms of the race.
+      abortSignalled ??= new Promise<"aborted">(() => {});
+      return abortSignalled;
+    }
+    abortSignalled ??= new Promise<"aborted">((resolve) => {
+      if (signal.aborted) {
+        resolve("aborted");
+        return;
+      }
+      signal.addEventListener("abort", () => resolve("aborted"), {
+        once: true,
+      });
+    });
+    return abortSignalled;
+  };
+
+  /**
+   * Wait for a human decision — but only once there is nothing else to
+   * run. Every ready wave has already been dispatched by the time this is
+   * called, so the only thing a park can delay is its own dependents
+   * (ADR 0055 §7; ADR 0024's rule applied to parks).
+   *
+   * The wall-clock ceiling (ADR 0019) deliberately keeps running while the
+   * pipeline idles here: the bounded wait is already sized by
+   * configuration, and a park surviving run death is the point of the
+   * durable park — exempting human think-time from the ceiling would let a
+   * run live forever.
+   *
+   * - `"progress"` — at least one slice left `awaitingAdjudication`; its
+   *   re-dispatch on the next loop turn is the park's reopen (step 4:
+   *   `trackSlice` clears the mark and the persisted record).
+   * - `"aborted"` — cancellation won the race; the caller runs the normal
+   *   sweep and leaves every park untouched.
+   * - `"exhausted"` — no live wait remains and nothing became runnable.
+   */
+  const awaitAdjudicationAtIdle = async (): Promise<
+    "progress" | "aborted" | "exhausted"
+  > => {
+    while (adjudicationWaits.size > 0) {
+      if (signal?.aborted) return "aborted";
+      logger.phase(
+        `[afk] No runnable slices; waiting on ${adjudicationWaits.size} ` +
+          `adjudication decision(s): ` +
+          `${[...adjudicationWaits.keys()].map((id) => `#${id}`).join(", ")}`,
+      );
+      await Promise.race([...adjudicationWaits.values(), abortRace()]);
+      if (signal?.aborted) return "aborted";
+
+      // Drain everything that resolved by now, not just the race winner:
+      // several decisions can land while one wave runs, and each should
+      // reach the same next wave.
+      let progressed = false;
+      for (const [id, result] of settledAdjudications) {
+        settledAdjudications.delete(id);
+        adjudicationWaits.delete(id);
+        if (result.status === "accepted") {
+          // Dropping the hold-back is the whole reopen: the next wave
+          // dispatches the slice, and that dispatch clears the park's mark
+          // and persisted record in the journal (ADR 0055 §9).
+          awaitingAdjudication.delete(id);
+          logger.phase(
+            `[afk] Slice #${id}: valid adjudication received — redispatching`,
+          );
+          progressed = true;
+        } else if (result.status === "expired") {
+          if (result.defect) {
+            logger.phase(
+              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
+            );
+          }
+          logger.phase(
+            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
+          );
+        }
+      }
+      if (progressed) return "progress";
+    }
+    return "exhausted";
+  };
+
+  // Mark anything not yet completed/failed as CANCELLED. Worktrees are
+  // preserved on disk so a re-run resumes from the artifact state, and a
+  // parked slice keeps its own phase — its estate is durable (ADR 0003,
+  // ADR 0055 Seam 2).
+  const sweepCancelled = (): void => {
+    for (const [id, slice] of dag.slices) {
+      if (slice.type === "HITL") continue;
+      if (
+        completed.has(id) ||
+        failed.has(id) ||
+        awaitingAdjudication.has(id)
+      ) {
+        continue;
+      }
+      const branch = sliceBranch(prdSlug, slice, provider);
+      logger.recordTerminal(
+        { ghIssue: id, title: slice.title, branch },
+        { phase: "CANCELLED", error: CANCELLED_BY_USER },
+      );
+      failed.add(id);
+    }
+  };
+
+  let waveNumber = 0;
+  waves: while (true) {
+    waveNumber++;
+
+    // Nothing ready is not necessarily the end: a parked slice may be one
+    // human decision away from being runnable again. Only idle waits.
+    let toRun = await readyOrHang(waveNumber);
+    while (toRun.length === 0) {
+      const idle = await awaitAdjudicationAtIdle();
+      if (idle === "aborted") {
+        sweepCancelled();
+        break waves;
+      }
+      if (idle === "exhausted") break waves;
+      toRun = await readyOrHang(waveNumber);
+    }
 
     // Run the wave: Phase A (negotiate) → lane partition → Phase B
     // (execute + merge). Returns per-slice outcomes for persistence.
@@ -5176,29 +5317,13 @@ export async function runPipeline(
       if (outcome.phase === "PASS") {
         completed.add(id);
       } else if (outcome.phase === "AWAITING-ADJUDICATION") {
-        const wait = adjudicationWaits.get(id);
-        if (!wait) {
+        // The park is recorded and its bounded wait is already running
+        // (persistOutcome). Reconciliation does NOT await it: the rest of
+        // this wave's outcomes, and every wave they make ready, come first
+        // (ADR 0055 §7). `awaitAdjudicationAtIdle` collects the decision
+        // once there is nothing else to run.
+        if (!adjudicationWaits.has(id) && !settledAdjudications.has(id)) {
           throw new Error(`Missing adjudication wait for slice #${id}`);
-        }
-        const result = await wait;
-        adjudicationWaits.delete(id);
-        if (result.status === "accepted" && !signal?.aborted) {
-          // Dropping the hold-back is the whole reopen: the next wave
-          // dispatches the slice, and that dispatch clears the park's mark
-          // and persisted record in the journal (ADR 0055 §9).
-          awaitingAdjudication.delete(id);
-          logger.phase(
-            `[afk] Slice #${id}: valid adjudication received — redispatching`,
-          );
-        } else if (result.status === "expired") {
-          if (result.defect) {
-            logger.phase(
-              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
-            );
-          }
-          logger.phase(
-            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
-          );
         }
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
@@ -5211,32 +5336,15 @@ export async function runPipeline(
     logger.event({ type: "wave-completed", wave: waveNumber });
 
     // If cancelled, mark anything not yet completed/failed as CANCELLED
-    // and exit the wave loop. Worktrees are preserved on disk so a
-    // re-run resumes from the artifact state. See ADR 0003.
+    // and exit the wave loop. See ADR 0003.
     if (signal?.aborted) {
-      for (const [id, slice] of dag.slices) {
-        if (slice.type === "HITL") continue;
-        if (
-          completed.has(id) ||
-          failed.has(id) ||
-          awaitingAdjudication.has(id)
-        ) {
-          continue;
-        }
-        const branch = sliceBranch(prdSlug, slice, provider);
-        logger.recordTerminal(
-          { ghIssue: id, title: slice.title, branch },
-          { phase: "CANCELLED", error: CANCELLED_BY_USER },
-        );
-        failed.add(id);
-      }
+      sweepCancelled();
       break;
     }
 
-    // If no progress was made this round, we're stuck.
-    const newReady = dag.ready(completed);
-    const newToRun = newReady.filter((id) => !heldBack(id));
-    if (newToRun.length === 0) break;
+    // No early exit when nothing is ready: the top of the loop decides
+    // that, because "nothing ready" now has a second answer — idle on the
+    // live adjudication waits before concluding the run is done.
   }
 
   // Any selected slice that never received an outcome was held back by
