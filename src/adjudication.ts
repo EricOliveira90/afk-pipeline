@@ -414,6 +414,23 @@ export function recordPendingLock(
 }
 
 /**
+ * Clear a pending-lock witness that never became an accepted lock — a
+ * refused or failed lock exit. Without this, the witness survives beside
+ * whatever contract the rollback restored; if that contract is stale
+ * LOCKED debris, the next dispatch would prove the refused lock as this
+ * decision set's own and inherit it (the A2 shape, recreated). The
+ * witness is mechanical bookkeeping, not human input — clearing it is
+ * not covered by the "decisions outlive refusals" rule.
+ */
+export function clearPendingLock(
+  sliceDir: string,
+  log: AdjudicationDecisionLog,
+): AdjudicationDecisionLog {
+  const { pendingLock: _cleared, ...rest } = log;
+  return writeAdjudicationDecisionLog(sliceDir, rest);
+}
+
+/**
  * Mark the recorded decisions as applied to an accepted contract lock, and
  * clear the witness — the applied mark is the stronger proof, and a
  * witness left behind would outlive the window it describes.

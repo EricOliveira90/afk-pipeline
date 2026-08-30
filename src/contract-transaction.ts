@@ -49,6 +49,7 @@ import * as artifacts from "./artifacts.js";
 import { ACCEPTANCE_MANIFEST_FILENAME } from "./acceptance-manifest.js";
 import {
   recordPendingLock,
+  clearPendingLock,
   unresolvedBlockingFindingIds,
   type AdjudicationDecisionLog,
 } from "./adjudication.js";
@@ -188,19 +189,34 @@ export async function withContractTransaction<T>(
       // unlocked contract proves nothing and is overwritten by the next
       // apply, while a witness beside a lock proves the lock is this
       // decision set's.
+      //
+      // The witness must not outlive a lock exit that did not lock: the
+      // rollback restores the pre-transaction contract, and if that
+      // restored contract is itself stale LOCKED debris, a surviving
+      // witness would prove the *refused* lock on the next dispatch and
+      // bypass the gate re-run. Cleared in the finally for every
+      // non-locked exit, including a thrown lockContract or gate.
       if (request.completion) {
         recordPendingLock(ctx.absSliceDir, request.completion.log);
       }
-      artifacts.lockContract(contractPath, request.provenance);
-      const objection = ctx.onContractLocked?.(contractPath) ?? null;
-      if (objection !== null) {
-        // No local reopen: the rollback below restores the pre-mutation
-        // contract byte-for-byte, which is strictly more than reopening
-        // the status line of a contract the planner may also have
-        // rewritten.
-        return { locked: false, refusal: objection };
+      let lockAccepted = false;
+      try {
+        artifacts.lockContract(contractPath, request.provenance);
+        const objection = ctx.onContractLocked?.(contractPath) ?? null;
+        if (objection !== null) {
+          // No local reopen: the rollback below restores the pre-mutation
+          // contract byte-for-byte, which is strictly more than reopening
+          // the status line of a contract the planner may also have
+          // rewritten.
+          return { locked: false, refusal: objection };
+        }
+        lockAccepted = true;
+        return { locked: true };
+      } finally {
+        if (!lockAccepted && request.completion) {
+          clearPendingLock(ctx.absSliceDir, request.completion.log);
+        }
       }
-      return { locked: true };
     },
     onAccepted() {
       accepted = true;

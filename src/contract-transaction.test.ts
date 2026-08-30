@@ -324,7 +324,7 @@ describe("withContractTransaction", () => {
     );
   });
 
-  it("leaves a witness over an unlocked contract when the lock is refused", async () => {
+  it("clears the witness when the lock gate refuses, so a restored stale LOCKED cannot be proven by it", async () => {
     const harness = makeHarness({ gate: () => "injected lock-gate refusal" });
     const log = decisionLog([DECIDED_F01]);
 
@@ -338,12 +338,19 @@ describe("withContractTransaction", () => {
       ).toBe(false);
     });
 
-    // Harmless by design: a witness proves nothing without a lock beside
-    // it, and the next dispatch's full apply overwrites it.
+    // The rollback restores the pre-transaction contract byte-for-byte. If
+    // that contract were stale LOCKED debris, a surviving witness would
+    // prove the *refused* lock as this decision set's own on the next
+    // dispatch and inherit it without re-running the gate — the A2 shape
+    // recreated through its own fix. The witness is mechanical
+    // bookkeeping, so a refused lock exit clears it; the recorded
+    // decisions themselves survive untouched.
     expect(readFileSync(harness.contractPath, "utf-8")).toBe(ACCEPTED_CONTRACT);
-    expect(
-      JSON.parse(readFileSync(join(harness.ctx.absSliceDir, DECISIONS), "utf-8"))
-        .pendingLock,
-    ).toBeTruthy();
+    const reloaded = JSON.parse(
+      readFileSync(join(harness.ctx.absSliceDir, DECISIONS), "utf-8"),
+    );
+    expect(reloaded.pendingLock).toBeUndefined();
+    expect(reloaded.decisions).toHaveLength(1);
+    expect(reloaded.applied).toBe(false);
   });
 });

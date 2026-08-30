@@ -3036,6 +3036,12 @@ async function negotiateAttempt(
         lastVerdict = verdict;
         lastFindings = review.findings;
         if (verdict === "ACCEPT") {
+          // Deliberately not withContractTransaction: ordinary negotiation
+          // has no previously-accepted contract/manifest pair to capture
+          // and restore — the pair being written IS the first accepted
+          // one. The stamp keeps lock provenance uniform (ADR 0055 §4);
+          // the two revision paths, which do mutate an accepted pair, go
+          // through the shared transaction's single lock exit.
           artifacts.lockContract(contractPath, {
             kind: "negotiation",
             round,
