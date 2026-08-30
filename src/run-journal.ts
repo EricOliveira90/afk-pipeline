@@ -336,10 +336,19 @@ export class RunJournal {
    *
    * A completed terminal call is idempotent for the rest of this run. A
    * park (ADR 0055 §9) is idempotent the same way for a re-record of the
-   * same park, but it is replaceable: a *different* outcome may only
+   * *same* park, but it is replaceable: a **different** outcome may only
    * follow an intervening `trackSlice` dispatch, and asking for one
    * without that dispatch throws rather than silently overwriting the
    * record a human is being asked to act on (ADR 0031's protection).
+   *
+   * "Same park" means the whole record, phase and reason alike — not the
+   * phase alone. Phase-only idempotency looked like ADR 0031's retry rule
+   * and behaved like a data-loss bug: a partial adjudication parks again
+   * naming only the findings still undecided (ADR 0054 item 3), same phase,
+   * different reason, and the phase check silently kept the stale reason
+   * listing findings the human had already decided. A caller that reaches
+   * here with a changed park has skipped its reopen; that is a defect in
+   * the caller, so it is raised, not absorbed.
    */
   recordTerminal(
     sliceId: SliceIdentity,
@@ -348,10 +357,17 @@ export class RunJournal {
     const existing = this.slices.get(sliceId.ghIssue);
     if (this.terminalSlices.has(sliceId.ghIssue) && existing) return existing;
     if (this.parkedSlices.has(sliceId.ghIssue) && existing) {
-      if (existing.phase === outcome.phase) return existing;
+      const sameError =
+        ("error" in existing ? existing.error : undefined) ===
+        ("error" in outcome ? outcome.error : undefined);
+      if (existing.phase === outcome.phase && sameError) return existing;
+      const replacement =
+        existing.phase === outcome.phase
+          ? `a changed ${outcome.phase}`
+          : outcome.phase;
       throw new Error(
         `RunJournal.recordTerminal: slice ${sliceId.ghIssue} is parked ` +
-          `(lifecycle shows ${existing.phase}); ${outcome.phase} may only ` +
+          `(lifecycle shows ${existing.phase}); ${replacement} may only ` +
           `follow a trackSlice dispatch that reopens the park`,
       );
     }
