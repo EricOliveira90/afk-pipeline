@@ -2825,31 +2825,31 @@ async function negotiateAttempt(
 
     /**
      * Objection raised by `ctx.onContractLocked` and not yet handed to a
-     * planner round. Non-null means the last contract to reach LOCKED was
-     * refused after the evaluator had accepted it.
+     * planner round. Non-null means the last contract the evaluator
+     * accepted — or the last one found already `LOCKED` on disk — was
+     * refused by the gate, so it is NEGOTIATING and owes a planner round.
      */
     let gateObjection: string | null = null;
     let previousSchemaValidManifest: AcceptanceManifestV2 | null = null;
 
     /**
-     * Consult the contract-lock gate on a contract that just reached
-     * LOCKED. `true` means the gate refused it: the contract is back to
-     * NEGOTIATING on disk and `gateObjection` holds the feedback the next
-     * planner round must address.
+     * Route a gate objection to the next planner round: the contract is
+     * NEGOTIATING, and `gateObjection` holds the feedback that round must
+     * address.
      *
-     * `lockedAt` describes where the refused lock came from, and reaches
-     * the operator through `stuck.md` — so it says "a previous run" for a
-     * contract found already locked on disk rather than inventing a
-     * round number for a round this run never ran.
+     * `refusedContract` describes which contract was refused, and reaches
+     * the operator through `stuck.md` — so it says "locked by a previous
+     * run" for a contract found already locked on disk rather than
+     * inventing a round number for a round this run never ran.
      */
-    const lockRefusedByGate = (lockedAt: string): boolean => {
-      const objection = ctx.onContractLocked?.(contractPath) ?? null;
-      if (objection === null) return false;
+    const recordGateObjection = (
+      objection: string,
+      refusedContract: string,
+    ): void => {
       gateObjection = objection;
-      artifacts.reopenContract(contractPath);
       contractStatus = "NEGOTIATING";
       capDecisions.push(
-        `The contract-lock gate refused the contract locked at ${lockedAt}: ${objection}`,
+        `The contract-lock gate refused the contract ${refusedContract}: ${objection}`,
       );
       logger.phase(
         `${ctx.tag}: contract lock refused before generation — ${objection}`,
@@ -2861,6 +2861,38 @@ async function negotiateAttempt(
           message: objection,
         },
       );
+    };
+
+    /**
+     * Consult the contract-lock gate on the contract the evaluator just
+     * accepted, *before* anything writes `LOCKED`. `true` means the gate
+     * refused it: nothing has been written, the contract still says
+     * NEGOTIATING on disk, and the objection is routed to the next round.
+     *
+     * Gate before lock is ADR 0055 §5's mandated ordering, and it is what
+     * makes `LOCKED` on disk the gate's own attestation (ADR 0008). The
+     * gate reads the declared file scope, never the status line, so it
+     * needs no lock to run.
+     */
+    const candidateRefusedByGate = (round: number): boolean => {
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection === null) return false;
+      recordGateObjection(objection, `accepted in round ${round}`);
+      return true;
+    };
+
+    /**
+     * Consult the gate on a contract that is already `LOCKED` on disk —
+     * left there by an earlier run, or written by an agent despite a
+     * non-ACCEPT verdict. `true` means the gate refused it, and the
+     * contract is reopened: a stale `LOCKED` would otherwise reach the
+     * generator, which is the divergence ADR 0008 exists to prevent.
+     */
+    const lockRefusedByGate = (lockedAt: string): boolean => {
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection === null) return false;
+      artifacts.reopenContract(contractPath);
+      recordGateObjection(objection, lockedAt);
       return true;
     };
 
@@ -2957,7 +2989,7 @@ async function negotiateAttempt(
           "a previous LOCKED contract",
         );
       } else {
-        lockRefusedByGate("a previous run");
+        lockRefusedByGate("locked by a previous run");
       }
     }
 
@@ -3262,24 +3294,42 @@ async function negotiateAttempt(
         lastVerdict = verdict;
         lastFindings = review.findings;
         if (verdict === "ACCEPT") {
+          // Gate before lock, per ADR 0055 §5's mandated ordering. With
+          // `lockContract` first, a process stop between the two calls left
+          // an authoritative `LOCKED` contract whose gate had never passed
+          // — a status ADR 0008 makes the generator trust, forged by a
+          // crash window. Evaluating the gate against the accepted
+          // candidate first means the only thing that can write `LOCKED`
+          // here is a gate that already passed, so the status on disk *is*
+          // the attestation. A refusal writes nothing at all.
+          //
           // Deliberately not withContractTransaction: ordinary negotiation
           // has no previously-accepted contract/manifest pair to capture
           // and restore — the pair being written IS the first accepted
           // one. The stamp keeps lock provenance uniform (ADR 0055 §4);
           // the two revision paths, which do mutate an accepted pair, go
-          // through the shared transaction's single lock exit.
-          artifacts.lockContract(contractPath, {
-            kind: "negotiation",
-            round,
-          });
-          contractStatus = "LOCKED";
+          // through the shared transaction's single lock exit, which
+          // carries this same ordering.
+          if (!candidateRefusedByGate(round)) {
+            artifacts.lockContract(contractPath, {
+              kind: "negotiation",
+              round,
+            });
+            contractStatus = "LOCKED";
+            break;
+          }
         } else {
           contractStatus = artifacts.readContractStatus(contractPath);
+          // An agent that wrote `LOCKED` itself despite a non-ACCEPT
+          // verdict still faces the gate, and a refusal reopens it.
+          if (
+            contractStatus === "LOCKED" &&
+            !lockRefusedByGate(`locked in round ${round}`)
+          )
+            break;
         }
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.
-        if (contractStatus === "LOCKED" && !lockRefusedByGate(`round ${round}`))
-          break;
 
         if (round === allowedContractRounds) {
           const reason = gateObjection

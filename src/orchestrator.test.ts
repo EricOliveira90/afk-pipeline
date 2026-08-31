@@ -4223,6 +4223,7 @@ describe("contract review fails closed", () => {
     slug: string,
     ghIssue: string,
     artifact: string | null,
+    onContractLocked?: (contractPath: string) => string | null,
   ) {
     const repo = makeRepo();
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -4289,6 +4290,7 @@ describe("contract review fails closed", () => {
       "- README.md",
       "pnpm test",
     );
+    if (onContractLocked) ctx.onContractLocked = onContractLocked;
     const outcome = await runSliceNegotiate(ctx);
     return {
       outcome,
@@ -4437,6 +4439,52 @@ describe("contract review fails closed", () => {
     },
     60_000,
   );
+
+  /**
+   * ADR 0055 §5's ordering — the gate runs before `LOCKED` is written —
+   * binds ordinary negotiation's lock too, not only the shared
+   * transaction's. `lockContract` used to run first, so a process stop
+   * between the two calls left an authoritative `LOCKED` contract whose
+   * gate had never passed, which is exactly what ADR 0008 makes the
+   * on-disk status authoritative *against*.
+   *
+   * Reuses `negotiateWithArtifact`'s fixture rather than spawning a
+   * scenario of its own. The gate callback is the only place the ordering
+   * is observable — it runs between the two operations, so what it reads on
+   * disk is the ordering — and the wave-level refusal already covered by
+   * `wave-migrations.test.ts` consults the real migration gate, which
+   * cannot be wrapped to look.
+   */
+  it("consults the lock gate before an accepted contract is locked", async () => {
+    const statusesAtGate: Array<string | null> = [];
+    const { outcome, ctx, plannerRounds, evaluatorRounds } =
+      await negotiateWithArtifact(
+        "review-gate-before-lock",
+        "9102",
+        reviewText({ verdict: "ACCEPT", findings: [] }),
+        (contractPath) => {
+          statusesAtGate.push(readContractStatus(contractPath));
+          return "injected negotiation lock-gate refusal";
+        },
+      );
+
+    // The gate saw the accepted candidate, and it was not locked yet: no
+    // crash window between here and `lockContract` can forge a `LOCKED`
+    // contract the gate never passed.
+    expect(statusesAtGate).toEqual(["NEGOTIATING"]);
+    // The refusal wrote nothing at all — not a lock, and so not a reopen
+    // either — and it still bought the planner the next round, where this
+    // fixture's planner writes no `contract-response.json`.
+    expect(readContractStatus(join(ctx.absSliceDir, "contract.md"))).toBe(
+      "NEGOTIATING",
+    );
+    expect(plannerRounds()).toBe(2);
+    expect(evaluatorRounds()).toBe(1);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /contract-response\.json is missing/,
+    );
+  }, 60_000);
 
   it("archives every review round without overwriting an earlier one", async () => {
     const repo = makeRepo();
