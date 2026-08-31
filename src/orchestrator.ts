@@ -21,6 +21,9 @@ import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
 import {
+  captureAcceptedContractPair,
+  mutatedAcceptedContractFiles,
+  restoreAcceptedContractPair,
   withContractTransaction,
   type ContractTransaction,
 } from "./contract-transaction.js";
@@ -4228,6 +4231,13 @@ export async function runSliceExecute(
           ? `${generatorPromptBase}\n\n${scopeRevisionNote}`
           : generatorPromptBase;
         rmSync(escalationPath, { force: true });
+        // The accepted pair's bytes, captured before the generator can
+        // touch them (architect A1, seventh gate round). Re-captured every
+        // iteration of this loop, because an accepted focused revision
+        // legitimately replaces the pair and the next dispatch must be
+        // measured against the *new* accepted bytes, not the round's first
+        // ones.
+        const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
         await invoke({
           role: "generator",
           prompt: generatorPrompt,
@@ -4246,6 +4256,64 @@ export async function runSliceExecute(
           agent: "generator",
           round,
         });
+
+        // --- The generator does not get to write its own lock (architect
+        // A1, seventh gate round). ADR 0055 Seam 1 §3 makes the shared
+        // contract transaction the only mutation path for the accepted
+        // `contract.md` / `acceptance-manifest.json` pair and ADR 0048
+        // assigns scope mutation to the orchestrator; nothing enforced it
+        // across a generator dispatch. A generator could add an undeclared
+        // source path to *both* files and then escalate for some unrelated
+        // path: the manifest read below became `lockedManifest`, the
+        // changed-set guard exempted everything under the slice directory,
+        // and `runFocusedScopeRevision` captured the generator's bytes as
+        // "the previously accepted pair" — so its additive guard preserved
+        // the smuggled path instead of catching it. The fresh generator
+        // then received a lock it had widened itself.
+        //
+        // Placed here, before `existsSync(escalationPath)`, on purpose: the
+        // pair is protected across *every* generator invocation, not only
+        // the escalating ones, and the refusal lands before escalation
+        // parsing, the focused revision's planner and evaluator, the
+        // migration claim gate, the base gates and QA. Refuses by throw
+        // like the two revision bounds below it: ERROR, and the operator
+        // gets the tree.
+        //
+        // Evidence first, then restore. The restore is what makes the
+        // refusal safe — the next dispatch, a resume, or a hand-declared
+        // scope all read the orchestrator's bytes and not the generator's —
+        // but it also erases the incident, so the attempted bytes are
+        // archived beside the round's other evidence before they go.
+        const mutatedOwned = mutatedAcceptedContractFiles(
+          ctx.absSliceDir,
+          acceptedPair,
+        );
+        if (mutatedOwned.length > 0) {
+          const archived = artifacts.archiveRejectedContractMutation({
+            sliceDir: ctx.absSliceDir,
+            archiveDir: reviewArchiveDir,
+            round,
+            attempt: generatorAttempt,
+            files: mutatedOwned,
+          });
+          restoreAcceptedContractPair(ctx.absSliceDir, acceptedPair);
+          throw new Error(
+            `Generator round ${round} attempt ${generatorAttempt} changed ` +
+              `orchestrator-owned contract file(s) ` +
+              `(${mutatedOwned.join(", ")}). The accepted contract.md and ` +
+              `${ACCEPTANCE_MANIFEST_FILENAME} pair is mutated only by the ` +
+              `orchestrator's contract transaction (ADR 0055 Seam 1, ` +
+              `ADR 0048) — a generator that rewrites its own lock has ` +
+              `widened its own file scope, so no escalation, revision, gate ` +
+              `or QA runs on this tree. The accepted bytes were restored` +
+              (archived.length > 0
+                ? `; the attempted bytes are preserved as ` +
+                  `${archived.join(", ")} in ${reviewArchiveDir}`
+                : ``) +
+              `. Review them, then either declare the path(s) in the ` +
+              `contract by hand or resume the slice.`,
+          );
+        }
 
         if (!existsSync(escalationPath)) break;
 
@@ -4304,6 +4372,13 @@ export async function runSliceExecute(
           changedFiles: escalationTree.paths,
           manifest: lockedManifest,
           sliceArtifactDir: ctx.relSliceDir,
+          // Proven above, not assumed: the integrity check threw unless
+          // both files still hold the bytes captured before dispatch. Both
+          // files show up in this changed set on every honest escalation
+          // too — they are written into the worktree during negotiation —
+          // so the guard needs the attestation to tell the honest tree from
+          // the laundered one.
+          acceptedPairIntact: true,
           options: { migrationPathPattern: config.migrationPathPattern },
         });
         if (undeclaredChanges.length > 0) {

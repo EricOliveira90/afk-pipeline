@@ -1528,6 +1528,19 @@ describe("generator scope escalation", () => {
         blockedBy: [],
         userStories: "",
       },
+      // Architect A1, seventh gate round. Not a failed revision at all —
+      // the revision never starts — but it belongs in this run rather than
+      // a fifth spawn: the claim it proves is exactly this describe's claim
+      // ("the accepted pair survives a refusal byte-for-byte"), and the
+      // per-slice `it.each` assertions below already read it.
+      {
+        number: "05",
+        ghIssue: "1144",
+        title: "Generator rewrites its own lock",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const escalation = (slice: Slice): string =>
       JSON.stringify({
@@ -1588,6 +1601,15 @@ describe("generator scope escalation", () => {
               slices[3]!.ghIssue,
               { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
             ],
+            // Widens both orchestrator-owned files with a path its
+            // escalation never mentions, then escalates for `extra-05`.
+            [
+              slices[4]!.ghIssue,
+              {
+                ...fixture(slices[4]!),
+                ownedContractWidening: "src/smuggled-05.ts",
+              },
+            ],
           ]),
         }),
         onContractLocked: (() => {
@@ -1645,6 +1667,64 @@ describe("generator scope escalation", () => {
       );
     });
 
+    /**
+     * Architect A1, seventh gate round: a generator may not write its own
+     * lock. The pair is read back by `lockedManifest`, by the changed-set
+     * guard and by the focused revision's capture, so a generator that
+     * widened both files handed itself a scope no orchestrator accepted.
+     */
+    it("ends the slice ERROR naming the rewritten orchestrator-owned files", () => {
+      expect(state.slices[slices[4]!.ghIssue]!.phase).toBe("ERROR");
+      const error = state.slices[slices[4]!.ghIssue]!.error!;
+      expect(error).toMatch(/changed orchestrator-owned contract file\(s\)/);
+      expect(error).toContain("contract.md");
+      expect(error).toContain("acceptance-manifest.json");
+      expect(error).toMatch(/ADR 0055/);
+    });
+
+    it("dispatches no planner or evaluator on the rewritten lock", () => {
+      // One planner and one contract evaluator: negotiation's. The refusal
+      // lands before escalation parsing, so the revision's planner and
+      // evaluator never run, and QA never sees the widened tree.
+      const forSlice = (role: string) =>
+        records.filter(
+          (record) =>
+            record.role === role && record.ghIssue === slices[4]!.ghIssue,
+        );
+      expect(forSlice("planner")).toHaveLength(1);
+      expect(forSlice("evaluator-contract")).toHaveLength(1);
+      expect(forSlice("generator")).toHaveLength(1);
+      expect(forSlice("evaluator-qa")).toHaveLength(0);
+    });
+
+    it("preserves the generator's attempted bytes as evidence", () => {
+      // The restore is what makes the refusal safe, and it is also what
+      // erases the incident — so the attempted bytes are archived first.
+      const reviews = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-05",
+        "reviews",
+      );
+      expect(
+        readFileSync(
+          join(reviews, "rejected-contract-mutation-r1-a1-contract.md"),
+          "utf-8",
+        ),
+      ).toContain("src/smuggled-05.ts");
+      expect(
+        readFileSync(
+          join(
+            reviews,
+            "rejected-contract-mutation-r1-a1-acceptance-manifest.json",
+          ),
+          "utf-8",
+        ),
+      ).toContain("src/smuggled-05.ts");
+    });
+
     it("does not resume generation after the additive guard refuses", () => {
       // The dropped-path revision fails before the fresh generator: the only
       // generator invocation is the one that raised the escalation.
@@ -1661,6 +1741,7 @@ describe("generator scope escalation", () => {
       ["an evaluator rejection", 1],
       ["a lock-gate refusal", 2],
       ["a dropped locked path", 3],
+      ["a generator rewriting its own lock", 4],
     ])(
       "leaves the accepted contract byte-identical after %s",
       (_label, index) => {
@@ -1679,6 +1760,7 @@ describe("generator scope escalation", () => {
       ["an evaluator rejection", 1],
       ["a lock-gate refusal", 2],
       ["a dropped locked path", 3],
+      ["a generator rewriting its own lock", 4],
     ])(
       "restores the accepted acceptance manifest after %s, unwidened",
       (_label, index) => {

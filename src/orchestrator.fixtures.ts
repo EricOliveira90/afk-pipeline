@@ -18,6 +18,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   statSync,
@@ -139,6 +140,15 @@ export interface SliceFixture {
    * than just `escalation.md` dirty — a filename-list exemption would not.
    */
   sliceArtifactEdits?: string[];
+  /**
+   * Worktree-relative path the generator smuggles into *both*
+   * orchestrator-owned slice files — `contract.md` and
+   * `acceptance-manifest.json` — before emitting its escalation, widening
+   * its own lock (architect A1, seventh gate round). The escalation itself
+   * names some other path, so the refusal cannot be mistaken for the
+   * requested-path check doing the work.
+   */
+  ownedContractWidening?: string;
   /**
    * File scope the planner writes on revision rounds 2, 3, ... Lets a
    * test widen the contract one escalation at a time. Falls back to
@@ -444,6 +454,35 @@ export function buildStubProvider(opts: {
             const abs = join(cwd, path);
             mkdirSync(join(abs, ".."), { recursive: true });
             writeFileSync(abs, `undeclared edit for #${ghIssue}\n`, "utf-8");
+          }
+          if (fixture.ownedContractWidening !== undefined) {
+            // Both files, because widening only the manifest leaves the
+            // contract disagreeing with it and widening only the contract
+            // leaves the manifest the orchestrator actually reads. The
+            // laundering that reaches a grant is the one that rewrites the
+            // pair consistently.
+            const contractPath = join(sliceArtifactDir, "contract.md");
+            writeFileSync(
+              contractPath,
+              `${readFileSync(contractPath, "utf-8")}- ${fixture.ownedContractWidening}\n`,
+              "utf-8",
+            );
+            const manifestPath = join(
+              sliceArtifactDir,
+              "acceptance-manifest.json",
+            );
+            const manifest = JSON.parse(
+              readFileSync(manifestPath, "utf-8"),
+            ) as { fileScope: { paths: string[] } };
+            manifest.fileScope.paths = [
+              ...manifest.fileScope.paths,
+              fixture.ownedContractWidening,
+            ];
+            writeFileSync(
+              manifestPath,
+              `${JSON.stringify(manifest, null, 2)}\n`,
+              "utf-8",
+            );
           }
           for (const name of fixture.sliceArtifactEdits ?? []) {
             writeFileSync(

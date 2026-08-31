@@ -1,4 +1,5 @@
 import {
+  ACCEPTANCE_MANIFEST_FILENAME,
   acceptanceManifestPaths,
   normalizeAcceptanceManifestPath,
   type AcceptanceManifest,
@@ -7,6 +8,21 @@ import { parseJsonWithUniqueKeys } from "./json-scan.js";
 import { migrationPathsIn, type LaneResourceOptions } from "./lanes.js";
 
 export const ESCALATION_FILENAME = "escalation.md";
+
+/**
+ * The two files at a slice's artifact root that no agent may write: the
+ * accepted `contract.md` / `acceptance-manifest.json` pair, mutated only
+ * by the shared contract transaction (ADR 0055 Seam 1 §3, ADR 0048).
+ *
+ * Named once and used twice — by the changed-set guard's carve-out below
+ * and by the orchestrator's per-invocation integrity check — so the answer
+ * to "which files are the orchestrator's" cannot drift between the guard
+ * that refuses a widened lock and the check that restores one.
+ */
+export const ORCHESTRATOR_OWNED_SLICE_FILENAMES: readonly string[] = [
+  "contract.md",
+  ACCEPTANCE_MANIFEST_FILENAME,
+];
 
 /**
  * The reserved `findingIds` identity for a **pre-build scope discovery**:
@@ -132,14 +148,36 @@ function normalizeDirKey(raw: string): string {
  *
  * ## The two exemptions, and why they are these
  *
- * - **The slice artifact directory, by directory prefix.** The slice's own
- *   artifacts live in the worktree and are written by the pipeline and the
- *   agents as a matter of course — `escalation.md` most of all, since it is
- *   the very file that triggers this check. The exemption is a prefix and
- *   not a filename list on purpose: `artifacts.sliceArtifactNames()` omits
+ * - **The slice artifact directory, by directory prefix, minus the two
+ *   orchestrator-owned files at its root.** The slice's own artifacts live
+ *   in the worktree and are written by the pipeline and the agents as a
+ *   matter of course — `escalation.md` most of all, since it is the very
+ *   file that triggers this check. The exemption is a prefix and not a
+ *   filename list on purpose: `artifacts.sliceArtifactNames()` omits
  *   `escalation.md`, `acceptance-manifest.json` and both adjudication
  *   files, so a list-based exemption would refuse every honest escalation
  *   on its own escalation artifact.
+ *
+ *   `contract.md` and `acceptance-manifest.json` at the slice root are
+ *   carved back out of that prefix unless the caller passes
+ *   `acceptedPairIntact` (architect A1, seventh gate round). They are not
+ *   agent-writable artifacts: they are the accepted pair the shared
+ *   contract transaction alone mutates (ADR 0055 Seam 1 §3, ADR 0048). An
+ *   unconditional prefix exemption let a generator add an undeclared source
+ *   path to *both* locked files, escalate for some unrelated path, and have
+ *   this guard wave the widened lock through — the focused revision then
+ *   captured the generator's own bytes as "the previously accepted pair"
+ *   and its additive guard preserved the smuggled path.
+ *
+ *   The exemption cannot simply be dropped: both files live inside the
+ *   worktree and are written during negotiation, so `git` reports them as
+ *   changed against the feature branch on every honest escalation too.
+ *   What separates the honest tree from the laundered one is not *whether*
+ *   they changed but *whose* bytes they hold, and that is a question only
+ *   the caller holding the orchestrator's pre-dispatch snapshot can answer.
+ *   So the caller answers it: `acceptedPairIntact` is that answer, and it
+ *   has no default — a caller that cannot prove the pair still holds the
+ *   accepted bytes says `false` and gets both files named.
  * - **Migration files.** `fileScope` forbids placeholders and globs, and a
  *   migration's exact filename is chosen at build time, so a migration can
  *   never be a declared path — `planScopeAmendment` refuses migration paths
@@ -158,13 +196,41 @@ function normalizeDirKey(raw: string): string {
 export function outOfScopeChangedPaths(args: {
   changedFiles: readonly string[];
   manifest: AcceptanceManifest;
-  /** Repo-relative slice artifact directory, exempt with everything under it. */
+  /**
+   * Repo-relative slice artifact directory, exempt with everything under
+   * it — except the two orchestrator-owned files at its root, which are
+   * exempt only under `acceptedPairIntact`.
+   */
   sliceArtifactDir: string;
+  /**
+   * The caller's attestation that `contract.md` and
+   * `acceptance-manifest.json` still hold the bytes the orchestrator
+   * accepted — proven, not assumed. No default: see the docstring.
+   */
+  acceptedPairIntact: boolean;
   options?: LaneResourceOptions;
 }): string[] {
-  const { changedFiles, manifest, sliceArtifactDir, options } = args;
+  const {
+    changedFiles,
+    manifest,
+    sliceArtifactDir,
+    acceptedPairIntact,
+    options,
+  } = args;
   const declared = new Set(acceptanceManifestPaths(manifest));
   const artifactDir = normalizeDirKey(sliceArtifactDir);
+  /**
+   * The orchestrator-owned pair, normalized the manifest's way so the
+   * carve-out matches on every platform and casing — the same reason the
+   * prefix test below normalizes rather than comparing raw strings.
+   */
+  const orchestratorOwned = new Set(
+    artifactDir === "" || acceptedPairIntact
+      ? []
+      : ORCHESTRATOR_OWNED_SLICE_FILENAMES.map((name) =>
+          normalizeAcceptanceManifestPath(`${artifactDir}/${name}`),
+        ),
+  );
   const offenders: string[] = [];
 
   for (const raw of changedFiles) {
@@ -173,6 +239,12 @@ export function outOfScopeChangedPaths(args: {
     try {
       key = normalizeAcceptanceManifestPath(raw);
     } catch {
+      offenders.push(display);
+      continue;
+    }
+    if (orchestratorOwned.has(key)) {
+      // Refused even if the manifest declares it: a manifest that declares
+      // itself is the widening this carve-out exists to catch.
       offenders.push(display);
       continue;
     }

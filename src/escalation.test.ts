@@ -242,11 +242,16 @@ describe("parseScopeEscalation", () => {
  */
 describe("outOfScopeChangedPaths", () => {
   const SLICE_DIR = ".kiro/specs/demo/slices/01-thing";
-  const call = (changedFiles: string[], manifest = MANIFEST) =>
+  const call = (
+    changedFiles: string[],
+    manifest = MANIFEST,
+    acceptedPairIntact = true,
+  ) =>
     outOfScopeChangedPaths({
       changedFiles,
       manifest,
       sliceArtifactDir: SLICE_DIR,
+      acceptedPairIntact,
     });
 
   it("passes a tree that changed only declared paths", () => {
@@ -269,17 +274,93 @@ describe("outOfScopeChangedPaths", () => {
    * `escalation.md`, `acceptance-manifest.json` and both adjudication files,
    * so it would refuse every honest escalation on the very artifact that
    * raised it.
+   *
+   * Both orchestrator-owned files appear here too, and are exempt *because*
+   * this call attests the pair is intact — they always show as changed
+   * against the feature branch, since negotiation writes them into the
+   * worktree. See the next case for what happens without that attestation.
    */
   it("exempts anything under the slice artifact directory", () => {
     expect(
       call([
         `${SLICE_DIR}/escalation.md`,
         `${SLICE_DIR}/handoff.md`,
+        `${SLICE_DIR}/contract.md`,
         `${SLICE_DIR}/acceptance-manifest.json`,
         `${SLICE_DIR}/adjudication-decisions.json`,
         `${SLICE_DIR}/nested/anything.txt`,
       ]),
     ).toEqual([]);
+  });
+
+  /**
+   * Architect A1, seventh gate round. The prefix exemption used to cover
+   * the accepted `contract.md` / `acceptance-manifest.json` pair
+   * unconditionally, which is how a generator could widen both files, then
+   * escalate for some unrelated path and have this guard call the tree
+   * clean. Without the caller's proof that the pair still holds the
+   * orchestrator's bytes, both files are out of scope — every other
+   * artifact under the directory stays exempt.
+   */
+  it("refuses the orchestrator-owned pair when the caller cannot prove it intact", () => {
+    expect(
+      call(
+        [
+          `${SLICE_DIR}/escalation.md`,
+          `${SLICE_DIR}/contract.md`,
+          `${SLICE_DIR}/acceptance-manifest.json`,
+          `${SLICE_DIR}/adjudication-decisions.json`,
+        ],
+        MANIFEST,
+        false,
+      ),
+    ).toEqual([
+      `${SLICE_DIR}/acceptance-manifest.json`,
+      `${SLICE_DIR}/contract.md`,
+    ]);
+  });
+
+  it("refuses a mutated pair even where the manifest declares it", () => {
+    // The laundering shape exactly: the generator's manifest declares
+    // itself, so a `declared.has` check ahead of the carve-out would have
+    // let its own widening through.
+    const selfDeclaring = parseAcceptanceManifest({
+      version: 1,
+      fileScope: {
+        kind: "paths",
+        paths: [
+          "src/declared.ts",
+          `${SLICE_DIR}/contract.md`,
+          `${SLICE_DIR}/acceptance-manifest.json`,
+        ],
+      },
+      migrationCount: 0,
+    });
+    expect(call([`${SLICE_DIR}/contract.md`], selfDeclaring, false)).toEqual([
+      `${SLICE_DIR}/contract.md`,
+    ]);
+  });
+
+  it("matches the pair carve-out by the manifest's own normalization", () => {
+    // Same reason as the prefix case below: a second normalization dialect
+    // here would refuse a rewritten contract on one platform and exempt it
+    // on another.
+    expect(
+      call(
+        [
+          `./${SLICE_DIR}/contract.md`,
+          [SLICE_DIR, "acceptance-manifest.json"]
+            .join("/")
+            .split("/")
+            .join(String.fromCharCode(92)),
+        ],
+        MANIFEST,
+        false,
+      ),
+    ).toEqual([
+      `${SLICE_DIR}/acceptance-manifest.json`,
+      `${SLICE_DIR}/contract.md`,
+    ]);
   });
 
   it("does not exempt a sibling slice, or the specs dir above it", () => {
