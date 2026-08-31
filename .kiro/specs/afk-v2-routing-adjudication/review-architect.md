@@ -5,99 +5,94 @@
 ## Scope reviewed
 
 Reviewed the feature diff from merge base
-`8f97ce6b34e5c268f159d7a48d3d28af83d4c542`, all slice contracts and
-implementations under `.kiro/specs/afk-v2-routing-adjudication/slices/`, and
-the merged transaction, adjudication, worktree, scheduler, journal, cleanup,
-adoption, and finalization paths.
+`8f97ce6b34e5c268f159d7a48d3d28af83d4c542`, the slice contracts and
+handoffs under `.kiro/specs/afk-v2-routing-adjudication/slices/`, and the
+merged escalation, adjudication, contract-mutation, wave, journal, cleanup,
+adoption, and preflight paths.
 
-The pre-ship gate already passed this tree, so I did not rerun the full suite.
-Fresh evidence below comes from direct source and ADR reads; I also ran
-`git diff --check` against the feature diff.
+The pre-ship gate already passed this tree, so I did not rerun the full
+suite. I read the source and ADR control flows directly, ran
+`git diff --check`, and ran only the focused tests named below.
 
 ## Blocking findings
 
-### 1. The pending-lock witness can certify a lock that never passed its gate or was rolled back
+### 1. An adjudicated lane successor skips the lock gate after its base changes
 
-- **File/location:** `src/contract-transaction.ts`,
-  `withContractTransaction` and `tx.lock` (lines 158-241);
-  `src/orchestrator.ts`, `applyAdjudicationDecisions` (lines 2442-2453);
-  `src/adjudication.ts`, `adjudicatedLockIsProven` (lines 461-479).
-- **Evidence gathered:** I read the complete transaction and shortcut control
-  flow. `tx.lock` writes the witness, calls `lockContract`, and only then calls
-  `onContractLocked`. A process stop between the latter two operations leaves
-  witness plus stamped `LOCKED` contract even though the mechanical gate never
-  ran; `adjudicatedLockIsProven` accepts that pair. Separately,
-  `lockAccepted = true` preserves the witness before the caller writes the
-  applied marker. If that marker write throws, the outer transaction restores
-  the old contract because `onAccepted` was not called but leaves the witness.
-  When the restored contract was stale `LOCKED`, the next dispatch accepts the
-  surviving witness and skips both application and the gate.
-- **Convention violated:** ADR 0055, **Decision - Seam 1**, section 2 permits
-  `LOCKED` only after the mechanical gate passes; section 3 requires restoration
-  on every exit not explicitly accepted through `onAccepted`; section 5 permits
-  the crash shortcut only for proof of the completed lock operation. This also
-  breaks ADR 0008, **Decision**, which makes orchestrator-owned on-disk lock
-  status authoritative.
-- **Required fix:** Run the mechanical gate before writing `LOCKED`, and clear
-  the pending witness on every transaction exit that did not reach
-  `onAccepted`. Add focused fault-injection coverage for a stop before the gate
-  and for an applied-marker write failure over a previously locked contract.
+- **File/location:** `src/wave.ts`, the adjudicated lane-successor refresh
+  in `runWave` (lines 399-453); `src/orchestrator.ts`,
+  `runImpasseAdjudication`'s proven-lock shortcut (lines 2297-2320).
+- **Evidence gathered:** I traced the lane successor after its predecessor
+  merges. `runWave` merges the new feature tip into the preserved successor
+  worktree and calls `runSliceNegotiate`. The complete applied decision log
+  makes `adjudicatedLockIsProven` return `LOCKED` immediately, before
+  `ctx.onContractLocked` is consulted. I ran
+  `pnpm vitest run src/wave.test.ts -t "keeps an adjudicated lane successor's decision and lock through refresh"`;
+  it passed while exercising both proven-lock shortcuts around the feature-tip
+  refresh. The test asserts estate preservation but never injects or observes
+  a post-refresh lock objection.
+- **Convention violated:** ADR 0028, **Why the gate is a callback**, requires
+  the gate to cover lane-successor re-negotiation because the refreshed feature
+  tip can introduce a migration-prefix collision. ADR 0055, **Seam 1 sections
+  2-3**, permits `LOCKED` only through the mechanical gate.
+- **Required fix:** Revalidate a proven adjudication lock against the current
+  feature tip after lane refresh, before generation. Preserve the decision
+  estate on refusal and add a focused test where the predecessor introduces a
+  lock-gate objection.
 
-### 2. Resumed IMPASSE dispatch bypasses the worktree ownership assertion
+### 2. Adoption can orphan a parked worktree and make the next launch refuse
 
-- **File/location:** `src/orchestrator.ts`, `runSliceNegotiate`
-  (lines 2053-2078), `runImpasseAdjudication` (lines 2113-2274),
-  `prepareSliceWorktree` (lines 1698-1979), and `negotiateAttempt`
-  (lines 2520-2529).
-- **Evidence gathered:** I traced both branches from `runSliceNegotiate`.
-  Finding an existing IMPASSE calls `runImpasseAdjudication` immediately.
-  The only shared call to `prepareSliceWorktree`, whose final operation is
-  `git.assertWorktreeRegistered`, is inside `negotiateAttempt` and is therefore
-  skipped. The IMPASSE path later merges into `ctx.worktreeDir` and can invoke
-  agents from it. A leaked directory no longer registered with Git can
-  consequently make Git walk up to the parent repository, the corruption mode
-  this invariant exists to prevent.
-- **Convention violated:** ADR 0010, **Decision**, item 3 requires
-  `assertWorktreeRegistered` immediately before every agent dispatch. ADR 0055,
-  **Decision - Seam 2**, requires lifecycle operations to prove preservation
-  of the parked worktree and branch.
-- **Required fix:** Put shared worktree ownership and registration validation
-  before ordinary-versus-IMPASSE routing, so every dispatch validates the same
-  boundary before Git mutation or agent invocation. Cover redispatch from a
-  stale unregistered parked directory.
+- **File/location:** `src/adopt-command.ts`, `runAdoptCli` (lines 426-446 and
+  546-589); `src/orchestrator.ts`, launch namespace construction (lines
+  4730-4758); `src/preflight.ts`, leftover registered-worktree refusal (lines
+  282-308).
+- **Evidence gathered:** I read the complete adoption transition. It checks
+  only whether the feature branch is checked out, never the selected slice's
+  persisted phase or its registered slice worktree. Success moves the feature
+  ref and overwrites the slice record with `PASS`, but does not remove or
+  otherwise reconcile that worktree. The next run excludes completed slices
+  from both `intended` and `retained`, so preflight classifies the still
+  registered AFK worktree as unowned and refuses. I ran
+  `pnpm vitest run src/preflight.test.ts -t "refuses a registered namespace worktree no live slice owns"`;
+  it passed and confirms that terminal state. This is directly reachable when
+  `afk adopt` is used on an `AWAITING-ADJUDICATION` slice.
+- **Convention violated:** ADR 0055, **Seam 2 invariant and section 9**, says
+  the parked estate survives every lifecycle operation except the slice's own
+  re-dispatch and only that dispatch replaces the park. The current adoption
+  path replaces the record without dispatch and strands the estate outside the
+  lifecycle model.
+- **Required fix:** Make adoption an explicit, fail-closed transition for
+  parked slices. Either refuse it while the park owns a worktree, or quiesce and
+  reconcile the whole estate so a successful adoption leaves no registered
+  namespace worktree that blocks the next run. Cover adoption from persisted
+  `AWAITING-ADJUDICATION` through the next launch.
 
-### 3. Partial adjudication redispatch does not reopen its persisted park
+### 3. QA scope amendment bypasses the new accepted-contract transaction
 
-- **File/location:** `src/orchestrator.ts`, `runImpasseAdjudication`
-  (lines 2202-2234 and 2263-2272), and scheduler redispatch
-  (lines 5234-5249); `src/run-journal.ts`, `RunJournal.recordTerminal`
-  (lines 332-357); `src/run-journal.test.ts`, same-phase park case
-  (lines 213-230).
-- **Evidence gathered:** I traced an IMPASSE with multiple findings through a
-  valid first decision. The scheduler removes the hold-back and redispatches,
-  but no `trackSlice` occurs before `runImpasseAdjudication` returns a new
-  `AWAITING-ADJUDICATION` outcome naming the remaining findings; its only
-  `trackSlice` call is after the all-decided check. `recordTerminal` sees the
-  existing parked phase and returns it unchanged solely because the phase
-  matches. The test explicitly confirms that even a changed error is discarded.
-  State, events, and summary therefore retain the prior park instead of the
-  replacement that names what remains undecided.
-- **Convention violated:** ADR 0054, **Decision**, item 3 requires each partial
-  adjudication to park again naming the findings still undecided. ADR 0055,
-  **Decision - Seam 2**, section 9 defines redispatch as the reopen and requires
-  `trackSlice` to clear the parked mark and persisted record before a new
-  outcome.
-- **Required fix:** Reopen every actual parked redispatch with `trackSlice`
-  before processing its decision, including partial and refused decisions, then
-  persist the replacement park. Add a journal-level or existing orchestration
-  assertion that the persisted reason changes from all findings to the
-  remaining set.
+- **File/location:** `src/scope-amendment.ts`, `applyScopeAmendment` (lines
+  173-205) and `appendContractScopeFiles` (lines 217-254);
+  `src/orchestrator.ts`, the QA amendment caller (lines 3693-3744).
+- **Evidence gathered:** I read the write order and caller. The amendment
+  writes `acceptance-manifest.json` first, then calls a second function that can
+  throw before writing `contract.md`; the caller has no capture/rollback
+  boundary. The existing missing-section case at
+  `src/scope-amendment.test.ts:233` exercises exactly that throw but does not
+  assert restoration of the already-written manifest. I ran
+  `pnpm vitest run src/scope-amendment.test.ts`; all 16 tests passed, confirming
+  current coverage does not detect the split accepted pair. A contract write
+  failure has the same result.
+- **Convention violated:** ADR 0048, **Decision**, requires the orchestrator to
+  keep the manifest and contract file list in sync and a refused amendment to
+  leave the contract untouched. ADR 0055, **Seam 1 section 3**, says the shared
+  capture/restore primitive is the only way the accepted pair is mutated. The
+  new transaction abstraction omits this pre-existing third mutation path.
+- **Required fix:** Route QA scope amendment through the shared accepted-pair
+  transaction, or provide an equivalent atomic two-file rollback, and test
+  failures after each write. The amendment archive should be committed only
+  with a coherent pair.
 
 ## Architecture assessment
 
-The merged design otherwise establishes the intended shared contract
-transaction, full-blocker completion predicate, durable cleanup trait,
-idle-only scheduler wait, fail-closed adoption guard, and single STUCK
-finalizer. The blockers are boundary-ordering defects in those abstractions,
-not style differences: each permits persisted state to claim an invariant that
-the responsible operation did not establish.
+The shared adjudication transaction, full-blocker completion predicate,
+replaceable park journal state, cleanup trait, and idle-only wait are otherwise
+coherent. The findings above are structural boundary leaks: each bypasses an
+invariant the new architecture claims to centralize.
