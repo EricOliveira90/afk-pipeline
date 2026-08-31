@@ -17,7 +17,23 @@ import {
   resolveTree,
   updateBranchIfUnchanged,
 } from "./git.js";
-import { isSliceComplete, loadRunState, saveRunState } from "./run-state.js";
+import {
+  isSliceComplete,
+  loadRunState,
+  saveRunState,
+  saveSliceState,
+} from "./run-state.js";
+import {
+  runLaunchPreflight,
+  type PreflightReport,
+} from "./preflight.js";
+import {
+  buildRunNamespace,
+  sliceBranch,
+  sliceWorktreeDir,
+} from "./orchestrator.js";
+import { kiroProvider } from "./kiro.js";
+import { parseIssuesMd } from "./issues-parser.js";
 
 const tempDirs: string[] = [];
 
@@ -537,6 +553,149 @@ describe("afk adopt", () => {
     // The linked worktree's tree still matches the ref it holds.
     expect(git(linked, ["status", "--porcelain"])).toBe("");
     git(repo, ["worktree", "remove", linked, "--force"]);
+  });
+
+  /**
+   * Adoption of a *parked* slice, from the persisted `AWAITING-ADJUDICATION`
+   * record through the next launch's preflight (ADR 0055 Seam 2).
+   *
+   * The estate a park owns survives every lifecycle operation but the
+   * slice's own re-dispatch, and adoption is not one: it moves the feature
+   * ref and overwrites the record with `PASS`, reconciling nothing. The
+   * worktree the park still holds is then registered with no live slice
+   * owning it, which is precisely what preflight refuses — so the bypass
+   * valve used on a parked slice bricked the next launch.
+   */
+  describe("a parked slice's adjudication estate", () => {
+    const PARKED_BRANCH = "afk/demo-slice-06-afk-adopt";
+
+    /** The park as a run leaves it: record, branch, registered worktree. */
+    function park(repo: string): string {
+      const worktree = join(repo, ".afk", "worktrees", "afk-demo-s06");
+      git(repo, ["branch", PARKED_BRANCH, "main"]);
+      git(repo, ["worktree", "add", worktree, PARKED_BRANCH]);
+      saveSliceState(repo, "demo", "129", {
+        phase: "AWAITING-ADJUDICATION",
+        branch: PARKED_BRANCH,
+        error: "IMPASSE: F-01 requires human adjudication",
+      });
+      return worktree;
+    }
+
+    /** What the next launch of this PRD would say about the namespace. */
+    async function nextLaunchPreflight(repo: string): Promise<PreflightReport> {
+      const state = loadRunState(repo, "demo");
+      const slice = parseIssuesMd(
+        join(repo, ".kiro", "specs", "demo", "issues.md"),
+      ).find((candidate) => candidate.ghIssue === "129")!;
+      const incomplete = isSliceComplete(state, "129") ? [] : [slice];
+      const entries = incomplete.map((candidate) => ({
+        path: sliceWorktreeDir(repo, "demo", candidate, kiroProvider),
+        branch: sliceBranch("demo", candidate, kiroProvider),
+      }));
+      return runLaunchPreflight({
+        repoRoot: repo,
+        namespace: buildRunNamespace({
+          repoRoot: repo,
+          prdSlug: "demo",
+          provider: kiroProvider,
+          featBranch: "feat/demo",
+          intended: entries,
+          retained: entries,
+        }),
+        minFreeBytes: 0,
+      });
+    }
+
+    const adopt = (repo: string, deps: Parameters<typeof runAdoptCli>[2]) =>
+      runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the parked slice manually",
+        ],
+        repo,
+        deps,
+      );
+
+    it("refuses while the park still holds a registered worktree", async () => {
+      const repo = makeRepo();
+      const worktree = park(repo);
+      const statePath = join(repo, ".afk", "state", "demo.json");
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+      const stateBefore = readFileSync(statePath, "utf-8");
+      let gatesCalled = false;
+
+      const result = await adopt(repo, {
+        resolveGatePlan: () => {
+          gatesCalled = true;
+          return { declarations: GATES };
+        },
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("parked AWAITING-ADJUDICATION");
+      // `git worktree list` reports forward slashes on Windows, and the
+      // refusal quotes git's path so `git worktree remove` can be pasted.
+      expect(result.output).toContain(worktree.replace(/\\/g, "/"));
+      expect(result.output).toContain(PARKED_BRANCH);
+      expect(result.output).toContain("git worktree remove");
+      // Refused before the candidate merge, so nothing moved and the park
+      // is exactly as the human left it.
+      expect(gatesCalled).toBe(false);
+      expect(existsSync(join(repo, ".afk", "adopt"))).toBe(false);
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+      expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(false);
+      // And the estate is still the next run's legitimate input rather than
+      // a leftover, because the record still says the slice is live.
+      expect((await nextLaunchPreflight(repo)).refuse).toBe(false);
+    });
+
+    it("adopts once the park is quiesced, and the next launch is clean", async () => {
+      const repo = makeRepo();
+      const worktree = park(repo);
+      const treeId = git(repo, [
+        "merge-tree",
+        "--write-tree",
+        "feat/demo",
+        "manual/demo-01",
+      ]).split(/\r?\n/)[0]!;
+
+      // What the refusal tells the operator to do. `--force` stands in for
+      // a tree with the parked worktree's own scratch in it; the branch and
+      // the slice directory (decisions, impasse record) are untouched.
+      git(repo, ["worktree", "remove", worktree, "--force"]);
+
+      const result = await adopt(repo, {
+        resolveGatePlan: () => ({ declarations: GATES }),
+        runBaseGates: async ({ declarations }) =>
+          declarations.map((gate) => passingResult(gate, treeId)),
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(loadRunState(repo, "demo").slices["129"]).toMatchObject({
+        phase: "PASS",
+        mergedToFeature: true,
+        adoption: { adopter: "Ada Lovelace" },
+      });
+      // The park's branch survives the adoption as evidence.
+      expect(resolveCommit(repo, PARKED_BRANCH)).not.toBeNull();
+      // The point of the refusal: no registered namespace worktree is left
+      // for the next launch to refuse over.
+      const preflight = await nextLaunchPreflight(repo);
+      expect(preflight.findings).toEqual([]);
+      expect(preflight.refuse).toBe(false);
+    });
   });
 
   it("refuses by name when worktree enumeration fails, before any ref mutation", async () => {

@@ -53,6 +53,9 @@ shape.
 - `runFocusedScopeRevision` (~1110) and the adjudication apply path in
   `runImpasseAdjudication` (~2185–2260) become callers; their private
   copies of capture/restore/lock are deleted.
+- The QA scope amendment (`applyScopeAmendment` + its archive, in the
+  QA loop) is the third caller — it widens the same pair without
+  locking, so it passes no `completion` and never calls `tx.lock`.
 - **Guards:** the existing Track C/D focused tests (lock-gate bypass,
   one-decision-per-finding) and the ADR 0051 rollback tests stay green
   unmodified — they are the regression net proving the extraction
@@ -161,6 +164,9 @@ shape.
 - **Failing test (architect finding 5):** existing adopt suite — a
   lister that throws ⇒ named refusal, exit 1, refs and run state
   byte-identical.
+- Refusal 7 (second gate round): the same single enumeration also
+  answers "does the slice being adopted still hold a parked estate?",
+  keyed on the phase's `preserve-all` debris trait.
 
 ### Step 8 — migration-sync STUCK goes through the finalizer (P1)
 
@@ -224,6 +230,15 @@ implementation, and fixed on `design/gate-blockers`:
 | Witness certifies an ungated or rolled-back lock | Seam 1 §5 amendment | gate observes a non-LOCKED contract; a lock whose bookkeeping throws leaves no witness |
 | Resumed IMPASSE / adjudicated successor dispatch skips `assertWorktreeRegistered` | Seam 2 amendment (shared check ahead of the routing fork) | redispatch into a stale unregistered parked dir refuses before any git mutation or agent |
 | Partial adjudication redispatch does not reopen its park (#141) | Seam 2 §9 amendment | persisted park reason changes from all findings to the remaining set; a changed park with no dispatch throws |
+
+Found by the gate round's *second* architect review, and fixed on
+`design/gate-blockers-2`:
+
+| Blocker | Eliminated by | Probe that must stay green |
+|---|---|---|
+| Adjudicated lane successor's proven lock skips the gate after its base changes | Seam 1 §5 second amendment (`revalidateAdjudicatedLock`, both `LOCKED` shortcuts) | an objection injected after an accepted lock refuses the re-entry with the estate byte-identical; the lock is accepted again once the objection clears; the wave's own gate closure is reached through the lane refresh |
+| Adoption orphans a parked worktree and the next launch refuses | Seam 2 §8 amendment (refusal 7, keyed on the `preserve-all` debris trait) | adopt refuses while the park holds a registered worktree, before the candidate merge; after the operator quiesces it, adoption succeeds and the next launch's preflight finds nothing |
+| QA scope amendment bypasses the accepted-pair transaction | Seam 1 §3 amendment (third caller of `withContractTransaction`) | a throw after the manifest write — the contract refusal, and a failure in the step after it — leaves both files byte-identical; a completed amendment keeps both |
 
 ## Non-goals
 

@@ -13,6 +13,12 @@ import {
   planScopeAmendment,
   type ScopeAmendmentPlan,
 } from "./scope-amendment.js";
+import { withContractTransaction } from "./contract-transaction.js";
+
+const NOTICE = {
+  reason: "qa scope amendment did not complete",
+  qualifier: "the previously accepted",
+};
 
 const MANIFEST = {
   version: 2,
@@ -238,6 +244,114 @@ describe("applyScopeAmendment", () => {
       expect(() =>
         applyScopeAmendment({ sliceDir: dir, plan: candidate }),
       ).toThrow(/no "## Files expected to change" section to amend/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The composition the QA loop performs (ADR 0055 Seam 1 §3): the amendment
+ * is the third path that mutates the accepted pair, so it runs inside the
+ * one transaction rather than carrying its own half of a rollback.
+ *
+ * Tested here rather than through a spawned QA round: what has to be proved
+ * is that a throw *after* the manifest write leaves neither file changed,
+ * and the transaction is what makes that true for every throw, wherever in
+ * the amendment it comes from.
+ */
+describe("applyScopeAmendment inside the shared contract transaction", () => {
+  const txContext = (dir: string) => ({
+    absSliceDir: dir,
+    tag: "[slice]",
+    logger: { phase: () => {} },
+  });
+
+  it("restores both files when the contract write refuses after the manifest write", async () => {
+    // The contract has no file-list section, so `appendContractScopeFiles`
+    // throws — after the manifest has already been widened on disk.
+    const dir = makeSliceDir("# Slice Contract\n\n**Status:** LOCKED\n");
+    try {
+      const candidate = plan();
+      if (!candidate.ok) throw new Error("expected a valid plan");
+      const contractBefore = readFileSync(join(dir, "contract.md"), "utf-8");
+      const manifestBefore = readFileSync(
+        join(dir, "acceptance-manifest.json"),
+        "utf-8",
+      );
+
+      await expect(
+        withContractTransaction(txContext(dir), NOTICE, async (tx) => {
+          applyScopeAmendment({ sliceDir: dir, plan: candidate });
+          tx.onAccepted();
+        }),
+      ).rejects.toThrow(/no "## Files expected to change" section to amend/);
+
+      expect(readFileSync(join(dir, "contract.md"), "utf-8")).toBe(
+        contractBefore,
+      );
+      expect(readFileSync(join(dir, "acceptance-manifest.json"), "utf-8")).toBe(
+        manifestBefore,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores both files when the step after the amendment fails", async () => {
+    // Both writes succeeded and the *archive* throws — the caller's own
+    // bookkeeping, inside the transaction so the amendment archive is only
+    // ever written over a coherent pair.
+    const dir = makeSliceDir();
+    try {
+      const candidate = plan();
+      if (!candidate.ok) throw new Error("expected a valid plan");
+      const contractBefore = readFileSync(join(dir, "contract.md"), "utf-8");
+      const manifestBefore = readFileSync(
+        join(dir, "acceptance-manifest.json"),
+        "utf-8",
+      );
+
+      await expect(
+        withContractTransaction(txContext(dir), NOTICE, async () => {
+          applyScopeAmendment({ sliceDir: dir, plan: candidate });
+          // Stands in for the archive write: any throw before `onAccepted`
+          // is a rollback, which is the property the caller relies on.
+          throw new Error("archive write failed");
+        }),
+      ).rejects.toThrow(/archive write failed/);
+
+      expect(readFileSync(join(dir, "contract.md"), "utf-8")).toBe(
+        contractBefore,
+      );
+      expect(readFileSync(join(dir, "acceptance-manifest.json"), "utf-8")).toBe(
+        manifestBefore,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a completed amendment", async () => {
+    const dir = makeSliceDir();
+    try {
+      const candidate = plan();
+      if (!candidate.ok) throw new Error("expected a valid plan");
+
+      await withContractTransaction(txContext(dir), NOTICE, async (tx) => {
+        applyScopeAmendment({ sliceDir: dir, plan: candidate });
+        tx.onAccepted();
+      });
+
+      const written = parseAcceptanceManifest(
+        readFileSync(join(dir, "acceptance-manifest.json"), "utf-8"),
+      );
+      expect(
+        written.fileScope.kind === "paths" && written.fileScope.paths,
+      ).toEqual(["src/resume.ts", "src/resume-integration.test.ts"]);
+      expect(readFileSync(join(dir, "contract.md"), "utf-8")).toContain(
+        "- src/resume-integration.test.ts (added by scope amendment for QA finding QA-02)",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

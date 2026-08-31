@@ -2150,6 +2150,57 @@ export async function runSliceNegotiate(
  * refusal. A rolled-back apply is retried from the same decisions, not
  * from a fresh interrogation of the human.
  */
+/**
+ * Re-run the mechanical lock gate over an adjudication lock this dispatch
+ * did not itself produce, and refuse the dispatch if it now objects.
+ *
+ * The two shortcuts that return `LOCKED` without entering the transaction —
+ * a stamped lock beside a discarded record, and an already-applied decision
+ * log (ADR 0055 §4–5) — prove something about the *decisions*: that this
+ * exact set produced this lock. Neither proves anything about the base the
+ * lock is about to be generated against, and the gate's checks
+ * (migration-prefix allocation, run-specific claims — ADR 0028) are exactly
+ * the ones a changed base invalidates.
+ *
+ * A lane successor is where that gap bites (ADR 0028, *Why the gate is a
+ * callback*): `runWave` merges the new feature tip into the preserved parked
+ * worktree and re-negotiates, so a prefix the predecessor's merge has since
+ * claimed is a collision that only this call can see. Without it the
+ * shortcut returned `LOCKED` and generation ran on a contract whose declared
+ * migration prefix belonged to another slice.
+ *
+ * The refusal preserves the parked estate exactly as it stands — no reopen,
+ * no rollback, nothing written. There is no transaction here to roll back
+ * to, and the contract on disk is the one a passing gate did attest to at
+ * the base it was locked on; the objection is about the base, which the next
+ * dispatch re-reads anyway. So the refusal is idempotent: every dispatch
+ * re-asks the gate, and the lock cannot be consumed while it objects. It
+ * reads as a lock refusal (`ESCALATE`), the same phrasing the transaction's
+ * own gate refusal produces, because to the operator it is the same event.
+ */
+function revalidateAdjudicatedLock(
+  ctx: SliceContext,
+  contractPath: string,
+  proof: string,
+): NegotiateOutcome | null {
+  const objection = ctx.onContractLocked?.(contractPath) ?? null;
+  if (objection === null) return null;
+  ctx.logger.phase(
+    `${ctx.tag}: adjudicated contract lock refused — ${proof}, but the ` +
+      `mechanical lock gate objects on the current base: ${objection}; the ` +
+      `parked branch, decision record and lock are preserved`,
+    "error",
+  );
+  return {
+    phase: "ESCALATE",
+    cause: {
+      kind: "verdict",
+      verdict: "REVISE",
+      summary: `adjudication: contract lock refused — ${objection}`,
+    },
+  };
+}
+
 async function runImpasseAdjudication(
   ctx: SliceContext,
   impasse: { rawOutcome: string; outcome: ContractNegotiationOutcome },
@@ -2202,7 +2253,12 @@ async function runImpasseAdjudication(
           `the record of which decisions produced it is lost`,
         "error",
       );
-      return { phase: "LOCKED" };
+      const objected = revalidateAdjudicatedLock(
+        ctx,
+        contractPath,
+        "the stamped lock stands over a discarded decision record",
+      );
+      return objected ?? { phase: "LOCKED" };
     }
     if (reconciliation.action === "reopen") {
       artifacts.reopenContract(contractPath);
@@ -2307,6 +2363,16 @@ async function runImpasseAdjudication(
       log: decisionLog,
     })
   ) {
+    // The lock is proven for *these decisions*; it is not proven against
+    // *this base*. Re-attest before anything is dispatched from it — the
+    // applied mark below is bookkeeping about a lock the gate has to still
+    // stand behind (see `revalidateAdjudicatedLock`).
+    const objected = revalidateAdjudicatedLock(
+      ctx,
+      contractPath,
+      `the adjudication for ${decidedIds.join(", ")} was already applied`,
+    );
+    if (objected) return objected;
     if (!decisionLog.applied) {
       decisionLog = markAdjudicationDecisionsApplied(
         ctx.absSliceDir,
@@ -3724,11 +3790,50 @@ export async function runQAStage(
             `the contract by hand before resuming.`,
         );
       }
-      applyScopeAmendment({ sliceDir: ctx.absSliceDir, plan });
-      artifacts.archiveScopeAmendment({
-        archiveDir: reviewArchiveDir,
-        record: buildScopeAmendmentRecord({ stage, round, attempt, plan }),
-      });
+      // The third path that mutates the accepted pair, and so the third
+      // caller of the one transaction (ADR 0055 Seam 1 §3). It writes the
+      // manifest first and the contract second, and the contract write can
+      // refuse (no `## Files expected to change` section) or simply fail —
+      // which left a widened manifest beside an unwidened contract, exactly
+      // the desync ADR 0048 makes the orchestrator responsible for, with a
+      // *locked* contract to boot. It never locks, so no `tx.lock` here:
+      // what it needs is the capture/restore boundary and the guarantee
+      // that the archive is only written over a coherent pair.
+      try {
+        await withContractTransaction(
+          ctx,
+          {
+            reason: `${stage} scope amendment did not complete`,
+            qualifier: "the previously accepted",
+            note:
+              `the requested path(s) were not added, and the recorded QA ` +
+              `finding(s) ${requested} still stand`,
+          },
+          async (tx) => {
+            applyScopeAmendment({ sliceDir: ctx.absSliceDir, plan });
+            artifacts.archiveScopeAmendment({
+              archiveDir: reviewArchiveDir,
+              record: buildScopeAmendmentRecord({
+                stage,
+                round,
+                attempt,
+                plan,
+              }),
+            });
+            tx.onAccepted();
+          },
+        );
+      } catch (error) {
+        throw new Error(
+          `${stage} scope amendment failed in round ${round} attempt ` +
+            `${attempt}: ${
+              error instanceof Error ? error.message : String(error)
+            }. Requested: ${requested}. The accepted contract.md and ` +
+            `acceptance-manifest.json were restored to the bytes the lock ` +
+            `accepted and no work was reverted; add the path(s) by hand or ` +
+            `renegotiate the contract before resuming.`,
+        );
+      }
       amendments++;
       const amended = plan.entries.map((entry) => entry.path).join(", ");
       const message =
