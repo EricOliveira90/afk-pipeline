@@ -360,7 +360,15 @@ export class RunJournal {
       const sameError =
         ("error" in existing ? existing.error : undefined) ===
         ("error" in outcome ? outcome.error : undefined);
-      if (existing.phase === outcome.phase && sameError) return existing;
+      // "The same park" is the whole record (ADR 0055 §9): phase, reason, and
+      // branch identity. Branch naming is deterministic within a run today,
+      // so comparing it changes no current behaviour — but the invariant is
+      // stated over the whole record, and a re-park onto a different branch
+      // with no intervening dispatch is a missing reopen in the caller, not a
+      // retry, so it must throw rather than silently keep the old branch.
+      const sameBranch = existing.branch === sliceId.branch;
+      if (existing.phase === outcome.phase && sameError && sameBranch)
+        return existing;
       const replacement =
         existing.phase === outcome.phase
           ? `a changed ${outcome.phase}`
@@ -529,6 +537,12 @@ function terminalLifecycle(
       return lifecycle.escalate(sliceId, progress, outcome.error);
     case "AWAITING-ADJUDICATION":
       return lifecycle.awaitingAdjudication(sliceId, progress, outcome.error);
+    case "ADJUDICATION-LOCK-REFUSED":
+      return lifecycle.adjudicationLockRefused(
+        sliceId,
+        progress,
+        outcome.error,
+      );
     case "ERROR":
       return lifecycle.error(sliceId, progress, outcome.error);
     case "CONFLICT":

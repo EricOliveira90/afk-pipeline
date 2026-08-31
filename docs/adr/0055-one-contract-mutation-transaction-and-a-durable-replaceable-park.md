@@ -94,6 +94,24 @@ The Track C/D fixes from this review cycle (lock-gate bypass,
 one-decision-per-finding) stop being special cases: with one lock
 exit there is no second path to bypass.
 
+**Amended (third adjudication gate round, PM blocker): the focused-scope
+revision is additive, and the guard proves it.** A revision exists to
+repair a too-narrow lock by *adding* the escalation's requested paths
+(Story 1-2, slice 01 B-03/B-04: preserve the accepted contract, add the
+requested paths). `reviseAcceptedContract` verified that every requested
+path arrived but never that every previously locked path survived, so a
+revision that dropped an accepted path while adding the requested one was
+re-locked — handing the fresh generator an incomplete scope and losing
+already-contracted work. It now also requires every previously declared
+path to remain in *both* `contract.md` and `acceptance-manifest.json`;
+dropping one throws inside the transaction, which rolls the accepted pair
+back byte-for-byte and ends the slice `ERROR` with no fresh generator
+dispatch. This constraint is additive-only and therefore lives on the
+revision path alone: the adjudication apply path shares
+`validateAcceptanceManifestStability` but may legitimately *narrow* scope
+per a human decision (ADR 0054's "keep the API, narrow the file scope"),
+so the check is not in the shared validator.
+
 **Amended (second adjudication gate round, architect blocker 3): the QA
 scope amendment is the third caller, not a third copy.** `#112`'s
 amendment (ADR 0048) predates this ADR and mutates the same accepted
@@ -122,6 +140,22 @@ the `**Status:** LOCKED` line stays byte-identical, because agent
 prompts read that literal field (ADR 0008) and this ADR does not
 reopen that wound. The orchestrator writes and reads the stamp;
 agents never do.
+
+**Amended (third adjudication gate round, architect blocker 1): the
+impasse fingerprint identifies the *dispute*, not just its shape.** The
+fingerprint is what binds a decision log and a provenance stamp to the
+impasse they settle (§5 below and the discarded-log reconciliation
+above), so it must be the identity of the question a human decided.
+ADR 0054 Consequences makes decisions non-transferable precisely because
+a decision answers the two recorded positions — yet the fingerprint
+hashed only round, attempt, and each finding's id/severity/state. Two
+IMPASSE outcomes with identical IDs and state but different
+planner/evaluator positions or evidence collided, so a stale decision
+log validated against a new dispute and a stamped lock self-certified
+against the wrong question. The fingerprint now spans each finding's
+`plannerPosition`, `plannerEvidence`, `evaluatorEvidence`, and
+`unresolved` flag as well: changing any of them is a different question,
+which invalidates the log and reopens the stamped lock.
 
 Provenance is what makes a discarded decision log survivable. ADR 0054
 made the log evidence, never authority; without provenance, a `LOCKED`
@@ -229,10 +263,30 @@ about the decisions at all, and re-applying would re-invoke the planner
 for decisions already applied. Because nothing is mutated, the refusal
 is idempotent: every later dispatch re-asks the gate, so the lock can
 never be consumed while the objection stands, and it is accepted again
-unchanged once the base is fixed. The refusal reads as a lock refusal
-(`ESCALATE`, the operator's to resolve by renumbering), the same as the
-transaction's own gate refusal, because to the operator it is the same
-event.
+unchanged once the base is fixed.
+
+**Amended (third adjudication gate round, architect blocker 2): the
+refusal is its own phase, `ADJUDICATION-LOCK-REFUSED`, not `ESCALATE`.**
+As first written this section said the refusal "reads as a lock refusal
+(`ESCALATE`)", and every adjudication-branch lock refusal (this
+re-attestation, the transaction's own gate refusal, and the manifest
+stability/coverage refusal) returned terminal `ESCALATE`. But `ESCALATE`
+carries `debris: "disposable"` (Seam 2 §6), and the decision log lives
+inside the slice worktree — so `clean-failed` would delete the worktree
+holding a *completed* human adjudication, and `adopt` (refusal 7, §8)
+would no longer recognise the estate, both keying off the phase's debris
+trait. That directly contradicts this section's own promise that the
+same decisions are accepted again once the base is fixed: the promise
+only holds until the next cleanup. The refusal therefore persists as a
+distinct `FailurePhase` that presents like `ESCALATE` (failed bucket,
+`STUCK` summary label — to the operator it is still a lock refusal to
+resolve by renumbering) but declares `debris: "preserve-all"`, so
+cleanup and adoption inherit the estate-preserving behaviour off the
+trait without learning the phase by name. It is terminal *this* run —
+the operator fixes the base and the next run re-dispatches it via the
+persisted IMPASSE outcome, exactly like `ESCALATE` — so it is not
+`replaceableThisRun`; the park's within-run replacement is a human
+*decision*, which this estate already has.
 
 ## Decision — Seam 2: a park is durable, replaceable state
 
@@ -281,6 +335,18 @@ This narrows one sentence of ADR 0023: "every slice in a failure
 phase" becomes "every slice whose phase declares its debris
 disposable". The command's scope guarantees, branch-preservation
 guard, and pass structure are unchanged.
+
+**Amended (third adjudication gate round, architect blocker 2): a second
+phase now declares `preserve-all`.** `ADJUDICATION-LOCK-REFUSED`
+(Seam 1 §5) preserves its estate for the same reason the park does — it
+holds a completed human adjudication — so it carries the same trait and
+`clean-failed` skips it and `adopt` refuses it (§8) with no new code in
+either: both key off the trait, exactly as this decision intended when it
+said "a new preserved phase never has to be remembered in two places".
+The two preserve-all phases differ only on the *journal's* axis
+(`replaceableThisRun`): the park's within-run replacement is a human
+decision it is still awaiting; the lock-refused estate already has its
+decisions and waits on a base fix, so it is terminal this run.
 
 ### 7. The scheduler waits for a decision only at idle
 
@@ -371,6 +437,16 @@ becomes the model:
   park with no intervening dispatch is a missing reopen in the caller,
   so it throws like any other undispatched replacement rather than being
   absorbed (issue #141).
+
+  **Amended (third adjudication gate round, architect note): "the whole
+  record" includes branch identity.** The idempotency check compared
+  phase and reason but not the slice's branch. Branch naming is
+  deterministic within a run, so this changes no behaviour today — but
+  the invariant is stated over the whole record, and a re-park onto a
+  different branch with no intervening dispatch is a missing reopen just
+  as a changed reason is. The comparison now includes the branch, so the
+  implementation and the invariant stay aligned before branch identity
+  can become mutable.
 - **Re-dispatch is the reopen.** `trackSlice` on a parked slice clears
   the parked mark and, per ADR 0047, clears the persisted record —
   that is the one legal path from parked to a new outcome.
@@ -446,6 +522,16 @@ structural: `finishStuck` is the only constructor of a STUCK return in
 - The QA scope amendment inherits the accepted pair's rollback instead
   of owning half of one, so a refused or failed amendment can no longer
   leave a widened manifest beside an unwidened locked contract.
+- A refused adjudicated lock is its own phase,
+  `ADJUDICATION-LOCK-REFUSED`, presenting as a lock refusal but declaring
+  `preserve-all`, so `clean-failed` and `adopt` protect the completed
+  adjudication instead of destroying or stranding it — the retry-once-the-
+  base-is-fixed promise now survives cleanup. The impasse fingerprint
+  binds both positions and their evidence, so a stale log or stamp can no
+  longer certify against a different dispute.
+- A focused scope revision can no longer silently drop a locked path: it
+  must preserve the accepted file scope and add the requested paths, or
+  it rolls back and errors without dispatching a generator.
 - The journal's state machine is honest: PENDING → RUNNING →
   (terminal | parked); parked → RUNNING → …; terminal is final this
   run. Tests assert the machine directly instead of the

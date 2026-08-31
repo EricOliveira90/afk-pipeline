@@ -569,15 +569,28 @@ describe("afk adopt", () => {
   describe("a parked slice's adjudication estate", () => {
     const PARKED_BRANCH = "afk/demo-slice-06-afk-adopt";
 
-    /** The park as a run leaves it: record, branch, registered worktree. */
-    function park(repo: string): string {
+    /**
+     * The park as a run leaves it: record, branch, registered worktree.
+     * `phase` covers both preserve-all shapes — AWAITING-ADJUDICATION (a
+     * pending human decision) and ADJUDICATION-LOCK-REFUSED (decisions done,
+     * lock gate objecting on the base). Adoption must refuse both.
+     */
+    function park(
+      repo: string,
+      phase:
+        | "AWAITING-ADJUDICATION"
+        | "ADJUDICATION-LOCK-REFUSED" = "AWAITING-ADJUDICATION",
+    ): string {
       const worktree = join(repo, ".afk", "worktrees", "afk-demo-s06");
       git(repo, ["branch", PARKED_BRANCH, "main"]);
       git(repo, ["worktree", "add", worktree, PARKED_BRANCH]);
       saveSliceState(repo, "demo", "129", {
-        phase: "AWAITING-ADJUDICATION",
+        phase,
         branch: PARKED_BRANCH,
-        error: "IMPASSE: F-01 requires human adjudication",
+        error:
+          phase === "ADJUDICATION-LOCK-REFUSED"
+            ? "adjudication: contract lock refused — migration prefix collision"
+            : "IMPASSE: F-01 requires human adjudication",
       });
       return worktree;
     }
@@ -643,7 +656,7 @@ describe("afk adopt", () => {
       });
 
       expect(result.exitCode).toBe(1);
-      expect(result.output).toContain("parked AWAITING-ADJUDICATION");
+      expect(result.output).toContain("recorded AWAITING-ADJUDICATION");
       // `git worktree list` reports forward slashes on Windows, and the
       // refusal quotes git's path so `git worktree remove` can be pasted.
       expect(result.output).toContain(worktree.replace(/\\/g, "/"));
@@ -658,6 +671,46 @@ describe("afk adopt", () => {
       expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(false);
       // And the estate is still the next run's legitimate input rather than
       // a leftover, because the record still says the slice is live.
+      expect((await nextLaunchPreflight(repo)).refuse).toBe(false);
+    });
+
+    it("refuses a lock-refused estate too, and points at the base fix", async () => {
+      // The other preserve-all shape: the human decisions are recorded and
+      // the lock gate objects on the current base. Adoption must still refuse
+      // (the estate is a completed adjudication awaiting a base fix), keying
+      // off the shared preserve-all trait rather than the park phase by name,
+      // and the retry path stays coherent — the next launch does not refuse
+      // the retained worktree, so the slice re-dispatches and re-runs the gate.
+      const repo = makeRepo();
+      const worktree = park(repo, "ADJUDICATION-LOCK-REFUSED");
+      const statePath = join(repo, ".afk", "state", "demo.json");
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+      const stateBefore = readFileSync(statePath, "utf-8");
+      let gatesCalled = false;
+
+      const result = await adopt(repo, {
+        resolveGatePlan: () => {
+          gatesCalled = true;
+          return { declarations: GATES };
+        },
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("recorded ADJUDICATION-LOCK-REFUSED");
+      expect(result.output).toContain(worktree.replace(/\\/g, "/"));
+      expect(result.output).toContain(PARKED_BRANCH);
+      // The forward path differs from a park's: fix the base, not decide.
+      expect(result.output).toContain("fix the base");
+      // Refused before the candidate merge — nothing moved.
+      expect(gatesCalled).toBe(false);
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+      expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(false);
+      // The retry path: the estate is still the next run's legitimate input.
       expect((await nextLaunchPreflight(repo)).refuse).toBe(false);
     });
 

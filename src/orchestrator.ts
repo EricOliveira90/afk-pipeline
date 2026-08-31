@@ -1253,6 +1253,35 @@ async function reviseAcceptedContract(
         `[${missingManifestPaths.join(", ")}]`,
     );
   }
+  // A focused scope revision is *additive*: it repairs a too-narrow lock by
+  // adding the escalation's requested paths, and Stories 1-2 (slice 01
+  // B-03/B-04) require it to preserve the accepted contract. Verifying only
+  // that the requested paths arrived left the other half unguarded — a
+  // revision could add them while silently dropping paths already locked, so
+  // the fresh generator would receive an incomplete scope and the transaction
+  // would re-lock over lost, already-contracted work. So every previously
+  // declared path must survive, in both artifacts, on top of the requested
+  // ones. (Only this path is additive-only: the adjudication apply path
+  // shares `validateAcceptanceManifestStability` but may legitimately narrow
+  // scope per a human decision — ADR 0054 — so the check lives here, not
+  // there.)
+  const droppedManifestPaths = acceptanceManifestPaths(previousManifest).filter(
+    (path) => !revisedManifestPaths.has(path),
+  );
+  const droppedContractPaths = (
+    artifacts.parseContractFiles(previousContract) ?? []
+  )
+    .map((path) => normalizeAcceptanceManifestPath(path, contractPath))
+    .filter((path) => !revisedContractPaths.has(path));
+  if (droppedManifestPaths.length > 0 || droppedContractPaths.length > 0) {
+    throw new Error(
+      "Focused scope revision dropped previously locked path(s): " +
+        `contract.md dropped [${droppedContractPaths.join(", ")}]; ` +
+        `${ACCEPTANCE_MANIFEST_FILENAME} dropped ` +
+        `[${droppedManifestPaths.join(", ")}]. A revision must preserve the ` +
+        `accepted file scope and add the requested paths, never replace it.`,
+    );
+  }
   const revisions: ContractRevisionArtifacts = {
     "contract.md": {
       before: previousContract,
@@ -1429,7 +1458,12 @@ export type NegotiateOutcome =
   | { phase: "LOCKED" }
   | { phase: "CANCELLED" }
   | {
-      phase: "STUCK" | "ESCALATE" | "AWAITING-ADJUDICATION" | "ERROR";
+      phase:
+        | "STUCK"
+        | "ESCALATE"
+        | "AWAITING-ADJUDICATION"
+        | "ADJUDICATION-LOCK-REFUSED"
+        | "ERROR";
       cause: NegotiateFailureCause;
     };
 
@@ -2192,7 +2226,7 @@ function revalidateAdjudicatedLock(
     "error",
   );
   return {
-    phase: "ESCALATE",
+    phase: "ADJUDICATION-LOCK-REFUSED",
     cause: {
       kind: "verdict",
       verdict: "REVISE",
@@ -2435,7 +2469,7 @@ async function runImpasseAdjudication(
             "error",
           );
           return {
-            phase: "ESCALATE",
+            phase: "ADJUDICATION-LOCK-REFUSED",
             cause: {
               kind: "verdict",
               verdict: "REVISE",
@@ -2457,7 +2491,7 @@ async function runImpasseAdjudication(
             "error",
           );
           return {
-            phase: "ESCALATE",
+            phase: "ADJUDICATION-LOCK-REFUSED",
             cause: {
               kind: "verdict",
               verdict: "REVISE",
@@ -4529,6 +4563,7 @@ async function runSlice(
   | "STUCK"
   | "ESCALATE"
   | "AWAITING-ADJUDICATION"
+  | "ADJUDICATION-LOCK-REFUSED"
   | "ERROR"
   | "CANCELLED"
 > {

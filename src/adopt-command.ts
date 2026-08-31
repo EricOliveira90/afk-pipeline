@@ -345,18 +345,27 @@ function parkedEstateRefusal(
   }
   const holders = worktreesHolding(worktrees, record.branch);
   if (holders.length === 0) return null;
+  // AWAITING-ADJUDICATION still needs a human decision; ADJUDICATION-LOCK-
+  // REFUSED already has its decisions and needs the base fixed instead. Both
+  // preserve the estate, so both refuse here — the forward path differs.
+  const finishGuidance =
+    record.phase === "ADJUDICATION-LOCK-REFUSED"
+      ? `fix the base the lock gate objected to (typically renumber the ` +
+        `colliding migration prefix) and let the slice's own re-dispatch ` +
+        `re-run the gate`
+      : `write the pending decision into adjudication.md and let the ` +
+        `pipeline finish the slice`;
   return (
-    `slice #${ghIssue} is parked ${record.phase} and its adjudication ` +
+    `slice #${ghIssue} is recorded ${record.phase} and its adjudication ` +
     `estate is still live: ${holders.join(", ")} ${
       holders.length === 1 ? "is a" : "are"
     } registered worktree${holders.length === 1 ? "" : "s"} on ` +
-    `${record.branch}. Adoption would replace that park with PASS without a ` +
-    `dispatch, and the next launch then refuses the worktree as a leftover ` +
-    `no live slice owns. Only the slice's own re-dispatch replaces a park ` +
-    `(ADR 0055 Seam 2): either write the pending decision into ` +
-    `adjudication.md and let the pipeline finish the slice, or remove the ` +
-    `parked worktree yourself (\`git worktree remove\`) — its branch and ` +
-    `recorded decisions survive that — and run adopt again.`
+    `${record.branch}. Adoption would replace that estate with PASS without ` +
+    `a dispatch, and the next launch then refuses the worktree as a leftover ` +
+    `no live slice owns. Only the slice's own re-dispatch replaces it ` +
+    `(ADR 0055 Seam 2): either ${finishGuidance}, or remove the parked ` +
+    `worktree yourself (\`git worktree remove\`) — its branch and recorded ` +
+    `decisions survive that — and run adopt again.`
   );
 }
 

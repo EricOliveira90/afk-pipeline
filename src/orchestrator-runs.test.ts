@@ -565,8 +565,12 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       expect(
         readContractStatus(join(artifactDir, "contract.md")),
       ).not.toBe("LOCKED");
+      // A refused adjudicated lock preserves the parked estate rather than
+      // reading as disposable ESCALATE debris (ADR 0055 Seam 2): the human
+      // decisions and the worktree survive clean-failed and adopt so the
+      // operator can fix the base and let the next run re-run the gate.
       expect(state.slices[refusal.ghIssue]).toMatchObject({
-        phase: "ESCALATE",
+        phase: "ADJUDICATION-LOCK-REFUSED",
         error: expect.stringContaining(refusal.text),
       });
       expect(runLog).toContain(refusal.text);

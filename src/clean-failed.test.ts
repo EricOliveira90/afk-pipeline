@@ -112,7 +112,7 @@ describe("runCleanFailed", () => {
    * distinction ADR 0055 Seam 2 §6 draws. Both phases render in the
    * `failed` bucket; only one is debris.
    */
-  it("removes an ERRORed slice's estate while leaving a parked slice's untouched", async () => {
+  it("removes an ERRORed slice's estate while leaving preserve-all slices' untouched", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "101", number: "01", phase: "ERROR", materialise: true },
@@ -122,35 +122,44 @@ describe("runCleanFailed", () => {
         phase: "AWAITING-ADJUDICATION",
         materialise: true,
       },
+      // A completed adjudication whose lock the mechanical gate refused on
+      // the current base (ADR 0055 Seam 1 §5). Its decisions are recorded,
+      // not pending — but the estate is still a human's completed input
+      // awaiting a base fix, so it preserves like the park. clean-failed must
+      // not learn this second phase by name: it inherits the skip off the
+      // shared preserve-all trait (Seam 2 §6).
+      {
+        ghIssue: "121",
+        number: "12",
+        phase: "ADJUDICATION-LOCK-REFUSED",
+        materialise: true,
+      },
     ]);
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s01`);
     const branch = `afk/${SLUG}-slice-01-fixture`;
     expect(existsSync(dir)).toBe(true);
 
-    // The park's estate as the run left it: the impasse record and the
-    // decision log live in the slice directory *inside the worktree*, so
-    // removing the worktree destroys the operator's pending input.
-    const parkedDir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s11`);
-    const parkedBranch = `afk/${SLUG}-slice-11-fixture`;
-    const parkedSliceDir = join(parkedDir, "specs", "slices", "11-parked");
-    mkdirSync(parkedSliceDir, { recursive: true });
-    const impasseRecord = join(
-      parkedSliceDir,
-      "contract-negotiation-outcome.json",
-    );
-    const decisionLog = join(parkedSliceDir, "adjudication-decisions.json");
-    // The fourth estate file: a decision the human has written but that no
-    // dispatch has consumed yet. It is the only member of the estate that
-    // exists nowhere else — the log has not recorded it, so deleting it
-    // loses the operator's answer outright (ADR 0055 Seam 2 invariant).
-    const inFlight = join(parkedSliceDir, "adjudication.md");
-    writeFileSync(impasseRecord, JSON.stringify({ outcome: "IMPASSE" }), "utf-8");
-    writeFileSync(decisionLog, JSON.stringify({ version: 1 }), "utf-8");
-    writeFileSync(
-      inFlight,
-      JSON.stringify({ version: 1, findingId: "F-02" }),
-      "utf-8",
-    );
+    // Each preserve-all slice's estate as the run left it: the impasse
+    // record and the decision log live in the slice directory *inside the
+    // worktree*, so removing the worktree destroys the operator's input.
+    const preserved = [
+      { number: "11", name: "parked", phase: "AWAITING-ADJUDICATION" },
+      { number: "12", name: "lock-refused", phase: "ADJUDICATION-LOCK-REFUSED" },
+    ].map(({ number, name, phase }) => {
+      const wtDir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s${number}`);
+      const branchName = `afk/${SLUG}-slice-${number}-fixture`;
+      const sliceDir = join(wtDir, "specs", "slices", `${number}-${name}`);
+      mkdirSync(sliceDir, { recursive: true });
+      const impasseRecord = join(sliceDir, "contract-negotiation-outcome.json");
+      const decisionLog = join(sliceDir, "adjudication-decisions.json");
+      // The in-flight decision only exists for a park still awaiting an
+      // answer; a lock-refused estate has its decisions recorded already.
+      const inFlight = join(sliceDir, "adjudication.md");
+      writeFileSync(impasseRecord, JSON.stringify({ outcome: "IMPASSE" }), "utf-8");
+      writeFileSync(decisionLog, JSON.stringify({ version: 1 }), "utf-8");
+      writeFileSync(inFlight, JSON.stringify({ version: 1, findingId: "F-02" }), "utf-8");
+      return { wtDir, branchName, impasseRecord, decisionLog, inFlight, phase };
+    });
 
     const report = await runCleanFailed({
       repoRoot: repo,
@@ -164,25 +173,27 @@ describe("runCleanFailed", () => {
     expect(report.deletedBranches).toEqual([branch]);
     expect(report.keptBranches).toEqual([]);
 
-    // Nothing of the park is debris — not the worktree, not the branch,
-    // and above all not the two files a human is being asked to decide on.
-    expect(existsSync(parkedDir)).toBe(true);
-    expect(existsSync(impasseRecord)).toBe(true);
-    expect(existsSync(decisionLog)).toBe(true);
-    expect(existsSync(inFlight)).toBe(true);
-    expect(git.branchExists(repo, parkedBranch)).toBe(true);
-    // The worktree is still git's, not just a surviving directory: pass 2
-    // sweeps unregistered namespace leftovers, and a park that pass 1
-    // skipped but pass 2 deleted would be preserved in name only.
-    expect(git.findWorktreeForBranch(repo, parkedBranch)).not.toBeNull();
-    expect(report.removedWorktrees).not.toContain(parkedDir);
+    for (const est of preserved) {
+      // Nothing of the estate is debris — not the worktree, not the branch,
+      // and above all not the files the operator's next step depends on.
+      expect(existsSync(est.wtDir)).toBe(true);
+      expect(existsSync(est.impasseRecord)).toBe(true);
+      expect(existsSync(est.decisionLog)).toBe(true);
+      expect(existsSync(est.inFlight)).toBe(true);
+      expect(git.branchExists(repo, est.branchName)).toBe(true);
+      // The worktree is still git's, not just a surviving directory: pass 2
+      // sweeps unregistered namespace leftovers, and an estate that pass 1
+      // skipped but pass 2 deleted would be preserved in name only.
+      expect(git.findWorktreeForBranch(repo, est.branchName)).not.toBeNull();
+      expect(report.removedWorktrees).not.toContain(est.wtDir);
 
-    // And the operator is told WHY the slice still has a worktree — a
-    // silent skip reads as a bug in the command.
-    const parkSkip = report.skipped.find((s) => s.target === parkedDir);
-    expect(parkSkip).toBeDefined();
-    expect(parkSkip!.reason).toContain("AWAITING-ADJUDICATION");
-    expect(parkSkip!.reason).toMatch(/adjudication estate|re-dispatch/);
+      // And the operator is told WHY the slice still has a worktree — a
+      // silent skip reads as a bug in the command.
+      const skip = report.skipped.find((s) => s.target === est.wtDir);
+      expect(skip).toBeDefined();
+      expect(skip!.reason).toContain(est.phase);
+      expect(skip!.reason).toMatch(/adjudication estate|re-dispatch/);
+    }
   });
 
   it("keeps a branch with commits ahead of the feature branch but still removes its worktree", async () => {
