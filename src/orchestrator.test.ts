@@ -3287,11 +3287,63 @@ describe("round-scoped contract feedback", () => {
     expect(appliedRecord).not.toContain("pendingLock");
 
     // --- An implementation retry re-enters the IMPASSE branch. The applied
-    // decisions are not applied a second time.
+    // decisions are not applied a second time — but the lock is re-attested
+    // against the current base before anything is dispatched from it, so the
+    // gate does run on this dispatch (one call for the accepted lock above,
+    // one for this re-attestation).
     expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
     expect(plannerRounds).toBe(beforeAcceptedLock.planner + 1);
     expect(evaluatorRounds).toBe(beforeAcceptedLock.evaluator);
-    expect(lockGateCalls).toBe(beforeAcceptedLock.gateCalls + 1);
+    expect(lockGateCalls).toBe(beforeAcceptedLock.gateCalls + 2);
+
+    // --- The lane-successor shape: the base changed under a proven lock.
+    //
+    // The predecessor merged into the feature tip and claimed the migration
+    // prefix this contract declares, so the gate that passed at lock time
+    // objects now (ADR 0028, *why the gate is a callback*). The proven-lock
+    // shortcut used to return `LOCKED` before `onContractLocked` was
+    // consulted at all, so generation ran on a contract whose prefix
+    // belonged to another slice — the transaction's own gate-before-lock
+    // ordering cannot see it, because this path never enters the
+    // transaction.
+    const beforeRefreshedBase = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      generator: generatorRounds,
+      gateCalls: lockGateCalls,
+      contract: readFileSync(contractPath, "utf-8"),
+      record: readFileSync(recordPath, "utf-8"),
+    };
+    gateObjection = "injected post-refresh migration-prefix collision";
+
+    const refusedAfterRefresh = await runSliceNegotiate(ctx);
+
+    expect(refusedAfterRefresh.phase).toBe("ESCALATE");
+    expect(
+      refusedAfterRefresh.phase === "ESCALATE"
+        ? refusedAfterRefresh.cause.summary
+        : "",
+    ).toContain("injected post-refresh migration-prefix collision");
+    expect(lockGateCalls).toBe(beforeRefreshedBase.gateCalls + 1);
+    // The parked estate survives the refusal byte-for-byte — no reopen, no
+    // re-apply, no dispatch. The objection is about the base, which the next
+    // dispatch re-reads, so the refusal is idempotent rather than terminal
+    // for the decisions (ADR 0055 Seam 2).
+    expect(readFileSync(contractPath, "utf-8")).toBe(
+      beforeRefreshedBase.contract,
+    );
+    expect(readFileSync(recordPath, "utf-8")).toBe(beforeRefreshedBase.record);
+    expect(plannerRounds).toBe(beforeRefreshedBase.planner);
+    expect(evaluatorRounds).toBe(beforeRefreshedBase.evaluator);
+    expect(generatorRounds).toBe(beforeRefreshedBase.generator);
+
+    // Base fixed (the operator renumbered, or the colliding slice landed
+    // elsewhere): the same proven lock is accepted again, still without
+    // re-applying anything.
+    gateObjection = null;
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeRefreshedBase.planner);
+    expect(lockGateCalls).toBe(beforeRefreshedBase.gateCalls + 2);
 
     // --- A third instruction reaches the planner verbatim alongside the
     // other finding's decision.
@@ -3498,7 +3550,23 @@ describe("round-scoped contract feedback", () => {
     expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
     expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
     expect(plannerRounds).toBe(beforeLockStands.planner);
-    expect(lockGateCalls).toBe(beforeLockStands.gateCalls);
+    // Nothing is re-applied, but this shortcut is the other way to reach
+    // generation on a lock this dispatch did not produce, so it re-attests
+    // the same way: the gate runs, and an objection refuses the dispatch
+    // while leaving the stamped lock and the mangled receipt exactly as
+    // they are for the operator to read.
+    expect(lockGateCalls).toBe(beforeLockStands.gateCalls + 1);
+    gateObjection = "injected lock-stands base objection";
+    const refusedLockStands = await runSliceNegotiate(ctx);
+    expect(refusedLockStands.phase).toBe("ESCALATE");
+    expect(
+      refusedLockStands.phase === "ESCALATE"
+        ? refusedLockStands.cause.summary
+        : "",
+    ).toContain("injected lock-stands base objection");
+    expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
+    expect(plannerRounds).toBe(beforeLockStands.planner);
+    gateObjection = null;
 
     // --- The crash window is proved by the witness, not by LOCKED.
     //

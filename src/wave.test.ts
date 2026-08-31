@@ -332,6 +332,20 @@ describe("runWave", () => {
     );
     const branchTipBefore = git(repo, ["rev-parse", successorCtx.branch]);
 
+    // The lane refresh moves the successor's base, and the migration-prefix
+    // gate is the only thing that can see a prefix the predecessor's merge
+    // has since claimed (ADR 0028). Its proven adjudication lock therefore
+    // has to be re-attested on the refreshed tip: an `it` on this scenario
+    // rather than a spawn of its own, because the refusal behaviour itself
+    // is covered at the negotiate seam in `orchestrator.test.ts`, and what
+    // is only provable here is that the wave's own gate closure is reached
+    // through the refresh at all.
+    const gatedOnRefresh: string[] = [];
+    config.onContractLocked = (id) => {
+      gatedOnRefresh.push(id);
+      return null;
+    };
+
     let decisionPresentAtGenerator = false;
     let acceptedLockPresentAtGenerator = false;
     /** Estate names whose bytes changed between negotiation and generation. */
@@ -384,6 +398,10 @@ describe("runWave", () => {
     // bytes negotiation left, and the branch was refreshed by merge rather
     // than deleted and recreated at the feature tip.
     expect(estateDriftAtGenerator).toEqual([]);
+    // The successor's lock was proven by its applied decision record, not by
+    // this dispatch — and it still went through the gate on the refreshed
+    // tip before generation.
+    expect(gatedOnRefresh).toContain("322");
     expect(() =>
       git(repo, [
         "merge-base",
