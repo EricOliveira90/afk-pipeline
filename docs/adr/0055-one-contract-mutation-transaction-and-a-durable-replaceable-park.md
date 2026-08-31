@@ -94,6 +94,24 @@ The Track C/D fixes from this review cycle (lock-gate bypass,
 one-decision-per-finding) stop being special cases: with one lock
 exit there is no second path to bypass.
 
+**Amended (second adjudication gate round, architect blocker 3): the QA
+scope amendment is the third caller, not a third copy.** `#112`'s
+amendment (ADR 0048) predates this ADR and mutates the same accepted
+pair — it widens `acceptance-manifest.json`, then widens the contract's
+file list in a second function that can refuse (no
+`## Files expected to change` section) or simply fail. With no
+capture/restore boundary around the two writes, a refusal left a widened
+manifest beside an unwidened, *locked* contract: exactly the desync
+ADR 0048 makes the orchestrator responsible for preventing. "Both
+mutation paths" was therefore an undercount of this decision's own
+scope; the rule is **every** path that mutates the accepted pair calls
+the transaction. The amendment passes no `completion` and never calls
+`tx.lock` — it does not lock, it widens a contract already locked — so
+what it takes from the transaction is the two-file capture/restore and
+the guarantee that its archive is written only over a coherent pair.
+The archive therefore goes *inside* the transaction, beside the writes
+it records, and not after it.
+
 ### 4. Every lock names what produced it
 
 Every lock exit of the shared transaction stamps the contract with the
@@ -181,6 +199,41 @@ close it, and they are the ordering this ADR now mandates —
   operator told which artifact to inspect is strictly better than a
   masked original error.
 
+**Amended again (second adjudication gate round, architect blocker 1): a
+proven lock is proof about the decisions, not about the base.** The two
+shortcuts that return `LOCKED` without entering the transaction — an
+already-applied (or witnessed) decision log, and a stamped lock beside a
+discarded log — both establish that *this decision set produced this
+lock*. Neither establishes anything about the base the contract is about
+to be generated against, and the mechanical gate's checks are precisely
+the ones a changed base invalidates. An adjudicated lane successor is
+where that gap opens: `runWave` merges the new feature tip into the
+preserved parked worktree and re-negotiates, so a migration prefix the
+predecessor's merge has since claimed is a collision only a fresh gate
+call can see — which is what ADR 0028's *why the gate is a callback*
+requires it to see. The gate-before-`lockContract` ordering above cannot
+help, because these shortcuts never enter the transaction.
+
+So **every path that returns `LOCKED` re-runs the mechanical gate,
+including the ones that do not lock anything.** The gate is a pure read
+of the declared scope against the current base, and it is cheap, so the
+rule is unconditional rather than conditional on "did the base change" —
+a predicate nothing here could answer honestly.
+
+A refusal from that re-attestation preserves the parked estate exactly
+as it stands: no reopen, no rollback, nothing written. There is no
+transaction to roll back to, and the contract on disk is the one a
+passing gate did attest to at the base it locked on. Reopening it would
+throw away a completed human adjudication over a condition that is not
+about the decisions at all, and re-applying would re-invoke the planner
+for decisions already applied. Because nothing is mutated, the refusal
+is idempotent: every later dispatch re-asks the gate, so the lock can
+never be consumed while the objection stands, and it is accepted again
+unchanged once the base is fixed. The refusal reads as a lock refusal
+(`ESCALATE`, the operator's to resolve by renumbering), the same as the
+transaction's own gate refusal, because to the operator it is the same
+event.
+
 ## Decision — Seam 2: a park is durable, replaceable state
 
 One invariant, stated once and consulted by every lifecycle operation:
@@ -264,6 +317,34 @@ refs and run state untouched. The worktree lister is injected at the
 command seam so the failure path is testable. This is the invariant's
 fail-closed clause applied to the one lifecycle operation that moves
 refs out from under worktrees.
+
+**Amended (second adjudication gate round, architect blocker 2):
+adoption also refuses while a park owns a worktree — refusal 7.** The
+enumeration fix asked the right question of the *feature* branch and no
+question at all about the slice being adopted. Adoption is not a
+dispatch, so under the invariant above it may not replace a park; but it
+overwrites the slice's persisted record with `PASS` and reconciles
+nothing, which strands the park's registered worktree with no live slice
+owning it. The next launch then excludes completed slices from both
+`intended` and `retained`, preflight classifies that worktree as a
+leftover, and the run refuses — so the operator's bypass valve, used on
+the phase most likely to need it, bricked their next launch.
+
+The check is therefore a refusal, not a reconciliation. Quiescing the
+estate on the operator's behalf would delete a human's pending
+adjudication worktree inside a command that never mentions adjudication:
+the same "disposability inferred rather than proved" mistake decision 6
+exists to undo. The refusal names the holding worktree and the two ways
+forward — record the pending decision and let the slice's own
+re-dispatch finish it, or remove the parked worktree by hand (its branch
+and `adjudication-decisions.json` survive that) and adopt again. It is
+raised before candidate creation or any ref mutation, like every other
+adoption refusal, and it keys off the phase's `preserve-all` debris
+trait rather than the phase name, so a future phase that preserves its
+estate inherits the refusal instead of re-learning it. A record whose
+phase preserves everything but that names no branch is refused too:
+which worktree the estate holds cannot then be proved, and proved
+absence is what the invariant demands.
 
 ### 9. The journal gets a third transition class: the park
 
@@ -352,7 +433,19 @@ structural: `finishStuck` is the only constructor of a STUCK return in
 - A parked slice no longer delays unrelated waves; total pipeline time
   for a run with one impasse drops from "everything after the park
   waits for the human" to "only the park's dependents wait".
-- `afk adopt` gains one refusal and loses one corruption path.
+- `afk adopt` gains two refusals (unenumerable worktrees, and a park
+  that still holds one) and loses one corruption path. Adopting a
+  parked slice is now a two-step operator action rather than a silent
+  one that costs them the next launch.
+- Every `LOCKED` return from the adjudication branch has run the
+  mechanical gate against the base it is about to generate on, whether
+  or not this dispatch produced the lock. The cost is one extra gate
+  call per re-entry — a scope read, no agent — and the guarantee is that
+  no adjudicated contract reaches a generator over a prefix another
+  slice has since claimed.
+- The QA scope amendment inherits the accepted pair's rollback instead
+  of owning half of one, so a refused or failed amendment can no longer
+  leave a widened manifest beside an unwidened locked contract.
 - The journal's state machine is honest: PENDING → RUNNING →
   (terminal | parked); parked → RUNNING → …; terminal is final this
   run. Tests assert the machine directly instead of the
