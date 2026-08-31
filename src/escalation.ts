@@ -3,6 +3,7 @@ import {
   normalizeAcceptanceManifestPath,
   type AcceptanceManifest,
 } from "./acceptance-manifest.js";
+import { parseJsonWithUniqueKeys } from "./json-scan.js";
 import { migrationPathsIn, type LaneResourceOptions } from "./lanes.js";
 
 export const ESCALATION_FILENAME = "escalation.md";
@@ -80,22 +81,131 @@ function displayPath(raw: string): string {
   return path;
 }
 
+/**
+ * Normalize a directory to the same comparison key the manifest uses for a
+ * file path, minus the "must name a file" rule: trimmed, forward-slashed,
+ * `./`-stripped, trailing-slash-stripped, lowercased. Deliberately the
+ * manifest's own rules — the prefix is compared against keys produced by
+ * `normalizeAcceptanceManifestPath`, so a second normalization dialect here
+ * would exempt a directory on Windows and refuse it on Linux.
+ */
+function normalizeDirKey(raw: string): string {
+  let dir = raw.trim().replace(/\\/g, "/");
+  while (dir.startsWith("./")) dir = dir.slice(2);
+  return dir.replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * Changed paths this worktree holds that the locked contract does not
+ * declare — the guard that stops an escalation laundering an edit that
+ * already happened (architect blocker 1, fifth adjudication gate round).
+ *
+ * ## Why the two scope doors are deliberately asymmetric
+ *
+ * `planScopeAmendment` (`scope-amendment.ts`) **requires** the requested
+ * path to be already changed; this door **forbids** any undeclared change
+ * at all. That is not a contradiction, it is the whole design:
+ *
+ * - The amendment's warrant is an independent QA finding. A generator
+ *   cannot forge one, so "the work is already there" is evidence that an
+ *   evaluator judged the work correct and only the bookkeeping is wrong
+ *   (#112). Refusing a path with no work in it would declare a file the
+ *   slice never wrote.
+ * - The escalation's warrant is written by the generator itself. "The work
+ *   is already there" is therefore not evidence of anything — it is exactly
+ *   the state the route exists to prevent. ADR 0052 defines this route as a
+ *   *pre-build discovery*: the generator stops **before** the undeclared
+ *   edit, says which path it needs, and builds after the contract is
+ *   revised. Both generator prompts say "Stop before making the undeclared
+ *   edit" in those words. A tree that already holds the edit is a generator
+ *   that did not follow the protocol, and granting the revision would
+ *   retro-authorize the boundary violation the locked contract exists to
+ *   hold (ADR 0008/0048: the contract is the orchestrator's).
+ *
+ * ## Why the FULL changed set, not just the requested paths
+ *
+ * Checking only `escalation.paths` leaves the laundering intact one step
+ * removed: edit undeclared `X`, escalate for unrelated `Y`, and `X` sails
+ * through the grant untouched. The question the grant has to answer is
+ * "is this tree still inside its lock", and that is a question about every
+ * changed path.
+ *
+ * ## The two exemptions, and why they are these
+ *
+ * - **The slice artifact directory, by directory prefix.** The slice's own
+ *   artifacts live in the worktree and are written by the pipeline and the
+ *   agents as a matter of course — `escalation.md` most of all, since it is
+ *   the very file that triggers this check. The exemption is a prefix and
+ *   not a filename list on purpose: `artifacts.sliceArtifactNames()` omits
+ *   `escalation.md`, `acceptance-manifest.json` and both adjudication
+ *   files, so a list-based exemption would refuse every honest escalation
+ *   on its own escalation artifact.
+ * - **Migration files.** `fileScope` forbids placeholders and globs, and a
+ *   migration's exact filename is chosen at build time, so a migration can
+ *   never be a declared path — `planScopeAmendment` refuses migration paths
+ *   for exactly that reason. Migrations are governed by the reserved-prefix
+ *   claim gate (`checkClaimedGeneratedMigrations`, ADR 0028/0034), which
+ *   runs on this same tree before QA. Not exempting them here would refuse
+ *   every escalation from every slice that has a migration to write.
+ *
+ * Anything else is out of scope, including other paths under `specsDir`
+ * that are not this slice's own artifact directory.
+ *
+ * A path git reported that the manifest's rules cannot even normalize is
+ * reported as out-of-scope rather than skipped: an unclassifiable path is
+ * not a proof that the tree is clean.
+ */
+export function outOfScopeChangedPaths(args: {
+  changedFiles: readonly string[];
+  manifest: AcceptanceManifest;
+  /** Repo-relative slice artifact directory, exempt with everything under it. */
+  sliceArtifactDir: string;
+  options?: LaneResourceOptions;
+}): string[] {
+  const { changedFiles, manifest, sliceArtifactDir, options } = args;
+  const declared = new Set(acceptanceManifestPaths(manifest));
+  const artifactDir = normalizeDirKey(sliceArtifactDir);
+  const offenders: string[] = [];
+
+  for (const raw of changedFiles) {
+    const display = displayPath(raw);
+    let key: string;
+    try {
+      key = normalizeAcceptanceManifestPath(raw);
+    } catch {
+      offenders.push(display);
+      continue;
+    }
+    if (declared.has(key)) continue;
+    if (
+      artifactDir !== "" &&
+      (key === artifactDir || key.startsWith(`${artifactDir}/`))
+    ) {
+      continue;
+    }
+    if (migrationPathsIn([key], options).length > 0) continue;
+    offenders.push(display);
+  }
+  return [...new Set(offenders)].sort();
+}
+
 export function parseScopeEscalation(
   value: string | unknown,
   manifest: AcceptanceManifest,
   options?: LaneResourceOptions,
   source = ESCALATION_FILENAME,
 ): ScopeEscalation {
-  let parsed: unknown;
-  try {
-    parsed = typeof value === "string" ? JSON.parse(value) : value;
-  } catch (error) {
-    throw new Error(
-      `${source} is not valid JSON: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
+  // Duplicate keys are refused, not resolved. `requireExactKeys` below
+  // reads the *parsed* object, so
+  // `{"findingIds":["F-01"],"findingIds":["PRE-BUILD-SCOPE"],...}` presents
+  // one well-formed `findingIds` and passes — while the artifact on disk
+  // claims both a cited-finding fix and a pre-build discovery. That is the
+  // same class of defect as the duplicated `winningPosition` in
+  // `adjudication.md` (PM blocker 1) and is closed with the same primitive:
+  // this escalation is generator-authored, so it is the last artifact that
+  // should get the benefit of the doubt.
+  const parsed: unknown =
+    typeof value === "string" ? parseJsonWithUniqueKeys(value, source) : value;
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${source} must contain a JSON object`);

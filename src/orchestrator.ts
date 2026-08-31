@@ -194,6 +194,7 @@ import {
 } from "./scope-amendment.js";
 import {
   ESCALATION_FILENAME,
+  outOfScopeChangedPaths,
   parseScopeEscalation,
 } from "./escalation.js";
 
@@ -579,7 +580,32 @@ export function sliceBranchPrefixForProviderName(providerName: string): string {
 }
 
 function featureBranchPrefix(provider: AgentProvider): string {
-  return provider.name === "kiro" ? "feat" : `feat-${provider.name}`;
+  return featureBranchPrefixForProviderName(provider.name);
+}
+
+function featureBranchPrefixForProviderName(providerName: string): string {
+  return providerName === "kiro" ? "feat" : `feat-${providerName}`;
+}
+
+/**
+ * The feature branch a given PRD slug and provider *name* produce — the
+ * same formula `featureBranch` uses, for a caller holding a name and no
+ * provider object.
+ *
+ * `afk adopt` needs it to *prove* that a discovered run state belongs to the
+ * PRD the operator named. A prefix match on the state filename alone cannot:
+ * `.afk/state/api-v2.json` matches PRD `api` with an apparent provider
+ * `v2`, and adoption would then move `feat/api-v2` and write the slice into
+ * another PRD's run (PM blocker 2, fifth adjudication gate round). The
+ * recorded feature branch is the discriminator, because the run wrote it
+ * from its own PRD slug and provider: a genuine `api` + `codex` run records
+ * `feat-codex/api`, while the `api-v2` run records `feat/api-v2`.
+ */
+export function featureBranchForProviderName(
+  prdSlug: string,
+  providerName: string,
+): string {
+  return `${featureBranchPrefixForProviderName(providerName)}/${prdSlug}`;
 }
 
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
@@ -3885,10 +3911,26 @@ export async function runQAStage(
           (request) => `${request.findingId} (${request.paths.join(", ")})`,
         )
         .join("; ");
+      // Fail closed on a probe that could not answer. `planScopeAmendment`
+      // refuses any requested path that is not in `changedFiles`, so a
+      // swallowed git failure used to make every requested path look
+      // untouched and produce a refusal blaming the evaluator for a defect
+      // git had (see `ChangedFilesProbe`). Same decision as the escalation
+      // guard below and as the estate probe: prove it or refuse by name.
+      const changed = git.listChangedFiles(ctx.worktreeDir, featBranch);
+      if (!changed.ok) {
+        throw new Error(
+          `${stage} scope amendment refused in round ${round} attempt ` +
+            `${attempt}: the set of files this slice changed could not be ` +
+            `determined — ${changed.failure}. Requested: ${requested}. The ` +
+            `contract is unchanged and no work was reverted; nothing may be ` +
+            `added to or kept out of the locked scope on an unproven tree.`,
+        );
+      }
       const plan = planScopeAmendment({
         requests,
         manifest: loadAcceptanceManifest(ctx.absSliceDir),
-        changedFiles: git.listChangedFiles(ctx.worktreeDir, featBranch),
+        changedFiles: changed.paths,
         options: { migrationPathPattern: config.migrationPathPattern },
       });
       if (!plan.ok) {
@@ -4245,9 +4287,10 @@ export async function runSliceExecute(
           round,
           attempt: generatorAttempt,
         });
+        const lockedManifest = loadAcceptanceManifest(ctx.absSliceDir);
         const escalation = parseScopeEscalation(
           readFileSync(escalationPath, "utf-8"),
-          loadAcceptanceManifest(ctx.absSliceDir),
+          lockedManifest,
           { migrationPathPattern: config.migrationPathPattern },
           escalationPath,
         );
@@ -4260,6 +4303,54 @@ export async function runSliceExecute(
               `contract is unchanged; declare the remaining path(s) in the ` +
               `contract by hand, or resume the slice so the next round ` +
               `earns a fresh grant.`,
+          );
+        }
+        // --- The grant is only for an edit that has NOT happened yet
+        // (architect blocker 1, fifth adjudication gate round). ADR 0052
+        // makes this route a pre-build discovery and both generator prompts
+        // say "stop before making the undeclared edit"; nothing checked it,
+        // so a generator could edit an undeclared path, name it in a valid
+        // escalation, and have the revision legitimize the edit after the
+        // fact. The full changed set is compared, not just the requested
+        // paths — otherwise editing undeclared X and escalating for
+        // unrelated Y keeps X. See `outOfScopeChangedPaths` for the
+        // exemptions and for why this door is deliberately the mirror image
+        // of the QA amendment door.
+        //
+        // Placed after the archive above, so the raw escalation evidence
+        // survives the refusal, and before the revision, so the contract is
+        // never touched. Refuses by throw like the revision bound it sits
+        // next to: ERROR, nothing reverted, the tree left for the operator.
+        const escalationTree = git.listChangedFiles(ctx.worktreeDir, featBranch);
+        if (!escalationTree.ok) {
+          throw new Error(
+            `Focused scope revision refused in round ${round}: the set of ` +
+              `files this worktree has changed could not be determined — ` +
+              `${escalationTree.failure}. Requested: ` +
+              `[${escalation.paths.join(", ")}] (${escalation.reason}). A ` +
+              `grant may not be issued on an unproven tree; the escalation ` +
+              `is archived and the contract is unchanged.`,
+          );
+        }
+        const undeclaredChanges = outOfScopeChangedPaths({
+          changedFiles: escalationTree.paths,
+          manifest: lockedManifest,
+          sliceArtifactDir: ctx.relSliceDir,
+          options: { migrationPathPattern: config.migrationPathPattern },
+        });
+        if (undeclaredChanges.length > 0) {
+          throw new Error(
+            `Focused scope revision refused in round ${round}: this worktree ` +
+              `already holds changes outside the locked file scope ` +
+              `(${undeclaredChanges.join(", ")}). A scope escalation is a ` +
+              `pre-build discovery (ADR 0052) — the generator must stop ` +
+              `*before* the undeclared edit — so granting a revision now ` +
+              `would authorize an edit that already happened. Requested: ` +
+              `[${escalation.paths.join(", ")}] (${escalation.reason}). The ` +
+              `escalation is archived, the contract is unchanged and nothing ` +
+              `was reverted; review the listed path(s), then either declare ` +
+              `them in the contract by hand or discard them and resume the ` +
+              `slice so the next round earns a fresh grant.`,
           );
         }
         const revision = await runFocusedScopeRevision(ctx, escalation);
@@ -4942,6 +5033,12 @@ export async function runPipeline(
   );
   runState.scope = scope.persisted;
   runState.featureBranch = featBranch;
+  // Recorded so `clean-failed` and `afk adopt` can *resolve* where this
+  // run's slice artifacts live rather than search a worktree for them
+  // (architect blocker 2; see `RunState.specsDir`). Written here, beside the
+  // feature branch, because both are facts about the run that later commands
+  // read and neither can be re-derived from a worktree alone.
+  runState.specsDir = specsDir.replace(/\\/g, "/");
   saveRunState(repoRoot, runState);
   const dag = buildDAG(scope.selected);
   const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));

@@ -147,6 +147,75 @@ describe("parseAdjudication", () => {
   it.each(invalid)("rejects %s", (_name, raw, expected) => {
     expect(() => parseAdjudication(raw, IMPASSE)).toThrow(expected);
   });
+
+  /**
+   * PM blocker 1, fifth adjudication gate round. `JSON.parse` keeps the last
+   * of a repeated key, and every check in `parseAdjudication` reads the
+   * parsed object — so this artifact presented one well-formed
+   * `winningPosition` and was accepted, returning `EVALUATOR`: the *opposite*
+   * of the decision the same artifact also states. A human decision that
+   * says two things has not been made.
+   */
+  describe("a repeated key is a contradiction, not a value", () => {
+    it("refuses two winningPositions rather than applying the last one", () => {
+      const raw =
+        '{"version":1,"findingId":"F-01","winningPosition":"PLANNER",' +
+        '"winningPosition":"EVALUATOR","author":"human"}';
+      // The exact defect: JSON.parse resolves it, and silently inverts the
+      // decision.
+      expect(
+        (JSON.parse(raw) as { winningPosition: string }).winningPosition,
+      ).toBe("EVALUATOR");
+      expect(() => parseAdjudication(raw, IMPASSE)).toThrow(
+        /repeats the key "winningPosition"/,
+      );
+    });
+
+    it.each([
+      [
+        "findingId",
+        '{"version":1,"findingId":"F-01","findingId":"F-OPEN",' +
+          '"winningPosition":"PLANNER","author":"human"}',
+      ],
+      [
+        "author",
+        '{"version":1,"findingId":"F-01","winningPosition":"PLANNER",' +
+          '"author":"Ada","author":"Grace"}',
+      ],
+      [
+        "version",
+        '{"version":1,"version":1,"findingId":"F-01",' +
+          '"winningPosition":"PLANNER","author":"human"}',
+      ],
+      [
+        "thirdInstruction",
+        '{"version":1,"findingId":"F-01","thirdInstruction":"do X",' +
+          '"thirdInstruction":"do Y","author":"human"}',
+      ],
+    ])("refuses a repeated %s", (key, raw) => {
+      expect(() => parseAdjudication(raw, IMPASSE)).toThrow(
+        new RegExp(`repeats the key "${key}"`),
+      );
+    });
+
+    it("still accepts the same key name inside a nested value", () => {
+      // The scanner is per-object, so a key that appears once in each of two
+      // objects is not a duplicate. A whole-document string search would
+      // have refused honest artifacts.
+      expect(
+        parseAdjudication(
+          '{"version":1,"findingId":"F-01",' +
+            '"thirdInstruction":"see {\\"author\\": \\"Ada\\"}","author":"Ada"}',
+          IMPASSE,
+        ),
+      ).toEqual({
+        version: 1,
+        findingId: "F-01",
+        thirdInstruction: 'see {"author": "Ada"}',
+        author: "Ada",
+      });
+    });
+  });
 });
 
 /**
@@ -420,6 +489,70 @@ describe("the adjudication decision log", () => {
         "F-01",
       ]),
     ).toThrow(/F-01 was already adjudicated in the current IMPASSE/);
+  });
+
+  /**
+   * PM blocker 1's second half: the log is what a lock is *proved* against
+   * (`adjudicatedLockIsProven`), so a repeated `applied`, `impasse` or
+   * `pendingLock` would let the JSON runtime pick which claim does the
+   * proving. And a duplicate inside a recorded decision's own raw bytes is
+   * refused where every other malformed decision is, by the re-parse.
+   */
+  describe("a repeated key discards the persisted log", () => {
+    const logPath = (sliceDir: string) =>
+      join(sliceDir, "adjudication-decisions.json");
+
+    it.each([
+      ["applied", '"applied":false,"applied":true'],
+      ["decisions", '"decisions":[],"decisions":[]'],
+    ])("refuses a repeated %s", (key, pair) => {
+      withSliceDir((sliceDir) => {
+        writeFileSync(
+          logPath(sliceDir),
+          `{"version":1,"impasse":"${impasseFingerprint(CONTESTED_PAIR)}",${pair}}`,
+          "utf-8",
+        );
+        const { log, discarded } = loadAdjudicationDecisionLog(
+          sliceDir,
+          CONTESTED_PAIR,
+        );
+        expect(discarded).toMatch(new RegExp(`repeats the key "${key}"`));
+        // Discarded means empty, so nothing in it can permit a lock.
+        expect(log.decisions).toEqual([]);
+        expect(log.applied).toBe(false);
+        expect(adjudicatedLockIsProven({ locked: true, log })).toBe(false);
+      });
+    });
+
+    it("refuses a repeated key inside a recorded decision's raw bytes", () => {
+      withSliceDir((sliceDir) => {
+        writeFileSync(
+          logPath(sliceDir),
+          JSON.stringify({
+            version: 1,
+            impasse: impasseFingerprint(CONTESTED_PAIR),
+            applied: true,
+            decisions: [
+              {
+                raw:
+                  '{"version":1,"findingId":"F-01","winningPosition":"PLANNER",' +
+                  '"winningPosition":"EVALUATOR","author":"human"}',
+              },
+            ],
+          }),
+          "utf-8",
+        );
+        const { log, discarded } = loadAdjudicationDecisionLog(
+          sliceDir,
+          CONTESTED_PAIR,
+        );
+        expect(discarded).toMatch(/repeats the key "winningPosition"/);
+        expect(log.applied).toBe(false);
+        // The `applied: true` above is exactly what would have proved a
+        // stale lock. A contradictory decision may not carry it.
+        expect(adjudicatedLockIsProven({ locked: true, log })).toBe(false);
+      });
+    });
   });
 });
 
@@ -754,5 +887,46 @@ describe("waitForAdjudication", () => {
     } finally {
       rmSync(sliceDir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Found by the fifth round's self-probe pass rather than by a gate.
+ * `adjudication.md` is the one artifact in the pipeline a *human* types, on
+ * Windows, where PowerShell's `Set-Content` and Notepad both write a UTF-8
+ * BOM by default. `JSON.parse` then fails at position 0, the slice stays
+ * parked, and the operator is told their decision "is not valid JSON" with no
+ * visible cause. A BOM carries no semantics, so stripping it guesses at
+ * nothing.
+ */
+describe("a byte-order mark on a human-written artifact", () => {
+  const decision =
+    '{"version":1,"findingId":"F-01","winningPosition":"PLANNER","author":"Ada"}';
+
+  it("is stripped rather than refused", () => {
+    expect(parseAdjudication(`﻿${decision}`, IMPASSE)).toEqual({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+  });
+
+  it("does not stop the duplicate-key scan from seeing the object", () => {
+    expect(() =>
+      parseAdjudication(
+        '﻿{"version":1,"findingId":"F-01","winningPosition":"PLANNER",' +
+          '"winningPosition":"EVALUATOR","author":"Ada"}',
+        IMPASSE,
+      ),
+    ).toThrow(/repeats the key "winningPosition"/);
+  });
+
+  it("is still refused in the middle of the document", () => {
+    // Only a *leading* mark is a BOM. One anywhere else is a real character
+    // in a real defect.
+    expect(() =>
+      parseAdjudication(`{﻿"version":1}`, IMPASSE),
+    ).toThrow(/is not valid JSON/);
   });
 });

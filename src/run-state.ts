@@ -44,6 +44,21 @@ export interface RunState {
   version: 1;
   prdSlug: string;
   featureBranch: string;
+  /**
+   * Repo-relative specs directory this run was launched against (e.g.
+   * `.kiro/specs/<prd-slug>`), recorded so a later command can *resolve*
+   * where a slice's artifacts live instead of searching for them.
+   *
+   * `--prd-dir` is arbitrary, so the estate probe used to guess with a
+   * depth-bounded walk and reported "no estate" for any layout deeper than
+   * the default — after which `clean-failed` deleted the worktree and
+   * `adopt` overwrote the park (architect blocker 2, fifth adjudication gate
+   * round). The run is the one party that knows this without guessing, so it
+   * writes it down. Optional because state files predating the field must
+   * stay loadable: `probeAdjudicationEstate` falls back to a complete walk,
+   * which is slower but still never infers absence.
+   */
+  specsDir?: string;
   /** Immutable executable slice identities resolved at the first run. */
   scope?: PersistedRunScope;
   slices: Record<string, PersistedSliceState>;
@@ -246,6 +261,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     version?: unknown;
     prdSlug?: string;
     featureBranch?: string;
+    specsDir?: unknown;
     scope?: PersistedRunScope;
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
@@ -254,6 +270,13 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
+  // A blank or non-string value degrades to absent, which selects the
+  // complete-walk fallback in `probeAdjudicationEstate`. It never degrades
+  // to a guessed path: the whole point of the field is that it is resolved.
+  const specsDir =
+    typeof r.specsDir === "string" && r.specsDir.trim() !== ""
+      ? r.specsDir
+      : undefined;
 
   if (r.version === 1) {
     const slices: Record<string, PersistedSliceState> = {};
@@ -267,6 +290,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       version: 1,
       prdSlug,
       featureBranch,
+      ...(specsDir !== undefined ? { specsDir } : {}),
       ...(r.scope !== undefined ? { scope: r.scope } : {}),
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
@@ -306,6 +330,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     version: 1,
     prdSlug,
     featureBranch,
+    ...(specsDir !== undefined ? { specsDir } : {}),
     ...(r.scope !== undefined ? { scope: r.scope } : {}),
     slices,
   };
@@ -435,6 +460,68 @@ export function saveSliceState(
   const current = loadRunState(repoRoot, prdSlug);
   current.slices[ghIssue] = result;
   writeFileSync(p, JSON.stringify(current, null, 2));
+}
+
+/**
+ * `saveSliceState`, but only if this slice's record is still the one the
+ * caller last observed. Returns the record found on re-read when it has
+ * changed, so the caller can name what it lost to.
+ *
+ * `saveSliceState` re-reads the file to avoid clobbering *other* slices'
+ * parallel updates, then replaces this slice's record unconditionally. That
+ * is right for the pipeline, which owns the slice it is writing. It is wrong
+ * for `afk adopt`, which reads the record, spends minutes running base
+ * gates, and then writes: a concurrent run can park the same slice inside
+ * that window, and the unconditional write turns `AWAITING-ADJUDICATION`
+ * into `PASS` and strands a live estate with no slice record owning it
+ * (architect blocker 3, fifth adjudication gate round). ADR 0055 Seam 2:
+ * only the slice's own re-dispatch replaces a park.
+ *
+ * Compared on the persisted projection rather than by identity, because the
+ * observed record came from a different `loadRunState` call: the question is
+ * whether the *claim on disk* changed, not whether the object did.
+ */
+export function saveSliceStateIfUnchanged(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  result: PersistedSliceState,
+  expected: PersistedSliceState | undefined,
+): { ok: true } | { ok: false; found: PersistedSliceState | undefined } {
+  const p = statePath(repoRoot, prdSlug);
+  mkdirSync(dirname(p), { recursive: true });
+  const current = loadRunState(repoRoot, prdSlug);
+  const found = current.slices[ghIssue];
+  if (!sameSliceRecord(found, expected)) return { ok: false, found };
+  current.slices[ghIssue] = result;
+  writeFileSync(p, JSON.stringify(current, null, 2));
+  return { ok: true };
+}
+
+/**
+ * Do two slice records make the same claim? Compared on values rather than
+ * identity, because the records being compared came from different
+ * `loadRunState` calls; key order is not part of the claim.
+ *
+ * Exported because `afk adopt` asks the same question twice — once on its
+ * pre-finalization re-check and once inside the write above — and the two
+ * must not be able to disagree.
+ */
+export function sameSliceRecord(
+  a: PersistedSliceState | undefined,
+  b: PersistedSliceState | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    JSON.stringify(canonicalSliceRecord(a)) ===
+    JSON.stringify(canonicalSliceRecord(b))
+  );
+}
+
+function canonicalSliceRecord(record: PersistedSliceState): unknown {
+  return Object.entries(record as unknown as Record<string, unknown>).sort(
+    ([x], [y]) => (x < y ? -1 : x > y ? 1 : 0),
+  );
 }
 
 /**

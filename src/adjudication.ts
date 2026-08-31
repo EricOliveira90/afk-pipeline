@@ -13,6 +13,7 @@ import {
 } from "./artifacts.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
 import { CONTRACT_NEGOTIATION_OUTCOME_FILENAME } from "./contract-review.js";
+import { parseJsonWithUniqueKeys } from "./json-scan.js";
 
 export const ADJUDICATION_FILENAME = "adjudication.md";
 
@@ -63,6 +64,19 @@ function requireNonBlankString(
  * second copy could only either change a settled answer silently or make
  * the bounded wait accept a decision that adds nothing and redispatch the
  * slice forever.
+ *
+ * The raw bytes are scanned for a repeated key before the parsed object is
+ * trusted (PM blocker 1, fifth adjudication gate round).
+ * `{"winningPosition":"PLANNER","winningPosition":"EVALUATOR"}` is valid
+ * JSON that `JSON.parse` resolves to `EVALUATOR` — the *opposite* of the
+ * decision the artifact also states — and the key-set checks below run on
+ * the parsed object, so they see one well-formed `winningPosition` and pass.
+ * A human decision that says two things has not been made; it is refused,
+ * never resolved by whichever value the runtime happened to keep.
+ *
+ * Every real caller hands this function text, which is why the scan can be
+ * unconditional in practice; a non-string `value` is still accepted (tests
+ * construct one) and simply has no bytes to scan.
  */
 export function parseAdjudication(
   value: string | unknown,
@@ -70,16 +84,10 @@ export function parseAdjudication(
   source = ADJUDICATION_FILENAME,
   decidedFindingIds: readonly string[] = [],
 ): Adjudication {
-  let parsed: unknown;
-  try {
-    parsed = typeof value === "string" ? JSON.parse(value) : value;
-  } catch (error) {
-    throw new Error(
-      `${source} is not valid JSON: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
+  const parsed: unknown =
+    typeof value === "string"
+      ? parseJsonWithUniqueKeys(value, source)
+      : value;
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${source} must contain a JSON object`);
@@ -251,6 +259,14 @@ function decisionLogPath(sliceDir: string): string {
  * log. Every recorded decision is re-validated against the current impasse,
  * so a log that no longer describes decidable findings cannot be what
  * permits a lock.
+ *
+ * The log's own bytes are held to the same no-repeated-key rule as the
+ * incoming artifact (PM blocker 1). It is the thing a lock is proved
+ * against, so a duplicated `applied`, `impasse` or `pendingLock` would let
+ * the JSON runtime pick which claim proves the lock. And the *stored* raw
+ * decision bytes are re-parsed through `parseAdjudication` below, so a
+ * duplicate inside a recorded decision is refused there — which discards
+ * the whole log rather than applying half of a contradiction.
  */
 export function loadAdjudicationDecisionLog(
   sliceDir: string,
@@ -259,7 +275,10 @@ export function loadAdjudicationDecisionLog(
   const path = decisionLogPath(sliceDir);
   if (!existsSync(path)) return { log: emptyLog(outcome), discarded: null };
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    const parsed = parseJsonWithUniqueKeys(
+      readFileSync(path, "utf-8"),
+      ADJUDICATION_DECISIONS_FILENAME,
+    );
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error(
         `${ADJUDICATION_DECISIONS_FILENAME} must contain a JSON object`,
