@@ -1346,6 +1346,130 @@ describe("generator scope escalation", () => {
     ).toBe(escalation);
   }, 60_000);
 
+  /**
+   * Architect blocker 1, fifth adjudication gate round.
+   *
+   * A new spawned scenario, reluctantly: the claim is about the state of the
+   * *worktree* at the moment the grant is decided, and nothing short of a
+   * real run puts a generator's uncommitted undeclared edit next to a valid
+   * escalation. The unit half — which paths count as out of scope, and why
+   * the slice artifact directory and migration files do not — is in
+   * `escalation.test.ts`, and the honest-grant half rides the shared
+   * "focused generator scope revision" run above. This is the one assertion
+   * neither could carry.
+   */
+  it("refuses the grant when the escalation follows an undeclared edit", async () => {
+    const repo = makeRepo();
+    const slug = "laundered-scope-escalation";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1160",
+      title: "Edits first and escalates after",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    // A perfectly valid escalation for the path it already wrote — the
+    // laundering shape. It also names a second, untouched path, so the
+    // refusal cannot be passed off as "the requested paths were checked".
+    const escalation = JSON.stringify({
+      version: 1,
+      findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+      paths: ["src/undeclared.ts", "src/never-touched.ts"],
+      reason: "the helper had to change too",
+    });
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({
+        slices: [slice],
+        records,
+        fixtures: new Map<string, SliceFixture>([
+          [
+            slice.ghIssue,
+            {
+              files: ["src/declared.ts"],
+              revisedFiles: [
+                "src/declared.ts",
+                "src/undeclared.ts",
+                "src/never-touched.ts",
+              ],
+              qaPasses: true,
+              outputFile: "src/declared.ts",
+              outputContent: "declared work",
+              escalation,
+              undeclaredEdits: ["src/undeclared.ts"],
+            },
+          ],
+        ]),
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /already holds changes outside the locked file scope/,
+    );
+    expect(state.slices[slice.ghIssue].error).toContain("src/undeclared.ts");
+    expect(state.slices[slice.ghIssue].error).toMatch(/ADR 0052/);
+
+    // No revision was performed: the second planner never ran, the
+    // contract was never reopened, and QA never saw the laundered tree.
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(1);
+    expect(
+      records.filter(({ role }) => role === "evaluator-contract"),
+    ).toHaveLength(1);
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(1);
+    expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
+
+    // The contract is unchanged — still the accepted lock, still declaring
+    // only the path the planner declared.
+    const sliceDir = join(
+      repo,
+      ".afk",
+      "worktrees",
+      `afk-stub-${slug}-s01`,
+      specsDir,
+      "slices",
+      "01-edits-first-and-escalates-after",
+    );
+    const contract = readFileSync(join(sliceDir, "contract.md"), "utf-8");
+    expect(contract).toContain("**Status:** LOCKED");
+    expect(contract).not.toContain("src/undeclared.ts");
+    expect(
+      (
+        JSON.parse(
+          readFileSync(join(sliceDir, "acceptance-manifest.json"), "utf-8"),
+        ) as { fileScope: { paths: string[] } }
+      ).fileScope.paths,
+    ).toEqual(["src/declared.ts"]);
+
+    // ...and the raw escalation evidence survives the refusal, because the
+    // guard sits after the archive call.
+    expect(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "reviews",
+          "escalation-r1-a1.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe(escalation);
+  }, 60_000);
+
   // A new spawned scenario, because the state under test only exists
   // *inside* a focused revision: the accepted contract has been reopened
   // and its manifest deleted, and nothing short of a real run reaches
@@ -1639,6 +1763,11 @@ describe("focused generator scope revision", () => {
           outputContent: "declared work",
           escalation: JSON.stringify(escalation),
           escalationGeneratorInvocation: 2,
+          // The slice's own artifact directory is dirty when the grant is
+          // decided — `escalation.md` always, and `handoff.md` here as a
+          // second file — so this scenario doubles as the honest-escalation
+          // half of the grant guard (architect blocker 1).
+          sliceArtifactEdits: ["handoff.md"],
         },
       ],
     ]);
@@ -1655,6 +1784,37 @@ describe("focused generator scope revision", () => {
 
   afterAll(() => {
     rmSync(repo, { recursive: true, force: true });
+  });
+
+  /**
+   * The honest half of the grant guard (architect blocker 1, fifth
+   * adjudication gate round). An `it` on this shared run rather than a new
+   * spawned scenario, per the AGENTS.md ladder: the tree this scenario
+   * already produces is exactly the one the guard has to allow.
+   *
+   * The exemption is the slice artifact directory *by prefix*, and this is
+   * what makes that necessary: `escalation.md` and `handoff.md` are both
+   * uncommitted and neither is on the locked file scope, so a guard with no
+   * exemption would refuse every escalation, and one keyed on
+   * `artifacts.sliceArtifactNames()` would too — that list omits
+   * `escalation.md`, `acceptance-manifest.json` and both adjudication files.
+   */
+  it("grants the revision with the slice's own artifacts dirty", () => {
+    // The archive is written from `escalation.md` in the slice directory
+    // immediately before the guard runs, so its presence proves the file was
+    // an uncommitted, undeclared change in the tree the guard inspected.
+    expect(
+      readdirSync(
+        join(repo, ".afk", "artifacts", `${slug}-stub`, "slice-01", "reviews"),
+      ).filter((name) => name.startsWith("escalation-")),
+    ).toHaveLength(1);
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices["1081"].phase).toBe("PASS");
+    // And the grant really happened: a refused grant throws before the
+    // second planner ever runs.
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(2);
   });
 
   it("routes the exact escalation evidence through one focused planner", () => {

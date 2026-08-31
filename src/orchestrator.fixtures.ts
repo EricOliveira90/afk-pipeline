@@ -124,6 +124,22 @@ export interface SliceFixture {
    */
   escalations?: string[];
   /**
+   * Worktree-relative paths the generator writes *before* emitting its
+   * escalation, none of them on the locked file scope — the protocol
+   * violation the grant guard exists to refuse (architect blocker 1, fifth
+   * adjudication gate round). A generator that edits an undeclared path and
+   * then names it in a valid escalation would otherwise have the focused
+   * revision legitimize the edit after the fact.
+   */
+  undeclaredEdits?: string[];
+  /**
+   * Extra file names the generator writes into its own slice artifact
+   * directory alongside the escalation. The grant guard exempts that
+   * directory by prefix, so an honest escalation keeps its grant with more
+   * than just `escalation.md` dirty — a filename-list exemption would not.
+   */
+  sliceArtifactEdits?: string[];
+  /**
    * File scope the planner writes on revision rounds 2, 3, ... Lets a
    * test widen the contract one escalation at a time. Falls back to
    * `revisedFiles`.
@@ -424,6 +440,18 @@ export function buildStubProvider(opts: {
           (fixture.escalation !== undefined ? [fixture.escalation] : []);
         const raw = escalations[round - firstEscalation];
         if (round >= firstEscalation && raw !== undefined) {
+          for (const path of fixture.undeclaredEdits ?? []) {
+            const abs = join(cwd, path);
+            mkdirSync(join(abs, ".."), { recursive: true });
+            writeFileSync(abs, `undeclared edit for #${ghIssue}\n`, "utf-8");
+          }
+          for (const name of fixture.sliceArtifactEdits ?? []) {
+            writeFileSync(
+              join(sliceArtifactDir, name),
+              `# ${name} written in generator round ${round}\n`,
+              "utf-8",
+            );
+          }
           writeFileSync(
             join(sliceArtifactDir, "escalation.md"),
             raw,

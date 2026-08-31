@@ -82,3 +82,83 @@ its own prompt, not a judgement call.
   findings, or that a cited ID names a real finding — the parser has never
   seen the finding set and cannot. The check that exists is the exclusivity
   rule; the rest is prompt discipline, the same as for cited IDs today.
+
+## Amendment — the grant is only for an edit that has not happened yet
+
+Fifth adjudication gate round, architect blocker 1. Operator-authorized fix
+round recorded 2026-08-31.
+
+The route above is defined as a **pre-build** discovery, and both generator
+prompts say so in those words: *stop before making the undeclared edit*.
+Nothing checked it. `runSliceExecute` archived `escalation.md`, validated it
+against the locked manifest, checked the two-revision bound and went straight
+into `runFocusedScopeRevision` — it never compared the worktree against the
+scope it was about to widen. So a generator could edit an undeclared path,
+name that path in a perfectly valid escalation, and have the focused revision
+declare it *after the fact*. The control artifact laundered the boundary
+violation it exists to prevent, and the edit then reached the gates as though
+it had been made under the revised lock (ADR 0008/0048: the locked contract is
+the orchestrator's, and the generator owns no part of the file list).
+
+**Before granting a focused revision, the full changed set of the worktree is
+compared against the currently locked scope, and any out-of-scope change
+refuses the grant.** `outOfScopeChangedPaths` in `src/escalation.ts` decides
+it; the caller is the grant site in `runSliceExecute`.
+
+Four things about the shape, each of which was a way to get it wrong:
+
+- **The full changed set, not the requested paths.** Checking only
+  `escalation.paths` leaves the laundering intact one step removed: edit
+  undeclared `X`, escalate for unrelated `Y`, keep `X`. The question the grant
+  has to answer is whether the tree is still inside its lock.
+- **Exempt the slice artifact directory by directory prefix.** The slice's own
+  artifacts are written into the worktree by the pipeline and the agents as a
+  matter of course, `escalation.md` above all — it is the file that triggers
+  the check. The exemption is deliberately *not* built from
+  `artifacts.sliceArtifactNames()`: that list omits `escalation.md`,
+  `acceptance-manifest.json` and both adjudication files, so a filename-list
+  exemption would refuse every honest escalation on its own escalation
+  artifact.
+- **Exempt migration files.** `fileScope` forbids placeholders and globs and a
+  migration's exact filename is chosen at build time, so a migration can never
+  be a declared path — `planScopeAmendment` refuses migration paths for that
+  same reason. The reserved-prefix claim gate
+  (`checkClaimedGeneratedMigrations`, ADR 0028/0034) governs them, on this same
+  tree, before QA.
+- **Placement and refusal shape.** After the archive call, so the raw
+  escalation evidence survives the refusal, and before the revision, so the
+  contract is never reopened. It refuses by `throw` — surfacing as `ERROR`,
+  like the two-revision bound beside it — names the offending paths, and
+  reverts nothing: the tree is the operator's to inspect.
+
+### The two scope doors are asymmetric on purpose
+
+`planScopeAmendment` (the QA amendment door, #112) **requires** the requested
+path to be already changed. This door **forbids** any undeclared change at all.
+A future reviewer will read that as a contradiction and try to "fix" one of
+them. It is not:
+
+- The amendment's warrant is an **independent evaluator finding**, which a
+  generator cannot forge. "The work is already there" is then evidence that the
+  work was judged correct and only the bookkeeping is wrong — and refusing a
+  path with no work in it would declare a file the slice never wrote (ADR 0048:
+  a QA finding names its remedy, and this remedy is the orchestrator's).
+- The escalation's warrant is **written by the generator itself**. "The work is
+  already there" is therefore evidence of nothing, and is precisely the state
+  this route exists to prevent.
+
+Same word, "changed", opposite polarity, because the two doors are guarded by
+warrants of different trustworthiness. Neither should be made to match the
+other.
+
+### Absence is proved, not inferred — here too
+
+The check reads the changed set from `git.listChangedFiles`, which used to
+swallow each of its three git commands' failures and return the partial union.
+A swallowed failure would have read as "no out-of-scope changes" and **granted**
+the revision. It now returns a `ChangedFilesProbe` that distinguishes failure
+from empty, and both callers fail closed in their own direction: this door
+refuses the grant, and the QA amendment door refuses the amendment rather than
+blaming the evaluator for a path git could not confirm. That is the same
+decision as the estate probe's tri-state (ADR 0055 Seam 2 §8) — one honest
+primitive, every caller refusing by name.
