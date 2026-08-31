@@ -130,36 +130,6 @@ function makeArgs(
   };
 }
 
-describe("buildPrCreationPlan adoption provenance", () => {
-  it("identifies each adopted slice and records its full provenance", () => {
-    const plan = buildPrCreationPlan({
-      prdSlug: "demo",
-      specsDir: ".kiro/specs/demo",
-      architect: "SHIP",
-      pm: "SHIP",
-      openPrOnOverride: false,
-      closesIssues: ["129", "130"],
-      adoptions: [
-        {
-          ghIssue: "129",
-          adopter: "Ada Lovelace",
-          reason: "finished the slice manually",
-          branch: "manual/demo-01",
-          commit: "abc123",
-        },
-      ],
-    });
-
-    expect(plan.body).toContain("## Adopted Slices");
-    expect(plan.body).toContain("#129");
-    expect(plan.body).toContain("Ada Lovelace");
-    expect(plan.body).toContain("finished the slice manually");
-    expect(plan.body).toContain("manual/demo-01");
-    expect(plan.body).toContain("abc123");
-    expect(plan.body).not.toContain("#130\n- Adopter:");
-  });
-});
-
 describe("runShipGate", () => {
   it("reuses sanity and favorable reviews cached against unchanged SHAs", async () => {
     const repo = makeRepo();

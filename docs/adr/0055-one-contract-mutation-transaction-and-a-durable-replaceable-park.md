@@ -471,6 +471,12 @@ Two boundary decisions, made explicitly rather than by accident:
 
 ### 8. Adoption refuses when it cannot enumerate
 
+> **Deferred to PRD `afk-v2-run-state-lock-and-adoption` (2026-08-31).** This
+> section is about `afk adopt`, which was excised from PRD 2 — the code it
+> describes is not in the tree. The estate probe it relies on
+> (`probeAdjudicationEstate`, §10) *did* ship and `clean-failed` uses it; only
+> adoption's use of it is deferred. See ADR 0053's banner.
+
 `worktreesHolding`'s catch-all returned `[]`, making "git failed" and
 "no worktree holds the branch" the same answer, ahead of an
 `update-ref` that corrupts a checked-out worktree (ADR 0010). Worktree
@@ -753,6 +759,18 @@ their own direction.
 
 ### 11. Adoption is conditional on the record it was authorized against
 
+> **Deferred to PRD `afk-v2-run-state-lock-and-adoption` (2026-08-31), and
+> incomplete as written.** The compare-and-swap below is an unlocked
+> read-check-write: it loads the state file, compares one slice record, and
+> then overwrites the whole file, with no lock spanning the comparison and the
+> write. A second process can persist a park in that window, so the claim at
+> the end of this section that concurrent corruption is "impossible" overstates
+> what the code did — the window is *narrowed*, not closed. Closing it needs a
+> cross-process lock held by **every** run-state writer (`saveSliceState`,
+> `saveRunState`, `saveReviewPhase`, `recordRetryDecision`,
+> `clearSliceStateForDispatch`), which is why adoption moved to its own PRD.
+> `saveSliceStateIfUnchanged` and `sameSliceRecord` are not in the tree.
+
 §8 made adoption refuse a park it could see. It could only see the park it
 looked for *before* verification: run state and worktrees were read once, the
 estate refusal ran, base gates executed for minutes, the feature ref was
@@ -793,9 +811,12 @@ reads a record, spends minutes, and then writes.
   "there is an estate" nor "there is not": the probe could not tell. That is a
   new operator-facing outcome and it is deliberately loud.
 - `afk adopt` gains two more refusals — a record that changed during
-  verification, and a lost state CAS — and loses the one silent corruption path
-  §8 had left open. Adopting a slice a concurrent run is touching is now
-  impossible rather than last-writer-wins.
+  verification, and a lost state CAS — which narrows the silent corruption path
+  §8 had left open. It does **not** close it: the check and the write are not
+  atomic across processes, so a park persisted between them is still lost.
+  Adopting a slice a concurrent run is touching is *unlikely* rather than
+  last-writer-wins, and making it genuinely impossible is deferred to PRD
+  `afk-v2-run-state-lock-and-adoption` (architect A1, sixth gate round).
 - Adoption pays one extra worktree enumeration, run-state read and estate probe
   per invocation. Against a command whose middle step is a full base-gate run,
   that is free.

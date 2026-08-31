@@ -21,7 +21,6 @@ import {
 import {
   lifecycle,
   traitsFor,
-  type SliceAdoption,
   type FailurePhase,
   type SliceIdentity,
   type SliceLifecycle,
@@ -258,11 +257,8 @@ export class RunJournal {
   }
 
   /** Restore an already-persisted PASS for this run's summary. */
-  restoreCompleted(sliceId: SliceIdentity, adoption?: SliceAdoption) {
-    this.slices.set(
-      sliceId.ghIssue,
-      lifecycle.pass(sliceId, ZERO_PROGRESS, true, adoption),
-    );
+  restoreCompleted(sliceId: SliceIdentity) {
+    this.slices.set(sliceId.ghIssue, lifecycle.pass(sliceId, ZERO_PROGRESS, true));
   }
 
   /**

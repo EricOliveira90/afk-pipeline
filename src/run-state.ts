@@ -1,6 +1,5 @@
 import {
   readFileSync,
-  readdirSync,
   writeFileSync,
   existsSync,
   mkdirSync,
@@ -9,7 +8,6 @@ import { join, dirname } from "node:path";
 import {
   ALL_PHASES,
   traitsFor,
-  type SliceAdoption,
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
@@ -36,8 +34,6 @@ export interface PersistedSliceState {
    * anything (ADR 0029).
    */
   collidingPrefixes?: string[];
-  /** Audit trail for a slice completed outside the pipeline and adopted. */
-  adoption?: SliceAdoption;
 }
 
 export interface RunState {
@@ -51,9 +47,9 @@ export interface RunState {
    *
    * `--prd-dir` is arbitrary, so the estate probe used to guess with a
    * depth-bounded walk and reported "no estate" for any layout deeper than
-   * the default — after which `clean-failed` deleted the worktree and
-   * `adopt` overwrote the park (architect blocker 2, fifth adjudication gate
-   * round). The run is the one party that knows this without guessing, so it
+   * the default — after which `clean-failed` deleted the worktree (architect
+   * blocker 2, fifth adjudication gate round). The run is the one party that
+   * knows this without guessing, so it
    * writes it down. Optional because state files predating the field must
    * stay loadable: `probeAdjudicationEstate` falls back to a complete walk,
    * which is slower but still never infers absence.
@@ -224,24 +220,6 @@ function statePath(repoRoot: string, prdSlug: string): string {
 }
 
 /**
- * Every run-state key with a file on disk.
- *
- * The key is a *run slug*, not a PRD slug: `pipelineRunSlug` appends the
- * provider name for every non-kiro provider, so one PRD can have several.
- * Callers that only know the PRD slug (`afk adopt`) need to discover which
- * ones exist rather than assume the bare name. Sorted for a stable
- * refusal message.
- */
-export function listRunStateSlugs(repoRoot: string): string[] {
-  const dir = join(repoRoot, ".afk", "state");
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => name.slice(0, -".json".length))
-    .sort();
-}
-
-/**
  * Load run state, adapting unversioned (v0) files in place. v0 files used
  * a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so the migration is a field rename. Throws on unknown
@@ -308,7 +286,6 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       mergedToFeature?: boolean;
       error?: string;
       collidingPrefixes?: unknown;
-      adoption?: unknown;
     };
     if (typeof v.status !== "string" || !PERSISTED_PHASES.has(v.status)) {
       throw new Error(
@@ -323,7 +300,6 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         : {}),
       ...(v.error !== undefined ? { error: v.error } : {}),
       ...prefixesOf(v.collidingPrefixes),
-      ...adoptionOf(v.adoption),
     };
   }
   return {
@@ -347,31 +323,6 @@ function prefixesOf(value: unknown): { collidingPrefixes?: string[] } {
   return prefixes.length > 0 ? { collidingPrefixes: prefixes } : {};
 }
 
-function adoptionOf(value: unknown): { adoption?: SliceAdoption } {
-  if (typeof value !== "object" || value === null) return {};
-  const adoption = value as Partial<Record<keyof SliceAdoption, unknown>>;
-  if (
-    typeof adoption.adopter !== "string" ||
-    adoption.adopter.trim() === "" ||
-    typeof adoption.reason !== "string" ||
-    adoption.reason.trim() === "" ||
-    typeof adoption.branch !== "string" ||
-    adoption.branch.trim() === "" ||
-    typeof adoption.commit !== "string" ||
-    adoption.commit.trim() === ""
-  ) {
-    return {};
-  }
-  return {
-    adoption: {
-      adopter: adoption.adopter,
-      reason: adoption.reason,
-      branch: adoption.branch,
-      commit: adoption.commit,
-    },
-  };
-}
-
 function validateV1Slice(id: string, val: unknown): PersistedSliceState {
   const v = (val ?? {}) as {
     phase?: string;
@@ -379,7 +330,6 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
     mergedToFeature?: boolean;
     error?: string;
     collidingPrefixes?: unknown;
-    adoption?: unknown;
   };
   if (typeof v.phase !== "string" || !PERSISTED_PHASES.has(v.phase)) {
     throw new Error(
@@ -394,7 +344,6 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
       : {}),
     ...(v.error !== undefined ? { error: v.error } : {}),
     ...prefixesOf(v.collidingPrefixes),
-    ...adoptionOf(v.adoption),
   };
 }
 
@@ -414,7 +363,6 @@ export function projectForPersistence(
         phase: "PASS",
         ...(s.branch ? { branch: s.branch } : {}),
         mergedToFeature: s.mergedToFeature,
-        ...(s.adoption ? { adoption: s.adoption } : {}),
       };
     case "SKIPPED":
       return {
@@ -460,68 +408,6 @@ export function saveSliceState(
   const current = loadRunState(repoRoot, prdSlug);
   current.slices[ghIssue] = result;
   writeFileSync(p, JSON.stringify(current, null, 2));
-}
-
-/**
- * `saveSliceState`, but only if this slice's record is still the one the
- * caller last observed. Returns the record found on re-read when it has
- * changed, so the caller can name what it lost to.
- *
- * `saveSliceState` re-reads the file to avoid clobbering *other* slices'
- * parallel updates, then replaces this slice's record unconditionally. That
- * is right for the pipeline, which owns the slice it is writing. It is wrong
- * for `afk adopt`, which reads the record, spends minutes running base
- * gates, and then writes: a concurrent run can park the same slice inside
- * that window, and the unconditional write turns `AWAITING-ADJUDICATION`
- * into `PASS` and strands a live estate with no slice record owning it
- * (architect blocker 3, fifth adjudication gate round). ADR 0055 Seam 2:
- * only the slice's own re-dispatch replaces a park.
- *
- * Compared on the persisted projection rather than by identity, because the
- * observed record came from a different `loadRunState` call: the question is
- * whether the *claim on disk* changed, not whether the object did.
- */
-export function saveSliceStateIfUnchanged(
-  repoRoot: string,
-  prdSlug: string,
-  ghIssue: string,
-  result: PersistedSliceState,
-  expected: PersistedSliceState | undefined,
-): { ok: true } | { ok: false; found: PersistedSliceState | undefined } {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  const found = current.slices[ghIssue];
-  if (!sameSliceRecord(found, expected)) return { ok: false, found };
-  current.slices[ghIssue] = result;
-  writeFileSync(p, JSON.stringify(current, null, 2));
-  return { ok: true };
-}
-
-/**
- * Do two slice records make the same claim? Compared on values rather than
- * identity, because the records being compared came from different
- * `loadRunState` calls; key order is not part of the claim.
- *
- * Exported because `afk adopt` asks the same question twice — once on its
- * pre-finalization re-check and once inside the write above — and the two
- * must not be able to disagree.
- */
-export function sameSliceRecord(
-  a: PersistedSliceState | undefined,
-  b: PersistedSliceState | undefined,
-): boolean {
-  if (a === undefined || b === undefined) return a === b;
-  return (
-    JSON.stringify(canonicalSliceRecord(a)) ===
-    JSON.stringify(canonicalSliceRecord(b))
-  );
-}
-
-function canonicalSliceRecord(record: PersistedSliceState): unknown {
-  return Object.entries(record as unknown as Record<string, unknown>).sort(
-    ([x], [y]) => (x < y ? -1 : x > y ? 1 : 0),
-  );
 }
 
 /**

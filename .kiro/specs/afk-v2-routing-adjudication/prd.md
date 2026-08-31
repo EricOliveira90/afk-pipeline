@@ -2,7 +2,7 @@
 
 **GH issue:** #70
 **Parent design:** `docs/specs/afk-v2-agent-roles.md` (mechanism M4)
-**Parent plan:** `docs/specs/afk-v2-plan.md` (SS2 PRD 2; carries SS3 item 10, `afk adopt`)
+**Parent plan:** `docs/specs/afk-v2-plan.md` (SS2 PRD 2)
 ## Problem Statement
 
 When an agent cannot proceed legally, AFK has no move that changes pipeline state. A finding whose fix sits outside the locked file list deadlocks the slice: the generator either edits out of scope or stalls (round expires). This caused two STUCK outcomes in run-20260824-174249. ADR 0048 (wave 3, #112) has since absorbed the QA-side half: a QA boundary finding that only needs the scope widened names remedy `SCOPE_AMENDMENT`, and the orchestrator amends the locked scope and re-grades without spending a generator round. The generator-side half remains: a generator that knows the fix needs an out-of-scope path *before* building anything still has no legal move. A negotiation disagreement between planner and contract evaluator has no terminal except round exhaustion. The stuck diagnosis is written by a tired agent as prose. And when a human does decide something, there is no way to inject that decision into a live run - the slice waits for a whole new run.
@@ -16,7 +16,6 @@ One routing mechanism with structured artifacts:
 - A schema-validated **adjudication artifact** (finding ID, winning position or third instruction, author) written into the slice directory. When it appears, the slice is dispatchable again like any slice whose dependencies completed. The wait is bounded; after timeout the slice parks permanently and the next run resumes it. The human decision resolves a finding, not the contract: one mechanical apply-and-lock step runs before any generator starts.
 - **Code-assembled stuck diagnosis:** the stuck artifact is generated deterministically from archived findings, escalations, and round evidence. The generator-stuck agent invocation is removed.
 - The **babysit skill becomes the courier**: it watches for impasse artifacts, presents the contested question to the human verbatim (both positions, both evidences, no summary bias), and writes the validated adjudication artifact. It carries the message; it does not vote. The skill stays in its external home; courier duties land as a manual follow-up (#94) after #89, and relocation (story 14) stays deferred.
-- **`afk adopt`** (afk-v2 plan §3 item 10, thin): verified manual adoption of a slice branch finished outside the pipeline. The command verifies the branch merges and the base gates pass, merges it, writes the state entry, and records who adopted and why. A refusal names which check failed. The adoption record surfaces in the run summary and the draft PR. Carries the write-time state↔branch verification; replaces the documented hand-finishing procedure (plan §5).
 
 ## User Stories
 
@@ -69,10 +68,24 @@ Full session record: `docs/specs/afk-v2-agent-roles.md` (mechanism M4). Kills th
 
 ## Post-wave-3 alignment note (2026-08-28)
 
-- Story 17 added below; stories 1-16 keep their numbers (the plan's deferral references story 14 by number).
 - ADR 0048 (merged, PR #128) owns the QA-side scope amendment. Slice S1 (#80) is the generator-side escalation only and reuses the ADR 0048 machinery's vocabulary; it must not build a parallel scope-amendment path.
-- #94 is rescoped to a manual courier-only follow-up after #89 (it edits a skill file outside this repository, unreachable from an AFK slice's repo-relative file scope). The AFK slices of this PRD are #80, #81, #82, #89, #129.
+- #94 is rescoped to a manual courier-only follow-up after #89 (it edits a skill file outside this repository, unreachable from an AFK slice's repo-relative file scope). The AFK slices of this PRD are #80, #81, #82 and #89.
 
-17. As a run operator, I want a finished slice branch adopted with the same verification the pipeline applies (`afk adopt`), so that hand-finishing a stuck slice never bypasses gates or state discipline.
+## Slice 06 excision note (2026-08-31)
 
+Story 17 (`afk adopt`) and slice 06 (#129) were moved to
+`.kiro/specs/afk-v2-run-state-lock-and-adoption/`. Stories 1-16 keep their
+numbers — the plan's deferral references story 14 by number, and the new PRD
+carries story 17 under its own numbering.
+
+`afk adopt` blocked the post-implementation guardian gate in three consecutive
+rounds. The last finding (architect A1, round 6) requires a cross-process lock
+shared by *every* run-state writer, not just adoption's. That is a
+persistence-layer decision, so it belongs to its own PRD rather than to routing
+and adjudication. `afk adopt` is an operator bypass valve and nothing else in
+this PRD depends on it, so the four remaining AFK slices ship without it and
+the `adopt` code is not in this PRD's branch.
+
+Consequently ADR 0053 and ADR 0055 §8 and §11 describe code that is not in the
+tree. Each now carries a banner saying so and pointing at the new PRD.
 
