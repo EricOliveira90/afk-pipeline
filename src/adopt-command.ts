@@ -29,7 +29,9 @@ import {
   listRunStateSlugs,
   loadRunState,
   saveSliceState,
+  type PersistedSliceState,
 } from "./run-state.js";
+import { traitsFor } from "./slice-lifecycle.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 600_000;
 const DEFAULT_GATE_WALL_CLOCK_TIMEOUT_MS = 7_200_000;
@@ -276,15 +278,12 @@ function resolveSliceIdentity(
  * mutation that can corrupt a checked-out worktree. Fail closed
  * instead (ADR 0055 seam 2 decision 8; refusal 6 in ADR 0053).
  */
-function worktreesHolding(
+function enumerateWorktrees(
   repoRoot: string,
-  branch: string,
   list: (repoRoot: string) => ReturnType<typeof listWorktrees>,
-): { holders: string[] } | { refusal: string } {
-  const name = branch.replace(/^refs\/heads\//, "");
-  let worktrees: ReturnType<typeof listWorktrees>;
+): { worktrees: ReturnType<typeof listWorktrees> } | { refusal: string } {
   try {
-    worktrees = list(repoRoot);
+    return { worktrees: list(repoRoot) };
   } catch (error) {
     return {
       refusal: `could not enumerate worktrees — ${
@@ -292,11 +291,73 @@ function worktreesHolding(
       }`,
     };
   }
-  return {
-    holders: worktrees
-      .filter((worktree) => worktree.branch === name)
-      .map((worktree) => worktree.path),
-  };
+}
+
+function worktreesHolding(
+  worktrees: ReturnType<typeof listWorktrees>,
+  branch: string,
+): string[] {
+  const name = branch.replace(/^refs\/heads\//, "");
+  return worktrees
+    .filter((worktree) => worktree.branch === name)
+    .map((worktree) => worktree.path);
+}
+
+/**
+ * Refuse an adoption that would strand a parked slice's adjudication
+ * estate (ADR 0055 Seam 2; refusal 7 in ADR 0053's list).
+ *
+ * A successful adoption overwrites the slice's persisted record with `PASS`
+ * and moves the feature ref — but it is not a dispatch, and Seam 2's
+ * invariant says only the slice's own re-dispatch replaces a park. Nothing
+ * here reconciles the estate, so the park's registered worktree survives
+ * with no live slice owning it: the next launch excludes completed slices
+ * from both `intended` and `retained`, preflight classifies that worktree
+ * as a leftover, and the run refuses (`leftover-worktree`). The operator's
+ * bypass valve would have bricked their next launch.
+ *
+ * So the check is a refusal, not a reconciliation. Quiescing the estate
+ * *for* the operator would mean deleting a human's pending adjudication
+ * worktree inside a command that never mentions it — the same
+ * "disposability inferred, not proved" mistake `clean-failed` made. The
+ * refusal names the estate and the two ways forward, and the park stays
+ * byte-for-byte intact.
+ *
+ * Keyed on the phase's `preserve-all` debris trait rather than on the
+ * phase name, so a future phase that also preserves its estate inherits
+ * this refusal instead of re-learning it.
+ */
+function parkedEstateRefusal(
+  record: PersistedSliceState | undefined,
+  ghIssue: string,
+  worktrees: ReturnType<typeof listWorktrees>,
+): string | null {
+  if (!record || traitsFor(record.phase).debris !== "preserve-all") return null;
+  if (!record.branch) {
+    return (
+      `slice #${ghIssue} is recorded ${record.phase} in run state with no ` +
+      `branch, so which worktree its parked estate holds cannot be proved. ` +
+      `A park's estate survives every lifecycle operation but its own ` +
+      `re-dispatch (ADR 0055 Seam 2), and adoption is not one — inspect ` +
+      `.afk/worktrees and the slice directory, then re-run adopt once the ` +
+      `record names its branch.`
+    );
+  }
+  const holders = worktreesHolding(worktrees, record.branch);
+  if (holders.length === 0) return null;
+  return (
+    `slice #${ghIssue} is parked ${record.phase} and its adjudication ` +
+    `estate is still live: ${holders.join(", ")} ${
+      holders.length === 1 ? "is a" : "are"
+    } registered worktree${holders.length === 1 ? "" : "s"} on ` +
+    `${record.branch}. Adoption would replace that park with PASS without a ` +
+    `dispatch, and the next launch then refuses the worktree as a leftover ` +
+    `no live slice owns. Only the slice's own re-dispatch replaces a park ` +
+    `(ADR 0055 Seam 2): either write the pending decision into ` +
+    `adjudication.md and let the pipeline finish the slice, or remove the ` +
+    `parked worktree yourself (\`git worktree remove\`) — its branch and ` +
+    `recorded decisions survive that — and run adopt again.`
+  );
 }
 
 function resolveAdopter(repoRoot: string, explicit: string | undefined): string {
@@ -425,15 +486,27 @@ export async function runAdoptCli(
 
   const state = loadRunState(repoRoot, runSlug);
 
-  const enumeration = worktreesHolding(
+  const enumeration = enumerateWorktrees(
     repoRoot,
-    state.featureBranch,
     dependencies.listWorktrees ?? listWorktrees,
   );
   if ("refusal" in enumeration) {
     return { output: `Adoption refused: ${enumeration.refusal}`, exitCode: 1 };
   }
-  const { holders } = enumeration;
+  const { worktrees } = enumeration;
+
+  // Before candidate creation or any ref mutation, like every other
+  // adoption refusal: a parked slice whose estate is still registered.
+  const parked = parkedEstateRefusal(
+    state.slices[slice.ghIssue],
+    slice.ghIssue,
+    worktrees,
+  );
+  if (parked) {
+    return { output: `Adoption refused: ${parked}`, exitCode: 1 };
+  }
+
+  const holders = worktreesHolding(worktrees, state.featureBranch);
   if (holders.length > 0) {
     return {
       output:
