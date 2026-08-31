@@ -4,52 +4,54 @@
 
 ## Blocking Finding
 
-### A1. The adoption state "CAS" is an unlocked read-check-write
+### A1. A generator can rewrite the accepted contract pair before escalation validation
 
-**Convention:** ADR 0055 section 11 requires adoption's state write to be a
-compare-and-swap against the record observed before verification, and states
-that a concurrent run touching the slice must make adoption refuse rather than
-win by last writer. ADR 0018's Concurrency section only establishes that a
-synchronous read-modify-write cannot interleave on one Node process's event
-loop; it does not protect this command from a separate pipeline process.
+**Convention:** ADR 0055 Seam 1 section 3 says the shared contract transaction
+is the only way the accepted `contract.md` and `acceptance-manifest.json` pair
+is mutated. ADR 0048's Decision likewise assigns scope mutation to the
+orchestrator, not the generator.
 
-**File and location:** `src/run-state.ts`,
-`saveSliceStateIfUnchanged` (lines 484-498), especially the load at line 493,
-comparison at line 495, and unconditional `writeFileSync` at line 497.
-`src/adopt-command.ts:894-968` moves the feature ref and then relies on this
-helper to report a lost state CAS.
+**File and location:** `src/escalation.ts`,
+`outOfScopeChangedPaths` (lines 158-188), especially the whole-directory
+exemption at lines 180-184; `src/orchestrator.ts`,
+`runSliceExecute` (lines 4250-4324), especially loading `lockedManifest`
+after the generator returns at line 4258; and `src/contract-transaction.ts`,
+`withContractTransaction` (lines 162-172), which captures the pair only when
+the focused revision starts.
 
-**Evidence read/run:** I read both production call sites and searched
-`src/run-state.ts` and `src/adopt-command.ts` for any file lock, mutex, atomic
-conditional replacement, or generation check spanning that sequence; none
-exists. The helper loads the file, compares one slice record, and later
-overwrites the whole state file. I also read
-`src/run-state.test.ts:518-590` and `src/adopt-command.test.ts:1447-1493`.
-The former places the competing record before the helper starts; the latter
-injects a fake `persistSliceState` that reports `{ ok: false }`. Neither test
-creates an update between the production comparison and write.
+**Evidence read/run:** I read the generator return path, the changed-set guard,
+and the transaction capture together. I also read
+`src/escalation.test.ts:266-309`, which explicitly proves that every path
+under the slice directory is exempt, including
+`acceptance-manifest.json` and `contract.md`. I searched `runSliceExecute`
+for a pre-invocation snapshot or post-invocation integrity check of the locked
+pair and found none. `git diff --check
+run/v2-routing-adjudication-host...HEAD` passed; I did not rerun the full
+suite because the pre-ship gate already passed this tree.
 
-Another process can therefore persist `AWAITING-ADJUDICATION` after line 495
-and before line 497. Adoption then overwrites that park with `PASS`, returns
-success, and strands the live adjudication estate. A concurrent update to any
-other slice can also be lost because the helper rewrites the full previously
-loaded state object. This is the corruption ADR 0055 section 11 says the CAS
-must make impossible.
+A generator can therefore add an undeclared source path to both locked files,
+then write an escalation for some other path. The orchestrator loads the
+generator-modified manifest as `lockedManifest`; the changed-set check ignores
+both modified control files because they are under `sliceArtifactDir`; and
+`runFocusedScopeRevision` captures those modified bytes as the previously
+accepted pair. Its additive guard then preserves the unauthorized path rather
+than detecting it. The fresh generator receives a lock that it widened itself,
+bypassing the orchestrator-owned mutation transaction and the pre-build scope
+boundary.
 
-**Required before ship:** Make the state mutation genuinely cross-process
-conditional. For example, serialize every run-state writer on a shared
-inter-process lock and perform load, expected-record comparison, mutation, and
-commit while holding it; a lock used only by adoption is insufficient. An
-equivalent generation-based or transactional store is also acceptable. Add a
-deterministic test that pauses the production primitive after comparison,
-writes a competing park through another writer, then proves adoption refuses
-and rolls the feature ref back without losing either record.
+**Required before ship:** Protect the accepted pair across every generator
+invocation. Capture its bytes before dispatch and fail closed if the generator
+changes either file, before escalation parsing, focused revision, gates, or QA.
+Restore or otherwise preserve the last orchestrator-accepted bytes and retain
+the attempted mutation as evidence. Keep the slice-directory exemption only
+for agent-writable artifacts, or special-case these two orchestrator-owned
+files. Add a focused test where a generator edits both files and emits an
+otherwise valid escalation; assert `ERROR`, no planner/evaluator dispatch, and
+byte-identical accepted artifacts.
 
 ## Structural Assessment
 
-The shared contract transaction, single lock predicate, tri-state estate
-probe, and replaceable park lifecycle centralize the invariants required by
-ADRs 0050-0055. No other structural violation warrants blocking shipment.
-
-The pre-ship sanity gate is accepted as passed for this tree; I did not rerun
-the full suite. `git diff --check main...HEAD` passed during this review.
+The shared contract transaction, one adjudication completion predicate,
+replaceable park lifecycle, and tri-state estate probe otherwise centralize the
+new state transitions coherently. The excised `afk adopt` implementation is no
+longer present on this branch.

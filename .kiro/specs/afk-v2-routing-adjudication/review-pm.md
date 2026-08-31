@@ -2,48 +2,57 @@
 
 ## Product outcome
 
-The selected slices deliver the PRD's promised routing and adjudication
-outcomes. I found no selected-slice requirement that is missing, broken, or
-materially different for the operator.
+The four selected slices deliver the PRD's promised user outcomes. Scope
+problems route back through contract revision, pure contract impasses park
+without stalling unrelated work, human decisions resume parked slices through
+the lock gate, and STUCK diagnosis is assembled without a summarizing agent.
+I found no selected-slice defect that should block shipment.
 
 ## Selected-slice verification
 
 | Slice | Result | User outcome verified |
 |---|---|---|
-| 01 Scope escalation | Delivered | Initial, repair, and resumed generators receive the same stop-before-edit escalation protocol. `parseScopeEscalation` validates exact version-1 evidence and archives malformed attempts before failing closed. `runSliceExecute` routes a valid pre-build or cited-finding escalation through a focused planner/evaluator revision, preserves the accepted lock on refusal, and resumes generation without spending the implementation round. It also refuses to retroactively authorize an undeclared edit already in the tree. |
-| 02 Impasse parking | Delivered | `buildContractNegotiationOutcome` parks only pure contested exhaustion and leaves mixed/open exhaustion as non-convergence with both positions visible. The park persists its branch, reason, and verbatim evidence. Independent and same-lane siblings continue, dependents remain visibly blocked, and cancellation leaves parked state and artifacts intact. |
-| 03 Human decision resume | Delivered | `parseAdjudication` rejects malformed, contradictory, duplicate-key, stale, and already-decided input. Decisions are durable per finding; a multi-finding impasse cannot lock early. A valid decision can redispatch the slice in the same run, timeout leaves a resumable park for the next run, and cancellation loses no decision. The apply-and-lock transaction preserves human input on refusal, restores the prior contract pair, and rechecks the mechanical lock gate against the current base before generation. |
-| 04 Code-assembled diagnosis | Delivered | `renderStuckDiagnosis` and the single `finishStuck` execution exit assemble findings, escalation attempts, round artifacts, reasons, and commit evidence deterministically. Negotiation failure diagnosis is also code-written. The generator-stuck invocation and both stuck-specific prompt files are retired; ordinary and stuck resumes share the situation-driven resume template. |
-| 06 `afk adopt` | Delivered | `runAdoptCli` verifies the candidate merged tree with every base gate before moving the feature ref, then records PASS plus adopter, reason, branch, and verified slice-tip commit. Conflict, failed gate, invalid reason, changed branch/state, unresolved adjudication estate, and state-write failures refuse with the cause and preserve or roll back state. Provider-qualified run ownership is proved. Adoption provenance appears in both run summaries and draft-PR bodies. |
+| 01 Scope escalation (#80) | Delivered | All generator entry points receive the same stop-before-edit artifact instructions (`prompts/generator.md`, `prompts/generator-resume.md`, `agents/generator.md`). `parseScopeEscalation` validates exact version-1 evidence and refuses malformed, duplicate-key, declared, migration, or mixed-identity requests. `runSliceExecute` archives every attempt, proves no undeclared edit already happened, runs a focused planner/evaluator revision, preserves the prior accepted lock on refusal, and resumes generation in the same implementation round. |
+| 02 Impasse parking (#81) | Delivered | `buildContractNegotiationOutcome` parks only exhaustion where every unresolved blocker is `CONTESTED`; mixed/open exhaustion remains non-convergence and its diagnosis exposes both contested positions. The working and archived outcome retain both sides' evidence. `runPipeline`, `runWave`, and `RunJournal` persist `AWAITING-ADJUDICATION`, continue independent and same-lane siblings, hold DAG dependents visibly, and preserve the park through cancellation. |
+| 03 Human decision resume (#89) | Delivered | `parseAdjudication` validates one exact decision for one current contested finding and refuses malformed, duplicate-key, stale, or repeated input. Decisions persist per finding. `runImpasseAdjudication` waits for all findings, applies evaluator/third-position decisions through one planner invocation, then uses the shared transaction and mechanical lock gate before generation. `runPipeline` supports same-run pickup, bounded expiry, next-run pickup, and cancellation without losing the parked branch or evidence. |
+| 04 Code-assembled diagnosis (#82) | Delivered | `renderStuckDiagnosis` deterministically renders the latest OPEN/RESOLVED finding lifecycle, escalation attempts, round evidence, artifact references, reason, and commit evidence. `finishStuck` is the single implementation STUCK finalizer and refreshes the diagnosis after a failed resume. The active runtime has no `generator-stuck` or `generator-resume-stuck` references; both prompt files are deleted and the shared resume prompt carries situation data. |
 
 ## Notes
 
-- A failed adjudication lock is represented as the explicit
-  `ADJUDICATION-LOCK-REFUSED` lifecycle phase. The PRD said routing should
-  avoid a new terminal taxonomy, but this phase preserves the accepted human
-  decision, names the mechanical objection, and supports retry after the base
-  is fixed. The operator outcome is correct, so this is not blocking.
-- Focused scope revision is bounded to two grants per implementation round.
-  The PRD does not define repeated escalation behavior. A third request fails
-  with archived evidence and an actionable remedy, which is a reasonable
-  bounded choice.
+- The PRD says routing should not add a terminal status taxonomy, but lock-gate
+  refusal is persisted as `ADJUDICATION-LOCK-REFUSED`. This is a presentation
+  difference: the human decision and parked estate remain intact, the
+  mechanical objection is visible, and generation does not run under a
+  refused lock.
+- Scope revision is capped at two accepted revisions per implementation round.
+  The PRD does not specify repeated escalation behavior. A third valid request
+  is archived and fails with an operator remedy instead of looping.
+- `archivedScopeEscalations` uses shallow JSON checks when rendering a later
+  STUCK diagnosis. An escalation correctly refused by the routing parser for
+  duplicate keys, extra fields, or blank values can later be displayed as if
+  it were valid. The original bytes remain archived and routing still fails
+  closed, so this affects diagnosis labeling rather than control flow.
 
 ## Verification
 
-I read the PRD, every available selected-slice contract/handoff, and the
-implementation paths for escalation, impasse classification, scheduling,
-adjudication, diagnosis, adoption, persistence, summaries, and draft-PR
-projection.
+I read the PRD, every selected-slice contract, acceptance manifest, context,
+and handoff available under `slices/`, then inspected the implementation
+transitions and their focused tests. Fresh focused verification passed:
 
-Focused verification passed: 373 tests across escalation, adjudication,
-contract transactions, artifacts, prompts, state/journal/reporting, CLI
-routing, adoption, focused orchestrator scenarios, same-run and next-run
-pickup, cancellation, and wave lane behavior. I did not rerun the full suite
-because the pre-ship sanity gate already passed this exact tree.
+- 319 parser, artifact, contract-review, prompt, and run-journal tests
+- 29 scope-escalation and impasse orchestration tests
+- 5 live pickup, next-run pickup, cancellation, and wave-continuation tests
+
+I did not rerun the full suite because the pre-ship sanity gate already passed
+this exact tree.
 
 ## Out-of-scope PRD gaps
 
-- Slice 05 / issue #94, the babysit courier that presents both positions
-  verbatim and writes `adjudication.md`, was intentionally not executed.
-- PRD story 14, relocating and globally installing the babysit skill, remains
-  explicitly deferred.
+- Slice 05 / #94, the babysit courier that presents both positions verbatim
+  and writes `adjudication.md`, was intentionally not executed. Until that
+  manual follow-up lands, the operator must supply the artifact directly.
+- Story 14, relocating and globally installing the babysit skill, remains
+  explicitly deferred by the PRD.
+- Slice 06 / #129 (`afk adopt`) was not executed and has been moved to
+  `.kiro/specs/afk-v2-run-state-lock-and-adoption/`; it is no longer a
+  requirement of this PRD.
