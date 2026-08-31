@@ -1226,5 +1226,298 @@ describe("afk adopt", () => {
       expect(result.exitCode).toBe(1);
       expect(result.output).toContain("no run state for 'demo'");
     });
+
+    /**
+     * PM blocker 2, fifth adjudication gate round. No-provider discovery
+     * accepted any state slug equal to the PRD slug or starting with
+     * `<prdSlug>-`, so `afk adopt demo` in a repo with no `demo.json` but an
+     * unrelated `demo-v2.json` read that as "PRD demo, provider v2", exited
+     * 0, moved `feat/demo-v2` and wrote slice #129 into another PRD's run.
+     *
+     * The discriminator is the recorded feature branch: a real `demo` +
+     * `codex` run records `feat-codex/demo`, while the `demo-v2` PRD's own
+     * run records `feat/demo-v2`, which `demo` + `v2` would never produce.
+     */
+    describe("ownership is proved, not inferred from the state filename", () => {
+      /** A different PRD whose slug merely starts with `demo-`. */
+      function addUnrelatedPrd(repo: string, slug: string): void {
+        git(repo, ["branch", `feat/${slug}`, "main"]);
+        saveRunState(repo, {
+          version: 1,
+          prdSlug: slug,
+          featureBranch: `feat/${slug}`,
+          slices: {},
+        });
+      }
+
+      const adopt = (repo: string, extra: string[] = []) =>
+        runAdoptCli(
+          [
+            "demo",
+            "129",
+            "--branch",
+            "manual/demo-01",
+            "--adopter",
+            "Ada Lovelace",
+            "--reason",
+            "finished the slice manually",
+            ...extra,
+          ],
+          repo,
+          PASSING,
+        );
+
+      it("refuses another PRD whose slug shares this one's prefix", async () => {
+        const repo = makeRepo();
+        rmSync(join(repo, ".afk", "state"), { recursive: true, force: true });
+        addUnrelatedPrd(repo, "demo-v2");
+        const otherBefore = resolveCommit(repo, "feat/demo-v2")!;
+
+        const result = await adopt(repo);
+
+        expect(result.exitCode).toBe(1);
+        expect(result.output).toContain("no run state for 'demo'");
+        expect(result.output).toContain("is NOT this PRD's run");
+        expect(result.output).toContain("feat/demo-v2");
+        // The other PRD is untouched: no ref moved, no slice written.
+        expect(resolveCommit(repo, "feat/demo-v2")).toBe(otherBefore);
+        expect(loadRunState(repo, "demo-v2").slices["129"]).toBeUndefined();
+      });
+
+      it("refuses the same guess spelled as --provider", async () => {
+        const repo = makeRepo();
+        rmSync(join(repo, ".afk", "state"), { recursive: true, force: true });
+        addUnrelatedPrd(repo, "demo-v2");
+        const otherBefore = resolveCommit(repo, "feat/demo-v2")!;
+
+        const result = await adopt(repo, ["--provider", "v2"]);
+
+        expect(result.exitCode).toBe(1);
+        expect(result.output).toContain("cannot be proved to belong to PRD");
+        expect(result.output).toContain("feat-v2/demo");
+        expect(resolveCommit(repo, "feat/demo-v2")).toBe(otherBefore);
+      });
+
+      it("still adopts the genuine provider-qualified run beside a prefix twin", async () => {
+        const repo = makeRepo("codex");
+        addUnrelatedPrd(repo, "demo-v2");
+        const otherBefore = resolveCommit(repo, "feat/demo-v2")!;
+
+        const result = await adopt(repo);
+
+        expect(result.exitCode).toBe(0);
+        expect(result.output).toContain("into feat-codex/demo");
+        expect(loadRunState(repo, "demo-codex").slices["129"]?.phase).toBe(
+          "PASS",
+        );
+        expect(resolveCommit(repo, "feat/demo-v2")).toBe(otherBefore);
+      });
+
+      it("refuses a run whose recorded feature branch is not the one it would use", async () => {
+        const repo = makeRepo();
+        // A state file under the right name whose branch belongs elsewhere:
+        // the name match is satisfied and the ownership proof is not.
+        saveRunState(repo, {
+          version: 1,
+          prdSlug: "demo",
+          featureBranch: "feat/something-else",
+          slices: {},
+        });
+
+        const result = await adopt(repo);
+
+        expect(result.exitCode).toBe(1);
+        expect(result.output).toContain("feat/something-else");
+        expect(result.output).toContain("is NOT this PRD's run");
+      });
+    });
+  });
+
+  /**
+   * Architect blocker 3, fifth adjudication gate round.
+   *
+   * Adoption read run state and worktrees once, refused on the estate, ran
+   * base gates for minutes, compare-and-swapped the feature ref and then
+   * wrote the slice record unconditionally. A concurrent run can park the
+   * same slice inside that window *without moving the feature branch*, so
+   * the ref CAS still succeeds — and the write turned
+   * `AWAITING-ADJUDICATION` into `PASS`, stranding a live estate with no
+   * slice record owning it.
+   */
+  describe("a park created while the gates run", () => {
+    const PARKED_BRANCH = "afk/demo-slice-06-afk-adopt";
+
+    /** Park slice #129 the way a concurrent run would, mid-verification. */
+    function parkConcurrently(repo: string, withEstate: boolean): void {
+      git(repo, ["branch", PARKED_BRANCH, "main"]);
+      if (withEstate) {
+        const worktree = join(repo, ".afk", "worktrees", "afk-demo-s06");
+        git(repo, ["worktree", "add", worktree, PARKED_BRANCH]);
+        const sliceDir = join(
+          worktree,
+          ".kiro",
+          "specs",
+          "demo",
+          "slices",
+          "06-afk-adopt",
+        );
+        mkdirSync(sliceDir, { recursive: true });
+        writeFileSync(
+          join(sliceDir, "contract-negotiation-outcome.json"),
+          JSON.stringify({
+            version: 1,
+            classification: "IMPASSE",
+            findings: [],
+          }),
+          "utf-8",
+        );
+      }
+      saveSliceState(repo, "demo", "129", {
+        phase: "AWAITING-ADJUDICATION",
+        branch: PARKED_BRANCH,
+        error: "IMPASSE: F-01 requires human adjudication",
+      });
+    }
+
+    const adoptWhileParking = (repo: string, withEstate: boolean) =>
+      runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+        ],
+        repo,
+        {
+          resolveGatePlan: () => ({ declarations: GATES }),
+          runBaseGates: async ({ treeId, declarations }) => {
+            // The window. Everything adoption read before this point is now
+            // stale.
+            parkConcurrently(repo, withEstate);
+            return declarations.map((gate) => passingResult(gate, treeId));
+          },
+        },
+      );
+
+    it("refuses on the estate the concurrent park left, without moving the ref", async () => {
+      const repo = makeRepo();
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+
+      const result = await adoptWhileParking(repo, true);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("live adjudication estate");
+      expect(result.output).toContain("immediately before finalization");
+      // Nothing was adopted: the ref never moved and the park is intact.
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(loadRunState(repo, "demo").slices["129"]).toEqual({
+        phase: "AWAITING-ADJUDICATION",
+        branch: PARKED_BRANCH,
+        error: "IMPASSE: F-01 requires human adjudication",
+      });
+      expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(false);
+    });
+
+    /**
+     * The record-changed refusal on its own, with no estate on disk: the
+     * park's worktree may not exist yet (the run writes the record first, or
+     * an operator removed it), and the slice record is still not adoption's
+     * to replace.
+     */
+    it("refuses a record that changed under it even with no estate on disk", async () => {
+      const repo = makeRepo();
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+
+      const result = await adoptWhileParking(repo, false);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("changed while base gates ran");
+      expect(result.output).toContain("AWAITING-ADJUDICATION");
+      expect(result.output).toContain("absent (no recorded outcome)");
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(loadRunState(repo, "demo").slices["129"]!.phase).toBe(
+        "AWAITING-ADJUDICATION",
+      );
+    });
+
+    /**
+     * The narrower window the re-check cannot close: the record changes
+     * *after* the re-check and before the state write, so the ref has
+     * already moved. The conditional write refuses and the ref is rolled
+     * back, exactly as a throwing write is.
+     */
+    it("rolls the feature ref back when the state CAS loses", async () => {
+      const repo = makeRepo();
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+
+      const result = await runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+        ],
+        repo,
+        {
+          resolveGatePlan: () => ({ declarations: GATES }),
+          runBaseGates: async ({ treeId, declarations }) =>
+            declarations.map((gate) => passingResult(gate, treeId)),
+          persistSliceState: (_repoRoot, _runSlug, _ghIssue, _result, expected) => {
+            expect(expected).toBeUndefined();
+            return {
+              ok: false,
+              found: {
+                phase: "AWAITING-ADJUDICATION",
+                branch: PARKED_BRANCH,
+              },
+            };
+          },
+        },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain(
+        "changed between the pre-finalization re-check and the state write",
+      );
+      expect(result.output).toContain("was rolled back");
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(loadRunState(repo, "demo").slices["129"]).toBeUndefined();
+    });
+
+    it("still adopts when nothing changed during verification", async () => {
+      const repo = makeRepo();
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+
+      const result = await runAdoptCli(
+        [
+          "demo",
+          "129",
+          "--branch",
+          "manual/demo-01",
+          "--adopter",
+          "Ada Lovelace",
+          "--reason",
+          "finished the slice manually",
+        ],
+        repo,
+        {
+          resolveGatePlan: () => ({ declarations: GATES }),
+          runBaseGates: async ({ treeId, declarations }) =>
+            declarations.map((gate) => passingResult(gate, treeId)),
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(resolveCommit(repo, "feat/demo")).not.toBe(featureBefore);
+      expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(true);
+    });
   });
 });

@@ -678,3 +678,166 @@ structural: `finishStuck` is the only constructor of a STUCK return in
   (decision 6), the remaining harm is a human misled by `afk status`
   grouping — the same bug class one layer up, but cosmetic, with real
   rendering ripple, and not required by any blocker.
+
+## Amendment (fifth round) — §8 applied to the probe that was meant to honour it
+
+Fifth adjudication gate round, architect blockers 2 and 3. Operator-authorized
+fix round recorded 2026-08-31. Both are defects in code the *fourth* round added
+to satisfy §6 and §8, which is the reason they are recorded here rather than in
+a new ADR: the invariant was right, its first implementation was not.
+
+### 10. The estate probe returns a tri-state, and the run records where to look
+
+`findAdjudicationEstate` read ownership off disk (§6) but reported two different
+facts as the same `null`:
+
+- **"I walked the worktree and found no estate."** Proved absence.
+- **"I could not complete the walk."** Not a fact about the estate at all.
+
+Two ways to reach the second one, both routine. The walk was bounded at six
+levels — exactly deep enough for the default
+`.kiro/specs/<prd-slug>/slices/<NN>-<slug>/` — while `--prd-dir` accepts any
+path, so any deeper `specsDir` fell off the end. And every `readdirSync` failure
+returned silently. After either, `clean-failed` deleted the worktree and `adopt`
+treated the same incomplete inspection as proof no estate existed. §8 forbids
+exactly that, and the code written to honour §8 did it.
+
+**Two repairs, and both are needed:**
+
+1. **Resolve, do not guess.** The run knows its own `specsDir` — it is a launch
+   input — so it is persisted as `RunState.specsDir` beside the feature branch
+   and handed to the probe. The estate's location is then computed
+   (`<worktree>/<specsDir>/slices/*`), one directory is enumerated, and layout
+   depth stops being a variable. Optional, because state files predating the
+   field must stay loadable.
+2. **Never collapse `absent` into `indeterminate`.**
+   `probeAdjudicationEstate` returns `present | absent | indeterminate`, and
+   `indeterminate` carries its reason. The no-`specsDir` fallback still walks,
+   but it walks the **whole** worktree minus `SKIP_DIRS` rather than six levels
+   of it, so a completed fallback walk is a real proof of absence; the remaining
+   depth bound is a cycle valve set far above any honest layout, and reaching it
+   is `indeterminate`, not absence. Symlinked and junctioned directories are not
+   descended.
+
+**The two compose asymmetrically, and that asymmetry is the point.** A
+`present` from the resolved location short-circuits — that is the answer where
+being wrong destroys something, and it costs no walk. A `resolved` result of
+`absent` does **not** short-circuit: it proves only that the *recorded*
+location holds no estate, and the record can be wrong (relaunching the same PRD
+slug with a different `--prd-dir` overwrites `specsDir`; a hand-edited state
+file can say anything). Trusting it would be inferring absence from an input
+instead of proving it — the same mistake in a new place. So `absent` is always
+earned by the complete walk. An `indeterminate` from the resolved location
+stands as `indeterminate`: the place the run itself said to look could not be
+read, and that is not something to walk past quietly. This composition was
+found by the fifth round's own self-probe pass, after the first version of the
+fix had already been written.
+
+**Every caller refuses by name on `indeterminate`:** `clean-failed` pass 1 and
+pass 2 preserve the directory and put the probe's reason in the report;
+`adopt`'s estate check refuses before any ref moves. `absent` is now a claim the
+probe has earned.
+
+One implementation note that is load-bearing: whether a path is a directory is
+asked with `existsSync`/`statSync`, not classified from the `readdir` errno.
+Windows reports `ENOENT` for a read under a plain file, so an errno-only rule
+would turn "the run's recorded specs dir is a file" back into proved absence —
+the same bug in a new costume. A missing directory is absence (git checked the
+tree out from a commit); a path that exists and is not a directory is
+`indeterminate`.
+
+The identical decision governs `git.listChangedFiles`, which had the same shape
+— three commands, swallowed failures, a partial union returned as if complete.
+See ADR 0052's amendment: one honest primitive, and callers that fail closed in
+their own direction.
+
+### 11. Adoption is conditional on the record it was authorized against
+
+§8 made adoption refuse a park it could see. It could only see the park it
+looked for *before* verification: run state and worktrees were read once, the
+estate refusal ran, base gates executed for minutes, the feature ref was
+compare-and-swapped, and `saveSliceState` then re-read the file and replaced
+this slice's record **unconditionally**.
+
+A concurrent run can park the same slice inside that window without moving the
+feature branch. The ref CAS therefore still succeeds, the blind write turns
+`AWAITING-ADJUDICATION` into `PASS`, and the live estate is stranded with no
+slice record owning it — which is the corruption §8 exists to prevent, produced
+by the command §8 was written for.
+
+**Adoption now re-asks everything that can change, immediately before
+finalization, and its state write is a compare-and-swap on the record observed
+before verification.** Concretely:
+
+- Worktrees are re-enumerated, run state re-read, and the estate re-probed
+  before the feature ref moves. Enumeration failure is still refusal 6; an
+  `indeterminate` probe is a refusal too (§10). A refusal here costs nothing —
+  no ref has been touched.
+- If the slice's record is no longer the one adoption observed, it refuses and
+  names both records. Only the slice's own re-dispatch replaces a park.
+- The state write goes through `saveSliceStateIfUnchanged`. If it loses the CAS
+  in the remaining window — after the re-check, before the write — the feature
+  ref is rolled back with the same guarded update a throwing write already used,
+  and the refusal names both outcomes. The two failures leave the same
+  inconsistency, so they get the same repair.
+
+`saveSliceState` keeps its unconditional behavior for the pipeline, which owns
+the slice it is writing. The conditional form exists for the one caller that
+reads a record, spends minutes, and then writes.
+
+### Consequences of the amendment
+
+- `RunState` gains an optional `specsDir`. Nothing refuses a state file without
+  it; the probe falls back to a complete walk, which is slower and still honest.
+- `clean-failed` and `adopt` can now decline to act for a reason that is neither
+  "there is an estate" nor "there is not": the probe could not tell. That is a
+  new operator-facing outcome and it is deliberately loud.
+- `afk adopt` gains two more refusals — a record that changed during
+  verification, and a lost state CAS — and loses the one silent corruption path
+  §8 had left open. Adopting a slice a concurrent run is touching is now
+  impossible rather than last-writer-wins.
+- Adoption pays one extra worktree enumeration, run-state read and estate probe
+  per invocation. Against a command whose middle step is a full base-gate run,
+  that is free.
+- Not changed: the refusal-not-reconciliation stance (adoption still never
+  quiesces an estate for the operator), the estate's two ownership files, and
+  every §6 trait.
+
+### Also found by the fifth round's self-probe pass
+
+Two defects the guardians had not reported, found by probing the slice 01/03/06
+surface with adversarial input before submitting. Both are the same "prove it,
+do not infer it" family:
+
+- **`git.listChangedFiles` returned git's quoted spelling of a non-ASCII path.**
+  git's default `core.quotePath` prints a non-ASCII path C-quoted *and* wrapped
+  in double quotes, which matches no declared path. The QA scope-amendment door
+  therefore refused an honest request for such a file with "not among the files
+  this slice changed", and the new escalation guard would have reported it as an
+  out-of-scope change — a false accusation manufactured by an output
+  convention. The probe now runs with `core.quotePath=false`.
+- **A UTF-8 BOM refused a human's adjudication.** `adjudication.md` is the one
+  artifact in the pipeline a *human* types, on Windows, where PowerShell's
+  `Set-Content` and Notepad both emit a BOM by default. `JSON.parse` then failed
+  at position 0, the slice stayed parked, and the operator was told their
+  decision "is not valid JSON" with no visible cause. A leading BOM carries no
+  semantics, so it is stripped — nothing is guessed at, and the duplicate-key
+  scan still sees the whole object. A mark anywhere but the start is still a
+  real defect and still refuses.
+
+Reported, not fixed, because each would widen this round's scope and each
+already fails closed with a message that names the cause:
+
+- `normalizeAcceptanceManifestPath` accepts control characters inside a path, so
+  a path containing one is a "valid" declarable path. Nothing can be written
+  there, so the failure lands later — at the planner's revised manifest or at
+  the filesystem — rather than at the parse. Tightening it is a manifest-wide
+  normalization change.
+- `afk adopt` resolves `issues.md` at the hard-coded
+  `.kiro/specs/<prd-slug>/issues.md`, so a run launched with a configurable
+  `--prd-dir` cannot be adopted. It refuses with "cannot resolve slice … not
+  found", which is honest but is a capability gap, not a defect — and
+  `RunState.specsDir` (§10) now makes the fix a small one for whoever takes it.
+- Adoption's feature-ref CAS uses the `featureBranch` read before verification.
+  A run does not rename its own feature branch mid-flight, and the commit CAS
+  still protects the ref itself, so the exposure is theoretical.

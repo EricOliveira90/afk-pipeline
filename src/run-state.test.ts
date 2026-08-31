@@ -20,6 +20,7 @@ import {
   getResumeAttempts,
   recordRetryDecision,
   clearSliceStateForDispatch,
+  saveSliceStateIfUnchanged,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
@@ -505,5 +506,154 @@ describe("clearSliceStateForDispatch", () => {
     // A first dispatch must not leave a state file behind just to prove
     // it had nothing to clear.
     expect(existsSync(join(repo, ".afk", "state", "demo.json"))).toBe(false);
+  });
+});
+
+/**
+ * Architect blocker 3, fifth adjudication gate round. `saveSliceState`
+ * replaces a slice's record unconditionally, which is right for the pipeline
+ * (it owns the slice it is writing) and wrong for `afk adopt` — which reads
+ * the record, runs base gates for minutes, and only then writes.
+ */
+describe("saveSliceStateIfUnchanged", () => {
+  const write = (
+    repo: string,
+    expected: Parameters<typeof saveSliceStateIfUnchanged>[4],
+  ) =>
+    saveSliceStateIfUnchanged(
+      repo,
+      "demo",
+      "75",
+      { phase: "PASS", mergedToFeature: true, branch: "manual/x" },
+      expected,
+    );
+
+  it("writes when the record is still the one that was observed", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    const observed = loadRunState(repo, "demo").slices["75"];
+
+    expect(write(repo, observed)).toEqual({ ok: true });
+    expect(loadRunState(repo, "demo").slices["75"]!.phase).toBe("PASS");
+  });
+
+  it("writes when nothing was observed and nothing is there", () => {
+    const repo = makeRepo();
+    expect(write(repo, undefined)).toEqual({ ok: true });
+    expect(loadRunState(repo, "demo").slices["75"]!.phase).toBe("PASS");
+  });
+
+  /**
+   * The exact race: adoption observed no record (or a failure), a concurrent
+   * run parked the slice while the gates ran, and the blind write turned
+   * `AWAITING-ADJUDICATION` into `PASS` and stranded a live estate.
+   */
+  it("refuses when a concurrent park replaced the observed record", () => {
+    const repo = makeRepo();
+    const observed = loadRunState(repo, "demo").slices["75"];
+    expect(observed).toBeUndefined();
+    saveSliceState(repo, "demo", "75", {
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/demo-slice-01-x",
+      error: "one contested finding awaits a human decision",
+    });
+
+    const result = write(repo, observed);
+    expect(result.ok).toBe(false);
+    expect(
+      (result as { found: { phase: string } }).found.phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    // The park survives byte-for-byte: nothing was overwritten.
+    expect(loadRunState(repo, "demo").slices["75"]!.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+  });
+
+  it("refuses when the observed record was cleared for a re-dispatch", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    const observed = loadRunState(repo, "demo").slices["75"];
+    clearSliceStateForDispatch(repo, "demo", "75");
+
+    const result = write(repo, observed);
+    expect(result.ok).toBe(false);
+    expect((result as { found: unknown }).found).toBeUndefined();
+    expect(loadRunState(repo, "demo").slices["75"]).toBeUndefined();
+  });
+
+  it("refuses on a changed field even when the phase is unchanged", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    const observed = loadRunState(repo, "demo").slices["75"];
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "different" });
+
+    expect(write(repo, observed).ok).toBe(false);
+  });
+
+  it("does not clobber a sibling slice's parallel update", () => {
+    const repo = makeRepo();
+    const observed = loadRunState(repo, "demo").slices["75"];
+    saveSliceState(repo, "demo", "76", { phase: "ERROR", error: "sibling" });
+
+    expect(write(repo, observed)).toEqual({ ok: true });
+    const state = loadRunState(repo, "demo");
+    expect(state.slices["75"]!.phase).toBe("PASS");
+    expect(state.slices["76"]!.phase).toBe("ERROR");
+  });
+});
+
+/**
+ * Architect blocker 2: the run records where its own slice artifacts live so
+ * the estate probe resolves instead of guessing. Optional, because state
+ * files that predate the field must stay loadable — the probe then falls back
+ * to a complete walk.
+ */
+describe("RunState.specsDir", () => {
+  it("round-trips through save and load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: 1,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      specsDir: "docs/internal/specs/demo",
+      slices: {},
+    });
+    expect(loadRunState(repo, "demo").specsDir).toBe(
+      "docs/internal/specs/demo",
+    );
+  });
+
+  it("survives a per-slice write", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: 1,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      specsDir: ".kiro/specs/demo",
+      slices: {},
+    });
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    expect(loadRunState(repo, "demo").specsDir).toBe(".kiro/specs/demo");
+  });
+
+  it.each([undefined, "", "   ", 7, null, {}])(
+    "degrades %p to absent rather than to a guessed path",
+    (value) => {
+      expect(
+        adaptLoadedState(
+          { version: 1, featureBranch: "feat/demo", specsDir: value, slices: {} },
+          "demo",
+        ).specsDir,
+      ).toBeUndefined();
+    },
+  );
+
+  it("is carried through the v0 migration too", () => {
+    expect(
+      adaptLoadedState(
+        { featureBranch: "feat/demo", specsDir: ".kiro/specs/demo", slices: {} },
+        "demo",
+      ).specsDir,
+    ).toBe(".kiro/specs/demo");
   });
 });

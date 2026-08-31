@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { findAdjudicationEstate } from "./adjudication-estate.js";
+import { probeAdjudicationEstate } from "./adjudication-estate.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
@@ -70,7 +70,7 @@ const mustPreserveBranch = (phase: SlicePhase): boolean =>
  * Nothing is debris — the estate belongs to a human's pending decision.
  *
  * Two independent sources, and the *disk* one is the authority (ADR 0055
- * Seam 2 §6, fourth adjudication gate round). `findAdjudicationEstate`
+ * Seam 2 §6, fourth adjudication gate round). `probeAdjudicationEstate`
  * asks the only question that matters — does this worktree still hold the
  * impasse record or the decision log? — and so covers every terminal phase
  * a post-decision apply can exit through, including the ordinary `ERROR`
@@ -79,18 +79,36 @@ const mustPreserveBranch = (phase: SlicePhase): boolean =>
  * phase trait remains as a second, weaker term: it catches an
  * `AWAITING-ADJUDICATION` record whose worktree an operator has already
  * removed by hand, where there is no disk to read.
+ *
+ * A probe that could not finish preserves too, and says why (architect
+ * blocker 2, fifth round). `clean-failed` deletes worktrees; "the probe
+ * could not read this directory" is the one answer that must never be
+ * spent as "there is nothing here to lose" (ADR 0055 Seam 2 §8).
  */
 const mustPreserveEstate = (
   phase: SlicePhase,
   dir: string | undefined,
+  specsDir: string | undefined,
 ): { reason: string } | null => {
-  const estate = dir ? findAdjudicationEstate(dir) : null;
-  if (estate) {
+  const probe = dir
+    ? probeAdjudicationEstate(dir, { specsDir })
+    : ({ status: "absent" } as const);
+  if (probe.status === "indeterminate") {
+    return {
+      reason:
+        `${phase} — refusing to remove ${dir}: whether it holds an ` +
+        `adjudication estate could not be established (${probe.reason}). ` +
+        `Absence has to be proved, never inferred (ADR 0055 Seam 2 §8), so ` +
+        `nothing here is treated as debris; fix the cause or remove the ` +
+        `worktree yourself once you have checked it`,
+    };
+  }
+  if (probe.status === "present") {
     return {
       reason:
         `${phase} — preserving the adjudication estate this worktree still ` +
-        `holds (${estate.evidence}): it is the operator's pending input, and ` +
-        `only this slice's own re-dispatch replaces it`,
+        `holds (${probe.estate.evidence}): it is the operator's pending ` +
+        `input, and only this slice's own re-dispatch replaces it`,
     };
   }
   if (traitsFor(phase).debris === "preserve-all") {
@@ -150,6 +168,10 @@ export async function runCleanFailed(
 
   const state = loadRunState(repoRoot, runSlug);
   const featureBranch = state.featureBranch;
+  // The run recorded where its slice artifacts live, so the estate probe
+  // resolves rather than walks (architect blocker 2). Absent on state files
+  // that predate the field; the probe then walks the whole worktree.
+  const specsDir = state.specsDir;
   const featureExists = git.branchExists(repoRoot, featureBranch);
 
   // ghIssue -> manifest slice number, for computing worktree dirs when
@@ -220,7 +242,7 @@ export async function runCleanFailed(
     // so — an operator who ran clean-failed to clear the way for a re-run
     // has to be able to tell a deliberate skip from a command that missed
     // one.
-    const preserve = mustPreserveEstate(slice.phase, dir);
+    const preserve = mustPreserveEstate(slice.phase, dir, specsDir);
     if (preserve) {
       if (dir) handledDirs.add(normalise(dir));
       report.skipped.push({
@@ -314,14 +336,24 @@ export async function runCleanFailed(
       // property of the worktree, so it holds here too — and this is the
       // one pass that would otherwise delete an estate precisely because
       // nothing recorded it.
-      const orphanEstate = findAdjudicationEstate(dir);
-      if (orphanEstate) {
+      const orphanProbe = probeAdjudicationEstate(dir, { specsDir });
+      if (orphanProbe.status === "indeterminate") {
+        report.skipped.push({
+          target: dir,
+          reason:
+            `unregistered leftover whose adjudication estate could not be ` +
+            `probed (${orphanProbe.reason}) — an unfinished probe is not ` +
+            `proof that this directory is disposable (ADR 0055 Seam 2 §8)`,
+        });
+        continue;
+      }
+      if (orphanProbe.status === "present") {
         report.skipped.push({
           target: dir,
           reason:
             `unregistered leftover that still holds an adjudication estate ` +
-            `(${orphanEstate.evidence}) — the operator's input outlives the ` +
-            `run state that lost track of it`,
+            `(${orphanProbe.estate.evidence}) — the operator's input outlives ` +
+            `the run state that lost track of it`,
         });
         continue;
       }

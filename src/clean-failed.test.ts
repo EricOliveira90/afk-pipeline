@@ -97,6 +97,11 @@ function setUp(repo: string, slices: SliceFixture[]): void {
       version: 1,
       prdSlug: SLUG,
       featureBranch: FEAT,
+      // The run records where its own slice artifacts live, so the estate
+      // probe resolves `<worktree>/specs/slices/*` instead of walking for it
+      // (architect blocker 2, fifth adjudication gate round). Every fixture
+      // worktree below puts its slice directory under `specs/`.
+      specsDir: "specs",
       scope: { mode: "all-afk", slices: scopeSlices },
       slices: stateSlices,
     }),
@@ -152,6 +157,12 @@ describe("runCleanFailed", () => {
         phase: "LANE-CANCELLED",
         materialise: true,
       },
+      // Architect blocker 2: a worktree whose estate could not be *probed*.
+      // Its own `specs` path is a file, so the enumeration cannot complete —
+      // and an unfinished probe is not proof that the directory is
+      // disposable. It rides this fixture rather than paying for another
+      // temp repo (AGENTS.md ladder).
+      { ghIssue: "161", number: "16", phase: "ERROR", materialise: true },
     ]);
     const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s01`);
     const branch = `afk/${SLUG}-slice-01-fixture`;
@@ -181,6 +192,25 @@ describe("runCleanFailed", () => {
     );
     const plainLeftover = join(repo, ".afk", "worktrees", `afk-${SLUG}-s08`);
     mkdirSync(plainLeftover, { recursive: true });
+    // ...and an unregistered leftover whose estate cannot be probed either.
+    // Pass 2 is the pass that deletes because nothing claims a directory, so
+    // it is the one that most needs "I could not tell" to refuse.
+    const unprobableLeftover = join(
+      repo,
+      ".afk",
+      "worktrees",
+      `afk-${SLUG}-s07`,
+    );
+    mkdirSync(unprobableLeftover, { recursive: true });
+    writeFileSync(join(unprobableLeftover, "specs"), "not a directory", "utf-8");
+    // The pass-1 counterpart, in slice #161's registered worktree.
+    const unprobableWorktree = join(
+      repo,
+      ".afk",
+      "worktrees",
+      `afk-${SLUG}-s16`,
+    );
+    writeFileSync(join(unprobableWorktree, "specs"), "not a directory", "utf-8");
 
     // Each estate as the run left it: the impasse record and the decision
     // log live in the slice directory *inside the worktree*, so removing the
@@ -242,6 +272,22 @@ describe("runCleanFailed", () => {
     const orphanSkip = report.skipped.find((s) => s.target === orphanEstate);
     expect(orphanSkip).toBeDefined();
     expect(orphanSkip!.reason).toContain("adjudication estate");
+
+    // Neither unprobable directory was removed, and both refusals say why.
+    // "The probe could not finish" must never be spent as "there is nothing
+    // here to lose" (ADR 0055 Seam 2 §8).
+    for (const target of [unprobableWorktree, unprobableLeftover]) {
+      expect(existsSync(target)).toBe(true);
+      expect(report.removedWorktrees).not.toContain(target);
+      const skip = report.skipped.find((s) => s.target === target);
+      expect(skip).toBeDefined();
+      expect(skip!.reason).toMatch(/could not be (established|probed)/);
+      expect(skip!.reason).toContain("not a directory");
+    }
+    // ...and the slice branch of the unprobable worktree survives with it.
+    expect(
+      git.branchExists(repo, `afk/${SLUG}-slice-16-fixture`),
+    ).toBe(true);
 
     for (const est of preserved) {
       // Nothing of the estate is debris — not the worktree, not the branch,
