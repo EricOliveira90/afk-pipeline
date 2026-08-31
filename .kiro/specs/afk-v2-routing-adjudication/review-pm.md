@@ -1,110 +1,65 @@
-# Product Guardian Review
-
 **Verdict:** FIX-BEFORE-SHIP
 
-## Scope
+## Blocking finding
 
-This review judges slices 01 (#80), 02 (#81), 03 (#89), 04 (#82), and
-06 (#129). Slice 05 (#94) is out of scope.
+### 1. A mixed contested/open exhaustion bypasses the promised human-adjudication route
 
-## Fix before ship
+PRD stories 3 and 10 promise that a `CONTESTED` finding held at round
+exhaustion becomes an impasse for a human decision, while non-convergence
+routes the operator to fix the ticket. Slice 02 behavior B-01 makes the mixed
+case explicit: if round-two exhaustion leaves *any* unresolved blocking
+finding `CONTESTED`, the slice must surface `AWAITING-ADJUDICATION`.
 
-### 1. A focused scope revision can silently remove previously locked paths
+The shipped classifier does something materially different. In
+`src/contract-review.ts`, `buildContractNegotiationOutcome` (lines 735-750)
+returns `IMPASSE` only when *every* unresolved blocking finding is
+`CONTESTED`. A round-two result containing one blocking `CONTESTED` finding
+and one blocking `OPEN` finding is therefore classified as
+`NON_CONVERGENCE`. `src/contract-review.test.ts`, test
+`classifies a contest mixed with an OPEN blocker as NON_CONVERGENCE`
+(lines 1038-1080), asserts that exact behavior.
 
-**PRD requirement:** Stories 1 and 2 promise that a too-narrow lock routes to
-a focused contract revision instead of deadlocking. Slice 01 B-03/B-04 requires
-the revision to preserve the accepted contract, add the requested paths, and
-resume the generator with the complete revised file scope.
+I read both locations and ran:
 
-**Evidence gathered:**
+`pnpm vitest run src/escalation.test.ts src/adjudication.test.ts src/artifacts.test.ts src/adopt-command.test.ts src/logger.test.ts src/ship-gate.test.ts src/contract-review.test.ts src/run-journal.test.ts src/prompt-template.test.ts src/status-future.test.ts`
 
-- In `src/orchestrator.ts`, `reviseAcceptedContract` at lines 1222-1255
-  validates behavior-ID stability, current contract/manifest consistency, gate
-  bindings, and whether the newly requested paths exist. It never checks that
-  every path from `previousManifest` remains in the revised contract and
-  manifest.
-- In `src/acceptance-manifest.ts`, `validateAcceptanceManifestStability` at
-  lines 403-443 checks only unchanged behaviors that were renumbered. It does
-  not compare the previous and current file scopes.
-- I ran those production validators with a previous scope containing
-  `src/original.ts` and `src/keep.ts`, then a revised contract and manifest
-  containing only `src/requested.ts`. Both validators accepted the replacement
-  and printed `accepted-consistently-shrunk-contract`.
+All 362 tests passed, including the mixed-exhaustion assertion. This confirms
+that the current user-visible outcome is deliberate: the operator is told to
+fix the ticket instead of receiving the contested point for adjudication.
+That misses a selected slice's locked outcome and the PRD's core routing
+promise.
 
-**User impact:** A planner can add the escalation's requested path while
-dropping paths from the already accepted lock. If the evaluator accepts that
-pair, the transaction re-locks it and the fresh generator receives an
-incomplete scope. The promised focused additive repair can therefore create a
-new scope deadlock or authorize loss of already contracted work.
+Required before ship: preserve the non-convergence handling for `OPEN`
+blockers without dropping the adjudication route promised for a coexisting
+`CONTESTED` blocker.
 
-**Clear condition:** Before re-locking, require every previously declared path
-to remain in both `contract.md` and `acceptance-manifest.json`, in addition to
-the requested paths. Add a focused-revision test where the planner removes an
-old path and assert `ERROR`, byte-for-byte rollback of the accepted pair, and
-no fresh generator dispatch.
+## Selected-slice verification
 
-## Outcome verification
+| Slice | Result | Product evidence |
+|---|---|---|
+| 01 Scope escalation | Delivered | Generator and resume prompts provide the exact stop-and-escalate artifact; `parseScopeEscalation` fails closed; `runFocusedScopeRevision` re-evaluates and re-locks; the generator loop resumes in the same implementation round; raw attempts are archived before parsing. |
+| 02 Impasse parking | Partial | Pure contested exhaustions park with verbatim evidence; independent and same-lane siblings continue; dependents remain undispatched and visible; cancellation preserves the park. The mixed-exhaustion blocker above violates B-01. |
+| 03 Human decision resume | Delivered | `parseAdjudication` validates one finding decision, `waitForAdjudication` is bounded and cancellation-aware, and `runImpasseAdjudication` records decisions, applies them once, runs the lock gate before generation, and supports same-run and next-run pickup. |
+| 04 Code-assembled diagnosis | Delivered | `renderStuckDiagnosis` deterministically orders archived finding, escalation, round, artifact, and commit evidence; `finishStuck` is the shared STUCK finalizer; the synthesis section and both dedicated stuck prompt files are gone. |
+| 06 `afk adopt` | Delivered | `runAdoptCli` verifies a detached candidate merge with every base gate before moving the feature ref, refuses conflicts/gate failures/bad reasons without live-state mutation, persists complete provenance, and projects it into summaries and draft PR bodies. |
 
-### Slice 01 - Scope escalation routes to contract revision
+## Notes
 
-The canonical generator instruction, strict artifact parsing, raw attempt
-archives, no-round-spend routing, transactional rollback, and lock gate are
-present and exercised. The additive-scope guarantee above is not delivered.
-
-### Slice 02 - Impasse parks the slice and the run continues
-
-Delivered. Exhaustion distinguishes adjudicable impasse from non-convergence,
-retains both positions and evidence, projects the parked branch and reason,
-continues independent work, holds DAG dependents, and preserves the park on
-cancellation.
-
-### Slice 03 - A human decision resumes the parked slice
-
-Delivered. Decisions are schema-validated per finding, partial decisions remain
-parked, the wait is bounded, valid decisions redispatch in the same run, and a
-later run consumes an existing decision. The contract locks only after all
-blocking findings have decisions and the mechanical lock gate passes.
-
-### Slice 04 - Stuck diagnosis assembled by code
-
-Delivered. `stuck.md` is assembled deterministically from archived lifecycle,
-escalation, artifact, and commit evidence. Malformed retained escalation bytes
-do not abort diagnosis. All execution-side STUCK exits use the code finalizer,
-and the two stuck-specific generator prompts are retired.
-
-### Slice 06 - Verified manual adoption
-
-Delivered. `afk adopt` verifies the detached candidate tree with every base
-gate before an atomic feature-ref update, records PASS and full provenance, and
-surfaces it in the run summary and draft PR. Reason, conflict, gate, branch
-race, provider ambiguity, worktree, parked-estate, and state-write failures
-refuse or roll back without silently adopting.
-
-## Verification
-
-Read the PRD and all selected-slice contract, acceptance, context, QA, and
-handoff artifacts, then traced the production and focused-test paths for all
-five selected slices.
-
-Ran 393 focused tests covering escalation, adjudication, impasse
-classification, contract transactions, evidence rendering, adoption,
-persistence/reporting, late STUCK diagnosis, lane refresh, same-run
-redispatch, and next-run pickup. All passed. The already-passed full suite was
-not re-run.
-
-## Non-blocking notes
-
-- A generator receives at most two focused revisions in one implementation
-  round. The anti-loop bound is reasonable but is not stated in the PRD.
-- Legacy negotiation `stuck.md` still says `Outcome: ESCALATE` for an impasse,
-  while structured state and live projections correctly say
-  `AWAITING-ADJUDICATION`.
+- Adjudication lock-gate refusal now has the additional persisted phase
+  `ADJUDICATION-LOCK-REFUSED`. This differs from the PRD's stated intent to
+  preserve the existing terminal taxonomy, but it preserves the human
+  decision and parked estate and gives the operator a more accurate remedy.
+  I do not consider that product-safe deviation a separate blocker.
+- A generator round permits two focused scope revisions and then fails closed
+  on another escalation. The PRD and slice contract promise one focused
+  revision and require the generator to list every needed path, so this is a
+  reasonable bound for an unspecified repeated-escalation edge case.
+- I did not rerun the full suite because the pre-ship sanity gate already
+  passed this exact tree, as stated in the review instructions.
 
 ## Out-of-scope PRD gaps
 
-- Slice 05 (#94), the babysit courier that presents both positions verbatim
-  and writes the adjudication artifact, was not executed by this run.
-- Story 14, repository-versioned/global babysit skill packaging, remains
+- Slice 05 / issue #94, the babysit courier that presents both positions and
+  writes `adjudication.md`, was intentionally not executed in this run.
+- PRD story 14, relocating and globally installing the babysit skill, remains
   explicitly deferred.
-
-These gaps do not drive the verdict.
