@@ -1,65 +1,85 @@
 **Verdict:** FIX-BEFORE-SHIP
 
-## Blocking finding
+## Blocking findings
 
-### 1. A mixed contested/open exhaustion bypasses the promised human-adjudication route
+### 1. Ambiguous adjudication JSON can apply the opposite human decision
 
-PRD stories 3 and 10 promise that a `CONTESTED` finding held at round
-exhaustion becomes an impasse for a human decision, while non-convergence
-routes the operator to fix the ticket. Slice 02 behavior B-01 makes the mixed
-case explicit: if round-two exhaustion leaves *any* unresolved blocking
-finding `CONTESTED`, the slice must surface `AWAITING-ADJUDICATION`.
+The PRD Solution and stories 7 and 9 require a schema-validated human
+decision to resolve one finding, then pass through the mechanical lock step.
+An ambiguous artifact must fail closed; applying whichever duplicate value
+the JSON runtime keeps does not preserve the human's decision.
 
-The shipped classifier does something materially different. In
-`src/contract-review.ts`, `buildContractNegotiationOutcome` (lines 735-750)
-returns `IMPASSE` only when *every* unresolved blocking finding is
-`CONTESTED`. A round-two result containing one blocking `CONTESTED` finding
-and one blocking `OPEN` finding is therefore classified as
-`NON_CONVERGENCE`. `src/contract-review.test.ts`, test
-`classifies a contest mixed with an OPEN blocker as NON_CONVERGENCE`
-(lines 1038-1080), asserts that exact behavior.
+Evidence gathered:
 
-I read both locations and ran:
+- File and location: `src/adjudication.ts`, `parseAdjudication` (lines 67-145).
+  I read that the function calls `JSON.parse` and checks the resulting keys,
+  but never checks the raw JSON for duplicate keys.
+- I ran `parseAdjudication` against a current `IMPASSE` with this raw artifact:
+  `{"version":1,"findingId":"F-01","winningPosition":"PLANNER","winningPosition":"EVALUATOR","author":"human"}`.
+  It was accepted and returned `winningPosition: "EVALUATOR"` instead of
+  refusing the contradictory decision.
+- The focused `src/adjudication.test.ts` suite passed, confirming its invalid
+  input matrix does not currently protect this outcome.
 
-`pnpm vitest run src/escalation.test.ts src/adjudication.test.ts src/artifacts.test.ts src/adopt-command.test.ts src/logger.test.ts src/ship-gate.test.ts src/contract-review.test.ts src/run-journal.test.ts src/prompt-template.test.ts src/status-future.test.ts`
+Required before ship: reject duplicate keys in both incoming adjudication
+artifacts and persisted decision logs before any decision can be recorded,
+applied, or used to prove a lock.
 
-All 362 tests passed, including the mixed-exhaustion assertion. This confirms
-that the current user-visible outcome is deliberate: the operator is told to
-fix the ticket instead of receiving the contested point for adjudication.
-That misses a selected slice's locked outcome and the PRD's core routing
-promise.
+### 2. `afk adopt` can silently merge into a different PRD's run
 
-Required before ship: preserve the non-convergence handling for `OPEN`
-blockers without dropping the adjudication route promised for a coexisting
-`CONTESTED` blocker.
+PRD story 17 and slice 06 behavior B-01 promise that the named PRD's finished
+slice is verified, merged into that run's feature branch, and recorded in
+that run's state. Prefix-sharing PRD names can currently select another
+PRD's state and mutate its branch.
+
+Evidence gathered:
+
+- File and location: `src/adopt-command.ts`, `resolveRunSlug` (lines 164-206).
+  I read that no-provider discovery accepts any state slug equal to the PRD
+  slug or beginning with `<prdSlug>-`, without proving the suffix is a
+  provider qualifier or that the state belongs to the requested PRD.
+- I ran `runAdoptCli` in a temporary Git repository containing the requested
+  PRD `api`, no `api.json` state, and an unrelated `api-v2.json` state whose
+  feature branch was `feat/api-v2`.
+- `afk adopt api 129 ...` exited 0, reported adoption into `feat/api-v2`,
+  moved that branch, and wrote slice `129` into `api-v2.json`.
+
+Required before ship: discover only the exact PRD run and valid
+provider-qualified variants, and refuse when ownership cannot be proved.
 
 ## Selected-slice verification
 
-| Slice | Result | Product evidence |
+| Slice | Result | User outcome checked |
 |---|---|---|
-| 01 Scope escalation | Delivered | Generator and resume prompts provide the exact stop-and-escalate artifact; `parseScopeEscalation` fails closed; `runFocusedScopeRevision` re-evaluates and re-locks; the generator loop resumes in the same implementation round; raw attempts are archived before parsing. |
-| 02 Impasse parking | Partial | Pure contested exhaustions park with verbatim evidence; independent and same-lane siblings continue; dependents remain undispatched and visible; cancellation preserves the park. The mixed-exhaustion blocker above violates B-01. |
-| 03 Human decision resume | Delivered | `parseAdjudication` validates one finding decision, `waitForAdjudication` is bounded and cancellation-aware, and `runImpasseAdjudication` records decisions, applies them once, runs the lock gate before generation, and supports same-run and next-run pickup. |
-| 04 Code-assembled diagnosis | Delivered | `renderStuckDiagnosis` deterministically orders archived finding, escalation, round, artifact, and commit evidence; `finishStuck` is the shared STUCK finalizer; the synthesis section and both dedicated stuck prompt files are gone. |
-| 06 `afk adopt` | Delivered | `runAdoptCli` verifies a detached candidate merge with every base gate before moving the feature ref, refuses conflicts/gate failures/bad reasons without live-state mutation, persists complete provenance, and projects it into summaries and draft PR bodies. |
+| 01 Scope escalation | Delivered | Initial and resumed generators receive the canonical stop-and-escalate instruction; strict validation and immutable archives fail closed; accepted focused revision is additive, lock-gated, transactional, and resumes generation without spending the implementation round. |
+| 02 Impasse parking | Delivered | Pure contested exhaustion parks with both positions and evidence; mixed open/contested exhaustion names both remedies; independent and same-lane siblings continue; dependents remain visible and blocked; cancellation preserves the park. |
+| 03 Human decision resume | Blocked | Bounded same-run and next-run pickup, per-finding durable decisions, cancellation, lane refresh, and the apply-and-lock transaction are present. Finding 1 means the decision artifact is not reliably fail-closed. |
+| 04 Code-assembled diagnosis | Delivered | `stuck.md` is deterministically assembled from archived lifecycle, escalation, round, artifact, and commit evidence; all STUCK exits use the code finalizer; the synthesis invocation and both stuck-specific prompts are retired. |
+| 06 `afk adopt` | Blocked | Candidate-tree gates, conflict/gate/reason refusals, provenance persistence, summary and draft-PR reporting, and provider-qualified runs are present. Finding 2 permits silent cross-PRD adoption. |
 
 ## Notes
 
-- Adjudication lock-gate refusal now has the additional persisted phase
-  `ADJUDICATION-LOCK-REFUSED`. This differs from the PRD's stated intent to
-  preserve the existing terminal taxonomy, but it preserves the human
-  decision and parked estate and gives the operator a more accurate remedy.
-  I do not consider that product-safe deviation a separate blocker.
-- A generator round permits two focused scope revisions and then fails closed
-  on another escalation. The PRD and slice contract promise one focused
-  revision and require the generator to list every needed path, so this is a
-  reasonable bound for an unspecified repeated-escalation edge case.
-- I did not rerun the full suite because the pre-ship sanity gate already
-  passed this exact tree, as stated in the review instructions.
+- Adjudication lock refusal now persists as
+  `ADJUDICATION-LOCK-REFUSED`, although the PRD says routing should not add a
+  new terminal taxonomy. The status preserves the human decision and gives
+  the operator the correct remedy, so this difference does not independently
+  block the promised outcome.
+- A generator implementation round allows two focused scope revisions before
+  refusing another. The selected contract promises the route but does not
+  define repeated-escalation behavior; the bounded refusal retains evidence
+  and is reasonable.
+
+## Verification
+
+I ran focused suites only, as instructed: 390 tests passed across escalation,
+contract review, artifacts, prompts, adjudication, contract transactions,
+run journal, status, adoption, reporting, CLI routing, and estate handling.
+I also ran the two temporary runtime probes described above. I did not rerun
+the full suite because the pre-ship sanity gate already passed this tree.
 
 ## Out-of-scope PRD gaps
 
-- Slice 05 / issue #94, the babysit courier that presents both positions and
-  writes `adjudication.md`, was intentionally not executed in this run.
+- Slice 05 / issue #94, the babysit courier that presents both positions
+  verbatim and writes `adjudication.md`, was intentionally not executed.
 - PRD story 14, relocating and globally installing the babysit skill, remains
-  explicitly deferred.
+  explicitly deferred and does not affect this verdict.
