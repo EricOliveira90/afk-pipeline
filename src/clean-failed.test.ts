@@ -157,6 +157,31 @@ describe("runCleanFailed", () => {
     const branch = `afk/${SLUG}-slice-01-fixture`;
     expect(existsSync(dir)).toBe(true);
 
+    // Pass 2's namespace sweep rides along in the same repo. It is the one
+    // place that deletes a directory *because* no run state claims it —
+    // state deleted by hand, a crash before the state write, a record that
+    // never named its branch — and the disk fact has to hold there too: it
+    // is a property of the worktree, not of the record that lost track of
+    // it. `s09` holds a decision log; `s08` is an ordinary leftover.
+    const orphanEstate = join(repo, ".afk", "worktrees", `afk-${SLUG}-s09`);
+    const orphanLog = join(
+      orphanEstate,
+      "specs",
+      "slices",
+      "09-orphaned-estate",
+      "adjudication-decisions.json",
+    );
+    mkdirSync(join(orphanEstate, "specs", "slices", "09-orphaned-estate"), {
+      recursive: true,
+    });
+    writeFileSync(
+      orphanLog,
+      JSON.stringify({ version: 1, decisions: [{ findingId: "F-01" }] }),
+      "utf-8",
+    );
+    const plainLeftover = join(repo, ".afk", "worktrees", `afk-${SLUG}-s08`);
+    mkdirSync(plainLeftover, { recursive: true });
+
     // Each estate as the run left it: the impasse record and the decision
     // log live in the slice directory *inside the worktree*, so removing the
     // worktree destroys the operator's input.
@@ -208,9 +233,15 @@ describe("runCleanFailed", () => {
 
     expect(existsSync(dir)).toBe(false);
     expect(git.branchExists(repo, branch)).toBe(false);
-    expect(report.removedWorktrees).toEqual([dir]);
+    expect(report.removedWorktrees).toEqual([dir, plainLeftover]);
     expect(report.deletedBranches).toEqual([branch]);
     expect(report.keptBranches).toEqual([]);
+
+    // The unregistered estate survives the sweep, named in the report.
+    expect(existsSync(orphanLog)).toBe(true);
+    const orphanSkip = report.skipped.find((s) => s.target === orphanEstate);
+    expect(orphanSkip).toBeDefined();
+    expect(orphanSkip!.reason).toContain("adjudication estate");
 
     for (const est of preserved) {
       // Nothing of the estate is debris — not the worktree, not the branch,
@@ -237,41 +268,6 @@ describe("runCleanFailed", () => {
       expect(skip!.reason).toContain(est.phase);
       expect(skip!.reason).toMatch(/adjudication estate|re-dispatch/);
     }
-  });
-
-  /**
-   * Pass 2's namespace sweep is the one place that deletes a directory
-   * *because* no run state claims it — state deleted by hand, a crash
-   * before the state write, a record that never named its branch. The disk
-   * fact holds there too: it is a property of the worktree, not of the
-   * record that lost track of it.
-   */
-  it("keeps an unregistered leftover that still holds a decision log", async () => {
-    const repo = makeRepo();
-    setUp(repo, []);
-    const orphan = join(repo, ".afk", "worktrees", `afk-${SLUG}-s09`);
-    const sliceDir = join(orphan, "specs", "slices", "09-orphaned-estate");
-    mkdirSync(sliceDir, { recursive: true });
-    const decisionLog = join(sliceDir, "adjudication-decisions.json");
-    writeFileSync(
-      decisionLog,
-      JSON.stringify({ version: 1, decisions: [{ findingId: "F-01" }] }),
-      "utf-8",
-    );
-    const plainLeftover = join(repo, ".afk", "worktrees", `afk-${SLUG}-s08`);
-    mkdirSync(plainLeftover, { recursive: true });
-
-    const report = await runCleanFailed({
-      repoRoot: repo,
-      prdSlug: SLUG,
-      log: () => {},
-    });
-
-    expect(existsSync(decisionLog)).toBe(true);
-    expect(report.removedWorktrees).toEqual([plainLeftover]);
-    const skip = report.skipped.find((s) => s.target === orphan);
-    expect(skip).toBeDefined();
-    expect(skip!.reason).toContain("adjudication estate");
   });
 
   it("keeps a branch with commits ahead of the feature branch but still removes its worktree", async () => {

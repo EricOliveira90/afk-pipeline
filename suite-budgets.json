@@ -177,13 +177,39 @@
     "clean-failed": 15.9,
     "_total": "961.7s of suite time"
   },
+  "_measured2026_08_31_prd2_gate6@feat-codex/afk-v2-routing-adjudication": {
+    "_note": [
+      "Full chain, in the PRD 2 gate's review worktree on the run host,",
+      "at the round-4 blocker fix (adjudication estate ownership read off",
+      "disk). clean-failed came in at 23.9s against a 23s budget and",
+      "failed the gate; the three prior gate rounds on this same host",
+      "measured 11.9 / 11.1 / 16.6s in chain. The growth is real and",
+      "structural: the estate-ownership fix needs a slice worktree",
+      "materialised per post-decision exit (park, lock refusal, planner",
+      "failure, refresh conflict, cancellation mid-apply) and each `git",
+      "worktree add` is seconds on this host. The AGENTS.md ladder was",
+      "applied first — the pass-2 namespace-sweep scenario was folded into",
+      "the existing fixture instead of paying for its own temp repo, which",
+      "took the suite alone from 14.1s to 12.0s (9 tests) — and the budget",
+      "is raised for what remains: 30s, ~30% above the 23.9s in-chain",
+      "measurement recorded here."
+    ],
+    "fast": 123.3,
+    "orchestrator": 334.3,
+    "wave": 208.3,
+    "resume-integration": 84.3,
+    "qa-orchestration": 61.3,
+    "clean-failed": 23.9,
+    "_total": "835.3s of suite time, 14m18s of the gate's `pnpm test`",
+    "_alone": "clean-failed alone on the launcher host: 14.1s before the fold, 12.0s after"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
     "wave": 295,
     "resume-integration": 152,
     "qa-orchestration": 87,
-    "clean-failed": 23
+    "clean-failed": 30
   },
-  "totalSeconds": 1287
+  "totalSeconds": 1294
 }
