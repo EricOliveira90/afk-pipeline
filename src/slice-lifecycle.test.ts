@@ -124,6 +124,17 @@ describe("phase traits", () => {
     expect(traitsFor("AWAITING-ADJUDICATION").bucket).toBe("failed");
   });
 
+  it("preserves a refused adjudicated lock's estate while it reads as a failure", () => {
+    // The mechanical lock gate refused a completed adjudication on the
+    // current base: it presents like ESCALATE (failed bucket, STUCK label)
+    // but its estate is a human's completed input awaiting a base fix, so it
+    // shares the park's preserve-all disposition — decoupled from the
+    // presentation (ADR 0055 Seam 2 §6).
+    expect(traitsFor("ADJUDICATION-LOCK-REFUSED").debris).toBe("preserve-all");
+    expect(traitsFor("ADJUDICATION-LOCK-REFUSED").bucket).toBe("failed");
+    expect(traitsFor("ADJUDICATION-LOCK-REFUSED").summaryLabel).toBe("STUCK");
+  });
+
   it("keeps the cleanup axis independent of the presentation bucket", () => {
     // The disposition every other failure/cancellation phase carries —
     // clean-failed's whole reason to exist.
@@ -142,15 +153,21 @@ describe("phase traits", () => {
   });
 
   it("keeps the cleanup axis separate from the journal's replaceability axis", () => {
-    // Step 4 put `replaceableThisRun` on these same traits. Both are
-    // properties of the park, and neither implies the other.
+    // `replaceableThisRun` (the journal's axis) and `preserve-all` (cleanup's)
+    // are independent, and the two preserve-all phases prove it: the park is
+    // replaceable within the run by a human decision plus a re-dispatch, but
+    // a refused adjudicated lock is terminal this run — the operator fixes the
+    // base and the next run picks it up — while both preserve their estate.
     expect(traitsFor("AWAITING-ADJUDICATION").replaceableThisRun).toBe(true);
+    expect(
+      traitsFor("ADJUDICATION-LOCK-REFUSED").replaceableThisRun,
+    ).toBeUndefined();
     expect(
       ALL_PHASES.filter((phase) => traitsFor(phase).replaceableThisRun),
     ).toEqual(["AWAITING-ADJUDICATION"]);
     expect(
       ALL_PHASES.filter((phase) => traitsFor(phase).debris === "preserve-all"),
-    ).toEqual(["AWAITING-ADJUDICATION"]);
+    ).toEqual(["AWAITING-ADJUDICATION", "ADJUDICATION-LOCK-REFUSED"]);
   });
 });
 

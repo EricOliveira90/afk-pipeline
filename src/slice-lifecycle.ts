@@ -32,6 +32,7 @@ export type FailurePhase =
   | "STUCK"
   | "ESCALATE"
   | "AWAITING-ADJUDICATION"
+  | "ADJUDICATION-LOCK-REFUSED"
   | "ERROR"
   | "CONFLICT"
   | "CANCELLED"
@@ -72,6 +73,7 @@ export const ALL_PHASES = [
   "STUCK",
   "ESCALATE",
   "AWAITING-ADJUDICATION",
+  "ADJUDICATION-LOCK-REFUSED",
   "ERROR",
   "CONFLICT",
   "MERGE-PENDING",
@@ -124,6 +126,16 @@ export const lifecycle = {
     error: string,
   ): SliceLifecycle => ({
     phase: "AWAITING-ADJUDICATION",
+    ...id,
+    progress,
+    error,
+  }),
+  adjudicationLockRefused: (
+    id: SliceIdentity,
+    progress: SliceProgress,
+    error: string,
+  ): SliceLifecycle => ({
+    phase: "ADJUDICATION-LOCK-REFUSED",
     ...id,
     progress,
     error,
@@ -286,6 +298,27 @@ export const PHASE_TRAITS = {
     // The park: durable, but a human decision plus a re-dispatch replaces
     // it within this run.
     replaceableThisRun: true,
+    debris: "preserve-all",
+    branchDisposition: "branch",
+  },
+  "ADJUDICATION-LOCK-REFUSED": {
+    // The mechanical lock gate refused an adjudicated lock on the current
+    // base (ADR 0055 Seam 1 §5): the human decisions are complete and
+    // recorded, but a migration prefix (or other run-specific claim) now
+    // collides. To the operator it reads as a lock refusal — the same event
+    // as the transaction's own gate refusal, so it presents as ESCALATE
+    // does (failed bucket, STUCK label). But the decision log, worktree and
+    // branch are a completed human adjudication awaiting a base fix, not
+    // debris: the estate must survive clean-failed and adopt so the operator
+    // can renumber and let the slice's own next-run re-dispatch re-run the
+    // gate. Hence `preserve-all`, decoupled from the presentation (Seam 2
+    // §6) — clean-failed and adopt inherit the right behaviour off the
+    // trait, without either learning this phase by name.
+    bucket: "failed",
+    icon: "🔴",
+    summaryLabel: "STUCK",
+    persisted: true,
+    terminalThisRun: true,
     debris: "preserve-all",
     branchDisposition: "branch",
   },

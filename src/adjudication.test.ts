@@ -48,6 +48,19 @@ const IMPASSE: ContractNegotiationOutcome = {
   ],
 };
 
+/** IMPASSE with one field of its first (contested) finding overridden. */
+function mutateFirstFinding(
+  patch: Partial<ContractNegotiationOutcome["findings"][number]>,
+): ContractNegotiationOutcome {
+  return {
+    ...IMPASSE,
+    findings: [
+      { ...IMPASSE.findings[0]!, ...patch },
+      IMPASSE.findings[1]!,
+    ],
+  };
+}
+
 describe("parseAdjudication", () => {
   const valid: Adjudication[] = [
     {
@@ -134,6 +147,105 @@ describe("parseAdjudication", () => {
   it.each(invalid)("rejects %s", (_name, raw, expected) => {
     expect(() => parseAdjudication(raw, IMPASSE)).toThrow(expected);
   });
+});
+
+/**
+ * ADR 0054 Consequences / ADR 0055 Seam 1 §4-5, architect blocker 1: the
+ * fingerprint is the identity of the dispute a human decided, so it must
+ * bind the two positions and their evidence, not merely id/severity/state.
+ * Two impasses that share IDs and state but hold different positions or
+ * evidence are different questions; a decision log or a stamped lock made
+ * for one must not validate against the other.
+ */
+describe("impasseFingerprint binds the full question", () => {
+  const decisionFor = (findingId: string) =>
+    JSON.stringify({
+      version: 1,
+      findingId,
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+  const withSliceDir = (body: (sliceDir: string) => void) => {
+    const sliceDir = mkdtempSync(join(tmpdir(), "afk-fingerprint-"));
+    try {
+      body(sliceDir);
+    } finally {
+      rmSync(sliceDir, { recursive: true, force: true });
+    }
+  };
+
+  // Each variant shares F-01's id, severity, and state with IMPASSE but
+  // changes one question-bearing field. The pre-fix fingerprint collided
+  // on all of these.
+  const variants: Array<[string, ContractNegotiationOutcome]> = [
+    [
+      "the planner's position",
+      mutateFirstFinding({ plannerPosition: "CONDITION_MET" }),
+    ],
+    [
+      "the planner's evidence",
+      mutateFirstFinding({ plannerEvidence: "a different argument" }),
+    ],
+    [
+      "the evaluator's evidence",
+      mutateFirstFinding({ evaluatorEvidence: "a different objection" }),
+    ],
+    ["the unresolved flag", mutateFirstFinding({ unresolved: false })],
+  ];
+
+  it.each(variants)(
+    "produces a different fingerprint when %s changes",
+    (_name, variant) => {
+      expect(impasseFingerprint(variant)).not.toBe(impasseFingerprint(IMPASSE));
+    },
+  );
+
+  it.each(variants)(
+    "discards a decision log recorded against a dispute that differed in %s",
+    (_name, variant) => {
+      withSliceDir((sliceDir) => {
+        // A log recorded against the original impasse, complete with the
+        // matching fingerprint on disk.
+        writeFileSync(
+          join(sliceDir, "adjudication-decisions.json"),
+          JSON.stringify({
+            version: 1,
+            impasse: impasseFingerprint(IMPASSE),
+            applied: true,
+            decisions: [{ raw: decisionFor("F-01") }],
+          }),
+          "utf-8",
+        );
+        // Loaded against the new dispute, it is stale and discarded.
+        const loaded = loadAdjudicationDecisionLog(sliceDir, variant);
+        expect(loaded.discarded).toMatch(/recorded against a different IMPASSE/);
+        expect(loaded.log.decisions).toEqual([]);
+        expect(loaded.log.applied).toBe(false);
+      });
+    },
+  );
+
+  it.each(variants)(
+    "reopens a lock stamped for a dispute that differed in %s",
+    (_name, variant) => {
+      // A stamped lock can no longer self-certify against the new dispute:
+      // the stamp binds the old fingerprint, which the new outcome does not
+      // match, so the contract is reopened rather than inherited.
+      expect(
+        reconcileDiscardedDecisionLog({
+          locked: true,
+          provenance: {
+            kind: "impasse-adjudication",
+            impasse: impasseFingerprint(IMPASSE),
+          },
+          outcome: variant,
+        }),
+      ).toEqual({
+        action: "reopen",
+        because: "the lock is stamped with a different IMPASSE",
+      });
+    },
+  );
 });
 
 describe("the adjudication decision log", () => {

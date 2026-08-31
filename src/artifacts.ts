@@ -192,7 +192,17 @@ export function readReviewVerdict(reviewPath: string): ReviewVerdict {
 export function readContractFiles(contractPath: string): string[] | undefined {
   const content = readIfExists(contractPath);
   if (content === null) return undefined;
+  return parseContractFiles(content);
+}
 
+/**
+ * The path-extraction half of `readContractFiles`, over already-loaded
+ * contract bytes. The focused-scope-revision guard compares a captured
+ * previous contract (a string held by the transaction) against the revised
+ * one on disk, so it needs to parse content, not a file. Same return
+ * semantics as `readContractFiles`.
+ */
+export function parseContractFiles(content: string): string[] | undefined {
   const headingRe = /^##\s+Files expected to change\s*$/im;
   const headingMatch = content.match(headingRe);
   if (!headingMatch || headingMatch.index === undefined) return undefined;

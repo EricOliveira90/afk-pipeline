@@ -550,6 +550,7 @@ function roundsCellFor(s: SliceLifecycle): string {
     case "STUCK":
     case "ESCALATE":
     case "AWAITING-ADJUDICATION":
+    case "ADJUDICATION-LOCK-REFUSED":
     case "ERROR":
     case "CONFLICT":
     case "MERGE-PENDING":

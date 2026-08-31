@@ -1396,6 +1396,14 @@ describe("generator scope escalation", () => {
         blockedBy: [],
         userStories: "",
       },
+      {
+        number: "04",
+        ghIssue: "1143",
+        title: "Revision drops a locked path",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const escalation = (slice: Slice): string =>
       JSON.stringify({
@@ -1448,6 +1456,14 @@ describe("generator scope escalation", () => {
               { ...fixture(slices[1]!), revisionRejected: true },
             ],
             [slices[2]!.ghIssue, fixture(slices[2]!)],
+            // The revision drops the accepted path instead of adding to it:
+            // it declares only the escalation's requested path, so the
+            // requested-path check passes but the additive guard must catch
+            // the lost `declared-04` (finding 3).
+            [
+              slices[3]!.ghIssue,
+              { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
+            ],
           ]),
         }),
         onContractLocked: (() => {
@@ -1495,10 +1511,32 @@ describe("generator scope escalation", () => {
       );
     });
 
+    it("ends the slice ERROR naming the dropped locked path", () => {
+      expect(state.slices[slices[3]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[3]!.ghIssue]!.error).toMatch(
+        /dropped previously locked path/,
+      );
+      expect(state.slices[slices[3]!.ghIssue]!.error).toContain(
+        declared(slices[3]!),
+      );
+    });
+
+    it("does not resume generation after the additive guard refuses", () => {
+      // The dropped-path revision fails before the fresh generator: the only
+      // generator invocation is the one that raised the escalation.
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "generator" && ghIssue === slices[3]!.ghIssue,
+        ),
+      ).toHaveLength(1);
+    });
+
     it.each([
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
       ["a lock-gate refusal", 2],
+      ["a dropped locked path", 3],
     ])(
       "leaves the accepted contract byte-identical after %s",
       (_label, index) => {
@@ -1516,6 +1554,7 @@ describe("generator scope escalation", () => {
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
       ["a lock-gate refusal", 2],
+      ["a dropped locked path", 3],
     ])(
       "restores the accepted acceptance manifest after %s, unwidened",
       (_label, index) => {
@@ -1531,6 +1570,7 @@ describe("generator scope escalation", () => {
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
       ["a lock-gate refusal", 2],
+      ["a dropped locked path", 3],
     ])("keeps the escalation archive after %s", (_label, index) => {
       const slice = slices[index]!;
       expect(
@@ -3208,9 +3248,9 @@ describe("round-scoped contract feedback", () => {
 
     const refusedRenumbering = await decide(JSON.parse(evaluatorDecisionRaw));
 
-    expect(refusedRenumbering.phase).toBe("ESCALATE");
+    expect(refusedRenumbering.phase).toBe("ADJUDICATION-LOCK-REFUSED");
     expect(
-      refusedRenumbering.phase === "ESCALATE"
+      refusedRenumbering.phase === "ADJUDICATION-LOCK-REFUSED"
         ? refusedRenumbering.cause.summary
         : "",
     ).toContain(
@@ -3238,9 +3278,11 @@ describe("round-scoped contract feedback", () => {
 
     const refusedLock = await runSliceNegotiate(ctx);
 
-    expect(refusedLock.phase).toBe("ESCALATE");
+    expect(refusedLock.phase).toBe("ADJUDICATION-LOCK-REFUSED");
     expect(
-      refusedLock.phase === "ESCALATE" ? refusedLock.cause.summary : "",
+      refusedLock.phase === "ADJUDICATION-LOCK-REFUSED"
+        ? refusedLock.cause.summary
+        : "",
     ).toContain("injected adjudication lock-gate refusal");
     expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
     expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
@@ -3318,9 +3360,9 @@ describe("round-scoped contract feedback", () => {
 
     const refusedAfterRefresh = await runSliceNegotiate(ctx);
 
-    expect(refusedAfterRefresh.phase).toBe("ESCALATE");
+    expect(refusedAfterRefresh.phase).toBe("ADJUDICATION-LOCK-REFUSED");
     expect(
-      refusedAfterRefresh.phase === "ESCALATE"
+      refusedAfterRefresh.phase === "ADJUDICATION-LOCK-REFUSED"
         ? refusedAfterRefresh.cause.summary
         : "",
     ).toContain("injected post-refresh migration-prefix collision");
@@ -3558,9 +3600,9 @@ describe("round-scoped contract feedback", () => {
     expect(lockGateCalls).toBe(beforeLockStands.gateCalls + 1);
     gateObjection = "injected lock-stands base objection";
     const refusedLockStands = await runSliceNegotiate(ctx);
-    expect(refusedLockStands.phase).toBe("ESCALATE");
+    expect(refusedLockStands.phase).toBe("ADJUDICATION-LOCK-REFUSED");
     expect(
-      refusedLockStands.phase === "ESCALATE"
+      refusedLockStands.phase === "ADJUDICATION-LOCK-REFUSED"
         ? refusedLockStands.cause.summary
         : "",
     ).toContain("injected lock-stands base objection");

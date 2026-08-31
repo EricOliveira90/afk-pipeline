@@ -189,11 +189,17 @@ export interface AdjudicationDecisionLog {
 }
 
 /**
- * Identity of the impasse a decision log belongs to. Round, attempt, and
- * every finding's id/severity/state — the whole of what makes a decision
- * answerable. A renegotiation that produces a different impasse therefore
- * produces a different fingerprint, and the stale log is discarded rather
- * than counted towards the new impasse's contested findings.
+ * Identity of the impasse a decision log belongs to. Round, attempt, and —
+ * for every finding — the *whole* of what a human is deciding: not just
+ * id/severity/state, but the two positions and the evidence behind them
+ * (`plannerPosition`, `plannerEvidence`, `evaluatorEvidence`) and whether
+ * the finding is still unresolved. ADR 0054 Consequences: a decision
+ * answers the two recorded positions, so two impasses that share IDs and
+ * state but hold different positions or evidence are different questions
+ * and must not share a fingerprint (architect blocker 1). A renegotiation
+ * that produces a different impasse therefore produces a different
+ * fingerprint, and the stale log is discarded and the stamped lock reopened
+ * rather than self-certifying against the wrong dispute.
  */
 export function impasseFingerprint(
   outcome: ContractNegotiationOutcome,
@@ -207,6 +213,10 @@ export function impasseFingerprint(
           id: finding.id,
           severity: finding.severity,
           state: finding.state,
+          unresolved: finding.unresolved,
+          plannerPosition: finding.plannerPosition,
+          plannerEvidence: finding.plannerEvidence,
+          evaluatorEvidence: finding.evaluatorEvidence,
         })),
       }),
     )

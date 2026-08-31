@@ -37,6 +37,7 @@ export type WaveOutcomePhase =
   | "STUCK"
   | "ESCALATE"
   | "AWAITING-ADJUDICATION"
+  | "ADJUDICATION-LOCK-REFUSED"
   | "ERROR"
   | "CANCELLED"
   | "CONFLICT"
