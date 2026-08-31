@@ -2,70 +2,81 @@
 
 **Verdict:** FIX-BEFORE-SHIP
 
-## Blocking Findings
+## Standards
 
-### A1. Accepted-pair recovery can be skipped or only half-applied
+### A1. Accepted-pair recovery is not unconditional
 
-**Convention:** ADR 0055, Decision - Seam 1 section 3 requires the accepted
-`contract.md` and `acceptance-manifest.json` pair to be restored byte-for-byte
-on every non-accepted exit. ADR 0048, Decision assigns scope mutation to the
-orchestrator and requires a refused amendment to leave the contract untouched.
+**Convention:** ADR 0008, Decision makes the on-disk contract the
+orchestrator-owned source of truth. ADR 0055, Seam 1 section 3 requires
+`contract.md` and `acceptance-manifest.json` to be restored byte-for-byte on
+every non-accepted exit; ADR 0051 requires rollback by default.
 
-**File and location:** `src/orchestrator.ts`, `runSliceExecute`, lines
-4291-4299; `src/artifacts.ts`, `archiveRejectedContractMutation`, lines
-374-395; and `src/contract-transaction.ts`,
-`restoreAcceptedContractPair`/`withContractTransaction`, lines 159-170 and
-349-376.
+**File and location:** `src/orchestrator.ts`, `runSliceExecute`'s generator
+dispatch and rejected-mutation branch; `src/artifacts.ts`,
+`archiveRejectedContractMutation`; `src/contract-transaction.ts`,
+`restoreAcceptedContractPair` and `withContractTransaction`'s `finally`.
 
-**Evidence read/run:** I read the generator-mutation refusal in
-`runSliceExecute` and confirmed it calls `archiveRejectedContractMutation`
-before `restoreAcceptedContractPair`, without `finally`. I read the archive
-implementation and confirmed its `flag: "wx"` write intentionally throws on
-an existing stamp and can also throw after archiving only the first file. I
-then read both rollback implementations and confirmed their sequential writes
-are not isolated: failure restoring `contract.md` prevents any manifest
-restore, while failure restoring the manifest leaves a half-restored pair.
-The current integration assertions at `src/orchestrator.test.ts:1700` and
-`:1746` cover only successful archival and restoration.
+**Evidence read/run:** I read the current generator loop and confirmed it
+captures the pair, awaits `invoke`, and only then checks for mutation. If the
+generator changes either file and the invocation throws or is cancelled, the
+outer catch returns without checking or restoring the pair. On the normal
+return path, `archiveRejectedContractMutation` runs before restoration and
+uses `flag: "wx"`; a collision or write failure therefore also skips
+restoration. I read both rollback implementations and confirmed their
+sequential writes stop after the first failed restore, potentially leaving
+the pair half-restored. I inspected the focused tests; they cover successful
+archival and rollback, not these failure exits.
 
-An archive collision or filesystem write failure can therefore leave the
-generator's unauthorized lock bytes on disk, or leave the accepted pair
-internally inconsistent. The slice reports `ERROR`, but the next dispatch
-reads control state that the orchestrator did not accept.
+This can leave an agent-authored lock or an internally inconsistent accepted
+pair as the control state read by the next dispatch.
 
-**Required before ship:** Capture the rejected bytes independently of the live
-files, make restoration unconditional even when evidence archival fails, and
-attempt both file restorations before reporting an aggregate rollback error.
-Add focused coverage for an archive failure and for each restoration write
-failing.
+**Required before ship:** Put the integrity check and restoration behind
+`finally` semantics, make evidence archival unable to prevent restoration,
+and attempt both file restorations before reporting an aggregate failure.
+Use one restoration primitive for the generator guard and transaction
+rollback, with focused coverage for invocation failure, archive collision,
+and each restore write failing.
 
-### A2. Ordinary negotiation writes LOCKED before its mechanical gate passes
+### A2. Ordinary negotiation still trusts agent-written LOCKED status
 
-**Convention:** ADR 0055 section 5 mandates gate-before-lock ordering and says
-that `LOCKED` on disk is the gate's attestation. ADR 0008, Decision makes that
-on-disk status the authoritative contract state.
+**Convention:** ADR 0008, Decision says only the orchestrator writes
+`LOCKED`, and only after evaluator `ACCEPT`. ADR 0055 section 4 requires every
+lock to carry orchestrator provenance; section 5 requires the mechanical gate
+to pass before anything writes `LOCKED`.
 
-**File and location:** `src/orchestrator.ts`, `negotiateAttempt`, lines
-3264-3282, together with `lockRefusedByGate`, lines 2845-2850.
+**File and location:** `src/orchestrator.ts`, `negotiateAttempt`, specifically
+`recordGateObjection`, `candidateRefusedByGate`, and the verdict branch after
+loading `contract-review.json`.
 
-**Evidence read/run:** I read the ACCEPT branch and confirmed
-`artifacts.lockContract()` writes `LOCKED` at line 3271; only afterward does
-line 3281 call `lockRefusedByGate`, which invokes `ctx.onContractLocked` and
-reopens on objection. I also read the prior-lock recovery at lines 2942-2961;
-it revalidates on a later dispatch but does not remove the crash window in the
-current one.
+**Evidence read/run:** I read the current verdict branch and its gate helpers.
+For an `ACCEPT` candidate already written as `LOCKED` by the planner, a gate
+refusal records an in-memory `NEGOTIATING` state but never reopens the file,
+leaving an ungated `LOCKED` contract on disk. For a non-`ACCEPT` verdict, the
+code reads the planner-written status and breaks successfully when it is
+`LOCKED` and the gate passes, even though the evaluator returned `REVISE`;
+that lock also has no orchestrator provenance. I inspected the new ordering
+test at `src/orchestrator.test.ts` and confirmed its planner writes
+`NEGOTIATING`, so neither pre-locked path is exercised.
 
-A process stop between those calls leaves an authoritative `LOCKED` contract
-whose migration/run-specific gate never passed. A later run can repair it, but
-until then disk asserts the exact invariant ADR 0055 says must not be written.
+These paths let an agent grant generation authority despite the evaluator or
+mechanical gate withholding it.
 
-**Required before ship:** Evaluate the mechanical gate against the accepted
-candidate before calling `lockContract`; write the status and provenance only
-after the gate passes. Preserve the existing objection-to-next-round routing.
+**Required before ship:** Treat every agent-written `LOCKED` candidate as
+unauthorized. Normalize or refuse it before the gate, write `LOCKED` only in
+the orchestrator's `ACCEPT`-after-gate branch, and never accept a
+non-`ACCEPT` review because of the file's status. Cover both an `ACCEPT` plus
+gate refusal and a `REVISE` plus passing gate with a pre-locked candidate.
 
-## Structural Assessment
+## Spec
 
-The shared transaction, adjudication completion predicate, replaceable park
-lifecycle, idle-only wait, and tri-state estate probe otherwise align with
-ADRs 0054-0055. The excised adoption implementation is absent from the
-shipping source diff.
+The four retained slices otherwise form the requested routing flow:
+generator escalation, durable impasse parking, per-finding adjudication with
+idle-only waiting, and code-assembled STUCK diagnosis. Slice 06 adoption code
+is absent as required by the excision note. No separate spec-only blocker was
+found beyond the authority and recovery defects above.
+
+## Summary
+
+Standards: 2 blocking findings. Spec: no additional findings. The worst risk
+is authoritative contract state surviving from an agent mutation or being
+accepted from an agent-written lock.
