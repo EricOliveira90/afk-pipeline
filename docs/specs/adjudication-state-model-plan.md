@@ -167,6 +167,11 @@ shape.
 - Refusal 7 (second gate round): the same single enumeration also
   answers "does the slice being adopted still hold a parked estate?",
   keyed on the phase's `preserve-all` debris trait.
+- **Superseded (fourth gate round):** refusal 7 and step 6 both read
+  ownership off disk (`findAdjudicationEstate`) instead of off the phase
+  trait, and refusal 7 matches the registered *expected path* as well as
+  the branch so a detached worktree fails closed. See ADR 0055 Seam 2 §6
+  and §8 for why the phase was the wrong carrier.
 
 ### Step 8 — migration-sync STUCK goes through the finalizer (P1)
 

@@ -105,14 +105,24 @@ function setUp(repo: string, slices: SliceFixture[]): void {
 
 describe("runCleanFailed", () => {
   /**
-   * The ERROR slice is the command's bread and butter. The parked slice
-   * rides along in the same fixture rather than paying for a second temp
-   * git repo (AGENTS.md: put a new assertion in a fixture that already
-   * runs), and it earns its place here — the two together are the
-   * distinction ADR 0055 Seam 2 §6 draws. Both phases render in the
-   * `failed` bucket; only one is debris.
+   * The ERROR slice is the command's bread and butter. Every estate-owning
+   * slice rides along in the same fixture rather than paying for a temp git
+   * repo each (AGENTS.md: put a new assertion in a fixture that already
+   * runs), and they earn their place here — together they are the
+   * distinction ADR 0055 Seam 2 §6 draws. All of them render in the `failed`
+   * bucket; only the one with no estate on disk is debris.
+   *
+   * The three exits after `#131` are the point of the fourth gate round.
+   * Once every human decision is accepted, the apply step can still fail
+   * mechanically — the planner or provider dies, the lane-successor refresh
+   * conflicts, the operator cancels mid-apply — and each of those lands in
+   * an ordinary `ERROR`, `CONFLICT` or `LANE-CANCELLED`, not in a
+   * `preserve-all` phase. Deriving disposability from the phase deleted the
+   * only decision log in exactly those cases. Ownership is read off disk
+   * instead, so all three preserve for the same reason and no future exit
+   * has to remember to opt in.
    */
-  it("removes an ERRORed slice's estate while leaving preserve-all slices' untouched", async () => {
+  it("removes an ERRORed slice's estate while leaving every adjudication estate untouched", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "101", number: "01", phase: "ERROR", materialise: true },
@@ -124,14 +134,22 @@ describe("runCleanFailed", () => {
       },
       // A completed adjudication whose lock the mechanical gate refused on
       // the current base (ADR 0055 Seam 1 §5). Its decisions are recorded,
-      // not pending — but the estate is still a human's completed input
-      // awaiting a base fix, so it preserves like the park. clean-failed must
-      // not learn this second phase by name: it inherits the skip off the
-      // shared preserve-all trait (Seam 2 §6).
+      // not pending. Its phase is presentation-only (`disposable`, like
+      // ESCALATE), so its survival here is the disk fact and nothing else.
       {
         ghIssue: "121",
         number: "12",
         phase: "ADJUDICATION-LOCK-REFUSED",
+        materialise: true,
+      },
+      // The post-decision apply exits: a planner/provider failure, a
+      // lane-successor refresh conflict, and a cancellation mid-apply.
+      { ghIssue: "131", number: "13", phase: "ERROR", materialise: true },
+      { ghIssue: "141", number: "14", phase: "CONFLICT", materialise: true },
+      {
+        ghIssue: "151",
+        number: "15",
+        phase: "LANE-CANCELLED",
         materialise: true,
       },
     ]);
@@ -139,25 +157,46 @@ describe("runCleanFailed", () => {
     const branch = `afk/${SLUG}-slice-01-fixture`;
     expect(existsSync(dir)).toBe(true);
 
-    // Each preserve-all slice's estate as the run left it: the impasse
-    // record and the decision log live in the slice directory *inside the
-    // worktree*, so removing the worktree destroys the operator's input.
+    // Each estate as the run left it: the impasse record and the decision
+    // log live in the slice directory *inside the worktree*, so removing the
+    // worktree destroys the operator's input.
     const preserved = [
-      { number: "11", name: "parked", phase: "AWAITING-ADJUDICATION" },
-      { number: "12", name: "lock-refused", phase: "ADJUDICATION-LOCK-REFUSED" },
-    ].map(({ number, name, phase }) => {
+      // Still awaiting an answer: the impasse record is the retry path and
+      // adjudication.md is the decision in flight; no decision recorded yet.
+      { number: "11", name: "parked", phase: "AWAITING-ADJUDICATION", log: false },
+      { number: "12", name: "lock-refused", phase: "ADJUDICATION-LOCK-REFUSED", log: true },
+      { number: "13", name: "planner-failed", phase: "ERROR", log: true },
+      { number: "14", name: "refresh-conflict", phase: "CONFLICT", log: true },
+      { number: "15", name: "cancelled-mid-apply", phase: "LANE-CANCELLED", log: true },
+    ].map(({ number, name, phase, log }) => {
       const wtDir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s${number}`);
       const branchName = `afk/${SLUG}-slice-${number}-fixture`;
       const sliceDir = join(wtDir, "specs", "slices", `${number}-${name}`);
       mkdirSync(sliceDir, { recursive: true });
       const impasseRecord = join(sliceDir, "contract-negotiation-outcome.json");
-      const decisionLog = join(sliceDir, "adjudication-decisions.json");
-      // The in-flight decision only exists for a park still awaiting an
-      // answer; a lock-refused estate has its decisions recorded already.
-      const inFlight = join(sliceDir, "adjudication.md");
-      writeFileSync(impasseRecord, JSON.stringify({ outcome: "IMPASSE" }), "utf-8");
-      writeFileSync(decisionLog, JSON.stringify({ version: 1 }), "utf-8");
-      writeFileSync(inFlight, JSON.stringify({ version: 1, findingId: "F-02" }), "utf-8");
+      const decisionLog = log
+        ? join(sliceDir, "adjudication-decisions.json")
+        : null;
+      const inFlight = log ? null : join(sliceDir, "adjudication.md");
+      writeFileSync(
+        impasseRecord,
+        JSON.stringify({ version: 1, classification: "IMPASSE", findings: [] }),
+        "utf-8",
+      );
+      if (decisionLog) {
+        writeFileSync(
+          decisionLog,
+          JSON.stringify({ version: 1, decisions: [{ findingId: "F-02" }] }),
+          "utf-8",
+        );
+      }
+      if (inFlight) {
+        writeFileSync(
+          inFlight,
+          JSON.stringify({ version: 1, findingId: "F-02" }),
+          "utf-8",
+        );
+      }
       return { wtDir, branchName, impasseRecord, decisionLog, inFlight, phase };
     });
 
@@ -178,9 +217,13 @@ describe("runCleanFailed", () => {
       // and above all not the files the operator's next step depends on.
       expect(existsSync(est.wtDir)).toBe(true);
       expect(existsSync(est.impasseRecord)).toBe(true);
-      expect(existsSync(est.decisionLog)).toBe(true);
-      expect(existsSync(est.inFlight)).toBe(true);
+      if (est.decisionLog) expect(existsSync(est.decisionLog)).toBe(true);
+      if (est.inFlight) expect(existsSync(est.inFlight)).toBe(true);
+      // The retry path: the branch the next dispatch re-enters adjudication
+      // on, still pointing at the same commit the estate was recorded
+      // against.
       expect(git.branchExists(repo, est.branchName)).toBe(true);
+      expect(report.deletedBranches).not.toContain(est.branchName);
       // The worktree is still git's, not just a surviving directory: pass 2
       // sweeps unregistered namespace leftovers, and an estate that pass 1
       // skipped but pass 2 deleted would be preserved in name only.
@@ -194,6 +237,41 @@ describe("runCleanFailed", () => {
       expect(skip!.reason).toContain(est.phase);
       expect(skip!.reason).toMatch(/adjudication estate|re-dispatch/);
     }
+  });
+
+  /**
+   * Pass 2's namespace sweep is the one place that deletes a directory
+   * *because* no run state claims it — state deleted by hand, a crash
+   * before the state write, a record that never named its branch. The disk
+   * fact holds there too: it is a property of the worktree, not of the
+   * record that lost track of it.
+   */
+  it("keeps an unregistered leftover that still holds a decision log", async () => {
+    const repo = makeRepo();
+    setUp(repo, []);
+    const orphan = join(repo, ".afk", "worktrees", `afk-${SLUG}-s09`);
+    const sliceDir = join(orphan, "specs", "slices", "09-orphaned-estate");
+    mkdirSync(sliceDir, { recursive: true });
+    const decisionLog = join(sliceDir, "adjudication-decisions.json");
+    writeFileSync(
+      decisionLog,
+      JSON.stringify({ version: 1, decisions: [{ findingId: "F-01" }] }),
+      "utf-8",
+    );
+    const plainLeftover = join(repo, ".afk", "worktrees", `afk-${SLUG}-s08`);
+    mkdirSync(plainLeftover, { recursive: true });
+
+    const report = await runCleanFailed({
+      repoRoot: repo,
+      prdSlug: SLUG,
+      log: () => {},
+    });
+
+    expect(existsSync(decisionLog)).toBe(true);
+    expect(report.removedWorktrees).toEqual([plainLeftover]);
+    const skip = report.skipped.find((s) => s.target === orphan);
+    expect(skip).toBeDefined();
+    expect(skip!.reason).toContain("adjudication estate");
   });
 
   it("keeps a branch with commits ahead of the feature branch but still removes its worktree", async () => {

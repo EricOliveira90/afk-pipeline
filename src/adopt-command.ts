@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { findAdjudicationEstate } from "./adjudication-estate.js";
 import type {
   GateDeclaration,
   GateResult,
@@ -20,8 +21,10 @@ import {
 import type { Slice } from "./issues-parser.js";
 import { parseIssuesMd } from "./issues-parser.js";
 import {
+  providerNameFromRunSlug,
   resolveBaseGateDeclarations,
   runSlugForProviderName,
+  sliceWorktreeDirForProviderName,
 } from "./orchestrator.js";
 import { resolveSanityPlan } from "./preship.js";
 import { matchesSliceSelector } from "./resume.js";
@@ -303,6 +306,11 @@ function worktreesHolding(
     .map((worktree) => worktree.path);
 }
 
+function normalisePath(p: string): string {
+  const n = p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? n.toLowerCase() : n;
+}
+
 /**
  * Refuse an adoption that would strand a parked slice's adjudication
  * estate (ADR 0055 Seam 2; refusal 7 in ADR 0053's list).
@@ -323,16 +331,69 @@ function worktreesHolding(
  * refusal names the estate and the two ways forward, and the park stays
  * byte-for-byte intact.
  *
- * Keyed on the phase's `preserve-all` debris trait rather than on the
- * phase name, so a future phase that also preserves its estate inherits
- * this refusal instead of re-learning it.
+ * Ownership is read off **disk**, not off the phase (ADR 0055 Seam 2 §6/§8,
+ * fourth adjudication gate round). Two independent leaks made the earlier
+ * phase-keyed form miss estates it existed to protect:
+ *
+ * - The estate can be left behind by any post-decision apply exit — a
+ *   planner failure, a feature-refresh conflict, a cancellation mid-apply —
+ *   and those end in ordinary `ERROR`/`CONFLICT`, not in a `preserve-all`
+ *   phase. `findAdjudicationEstate` asks the worktree instead, so it does
+ *   not matter which exit was taken.
+ * - Holders were matched by branch alone, and `listWorktrees` reports a
+ *   detached worktree with `branch: null`. A registered worktree at the
+ *   slice's expected path therefore slipped past the guard entirely. It is
+ *   now matched by expected path as well, and a detached or
+ *   wrong-branch worktree there fails closed rather than reading as
+ *   absence.
  */
-function parkedEstateRefusal(
+function adjudicationEstateRefusal(
   record: PersistedSliceState | undefined,
   ghIssue: string,
   worktrees: ReturnType<typeof listWorktrees>,
+  expectedWorktreeDir: string,
 ): string | null {
+  const expected = normalisePath(expectedWorktreeDir);
+  const registeredAtExpected = worktrees.filter(
+    (worktree) => normalisePath(worktree.path) === expected,
+  );
+  const byBranch = record?.branch
+    ? worktreesHolding(worktrees, record.branch)
+    : [];
+  // Registered paths first: git's own spelling is what `git worktree
+  // remove` takes, and the refusal is meant to be pasteable.
+  const candidatePaths = [
+    ...new Set([
+      ...registeredAtExpected.map((w) => w.path),
+      ...byBranch,
+      expectedWorktreeDir,
+    ]),
+  ];
+
+  // 1. The disk fact, independent of both the phase and the branch: does
+  //    any candidate worktree still hold the impasse record or the decision
+  //    log? This is the term that covers every apply exit.
+  for (const path of candidatePaths) {
+    const estate = findAdjudicationEstate(path);
+    if (!estate) continue;
+    return (
+      `slice #${ghIssue} still owns a live adjudication estate in ` +
+      `${path} (${estate.evidence})` +
+      (record ? `; the run recorded ${record.phase}` : "") +
+      (record?.branch ? ` on ${record.branch}` : "") +
+      `. Adoption would replace that estate with PASS without a dispatch, ` +
+      `and the next launch then refuses the worktree as a leftover no live ` +
+      `slice owns. Only the slice's own re-dispatch replaces it (ADR 0055 ` +
+      `Seam 2): either ${forwardPath(record)}, or remove the worktree ` +
+      `yourself (\`git worktree remove\`) — its branch and recorded ` +
+      `decisions survive that — and run adopt again.`
+    );
+  }
+
   if (!record || traitsFor(record.phase).debris !== "preserve-all") return null;
+
+  // 2. The record says a human owes input but the disk showed nothing.
+  //    Absence has to be proved, so anything ambiguous refuses.
   if (!record.branch) {
     return (
       `slice #${ghIssue} is recorded ${record.phase} in run state with no ` +
@@ -343,29 +404,58 @@ function parkedEstateRefusal(
       `record names its branch.`
     );
   }
-  const holders = worktreesHolding(worktrees, record.branch);
-  if (holders.length === 0) return null;
-  // AWAITING-ADJUDICATION still needs a human decision; ADJUDICATION-LOCK-
-  // REFUSED already has its decisions and needs the base fixed instead. Both
-  // preserve the estate, so both refuse here — the forward path differs.
-  const finishGuidance =
-    record.phase === "ADJUDICATION-LOCK-REFUSED"
-      ? `fix the base the lock gate objected to (typically renumber the ` +
-        `colliding migration prefix) and let the slice's own re-dispatch ` +
-        `re-run the gate`
-      : `write the pending decision into adjudication.md and let the ` +
-        `pipeline finish the slice`;
+  const ambiguous = registeredAtExpected.filter(
+    (worktree) => worktree.branch !== record.branch!.replace(/^refs\/heads\//, ""),
+  );
+  if (ambiguous.length > 0) {
+    return (
+      `slice #${ghIssue} is recorded ${record.phase} and a worktree is ` +
+      `registered at its expected path ${ambiguous[0]!.path} with ` +
+      `${ambiguous[0]!.branch === null ? "a detached HEAD" : `${ambiguous[0]!.branch} checked out`} ` +
+      `instead of ${record.branch}. Whether that worktree is the park's ` +
+      `estate cannot be proved, and adoption may not infer absence (ADR ` +
+      `0055 Seam 2 §8) — inspect it, then either let the slice's own ` +
+      `re-dispatch reconcile it or remove it yourself and run adopt again.`
+    );
+  }
+  if (byBranch.length === 0) return null;
   return (
     `slice #${ghIssue} is recorded ${record.phase} and its adjudication ` +
-    `estate is still live: ${holders.join(", ")} ${
-      holders.length === 1 ? "is a" : "are"
-    } registered worktree${holders.length === 1 ? "" : "s"} on ` +
+    `estate is still live: ${byBranch.join(", ")} ${
+      byBranch.length === 1 ? "is a" : "are"
+    } registered worktree${byBranch.length === 1 ? "" : "s"} on ` +
     `${record.branch}. Adoption would replace that estate with PASS without ` +
     `a dispatch, and the next launch then refuses the worktree as a leftover ` +
     `no live slice owns. Only the slice's own re-dispatch replaces it ` +
-    `(ADR 0055 Seam 2): either ${finishGuidance}, or remove the parked ` +
+    `(ADR 0055 Seam 2): either ${forwardPath(record)}, or remove the parked ` +
     `worktree yourself (\`git worktree remove\`) — its branch and recorded ` +
     `decisions survive that — and run adopt again.`
+  );
+}
+
+/**
+ * What the operator does next. A park still needs a human decision; a
+ * refused lock already has its decisions and needs the base fixed; any
+ * other phase holding an estate got there by an apply exit, so the
+ * decisions are recorded and a re-dispatch retries them.
+ */
+function forwardPath(record: PersistedSliceState | undefined): string {
+  if (record?.phase === "AWAITING-ADJUDICATION") {
+    return (
+      `write the pending decision into adjudication.md and let the ` +
+      `pipeline finish the slice`
+    );
+  }
+  if (record?.phase === "ADJUDICATION-LOCK-REFUSED") {
+    return (
+      `fix the base the lock gate objected to (typically renumber the ` +
+      `colliding migration prefix) and let the slice's own re-dispatch ` +
+      `re-run the gate`
+    );
+  }
+  return (
+    `let the slice's own re-dispatch retry the recorded decisions from ` +
+    `where the apply stopped`
   );
 }
 
@@ -505,11 +595,17 @@ export async function runAdoptCli(
   const { worktrees } = enumeration;
 
   // Before candidate creation or any ref mutation, like every other
-  // adoption refusal: a parked slice whose estate is still registered.
-  const parked = parkedEstateRefusal(
+  // adoption refusal: a slice that still owns an adjudication estate.
+  const parked = adjudicationEstateRefusal(
     state.slices[slice.ghIssue],
     slice.ghIssue,
     worktrees,
+    sliceWorktreeDirForProviderName(
+      repoRoot,
+      parsed.prdSlug,
+      slice.number,
+      providerNameFromRunSlug(parsed.prdSlug, runSlug),
+    ),
   );
   if (parked) {
     return { output: `Adoption refused: ${parked}`, exitCode: 1 };

@@ -33,13 +33,25 @@
     {
       "id": "B-01",
       "source": "GH #81 AC1; PRD stories 3 and 10",
-      "given": "round-two exhaustion leaves any unresolved blocking finding CONTESTED",
+      "given": "round-two exhaustion leaves every unresolved blocking finding CONTESTED",
       "when": "contract negotiation ends",
       "then": "the slice parks in AWAITING-ADJUDICATION instead of ESCALATE",
       "observableResult": "Run state, the slice-outcome event, run-summary.md, and afk status each expose AWAITING-ADJUDICATION, the parked branch, and the impasse reason; any missing branch or reason fails verification.",
       "preservation": false,
       "gateIds": [
         "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-01a",
+      "source": "ADR 0055 section 1 and ADR 0041; PRD stories 3 and 10 (fourth gate round, PM finding)",
+      "given": "round-two exhaustion leaves a CONTESTED blocking finding beside an unresolved OPEN blocking finding",
+      "when": "contract negotiation ends",
+      "then": "the exhaustion classifies NON_CONVERGENCE and routes to the operator, and the diagnosis surfaces the contest rather than dropping it",
+      "observableResult": "stuck.md names each contested finding with both held positions and both sides' evidence, names the OPEN blocker that made the exhaustion non-adjudicable, and states that closing it and rerunning parks a surviving contest adjudicably; the run-state reason names the contested finding too.",
+      "preservation": false,
+      "gateIds": [
         "tests"
       ]
     },

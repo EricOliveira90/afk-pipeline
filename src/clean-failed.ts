@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { findAdjudicationEstate } from "./adjudication-estate.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
@@ -21,11 +22,13 @@ import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
  * issue #19 and ADR 0023.
  *
  * Scope guarantees:
- * - Targets are the slices whose phase declares its debris disposable.
- *   ADR 0055 Seam 2 §6 narrows ADR 0023's "every slice in a failure
- *   phase" to exactly that: an AWAITING-ADJUDICATION slice renders as a
- *   failure but its estate is a human's pending input, so it is skipped
- *   and named in the report. Everything below is unchanged.
+ * - Targets are the slices whose phase declares its debris disposable and
+ *   whose worktree does not hold an adjudication estate. ADR 0055 Seam 2
+ *   §6 narrows ADR 0023's "every slice in a failure phase" to exactly
+ *   that: an adjudication estate is a human's pending input, so the slice
+ *   is skipped and named in the report whatever phase it ended in — the
+ *   fact is read off disk, not off the phase. Everything below is
+ *   unchanged.
  * - Only targets identified by this PRD's run state, plus on-disk
  *   leftovers matching this PRD's exact worktree/scratch naming
  *   (`<prefix>-<prdSlug>-s<NN>`) — other PRDs' and other providers'
@@ -63,9 +66,43 @@ const isCleanupTarget = (phase: SlicePhase): boolean =>
 const mustPreserveBranch = (phase: SlicePhase): boolean =>
   traitsFor(phase).debris === "preserve-branch";
 
-/** Nothing is debris — the estate belongs to a human's pending decision. */
-const mustPreserveEstate = (phase: SlicePhase): boolean =>
-  traitsFor(phase).debris === "preserve-all";
+/**
+ * Nothing is debris — the estate belongs to a human's pending decision.
+ *
+ * Two independent sources, and the *disk* one is the authority (ADR 0055
+ * Seam 2 §6, fourth adjudication gate round). `findAdjudicationEstate`
+ * asks the only question that matters — does this worktree still hold the
+ * impasse record or the decision log? — and so covers every terminal phase
+ * a post-decision apply can exit through, including the ordinary `ERROR`
+ * and `CONFLICT` a planner failure, a feature-refresh conflict, a
+ * cancellation mid-apply, or a flattened bookkeeping throw produce. The
+ * phase trait remains as a second, weaker term: it catches an
+ * `AWAITING-ADJUDICATION` record whose worktree an operator has already
+ * removed by hand, where there is no disk to read.
+ */
+const mustPreserveEstate = (
+  phase: SlicePhase,
+  dir: string | undefined,
+): { reason: string } | null => {
+  const estate = dir ? findAdjudicationEstate(dir) : null;
+  if (estate) {
+    return {
+      reason:
+        `${phase} — preserving the adjudication estate this worktree still ` +
+        `holds (${estate.evidence}): it is the operator's pending input, and ` +
+        `only this slice's own re-dispatch replaces it`,
+    };
+  }
+  if (traitsFor(phase).debris === "preserve-all") {
+    return {
+      reason:
+        `${phase} — preserving the adjudication estate (impasse record, ` +
+        `decision log, worktree, branch): it is the operator's pending input, ` +
+        `and only this slice's own re-dispatch replaces it`,
+    };
+  }
+  return null;
+};
 
 export interface CleanFailedOptions {
   repoRoot: string;
@@ -176,22 +213,23 @@ export async function runCleanFailed(
         ? computed
         : (registeredDir ?? computed);
 
-    // A parked slice's estate is not debris: the impasse record, the
-    // decision log, the in-flight adjudication.md, the worktree they live
-    // in and the branch under it are a human's pending input, and only the
-    // slice's own re-dispatch replaces them (ADR 0055 Seam 2). Say so —
-    // an operator who ran clean-failed to clear the way for a re-run has
-    // to be able to tell a deliberate skip from a command that missed one.
-    if (mustPreserveEstate(slice.phase)) {
+    // A slice that owns an adjudication estate has no debris: the impasse
+    // record, the decision log, the in-flight adjudication.md, the worktree
+    // they live in and the branch under it are a human's pending input, and
+    // only the slice's own re-dispatch replaces them (ADR 0055 Seam 2). Say
+    // so — an operator who ran clean-failed to clear the way for a re-run
+    // has to be able to tell a deliberate skip from a command that missed
+    // one.
+    const preserve = mustPreserveEstate(slice.phase, dir);
+    if (preserve) {
       if (dir) handledDirs.add(normalise(dir));
       report.skipped.push({
         target: dir ?? slice.branch ?? `#${ghIssue}`,
-        reason:
-          `${slice.phase} — preserving the adjudication estate (impasse record, ` +
-          `decision log, worktree, branch): it is the operator's pending input, ` +
-          `and only this slice's own re-dispatch replaces it`,
+        reason: preserve.reason,
       });
-      log(`  kept the whole estate — ${slice.phase}, awaiting a human decision`);
+      log(
+        `  kept the whole estate — ${slice.phase}, an adjudication the operator still owns`,
+      );
       continue;
     }
 
@@ -267,6 +305,23 @@ export async function runCleanFailed(
           target: dir,
           reason:
             "registered worktree whose slice is not in a failure phase — not touching",
+        });
+        continue;
+      }
+      // The same disk fact pass 1 consults, asked of a directory no run
+      // state claims: state deleted by hand, a crash before the state
+      // write, a slice record that never named its branch. Ownership is a
+      // property of the worktree, so it holds here too — and this is the
+      // one pass that would otherwise delete an estate precisely because
+      // nothing recorded it.
+      const orphanEstate = findAdjudicationEstate(dir);
+      if (orphanEstate) {
+        report.skipped.push({
+          target: dir,
+          reason:
+            `unregistered leftover that still holds an adjudication estate ` +
+            `(${orphanEstate.evidence}) — the operator's input outlives the ` +
+            `run state that lost track of it`,
         });
         continue;
       }

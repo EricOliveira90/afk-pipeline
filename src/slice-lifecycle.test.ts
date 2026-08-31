@@ -124,15 +124,23 @@ describe("phase traits", () => {
     expect(traitsFor("AWAITING-ADJUDICATION").bucket).toBe("failed");
   });
 
-  it("preserves a refused adjudicated lock's estate while it reads as a failure", () => {
+  it("leaves a refused adjudicated lock presentation-only — its estate is owned on disk", () => {
     // The mechanical lock gate refused a completed adjudication on the
-    // current base: it presents like ESCALATE (failed bucket, STUCK label)
-    // but its estate is a human's completed input awaiting a base fix, so it
-    // shares the park's preserve-all disposition — decoupled from the
-    // presentation (ADR 0055 Seam 2 §6).
-    expect(traitsFor("ADJUDICATION-LOCK-REFUSED").debris).toBe("preserve-all");
+    // current base. It presents like ESCALATE (failed bucket, STUCK label),
+    // and — as of the fourth adjudication gate round — its debris trait says
+    // so too. The estate it leaves behind is still protected, but by the
+    // disk fact `findAdjudicationEstate`, not by this phase: every other
+    // post-decision apply exit (planner failure, refresh conflict,
+    // cancellation mid-apply, a flattened bookkeeping throw) leaves the same
+    // estate under ERROR or CONFLICT, so the phase was a lossy proxy for
+    // ownership (ADR 0055 Seam 2 §6).
+    expect(traitsFor("ADJUDICATION-LOCK-REFUSED").debris).toBe("disposable");
     expect(traitsFor("ADJUDICATION-LOCK-REFUSED").bucket).toBe("failed");
     expect(traitsFor("ADJUDICATION-LOCK-REFUSED").summaryLabel).toBe("STUCK");
+    // Presentation-identical to the phase it reads as, cleanup axis included.
+    expect(traitsFor("ADJUDICATION-LOCK-REFUSED").debris).toBe(
+      traitsFor("ESCALATE").debris,
+    );
   });
 
   it("keeps the cleanup axis independent of the presentation bucket", () => {
@@ -154,10 +162,9 @@ describe("phase traits", () => {
 
   it("keeps the cleanup axis separate from the journal's replaceability axis", () => {
     // `replaceableThisRun` (the journal's axis) and `preserve-all` (cleanup's)
-    // are independent, and the two preserve-all phases prove it: the park is
-    // replaceable within the run by a human decision plus a re-dispatch, but
-    // a refused adjudicated lock is terminal this run — the operator fixes the
-    // base and the next run picks it up — while both preserve their estate.
+    // are independent: the park is replaceable within the run by a human
+    // decision plus a re-dispatch, and it is also the one phase whose own
+    // semantics assert a human owes input.
     expect(traitsFor("AWAITING-ADJUDICATION").replaceableThisRun).toBe(true);
     expect(
       traitsFor("ADJUDICATION-LOCK-REFUSED").replaceableThisRun,
@@ -165,9 +172,14 @@ describe("phase traits", () => {
     expect(
       ALL_PHASES.filter((phase) => traitsFor(phase).replaceableThisRun),
     ).toEqual(["AWAITING-ADJUDICATION"]);
+    // Exactly one phase claims `preserve-all`, and it is a *secondary*
+    // signal — the one that still preserves a park whose worktree an
+    // operator has already removed, where there is no disk left to read.
+    // Estate ownership itself is proved from disk, so no future exit has to
+    // remember to add itself to this list (ADR 0055 Seam 2 §6).
     expect(
       ALL_PHASES.filter((phase) => traitsFor(phase).debris === "preserve-all"),
-    ).toEqual(["AWAITING-ADJUDICATION", "ADJUDICATION-LOCK-REFUSED"]);
+    ).toEqual(["AWAITING-ADJUDICATION"]);
   });
 });
 
