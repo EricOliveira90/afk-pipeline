@@ -1,5 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { findDuplicateJsonKey } from "./json-scan.js";
+
+// Re-exported so the review parsers' existing importers keep one import
+// site while the scanner itself lives where every artifact on the
+// decision boundary can reach it (see `json-scan.ts`).
+export { findDuplicateJsonKey };
 
 export const CONTRACT_REVIEW_FILENAME = "contract-review.json";
 export const CONTRACT_RESPONSE_FILENAME = "contract-response.json";
@@ -201,83 +207,6 @@ export function requireNonBlankString(
     throw new Error(`${source} ${field} must be a non-blank string`);
   }
   return value;
-}
-
-type JsonScope = { kind: "object"; keys: Set<string> } | { kind: "array" };
-
-/**
- * First key that appears twice in the same JSON object, or `null`.
- *
- * `JSON.parse` silently keeps the last of a repeated key, so
- * `{"verdict": "ACCEPT", "verdict": "REVISE"}` parses to a single
- * verdict and reads as a clean artifact. Two verdicts in one review is
- * exactly the contradiction this slice must refuse, so the raw bytes are
- * scanned before the parsed object is trusted. That is why
- * {@link parseContractReview} takes text and not an already-parsed
- * value.
- *
- * Only well-formed JSON reaches this scanner — callers parse first — so
- * it does not need to validate syntax, only to walk strings correctly so
- * a `":"` inside a string value is never mistaken for a key separator.
- */
-export function findDuplicateJsonKey(text: string): string | null {
-  const scopes: JsonScope[] = [];
-  let index = 0;
-  while (index < text.length) {
-    const char = text[index]!;
-    if (char === "{") {
-      scopes.push({ kind: "object", keys: new Set() });
-      index++;
-      continue;
-    }
-    if (char === "[") {
-      scopes.push({ kind: "array" });
-      index++;
-      continue;
-    }
-    if (char === "}" || char === "]") {
-      scopes.pop();
-      index++;
-      continue;
-    }
-    if (char !== '"') {
-      index++;
-      continue;
-    }
-
-    const start = index;
-    index++;
-    while (index < text.length) {
-      if (text[index] === "\\") {
-        index += 2;
-        continue;
-      }
-      if (text[index] === '"') {
-        index++;
-        break;
-      }
-      index++;
-    }
-    const literal = text.slice(start, index);
-
-    // A string is a key only when the next non-whitespace character is a
-    // colon and the enclosing scope is an object.
-    let after = index;
-    while (after < text.length && /\s/.test(text[after]!)) after++;
-    const scope = scopes[scopes.length - 1];
-    if (text[after] !== ":" || scope?.kind !== "object") continue;
-
-    let key: unknown;
-    try {
-      key = JSON.parse(literal);
-    } catch {
-      continue;
-    }
-    if (typeof key !== "string") continue;
-    if (scope.keys.has(key)) return key;
-    scope.keys.add(key);
-  }
-  return null;
 }
 
 function parseFindings(

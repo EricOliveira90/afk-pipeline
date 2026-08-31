@@ -1,3 +1,5 @@
+import { parseJsonWithUniqueKeys } from "./json-scan.js";
+
 export interface AcceptanceBehavior {
   id: string;
   source: string;
@@ -200,14 +202,14 @@ export function parseAcceptanceManifest(
   value: string | unknown,
   source = ACCEPTANCE_MANIFEST_FILENAME,
 ): AcceptanceManifest {
-  let manifest: unknown;
-  try {
-    manifest = typeof value === "string" ? JSON.parse(value) : value;
-  } catch (error) {
-    throw new Error(
-      `${source} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  // The locked manifest is the machine source for file scope and migration
+  // count, and every check below reads the parsed object — so a duplicated
+  // `fileScope` or `migrationCount` would have the JSON runtime choose which
+  // of two declared scopes the slice is locked to. Same primitive, same
+  // reason as `adjudication.md` and `escalation.md` (PM blocker 1, fifth
+  // adjudication gate round).
+  const manifest: unknown =
+    typeof value === "string" ? parseJsonWithUniqueKeys(value, source) : value;
 
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     throw new Error(`${source} must contain a JSON object`);

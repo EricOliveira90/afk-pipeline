@@ -1108,6 +1108,24 @@ export function listAddedMigrationFiles(
 }
 
 /**
+ * The result of asking git what a worktree changed: a complete answer, or
+ * the reason there is no answer. Never a partial one.
+ *
+ * The probe needs three git commands, and it used to swallow each one's
+ * failure and return whatever the others had collected. That made "git
+ * could not tell me" indistinguishable from "nothing changed" — and the two
+ * callers read the empty set in opposite directions, so one swallowed
+ * failure refuses every honest request while the other *grants* an
+ * out-of-scope edit. Absence has to be proved, never inferred (ADR 0055
+ * Seam 2 §8, and the same decision as the estate probe in
+ * `adjudication-estate.ts`): one honest primitive, and both callers fail
+ * closed on `ok: false` in their own direction.
+ */
+export type ChangedFilesProbe =
+  | { ok: true; paths: string[] }
+  | { ok: false; failure: string };
+
+/**
  * Every repo-relative path this worktree changed relative to `base`,
  * committed or not: the committed diff since the merge base, plus the
  * working tree's modifications, plus untracked files listed
@@ -1117,24 +1135,29 @@ export function listAddedMigrationFiles(
  * committed once the slice passes, so a scope check that read HEAD alone
  * would see nothing at all during QA (#112).
  *
- * Failures return what was collected rather than throwing: the only
- * caller uses this to *refuse* an amendment for a path the slice never
- * touched, so an empty list refuses everything, which is the
- * conservative answer.
+ * A failure in any one of the three commands fails the whole probe: the
+ * set is a union, so a missing third of it is not a smaller true answer,
+ * it is an unknown one. See {@link ChangedFilesProbe}.
  */
-export function listChangedFiles(worktreeDir: string, base: string): string[] {
+export function listChangedFiles(
+  worktreeDir: string,
+  base: string,
+): ChangedFilesProbe {
   const paths = new Set<string>();
-  const collect = (args: string[]) => {
+  const collect = (args: string[]): string | null => {
     try {
-      for (const raw of git(args, {
+      for (const raw of git(["-c", "core.quotePath=false", ...args], {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
       }).split(/\r?\n/)) {
         const path = raw.trim();
         if (path !== "") paths.add(path.replace(/\\/g, "/"));
       }
-    } catch {
-      // Leave what was already collected in place.
+      return null;
+    } catch (error) {
+      return `\`git ${args.join(" ")}\` failed in ${worktreeDir}: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
     }
   };
 
@@ -1142,10 +1165,23 @@ export function listChangedFiles(worktreeDir: string, base: string): string[] {
   // these prints bare paths: a porcelain status line leads with two
   // status characters that are blank for an unstaged change, and the
   // shared runner trims the output it returns.
-  collect(["diff", "--name-only", `${base}...HEAD`]);
-  collect(["diff", "--name-only", "HEAD"]);
-  collect(["ls-files", "--others", "--exclude-standard"]);
-  return [...paths].sort();
+  //
+  // `core.quotePath=false` because git's default is to print a path with
+  // any non-ASCII byte C-quoted *and wrapped in double quotes*
+  // (`"caf\303\251.ts"`). That spelling matches no declared path, so the
+  // scope-amendment door refused an honest request for such a file and the
+  // escalation guard would report it as an out-of-scope change — a
+  // false accusation produced entirely by an output convention. Found by
+  // the fifth round's self-probe pass, not by a gate.
+  for (const args of [
+    ["diff", "--name-only", `${base}...HEAD`],
+    ["diff", "--name-only", "HEAD"],
+    ["ls-files", "--others", "--exclude-standard"],
+  ]) {
+    const failure = collect(args);
+    if (failure !== null) return { ok: false, failure };
+  }
+  return { ok: true, paths: [...paths].sort() };
 }
 
 /** Repo-relative files added between two refs, independent of project layout. */
