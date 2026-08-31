@@ -4,95 +4,89 @@
 
 ## Scope reviewed
 
-Reviewed the feature diff from merge base
-`8f97ce6b34e5c268f159d7a48d3d28af83d4c542`, the slice contracts and
-handoffs under `.kiro/specs/afk-v2-routing-adjudication/slices/`, and the
-merged escalation, adjudication, contract-mutation, wave, journal, cleanup,
-adoption, and preflight paths.
+Reviewed `git diff 8f97ce6...HEAD`, every slice artifact under
+`.kiro/specs/afk-v2-routing-adjudication/slices/`, the PRD, and ADRs
+0050-0055. I traced the merged escalation, adjudication, contract
+transaction, journal, wave, cleanup, and adoption paths.
 
 The pre-ship gate already passed this tree, so I did not rerun the full
-suite. I read the source and ADR control flows directly, ran
-`git diff --check`, and ran only the focused tests named below.
+suite. I ran only the focused commands cited below.
 
 ## Blocking findings
 
-### 1. An adjudicated lane successor skips the lock gate after its base changes
+### 1. The impasse fingerprint does not identify the dispute the human decided
 
-- **File/location:** `src/wave.ts`, the adjudicated lane-successor refresh
-  in `runWave` (lines 399-453); `src/orchestrator.ts`,
-  `runImpasseAdjudication`'s proven-lock shortcut (lines 2297-2320).
-- **Evidence gathered:** I traced the lane successor after its predecessor
-  merges. `runWave` merges the new feature tip into the preserved successor
-  worktree and calls `runSliceNegotiate`. The complete applied decision log
-  makes `adjudicatedLockIsProven` return `LOCKED` immediately, before
-  `ctx.onContractLocked` is consulted. I ran
-  `pnpm vitest run src/wave.test.ts -t "keeps an adjudicated lane successor's decision and lock through refresh"`;
-  it passed while exercising both proven-lock shortcuts around the feature-tip
-  refresh. The test asserts estate preservation but never injects or observes
-  a post-refresh lock objection.
-- **Convention violated:** ADR 0028, **Why the gate is a callback**, requires
-  the gate to cover lane-successor re-negotiation because the refreshed feature
-  tip can introduce a migration-prefix collision. ADR 0055, **Seam 1 sections
-  2-3**, permits `LOCKED` only through the mechanical gate.
-- **Required fix:** Revalidate a proven adjudication lock against the current
-  feature tip after lane refresh, before generation. Preserve the decision
-  estate on refusal and add a focused test where the predecessor introduces a
-  lock-gate objection.
+- **File/location:** `src/adjudication.ts`, `impasseFingerprint()` at
+  lines 198-213; consumers `loadAdjudicationDecisionLog()` and
+  `reconcileDiscardedDecisionLog()`.
+- **Evidence gathered:** I read `ContractReviewAttemptFinding` in
+  `src/contract-review.ts` and confirmed that the persisted impasse carries
+  `plannerPosition`, `plannerEvidence`, `evaluatorEvidence`, and
+  `unresolved`. The fingerprint hashes only round, attempt, finding ID,
+  severity, and state. I ran an inline `node --import tsx` probe with two
+  IMPASSE outcomes having identical IDs/state but different planner and
+  evaluator evidence; both produced
+  `c17e69d2ecb0fb69796af2abf7c27f360a369b13bbb29cefe6a898233bb73574`.
+- **Defect:** A fresh negotiation can reuse round 2, attempt 1, and the same
+  finding IDs while changing the positions or evidence being adjudicated.
+  The old decision log then validates against the new impasse. A stamped
+  lock can likewise self-certify against the incomplete identity, allowing
+  generation under a human decision made for a different question.
+- **Convention violated:** ADR 0054, **Consequences**, says a renegotiated
+  contract's decisions are non-transferable because a decision answers the
+  two recorded positions. ADR 0055, **Seam 1 sections 4-5**, relies on this
+  fingerprint as lock provenance and as the pending-lock witness's impasse
+  identity.
+- **Required fix:** Fingerprint the complete canonical question-bearing
+  impasse data, including both positions/evidence and unresolved status (or
+  the canonical raw outcome), and prove that changing any of those fields
+  invalidates the decision log and lock provenance.
 
-### 2. Adoption can orphan a parked worktree and make the next launch refuse
+### 2. A mechanical adjudication refusal makes durable human evidence disposable
 
-- **File/location:** `src/adopt-command.ts`, `runAdoptCli` (lines 426-446 and
-  546-589); `src/orchestrator.ts`, launch namespace construction (lines
-  4730-4758); `src/preflight.ts`, leftover registered-worktree refusal (lines
-  282-308).
-- **Evidence gathered:** I read the complete adoption transition. It checks
-  only whether the feature branch is checked out, never the selected slice's
-  persisted phase or its registered slice worktree. Success moves the feature
-  ref and overwrites the slice record with `PASS`, but does not remove or
-  otherwise reconcile that worktree. The next run excludes completed slices
-  from both `intended` and `retained`, so preflight classifies the still
-  registered AFK worktree as unowned and refuses. I ran
-  `pnpm vitest run src/preflight.test.ts -t "refuses a registered namespace worktree no live slice owns"`;
-  it passed and confirms that terminal state. This is directly reachable when
-  `afk adopt` is used on an `AWAITING-ADJUDICATION` slice.
-- **Convention violated:** ADR 0055, **Seam 2 invariant and section 9**, says
-  the parked estate survives every lifecycle operation except the slice's own
-  re-dispatch and only that dispatch replaces the park. The current adoption
-  path replaces the record without dispatch and strands the estate outside the
-  lifecycle model.
-- **Required fix:** Make adoption an explicit, fail-closed transition for
-  parked slices. Either refuse it while the park owns a worktree, or quiesce and
-  reconcile the whole estate so a successful adoption leaves no registered
-  namespace worktree that blocks the next run. Cover adoption from persisted
-  `AWAITING-ADJUDICATION` through the next launch.
+- **File/location:** `src/orchestrator.ts`,
+  `runImpasseAdjudication()`/`revalidateAdjudicatedLock()` at lines
+  2181-2201 and 2214-2232; `src/slice-lifecycle.ts`, the `ESCALATE` trait at
+  lines 271-278; `src/clean-failed.ts`, `isCleanupTarget()` and pass 1;
+  `src/adopt-command.ts`, `parkedEstateRefusal()`.
+- **Evidence gathered:** I traced re-dispatch from its initial
+  `logger.trackSlice(RUNNING)`, which clears the park, through both lock-gate
+  refusal paths, which return terminal `ESCALATE`. I ran an inline trait
+  probe: `AWAITING-ADJUDICATION` reports `debris: "preserve-all"`, while
+  `ESCALATE` reports `debris: "disposable"`. I also ran the focused
+  clean-failed test; it confirms pass 1 removes a disposable worktree and
+  preserves only the `preserve-all` park. The focused adoption tests passed
+  but guard only records whose phase has that same `preserve-all` trait.
+- **Defect:** The decision log lives inside the slice worktree. After a
+  lock-gate objection, pipeline persistence changes the record to
+  `ESCALATE`. `afk clean-failed` may then remove that worktree and the human
+  decisions, and `afk adopt` no longer recognizes the slice as owning an
+  estate. This contradicts the refusal path's promise that the same
+  decisions can be retried after the mechanical objection is fixed.
+- **Convention violated:** ADR 0054, **The decision log is not part of the
+  transaction**, requires human input to outlive a mechanical refusal. ADR
+  0055, **Seam 2 invariant** and **Consequences**, requires the adjudication
+  estate to remain protected and repeats that the decision log outlives
+  mechanical refusals.
+- **Required fix:** Persist adjudication-estate ownership independently of
+  the broad `ESCALATE` phase (or use a state variant that retains
+  `preserve-all`), and make cleanup and adoption consult it. Add a focused
+  flow from lock-gate refusal through `clean-failed` and adoption, asserting
+  the decision log, worktree, branch, and retry path remain coherent.
 
-### 3. QA scope amendment bypasses the new accepted-contract transaction
+## Note
 
-- **File/location:** `src/scope-amendment.ts`, `applyScopeAmendment` (lines
-  173-205) and `appendContractScopeFiles` (lines 217-254);
-  `src/orchestrator.ts`, the QA amendment caller (lines 3693-3744).
-- **Evidence gathered:** I read the write order and caller. The amendment
-  writes `acceptance-manifest.json` first, then calls a second function that can
-  throw before writing `contract.md`; the caller has no capture/rollback
-  boundary. The existing missing-section case at
-  `src/scope-amendment.test.ts:233` exercises exactly that throw but does not
-  assert restoration of the already-written manifest. I ran
-  `pnpm vitest run src/scope-amendment.test.ts`; all 16 tests passed, confirming
-  current coverage does not detect the split accepted pair. A contract write
-  failure has the same result.
-- **Convention violated:** ADR 0048, **Decision**, requires the orchestrator to
-  keep the manifest and contract file list in sync and a refused amendment to
-  leave the contract untouched. ADR 0055, **Seam 1 section 3**, says the shared
-  capture/restore primitive is the only way the accepted pair is mutated. The
-  new transaction abstraction omits this pre-existing third mutation path.
-- **Required fix:** Route QA scope amendment through the shared accepted-pair
-  transaction, or provide an equivalent atomic two-file rollback, and test
-  failures after each write. The amendment archive should be committed only
-  with a coherent pair.
+`RunJournal.recordTerminal()` calls two parks identical when only phase and
+error match. ADR 0055 section 9 says idempotency covers the whole record;
+branch identity is not compared. Current branch naming is deterministic
+within a run, so I do not classify this as a ship blocker, but the invariant
+and implementation should be aligned before branch identity becomes mutable.
 
-## Architecture assessment
+## Focused verification
 
-The shared adjudication transaction, full-blocker completion predicate,
-replaceable park journal state, cleanup trait, and idle-only wait are otherwise
-coherent. The findings above are structural boundary leaks: each bypasses an
-invariant the new architecture claims to centralize.
+- `git diff --check 8f97ce6...HEAD` - passed.
+- `pnpm vitest run src/contract-transaction.test.ts src/scope-amendment.test.ts`
+  - 31 passed.
+- Focused `src/clean-failed.test.ts` case - passed.
+- Focused parked-estate cases in `src/adopt-command.test.ts` - 2 passed.
+- Focused adjudicated lane-successor case in `src/wave.test.ts` - passed.
