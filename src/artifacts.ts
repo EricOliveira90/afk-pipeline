@@ -357,6 +357,44 @@ export function archiveScopeEscalationAttempt(details: {
   return name;
 }
 
+/**
+ * Preserve the bytes a generator wrote over an orchestrator-owned slice
+ * file before they are thrown away (architect A1, seventh gate round).
+ *
+ * The refusal restores the accepted `contract.md` /
+ * `acceptance-manifest.json` pair byte-for-byte, which means the operator
+ * reading the tree afterwards can no longer see what the generator tried
+ * to do — and "what it tried to do" is the whole content of the incident.
+ * Same reasoning as the escalation archive above: mechanical refusal, but
+ * the evidence outlives it.
+ *
+ * Copies are written with `wx`, so a second attempt at the same stamp
+ * fails loudly rather than overwriting the first attempt's evidence.
+ */
+export function archiveRejectedContractMutation(details: {
+  sliceDir: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+  /** Slice-root filenames to preserve; missing ones are skipped. */
+  files: readonly string[];
+}): string[] {
+  const { sliceDir, archiveDir, round, attempt, files } = details;
+  const archived: string[] = [];
+  for (const fileName of files) {
+    const source = join(sliceDir, fileName);
+    if (!existsSync(source)) continue;
+    const name = `rejected-contract-mutation-r${round}-a${attempt}-${fileName}`;
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(archiveDir, name), readFileSync(source, "utf-8"), {
+      encoding: "utf-8",
+      flag: "wx",
+    });
+    archived.push(name);
+  }
+  return archived;
+}
+
 /** The next unused contract-review round in a slice's shared review archive. */
 export function nextContractReviewRound(archiveDir: string): number {
   if (!existsSync(archiveDir)) return 1;

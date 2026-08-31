@@ -52,6 +52,16 @@
  *   debris the witness proves it on the next dispatch (ADR 0055 §5 as
  *   amended).
  *
+ * Beside the transaction, and for the same pair: the capture / compare /
+ * restore trio (`captureAcceptedContractPair`,
+ * `mutatedAcceptedContractFiles`, `restoreAcceptedContractPair`) the
+ * orchestrator wraps every generator dispatch in. A generator dispatch is
+ * not a mutation path — it is trusted not to touch the pair at all — so it
+ * cannot be a transaction; but "trusted" was doing all the work, and a
+ * generator that rewrote both files handed itself a widened lock. The trio
+ * lives here so both the mutation rule and the don't-mutate rule read the
+ * accepted pair through one module (architect A1, seventh gate round).
+ *
  * What is deliberately *outside* the transaction: the escalation archive
  * (written by the caller before a revision starts, ADR 0050/0051) and
  * `adjudication-decisions.json` (ADR 0054). Human input and the evidence
@@ -59,7 +69,7 @@
  * refusal, even though the contract must not change.
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import * as artifacts from "./artifacts.js";
 import { ACCEPTANCE_MANIFEST_FILENAME } from "./acceptance-manifest.js";
 import {
@@ -71,6 +81,94 @@ import {
 } from "./adjudication.js";
 import type { ContractLockProvenance } from "./artifacts.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
+
+/**
+ * The accepted pair's bytes at a moment in time. `null` means "this file
+ * did not exist", which the restore reproduces by deleting rather than by
+ * resurrecting bytes that were never there.
+ */
+export interface AcceptedContractPairSnapshot {
+  readonly contract: string | null;
+  readonly manifestText: string | null;
+}
+
+/** Where the pair lives for a slice. */
+function pairPaths(absSliceDir: string): {
+  contractPath: string;
+  manifestPath: string;
+} {
+  return {
+    contractPath: join(absSliceDir, "contract.md"),
+    manifestPath: join(absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+  };
+}
+
+/**
+ * Read the accepted pair's bytes so a later exit can prove whether they
+ * survived (architect A1, seventh gate round).
+ *
+ * The transaction above protects the pair across the *mutation* paths.
+ * This is the same protection for the path that is not a mutation at all:
+ * a plain generator dispatch, which is handed a worktree containing both
+ * files and is trusted not to touch them. A generator that widened both
+ * files before writing an escalation had its own bytes read back as the
+ * lock and as "the previously accepted pair", so the focused revision's
+ * additive guard preserved the path it smuggled in. Capture before
+ * dispatch, compare after, and the widened lock never reaches a grant.
+ */
+export function captureAcceptedContractPair(
+  absSliceDir: string,
+): AcceptedContractPairSnapshot {
+  const { contractPath, manifestPath } = pairPaths(absSliceDir);
+  return {
+    contract: existsSync(contractPath)
+      ? readFileSync(contractPath, "utf-8")
+      : null,
+    manifestText: existsSync(manifestPath)
+      ? readFileSync(manifestPath, "utf-8")
+      : null,
+  };
+}
+
+/**
+ * The pair's filenames whose current bytes differ from `snapshot`, in the
+ * order they are declared, or `[]` when both survived byte-for-byte.
+ *
+ * A deletion and a creation both count: "the file is gone" is as much a
+ * mutation of the orchestrator's lock as a rewrite, and a manifest that
+ * appears where none was accepted is a lock the orchestrator never issued.
+ */
+export function mutatedAcceptedContractFiles(
+  absSliceDir: string,
+  snapshot: AcceptedContractPairSnapshot,
+): string[] {
+  const { contractPath, manifestPath } = pairPaths(absSliceDir);
+  const now = captureAcceptedContractPair(absSliceDir);
+  const mutated: string[] = [];
+  if (now.contract !== snapshot.contract) mutated.push(basename(contractPath));
+  if (now.manifestText !== snapshot.manifestText)
+    mutated.push(basename(manifestPath));
+  return mutated;
+}
+
+/**
+ * Put the accepted pair back byte-for-byte. Deliberately the same shape as
+ * the transaction's rollback `finally` — one restore rule for the pair, so
+ * a caller cannot invent a gentler one.
+ */
+export function restoreAcceptedContractPair(
+  absSliceDir: string,
+  snapshot: AcceptedContractPairSnapshot,
+): void {
+  const { contractPath, manifestPath } = pairPaths(absSliceDir);
+  for (const [path, bytes] of [
+    [contractPath, snapshot.contract],
+    [manifestPath, snapshot.manifestText],
+  ] as const) {
+    if (bytes === null) rmSync(path, { force: true });
+    else writeFileSync(path, bytes, "utf-8");
+  }
+}
 
 /**
  * What the transaction needs from a `SliceContext`, and nothing more —
@@ -164,8 +262,7 @@ export async function withContractTransaction<T>(
   notice: ContractRollbackNotice,
   fn: (tx: ContractTransaction) => Promise<T>,
 ): Promise<T> {
-  const contractPath = join(ctx.absSliceDir, "contract.md");
-  const manifestPath = join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME);
+  const { contractPath, manifestPath } = pairPaths(ctx.absSliceDir);
   const previousContract = readFileSync(contractPath, "utf-8");
   const previousManifestText = existsSync(manifestPath)
     ? readFileSync(manifestPath, "utf-8")
