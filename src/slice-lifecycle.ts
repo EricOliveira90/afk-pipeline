@@ -211,7 +211,11 @@ export type BranchDisposition = "branch" | "merged" | "preserved" | "none";
  *   run's input (MERGE-PENDING, ADR 0029).
  * - `preserve-all` — nothing is debris: the estate is a human's pending
  *   input, and only the slice's own re-dispatch replaces it. Skipped, and
- *   reported by name, so the operator learns why.
+ *   reported by name, so the operator learns why. Only the park declares
+ *   it, and it is a *secondary* signal: an adjudication estate's owner is
+ *   proved from disk (`findAdjudicationEstate`), because every other exit
+ *   that can leave one behind ends in an ordinary failure phase. This
+ *   value is what still preserves a park whose worktree is already gone.
  * - `out-of-scope` — cleanup never considers this slice; nothing failed.
  */
 export type DebrisDisposition =
@@ -307,19 +311,25 @@ export const PHASE_TRAITS = {
     // recorded, but a migration prefix (or other run-specific claim) now
     // collides. To the operator it reads as a lock refusal — the same event
     // as the transaction's own gate refusal, so it presents as ESCALATE
-    // does (failed bucket, STUCK label). But the decision log, worktree and
-    // branch are a completed human adjudication awaiting a base fix, not
-    // debris: the estate must survive clean-failed and adopt so the operator
-    // can renumber and let the slice's own next-run re-dispatch re-run the
-    // gate. Hence `preserve-all`, decoupled from the presentation (Seam 2
-    // §6) — clean-failed and adopt inherit the right behaviour off the
-    // trait, without either learning this phase by name.
+    // does (failed bucket, STUCK label).
+    //
+    // The estate that refusal leaves behind must still survive
+    // clean-failed and adopt — but the phase is not what says so. This
+    // phase carried `preserve-all` for one round and it was the wrong
+    // place for it: ownership of an adjudication estate is a fact about
+    // the worktree, and every *other* post-decision apply exit (planner or
+    // provider failure, feature-refresh conflict, cancellation mid-apply,
+    // a post-lock bookkeeping throw the wave flattens) lands in ordinary
+    // `ERROR` or `CONFLICT` with the same estate on disk. So the phase is
+    // presentation-only again, exactly like ESCALATE, and clean-failed and
+    // adopt read ownership from `findAdjudicationEstate` (ADR 0055 Seam 2
+    // §6, fourth adjudication gate round).
     bucket: "failed",
     icon: "🔴",
     summaryLabel: "STUCK",
     persisted: true,
     terminalThisRun: true,
-    debris: "preserve-all",
+    debris: "disposable",
     branchDisposition: "branch",
   },
   ERROR: {

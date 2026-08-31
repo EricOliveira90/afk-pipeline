@@ -802,6 +802,129 @@ describe("preserveNegotiationFailure", () => {
     }
   });
 
+  /**
+   * Slice 02 [behavior:B-01a], the fourth gate round's PM finding. A mixed
+   * exhaustion — one blocking finding contested, another still OPEN — stays
+   * NON_CONVERGENCE by ADR 0055 §1: no decision a human can record closes an
+   * OPEN finding, so a park holding one could never satisfy the lock's
+   * completion predicate (ADR 0041, prefer the branch that cannot loop). The
+   * ruling that survived the round is a *visibility* one: the classification
+   * is untouched, but the operator must not have to reconstruct the contest
+   * from the raw JSON, so both held positions and the reason no adjudication
+   * happened render in stuck.md.
+   */
+  it("surfaces the contested positions when a mixed exhaustion escalates instead of parking", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    const negotiationOutcome: ContractNegotiationOutcome = {
+      version: 1,
+      classification: "NON_CONVERGENCE",
+      round: 3,
+      attempt: 1,
+      findings: [
+        {
+          id: "F-CONTEST",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the routing table already covers the fallback",
+          evaluatorEvidence: "the fallback lane has no acceptance clause",
+        },
+        {
+          id: "F-OPEN",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          plannerPosition: "UNRESOLVED",
+          plannerEvidence: null,
+          evaluatorEvidence: "the issue body never names the retry budget",
+        },
+      ],
+    };
+    try {
+      preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "mixed-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 3,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        negotiationOutcome,
+      });
+
+      const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
+      expect(stuck).toContain("## Contested positions held at exhaustion");
+      // Both sides of the contest, so the operator can see what was argued.
+      expect(stuck).toContain(
+        "Planner evidence: the routing table already covers the fallback",
+      );
+      expect(stuck).toContain(
+        "Evaluator evidence: the fallback lane has no acceptance clause",
+      );
+      // Why it escalated rather than parked, and what unblocks it — naming the
+      // OPEN blocker that made the park impossible.
+      expect(stuck).toContain("Why no adjudication:");
+      expect(stuck).toContain("[F-OPEN]");
+      expect(stuck).toContain("ADR 0055 §1");
+      expect(stuck).toContain("rerun the slice");
+      // The section is specific to the mixed case: a pure non-convergence has
+      // no contest to report and must not grow a section explaining one away.
+      expect(stuck.indexOf("## Contested positions held at exhaustion")).
+        toBeLessThan(stuck.indexOf("## Unresolved gaps"));
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the contested-positions section for a pure non-convergence", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    try {
+      preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "pure-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 3,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        negotiationOutcome: {
+          version: 1,
+          classification: "NON_CONVERGENCE",
+          round: 3,
+          attempt: 1,
+          findings: [
+            {
+              id: "F-OPEN",
+              severity: "BLOCKING",
+              state: "OPEN",
+              unresolved: true,
+              plannerPosition: "UNRESOLVED",
+              plannerEvidence: null,
+              evaluatorEvidence: "the issue body never names the retry budget",
+            },
+          ],
+        },
+      });
+
+      expect(readFileSync(join(sliceDir, "stuck.md"), "utf-8")).not.toContain(
+        "Contested positions held at exhaustion",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("writes actionable ESCALATE details and archives every negotiation artifact", () => {
     const { repoRoot, sliceDir } = makeFailureFixture();
     try {

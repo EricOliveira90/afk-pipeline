@@ -62,6 +62,36 @@ resumed slice renegotiates; if renegotiation resolves the open
 findings and the contested ones survive, the fresh exhaustion is a
 pure impasse and parks adjudicably.
 
+**Reaffirmed with an amendment (fourth adjudication gate round, PM
+finding, operator ruling).** The review argued that a mixed exhaustion —
+one blocking finding genuinely contested, another still open — discards
+the contest by classifying `NON_CONVERGENCE`. The classification stays as
+written above: the argument for parking such an exhaustion is an argument
+for a park that cannot unlock, which is exactly what ADR 0041 tells us
+not to build, and `buildContractNegotiationOutcome` is not changed. The
+real defect the review found is a *visibility* one — the operator saw
+"reached NON_CONVERGENCE after N rounds" and could not distinguish a flat
+non-convergence from a live contest the classifier declined to park, so
+the contest looked discarded because nothing showed it. So the diagnosis
+now carries it:
+
+- `stuck.md` gains a `## Contested positions held at exhaustion` section
+  whenever a `NON_CONVERGENCE` record contains a contested finding: each
+  contested finding's two held positions with both sides' evidence, the
+  named `OPEN` blocker that made the park impossible, and the forward path
+  (close the open blocker in the source issue, rerun; if the contest
+  survives a fresh negotiation, that exhaustion is a pure impasse and
+  parks for a decision).
+- The run-state reason names the contested ids and the open ids and points
+  at `stuck.md`, rather than reporting the round count alone.
+- The record itself already retains both blockers (decision 1's last
+  paragraph) — the audit was never lossy; only the operator-facing
+  rendering was.
+
+Slice 02 `[behavior:B-01a]` binds this. Anyone tempted to revisit the
+classification should read this paragraph first: the operator has ruled on
+it once, with the contest made visible instead.
+
 ### 2. One completion predicate, over all unresolved blocking findings
 
 `LOCKED` is permitted only when **every unresolved BLOCKING finding in
@@ -288,6 +318,18 @@ persisted IMPASSE outcome, exactly like `ESCALATE` — so it is not
 `replaceableThisRun`; the park's within-run replacement is a human
 *decision*, which this estate already has.
 
+**Amended again (fourth adjudication gate round): the phase stays, the
+trait does not.** The distinct phase is worth keeping — an operator
+reading the status table should see "the lock gate objected to the base",
+not a generic escalation — but its `preserve-all` trait was the wrong
+carrier for the estate and is retired to `disposable`. Seam 2 §6 has the
+reasoning: this phase was one exit among several that leave a decision log
+behind, and the estate is now proved from disk by `clean-failed` and
+`adopt` alike. This section's promise ("the same decisions are accepted
+again once the base is fixed") is therefore stronger than it was, not
+weaker: it now also holds for the refusals that never reached this phase
+because the apply died mechanically first.
+
 ## Decision — Seam 2: a park is durable, replaceable state
 
 One invariant, stated once and consulted by every lifecycle operation:
@@ -347,6 +389,61 @@ The two preserve-all phases differ only on the *journal's* axis
 (`replaceableThisRun`): the park's within-run replacement is a human
 decision it is still awaiting; the lock-refused estate already has its
 decisions and waits on a base fix, so it is terminal this run.
+
+**Superseded (fourth adjudication gate round, architect findings 1 and 2):
+estate ownership is a fact about the worktree, not about the phase.** The
+amendment above is the wrong shape and it is retired: `ADJUDICATION-LOCK-
+REFUSED` goes back to `disposable`, presentation-only like `ESCALATE`, and
+nothing about ownership rides on it.
+
+The reasoning: encoding ownership as a phase covers exactly the exits
+someone remembered to enumerate. Round 3 enumerated one — the lock
+refusal — but a decision log exists from the moment the first decision is
+recorded, and after that point the apply step can still fail
+*mechanically* in at least four ways that are not adjudication phases at
+all: the planner or provider dies, the lane-successor feature refresh
+conflicts, the operator cancels mid-apply, or post-lock bookkeeping throws
+and is flattened to `ERROR`. Each lands in `ERROR`, `CONFLICT` or
+`LANE-CANCELLED` — all `disposable` — and `clean-failed` then deletes the
+worktree holding the only copy of the operator's decisions. ADR 0054
+already says the decision log is not part of the transaction and that
+human input outlives a mechanical refusal; deriving its disposability from
+the phase contradicted that for every exit but one. The same lossiness hit
+`adopt`, which matched the estate by branch and so let a detached
+registered worktree (`branch: null`) through the refusal entirely.
+
+So the question is asked of disk instead. A slice **owns a live
+adjudication estate** iff its slice directory, inside the worktree, holds
+either:
+
+- `adjudication-decisions.json` — recorded human decisions (ADR 0054); or
+- `contract-negotiation-outcome.json` with `classification: "IMPASSE"` —
+  an impasse record awaiting a decision, which is literally the predicate
+  `negotiate()` re-enters adjudication on.
+
+Those two files are the two re-entry paths, which is why they and not the
+phase are the fact. One function (`findAdjudicationEstate`) answers it,
+over a bounded walk of the worktree that skips `node_modules` and friends;
+`clean-failed` consults it in both passes (registered slices *and* the
+namespace sweep, where no run state claims the directory at all) and
+`adopt` consults it before any ref or state mutation. Scoping the
+negotiation-outcome clause to `IMPASSE` matters: mere presence of that file
+would have preserved every escalated slice in the run. An unreadable
+record counts as owned — §8's "absence is proved, not inferred" applied to
+a truncated file, where deleting the worktree destroys the evidence of
+what it was.
+
+Read this before simplifying it back into the phase. Ownership was always
+a property of the worktree; the phase was a proxy for it, and four gate
+rounds each found another exit the proxy missed. Adding exit number five
+to a `preserve-all` list is the failure mode this decision removes — a new
+post-decision exit now inherits preservation without knowing this decision
+exists.
+
+`AWAITING-ADJUDICATION` keeps `preserve-all` as a *secondary* signal, and
+only for the case with no disk to read: a park whose worktree an operator
+has already removed by hand, where the phase is the last thing that says
+the branch is still the next dispatch's input.
 
 ### 7. The scheduler waits for a decision only at idle
 
@@ -411,6 +508,35 @@ estate inherits the refusal instead of re-learning it. A record whose
 phase preserves everything but that names no branch is refused too:
 which worktree the estate holds cannot then be proved, and proved
 absence is what the invariant demands.
+
+**Amended (fourth adjudication gate round, architect finding 2): refusal 7
+matches the estate on disk, and by path as well as by branch.** Keying off
+the `preserve-all` trait was the same lossy proxy §6 now retires, and
+matching only `worktreesHolding(record.branch)` had a second hole: a
+registered worktree with a detached `HEAD` reports `branch: null`, holds
+nothing by that query, and was adopted straight through the refusal while
+still holding the operator's decision log. Detachment is not exotic — it is
+what a `git bisect`, an interrupted rebase or a hand-inspected commit
+leaves behind.
+
+Refusal 7 therefore checks, before any ref or state mutation:
+
+1. Every candidate worktree — the one registered at the slice's
+   **expected** path (the path the run would have created, derived from the
+   run slug's provider), every worktree holding the recorded branch, and
+   the expected path itself even if git has forgotten it — for a live
+   estate on disk. Any hit refuses, quoting the estate's evidence.
+2. Then, for a record whose phase still declares `preserve-all`: the
+   no-branch case as before, plus an **ambiguity** case — a worktree
+   registered at the expected path whose branch is not the recorded one
+   (detached, or moved to something else). Which worktree the estate holds
+   cannot be proved, so it fails closed, citing this section.
+
+The refusal quotes the registered (git-spelled) path first so it is
+pasteable, and its forward path is specific to what the record is waiting
+on: write the pending decision for a park, fix the base the lock gate
+objected to for a lock refusal, and otherwise let the slice's own
+re-dispatch retry the recorded decisions from where the apply stopped.
 
 ### 9. The journal gets a third transition class: the park
 
@@ -523,12 +649,19 @@ structural: `finishStuck` is the only constructor of a STUCK return in
   of owning half of one, so a refused or failed amendment can no longer
   leave a widened manifest beside an unwidened locked contract.
 - A refused adjudicated lock is its own phase,
-  `ADJUDICATION-LOCK-REFUSED`, presenting as a lock refusal but declaring
-  `preserve-all`, so `clean-failed` and `adopt` protect the completed
-  adjudication instead of destroying or stranding it — the retry-once-the-
-  base-is-fixed promise now survives cleanup. The impasse fingerprint
-  binds both positions and their evidence, so a stale log or stamp can no
-  longer certify against a different dispute.
+  `ADJUDICATION-LOCK-REFUSED`, presenting as a lock refusal — but the
+  estate it leaves is protected by the disk fact, not by that phase
+  (§6, fourth round). `clean-failed` and `adopt` protect *any* worktree
+  holding a decision log or an impasse record, so the retry-once-the-base-
+  is-fixed promise survives cleanup for every post-decision exit — the
+  planner dying, a refresh conflict, a cancellation mid-apply — and not
+  only for the exits someone enumerated. The impasse fingerprint binds
+  both positions and their evidence, so a stale log or stamp can no longer
+  certify against a different dispute.
+- A mixed exhaustion still classifies `NON_CONVERGENCE` (§1), but the
+  operator can now see the contest it held: both positions, the open
+  blocker that made a park impossible, and the path back to an adjudicable
+  impasse.
 - A focused scope revision can no longer silently drop a locked path: it
   must preserve the accepted file scope and add the requested paths, or
   it rolls back and errors without dispatching a generator.

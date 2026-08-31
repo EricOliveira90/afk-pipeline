@@ -936,6 +936,68 @@ function formatNegotiationOutcome(
     .join("\n");
 }
 
+/**
+ * A non-convergence that *also* held a contest, spelled out for the human.
+ *
+ * ADR 0055 §1 routes a mixed exhaustion — one `CONTESTED` blocker beside an
+ * `OPEN` one — to `NON_CONVERGENCE` on purpose: no decision a human can
+ * record resolves an open finding, so a park containing one could never
+ * satisfy the completion predicate and would park forever (ADR 0041, take
+ * the branch that cannot loop). That routing is correct and stays. What was
+ * missing is that the operator was never *told* a contest existed: the
+ * "Next action" section said "close the unresolved gaps" and the two held
+ * positions sat unremarked in the exhaustion record, so the adjudication
+ * question the PRD promises to surface (stories 3/10, slice-02 B-01) read
+ * as if it had never been raised.
+ *
+ * So the diagnosis names the contest, shows both positions, names the open
+ * blockers that made the exhaustion non-adjudicable, and says what makes it
+ * adjudicable next time. `null` when there is nothing extra to say — a pure
+ * non-convergence, or an impasse, where the exhaustion record already is
+ * the adjudication question.
+ */
+function contestedPositionsHeldAtExhaustion(
+  outcome: ContractNegotiationOutcome | undefined,
+): string[] | null {
+  if (!outcome || outcome.classification !== "NON_CONVERGENCE") return null;
+  const contested = outcome.findings.filter(
+    (finding) => finding.state === "CONTESTED",
+  );
+  if (contested.length === 0) return null;
+  const open = outcome.findings.filter((finding) => finding.state === "OPEN");
+  const ids = contested.map((finding) => `[${finding.id}]`).join(", ");
+  const openIds = open.map((finding) => `[${finding.id}]`).join(", ");
+  return [
+    "## Contested positions held at exhaustion",
+    "",
+    `This exhaustion classified NON_CONVERGENCE, so it did not park for ` +
+      `adjudication — but ${contested.length === 1 ? "a blocking finding was" : "blocking findings were"} ` +
+      `contested, and ${contested.length === 1 ? "its" : "their"} two held ` +
+      `positions are below. You are not being asked to decide ${ids} yet.`,
+    "",
+    contested
+      .map((finding) =>
+        [
+          `- [${finding.id}] ${finding.severity} CONTESTED`,
+          `  - Planner position: ${finding.plannerPosition ?? "(none)"}`,
+          `  - Planner evidence: ${finding.plannerEvidence ?? "(none)"}`,
+          `  - Evaluator evidence: ${finding.evaluatorEvidence}`,
+        ].join("\n"),
+      )
+      .join("\n"),
+    "",
+    `Why no adjudication: ${openIds} ${open.length === 1 ? "is" : "are"} still ` +
+      `an unresolved OPEN blocker, and no decision a human can record ` +
+      `resolves an open finding — a park holding one could never satisfy the ` +
+      `lock's completion predicate and would park forever (ADR 0055 §1, ADR ` +
+      `0041). Close the OPEN blocker${open.length === 1 ? "" : "s"} in the ` +
+      `source issue and rerun the slice: if the contest survives that fresh ` +
+      `negotiation, the next exhaustion is a pure impasse and parks for your ` +
+      `decision.`,
+    "",
+  ];
+}
+
 export function preserveNegotiationFailure(
   details: NegotiationFailureDetails,
   warn: (message: string) => void = (message) => console.error(message),
@@ -997,6 +1059,7 @@ export function preserveNegotiationFailure(
           "",
         ]
       : []),
+    ...(contestedPositionsHeldAtExhaustion(negotiationOutcome) ?? []),
     "## Unresolved gaps",
     "",
     unresolvedGaps(findings, feedback),

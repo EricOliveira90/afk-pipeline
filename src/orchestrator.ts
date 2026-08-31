@@ -565,7 +565,17 @@ function slugify(s: string): string {
  * compat; every other provider gets its name appended.
  */
 export function sliceBranchPrefix(provider: AgentProvider): string {
-  return provider.name === "kiro" ? "afk" : `afk-${provider.name}`;
+  return sliceBranchPrefixForProviderName(provider.name);
+}
+
+/**
+ * `sliceBranchPrefix` for a caller that has a provider *name* and no
+ * provider object — the same split `runSlugForProviderName` makes below,
+ * and for the same reason: `afk adopt --provider codex` never constructs
+ * one.
+ */
+export function sliceBranchPrefixForProviderName(providerName: string): string {
+  return providerName === "kiro" ? "afk" : `afk-${providerName}`;
 }
 
 function featureBranchPrefix(provider: AgentProvider): string {
@@ -608,12 +618,42 @@ export function sliceWorktreeDir(
   slice: Slice,
   provider: AgentProvider,
 ): string {
+  return sliceWorktreeDirForProviderName(
+    repoRoot,
+    prdSlug,
+    slice.number,
+    provider.name,
+  );
+}
+
+/**
+ * `sliceWorktreeDir` for a caller holding a provider name and a slice
+ * number — `afk adopt`, which needs the *expected* path of a slice's
+ * worktree to ask whether one is registered there (ADR 0055 Seam 2 §8:
+ * absence is proved, and a detached worktree has no branch to match on).
+ * One formula, one place, so the guard and the pipeline cannot disagree
+ * about where a slice's worktree lives.
+ */
+export function sliceWorktreeDirForProviderName(
+  repoRoot: string,
+  prdSlug: string,
+  sliceNumber: string,
+  providerName: string,
+): string {
   return join(
     repoRoot,
     ".afk",
     "worktrees",
-    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+    `${sliceBranchPrefixForProviderName(providerName)}-${prdSlug}-s${sliceNumber}`,
   );
+}
+
+/** The provider name a run slug carries — the inverse of `runSlugForProviderName`. */
+export function providerNameFromRunSlug(
+  prdSlug: string,
+  runSlug: string,
+): string {
+  return runSlug === prdSlug ? "kiro" : runSlug.slice(prdSlug.length + 1);
 }
 
 /**
@@ -1631,6 +1671,43 @@ function negotiateVerdictCause(args: {
           `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
         : `negotiate: contract not locked after negotiation — last evaluator ` +
           `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+/**
+ * A NON_CONVERGENCE that also held a contest, named as such.
+ *
+ * The classification is deliberate (ADR 0055 §1: an OPEN blocker is not
+ * adjudicable, so the mixed case takes the branch that cannot loop, ADR
+ * 0041). The defect it left behind was one of *visibility* — the operator
+ * was told only "negotiation escalated, verdict REVISE" and never that a
+ * blocking finding had two held positions waiting. `null` for every other
+ * exhaustion, so the ordinary summary stays exactly as it was.
+ */
+export function negotiationMixedExhaustionCause(
+  outcome: ContractNegotiationOutcome | undefined,
+  verdict: RecordedContractVerdict,
+  round: number,
+): NegotiateFailureCause | null {
+  if (!outcome || outcome.classification !== "NON_CONVERGENCE") return null;
+  const contested = outcome.findings
+    .filter((finding) => finding.state === "CONTESTED")
+    .map((finding) => finding.id);
+  if (contested.length === 0) return null;
+  const open = outcome.findings
+    .filter((finding) => finding.state === "OPEN")
+    .map((finding) => finding.id);
+  return {
+    kind: "verdict",
+    verdict,
+    summary:
+      `negotiate: contract negotiation reached NON_CONVERGENCE after ` +
+      `${round} round(s) — contested blocking finding${contested.length === 1 ? "" : "s"} ` +
+      `${contested.join(", ")} ${contested.length === 1 ? "holds" : "hold"} two ` +
+      `positions, but unresolved OPEN blocker${open.length === 1 ? "" : "s"} ` +
+      `${open.join(", ")} cannot be settled by any human decision, so the ` +
+      `slice routes to the operator instead of parking (ADR 0055 §1); both ` +
+      `positions are in stuck.md`,
   };
 }
 
@@ -3244,11 +3321,18 @@ async function negotiateAttempt(
             cause: negotiateImpasseCause(negotiationOutcome, verdict),
           };
         }
-        const cause = negotiateVerdictCause({
-          outcome: "ESCALATE",
-          verdict,
-          round,
-        });
+        // A mixed exhaustion routes here on purpose (ADR 0055 §1), but the
+        // contest must not vanish from what the operator reads: the summary
+        // is the run-state reason `afk status` and the retry line show, and
+        // it was silent about a held contest until now. stuck.md carries the
+        // two positions themselves.
+        const cause =
+          negotiationMixedExhaustionCause(negotiationOutcome, verdict, round) ??
+          negotiateVerdictCause({
+            outcome: "ESCALATE",
+            verdict,
+            round,
+          });
         return { phase: "ESCALATE", cause };
       }
     }

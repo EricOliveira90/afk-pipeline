@@ -579,18 +579,55 @@ describe("afk adopt", () => {
       repo: string,
       phase:
         | "AWAITING-ADJUDICATION"
-        | "ADJUDICATION-LOCK-REFUSED" = "AWAITING-ADJUDICATION",
+        | "ADJUDICATION-LOCK-REFUSED"
+        | "ERROR" = "AWAITING-ADJUDICATION",
+      options: { detached?: boolean } = {},
     ): string {
       const worktree = join(repo, ".afk", "worktrees", "afk-demo-s06");
       git(repo, ["branch", PARKED_BRANCH, "main"]);
-      git(repo, ["worktree", "add", worktree, PARKED_BRANCH]);
+      if (options.detached) {
+        // A registered worktree with no branch attached — `listWorktrees`
+        // reports `branch: null` for it, which is exactly what the
+        // branch-only holder match could not see.
+        git(repo, ["worktree", "add", "--detach", worktree, PARKED_BRANCH]);
+      } else {
+        git(repo, ["worktree", "add", worktree, PARKED_BRANCH]);
+      }
+      // The estate the run actually leaves in the worktree. Ownership is
+      // this, not the phase (ADR 0055 Seam 2 §6): the files are what a
+      // re-dispatch reads and what adoption would strand.
+      const sliceDir = join(
+        worktree,
+        ".kiro",
+        "specs",
+        "demo",
+        "slices",
+        "06-afk-adopt",
+      );
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(
+        join(sliceDir, "contract-negotiation-outcome.json"),
+        JSON.stringify({ version: 1, classification: "IMPASSE", findings: [] }),
+        "utf-8",
+      );
+      if (phase !== "AWAITING-ADJUDICATION") {
+        // Decisions already recorded: a refused lock, or an apply that died
+        // after the last decision was accepted.
+        writeFileSync(
+          join(sliceDir, "adjudication-decisions.json"),
+          JSON.stringify({ version: 1, decisions: [{ findingId: "F-01" }] }),
+          "utf-8",
+        );
+      }
       saveSliceState(repo, "demo", "129", {
         phase,
         branch: PARKED_BRANCH,
         error:
           phase === "ADJUDICATION-LOCK-REFUSED"
             ? "adjudication: contract lock refused — migration prefix collision"
-            : "IMPASSE: F-01 requires human adjudication",
+            : phase === "ERROR"
+              ? "negotiate: planner died applying the accepted decisions"
+              : "IMPASSE: F-01 requires human adjudication",
       });
       return worktree;
     }
@@ -712,6 +749,73 @@ describe("afk adopt", () => {
       expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(false);
       // The retry path: the estate is still the next run's legitimate input.
       expect((await nextLaunchPreflight(repo)).refuse).toBe(false);
+    });
+
+    it("refuses a detached registered worktree, with no ref or state mutation", async () => {
+      // The leak the fourth gate round found: `listWorktrees` reports a
+      // detached worktree with `branch: null`, and the guard matched holders
+      // by branch identity alone — so the park's own registered worktree
+      // slipped past it entirely and adoption moved the ref behind a live
+      // estate. Ownership is now the disk fact plus the expected *path*, so
+      // a detached HEAD is not a hiding place.
+      const repo = makeRepo();
+      const worktree = park(repo, "AWAITING-ADJUDICATION", { detached: true });
+      const statePath = join(repo, ".afk", "state", "demo.json");
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+      const sliceBefore = resolveCommit(repo, "manual/demo-01")!;
+      const stateBefore = readFileSync(statePath, "utf-8");
+      let gatesCalled = false;
+
+      const result = await adopt(repo, {
+        resolveGatePlan: () => {
+          gatesCalled = true;
+          return { declarations: GATES };
+        },
+        runBaseGates: async () => {
+          gatesCalled = true;
+          return [];
+        },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("live adjudication estate");
+      expect(result.output).toContain(worktree.replace(/\\/g, "/"));
+      expect(result.output).toContain("contract-negotiation-outcome.json");
+      // Nothing moved: no candidate merge, no gates, no ref, no state.
+      expect(gatesCalled).toBe(false);
+      expect(existsSync(join(repo, ".afk", "adopt"))).toBe(false);
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(resolveCommit(repo, "manual/demo-01")).toBe(sliceBefore);
+      expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
+      expect(isSliceComplete(loadRunState(repo, "demo"), "129")).toBe(false);
+    });
+
+    it("refuses an estate left by a post-decision apply failure in ordinary ERROR", async () => {
+      // The class the fourth gate round closed: once every decision is
+      // accepted, a planner or provider failure during the apply lands the
+      // slice in plain `ERROR`. No phase trait protects that, and the
+      // decision log is the only copy of the human's input — so the disk
+      // fact has to be what refuses.
+      const repo = makeRepo();
+      const worktree = park(repo, "ERROR");
+      const statePath = join(repo, ".afk", "state", "demo.json");
+      const featureBefore = resolveCommit(repo, "feat/demo")!;
+      const stateBefore = readFileSync(statePath, "utf-8");
+
+      const result = await adopt(repo, {
+        resolveGatePlan: () => ({ declarations: GATES }),
+        runBaseGates: async () => [],
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("live adjudication estate");
+      expect(result.output).toContain("adjudication-decisions.json");
+      expect(result.output).toContain(worktree.replace(/\\/g, "/"));
+      // The forward path for an apply failure is a re-dispatch retrying the
+      // decisions already on disk — not a fresh decision, not a base fix.
+      expect(result.output).toContain("retry the recorded decisions");
+      expect(resolveCommit(repo, "feat/demo")).toBe(featureBefore);
+      expect(readFileSync(statePath, "utf-8")).toBe(stateBefore);
     });
 
     it("adopts once the park is quiesced, and the next launch is clean", async () => {
