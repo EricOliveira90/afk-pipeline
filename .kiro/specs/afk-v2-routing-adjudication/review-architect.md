@@ -2,94 +2,54 @@
 
 **Verdict:** FIX-BEFORE-SHIP
 
-## Scope reviewed
+## Blocking Finding
 
-Reviewed `git diff main...HEAD`, all contracts and implementation artifacts
-under `.kiro/specs/afk-v2-routing-adjudication/slices/`, the PRD, and ADRs
-0008, 0010, 0028, 0031, 0047, and 0050-0055. I traced the merged escalation,
-contract-transaction, adjudication, journal, cleanup, and adoption paths.
+### A1. The adoption state "CAS" is an unlocked read-check-write
 
-The pre-ship gate already passed this tree, so I did not rerun the full suite.
+**Convention:** ADR 0055 section 11 requires adoption's state write to be a
+compare-and-swap against the record observed before verification, and states
+that a concurrent run touching the slice must make adoption refuse rather than
+win by last writer. ADR 0018's Concurrency section only establishes that a
+synchronous read-modify-write cannot interleave on one Node process's event
+loop; it does not protect this command from a separate pipeline process.
 
-## Blocking findings
+**File and location:** `src/run-state.ts`,
+`saveSliceStateIfUnchanged` (lines 484-498), especially the load at line 493,
+comparison at line 495, and unconditional `writeFileSync` at line 497.
+`src/adopt-command.ts:894-968` moves the feature ref and then relies on this
+helper to report a lost state CAS.
 
-### 1. Scope escalation can authorize an out-of-scope edit after it happened
+**Evidence read/run:** I read both production call sites and searched
+`src/run-state.ts` and `src/adopt-command.ts` for any file lock, mutex, atomic
+conditional replacement, or generation check spanning that sequence; none
+exists. The helper loads the file, compares one slice record, and later
+overwrites the whole state file. I also read
+`src/run-state.test.ts:518-590` and `src/adopt-command.test.ts:1447-1493`.
+The former places the competing record before the helper starts; the latter
+injects a fake `persistSliceState` that reports `{ ok: false }`. Neither test
+creates an update between the production comparison and write.
 
-- **File/location:** `src/orchestrator.ts`, `runSliceExecute()` at
-  lines 4240-4266; `src/escalation.ts`, `parseScopeEscalation()` at
-  lines 83-169.
-- **Evidence gathered:** I read the complete post-generator escalation path.
-  It archives `escalation.md`, validates its schema and requested paths
-  against the manifest, and immediately starts `runFocusedScopeRevision()`.
-  It never compares the changed worktree paths with the still-locked scope.
-  A repository search for `listChangedFiles` in this flow found only the
-  separate QA amendment check at `src/orchestrator.ts:3891`.
-- **Defect:** A generator may edit an undeclared path first, then name that
-  path in a valid escalation. The focused revision adds the path and the
-  existing edit proceeds to gates as if it had been made under the revised
-  lock. The control artifact therefore launders the boundary violation it is
-  meant to prevent.
-- **Convention violated:** ADR 0008, **Decision**, makes the on-disk locked
-  contract the orchestrator-owned source of truth. ADR 0052, **Decision**,
-  defines this route as a pre-build discovery: the generator discovers the
-  narrow scope before building and then emits the reserved or cited identity.
-- **Required fix:** Before granting a focused revision, fail closed if the
-  worktree already contains changes outside the current locked scope. Preserve
-  the raw escalation archive and add focused coverage for an escalation that
-  follows an undeclared edit.
+Another process can therefore persist `AWAITING-ADJUDICATION` after line 495
+and before line 497. Adoption then overwrites that park with `PASS`, returns
+success, and strands the live adjudication estate. A concurrent update to any
+other slice can also be lost because the helper rewrites the full previously
+loaded state object. This is the corruption ADR 0055 section 11 says the CAS
+must make impossible.
 
-### 2. Estate discovery reports absence without completing the probe
+**Required before ship:** Make the state mutation genuinely cross-process
+conditional. For example, serialize every run-state writer on a shared
+inter-process lock and perform load, expected-record comparison, mutation, and
+commit while holding it; a lock used only by adoption is insufficient. An
+equivalent generation-based or transactional store is also acceptable. Add a
+deterministic test that pauses the production primitive after comparison,
+writes a competing park through another writer, then proves adoption refuses
+and rolls the feature ref back without losing either record.
 
-- **File/location:** `src/adjudication-estate.ts`, `MAX_DEPTH` and
-  `findAdjudicationEstate()` at lines 50-58 and 100-134; destructive callers
-  in `src/clean-failed.ts:223-242,317-328` and the adoption caller in
-  `src/adopt-command.ts:373-393`.
-- **Evidence gathered:** I read the walk: it stops at depth six and silently
-  returns from any `readdirSync()` failure, after which an empty result becomes
-  `null`. I also ran a focused TypeScript probe with a valid configurable
-  specs path,
-  `docs/internal/programs/2026/specs/demo/slices/01-deep/`, containing
-  `adjudication-decisions.json`; the function returned `null`. `src/afk.ts`
-  lines 145-163 accept an arbitrary `--prd-dir` and impose no matching depth
-  constraint.
-- **Defect:** `clean-failed` can delete a worktree whose estate is deeper than
-  the assumed default layout, or whose directory could not be enumerated.
-  Adoption can likewise treat the same incomplete inspection as proof that no
-  estate exists. Both destroy or strand operator-owned adjudication state.
-- **Convention violated:** ADR 0055, **Seam 2 invariant**, says an operation
-  that cannot prove it preserves the estate refuses by name. Seam 2
-  **sections 6 and 8** require estate ownership to be read from disk and
-  absence to be proved, not inferred from enumeration failure.
-- **Required fix:** Resolve the exact slice/specs location rather than using a
-  bounded blind walk, or return a tri-state result that distinguishes absent
-  from indeterminate. Traversal errors must make cleanup and adoption refuse.
+## Structural Assessment
 
-### 3. Adoption can overwrite a park created while gates run
+The shared contract transaction, single lock predicate, tri-state estate
+probe, and replaceable park lifecycle centralize the invariants required by
+ADRs 0050-0055. No other structural violation warrants blocking shipment.
 
-- **File/location:** `src/adopt-command.ts`, `runAdoptCli()` at lines
-  586-611 and 674-767; `src/run-state.ts`, `saveSliceState()` at lines
-  422-437.
-- **Evidence gathered:** I read the ordering: run state and worktrees are read
-  once, the estate refusal runs, base gates execute, the feature ref is
-  compare-and-swapped, and `saveSliceState()` then re-reads state but
-  unconditionally replaces this slice's record. I ran a focused reproduction
-  whose gate callback parked slice `#129` and wrote
-  `adjudication-decisions.json` after the initial refusal check. Adoption
-  returned exit code 0, persisted `PASS`, and left the decision file on disk.
-- **Defect:** Gate verification is long enough for a concurrent run to park
-  the same slice without moving the feature branch. The feature-ref CAS still
-  succeeds, adoption overwrites `AWAITING-ADJUDICATION` with `PASS`, and the
-  live estate is stranded with no slice record owning it.
-- **Convention violated:** ADR 0055, **Seam 2 invariant** and **section 8**,
-  says only the slice's own re-dispatch replaces a park and adoption must
-  refuse before mutation while that estate exists.
-- **Required fix:** Re-enumerate worktrees and re-check the estate immediately
-  before finalization, and make the slice-state update conditional on the
-  record observed before verification. A changed record must refuse without
-  moving the feature ref, or roll it back if the state CAS loses.
-
-## Verification
-
-- Focused estate-depth probe reproduced a false `null`.
-- Focused adoption-race probe reproduced `PASS` beside a live decision log.
-- No full suite was rerun, per the review invariant.
+The pre-ship sanity gate is accepted as passed for this tree; I did not rerun
+the full suite. `git diff --check main...HEAD` passed during this review.
