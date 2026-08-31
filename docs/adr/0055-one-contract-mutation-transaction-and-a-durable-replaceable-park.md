@@ -228,6 +228,23 @@ applied-mark leaves witness + stamped lock — proved, marked applied,
 ADR 0054's original intent. The lock-then-mark order is unchanged;
 only its evidence improved.
 
+**Amended (eighth adjudication gate round, architect A2): the ordering
+binds every lock, not only the transaction's.** The gate-before-lock rule
+just below was written for the shared transaction and implemented only
+there, while ordinary negotiation — which has no accepted pair to capture
+and so locks outside the transaction (§3) — kept `lockContract` first and
+consulted the gate afterwards. The leak is the same one, at the seam that
+produces almost every lock: a process stop between the two calls left an
+authoritative `LOCKED` contract whose gate had never passed, and the
+generator's own "if Status is not LOCKED, stop" invariant (ADR 0008) reads
+that status as permission. The rule is therefore stated over the operation
+rather than over the path: **nothing writes `LOCKED` before the gate has
+passed against the candidate that lock would attest.** Ordinary
+negotiation evaluates the gate on the accepted candidate while the
+contract still says `NEGOTIATING`; a refusal writes nothing at all — no
+lock, and so no reopen either — and routes the objection to the next
+planner round exactly as it did before.
+
 **Amended (adjudication gate round, architect blocker 1).** As first
 shipped this section left the mechanical lock gate *after*
 `lockContract`, and cleared the witness only at a lock exit that did not
