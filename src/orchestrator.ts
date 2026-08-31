@@ -572,8 +572,8 @@ export function sliceBranchPrefix(provider: AgentProvider): string {
 /**
  * `sliceBranchPrefix` for a caller that has a provider *name* and no
  * provider object — the same split `runSlugForProviderName` makes below,
- * and for the same reason: `afk adopt --provider codex` never constructs
- * one.
+ * and for the same reason. One formula, one place, so the name-keyed and
+ * object-keyed forms cannot drift.
  */
 export function sliceBranchPrefixForProviderName(providerName: string): string {
   return providerName === "kiro" ? "afk" : `afk-${providerName}`;
@@ -587,35 +587,13 @@ function featureBranchPrefixForProviderName(providerName: string): string {
   return providerName === "kiro" ? "feat" : `feat-${providerName}`;
 }
 
-/**
- * The feature branch a given PRD slug and provider *name* produce — the
- * same formula `featureBranch` uses, for a caller holding a name and no
- * provider object.
- *
- * `afk adopt` needs it to *prove* that a discovered run state belongs to the
- * PRD the operator named. A prefix match on the state filename alone cannot:
- * `.afk/state/api-v2.json` matches PRD `api` with an apparent provider
- * `v2`, and adoption would then move `feat/api-v2` and write the slice into
- * another PRD's run (PM blocker 2, fifth adjudication gate round). The
- * recorded feature branch is the discriminator, because the run wrote it
- * from its own PRD slug and provider: a genuine `api` + `codex` run records
- * `feat-codex/api`, while the `api-v2` run records `feat/api-v2`.
- */
-export function featureBranchForProviderName(
-  prdSlug: string,
-  providerName: string,
-): string {
-  return `${featureBranchPrefixForProviderName(providerName)}/${prdSlug}`;
-}
-
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
   return runSlugForProviderName(prdSlug, provider.name);
 }
 
 /**
  * `pipelineRunSlug` for a caller that has a provider *name* and no
- * provider object — `afk adopt --provider codex`, which never constructs
- * one. Same rule, one place, so the two cannot drift.
+ * provider object. Same rule, one place, so the two cannot drift.
  */
 export function runSlugForProviderName(
   prdSlug: string,
@@ -654,11 +632,9 @@ export function sliceWorktreeDir(
 
 /**
  * `sliceWorktreeDir` for a caller holding a provider name and a slice
- * number — `afk adopt`, which needs the *expected* path of a slice's
- * worktree to ask whether one is registered there (ADR 0055 Seam 2 §8:
- * absence is proved, and a detached worktree has no branch to match on).
- * One formula, one place, so the guard and the pipeline cannot disagree
- * about where a slice's worktree lives.
+ * number rather than a provider object and a `Slice`. One formula, one
+ * place, so no caller can disagree with the pipeline about where a
+ * slice's worktree lives.
  */
 export function sliceWorktreeDirForProviderName(
   repoRoot: string,
@@ -672,14 +648,6 @@ export function sliceWorktreeDirForProviderName(
     "worktrees",
     `${sliceBranchPrefixForProviderName(providerName)}-${prdSlug}-s${sliceNumber}`,
   );
-}
-
-/** The provider name a run slug carries — the inverse of `runSlugForProviderName`. */
-export function providerNameFromRunSlug(
-  prdSlug: string,
-  runSlug: string,
-): string {
-  return runSlug === prdSlug ? "kiro" : runSlug.slice(prdSlug.length + 1);
 }
 
 /**
@@ -5033,7 +5001,7 @@ export async function runPipeline(
   );
   runState.scope = scope.persisted;
   runState.featureBranch = featBranch;
-  // Recorded so `clean-failed` and `afk adopt` can *resolve* where this
+  // Recorded so `clean-failed` can *resolve* where this
   // run's slice artifacts live rather than search a worktree for them
   // (architect blocker 2; see `RunState.specsDir`). Written here, beside the
   // feature branch, because both are facts about the run that later commands
@@ -5239,10 +5207,7 @@ export async function runPipeline(
       alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
-      logger.restoreCompleted(
-        { ghIssue: id, title: slice.title, branch },
-        runState.slices[id]!.adoption,
-      );
+      logger.restoreCompleted({ ghIssue: id, title: slice.title, branch });
       logger.phase(
         `  Skipping #${id} ${slice.title} (already completed)`,
         "log",
@@ -5796,12 +5761,6 @@ export async function runPipeline(
   const readyForShipGate = allPassed && afkSlices.length > 0;
 
   if (readyForShipGate) {
-    const adoptions = Object.entries(runState.slices).flatMap(
-      ([ghIssue, sliceState]) =>
-        sliceState.adoption
-          ? [{ ghIssue, ...sliceState.adoption }]
-          : [],
-    );
     const invokeShipGate = (reviewDir: string) =>
       runShipGate({
         repoRoot,
@@ -5814,7 +5773,6 @@ export async function runPipeline(
         relevantFilesBlock,
         reviewScope: buildReviewScopeBlock(scope!),
         closesIssues: scope!.selected.map((slice) => slice.ghIssue),
-        adoptions,
         cachedReviewPhase: runState.reviewPhase,
         invoke,
         journal: logger,

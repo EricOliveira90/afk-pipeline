@@ -203,6 +203,27 @@
     "_total": "835.3s of suite time, 14m18s of the gate's `pnpm test`",
     "_alone": "clean-failed alone on the launcher host: 14.1s before the fold, 12.0s after"
   },
+  "_measured2026_08_31_slice06_excision@fix/prd2-excise-slice06": {
+    "_note": [
+      "After excising slice 06 (`afk adopt`) from PRD 2: adopt-command.ts and",
+      "its 1523-line test deleted, adoption provenance stripped from",
+      "ship-gate/logger/run-journal/run-state/slice-lifecycle/orchestrator.",
+      "Suites run individually on the launcher host with an agent session",
+      "resident, not as one `pnpm test` chain, so these are alone-runs and",
+      "read LOW against the in-chain numbers a budget covers — do not use",
+      "them to lower a budget. Recorded because the tree lost 1523 test",
+      "lines and the datapoint is worth having. No budget raised or lowered;",
+      "every suite passed with headroom. Compare with the gate6 block above,",
+      "measured in-chain on the branch this merges into."
+    ],
+    "fast": 80.4,
+    "orchestrator": 329.7,
+    "wave": 194.4,
+    "resume-integration": 108.7,
+    "qa-orchestration": 75.1,
+    "clean-failed": 16.4,
+    "_total": "804.8s of suite time, 1604 tests (1294 fast + 310 heavy)"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
