@@ -21,6 +21,3 @@
 - Prompt-template line endings follow the checkout, while formatted failure-set content uses LF; assertions at that boundary must preserve the rendered template bytes.
 - Vitest can report `[vitest-worker]: Timeout calling "onTaskUpdate"` after all fast tests pass while still exiting successfully.
 - QA orchestration fixtures that enter generation must seed both locked `contract.md` and version-2 `acceptance-manifest.json` inputs; repair assertions target finding IDs, clear conditions, and artifact references rather than retired summaries.
-
-## Status
-Tests passing locally. No regressions.
