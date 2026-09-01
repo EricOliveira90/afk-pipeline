@@ -1,6 +1,15 @@
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import { renderPrompt } from "./prompt-template.js";
 
+const GENERATOR_CONTRACT_SECTIONS = new Set([
+  "Scope lock",
+  "In scope",
+  "Non-goals (explicit out-of-scope)",
+  "Existing behavior to preserve",
+  "Changes to existing behavior (only if the issue asks for it)",
+  "New patterns / deps / schema (if any)",
+]);
+
 export const GENERATOR_CONTEXT_MANIFEST = {
   version: 1,
   role: "generator",
@@ -80,6 +89,39 @@ export interface GeneratorEnvelopeEvidence {
 export interface GeneratorEnvelopeResult {
   prompt: string;
   evidence: GeneratorEnvelopeEvidence;
+}
+
+export function projectGeneratorContractView(contract: string): string {
+  const headings = [
+    ...contract.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
+  ].map((match) => ({
+    title: match[2]!,
+    headingStart: match.index,
+    bodyStart: match.index + match[0].length - match[3]!.length,
+  }));
+
+  const selected = headings
+    .map((heading, index) => ({
+      ...heading,
+      bodyEnd: headings[index + 1]?.headingStart ?? contract.length,
+    }))
+    .filter((heading) => GENERATOR_CONTRACT_SECTIONS.has(heading.title));
+  const counts = new Map<string, number>();
+  for (const heading of selected) {
+    counts.set(heading.title, (counts.get(heading.title) ?? 0) + 1);
+  }
+  const invalid = [...GENERATOR_CONTRACT_SECTIONS].filter(
+    (title) => counts.get(title) !== 1,
+  );
+  if (invalid.length > 0) {
+    throw new Error(
+      `Generator contract view requires exactly one of each projected section; invalid: ${invalid.join(", ")}`,
+    );
+  }
+
+  return selected
+    .map(({ bodyStart, bodyEnd }) => contract.slice(bodyStart, bodyEnd))
+    .join("");
 }
 
 export function assembleGeneratorEnvelope(
