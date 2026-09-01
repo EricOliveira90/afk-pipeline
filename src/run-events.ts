@@ -201,6 +201,9 @@ export type RunEventPayload =
        * — swept shells, reported conditions, and a refusal bypassed with
        * `--preflight-report-only` (ADR 0042) — the `afk stop`
        * sentinel this run found in its own log directory (ADR 0043),
+       * a guardian review artifact the ship gate had to restore before
+       * committing — or could not restore — and a review worktree that moved
+       * under the gate between the reviews and the artifact commit (#136),
        * which is immediately followed by the `cancellation-requested`
        * line it triggers, and the previous attempt's persisted slice
        * record dropped when this run dispatched the slice (#111).
@@ -224,7 +227,10 @@ export type RunEventPayload =
         | "qa-review-archive-failed"
         | "feature-branch-fast-forward"
         | "restart-refused"
-        | "preflight";
+        | "preflight"
+        | "review-artifact-restored"
+        | "review-artifact-restore-failed"
+        | "review-worktree-drift";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

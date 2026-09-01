@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "resourceKeys": {
+    "orchestrator-core": "^src/(orchestrator|wave)\\.ts$"
+  },
+  "architectureDoc": "ARCHITECTURE.md"
+}
