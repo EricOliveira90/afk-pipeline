@@ -357,7 +357,8 @@ A failed dependency holds its dependents — fix the broken slice and re-run.
 | planner | `prompts/planner.md` |
 | evaluator (contract) | `prompts/evaluator-contract.md` |
 | evaluator (QA) | `prompts/evaluator-qa.md` |
-| generator | `prompts/generator.md` |
+| generator (initial) | `prompts/generator.md` |
+| generator (repair/resume) | `prompts/generator-repair.md` |
 
 **Guardian roles** — post-implementation reviews always receive complete prompt templates. Kiro also loads project agent configs; Claude Code runs guardians in `--bare` mode and Codex ignores `agent`/`bare`, so neither requires project agent files:
 

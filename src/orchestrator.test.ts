@@ -1927,9 +1927,8 @@ describe("focused generator scope revision", () => {
     expect(freshGeneratorPrompt).toContain("src/declared.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-a.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-b.ts");
-    expect(freshGeneratorPrompt).toContain("This is implementation round 2");
+    expect(freshGeneratorPrompt).toContain("Implementation round: 2 of 3.");
     expect(freshGeneratorPrompt).toContain("QA-01");
-    expect(freshGeneratorPrompt).toContain("Fixture implementation finding");
     expect(freshGeneratorPrompt).toContain(
       "The fixture evaluator observes the behavior passing",
     );

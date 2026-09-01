@@ -111,17 +111,42 @@ export function projectGeneratorContractView(contract: string): string {
   for (const heading of selected) {
     counts.set(heading.title, (counts.get(heading.title) ?? 0) + 1);
   }
-  const invalid = [...GENERATOR_CONTRACT_SECTIONS].filter(
-    (title) => counts.get(title) !== 1,
+  const duplicated = [...GENERATOR_CONTRACT_SECTIONS].filter(
+    (title) => (counts.get(title) ?? 0) > 1,
   );
-  if (invalid.length > 0) {
+  if (duplicated.length > 0) {
     throw new Error(
-      `Generator contract view requires exactly one of each projected section; invalid: ${invalid.join(", ")}`,
+      `Generator contract view requires unique projected sections; duplicated: ${duplicated.join(", ")}`,
     );
   }
+  if (selected.length !== GENERATOR_CONTRACT_SECTIONS.size) return contract;
 
   return selected
     .map(({ bodyStart, bodyEnd }) => contract.slice(bodyStart, bodyEnd))
+    .join("");
+}
+
+export function projectGeneratorPatternsAndHarness(context: string): string {
+  const selectedTitles = new Set(["Patterns in Use", "Test Infrastructure"]);
+  const headings = [
+    ...context.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
+  ].map((match) => ({
+    title: match[2]!,
+    headingStart: match.index,
+    bodyStart: match.index + match[0].length - match[3]!.length,
+  }));
+  const sections = headings
+    .map((heading, index) => ({
+      ...heading,
+      bodyEnd: headings[index + 1]?.headingStart ?? context.length,
+    }))
+    .filter((heading) => selectedTitles.has(heading.title));
+  if (sections.length === 0) return context;
+  return sections
+    .map(
+      ({ title, bodyStart, bodyEnd }) =>
+        `## ${title}${context.slice(bodyStart, bodyEnd)}`,
+    )
     .join("");
 }
 

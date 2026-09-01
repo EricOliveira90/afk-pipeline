@@ -143,32 +143,21 @@ describe("renderPrompt", () => {
     );
   });
 
-  /**
-   * #82 AC3: the shared resume template is what a STUCK repair round now
-   * reads, so the "don't touch the diagnosis" rule has to live in it. The
-   * orchestrator restores the bytes regardless, but a generator told to
-   * treat the file as read-only never makes it do the work.
-   */
-  it("tells the shared resume template to read stuck.md and leave it alone", () => {
-    const resumeTemplate = readFileSync(
-      new URL("../prompts/generator-resume.md", import.meta.url),
+  it("tells the repair template to leave stuck.md alone", () => {
+    const repairTemplate = readFileSync(
+      new URL("../prompts/generator-repair.md", import.meta.url),
       "utf-8",
     );
-    const requiredReading = resumeTemplate.match(
-      /^# Required reading\r?\n([\s\S]*?)(?=^# |\Z)/m,
-    )?.[1];
-    expect(requiredReading).toContain("{{SLICE_DIR}}/stuck.md");
-    const invariants = resumeTemplate.match(
-      /^# Invariants\r?\n([\s\S]*?)(?=^# |\Z)/m,
-    )?.[1];
-    expect(invariants).toContain("{{SLICE_DIR}}/stuck.md");
-    expect(invariants).toMatch(/never delete, move,\s+rewrite, or edit it/i);
+    expect(repairTemplate).toContain("preserved `stuck.md` evidence");
+    expect(repairTemplate).toMatch(
+      /read-only\. Never delete, move,\s+rewrite, or edit it/i,
+    );
   });
 
   it("gives every generator invocation the canonical scope-escalation contract", () => {
     const sources = [
       new URL("../prompts/generator.md", import.meta.url),
-      new URL("../prompts/generator-resume.md", import.meta.url),
+      new URL("../prompts/generator-repair.md", import.meta.url),
     ];
     const escalationSections = sources.map((source) => {
       const content = readFileSync(source, "utf-8");
@@ -232,19 +221,16 @@ describe("renderPrompt", () => {
       FAILURE_SET: "(none)",
     })).toBeTruthy();
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
-    expect(renderPrompt("generator-resume", {
+    expect(renderPrompt("generator-repair", {
       SLICE_DIR: "d",
-      RELEVANT_FILES: "",
-      SIBLING_HANDOFFS: "(none)",
-      TEST_COMMAND: "pnpm test",
-      COMMITS_AHEAD: 1,
-      COMMIT_LOG: "abc123 feat: work",
-      WORKTREE_STATE: "preserved state",
-      BASE_REFRESH_NOTE: "base refreshed",
-      STUCK_NOTE: "",
-      UNRESOLVED_FINDINGS: "(none)",
-      HANDOFF_NOTE: "",
+      FILE_SCOPE: "- `src/example.ts`",
       MIGRATION_RESERVATION: "none",
+      CONTRACT_VIEW: "contract",
+      ACCEPTANCE_MANIFEST: '{"version":2}',
+      TEST_COMMAND: "pnpm test",
+      PATTERNS_AND_HARNESS: "patterns",
+      REPAIR_SITUATION: "resume facts",
+      FAILURE_SET: "(none)",
     })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
@@ -259,6 +245,9 @@ describe("renderPrompt", () => {
         existsSync(new URL(`../prompts/${name}`, import.meta.url)),
       ).toBe(false);
     }
+    expect(
+      existsSync(new URL("../prompts/generator-resume.md", import.meta.url)),
+    ).toBe(false);
 
     expect(() =>
       execFileSync(

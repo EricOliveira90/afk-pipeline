@@ -36,6 +36,9 @@ Fix causes, not only listed examples.
 
 {{REPAIR_SITUATION}}
 
+When the situation includes preserved `stuck.md` evidence, treat that file as
+read-only. Never delete, move, rewrite, or edit it.
+
 # Locked contract view
 
 {{CONTRACT_VIEW}}

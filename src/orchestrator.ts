@@ -29,6 +29,12 @@ import {
 } from "./contract-transaction.js";
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
+import {
+  assembleGeneratorEnvelope,
+  projectGeneratorContractView,
+  projectGeneratorPatternsAndHarness,
+  type GeneratorFailureSet,
+} from "./context-envelope.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave, type WaveOutcome } from "./wave.js";
 import {
@@ -796,22 +802,21 @@ export interface SliceContext {
   /**
    * Set by `runSliceNegotiate` when the slice resumed from its
    * surviving branch tip instead of restarting from base (spec #33).
-   * Drives the round-1 generator prompt: a resumed generator gets a
-   * resume template (own commit log, verify-then-continue) instead of
-   * the normal one. Absent for fresh and restarted slices.
+   * Drives the round-1 generator repair envelope with the surviving
+   * situation facts. Absent for fresh and restarted slices.
    */
   resume?: {
     /**
-     * Which resume this is, selecting the round-1 generator template.
+     * Which resume situation the repair envelope describes.
      *
      * - `killed` — the default path (#33): the previous invocation died
      *   mid-run, so the tree was reset to its last commit and refreshed
      *   from the feature branch before the generator was handed
-     *   `generator-resume`.
+     *   the repair envelope.
      * - `stuck` — the operator opted in with `--resume-stuck` (#49): the
      *   tree was left untouched and the stuck.md diagnosis survives.
-     *   Both modes use `generator-resume`; explicit situation blocks
-     *   carry their opposite worktree facts without template drift.
+     *   Both modes use `generator-repair`; explicit situation blocks
+     *   carry their opposite worktree facts.
      */
     mode: "killed" | "stuck";
     /** Commits on the slice branch beyond the feature-branch base. */
@@ -4138,7 +4143,10 @@ export async function runSliceExecute(
   let sharedPreviewUnresolved: readonly QAReviewAttemptFinding[] = [];
   let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
   let firstRound = 1;
-  let retryNote = "";
+  let generatorFailureSet: GeneratorFailureSet = {
+    findings: [],
+    gates: [],
+  };
   const reviewArchiveDir = artifacts.contractReviewArchiveDir(
     config.repoRoot,
     pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
@@ -4201,6 +4209,14 @@ export async function runSliceExecute(
           : restored.retryStage === "shared-preview"
             ? sharedPreviewUnresolved
             : [];
+      generatorFailureSet = {
+        findings: resumedUnresolved.map((finding) => ({
+          id: finding.id,
+          clearCondition: finding.clearCondition,
+          artifactReferences: finding.artifactReferences,
+        })),
+        gates: [],
+      };
       firstRound = restored.nextRound;
     }
     // The three-round cap is global across a slice's lives (ADR 0014):
@@ -4248,52 +4264,76 @@ export async function runSliceExecute(
           },
         );
         const genLog = logger.agentLog(slice.number, "generator", round);
-        const generatorPromptBase =
-          implementationAttempt === 1 && ctx.resume
-              ? renderPrompt("generator-resume", {
-                  SLICE_DIR: ctx.relSliceDir,
-                  RELEVANT_FILES: ctx.relevantFilesBlock,
-                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-                  TEST_COMMAND: ctx.testCommand,
-                  COMMITS_AHEAD: ctx.resume.commitsAhead,
-                  COMMIT_LOG: ctx.resume.commitLog,
-                  WORKTREE_STATE:
-                    ctx.resume.mode === "stuck"
-                      ? "**Your worktree was not touched.** Nothing was reset, cleaned, or dropped. Every committed change and uncommitted edit remains exactly where the previous attempt left it. Treat dirty-tree state as real work-in-progress."
-                      : "Your worktree was reset to your last commit. Uncommitted changes were discarded; anything after your last commit is gone and must be redone.",
-                  BASE_REFRESH_NOTE:
-                    ctx.resume.mode === "stuck"
-                      ? ctx.resume.baseRefreshed
-                        ? `The feature branch \`${featBranch}\` was merged into your branch just before this run, so your verification world is current.`
-                        : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`
-                      : `The feature branch \`${featBranch}\` was merged into your branch just before this run. Your verification world is current: work merged by sibling slices while you were away is now part of your tree.`,
-                  STUCK_NOTE:
-                    ctx.resume.mode === "stuck"
-                      ? ctx.resume.stuckNote ?? ""
-                      : "",
-                  UNRESOLVED_FINDINGS:
-                    formatUnresolvedQAFindings(resumedUnresolved),
-                  HANDOFF_NOTE: ctx.resume.handoffNote,
-                  MIGRATION_RESERVATION: migrationReservationBlock(
-                    config,
-                    slice.ghIssue,
-                  ),
-                })
-              : renderPrompt("generator", {
-                  SLICE_DIR: ctx.relSliceDir,
-                  RELEVANT_FILES: ctx.relevantFilesBlock,
-                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-                  TEST_COMMAND: ctx.testCommand,
-                  RETRY_NOTE:
-                    implementationAttempt > 1 ? retryNote : "",
-                  MIGRATION_RESERVATION: migrationReservationBlock(
-                    config,
-                    slice.ghIssue,
-                  ),
-                });
-        const generatorPrompt = scopeRevisionNote
-          ? `${generatorPromptBase}\n\n${scopeRevisionNote}`
-          : generatorPromptBase;
+        const acceptanceManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        if (acceptanceManifest.version !== 2) {
+          throw new Error(
+            "Generator context assembly requires acceptance-manifest.json version 2",
+          );
+        }
+        const contract = readFileSync(
+          join(ctx.absSliceDir, "contract.md"),
+          "utf-8",
+        );
+        const contextPath = join(ctx.absSliceDir, "context.md");
+        const context = existsSync(contextPath)
+          ? readFileSync(contextPath, "utf-8")
+          : "(no explorer patterns or harness context)";
+        const mode =
+          implementationAttempt === 1 &&
+          !ctx.resume &&
+          generatorAttempt === 1
+            ? "initial"
+            : "repair";
+        const worktreeState =
+          ctx.resume?.mode === "stuck"
+            ? "**Your worktree was not touched.** Nothing was reset, cleaned, or dropped. Every committed change and uncommitted edit remains exactly where the previous attempt left it. Treat dirty-tree state as real work-in-progress."
+            : "Your worktree was reset to your last commit. Uncommitted changes were discarded; anything after your last commit is gone and must be redone.";
+        const baseRefreshNote =
+          ctx.resume?.mode === "stuck"
+            ? ctx.resume.baseRefreshed
+              ? `The feature branch \`${featBranch}\` was merged into your branch just before this run, so your verification world is current.`
+              : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`
+            : `The feature branch \`${featBranch}\` was merged into your branch just before this run. Your verification world is current: work merged by sibling slices while you were away is now part of your tree.`;
+        const repairSituation =
+          mode === "repair"
+            ? [
+                `Implementation round: ${round} of ${finalRound}.`,
+                `Generator dispatch in this round: ${generatorAttempt}.`,
+                ...(ctx.resume
+                  ? [
+                      `Resume mode: ${ctx.resume.mode}.`,
+                      `Commits ahead of base: ${ctx.resume.commitsAhead}.`,
+                      "# Commit log",
+                      ctx.resume.commitLog || "(none)",
+                      "# Worktree state",
+                      worktreeState,
+                      "# Base refresh",
+                      baseRefreshNote,
+                      ...(ctx.resume.mode === "stuck" && ctx.resume.stuckNote
+                        ? ["# Preserved STUCK evidence", ctx.resume.stuckNote]
+                        : []),
+                      ...(ctx.resume.handoffNote
+                        ? ["# Prior handoff", ctx.resume.handoffNote]
+                        : []),
+                    ]
+                  : []),
+                ...(scopeRevisionNote ? [scopeRevisionNote] : []),
+              ].join("\n\n")
+            : undefined;
+        const assembled = assembleGeneratorEnvelope({
+          mode,
+          sliceDir: ctx.relSliceDir,
+          contractView: projectGeneratorContractView(contract),
+          acceptanceManifest,
+          patternsAndHarness: projectGeneratorPatternsAndHarness(context),
+          testCommand: ctx.testCommand,
+          migrationReservation: migrationReservationBlock(
+            config,
+            slice.ghIssue,
+          ),
+          failureSet: generatorFailureSet,
+          ...(repairSituation !== undefined ? { repairSituation } : {}),
+        });
         rmSync(escalationPath, { force: true });
         // The accepted pair's bytes, captured before the generator can
         // touch them (architect A1, seventh gate round). Re-captured every
@@ -4304,7 +4344,7 @@ export async function runSliceExecute(
         const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
         await invoke({
           role: "generator",
-          prompt: generatorPrompt,
+          prompt: assembled.prompt,
           cwd: ctx.worktreeDir,
           logStream: genLog,
           ...longCommandRoleBounds({
@@ -4651,12 +4691,16 @@ export async function runSliceExecute(
           ),
         ];
         stuckReferences.push(...baseGateRepairReferences);
-        retryNote =
-          `This is implementation round ${round + 1}. Fix every unresolved ` +
-          `base-gate failure in these preserved artifacts:\n` +
-          baseGateRepairReferences
-            .map((path) => `- \`${path}\``)
-            .join("\n");
+        generatorFailureSet = {
+          findings: [],
+          gates: requiredFailures.map(({ evidencePath, result }) => ({
+            id: result.gateId,
+            evidence: [
+              evidencePath.replace(/\\/g, "/"),
+              join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+            ],
+          })),
+        };
         if (implementationAttempt < implementationAttemptLimit) continue;
       } else {
         assertGateEvidenceReleasesEvaluation(
@@ -4710,10 +4754,14 @@ export async function runSliceExecute(
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
         if (implementationFailed) {
-          retryNote =
-            `This is implementation round ${round + 1}. Fix every current ` +
-            `unresolved deterministic QA finding:\n` +
-            formatUnresolvedQAFindings(deterministic.unresolved);
+          generatorFailureSet = {
+            findings: deterministic.unresolved.map((finding) => ({
+              id: finding.id,
+              clearCondition: finding.clearCondition,
+              artifactReferences: finding.artifactReferences,
+            })),
+            gates: [],
+          };
         }
         if (
           deterministic.outcome !== "IMPLEMENTATION" &&
@@ -4750,10 +4798,14 @@ export async function runSliceExecute(
           stuckReferences.push(remote.report);
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
-            retryNote =
-              `This is implementation round ${round + 1}. Fix every current ` +
-              `unresolved shared-preview UAT finding:\n` +
-              formatUnresolvedQAFindings(remote.unresolved);
+            generatorFailureSet = {
+              findings: remote.unresolved.map((finding) => ({
+                id: finding.id,
+                clearCondition: finding.clearCondition,
+                artifactReferences: finding.artifactReferences,
+              })),
+              gates: [],
+            };
           }
         }
 

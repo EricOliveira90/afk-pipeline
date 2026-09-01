@@ -321,17 +321,15 @@ describe("retried slice resume (spec #33)", () => {
       expect(logFor("4001")).toMatch(/resuming from 1 commit/);
     });
 
-    it("hands slice 01 the resume prompt over its own commit log (#33)", () => {
+    it("hands slice 01 the repair prompt over its own commit log (#33)", () => {
       const prompt = generatorRecord("01").prompt;
-      // Original contract reference.
-      expect(prompt).toContain("contract.md");
+      expect(prompt).toContain("# Locked contract view");
       // Its own commit log with stats.
       expect(prompt).toContain("feat(#4001): committed before death");
       expect(prompt).toContain("src/work-01.ts");
-      // Post-reset warning + verify-then-continue instruction.
+      // Post-reset warning plus the resolved verification command.
       expect(prompt).toMatch(/anything after (your|the) last commit is gone/i);
-      expect(prompt).toMatch(/typecheck/i);
-      expect(prompt).toMatch(/do not re-run the full/i);
+      expect(prompt).toContain("`pnpm test:run`");
       // The half-written casualty was discarded before the generator ran.
       expect(generatorRecord("01").dirtyFilePresent).toBe(false);
     });
@@ -348,7 +346,6 @@ describe("retried slice resume (spec #33)", () => {
     it("continues QA lifecycle and evidence numbering after an ordinary resume", () => {
       const generatorPrompt = generatorRecord("05").prompt;
       expect(generatorPrompt).toContain("QA-01");
-      expect(generatorPrompt).toContain("Fixture implementation finding");
       expect(generatorPrompt).toContain(
         "The fixture evaluator observes the behavior passing",
       );
@@ -443,7 +440,9 @@ describe("retried slice resume (spec #33)", () => {
     it("restarts slice 03 because the operator named it in --force-restart (#37)", () => {
       // Resumable on its own merits — the flag is the only reason.
       expect(rolesFor("03")).toContain("explorer");
-      expect(generatorRecord("03").prompt).toContain("Implement the locked contract");
+      expect(generatorRecord("03").prompt).toContain(
+        "Implement every locked acceptance-manifest behavior",
+      );
       expect(logFor("4003")).toMatch(/restarting from base \(--force-restart\)/);
     });
 
@@ -451,8 +450,10 @@ describe("retried slice resume (spec #33)", () => {
       expect(rolesFor("04")).toContain("explorer");
       expect(rolesFor("04")).toContain("planner");
       const prompt = generatorRecord("04").prompt;
-      expect(prompt).toContain("Implement the locked contract");
-      expect(prompt).not.toContain("Verify, then continue");
+      expect(prompt).toContain(
+        "Implement every locked acceptance-manifest behavior",
+      );
+      expect(prompt).not.toContain("# Repair situation");
       expect(logFor("4004")).toMatch(/restarting from base \(no commits beyond base\)/);
     });
 
@@ -679,10 +680,10 @@ describe("retried slice resume (spec #33)", () => {
       expect(roles).not.toContain("planner");
     });
 
-    it("hands the named slice the STUCK-resume prompt, not the #33 one", () => {
+    it("hands the named slice the STUCK repair situation", () => {
       const prompt = generatorRecord("01").prompt;
-      const unresolvedFindings = prompt.match(
-        /# Current unresolved findings\r?\n\r?\n([\s\S]*?)\r?\n# Reconciling the contract/,
+      const failureSet = prompt.match(
+        /# Current failure set\r?\n\r?\n([\s\S]*?)\s*$/,
       )?.[1];
       expect(prompt).toContain("Your worktree was not touched.");
       expect(prompt).not.toMatch(/anything after your last commit is gone/i);
@@ -692,47 +693,34 @@ describe("retried slice resume (spec #33)", () => {
       // The preserved diagnosis rode into the prompt.
       expect(prompt).toMatch(/declared STUCK/i);
       expect(prompt).toContain("QA-01");
-      expect(prompt).toContain("Fixture implementation finding");
       expect(prompt).toContain(
         "The fixture evaluator observes the behavior passing",
       );
       expect(prompt).toContain("qa-review-r3-a1.json");
       expect(prompt).toContain("qa-report-r3-a1.md");
-      expect(unresolvedFindings).toBeDefined();
-      expect(unresolvedFindings).toContain("QA-01");
-      expect(unresolvedFindings).toContain("Fixture implementation finding");
-      expect(unresolvedFindings).toContain(
+      expect(failureSet).toBeDefined();
+      expect(failureSet).toContain("QA-01");
+      expect(failureSet).toContain(
         "The fixture evaluator observes the behavior passing",
       );
-      expect(unresolvedFindings).toContain("qa-review-r3-a1.json");
-      expect(unresolvedFindings).toContain("qa-report-r3-a1.md");
-      expect(unresolvedFindings).not.toContain("qa-review-r1-a1.json");
-      expect(unresolvedFindings).not.toContain("`qa-report-r2-a1.md`");
+      expect(failureSet).toContain("qa-review-r3-a1.json");
+      expect(failureSet).toContain("qa-report-r3-a1.md");
+      expect(failureSet).not.toContain("qa-review-r1-a1.json");
+      expect(failureSet).not.toContain("`qa-report-r2-a1.md`");
     });
 
-    /**
-     * B-03's "every unresolved-finding field": the repair input carries
-     * the whole `QAReviewAttemptFinding`, not the four fields the
-     * formatter happened to render first. Each field is asserted on its
-     * own labelled line inside the unresolved block, so dropping any one
-     * of them fails here rather than silently shrinking the repair input.
-     */
-    it("carries every unresolved-finding field into the repair input", () => {
-      const unresolvedFindings = generatorRecord("01").prompt.match(
-        /# Current unresolved findings\r?\n\r?\n([\s\S]*?)\r?\n# Reconciling the contract/,
+    it("carries only the allowed open-finding fields into repair", () => {
+      const failureSet = generatorRecord("01").prompt.match(
+        /# Current failure set\r?\n\r?\n([\s\S]*?)\s*$/,
       )?.[1];
-      expect(unresolvedFindings).toContain("Finding ID: `QA-01`");
-      expect(unresolvedFindings).toContain("Severity: BLOCKING");
-      expect(unresolvedFindings).toContain("State: OPEN");
-      expect(unresolvedFindings).toContain("Unresolved: yes");
-      expect(unresolvedFindings).toContain("Remedy: SOURCE_CHANGE");
-      expect(unresolvedFindings).toContain(
-        "Summary: Fixture implementation finding",
-      );
-      expect(unresolvedFindings).toContain(
+      expect(failureSet).toContain("Finding ID: `QA-01`");
+      expect(failureSet).toContain(
         "Clear condition: The fixture evaluator observes the behavior passing",
       );
-      expect(unresolvedFindings).toContain("Artifact references:");
+      expect(failureSet).toContain("Artifact references:");
+      expect(failureSet).not.toContain("Severity:");
+      expect(failureSet).not.toContain("Summary:");
+      expect(failureSet).not.toContain("Remedy:");
     });
 
     it("continues the deterministic lifecycle in the resumed evaluator", () => {
