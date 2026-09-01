@@ -575,7 +575,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(roles.filter((role) => role === "generator")).toHaveLength(2);
     expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(2);
     expect(roles.at(-1)).toBe("evaluator-qa");
-    expect(generatorPrompts[1]).toContain("This is implementation round 3");
+    expect(generatorPrompts[1]).toContain("Implementation round: 3 of 3.");
     expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
@@ -1249,10 +1249,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts).toHaveLength(3);
 
     expect(generatorPrompts[1]).toContain("QA-BLOCKING");
-    expect(generatorPrompts[1]).toContain("Blocking summary");
+    expect(generatorPrompts[1]).not.toContain("Blocking summary");
     expect(generatorPrompts[1]).toContain("Blocking condition");
     expect(generatorPrompts[1]).toContain("QA-ADVISORY");
-    expect(generatorPrompts[1]).toContain("Advisory summary");
+    expect(generatorPrompts[1]).not.toContain("Advisory summary");
     expect(generatorPrompts[1]).toContain("Advisory condition");
     expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
@@ -1264,10 +1264,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
     expect(generatorPrompts[2]).not.toContain("QA-BLOCKING");
     expect(generatorPrompts[2]).toContain("QA-ADVISORY");
-    expect(generatorPrompts[2]).toContain("Advisory summary");
+    expect(generatorPrompts[2]).not.toContain("Advisory summary");
     expect(generatorPrompts[2]).toContain("Advisory condition");
     expect(generatorPrompts[2]).toContain("QA-FRESH");
-    expect(generatorPrompts[2]).toContain("Fresh summary");
+    expect(generatorPrompts[2]).not.toContain("Fresh summary");
     expect(generatorPrompts[2]).toContain("Fresh condition");
     expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
@@ -1838,7 +1838,7 @@ describe("shared-preview QA", () => {
     expect(uatPrompts).toHaveLength(2);
 
     expect(generatorPrompts[1]).toContain("UAT-OPEN");
-    expect(generatorPrompts[1]).toContain("UAT-OPEN summary");
+    expect(generatorPrompts[1]).not.toContain("UAT-OPEN summary");
     expect(generatorPrompts[1]).toContain("UAT-OPEN condition");
     expect(generatorPrompts[1]).toContain("uat-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("uat-report-r1-a1.md");
