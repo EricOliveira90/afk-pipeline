@@ -275,13 +275,31 @@
     "orchestrator": 612.3,
     "_fullChainTotal": "1270.4s of suite time against the unchanged 1294s total budget"
   },
-  "suites": {
-    "fast": 170,
-    "orchestrator": 796,
-    "wave": 295,
-    "resume-integration": 152,
-    "qa-orchestration": 151,
-    "clean-failed": 30
+  "_measured2026_09_01_prd3_slice01_five_chain@afk-codex/afk-v2-context-envelopes-slice-01-generator-runs-on-the-focused-envelope": {
+    "_note": [
+      "Five assertion-green full chains on the same slice tree measured totals",
+      "of 1184.5s, 1321.6s, 1410.7s, 1270.4s, and 1443.2s; three",
+      "of five exceeded the 1294s total budget. A post-run CPU sample found",
+      "no dominant abnormal process. Re-baselined repeatable suite maxima and",
+      "the total at about 30% headroom. Excluded the isolated 113.7s cleanup",
+      "outlier; its repeatable maximum was 35.2s. QA remains at 151s from the",
+      "separate 115.7s measurement block."
+    ],
+    "fast": 198.0,
+    "orchestrator": 647.4,
+    "wave": 325.1,
+    "resume-integration": 168.0,
+    "qa-orchestration": 115.7,
+    "clean-failed": 35.2,
+    "_totals": "1184.5s, 1321.6s, 1410.7s, 1270.4s, 1443.2s"
   },
-  "totalSeconds": 1294
+  "suites": {
+    "fast": 258,
+    "orchestrator": 842,
+    "wave": 423,
+    "resume-integration": 219,
+    "qa-orchestration": 151,
+    "clean-failed": 46
+  },
+  "totalSeconds": 1877
 }
