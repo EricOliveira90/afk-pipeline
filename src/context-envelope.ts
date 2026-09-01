@@ -77,6 +77,7 @@ export interface GeneratorEnvelopeInput {
   testCommand: string;
   migrationReservation: string;
   failureSet: GeneratorFailureSet;
+  repairSituation?: string;
 }
 
 export interface GeneratorEnvelopeEvidence {
@@ -127,8 +128,8 @@ export function projectGeneratorContractView(contract: string): string {
 export function assembleGeneratorEnvelope(
   input: GeneratorEnvelopeInput,
 ): GeneratorEnvelopeResult {
-  if (input.mode !== "initial") {
-    throw new Error("Generator repair envelope is not implemented");
+  if (input.mode === "repair" && input.repairSituation === undefined) {
+    throw new Error("Generator repair envelope requires a repair situation");
   }
 
   const fileScope =
@@ -138,7 +139,7 @@ export function assembleGeneratorEnvelope(
           .join("\n")
       : "(no repository changes)";
   const failureSet = formatGeneratorFailureSet(input.failureSet);
-  const prompt = renderPrompt("generator", {
+  const commonArgs = {
     SLICE_DIR: input.sliceDir,
     FILE_SCOPE: fileScope,
     MIGRATION_RESERVATION: input.migrationReservation,
@@ -147,7 +148,20 @@ export function assembleGeneratorEnvelope(
     TEST_COMMAND: input.testCommand,
     PATTERNS_AND_HARNESS: input.patternsAndHarness,
     FAILURE_SET: failureSet,
-  });
+  };
+  const prompt =
+    input.mode === "repair"
+      ? renderPrompt("generator-repair", {
+          ...commonArgs,
+          REPAIR_SITUATION: input.repairSituation!,
+        })
+      : renderPrompt("generator", commonArgs);
+  const failureArtifactIds = [
+    ...input.failureSet.findings.flatMap(
+      (finding) => finding.artifactReferences,
+    ),
+    ...input.failureSet.gates.flatMap((gate) => gate.evidence),
+  ];
 
   return {
     prompt,
@@ -157,6 +171,7 @@ export function assembleGeneratorEnvelope(
         `${input.sliceDir}/contract.md`,
         `${input.sliceDir}/acceptance-manifest.json`,
         `${input.sliceDir}/context.md`,
+        ...new Set(failureArtifactIds),
       ],
       omittedArtifactClasses: [
         ...GENERATOR_CONTEXT_MANIFEST.omittedArtifactClasses,

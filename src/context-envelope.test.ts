@@ -123,4 +123,67 @@ describe("generator context envelope", () => {
       ].join(""),
     );
   });
+
+  it("B-03 ends a repair envelope with only open findings and failed gates", () => {
+    const input = {
+      mode: "repair" as const,
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      repairSituation: "ROUND-TWO-SITUATION",
+      failureSet: {
+        findings: [
+          {
+            id: "QA-OPEN",
+            clearCondition: "OPEN-CLEAR-CONDITION",
+            artifactReferences: [
+              "reviews/qa-open.json",
+              "reviews/qa-open.md",
+            ],
+          },
+        ],
+        gates: [
+          {
+            id: "typecheck",
+            evidence: [
+              "gates/attempt-2.json",
+              "gates/typecheck-attempt-2.log",
+            ],
+          },
+        ],
+      },
+      resolvedFindings: "RESOLVED-FINDING-MARKER",
+      passingLogs: "PASSING-LOG-MARKER",
+      priorConversation: "PRIOR-CONVERSATION-MARKER",
+      otherRoleConversation: "OTHER-ROLE-CONVERSATION-MARKER",
+    };
+
+    const result = assembleGeneratorEnvelope(input);
+    const expectedFailureSet = [
+      "- Finding ID: `QA-OPEN`",
+      "  Clear condition: OPEN-CLEAR-CONDITION",
+      "  Artifact references:",
+      "  - `reviews/qa-open.json`",
+      "  - `reviews/qa-open.md`",
+      "- Gate ID: `typecheck`",
+      "  Evidence:",
+      "  - `gates/attempt-2.json`",
+      "  - `gates/typecheck-attempt-2.log`",
+    ].join("\n");
+
+    expect(result.prompt.trimEnd()).toBe(
+      result.prompt
+        .slice(0, result.prompt.indexOf("# Current failure set"))
+        .concat("# Current failure set\n\n", expectedFailureSet),
+    );
+    expect(result.prompt).toContain("ROUND-TWO-SITUATION");
+    expect(result.prompt).toContain("Fix causes, not only listed examples.");
+    expect(result.prompt).not.toContain("RESOLVED-FINDING-MARKER");
+    expect(result.prompt).not.toContain("PASSING-LOG-MARKER");
+    expect(result.prompt).not.toContain("PRIOR-CONVERSATION-MARKER");
+    expect(result.prompt).not.toContain("OTHER-ROLE-CONVERSATION-MARKER");
+  });
 });
