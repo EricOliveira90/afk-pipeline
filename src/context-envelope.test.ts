@@ -233,4 +233,39 @@ describe("generator context envelope", () => {
 
     expect(event).toMatchObject(result.evidence);
   });
+
+  it("B-07 produces byte-identical prompts and evidence for identical inputs", () => {
+    const input = {
+      mode: "repair" as const,
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      repairSituation: "ROUND-TWO-SITUATION",
+      inlineSizeBudgetBytes: 32_768,
+      failureSet: {
+        findings: [
+          {
+            id: "QA-OPEN",
+            clearCondition: "OPEN-CLEAR-CONDITION",
+            artifactReferences: ["reviews/qa-open.json", "reviews/qa-open.md"],
+          },
+        ],
+        gates: [
+          {
+            id: "typecheck",
+            evidence: ["gates/attempt-2.json", "gates/typecheck.log"],
+          },
+        ],
+      },
+    };
+
+    const first = assembleGeneratorEnvelope(input);
+    const second = assembleGeneratorEnvelope(input);
+
+    expect(Buffer.from(second.prompt)).toEqual(Buffer.from(first.prompt));
+    expect(second.evidence).toEqual(first.evidence);
+  });
 });
