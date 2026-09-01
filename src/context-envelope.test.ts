@@ -163,6 +163,7 @@ describe("generator context envelope", () => {
     };
 
     const result = assembleGeneratorEnvelope(input);
+    const templateLineEnding = result.prompt.includes("\r\n") ? "\r\n" : "\n";
     const expectedFailureSet = [
       "- Finding ID: `QA-OPEN`",
       "  Clear condition: OPEN-CLEAR-CONDITION",
@@ -178,7 +179,10 @@ describe("generator context envelope", () => {
     expect(result.prompt.trimEnd()).toBe(
       result.prompt
         .slice(0, result.prompt.indexOf("# Current failure set"))
-        .concat("# Current failure set\n\n", expectedFailureSet),
+        .concat(
+          `# Current failure set${templateLineEnding}${templateLineEnding}`,
+          expectedFailureSet,
+        ),
     );
     expect(result.prompt).toContain("ROUND-TWO-SITUATION");
     expect(result.prompt).toContain("Fix causes, not only listed examples.");
