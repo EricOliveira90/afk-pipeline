@@ -264,9 +264,20 @@
     "qa-orchestration": 115.7,
     "_fullChainTotals": "1184.5s, 1321.6s, and 1410.7s of suite time"
   },
+  "_measured2026_09_01_prd3_slice01_orchestrator@afk-codex/afk-v2-context-envelopes-slice-01-generator-runs-on-the-focused-envelope": {
+    "_note": [
+      "Two full-chain runs on the same assertion-green slice tree measured",
+      "orchestrator at 608.8s and 612.3s. The second chain isolated the",
+      "overrun: every other suite and the 1270.4s total stayed under budget.",
+      "Raised orchestrator to 796s, about 30% above the 612.3s worst",
+      "in-chain result. Other suite and total budgets stay unchanged."
+    ],
+    "orchestrator": 612.3,
+    "_fullChainTotal": "1270.4s of suite time against the unchanged 1294s total budget"
+  },
   "suites": {
     "fast": 170,
-    "orchestrator": 560,
+    "orchestrator": 796,
     "wave": 295,
     "resume-integration": 152,
     "qa-orchestration": 151,
