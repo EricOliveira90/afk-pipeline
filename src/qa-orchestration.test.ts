@@ -891,7 +891,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
   });
 
-  it("blocks evaluation until every required checkpoint gate passes", async () => {
+  it("keeps current QA findings when a later required gate fails", async () => {
     const repo = makeRepo();
     const gateScript =
       "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
@@ -930,7 +930,12 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
-          writeQAReview(artifactDir, "deterministic");
+          writeQAReview(artifactDir, "deterministic", {
+            findings: stuckDiagnosisReviewFindings(1).map((finding) => ({
+              ...finding,
+              state: "RESOLVED",
+            })),
+          });
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -940,10 +945,36 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       heartbeatIntervalMs: 20,
     });
     artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    seedStuckDiagnosisArchive(reviewDir, {
+      rounds: [1],
+      includeEscalation: false,
+    });
+    ctx.resume = {
+      mode: "killed",
+      commitsAhead: 1,
+      commitLog: "abc1234 feat(#70): round-1 work",
+      handoffNote: "",
+    };
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generators).toBe(2);
     expect(evaluators).toBe(1);
+    expect(generatorPrompts[0]).toContain("QA-ALPHA");
+    expect(generatorPrompts[0]).toContain("Alpha clear condition");
+    expect(generatorPrompts[0]).toContain("qa-review-r1-a1.json");
+    expect(generatorPrompts[0]).toContain("qa-report-r1-a1.md");
+    expect(generatorPrompts[1]).toContain("QA-ALPHA");
+    expect(generatorPrompts[1]).toContain("Alpha clear condition");
+    expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
+    expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
     expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
     expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
     expect(generatorPrompts[1]).toMatch(/tests\.log/);
@@ -1018,7 +1049,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           "prd-070-stub",
           "slice-01",
           "reviews",
-          "qa-review-r2-a1-record.json",
+          "qa-review-r3-a1-record.json",
         ),
         "utf-8",
       ),

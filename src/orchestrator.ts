@@ -4707,7 +4707,7 @@ export async function runSliceExecute(
         ];
         stuckReferences.push(...baseGateRepairReferences);
         generatorFailureSet = {
-          findings: [],
+          findings: generatorFailureSet.findings,
           gates: requiredFailures.map(({ evidencePath, result }) => ({
             id: result.gateId,
             evidence: [
