@@ -29,6 +29,8 @@ stop before making that edit. Write `{{SLICE_DIR}}/escalation.md` as exactly
 Use only routed finding IDs when findings were cited. When nothing was cited,
 use `PRE-BUILD-SCOPE` alone. Never mix `PRE-BUILD-SCOPE` with a real finding
 ID. Then stop; the pipeline routes the request to contract revision.
+Also escalate a spec contradiction (including recorded ADRs), load-bearing
+silence, or a declared risk class. Decide and record otherwise.
 
 # Locked contract view
 

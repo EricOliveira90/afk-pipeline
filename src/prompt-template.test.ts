@@ -180,6 +180,26 @@ describe("renderPrompt", () => {
     }
   });
 
+  it("B-08 limits escalation to plan-level contradictions, silence, and risk", () => {
+    for (const name of ["generator.md", "generator-repair.md"]) {
+      const template = readFileSync(
+        new URL(`../prompts/${name}`, import.meta.url),
+        "utf-8",
+      );
+      const escalation = template.match(
+        /^# Scope escalation\r?\n([\s\S]*?)(?=^# |\Z)/m,
+      )?.[1];
+
+      expect(escalation).toMatch(/spec contradiction/i);
+      expect(escalation).toMatch(/including recorded ADRs/i);
+      expect(escalation).toMatch(/load-bearing\s+silence/i);
+      expect(escalation).toMatch(/declared risk class/i);
+      expect(escalation).toMatch(/decide and record otherwise/i);
+      expect(template).not.toMatch(/^#{1,6} ADR\b/m);
+      expect(template).not.toContain("grep for `docs/adr/`");
+    }
+  });
+
   it("loads all eight pipeline templates", () => {
     expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "" })).toBeTruthy();
     expect(
