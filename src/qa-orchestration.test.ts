@@ -41,6 +41,36 @@ import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
 const dirs: string[] = [];
 const fixtureChildren = new Set<ChildProcess>();
+const GENERATOR_FIXTURE_CONTRACT = [
+  "# Slice Contract",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "## Scope lock",
+  "Exercise QA orchestration.",
+  "",
+  "### In scope",
+  "- [behavior:B-01] Run the generator before QA.",
+  "",
+  "### Non-goals (explicit out-of-scope)",
+  "- Production behavior.",
+  "",
+  "### Existing behavior to preserve",
+  "- None.",
+  "",
+  "### Changes to existing behavior (only if the issue asks for it)",
+  "- None.",
+  "",
+  "## New patterns / deps / schema (if any)",
+  "- None.",
+  "",
+  "## Files expected to change",
+  "- README.md",
+  "",
+  "## Migration requirements",
+  "- New migration files: 0",
+  "",
+].join("\n");
 
 beforeEach(() => {
   vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -121,6 +151,32 @@ function makeContext(
   };
   const absSliceDir = join(repo, "specs", "slices", "01-prd-070-regression");
   mkdirSync(absSliceDir, { recursive: true });
+  writeFileSync(
+    join(absSliceDir, "contract.md"),
+    GENERATOR_FIXTURE_CONTRACT,
+    "utf-8",
+  );
+  writeFileSync(
+    join(absSliceDir, "acceptance-manifest.json"),
+    JSON.stringify({
+      version: 2,
+      fileScope: { kind: "paths", paths: ["README.md"] },
+      migrationCount: 0,
+      behaviors: [
+        {
+          id: "B-01",
+          source: "QA orchestration fixture",
+          given: "a locked fixture slice",
+          when: "the generator runs",
+          then: "QA evaluates its candidate",
+          observableResult: "the fixture reaches QA",
+          preservation: false,
+          gateIds: ["tests"],
+        },
+      ],
+    }),
+    "utf-8",
+  );
   const config: PipelineConfig = {
     repoRoot: repo,
     prdSlug: "prd-070",
