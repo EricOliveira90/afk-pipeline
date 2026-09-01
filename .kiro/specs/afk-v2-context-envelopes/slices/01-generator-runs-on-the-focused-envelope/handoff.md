@@ -18,6 +18,7 @@
 ## Gotchas / learnings
 - Repair envelopes include only open finding fields and failed required-gate evidence; resolved findings and passing evidence stay omitted.
 - Resume dispatch uses `generator-repair.md`; `generator-resume.md` no longer exists.
+- Prompt-template line endings follow the checkout, while formatted failure-set content uses LF; assertions at that boundary must preserve the rendered template bytes.
 - Vitest can report `[vitest-worker]: Timeout calling "onTaskUpdate"` after all fast tests pass while still exiting successfully.
 
 ## Status
