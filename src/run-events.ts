@@ -85,6 +85,16 @@ export type RunEventPayload =
       verdict?: string;
     }
   | {
+      type: "prompt-assembly";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      assembledByteSize: number;
+      includedArtifactIds: string[];
+      omittedArtifactClasses: string[];
+      contextManifestVersion: number;
+    }
+  | {
       type: "gate-outcome";
       ghIssue: string;
       sliceNumber: string;

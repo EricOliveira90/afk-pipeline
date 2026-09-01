@@ -4350,6 +4350,13 @@ export async function runSliceExecute(
         // measured against the *new* accepted bytes, not the round's first
         // ones.
         const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
+        logger.event({
+          type: "prompt-assembly",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          round,
+          ...assembled.evidence,
+        });
         await invoke({
           role: "generator",
           prompt: assembled.prompt,

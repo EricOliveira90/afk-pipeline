@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
+import type { RunEventPayload } from "./run-events.js";
 import {
   GENERATOR_CONTEXT_MANIFEST,
   assembleGeneratorEnvelope,
@@ -209,5 +210,27 @@ describe("generator context envelope", () => {
     ).toThrow(
       `Generator prompt exceeds inline-size budget: actual ${requiredBytes} bytes, allowed ${requiredBytes - 1} bytes`,
     );
+  });
+
+  it("B-06 exposes complete prompt-assembly evidence as a typed event", () => {
+    const result = assembleGeneratorEnvelope({
+      mode: "initial",
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      failureSet: { findings: [], gates: [] },
+    });
+    const event = {
+      type: "prompt-assembly",
+      ghIssue: "83",
+      sliceNumber: "01",
+      round: 1,
+      ...result.evidence,
+    } satisfies RunEventPayload;
+
+    expect(event).toMatchObject(result.evidence);
   });
 });

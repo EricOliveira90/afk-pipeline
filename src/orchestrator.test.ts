@@ -1957,6 +1957,37 @@ describe("focused generator scope revision", () => {
     expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
   });
 
+  it("B-06 journals assembly evidence for every generator dispatch", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const events = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assemblies = events.filter(
+      (event) => event.type === "prompt-assembly",
+    );
+
+    expect(assemblies).toHaveLength(3);
+    for (const event of assemblies) {
+      expect(event).toMatchObject({
+        ghIssue: "1081",
+        sliceNumber: "01",
+        contextManifestVersion: 1,
+      });
+      expect(event.assembledByteSize).toBeGreaterThan(0);
+      expect(event.includedArtifactIds).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("contract.md"),
+          expect.stringContaining("acceptance-manifest.json"),
+        ]),
+      );
+      expect(event.omittedArtifactClasses).toContain("prior-conversation");
+    }
+  });
+
   it("continues through QA after fresh generation", () => {
     expect(records.filter(({ role }) => role === "evaluator-qa")).toHaveLength(
       2,
