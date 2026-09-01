@@ -2877,6 +2877,19 @@ async function negotiateAttempt(
     const candidateRefusedByGate = (round: number): boolean => {
       const objection = ctx.onContractLocked?.(contractPath) ?? null;
       if (objection === null) return false;
+      // The planner may have written `**Status:** LOCKED` into the candidate
+      // itself. Nothing here wrote it, the gate has just refused it, and the
+      // generator reads that line as permission (ADR 0008) — so it cannot be
+      // left on disk. Under the old lock-then-gate ordering this
+      // normalisation came for free from the reopen that followed
+      // `lockContract`; with nothing written on the refusal path it has to be
+      // explicit. An agent-authored lock surviving a *non*-ACCEPT verdict is
+      // a wider hole than this one call site (architect A2 / PM P1 of the
+      // round-9 review, filed separately); this closes only the case the
+      // gate-before-lock reordering itself would otherwise have opened.
+      if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+        artifacts.reopenContract(contractPath);
+      }
       recordGateObjection(objection, `accepted in round ${round}`);
       return true;
     };

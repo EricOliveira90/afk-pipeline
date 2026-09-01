@@ -4224,6 +4224,8 @@ describe("contract review fails closed", () => {
     ghIssue: string,
     artifact: string | null,
     onContractLocked?: (contractPath: string) => string | null,
+    /** What the planner writes into its own `**Status:**` line. */
+    plannerStatus: "NEGOTIATING" | "LOCKED" = "NEGOTIATING",
   ) {
     const repo = makeRepo();
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -4237,6 +4239,8 @@ describe("contract review fails closed", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    /** Contract status each planner round found on disk before writing. */
+    const statusAtPlannerStart: Array<string | null> = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -4246,9 +4250,16 @@ describe("contract review fails closed", () => {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
+          // Read before overwriting: what a later planner round starts from
+          // is the only place a refusal's effect on disk is observable, since
+          // this stub rewrites the file on every round.
+          const contractPath = join(artifactDir, "contract.md");
+          statusAtPlannerStart.push(
+            existsSync(contractPath) ? readContractStatus(contractPath) : null,
+          );
           writeFileSync(
-            join(artifactDir, "contract.md"),
-            "# Contract\n\n**Status:** NEGOTIATING\n",
+            contractPath,
+            `# Contract\n\n**Status:** ${plannerStatus}\n`,
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
@@ -4298,6 +4309,7 @@ describe("contract review fails closed", () => {
       repo,
       plannerRounds: () => plannerRounds,
       evaluatorRounds: () => evaluatorRounds,
+      statusAtPlannerStart,
     };
   }
 
@@ -4455,36 +4467,55 @@ describe("contract review fails closed", () => {
    * `wave-migrations.test.ts` consults the real migration gate, which
    * cannot be wrapped to look.
    */
-  it("consults the lock gate before an accepted contract is locked", async () => {
-    const statusesAtGate: Array<string | null> = [];
-    const { outcome, ctx, plannerRounds, evaluatorRounds } =
-      await negotiateWithArtifact(
-        "review-gate-before-lock",
-        "9102",
-        reviewText({ verdict: "ACCEPT", findings: [] }),
-        (contractPath) => {
-          statusesAtGate.push(readContractStatus(contractPath));
-          return "injected negotiation lock-gate refusal";
-        },
-      );
+  it.each([
+    // The ordinary case: the planner leaves the status alone, so the gate can
+    // only ever see a `LOCKED` line this orchestrator wrote.
+    ["a planner-written NEGOTIATING candidate", "NEGOTIATING" as const],
+    // The planner wrote `LOCKED` into its own candidate. Nothing here wrote
+    // it, the gate has refused it, and the generator reads that line as
+    // permission — so the refusal has to reopen it. Under the old
+    // lock-then-gate ordering that normalisation came for free from the
+    // reopen after `lockContract`; the reordering had to make it explicit.
+    ["a planner-written LOCKED candidate", "LOCKED" as const],
+  ])(
+    "consults the lock gate before locking, and leaves %s NEGOTIATING on refusal",
+    async (name, plannerStatus) => {
+      const statusesAtGate: Array<string | null> = [];
+      const {
+        outcome,
+        plannerRounds,
+        evaluatorRounds,
+        statusAtPlannerStart,
+      } = await negotiateWithArtifact(
+          `review-gate-before-lock-${plannerStatus.toLowerCase()}`,
+          "9102",
+          reviewText({ verdict: "ACCEPT", findings: [] }),
+          (contractPath) => {
+            statusesAtGate.push(readContractStatus(contractPath));
+            return "injected negotiation lock-gate refusal";
+          },
+          plannerStatus,
+        );
 
-    // The gate saw the accepted candidate, and it was not locked yet: no
-    // crash window between here and `lockContract` can forge a `LOCKED`
-    // contract the gate never passed.
-    expect(statusesAtGate).toEqual(["NEGOTIATING"]);
-    // The refusal wrote nothing at all — not a lock, and so not a reopen
-    // either — and it still bought the planner the next round, where this
-    // fixture's planner writes no `contract-response.json`.
-    expect(readContractStatus(join(ctx.absSliceDir, "contract.md"))).toBe(
-      "NEGOTIATING",
-    );
-    expect(plannerRounds()).toBe(2);
-    expect(evaluatorRounds()).toBe(1);
-    expect(outcome.phase).toBe("ERROR");
-    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
-      /contract-response\.json is missing/,
-    );
-  }, 60_000);
+      // The gate saw the accepted candidate before anything here locked it:
+      // no crash window between the gate and `lockContract` can forge a
+      // `LOCKED` contract the gate never passed. What the planner itself
+      // wrote is whatever the gate reads — the gate does not consult the
+      // status line, so this is an observation, not a requirement.
+      expect(statusesAtGate).toEqual([plannerStatus]);
+      // The refusal left the contract NEGOTIATING either way, so the round it
+      // bought starts from an unlocked contract. Round 1 finds no contract at
+      // all; round 2 finds what the refusal left behind.
+      expect(statusAtPlannerStart).toEqual([null, "NEGOTIATING"]);
+      expect(plannerRounds()).toBe(2);
+      expect(evaluatorRounds()).toBe(1);
+      expect(outcome.phase).toBe("ERROR");
+      expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+        /contract-response\.json is missing/,
+      );
+    },
+    60_000,
+  );
 
   it("archives every review round without overwriting an earlier one", async () => {
     const repo = makeRepo();
