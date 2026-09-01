@@ -2,85 +2,57 @@
 
 **Parent PRD:** TBD - see `prd.md` in this directory.
 
-| Slice | GH Issue | Title | Type | Blocked by | User stories covered |
-|-------|----------|-------|------|------------|----------------------|
-| 01 | TBD | Every guardian round is recorded, blocked ones included | AFK | - | US-1 |
-| 02 | TBD | The architect's later rounds review only what changed | AFK | 01 | US-2, US-3 |
-| 03 | TBD | A blocking finding names a reachable trigger | AFK | - | US-4 |
-| 04 | TBD | A bounded gate: round cap and a symmetric override | AFK | 01 | US-5, US-6 |
-| 05 | TBD | A note that ships unfixed is filed once | AFK | 04 | US-7 |
+| Slice | GH Issue | Title | Status | Blocked by | User stories covered |
+|-------|----------|-------|--------|------------|----------------------|
+| 01 | TBD | Every guardian round is recorded, blocked ones included | Deferred until after PRD 3 | - | US-1 |
+| 02 | TBD | Later architect reviews use prior-round evidence | Deferred; delta-only design not approved | 01 | US-2, US-3 |
+| 03 | - | A blocking finding states impact, recovery, and attribution | Landed by hand on `integration/pre-prd3` | - | US-4 |
+| 04 | TBD | A bounded gate and a symmetric override | Override landed; automatic cap deferred | 01 | US-5, US-6 |
+| 05 | TBD | A note that ships unfixed is filed once | Deferred until after PRD 3 | 04 | US-7 |
 
-## Why the cut falls here
+## Current cut
 
-- **01 before 02 and 04.** Both consuming slices need the same thing that does
-  not exist today: a persisted record of an *unfavorable* round.
-  `PersistedReviewResult` is typed `"SHIP" | "ACCEPT-WITH-NOTES"` and
-  `sanitizeReviewResult` (`src/run-state.ts:93-104`) drops everything else, so
-  the storage change is not a field addition — it reverses an explicit ADR 0015
-  rule and needs its own sanitizer, its own tolerance for old state files, and
-  its own tests. 01 also stands alone: it makes the round-over-round history
-  readable, which for PRD 2 took a `git log` over twelve commits of a docs
-  artifact to reconstruct by hand.
-- **02 is separate from 01** because it is a different seam. 01 is
-  `src/run-state.ts`; 02 is the prompt-render call at `src/ship-gate.ts:519`
-  plus two new template variables in `prompts/architect-review.md`. Nothing in
-  02 changes storage, and 01 ships value without it.
-- **03 is independent and parallelizable.** It is a rubric change to
-  `prompts/architect-review.md` principle 2 with a mechanical assertion in the
-  finding disposition. It touches neither the state file nor the PR decision, so
-  it has no edge to 01, 02 or 04 and can run in the first wave alongside 01 and
-  03's own lane.
-- **04 holds both escape valves in one slice** because the cap and the symmetric
-  override are two conditions on the same expression — `open` in
-  `buildPrCreationPlan` (`src/ship-gate.ts:284`) — and share the PR-body
-  override note, the run-summary line and the exit-signal carve-out. Splitting
-  them would mean two slices editing the same three call sites.
-- **05 after 04** because 04 introduces the finding-to-issue filing path (for
-  unresolved blockers at the cap) and 05 reuses it (for notes at ship). Building
-  the filer twice, or building it in 05 and having 04 wait, both cost more.
-- **The reachability floor is not merged into the delta-scoping slice** even
-  though both are prompt edits, because they fail differently. Delta scoping is
-  a mechanical win regardless of whether the findings were right; the floor is a
-  policy judgement about which findings should block. Keeping them separate means
-  a rollback of the policy does not roll back the efficiency fix.
-- **No slice adds a spawned pipeline scenario.** See the PRD's Testing Decisions
-  and AGENTS.md's "where a new assertion goes".
+- Slice 03 landed by hand.
+- The override half of slice 04 landed by hand.
+- Slices 01, 02 and 05 remain deferred.
+- The automatic-cap half of slice 04 remains deferred.
+- PRD 3 supplies the next evidence before any deferred design returns.
 
 ## Before this runs
 
-Three things are deliberately unfilled and an AFK launch should refuse until
-they are:
+Do not launch this PRD before PRD 3 completes one measured guardian run. After
+that decision, the remaining work still needs:
 
-- **Every GH issue number is `TBD`, including the parent.** Creating issues is an
-  outward-facing action this spec session was not authorized to take. File six
-  issues (one parent, five slices), then replace all six `TBD`s. `pnpm
-  lint:tickets <issue>...` (ADR 0049) runs on them first.
+- **Every deferred GH issue number is `TBD`, including the parent.** Creating
+  issues is an outward-facing action this spec session was not authorized to
+  take. File five issues (one parent, four deferred slices), then replace all
+  five `TBD`s. `pnpm lint:tickets <issue>...` (ADR 0049) runs on them first.
 - **The `Blocked by` column names slice numbers, not issue numbers.** The DAG
   parser keys on issue numbers, so `01` and `04` must become `#<n>` once the
   issues exist.
-- **The ADR number is provisional.** The PRD proposes `0056`; `0050`-`0055` are
-  taken on PRD 2's unmerged branch and `0029` is duplicated on `main`. Re-derive
-  the next free number across all branches before writing the file.
+- **The ADR number is provisional.** `0056` is the next free number across
+  current repository history as of 2026-08-31. Re-check it when the deferred
+  work starts.
 
-## Round 9 — PLACEHOLDER
+## Landed by hand
 
-**TBD (round 9).** Round 9 of `afk-v2-routing-adjudication` was running while
-this spec was written. Record its architect verdict and blocking-finding count in
-the PRD's Problem Statement placeholder before this PRD enters AFK. It does not
-gate any slice; it is one more data point on a per-round finding series that
-currently reads 3, 3, 2, 2, 3, 1, 1, 2.
+- Slice 03 policy: `prompts/architect-review.md`.
+- Slice 04 override half: `src/ship-gate.ts`, its focused tests, and the
+  amendment to ADR 0015.
+- Related live defect #149: `src/orchestrator.ts` rejects a planner-authored
+  lock when the evaluator returns `REVISE`.
 
 ## Provenance
 
 All of this PRD's evidence is committed history in this repo, not reconstructed
 narrative:
 
-- Eight rounds of guardian artifacts under
+- Nine rounds of guardian artifacts under
   `.kiro/specs/afk-v2-routing-adjudication/` — round 1 `076540c`, then
   `74dfb34`, `86a2896`, `4c665ab`, `5521e3f`, round 6 `d80fc61`, `88174b9`,
-  round 8 `274f859`. Four earlier pairs (`770bb20`, `06a4e2f`, `f9cdf89`,
-  `672d53d`, 2026-08-29) belong to a previous run of the same PRD and are not
-  counted in the eight.
+  round 8 `274f859`, and round 9 `2000b34`. Four earlier complete pairs
+  (`770bb20`, `06a4e2f`, `f9cdf89`, `672d53d`, 2026-08-29) belong to a
+  previous run. PM-only rerun `516e6c2` is not a complete pair.
 - The `main`-side origin of round 8's finding A2: commit `32df84b`, 2026-08-22,
   with the lock-before-gate ordering live on `main` today at
   `src/orchestrator.ts:2284` and `:2291`.

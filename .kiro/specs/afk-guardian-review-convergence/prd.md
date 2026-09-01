@@ -4,8 +4,27 @@
 **Parent design:** none. This PRD is about the review gate itself, not a
 `docs/specs/afk-v2-plan.md` item.
 **Amends:** `docs/adr/0015-guardian-review-failure-classes-and-overrides.md`
-**Written:** 2026-08-31, after PRD `afk-v2-routing-adjudication` spent eight
+**Written:** 2026-08-31, after PRD `afk-v2-routing-adjudication` spent nine
 post-implementation guardian rounds without converging.
+
+## Status after the hand fixes
+
+This PRD is **deferred until after PRD 3 produces one measured guardian run**.
+Do not create its issues or launch it through AFK before that review.
+
+Landed by hand on `integration/pre-prd3`:
+
+- issue #149: a planner-authored `LOCKED` status cannot replace evaluator
+  `ACCEPT`;
+- architect findings now state impact, recovery, and diff attribution;
+- `--open-pr-on-override` can override exactly one blocking guardian when the
+  other guardian is favorable; two blocking guardians still close the gate.
+
+Deferred: the round ledger, later-round review scoping, an automatic round cap,
+and note filing. The original delta-only rule and successful unattended cap
+below are not approved designs. Before PRD 3, use an operator policy instead:
+after three blocked guardian invocations, stop re-entry and request a human
+decision without changing the blocked result to success.
 
 ## Problem Statement
 
@@ -17,76 +36,49 @@ properties compose into positive feedback: each round's fix is new error-handlin
 code, error handling is the highest-yield blocking class, and the next round
 reads it fresh with the previous round's accepted findings forgotten.
 
-`afk-v2-routing-adjudication` is the demonstration. It has twelve committed
-guardian-review artifact pairs under
-`.kiro/specs/afk-v2-routing-adjudication/`; the last eight are the current run's
-rounds 1–8 (round 1 at `076540c`, round 6 at `d80fc61`, round 8 at `274f859`).
-Every one of the eight returned `FIX-BEFORE-SHIP` from the architect. The PM
-returned `ACCEPT-WITH-NOTES` with all four selected slices "Delivered" in rounds
-6, 7 and 8, and `FIX-BEFORE-SHIP` in 3, 4 and 5.
+`afk-v2-routing-adjudication` is the demonstration. It has thirteen commits
+that update both guardian artifacts, plus PM-only rerun `516e6c2`. The last
+nine complete pairs are the current run's rounds 1–9 (round 1 at `076540c`,
+round 6 at `d80fc61`, round 8 at `274f859`, round 9 at `2000b34`). Every one
+returned `FIX-BEFORE-SHIP` from the architect. The PM returned
+`ACCEPT-WITH-NOTES` in rounds 1, 2, 6, 7 and 8, and `FIX-BEFORE-SHIP` in rounds
+3, 4, 5 and 9.
 
-Blocking findings per architect round, in order: **3, 3, 2, 2, 3, 1, 1, 2**. A
-convergent process runs out of findings. This one went back up.
+Blocking findings per architect round, in order:
+**3, 3, 2, 2, 3, 1, 1, 2, 2**. The series alone does not distinguish latent
+defects, incomplete fixes, and regressions introduced by fixes.
 
-### Mechanism 1 — the review resamples the entire diff every round
+### Mechanism 1 — repeated full-diff review costs time
 
-`prompts/architect-review.md` "Required reading" scopes the read to "The diff of
-the feature branch against the base branch" — 107 files, +19,398 lines — and
-nothing in the prompt, the state file, or the review artifact tells round N
-what rounds 1..N-1 examined and accepted. `renderPrompt("architect-review", …)`
-in `src/ship-gate.ts:519` passes exactly two variables: `SPECS_DIR` and
-`RELEVANT_FILES`. There is no scope variable and no ledger variable.
+The architect prompt requires the whole feature diff and keeps no prior-round
+finding ledger. This proves repeated reading cost. It does not prove that
+stochastic resampling caused the late findings.
 
-**Decisive evidence.** Round 8's finding A2 blocks on `negotiateAttempt` in
-`src/orchestrator.ts` calling `artifacts.lockContract()` before
-`lockRefusedByGate()`. That ordering is not in the feature branch's diff at all.
-It arrived on `main` in commit `32df84b` ("feat(wave): detect migration prefix
-collisions at contract-lock", 2026-08-22) and is present on `main` today at
-`src/orchestrator.ts:2284` and `:2291` — nine days and eight rounds before the
-round that blocked on it. A review scoped to "the diff against the base branch"
-should not have been able to reach it, seven rounds reading the same diff did
-not raise it, and the eighth blocked ship on it.
+Round 8's A2 inherited its bad ordering from `main`, but the branch modified
+the same lock call while preserving that ordering. The revised attribution rule
+allows a blocker when the diff introduces the defect or materially changes its
+faulty control flow or authority boundary. Mere reachability is not enough.
 
-That is the resampling signature in its clearest form: the finding stream is
-governed by which region of a 19k-line diff the sampler happened to walk, not by
-what the previous round left unfixed.
+### Rejected mechanism — trigger category decides severity
 
-### Mechanism 2 — the rubric has no reachability floor
+The original diagnosis treated infrastructure faults and self-repairing crash
+windows as notes by definition. That rule is unsafe for an unattended pipeline:
+crashes, retries, stale artifacts, and archive collisions are operating
+conditions. Severity depends on whether another actor can consume invalid
+durable authority before recovery completes.
 
-`prompts/architect-review.md` principle 2 reads, verbatim: "FIX-BEFORE-SHIP is
-for coupling, broken abstractions, missing error handling, security gaps."
-"Missing error handling" is an unqualified blocking class. Nothing in the prompt
-asks whether the missing handling is reachable.
+The revised rubric requires a concrete failure path and judges its impact and
+recovery. It does not demote a finding solely because its trigger is a
+filesystem failure or crash.
 
-Round 8 blocks on two findings that concede their own unreachability:
+### Landed mechanism 3 — the architect was unappealable
 
-- **A1** — "An archive collision or filesystem write failure can therefore leave
-  the generator's unauthorized lock bytes on disk." The trigger is a filesystem
-  write failing mid-sequence.
-- **A2** — "A process stop between those calls leaves an authoritative `LOCKED`
-  contract whose migration/run-specific gate never passed. **A later run can
-  repair it**, but until then disk asserts the exact invariant ADR 0055 says
-  must not be written."
+ADR 0015 and `buildPrCreationPlan` originally allowed only a PM override. The
+symmetric override now opens a draft PR when exactly one guardian blocks and
+the other is favorable. Two blocking guardians still close the gate.
 
-Both are faithful readings of the rubric as written. Under principle 2 there is
-no verdict available to a reviewer who finds a self-repairing two-statement crash
-window other than the one it returned.
-
-### Mechanism 3 — the architect is unappealable
-
-`buildPrCreationPlan` in `src/ship-gate.ts:269-318`:
-
-```ts
-const overridden =
-  args.openPrOnOverride && architectOk && !pmOk && args.pm === "FIX-BEFORE-SHIP";
-const open = (architectOk && pmOk) || overridden;
-```
-
-`architectOk` is a conjunct of both terms. `--open-pr-on-override` cannot clear
-an architect block; ADR 0015 states the asymmetry deliberately ("only when the
-architect verdict is favorable"). There is also no round counter anywhere in
-`src/ship-gate.ts` — the only occurrence of "round" in the file is a comment.
-The gate has an unappealable veto and no clock.
+This change supplies an operator escape valve. It does not create an automatic
+review loop or automatic success after a round count.
 
 ### Mechanism 4 — the review cache cannot remember a block
 
@@ -100,8 +92,8 @@ So the one structure that could have carried a ledger is defined to discard
 exactly the rounds a ledger is for. The write site is fine — `saveReviewPhase`
 at `src/ship-gate.ts:775` runs on every round regardless of verdict — but there
 is no field for a finding, no field for the SHA an unfavorable round examined,
-and no round counter. Reconstructing PRD 2's eight rounds for this document
-required `git log` over twelve commits of a docs artifact. The pipeline itself
+and no round counter. Reconstructing PRD 2's nine-round run required `git log` over the
+guardian artifact history. The pipeline itself
 knows nothing about round 7 when it runs round 8.
 
 ### Contributing factor — the citable corpus is written by the branch under review
@@ -121,20 +113,21 @@ This is not a cause on its own and this PRD does not fix it. It is recorded
 because it explains why the finding supply does not deplete even where the code
 stops changing.
 
-### Round 9 — PLACEHOLDER
+### Round 9
 
-> **TBD (round 9).** A ninth round of `afk-v2-routing-adjudication` was running
-> in parallel with the writing of this PRD and is not reflected above. Fill in
-> its architect verdict, its blocking-finding count, and whether any finding
-> re-raises one from rounds 1–8. A round-9 outcome of `FIX-BEFORE-SHIP` with a
-> non-zero finding count strengthens every claim here; a `SHIP` does not
-> invalidate them (nine rounds to converge on four slices is the same defect at
-> a smaller magnitude), but it should be recorded honestly next to them.
+Round 9 (`2000b34`) returned architect `FIX-BEFORE-SHIP` with two findings.
+A1 repeated round 8's still-unfixed accepted-pair recovery defect. A2 combined
+a pre-existing non-`ACCEPT` planner-lock bypass with a new gate-refusal
+regression from round 8's fix. The PM independently blocked on that authority
+bypass. Issue #149 and its regression test fix the non-`ACCEPT` path.
 
-## Solution
+## Original solution proposal — partially rejected and deferred
 
-Four changes, each attacking one mechanism, plus one that makes the notes the
-other three produce durable.
+The status section above controls. This section records the original proposal
+for later redesign; it is not ready for AFK implementation.
+
+Four changes attack separate mechanisms. A fifth change makes non-blocking
+findings durable.
 
 - **A persisted round ledger.** `PersistedReviewPhase` gains a per-round record:
   the SHA reviewed, the verdict, and each finding's identity, title and
@@ -144,14 +137,13 @@ other three produce durable.
   review `<last-reviewed-sha>..HEAD` and is handed the prior rounds' findings as
   an explicit "already reviewed, do not re-raise" block. Round 1 is unchanged —
   it is the only round that should read the whole branch.
-- **A reachability floor in the rubric.** A blocking finding must name a trigger
-  reachable in normal operation. A finding whose only trigger is an infrastructure
-  fault, or a crash window whose damage the next run repairs, is a note.
-- **An escape valve: a round cap, plus a symmetric override.** After a bounded
-  number of unfavorable architect rounds, unresolved findings are filed as
-  issues and the draft PR opens with them recorded. `--open-pr-on-override` is
-  extended to cover an architect-only block so an attended run does not have to
-  burn rounds to reach the cap.
+- **Impact and recovery evidence in the rubric.** This landed by hand. A
+  blocking finding states a concrete failure path, its impact, and whether
+  built-in recovery completes before another actor can consume invalid state.
+- **An escape valve: a round cap, plus a symmetric override.** The symmetric
+  override landed by hand. The automatic cap is deferred. The original proposal
+  would open a draft PR after a bounded number of unfavorable rounds; that
+  automatic-success rule is not approved.
 - **Durable non-blocking findings.** Every note that ships unfixed is filed,
   once, with a stable identity, so it is neither re-raised as new nor forgotten.
 
@@ -167,9 +159,9 @@ other three produce durable.
 3. As a maintainer, I want the architect handed the findings earlier rounds
    already accepted, so that an accepted decision stays accepted and the round's
    attention goes to the fix.
-4. As a maintainer, I want a blocking finding to name a trigger reachable in
-   normal operation, so that an infrastructure fault or a self-repairing crash
-   window becomes a note rather than a ship blocker.
+4. As a maintainer, I want a blocking finding to state its concrete failure
+   path, impact, recovery, and diff attribution, so that severity follows the
+   shipped risk rather than the trigger category.
 5. As a run operator, I want an unattended run to stop after a bounded number of
    unfavorable architect rounds, file the unresolved findings as issues, and open
    the draft PR with them recorded, so that a non-converging gate ends in a
@@ -183,27 +175,29 @@ other three produce durable.
 
 ## Implementation Decisions
 
-- **The round cap is the primary escape valve; the symmetric override is the
+- **Original cap proposal (not approved): the round cap is the primary escape
+  valve; the symmetric override is the
   secondary one.** A flag needs an operator at the console, and AFK's premise is
-  unattended running — the eight rounds under discussion all ran unattended and
+  unattended running — the nine rounds under discussion all ran unattended and
   no flag was there to be passed. A cap ends the loop without a human. The
   override is still worth building because it is a one-line change to an existing
   branch in `buildPrCreationPlan` and it removes the asymmetry ADR 0015
   introduced; making it symmetric costs almost nothing next to leaving a
   documented one-sided veto in place. Both live in one slice because they share
   the same PR-body, override-note and exit-signal plumbing.
-- **The cap default is 3**, matching ADR 0014's three-round implementation cap
+- **Original cap default (not approved): 3**, matching ADR 0014's three-round implementation cap
   and ADR 0015's "three-round implementation cap … unchanged". A gate that
   cannot converge in three architect rounds is not going to converge in eight;
   the evidence is that its finding rate does not fall. It is configurable, and
   the flag name is the implementer's call.
-- **A capped run is successful, like an override.** ADR 0015's 2026-08-22
+- **Original success rule (not approved): a capped run is successful, like an
+  override.** ADR 0015's 2026-08-22
   amendment already carves out the override from the unsuccessful-exit rule on
   the grounds that the recorded note is the operator's acknowledgement. A
   cap-cleared PR carries the same recorded acknowledgement plus filed issues, so
   it takes the same treatment. This must be stated in the amendment, not left to
   inference.
-- **Delta scoping starts at round 2.** Round 1 reads `main...HEAD` exactly as
+- **Original delta-only rule (not approved): scoping starts at round 2.** Round 1 reads `main...HEAD` exactly as
   today. The ledger's absence *is* the signal that this is round 1, so no extra
   flag is needed.
 - **The ledger keys findings by a stable identity the reviewer supplies**, not by
@@ -213,34 +207,25 @@ other three produce durable.
   requirement is that the same defect raised twice collides.
 - **A finding must be attributable to the diff under review.** Delta scoping
   enforces this mechanically for rounds 2+, but round 1 reads the whole branch
-  and round 8's A2 shows a reviewer reaching code that is not in it at all. The
-  rubric therefore also states it in prose: a blocking finding must be
-  introduced or changed by the diff under review, and pre-existing `main`
-  behaviour is a note with an issue, not a ship blocker.
-- **The reachability floor narrows one clause, not the class.** Principle 2's
-  coupling, broken-abstraction and security-gap classes are untouched, and
-  "missing error handling" stays blocking when the missing handling is reachable
-  in normal operation — a malformed agent response, an absent file, a
-  non-zero-exiting command. What moves to notes is the class whose trigger is an
-  infrastructure fault (a filesystem write failing mid-sequence, an archive
-  collision) or a crash window whose damage a later run repairs. ADR 0048 is the
-  precedent: a finding that names its remedy is already the house style, and a
-  finding that must name its trigger is the same discipline applied to severity.
-- **`agents/architect-review.md` is not in scope and must not be edited.** It is
-  a vendored Rumo Fisio consumer persona — it names `docs/ARCHITECTURE.md`,
-  `docs/CONVENTIONS.md`, `clinic_id`/RLS and `safeAction`, none of which exist in
-  this repo — and nothing in `src/` reads it. The file that drives the self-run
-  gate is `prompts/architect-review.md`. Changing the persona would look like
-  progress and change nothing.
-- **This needs an ADR.** The convergence decision — delta scope, a reachability
-  floor, a bounded round count, and a durable findings ledger — is exactly the
-  kind of expensive-to-reverse gate policy the ADR corpus exists for, and it
-  contradicts two explicit sentences of ADR 0015. Proposed number **0056**;
-  `0050`–`0055` are taken on PRD 2's unmerged branch `feat-codex/afk-v2-routing-adjudication`
-  and `0029` is already duplicated on `main`, so the implementer must re-derive
-  the next free number across all branches rather than trusting this one. It
-  **amends ADR 0015** (three sentences: the never-cache-unfavorable rule, the
-  architect-favorable precondition on the override, and the exit-signal carve-out)
+  and round 8's A2 shows why attribution needs judgment: `main` introduced the
+  bad ordering, while the branch changed the same authority boundary and
+  preserved it. The rubric therefore also states in prose that the diff must
+  introduce the defect or materially change its faulty control flow or
+  authority boundary. Unchanged base behavior is a note, not a ship blocker.
+- **Impact and recovery replace the proposed reachability floor.** Trigger
+  category and frequency do not decide severity. A blocker must show that its
+  failure path causes durable or user-visible harm before recovery restores a
+  safe state.
+- **The stale `agents/architect-review.md` persona was removed by hand.** It was
+  a vendored Rumo Fisio consumer persona that named `clinic_id`, RLS, and
+  `safeAction`; nothing in `src/` read it. The file that drives this repo's
+  self-run gate remains `prompts/architect-review.md`.
+- **This needs an ADR.** Any future convergence decision — review scope, impact
+  evidence, a bounded round count, and a durable findings ledger — is expensive
+  to reverse and needs an ADR. `0056` is the next free number across current
+  repository history as of 2026-08-31; re-check it when deferred work starts.
+  The symmetric override already amends ADR 0015 in place. Future work amends
+  ADR 0015 where it changes the never-cache-unfavorable rule or exit signal,
   and cites ADR 0014 (round-cap precedent) and ADR 0048 (findings name their
   remedy) as precedent without amending them. ADR 0033 (ship-gate extraction) is
   the module boundary the change lands inside and is unaffected. Nothing is
@@ -258,11 +243,9 @@ other three produce durable.
   second review round on an unchanged-but-for-the-fix branch must read the ledger
   the first round wrote. If a `ship-gate` scenario already spawns two rounds,
   hang the assertion there rather than adding a spawn.
-- **Prove the negative for the reachability floor.** A rubric change is only
-  verifiable through an agent, so the durable assertion is the mechanical half:
-  a finding record that carries no reachable trigger must not be able to reach a
-  blocking disposition in the ledger. Do not write a test that asks a live
-  reviewer to behave.
+- **Do not invent a mechanical test for rubric judgment.** Tests cover the
+  symmetric override and issue #149. A later structured finding schema needs
+  its own disposition tests only after that schema is approved.
 - **Prove a note is filed exactly once across rounds**, not once per round. The
   `archivedScopeEscalations` note rode two consecutive rounds unaddressed; the
   regression to guard is duplicate filing when the same note reappears.
@@ -278,7 +261,8 @@ other three produce durable.
 - **The PM rubric.** `prompts/pm-review.md` already has ADR 0015's scope
   awareness and is not the blocking side of the loop. Only slice 05 (durable
   notes) touches the PM path, and only its notes, not its verdict rules.
-- **`agents/*.md`.** See Implementation Decisions.
+- **Other `agents/*.md` files.** The stale architect persona removal does not
+  authorize changes to another consumer persona.
 - **Fixing the self-referential citation problem** (the contributing factor
   above). A rule about citing ADRs the branch itself authored is a real gap, but
   it is a rubric question tangled with how this repo writes ADRs during a PRD,
@@ -289,15 +273,8 @@ other three produce durable.
 
 ## Further Notes
 
-The delta-scoping slice is worth shipping even if every finding in all eight
-rounds turns out to be a genuine blocker the architect was right about. Reading
-19,398 lines eight times, and demonstrably missing a round-1 defect in seven of
-them, is waste on its own terms; scoping the read to what changed is cheaper and
-more accurate at the same time. That is the slice to build first if only one
-gets built.
-
-The escape-valve slice is the one that carries risk in the other direction: a
-cap can ship a real defect. That risk is bounded by what the cap actually does —
-it files the findings and records them in the PR body of a **draft** PR that
-still requires a human to merge. The status quo's risk is unbounded in the other
-direction, and eight rounds is the measurement.
+Use PRD 3 as the next measurement. Record each guardian invocation's reviewed
+SHA, verdict, findings, fix commit, and elapsed time. After three blocked
+invocations, stop re-entry and request a human decision; do not convert the
+blocked result to success. Revisit this deferred PRD with that evidence before
+PRD 4 starts.
