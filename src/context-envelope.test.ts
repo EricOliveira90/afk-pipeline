@@ -186,4 +186,28 @@ describe("generator context envelope", () => {
     expect(result.prompt).not.toContain("PRIOR-CONVERSATION-MARKER");
     expect(result.prompt).not.toContain("OTHER-ROLE-CONVERSATION-MARKER");
   });
+
+  it("B-05 fails closed one byte below the required prompt size", () => {
+    const input = {
+      mode: "initial" as const,
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      failureSet: { findings: [], gates: [] },
+    };
+    const requiredBytes = assembleGeneratorEnvelope(input).evidence
+      .assembledByteSize;
+
+    expect(() =>
+      assembleGeneratorEnvelope({
+        ...input,
+        inlineSizeBudgetBytes: requiredBytes - 1,
+      }),
+    ).toThrow(
+      `Generator prompt exceeds inline-size budget: actual ${requiredBytes} bytes, allowed ${requiredBytes - 1} bytes`,
+    );
+  });
 });

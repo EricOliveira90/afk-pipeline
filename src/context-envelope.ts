@@ -78,6 +78,7 @@ export interface GeneratorEnvelopeInput {
   migrationReservation: string;
   failureSet: GeneratorFailureSet;
   repairSituation?: string;
+  inlineSizeBudgetBytes?: number;
 }
 
 export interface GeneratorEnvelopeEvidence {
@@ -181,6 +182,15 @@ export function assembleGeneratorEnvelope(
           REPAIR_SITUATION: input.repairSituation!,
         })
       : renderPrompt("generator", commonArgs);
+  const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
+  const allowedByteSize =
+    input.inlineSizeBudgetBytes ??
+    GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes;
+  if (assembledByteSize > allowedByteSize) {
+    throw new Error(
+      `Generator prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
+    );
+  }
   const failureArtifactIds = [
     ...input.failureSet.findings.flatMap(
       (finding) => finding.artifactReferences,
@@ -191,7 +201,7 @@ export function assembleGeneratorEnvelope(
   return {
     prompt,
     evidence: {
-      assembledByteSize: Buffer.byteLength(prompt, "utf-8"),
+      assembledByteSize,
       includedArtifactIds: [
         `${input.sliceDir}/contract.md`,
         `${input.sliceDir}/acceptance-manifest.json`,

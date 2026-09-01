@@ -422,6 +422,8 @@ export interface PipelineConfig {
    * whole-suite guarantee moves per-checkpoint, not away. See ADR 0038.
    */
   testCommand?: string;
+  /** Effective inline byte limit for each assembled generator prompt. */
+  generatorInlineSizeBudgetBytes?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -4332,6 +4334,12 @@ export async function runSliceExecute(
             slice.ghIssue,
           ),
           failureSet: generatorFailureSet,
+          ...(config.generatorInlineSizeBudgetBytes !== undefined
+            ? {
+                inlineSizeBudgetBytes:
+                  config.generatorInlineSizeBudgetBytes,
+              }
+            : {}),
           ...(repairSituation !== undefined ? { repairSituation } : {}),
         });
         rmSync(escalationPath, { force: true });
