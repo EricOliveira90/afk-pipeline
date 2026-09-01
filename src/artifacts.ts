@@ -21,9 +21,11 @@ import {
 import {
   QA_REVIEW_FILENAME,
   UAT_REVIEW_FILENAME,
+  type QAReviewAttemptFinding,
   type QAReviewAttemptRecord,
   type QAReviewStage,
 } from "./qa-review.js";
+import type { ScopeEscalation } from "./escalation.js";
 import type { ScopeAmendmentRecord } from "./scope-amendment.js";
 
 export type ContractStatus = "DRAFT" | "NEGOTIATING" | "LOCKED" | "UNKNOWN";
@@ -201,7 +203,17 @@ export function parseReviewVerdict(
 export function readContractFiles(contractPath: string): string[] | undefined {
   const content = readIfExists(contractPath);
   if (content === null) return undefined;
+  return parseContractFiles(content);
+}
 
+/**
+ * The path-extraction half of `readContractFiles`, over already-loaded
+ * contract bytes. The focused-scope-revision guard compares a captured
+ * previous contract (a string held by the transaction) against the revised
+ * one on disk, so it needs to parse content, not a file. Same return
+ * semantics as `readContractFiles`.
+ */
+export function parseContractFiles(content: string): string[] | undefined {
   const headingRe = /^##\s+Files expected to change\s*$/im;
   const headingMatch = content.match(headingRe);
   if (!headingMatch || headingMatch.index === undefined) return undefined;
@@ -336,6 +348,74 @@ export function archiveContractReviewAttempt(details: {
   return archived;
 }
 
+/** Preserve one generator scope-escalation artifact under its attempt stamp. */
+export function archiveScopeEscalationAttempt(details: {
+  sliceDir: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+}): string | null {
+  const { sliceDir, archiveDir, round, attempt } = details;
+  const source = join(sliceDir, "escalation.md");
+  if (!existsSync(source)) return null;
+
+  const name = `escalation-r${round}-a${attempt}.md`;
+  mkdirSync(archiveDir, { recursive: true });
+  cpSync(source, join(archiveDir, name), {
+    errorOnExist: true,
+    force: false,
+  });
+  return name;
+}
+
+/**
+ * Preserve the bytes a generator wrote over an orchestrator-owned slice
+ * file before they are thrown away (architect A1, seventh gate round).
+ *
+ * The refusal restores the accepted `contract.md` /
+ * `acceptance-manifest.json` pair byte-for-byte, which means the operator
+ * reading the tree afterwards can no longer see what the generator tried
+ * to do — and "what it tried to do" is the whole content of the incident.
+ * Same reasoning as the escalation archive above: mechanical refusal, but
+ * the evidence outlives it.
+ *
+ * Copies are written with `wx`, so a second attempt at the same stamp
+ * fails loudly rather than overwriting the first attempt's evidence.
+ */
+export function archiveRejectedContractMutation(details: {
+  sliceDir: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+  /** Slice-root filenames to preserve; missing ones are skipped. */
+  files: readonly string[];
+}): string[] {
+  const { sliceDir, archiveDir, round, attempt, files } = details;
+  const archived: string[] = [];
+  for (const fileName of files) {
+    const source = join(sliceDir, fileName);
+    if (!existsSync(source)) continue;
+    const name = `rejected-contract-mutation-r${round}-a${attempt}-${fileName}`;
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(archiveDir, name), readFileSync(source, "utf-8"), {
+      encoding: "utf-8",
+      flag: "wx",
+    });
+    archived.push(name);
+  }
+  return archived;
+}
+
+/** The next unused contract-review round in a slice's shared review archive. */
+export function nextContractReviewRound(archiveDir: string): number {
+  if (!existsSync(archiveDir)) return 1;
+  const rounds = readdirSync(archiveDir).flatMap((name) => {
+    const match = /^contract-review-r(\d+)-a\d+\.json$/.exec(name);
+    return match ? [Number(match[1])] : [];
+  });
+  return (rounds.length > 0 ? Math.max(...rounds) : 0) + 1;
+}
+
 /** Archive the code-derived lifecycle record beside its raw attempt. */
 export function archiveContractReviewRecord(details: {
   archiveDir: string;
@@ -434,6 +514,317 @@ export function archiveScopeAmendment(details: {
     flag: "wx",
   });
   return name;
+}
+
+interface ArchivedQAReviewRecord {
+  name: string;
+  record: QAReviewAttemptRecord;
+}
+
+interface ValidArchivedScopeEscalation {
+  round: number;
+  attempt: number;
+  name: string;
+  escalation: ScopeEscalation;
+}
+
+interface InvalidArchivedScopeEscalation {
+  round: number;
+  attempt: number;
+  name: string;
+  invalid: true;
+}
+
+type ArchivedScopeEscalation =
+  | ValidArchivedScopeEscalation
+  | InvalidArchivedScopeEscalation;
+
+export interface StuckDiagnosisDetails {
+  /**
+   * Why this slice is stuck, in the words of whatever refused — round
+   * exhaustion, a failed migration-sync check, anything a later STUCK
+   * outcome adds. Required: a diagnosis that does not say what refused
+   * makes the operator infer it from the evidence below (ADR 0055 P1).
+   */
+  reason: string;
+  reviewArchiveDir: string;
+  additionalArtifactReferences?: readonly string[];
+  commitLog: string;
+}
+
+const QA_RECORD_NAME =
+  /^(qa|uat)-review-r(\d+)-a(\d+)-record\.json$/;
+const ESCALATION_RECORD_NAME = /^escalation-r(\d+)-a(\d+)\.md$/;
+const ADDITIONAL_ARTIFACT_LINE =
+  /^- Additional artifact: `([^`\r\n]+)`$/gm;
+
+function compareAttempt(
+  left: { round: number; attempt: number },
+  right: { round: number; attempt: number },
+): number {
+  return left.round - right.round || left.attempt - right.attempt;
+}
+
+function archivedQAReviewRecords(
+  reviewArchiveDir: string,
+): ArchivedQAReviewRecord[] {
+  if (!existsSync(reviewArchiveDir)) return [];
+  return readdirSync(reviewArchiveDir)
+    .flatMap((name): ArchivedQAReviewRecord[] => {
+      const match = QA_RECORD_NAME.exec(name);
+      if (!match) return [];
+      const record = JSON.parse(
+        readFileSync(join(reviewArchiveDir, name), "utf-8"),
+      ) as QAReviewAttemptRecord;
+      if (
+        !record ||
+        typeof record !== "object" ||
+        !Array.isArray(record.findings)
+      ) {
+        throw new Error(`${name} is not a valid archived QA lifecycle record`);
+      }
+      const expectedStage =
+        match[1] === "qa" ? "deterministic" : "shared-preview";
+      if (
+        record.stage !== expectedStage ||
+        record.round !== Number(match[2]) ||
+        record.attempt !== Number(match[3])
+      ) {
+        throw new Error(
+          `${name} contents must match its stage, round, and attempt filename`,
+        );
+      }
+      return [{ name, record }];
+    })
+    .sort(
+      (left, right) =>
+        compareAttempt(left.record, right.record) ||
+        left.record.stage.localeCompare(right.record.stage),
+    );
+}
+
+function archivedScopeEscalations(
+  reviewArchiveDir: string,
+): ArchivedScopeEscalation[] {
+  if (!existsSync(reviewArchiveDir)) return [];
+  return readdirSync(reviewArchiveDir)
+    .flatMap((name): ArchivedScopeEscalation[] => {
+      const match = ESCALATION_RECORD_NAME.exec(name);
+      if (!match) return [];
+      const attempt = {
+        round: Number(match[1]),
+        attempt: Number(match[2]),
+        name,
+      };
+      try {
+        const parsed = JSON.parse(
+          readFileSync(join(reviewArchiveDir, name), "utf-8"),
+        ) as ScopeEscalation;
+        if (
+          !parsed ||
+          typeof parsed !== "object" ||
+          parsed.version !== 1 ||
+          !Array.isArray(parsed.findingIds) ||
+          !Array.isArray(parsed.paths) ||
+          typeof parsed.reason !== "string"
+        ) {
+          return [{ ...attempt, invalid: true }];
+        }
+        return [{ ...attempt, escalation: parsed }];
+      } catch {
+        // Story 13 retains malformed generator bytes as evidence. A later
+        // STUCK diagnosis must isolate that invalid artifact rather than
+        // letting one failed parse erase the rest of the diagnosis.
+        return [{ ...attempt, invalid: true }];
+      }
+    })
+    .sort(compareAttempt);
+}
+
+function latestFindings(
+  records: readonly ArchivedQAReviewRecord[],
+): Array<QAReviewAttemptFinding & { stage: QAReviewStage }> {
+  const latest = new Map<
+    string,
+    QAReviewAttemptFinding & { stage: QAReviewStage }
+  >();
+  for (const { record } of records) {
+    for (const finding of record.findings) {
+      latest.set(`${record.stage}:${finding.id}`, {
+        ...finding,
+        artifactReferences: [...finding.artifactReferences],
+        stage: record.stage,
+      });
+    }
+  }
+  return [...latest.values()].sort(
+    (left, right) =>
+      left.id.localeCompare(right.id) ||
+      left.stage.localeCompare(right.stage),
+  );
+}
+
+function renderFinding(
+  finding: QAReviewAttemptFinding & { stage: QAReviewStage },
+): string {
+  return [
+    `- [${finding.id}] ${finding.severity} ${finding.state}`,
+    `  - Stage: ${finding.stage}`,
+    `  - Summary: ${finding.summary}`,
+    `  - Clear condition: ${finding.clearCondition}`,
+    "  - Artifact references:",
+    ...finding.artifactReferences.map((path) => `    - \`${path}\``),
+  ].join("\n");
+}
+
+function renderFindingSection(
+  findings: readonly (QAReviewAttemptFinding & { stage: QAReviewStage })[],
+): string {
+  return findings.length === 0
+    ? "(none)"
+    : findings.map(renderFinding).join("\n");
+}
+
+export function readStuckDiagnosisAdditionalArtifactReferences(
+  sliceDir: string,
+): string[] {
+  const stuckPath = join(sliceDir, "stuck.md");
+  if (!existsSync(stuckPath)) return [];
+  return [
+    ...new Set(
+      [...readFileSync(stuckPath, "utf-8").matchAll(ADDITIONAL_ARTIFACT_LINE)]
+        .map((match) => match[1])
+        .filter((path): path is string => path !== undefined),
+    ),
+  ].sort();
+}
+
+/**
+ * Assemble the terminal implementation diagnosis from archived evidence.
+ * File discovery is never presentation order: attempts and findings are
+ * sorted explicitly so identical archives always produce identical bytes.
+ */
+export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
+  const records = archivedQAReviewRecords(details.reviewArchiveDir);
+  const escalations = archivedScopeEscalations(details.reviewArchiveDir);
+  const findings = latestFindings(records);
+  const resolvedFindings = findings.filter(
+    (finding) => finding.state === "RESOLVED",
+  );
+  const openFindings = findings.filter((finding) => finding.state === "OPEN");
+  const escalationBlock =
+    escalations.length === 0
+      ? "(none)"
+      : escalations
+          .map((record) => {
+            if ("invalid" in record) {
+              return [
+                `- Round ${record.round} attempt ${record.attempt}`,
+                `  - Invalid artifact: \`${record.name}\` is not a valid version 1 scope escalation`,
+              ].join("\n");
+            }
+            return [
+              `- Round ${record.round} attempt ${record.attempt}`,
+              `  - Finding IDs: ${record.escalation.findingIds.map((id) => `\`${id}\``).join(", ")}`,
+              `  - Paths: ${record.escalation.paths.map((path) => `\`${path}\``).join(", ")}`,
+              `  - Reason: ${record.escalation.reason}`,
+            ].join("\n");
+          })
+          .join("\n");
+  const roundEvidence = records.map(({ name, record }) => {
+    const references = [
+      ...new Set(
+        record.findings.flatMap(
+          (finding) => finding.artifactReferences,
+        ),
+      ),
+    ].sort();
+    return [
+      `- Round ${record.round} attempt ${record.attempt} (${record.stage}): ${record.verdict} / ${record.failureClass}`,
+      `  - Lifecycle record: \`${name}\``,
+      "  - Artifact references:",
+      ...(references.length === 0
+        ? ["    - (none)"]
+        : references.map((path) => `    - \`${path}\``)),
+    ].join("\n");
+  });
+  const recordedArtifactReferences = new Set(
+    records.flatMap(({ record }) =>
+      record.findings.flatMap((finding) => finding.artifactReferences),
+    ),
+  );
+  for (const path of [...new Set(details.additionalArtifactReferences ?? [])]
+    .filter((path) => !recordedArtifactReferences.has(path))
+    .sort()) {
+    roundEvidence.push(`- Additional artifact: \`${path}\``);
+  }
+  if (roundEvidence.length === 0) roundEvidence.push("(none)");
+  const commitEvidence = details.commitLog.trim()
+    ? `\`\`\`text\n${details.commitLog.trimEnd()}\n\`\`\``
+    : "(none)";
+
+  return [
+    "# Stuck diagnosis",
+    "",
+    "## Reason",
+    "",
+    details.reason,
+    "",
+    "## Finding lifecycle",
+    "",
+    "### RESOLVED",
+    "",
+    renderFindingSection(resolvedFindings),
+    "",
+    "### OPEN",
+    "",
+    renderFindingSection(openFindings),
+    "",
+    "## Scope escalations",
+    "",
+    escalationBlock,
+    "",
+    "## Round evidence",
+    "",
+    ...roundEvidence,
+    "",
+    "## Commit evidence",
+    "",
+    commitEvidence,
+    "",
+  ].join("\n");
+}
+
+export function writeStuckDiagnosis(
+  sliceDir: string,
+  details: StuckDiagnosisDetails,
+): string {
+  const diagnosis = renderStuckDiagnosis(details);
+  writeFileSync(join(sliceDir, "stuck.md"), diagnosis, "utf-8");
+  return diagnosis;
+}
+
+/** The stuck diagnosis exactly as it sits on disk, or `null` when absent. */
+export function readStuckDiagnosis(sliceDir: string): string | null {
+  const stuckPath = join(sliceDir, "stuck.md");
+  if (!existsSync(stuckPath)) return null;
+  return readFileSync(stuckPath, "utf-8");
+}
+
+/**
+ * Put a captured diagnosis back byte-for-byte, and report whether that
+ * changed anything. Used to hold `stuck.md` stable across a STUCK
+ * resume's granted attempt (#82 AC3): the file is the operator's audit
+ * record of why the attempt was granted, and a generator that deletes or
+ * edits it destroys evidence the run is supposed to keep.
+ */
+export function restoreStuckDiagnosis(
+  sliceDir: string,
+  contents: string,
+): boolean {
+  if (readStuckDiagnosis(sliceDir) === contents) return false;
+  writeFileSync(join(sliceDir, "stuck.md"), contents, "utf-8");
+  return true;
 }
 
 /**
@@ -594,6 +985,68 @@ function formatNegotiationOutcome(
     .join("\n");
 }
 
+/**
+ * A non-convergence that *also* held a contest, spelled out for the human.
+ *
+ * ADR 0055 §1 routes a mixed exhaustion — one `CONTESTED` blocker beside an
+ * `OPEN` one — to `NON_CONVERGENCE` on purpose: no decision a human can
+ * record resolves an open finding, so a park containing one could never
+ * satisfy the completion predicate and would park forever (ADR 0041, take
+ * the branch that cannot loop). That routing is correct and stays. What was
+ * missing is that the operator was never *told* a contest existed: the
+ * "Next action" section said "close the unresolved gaps" and the two held
+ * positions sat unremarked in the exhaustion record, so the adjudication
+ * question the PRD promises to surface (stories 3/10, slice-02 B-01) read
+ * as if it had never been raised.
+ *
+ * So the diagnosis names the contest, shows both positions, names the open
+ * blockers that made the exhaustion non-adjudicable, and says what makes it
+ * adjudicable next time. `null` when there is nothing extra to say — a pure
+ * non-convergence, or an impasse, where the exhaustion record already is
+ * the adjudication question.
+ */
+function contestedPositionsHeldAtExhaustion(
+  outcome: ContractNegotiationOutcome | undefined,
+): string[] | null {
+  if (!outcome || outcome.classification !== "NON_CONVERGENCE") return null;
+  const contested = outcome.findings.filter(
+    (finding) => finding.state === "CONTESTED",
+  );
+  if (contested.length === 0) return null;
+  const open = outcome.findings.filter((finding) => finding.state === "OPEN");
+  const ids = contested.map((finding) => `[${finding.id}]`).join(", ");
+  const openIds = open.map((finding) => `[${finding.id}]`).join(", ");
+  return [
+    "## Contested positions held at exhaustion",
+    "",
+    `This exhaustion classified NON_CONVERGENCE, so it did not park for ` +
+      `adjudication — but ${contested.length === 1 ? "a blocking finding was" : "blocking findings were"} ` +
+      `contested, and ${contested.length === 1 ? "its" : "their"} two held ` +
+      `positions are below. You are not being asked to decide ${ids} yet.`,
+    "",
+    contested
+      .map((finding) =>
+        [
+          `- [${finding.id}] ${finding.severity} CONTESTED`,
+          `  - Planner position: ${finding.plannerPosition ?? "(none)"}`,
+          `  - Planner evidence: ${finding.plannerEvidence ?? "(none)"}`,
+          `  - Evaluator evidence: ${finding.evaluatorEvidence}`,
+        ].join("\n"),
+      )
+      .join("\n"),
+    "",
+    `Why no adjudication: ${openIds} ${open.length === 1 ? "is" : "are"} still ` +
+      `an unresolved OPEN blocker, and no decision a human can record ` +
+      `resolves an open finding — a park holding one could never satisfy the ` +
+      `lock's completion predicate and would park forever (ADR 0055 §1, ADR ` +
+      `0041). Close the OPEN blocker${open.length === 1 ? "" : "s"} in the ` +
+      `source issue and rerun the slice: if the contest survives that fresh ` +
+      `negotiation, the next exhaustion is a pure impasse and parks for your ` +
+      `decision.`,
+    "",
+  ];
+}
+
 export function preserveNegotiationFailure(
   details: NegotiationFailureDetails,
   warn: (message: string) => void = (message) => console.error(message),
@@ -655,6 +1108,7 @@ export function preserveNegotiationFailure(
           "",
         ]
       : []),
+    ...(contestedPositionsHeldAtExhaustion(negotiationOutcome) ?? []),
     "## Unresolved gaps",
     "",
     unresolvedGaps(findings, feedback),
@@ -699,17 +1153,108 @@ export function hasStuckFile(sliceDir: string): boolean {
 }
 
 /**
- * Write `**Status:** LOCKED` into `contract.md`. Replaces the first
- * matching `**Status:**` line in document order — including one nested
- * in a fenced code block, though contracts in production format have
- * exactly one Status line at the top. Inserts a Status line after the
+ * What produced a lock (ADR 0055 Seam 1 decision 4). Every lock names one
+ * of these, and the name is what lets a later dispatch tell "the lock
+ * these human decisions produced" from "debris from before the impasse"
+ * when the decision log beside it cannot be trusted.
+ */
+export type ContractLockProvenance =
+  /** The impasse this lock settled, by `impasseFingerprint`. */
+  | { kind: "impasse-adjudication"; impasse: string }
+  /** A focused scope revision of an already accepted lock (ADR 0051). */
+  | { kind: "focused-scope-revision"; round: number }
+  /** An ordinary negotiation round the contract evaluator accepted. */
+  | { kind: "negotiation"; round: number };
+
+/**
+ * The orchestrator-owned field naming the current lock's provenance. It is
+ * deliberately *not* part of the `**Status:**` line: agent prompts read
+ * that literal field (ADR 0008), and ADR 0055 does not reopen that wound.
+ */
+export const LOCK_PROVENANCE_FIELD = "**Lock-Provenance:**";
+
+const LOCK_PROVENANCE_LINE = /^\*\*Lock-Provenance:\*\*[ \t]*(.*)$/i;
+
+/** The stamp's on-disk text. One line, parseable back by the orchestrator. */
+export function formatContractLockProvenance(
+  provenance: ContractLockProvenance,
+): string {
+  switch (provenance.kind) {
+    case "impasse-adjudication":
+      return `impasse-adjudication ${provenance.impasse}`;
+    case "focused-scope-revision":
+      return `focused-scope-revision round ${provenance.round}`;
+    case "negotiation":
+      return `negotiation round ${provenance.round}`;
+  }
+}
+
+/**
+ * The provenance of the lock currently on disk, or `null` when the
+ * contract carries no stamp this orchestrator wrote — a pre-stamp lock, a
+ * hand-edited one, or a field nothing here can parse. `null` is the
+ * fail-closed answer: an unrecognised stamp proves nothing, so callers
+ * treat it exactly as they treat no stamp at all.
+ */
+export function readContractLockProvenance(
+  contractPath: string,
+): ContractLockProvenance | null {
+  const content = readIfExists(contractPath);
+  if (!content) return null;
+  for (const raw of content.split(/\r?\n/)) {
+    const match = raw.match(LOCK_PROVENANCE_LINE);
+    if (!match) continue;
+    return parseContractLockProvenance(match[1]!.trim());
+  }
+  return null;
+}
+
+function parseContractLockProvenance(
+  value: string,
+): ContractLockProvenance | null {
+  const impasse = value.match(/^impasse-adjudication[ \t]+([0-9a-f]{64})$/i);
+  if (impasse) {
+    return { kind: "impasse-adjudication", impasse: impasse[1]!.toLowerCase() };
+  }
+  const revision = value.match(/^focused-scope-revision[ \t]+round[ \t]+(\d+)$/i);
+  if (revision) {
+    return {
+      kind: "focused-scope-revision",
+      round: parseInt(revision[1]!, 10),
+    };
+  }
+  const negotiation = value.match(/^negotiation[ \t]+round[ \t]+(\d+)$/i);
+  if (negotiation) {
+    return { kind: "negotiation", round: parseInt(negotiation[1]!, 10) };
+  }
+  return null;
+}
+
+/**
+ * Write `**Status:** LOCKED` into `contract.md`, plus the
+ * `**Lock-Provenance:**` line naming what produced this lock. Replaces the
+ * first matching `**Status:**` line in document order — including one
+ * nested in a fenced code block, though contracts in production format
+ * have exactly one Status line at the top. Inserts a Status line after the
  * H1 heading if none is present.
+ *
+ * The Status line's bytes are the same ones this function has always
+ * written; the provenance travels on its own line immediately after it
+ * (ADR 0055 §4). Provenance is required, not optional: "every lock exit
+ * stamps" is only true if there is no way to lock without saying why.
  *
  * Owned by the orchestrator: callers run this after the contract
  * evaluator returns `ACCEPT`. Agents do not edit Status. See ADR 0008.
  */
-export function lockContract(contractPath: string): void {
-  writeContractStatus(contractPath, "LOCKED");
+export function lockContract(
+  contractPath: string,
+  provenance: ContractLockProvenance,
+): void {
+  writeContractStatus(
+    contractPath,
+    "LOCKED",
+    formatContractLockProvenance(provenance),
+  );
 }
 
 /**
@@ -724,23 +1269,28 @@ export function lockContract(contractPath: string): void {
  * LOCKED, stop"), so a stale LOCKED is exactly the disk-versus-
  * orchestrator divergence ADR 0008 exists to prevent — and it would let
  * a contract the pipeline already rejected reach generation.
+ *
+ * The provenance stamp goes with the lock: after a reopen there is no
+ * current lock, so a line still naming what produced the last one could
+ * only mislead the reconciliation that reads it (ADR 0055 §4).
  */
 export function reopenContract(contractPath: string): void {
-  writeContractStatus(contractPath, "NEGOTIATING");
+  writeContractStatus(contractPath, "NEGOTIATING", null);
 }
 
 /**
- * Set the contract's Status line. Replaces the first matching
- * `**Status:**` line in document order — including one nested in a
- * fenced code block, though contracts in production format have exactly
- * one Status line at the top. Inserts a Status line after the H1
- * heading if none is present.
+ * Set the contract's Status line, and the lock-provenance line that goes
+ * with it (`null` removes it). Replaces the first matching `**Status:**`
+ * line in document order — including one nested in a fenced code block,
+ * though contracts in production format have exactly one Status line at
+ * the top. Inserts a Status line after the H1 heading if none is present.
  *
  * Owned by the orchestrator; agents do not edit Status. See ADR 0008.
  */
 function writeContractStatus(
   contractPath: string,
   status: "LOCKED" | "NEGOTIATING",
+  provenance: string | null,
 ): void {
   const content = existsSync(contractPath)
     ? readFileSync(contractPath, "utf-8")
@@ -765,5 +1315,42 @@ function writeContractStatus(
     next = `${line}\n`;
   }
 
-  writeFileSync(contractPath, next, "utf-8");
+  writeFileSync(
+    contractPath,
+    setLockProvenanceLine(
+      next,
+      provenance === null ? null : `${LOCK_PROVENANCE_FIELD} ${provenance}`,
+    ),
+    "utf-8",
+  );
+}
+
+/**
+ * Put `stamp` on the contract's own provenance line, or remove the line
+ * when `stamp` is `null`. Line-based rather than one regex because the
+ * removal has to take the blank line it sat behind with it — a contract
+ * that accumulates blank lines every time it is reopened and relocked is
+ * a diff nobody can read.
+ */
+function setLockProvenanceLine(content: string, stamp: string | null): string {
+  const lines = content.split(/\r?\n/);
+  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const at = lines.findIndex((line) => LOCK_PROVENANCE_LINE.test(line));
+
+  if (at >= 0) {
+    if (stamp === null) {
+      lines.splice(at, 1);
+      if (at > 0 && lines[at - 1] === "" && lines[at] === "") {
+        lines.splice(at, 1);
+      }
+    } else {
+      lines[at] = stamp;
+    }
+    return lines.join(eol);
+  }
+  if (stamp === null) return content;
+
+  const statusAt = lines.findIndex((line) => /^\*\*Status:\*\*/i.test(line));
+  lines.splice(statusAt >= 0 ? statusAt + 1 : 0, 0, "", stamp);
+  return lines.join(eol);
 }

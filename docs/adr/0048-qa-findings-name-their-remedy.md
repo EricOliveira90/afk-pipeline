@@ -121,3 +121,30 @@ generator receiving it.
 - **Make `remedy` optional, defaulting to `SOURCE_CHANGE`.** No fixture
   or prompt churn, but an evaluator that omits the field gets the exact
   routing this ADR exists to remove, and nothing in the run would say so.
+
+## Cross-reference — why "already changed" is required here and forbidden next door
+
+Fifth adjudication gate round, architect blocker 1 (see ADR 0052's amendment
+for the full decision). Recorded here because a reader of *this* ADR is the one
+most likely to be surprised.
+
+`planScopeAmendment` requires the requested path to be **already changed** —
+declaring a path the slice never wrote would tell the next wave's lane
+partitioner that this slice owns a file it never touched. The scope-escalation
+door added in ADR 0052 does the exact opposite: it refuses the grant if the
+worktree holds **any** change outside the locked scope.
+
+That asymmetry is deliberate, and it follows from the warrants, not from the
+paths:
+
+- The amendment's warrant is an independent evaluator finding. A generator
+  cannot forge one, so "the work is there" is evidence an evaluator judged the
+  work correct and only the bookkeeping is wrong — which is what this whole ADR
+  is about.
+- The escalation's warrant is generator-authored. "The work is there" is
+  therefore evidence of nothing, and is exactly the pre-build protocol
+  violation that route exists to prevent.
+
+Both doors mutate the locked pair the orchestrator owns (ADR 0008), and both go
+through the one contract transaction (ADR 0055 Seam 1 §3). Only the trust in
+their warrants differs. Do not "reconcile" them.

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import * as artifacts from "./artifacts.js";
+import { negotiationMixedExhaustionCause } from "./orchestrator.js";
 import {
   buildContractNegotiationOutcome,
   buildContractReviewAttemptRecord,
@@ -1033,6 +1034,173 @@ describe("buildContractNegotiationOutcome", () => {
         },
       ],
     });
+  });
+
+  /**
+   * ADR 0055 §1: adjudicability decides the classification. A park is only
+   * escapable when every unresolved blocker is a held contest a human can
+   * choose between; an unresolved OPEN blocker has no decision that
+   * resolves it, so the exhaustion routes to non-convergence and the slice
+   * renegotiates instead of parking forever.
+   */
+  it("classifies a contest mixed with an OPEN blocker as NON_CONVERGENCE", () => {
+    expect(
+      buildContractNegotiationOutcome({
+        version: 1,
+        round: 2,
+        attempt: 1,
+        verdict: "REVISE",
+        findings: [
+          {
+            id: "F-C",
+            severity: "BLOCKING",
+            state: "CONTESTED",
+            unresolved: true,
+            plannerPosition: "CONTESTED",
+            plannerEvidence: "the gate already covers this path",
+            evaluatorEvidence: "the gate omits the negative case",
+          },
+          {
+            id: "F-O",
+            severity: "BLOCKING",
+            state: "OPEN",
+            unresolved: true,
+            plannerPosition: "UNRESOLVED",
+            plannerEvidence: null,
+            evaluatorEvidence: "the migration prefix is still unstated",
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 1,
+      classification: "NON_CONVERGENCE",
+      round: 2,
+      attempt: 1,
+      // Both blockers are retained: the record is the audit of what the
+      // exhaustion contained, not only of what a human could decide.
+      findings: [
+        {
+          id: "F-C",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the gate already covers this path",
+          evaluatorEvidence: "the gate omits the negative case",
+        },
+        {
+          id: "F-O",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          plannerPosition: "UNRESOLVED",
+          plannerEvidence: null,
+          evaluatorEvidence: "the migration prefix is still unstated",
+        },
+      ],
+    });
+  });
+
+  /**
+   * Slice 02 [behavior:B-01a]. The classification above is deliberate and
+   * stays; what the fourth gate round's PM finding was actually about is
+   * that the operator saw only "reached NON_CONVERGENCE after N rounds" and
+   * had no way to tell a flat non-convergence from a real contest the
+   * classifier declined to park. So the run-state reason names both sides of
+   * the split and points at the artifact that holds the positions.
+   */
+  it("names the contest and the blocking OPEN finding in the escalation reason", () => {
+    const cause = negotiationMixedExhaustionCause(
+      {
+        version: 1,
+        classification: "NON_CONVERGENCE",
+        round: 2,
+        attempt: 1,
+        findings: [
+          {
+            id: "F-C",
+            severity: "BLOCKING",
+            state: "CONTESTED",
+            unresolved: true,
+            plannerPosition: "CONTESTED",
+            plannerEvidence: "the gate already covers this path",
+            evaluatorEvidence: "the gate omits the negative case",
+          },
+          {
+            id: "F-O",
+            severity: "BLOCKING",
+            state: "OPEN",
+            unresolved: true,
+            plannerPosition: "UNRESOLVED",
+            plannerEvidence: null,
+            evaluatorEvidence: "the migration prefix is still unstated",
+          },
+        ],
+      },
+      "REVISE",
+      2,
+    );
+
+    expect(cause).not.toBeNull();
+    expect(cause!.summary).toContain("F-C");
+    expect(cause!.summary).toContain("F-O");
+    expect(cause!.summary).toContain("ADR 0055 §1");
+    expect(cause!.summary).toContain("stuck.md");
+  });
+
+  /**
+   * And it stays silent when there is no contest — a flat non-convergence
+   * keeps the plain reason it always had.
+   */
+  it("adds nothing when the exhaustion holds no contested finding", () => {
+    expect(
+      negotiationMixedExhaustionCause(
+        {
+          version: 1,
+          classification: "NON_CONVERGENCE",
+          round: 2,
+          attempt: 1,
+          findings: [
+            {
+              id: "F-O",
+              severity: "BLOCKING",
+              state: "OPEN",
+              unresolved: true,
+              plannerPosition: "UNRESOLVED",
+              plannerEvidence: null,
+              evaluatorEvidence: "the migration prefix is still unstated",
+            },
+          ],
+        },
+        "REVISE",
+        2,
+      ),
+    ).toBeNull();
+    // An impasse has its own reason (it parks); this helper must not
+    // intercept it.
+    expect(
+      negotiationMixedExhaustionCause(
+        {
+          version: 1,
+          classification: "IMPASSE",
+          round: 2,
+          attempt: 1,
+          findings: [
+            {
+              id: "F-C",
+              severity: "BLOCKING",
+              state: "CONTESTED",
+              unresolved: true,
+              plannerPosition: "CONTESTED",
+              plannerEvidence: "the gate already covers this path",
+              evaluatorEvidence: "the gate omits the negative case",
+            },
+          ],
+        },
+        "REVISE",
+        2,
+      ),
+    ).toBeNull();
   });
 });
 

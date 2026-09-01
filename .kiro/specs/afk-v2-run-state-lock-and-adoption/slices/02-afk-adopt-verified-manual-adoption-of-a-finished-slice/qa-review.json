@@ -1,0 +1,54 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "B-04"
+      ],
+      "summary": "A missing reason value is accepted when the next token is another option",
+      "evidence": "src/adopt-command.ts:68-71 rejects a value beginning with --, and src/adopt-command.test.ts:110-144 proves --reason --adopter exits with usage before repository or gate access. The test passed in the full-suite checkpoint for tree 86096960d474c741a3a629e19c4c1a0d2991b123.",
+      "expected": "A missing --reason value must be refused before adopter resolution, state loading, gate execution, or Git work.",
+      "observed": "The current parser returns no value when the token after --reason is another option, so runAdoptCli exits before repository access.",
+      "clearCondition": "Option parsing rejects a missing --reason value when the following token is another option, and a deterministic test proves the command refuses before adopter, state, gate, or Git work.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "B-01",
+        "B-02"
+      ],
+      "summary": "The final feature-branch update is not atomic with the verified tip check",
+      "evidence": "src/git.ts:857-878 uses git update-ref with the verified old commit, and src/adopt-command.test.ts:208-280 installs a competing feature update immediately before finalization and proves the CAS refuses, preserves that competing tip, and leaves slice state unchanged. The test passed in the full-suite checkpoint for tree 86096960d474c741a3a629e19c4c1a0d2991b123.",
+      "expected": "Only the exact feature tip used to build and verify the candidate may move atomically to the verified candidate, and refusal must leave refs and state unchanged.",
+      "observed": "Finalization now performs an atomic old-value compare-and-swap; a competing update prevents adoption from moving the ref or writing state.",
+      "clearCondition": "Finalization uses an atomic compare-and-swap or equivalent lock so only the verified feature tip can move to the verified candidate, and a deterministic race test proves a competing ref update cannot install an unverified merge or mutate state.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "P-04"
+      ],
+      "summary": "Run summaries without adoptions gain an extra blank line",
+      "evidence": "src/logger.ts:299-329 concatenates an empty adoption section directly with the preserved section boundary, and src/logger.test.ts:124-153 asserts the complete no-adoption summary byte for byte. The test passed in the full-suite checkpoint for tree 86096960d474c741a3a629e19c4c1a0d2991b123.",
+      "expected": "A run with no adopted slices must retain the prior run-summary.md bytes and section boundaries.",
+      "observed": "When there are no adopted slices, the adoption section contributes no bytes and the ordinary summary matches the preserved rendering exactly.",
+      "clearCondition": "A no-adoption summary is byte-for-byte unchanged from the preserved rendering, with a deterministic regression assertion covering the section boundary.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

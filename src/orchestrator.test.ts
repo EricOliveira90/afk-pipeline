@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -35,7 +35,11 @@ import {
   resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
+  assertSliceWorktreeOwnership,
 } from "./orchestrator.js";
+import type { NegotiateOutcome } from "./orchestrator.js";
+import { loadRunState } from "./run-state.js";
+import { createWorktree } from "./git.js";
 import {
   buildPrCreationPlan,
   buildReviewScopeBlock,
@@ -68,6 +72,8 @@ import {
   findSliceArtifactDir,
   git,
   makeRepo,
+  REVISION_PLANNER_FAILURE,
+  REVISION_REJECTION_FINDING,
   sliceFromCwd,
   writePrdFixture,
   type InvocationRecord,
@@ -78,7 +84,17 @@ import {
   writeContractResponse,
   writeContractReview,
 } from "./test-support.js";
-import { readContractStatus } from "./artifacts.js";
+import {
+  readContractLockProvenance,
+  readContractStatus,
+} from "./artifacts.js";
+import {
+  decisionSetFingerprint,
+  impasseFingerprint,
+  type AdjudicationDecisionLog,
+} from "./adjudication.js";
+import type { ContractNegotiationOutcome } from "./contract-review.js";
+import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 
 /**
  * Tests for the pre-ship sanity gate. The gate detects which scripts a
@@ -571,6 +587,76 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
  * Tests for `makeAsyncMutex`. The mutex serialises lane merges across
  * concurrently-running lanes; correctness here pins that contract.
  */
+/**
+ * The ownership check both dispatch entry points share (ADR 0010 item 3).
+ * Unit-level because both callers — `runSliceNegotiate`'s routing fork and
+ * the wave's adjudicated lane-successor refresh — reach it before any agent
+ * runs, so there is nothing a spawned pipeline would add here that the
+ * spawned redispatch assertion in the impasse scenario does not already
+ * cover.
+ */
+describe("assertSliceWorktreeOwnership", () => {
+  function contextFor(repo: string) {
+    const slug = "ownership";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "7001",
+      title: "Owned worktree",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    return makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG([slice]),
+        provider: { name: "stub", async invoke() { return { exitCode: 0, stdout: "", stats: {} }; } },
+      },
+      slice,
+      new Logger(repo, `${slug}-stub`),
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+  }
+
+  it("passes for a registered worktree and is silent when nothing is on disk yet", () => {
+    const repo = makeRepo();
+    const ctx = contextFor(repo);
+
+    // First dispatch: no directory yet, and creating one is the ordinary
+    // path's job — so this is not a violation.
+    expect(() => assertSliceWorktreeOwnership(ctx)).not.toThrow();
+
+    createWorktree(repo, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+    expect(() => assertSliceWorktreeOwnership(ctx)).not.toThrow();
+  });
+
+  it("refuses a directory git no longer registers for the branch", () => {
+    const repo = makeRepo();
+    const ctx = contextFor(repo);
+    createWorktree(repo, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+    // The ADR 0010 leftover: git's admin entry is gone, the tree is not.
+    // Running git in there walks up to the parent repository.
+    rmSync(join(repo, ".git", "worktrees", basename(ctx.worktreeDir)), {
+      recursive: true,
+      force: true,
+    });
+
+    expect(() => assertSliceWorktreeOwnership(ctx)).toThrow(
+      /is not registered with git/,
+    );
+    // Never deletes: ADR 0010 leaves a stale directory for the operator.
+    expect(existsSync(ctx.worktreeDir)).toBe(true);
+  });
+});
+
 describe("makeAsyncMutex", () => {
   it("serialises two concurrent acquirers in submission order", async () => {
     const lock = makeAsyncMutex();
@@ -918,6 +1004,982 @@ describe("runPipeline lane scheduling", () => {
     expect(handoff.finalCommitSha).toMatch(/^[0-9a-f]{40}$/);
     expect(handoff.githubIssuesToClose).toEqual(["4001"]);
   }, 240_000);
+});
+
+describe("generator scope escalation", () => {
+  // No successful pipeline fixture can reach a malformed post-generator
+  // control artifact, so this scenario deliberately stops at that boundary.
+  it("archives malformed and absent-field evidence before revision planning, gates, or QA", async () => {
+    const repo = makeRepo();
+    const slug = "malformed-generator-escalation";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const gateMarker = join(repo, "gate-ran.txt").replace(/\\/g, "/");
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "consumer-fixture",
+        private: true,
+        scripts: {
+          "test:run":
+            `node -e "require('fs').writeFileSync('${gateMarker}','ran')"`,
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "make gate observable"]);
+
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "1080",
+        title: "Absent field escalation",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "1082",
+        title: "Malformed escalation",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const absentField = JSON.stringify({
+      version: 1,
+      findingIds: ["F-17"],
+      reason: "the parser also needs another file",
+    });
+    const malformed = '{"version":1,"findingIds":["F-18"],';
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slices[0]!.ghIssue,
+        {
+          files: ["src/declared-a.ts"],
+          qaPasses: true,
+          outputFile: "src/declared-a.ts",
+          outputContent: "declared work",
+          escalation: absentField,
+        },
+      ],
+      [
+        slices[1]!.ghIssue,
+        {
+          files: ["src/declared-b.ts"],
+          qaPasses: true,
+          outputFile: "src/declared-b.ts",
+          outputContent: "declared work",
+          escalation: malformed,
+        },
+      ],
+    ]);
+    const records: InvocationRecord[] = [];
+    const provider = buildStubProvider({ fixtures, slices, records });
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG(slices),
+      provider,
+    });
+
+    const state = JSON.parse(
+      readFileSync(
+        join(repo, ".afk", "state", `${slug}-stub.json`),
+        "utf-8",
+      ),
+    );
+    expect(state.slices[slices[0]!.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slices[0]!.ghIssue].error).toMatch(
+      /escalation\.md root object must contain exactly/,
+    );
+    expect(state.slices[slices[1]!.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slices[1]!.ghIssue].error).toMatch(
+      /escalation\.md is not valid JSON/,
+    );
+    for (const slice of slices) {
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "planner" && ghIssue === slice.ghIssue,
+        ),
+      ).toHaveLength(1);
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "generator" && ghIssue === slice.ghIssue,
+        ),
+      ).toHaveLength(1);
+    }
+    expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
+    expect(existsSync(gateMarker)).toBe(false);
+
+    for (const [slice, raw] of [
+      [slices[0]!, absentField],
+      [slices[1]!, malformed],
+    ] as const) {
+      expect(
+        readFileSync(
+          join(
+            repo,
+            ".afk",
+            "artifacts",
+            `${slug}-stub`,
+            `slice-${slice.number}`,
+            "reviews",
+            "escalation-r1-a1.md",
+          ),
+        ),
+      ).toEqual(Buffer.from(raw));
+    }
+  }, 60_000);
+
+  // A new spawned scenario, because the bound under test is the escalation
+  // loop's own exit condition: only a real run drives generator -> planner
+  // -> contract-evaluator repeatedly, and the shared "focused generator
+  // scope revision" fixture escalates exactly once by construction.
+  it("refuses a third escalation in one round instead of looping", async () => {
+    const repo = makeRepo();
+    const slug = "repeated-generator-escalation";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1132",
+      title: "Escalates every attempt",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    // One new path at a time — each escalation is individually valid, so
+    // the loop is bounded by the round's allowance and nothing else.
+    const escalations = ["a", "b", "c"].map((suffix, index) =>
+      JSON.stringify({
+        version: 1,
+        findingIds: [`F-1${index}`],
+        paths: [`src/extra-${suffix}.ts`],
+        reason: `module ${suffix} must change too`,
+      }),
+    );
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({
+        slices: [slice],
+        records,
+        fixtures: new Map<string, SliceFixture>([
+          [
+            slice.ghIssue,
+            {
+              files: ["src/declared.ts"],
+              revisionFileScopes: [
+                ["src/declared.ts", "src/extra-a.ts"],
+                ["src/declared.ts", "src/extra-a.ts", "src/extra-b.ts"],
+              ],
+              qaPasses: true,
+              outputFile: "src/declared.ts",
+              outputContent: "declared work",
+              escalations,
+            },
+          ],
+        ]),
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /Focused scope revision refused in round 1/,
+    );
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /already spent its 2 revision\(s\)/,
+    );
+
+    // Two revisions granted, the third refused: the loop stopped rather
+    // than spawning a fourth generator on an unspent budget.
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(3);
+    expect(
+      records.filter(({ role }) => role === "evaluator-contract"),
+    ).toHaveLength(3);
+    expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
+
+    const reviews = join(
+      repo,
+      ".afk",
+      "artifacts",
+      `${slug}-stub`,
+      "slice-01",
+      "reviews",
+    );
+    for (const [index, raw] of escalations.entries()) {
+      expect(
+        readFileSync(join(reviews, `escalation-r1-a${index + 1}.md`), "utf-8"),
+      ).toBe(raw);
+    }
+  }, 120_000);
+
+  // A new spawned scenario, because the claim is about what the *initial*
+  // generator can do: the shared "focused generator scope revision"
+  // fixture escalates on invocation 2, after a QA round has produced
+  // findings to cite, and that is the only half #80 shipped. Nothing
+  // cheaper reaches a round-1 attempt-1 generator with no findings and an
+  // escalation that has to be honoured anyway (ADR 0052).
+  it("revises the contract for a pre-build discovery with no findings to cite", async () => {
+    const repo = makeRepo();
+    const slug = "pre-build-scope";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1150",
+      title: "Discovers the scope is too narrow before building",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const escalation = JSON.stringify({
+      version: 1,
+      findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+      paths: ["src/extra.ts"],
+      reason:
+        "the declared entry point cannot be implemented without its helper",
+    });
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({
+        slices: [slice],
+        records,
+        fixtures: new Map<string, SliceFixture>([
+          [
+            slice.ghIssue,
+            {
+              files: ["src/declared.ts"],
+              revisedFiles: ["src/declared.ts", "src/extra.ts"],
+              qaPasses: true,
+              outputFile: "src/declared.ts",
+              outputContent: "declared work",
+              // Invocation 1 — round 1, attempt 1, before any QA has run.
+              escalation,
+            },
+          ],
+        ]),
+      }),
+    });
+
+    // The premise: this generator was handed no finding identity at all,
+    // which is why a real finding ID was not an option.
+    const generators = records.filter(({ role }) => role === "generator");
+    expect(generators[0]!.prompt!).not.toContain("This is implementation round");
+    expect(generators[0]!.prompt!).not.toContain("Fix every");
+    // ...and the prompt it was handed names the identity it may use.
+    expect(generators[0]!.prompt!).toContain(PRE_BUILD_SCOPE_FINDING_ID);
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("PASS");
+
+    // The revision happened: a second planner ran on the escalation
+    // evidence, the revised contract was re-evaluated and re-locked, and
+    // the generator resumed in the same round rather than spending it.
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(2);
+    expect(records[records.length - 1]!.prompt).not.toBe(undefined);
+    expect(
+      records.filter(({ role }) => role === "evaluator-contract"),
+    ).toHaveLength(2);
+    expect(records.filter(({ role }) => role === "evaluator-qa")).toHaveLength(
+      1,
+    );
+    expect(generators).toHaveLength(2);
+    expect(generators[1]!.prompt!).toContain("src/extra.ts");
+
+    // Read off the feature branch: a PASS removes the slice worktree, and
+    // the merged commit is where the revised lock actually has to land.
+    const feature = `feat-stub/${slug}`;
+    const tracked = git(repo, ["ls-tree", "-r", "--name-only", feature]).split(
+      /\r?\n/,
+    );
+    const show = (suffix: string): string =>
+      git(repo, ["show", `${feature}:${tracked.find((p) => p.endsWith(suffix))!}`]);
+    const contract = show("/contract.md");
+    expect(contract).toContain("**Status:** LOCKED");
+    expect(contract).toContain("- src/extra.ts");
+    expect(
+      (
+        JSON.parse(show("/acceptance-manifest.json")) as {
+          fileScope: { paths: string[] };
+        }
+      ).fileScope.paths,
+    ).toEqual(["src/declared.ts", "src/extra.ts"]);
+
+    // The escalation evidence is archived under round 1 — the round it was
+    // raised in, before any implementation round was spent.
+    expect(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "reviews",
+          "escalation-r1-a1.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe(escalation);
+  }, 60_000);
+
+  /**
+   * Architect blocker 1, fifth adjudication gate round.
+   *
+   * A new spawned scenario, reluctantly: the claim is about the state of the
+   * *worktree* at the moment the grant is decided, and nothing short of a
+   * real run puts a generator's uncommitted undeclared edit next to a valid
+   * escalation. The unit half — which paths count as out of scope, and why
+   * the slice artifact directory and migration files do not — is in
+   * `escalation.test.ts`, and the honest-grant half rides the shared
+   * "focused generator scope revision" run above. This is the one assertion
+   * neither could carry.
+   */
+  it("refuses the grant when the escalation follows an undeclared edit", async () => {
+    const repo = makeRepo();
+    const slug = "laundered-scope-escalation";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1160",
+      title: "Edits first and escalates after",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    // A perfectly valid escalation for the path it already wrote — the
+    // laundering shape. It also names a second, untouched path, so the
+    // refusal cannot be passed off as "the requested paths were checked".
+    const escalation = JSON.stringify({
+      version: 1,
+      findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+      paths: ["src/undeclared.ts", "src/never-touched.ts"],
+      reason: "the helper had to change too",
+    });
+    const records: InvocationRecord[] = [];
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({
+        slices: [slice],
+        records,
+        fixtures: new Map<string, SliceFixture>([
+          [
+            slice.ghIssue,
+            {
+              files: ["src/declared.ts"],
+              revisedFiles: [
+                "src/declared.ts",
+                "src/undeclared.ts",
+                "src/never-touched.ts",
+              ],
+              qaPasses: true,
+              outputFile: "src/declared.ts",
+              outputContent: "declared work",
+              escalation,
+              undeclaredEdits: ["src/undeclared.ts"],
+            },
+          ],
+        ]),
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue].phase).toBe("ERROR");
+    expect(state.slices[slice.ghIssue].error).toMatch(
+      /already holds changes outside the locked file scope/,
+    );
+    expect(state.slices[slice.ghIssue].error).toContain("src/undeclared.ts");
+    expect(state.slices[slice.ghIssue].error).toMatch(/ADR 0052/);
+
+    // No revision was performed: the second planner never ran, the
+    // contract was never reopened, and QA never saw the laundered tree.
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(1);
+    expect(
+      records.filter(({ role }) => role === "evaluator-contract"),
+    ).toHaveLength(1);
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(1);
+    expect(records.some(({ role }) => role === "evaluator-qa")).toBe(false);
+
+    // The contract is unchanged — still the accepted lock, still declaring
+    // only the path the planner declared.
+    const sliceDir = join(
+      repo,
+      ".afk",
+      "worktrees",
+      `afk-stub-${slug}-s01`,
+      specsDir,
+      "slices",
+      "01-edits-first-and-escalates-after",
+    );
+    const contract = readFileSync(join(sliceDir, "contract.md"), "utf-8");
+    expect(contract).toContain("**Status:** LOCKED");
+    expect(contract).not.toContain("src/undeclared.ts");
+    expect(
+      (
+        JSON.parse(
+          readFileSync(join(sliceDir, "acceptance-manifest.json"), "utf-8"),
+        ) as { fileScope: { paths: string[] } }
+      ).fileScope.paths,
+    ).toEqual(["src/declared.ts"]);
+
+    // ...and the raw escalation evidence survives the refusal, because the
+    // guard sits after the archive call.
+    expect(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "reviews",
+          "escalation-r1-a1.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe(escalation);
+  }, 60_000);
+
+  // A new spawned scenario, because the state under test only exists
+  // *inside* a focused revision: the accepted contract has been reopened
+  // and its manifest deleted, and nothing short of a real run reaches
+  // that window. One run covers both failure halves as two independent
+  // slices in the same wave (ADR 0051).
+  describe("a failed focused revision restores the accepted lock", () => {
+    let repo: string;
+    let records: InvocationRecord[];
+    const slug = "focused-revision-rollback";
+    // Disjoint declared scopes, so the three slices land in different lanes
+    // and each negotiates its contract exactly once. Sharing a file puts
+    // the successor behind a lane re-negotiation, which is a different
+    // scenario than the one under test.
+    const declared = (slice: Slice): string =>
+      `src/declared-${slice.number}.ts`;
+    // What negotiation locked, before any revision touched it. The
+    // rollback has to reproduce this byte-for-byte: the LOCKED status, the
+    // provenance stamp naming the round that accepted it (ADR 0055 §4),
+    // *and* the unwidened file scope. A failed revision therefore restores
+    // the previous lock's provenance too, rather than leaving the contract
+    // claiming it was produced by the revision that did not happen.
+    const lockedContract = (slice: Slice): string =>
+      "# Slice Contract\n\n**Status:** LOCKED\n\n" +
+      "**Lock-Provenance:** negotiation round 1\n\n" +
+      `## Files expected to change\n- ${declared(slice)}\n`;
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "1140",
+        title: "Revision planner throws",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "1141",
+        title: "Revision evaluator rejects",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "03",
+        ghIssue: "1142",
+        title: "Revision lock gate refuses",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "04",
+        ghIssue: "1143",
+        title: "Revision drops a locked path",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      // Architect A1, seventh gate round. Not a failed revision at all —
+      // the revision never starts — but it belongs in this run rather than
+      // a fifth spawn: the claim it proves is exactly this describe's claim
+      // ("the accepted pair survives a refusal byte-for-byte"), and the
+      // per-slice `it.each` assertions below already read it.
+      {
+        number: "05",
+        ghIssue: "1144",
+        title: "Generator rewrites its own lock",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const escalation = (slice: Slice): string =>
+      JSON.stringify({
+        version: 1,
+        findingIds: ["F-40"],
+        paths: [`src/extra-${slice.number}.ts`],
+        reason: "the declared module delegates to an undeclared one",
+      });
+    let state: {
+      slices: Record<string, { phase: string; error?: string }>;
+    };
+    /** The slice artifact dir inside the preserved slice worktree. */
+    const sliceDir = (slice: Slice): string =>
+      findSliceArtifactDir(
+        join(repo, ".afk", "worktrees", `afk-stub-${slug}-s${slice.number}`),
+        slice.number,
+      )!;
+    const manifestBefore = (slice: Slice): string =>
+      readFileSync(join(sliceDir(slice), "acceptance-manifest.json"), "utf-8");
+
+    beforeAll(async () => {
+      repo = makeRepo({ lifetime: "describe" });
+      const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      records = [];
+      const fixture = (slice: Slice): SliceFixture => ({
+        files: [declared(slice)],
+        revisedFiles: [declared(slice), `src/extra-${slice.number}.ts`],
+        qaPasses: true,
+        outputFile: declared(slice),
+        outputContent: "declared work",
+        escalation: escalation(slice),
+      });
+
+      await runPipeline({
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag: buildDAG(slices),
+        provider: buildStubProvider({
+          slices,
+          records,
+          fixtures: new Map<string, SliceFixture>([
+            [
+              slices[0]!.ghIssue,
+              { ...fixture(slices[0]!), revisionPlannerThrows: true },
+            ],
+            [
+              slices[1]!.ghIssue,
+              { ...fixture(slices[1]!), revisionRejected: true },
+            ],
+            [slices[2]!.ghIssue, fixture(slices[2]!)],
+            // The revision drops the accepted path instead of adding to it:
+            // it declares only the escalation's requested path, so the
+            // requested-path check passes but the additive guard must catch
+            // the lost `declared-04` (finding 3).
+            [
+              slices[3]!.ghIssue,
+              { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
+            ],
+            // Widens both orchestrator-owned files with a path its
+            // escalation never mentions, then escalates for `extra-05`.
+            [
+              slices[4]!.ghIssue,
+              {
+                ...fixture(slices[4]!),
+                ownedContractWidening: "src/smuggled-05.ts",
+              },
+            ],
+          ]),
+        }),
+        onContractLocked: (() => {
+          const calls = new Map<string, number>();
+          return (ghIssue) => {
+            const count = (calls.get(ghIssue) ?? 0) + 1;
+            calls.set(ghIssue, count);
+            return ghIssue === slices[2]!.ghIssue && count === 2
+              ? "injected focused-revision lock-gate refusal"
+              : null;
+          };
+        })(),
+      });
+
+      state = JSON.parse(
+        readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+      );
+    }, 120_000);
+
+    afterAll(() => {
+      rmSync(repo, { recursive: true, force: true });
+    });
+
+    it("ends the slice ERROR naming the planner failure", () => {
+      expect(state.slices[slices[0]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[0]!.ghIssue]!.error).toContain(
+        REVISION_PLANNER_FAILURE,
+      );
+    });
+
+    it("ends the slice ERROR naming the rejected revision", () => {
+      expect(state.slices[slices[1]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[1]!.ghIssue]!.error).toMatch(
+        /Focused scope revision was not accepted/,
+      );
+      expect(state.slices[slices[1]!.ghIssue]!.error).toContain(
+        REVISION_REJECTION_FINDING,
+      );
+    });
+
+    it("ends the slice ERROR naming a focused-revision lock-gate refusal", () => {
+      expect(state.slices[slices[2]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[2]!.ghIssue]!.error).toContain(
+        "injected focused-revision lock-gate refusal",
+      );
+    });
+
+    it("ends the slice ERROR naming the dropped locked path", () => {
+      expect(state.slices[slices[3]!.ghIssue]!.phase).toBe("ERROR");
+      expect(state.slices[slices[3]!.ghIssue]!.error).toMatch(
+        /dropped previously locked path/,
+      );
+      expect(state.slices[slices[3]!.ghIssue]!.error).toContain(
+        declared(slices[3]!),
+      );
+    });
+
+    /**
+     * Architect A1, seventh gate round: a generator may not write its own
+     * lock. The pair is read back by `lockedManifest`, by the changed-set
+     * guard and by the focused revision's capture, so a generator that
+     * widened both files handed itself a scope no orchestrator accepted.
+     */
+    it("ends the slice ERROR naming the rewritten orchestrator-owned files", () => {
+      expect(state.slices[slices[4]!.ghIssue]!.phase).toBe("ERROR");
+      const error = state.slices[slices[4]!.ghIssue]!.error!;
+      expect(error).toMatch(/changed orchestrator-owned contract file\(s\)/);
+      expect(error).toContain("contract.md");
+      expect(error).toContain("acceptance-manifest.json");
+      expect(error).toMatch(/ADR 0055/);
+    });
+
+    it("dispatches no planner or evaluator on the rewritten lock", () => {
+      // One planner and one contract evaluator: negotiation's. The refusal
+      // lands before escalation parsing, so the revision's planner and
+      // evaluator never run, and QA never sees the widened tree.
+      const forSlice = (role: string) =>
+        records.filter(
+          (record) =>
+            record.role === role && record.ghIssue === slices[4]!.ghIssue,
+        );
+      expect(forSlice("planner")).toHaveLength(1);
+      expect(forSlice("evaluator-contract")).toHaveLength(1);
+      expect(forSlice("generator")).toHaveLength(1);
+      expect(forSlice("evaluator-qa")).toHaveLength(0);
+    });
+
+    it("preserves the generator's attempted bytes as evidence", () => {
+      // The restore is what makes the refusal safe, and it is also what
+      // erases the incident — so the attempted bytes are archived first.
+      const reviews = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-05",
+        "reviews",
+      );
+      expect(
+        readFileSync(
+          join(reviews, "rejected-contract-mutation-r1-a1-contract.md"),
+          "utf-8",
+        ),
+      ).toContain("src/smuggled-05.ts");
+      expect(
+        readFileSync(
+          join(
+            reviews,
+            "rejected-contract-mutation-r1-a1-acceptance-manifest.json",
+          ),
+          "utf-8",
+        ),
+      ).toContain("src/smuggled-05.ts");
+    });
+
+    it("does not resume generation after the additive guard refuses", () => {
+      // The dropped-path revision fails before the fresh generator: the only
+      // generator invocation is the one that raised the escalation.
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "generator" && ghIssue === slices[3]!.ghIssue,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it.each([
+      ["a planner throw", 0],
+      ["an evaluator rejection", 1],
+      ["a lock-gate refusal", 2],
+      ["a dropped locked path", 3],
+      ["a generator rewriting its own lock", 4],
+    ])(
+      "leaves the accepted contract byte-identical after %s",
+      (_label, index) => {
+        const slice = slices[index]!;
+        expect(readFileSync(join(sliceDir(slice), "contract.md"), "utf-8")).toBe(
+          lockedContract(slice),
+        );
+        expect(readContractStatus(join(sliceDir(slice), "contract.md"))).toBe(
+          "LOCKED",
+        );
+      },
+    );
+
+    it.each([
+      ["a planner throw", 0],
+      ["an evaluator rejection", 1],
+      ["a lock-gate refusal", 2],
+      ["a dropped locked path", 3],
+      ["a generator rewriting its own lock", 4],
+    ])(
+      "restores the accepted acceptance manifest after %s, unwidened",
+      (_label, index) => {
+        const slice = slices[index]!;
+        const manifest = JSON.parse(manifestBefore(slice)) as {
+          fileScope: { paths: string[] };
+        };
+        expect(manifest.fileScope.paths).toEqual([declared(slice)]);
+      },
+    );
+
+    it.each([
+      ["a planner throw", 0],
+      ["an evaluator rejection", 1],
+      ["a lock-gate refusal", 2],
+      ["a dropped locked path", 3],
+    ])("keeps the escalation archive after %s", (_label, index) => {
+      const slice = slices[index]!;
+      expect(
+        readFileSync(
+          join(
+            repo,
+            ".afk",
+            "artifacts",
+            `${slug}-stub`,
+            `slice-${slice.number}`,
+            "reviews",
+            "escalation-r1-a1.md",
+          ),
+          "utf-8",
+        ),
+      ).toBe(escalation(slice));
+    });
+
+    it("does not resume generation after the focused-revision gate refuses", () => {
+      expect(
+        records.filter(
+          ({ role, ghIssue }) =>
+            role === "generator" && ghIssue === slices[2]!.ghIssue,
+        ),
+      ).toHaveLength(1);
+    });
+  });
+});
+
+describe("focused generator scope revision", () => {
+  let repo: string;
+  let records: InvocationRecord[];
+  const slug = "focused-generator-scope-revision";
+  const escalation = {
+    version: 1,
+    findingIds: ["F-17", "F-18"],
+    paths: ["src/extra-a.ts", "src/extra-b.ts"],
+    reason: "both parser modules must change",
+  };
+
+  beforeAll(async () => {
+    repo = makeRepo({ lifetime: "describe" });
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "1081",
+      title: "Focused scope revision",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    records = [];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        slice.ghIssue,
+        {
+          files: ["src/declared.ts"],
+          revisedFiles: [
+            "src/declared.ts",
+            "src/extra-a.ts",
+            "src/extra-b.ts",
+          ],
+          qaPasses: true,
+          qaFailuresBeforePass: 1,
+          outputFile: "src/declared.ts",
+          outputContent: "declared work",
+          escalation: JSON.stringify(escalation),
+          escalationGeneratorInvocation: 2,
+          // The slice's own artifact directory is dirty when the grant is
+          // decided — `escalation.md` always, and `handoff.md` here as a
+          // second file — so this scenario doubles as the honest-escalation
+          // half of the grant guard (architect blocker 1).
+          sliceArtifactEdits: ["handoff.md"],
+        },
+      ],
+    ]);
+
+    await runPipeline({
+      repoRoot: repo,
+      prdSlug: slug,
+      prdDir,
+      specsDir,
+      dag: buildDAG([slice]),
+      provider: buildStubProvider({ fixtures, slices: [slice], records }),
+    });
+  }, 60_000);
+
+  afterAll(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  /**
+   * The honest half of the grant guard (architect blocker 1, fifth
+   * adjudication gate round). An `it` on this shared run rather than a new
+   * spawned scenario, per the AGENTS.md ladder: the tree this scenario
+   * already produces is exactly the one the guard has to allow.
+   *
+   * The exemption is the slice artifact directory *by prefix*, and this is
+   * what makes that necessary: `escalation.md` and `handoff.md` are both
+   * uncommitted and neither is on the locked file scope, so a guard with no
+   * exemption would refuse every escalation, and one keyed on
+   * `artifacts.sliceArtifactNames()` would too — that list omits
+   * `escalation.md`, `acceptance-manifest.json` and both adjudication files.
+   */
+  it("grants the revision with the slice's own artifacts dirty", () => {
+    // The archive is written from `escalation.md` in the slice directory
+    // immediately before the guard runs, so its presence proves the file was
+    // an uncommitted, undeclared change in the tree the guard inspected.
+    expect(
+      readdirSync(
+        join(repo, ".afk", "artifacts", `${slug}-stub`, "slice-01", "reviews"),
+      ).filter((name) => name.startsWith("escalation-")),
+    ).toHaveLength(1);
+    const state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices["1081"].phase).toBe("PASS");
+    // And the grant really happened: a refused grant throws before the
+    // second planner ever runs.
+    expect(records.filter(({ role }) => role === "planner")).toHaveLength(2);
+  });
+
+  it("routes the exact escalation evidence through one focused planner", () => {
+    const planners = records.filter(({ role }) => role === "planner");
+    expect(planners).toHaveLength(2);
+    expect(planners[1]!.prompt!).toContain(
+      JSON.stringify(escalation.findingIds),
+    );
+    expect(planners[1]!.prompt!).toContain(JSON.stringify(escalation.paths));
+    expect(planners[1]!.prompt!).toContain(escalation.reason);
+  });
+
+  it("evaluates the revised manifest after the focused planner", () => {
+    const relevant = records.filter(({ role }) =>
+      ["planner", "evaluator-contract", "generator"].includes(role),
+    );
+    expect(relevant.map(({ role }) => role)).toEqual([
+      "planner",
+      "evaluator-contract",
+      "generator",
+      "generator",
+      "planner",
+      "evaluator-contract",
+      "generator",
+    ]);
+    const freshGeneratorPrompt = relevant.at(-1)!.prompt!;
+    expect(freshGeneratorPrompt).toContain('"fileScope"');
+    expect(freshGeneratorPrompt).toContain("src/declared.ts");
+    expect(freshGeneratorPrompt).toContain("src/extra-a.ts");
+    expect(freshGeneratorPrompt).toContain("src/extra-b.ts");
+    expect(freshGeneratorPrompt).toContain("This is implementation round 2");
+    expect(freshGeneratorPrompt).toContain("QA-01");
+    expect(freshGeneratorPrompt).toContain("Fixture implementation finding");
+    expect(freshGeneratorPrompt).toContain(
+      "The fixture evaluator observes the behavior passing",
+    );
+    expect(freshGeneratorPrompt).toContain("qa-review-r1-a1.json");
+    expect(freshGeneratorPrompt).toContain("qa-report-r1-a1.md");
+  });
+
+  it("resumes generation in the same implementation round", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const generatorStarts = readFileSync(
+      join(runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter(
+        (event) =>
+          event.type === "phase-started" && event.agent === "generator",
+      );
+
+    expect(generatorStarts.map(({ round }) => round)).toEqual([1, 2, 2]);
+    expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
+  });
+
+  it("continues through QA after fresh generation", () => {
+    expect(records.filter(({ role }) => role === "evaluator-qa")).toHaveLength(
+      2,
+    );
+  });
+
+  it("archives the escalating generator attempt", () => {
+    expect(
+      readFileSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          `${slug}-stub`,
+          "slice-01",
+          "reviews",
+          "escalation-r2-a1.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe(JSON.stringify(escalation));
+  });
 });
 
 /**
@@ -2132,6 +3194,738 @@ describe("round-scoped contract feedback", () => {
     expect(contract).not.toContain("## Evaluator feedback");
   });
 
+  it("parks a contested round-two exhaustion for adjudication", async () => {
+    const repo = makeRepo();
+    const slug = "contract-impasse";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9081",
+      title: "Contested contract",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    let generatorRounds = 0;
+    let renumberManifestOnPlannerApply = false;
+    const plannerPrompts: string[] = [];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          plannerPrompts.push(opts.prompt);
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+          if (renumberManifestOnPlannerApply) {
+            writeAcceptanceManifest(artifactDir, ["src/example.ts"], [
+              {
+                id: "B-02",
+                source: "test fixture",
+                given: "a contract",
+                when: "it is negotiated",
+                then: "it reaches review",
+                observableResult: "the evaluator receives the contract",
+                preservation: false,
+                gateIds: ["tests"],
+              },
+            ]);
+          }
+          if (plannerRounds === 2) {
+            writeFileSync(
+              join(artifactDir, "contract-response.json"),
+              JSON.stringify({
+                version: 1,
+                round: 2,
+                responses: [
+                  {
+                    findingId: "F-01",
+                    position: "CONTESTED",
+                    evidence: "planner evidence alpha, verbatim",
+                  },
+                  {
+                    findingId: "F-02",
+                    position: "CONTESTED",
+                    evidence: "planner evidence beta, verbatim",
+                  },
+                ],
+              }),
+              "utf-8",
+            );
+          }
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          writeContractReview(
+            artifactDir,
+            "REVISE",
+            ["F-01", "F-02"].map((id, index) => ({
+              id,
+              severity: "BLOCKING" as const,
+              behaviorIds: ["B-01"],
+              evidence: `evaluator evidence ${index === 0 ? "alpha" : "beta"}, verbatim`,
+              expected: "one agreed contract interpretation",
+              observed: "planner and evaluator retain different interpretations",
+              clearCondition: "a human adjudicates the disputed interpretation",
+              state:
+                evaluatorRounds === 1
+                  ? ("OPEN" as const)
+                  : ("CONTESTED" as const),
+            })),
+          );
+        } else if (opts.role === "generator") {
+          generatorRounds++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      { repoRoot: repo, prdSlug: slug, prdDir, specsDir, dag, provider },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+
+    expect(outcome.phase).toBe("AWAITING-ADJUDICATION");
+    if (outcome.phase !== "AWAITING-ADJUDICATION") {
+      throw new Error(`expected impasse park, got ${outcome.phase}`);
+    }
+    expect(outcome.cause.summary).toContain("IMPASSE");
+    expect(outcome.cause.summary).toContain("F-01");
+    expect(outcome.cause.summary).toContain("F-02");
+
+    // Record the park through the journal, the way the pipeline's outcome
+    // reconciliation does. Carried through the phases below so the park's
+    // *persisted* projection is asserted end to end, not just the returned
+    // outcome — that projection is what a human reads to know which
+    // findings still need them (issue #141).
+    const sliceId = {
+      ghIssue: slice.ghIssue,
+      title: slice.title,
+      branch: ctx.branch,
+    };
+    const persistPark = (parked: NegotiateOutcome): string => {
+      if (parked.phase !== "AWAITING-ADJUDICATION") {
+        throw new Error(`expected a park, got ${parked.phase}`);
+      }
+      logger.recordTerminal(sliceId, {
+        phase: "AWAITING-ADJUDICATION",
+        error: parked.cause.summary,
+      });
+      const persisted = loadRunState(repo, `${slug}-stub`).slices[
+        slice.ghIssue
+      ];
+      if (!persisted?.error) {
+        throw new Error("park was not persisted with a reason");
+      }
+      return persisted.error;
+    };
+    const firstParkReason = persistPark(outcome);
+    expect(firstParkReason).toContain("F-01");
+    expect(firstParkReason).toContain("F-02");
+
+    const working = readFileSync(
+      join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
+      "utf-8",
+    );
+    const archived = readFileSync(
+      join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-01",
+        "contract-negotiation-outcome.json",
+      ),
+      "utf-8",
+    );
+    expect(archived).toBe(working);
+    expect(JSON.parse(working)).toMatchObject({
+      classification: "IMPASSE",
+      findings: [
+        {
+          id: "F-01",
+          state: "CONTESTED",
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "planner evidence alpha, verbatim",
+          evaluatorEvidence: "evaluator evidence alpha, verbatim",
+        },
+        {
+          id: "F-02",
+          state: "CONTESTED",
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "planner evidence beta, verbatim",
+          evaluatorEvidence: "evaluator evidence beta, verbatim",
+        },
+      ],
+    });
+
+    const rawDecision =
+      '{"version":1,"findingId":"F-99","winningPosition":"PLANNER","author":"Ada"}\r\n';
+    const decisionPath = join(ctx.absSliceDir, "adjudication.md");
+    const recordPath = join(ctx.absSliceDir, "adjudication-decisions.json");
+    writeFileSync(decisionPath, rawDecision, "utf-8");
+    const invocationsBeforeRetry = plannerRounds + evaluatorRounds;
+
+    const refused = await runSliceNegotiate(ctx);
+
+    expect(refused.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      refused.phase === "AWAITING-ADJUDICATION"
+        ? refused.cause.summary
+        : "",
+    ).toContain("F-99 is absent from the current IMPASSE");
+    expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    // A refused decision is not consumed: the human's bytes stay put so the
+    // defect can be read and corrected in place.
+    expect(readFileSync(decisionPath, "utf-8")).toBe(rawDecision);
+    expect(existsSync(recordPath)).toBe(false);
+
+    const contractPath = join(ctx.absSliceDir, "contract.md");
+    const manifestPath = join(ctx.absSliceDir, "acceptance-manifest.json");
+    const contractBefore = readFileSync(contractPath, "utf-8");
+    const manifestBefore = readFileSync(manifestPath, "utf-8");
+    let lockGateCalls = 0;
+    let gateObjection: string | null = null;
+    ctx.onContractLocked = () => {
+      lockGateCalls++;
+      return gateObjection;
+    };
+    const decide = async (decision: Record<string, unknown>) => {
+      writeFileSync(decisionPath, JSON.stringify(decision), "utf-8");
+      return runSliceNegotiate(ctx);
+    };
+    /**
+     * Put the slice back where the parked negotiation left it, with no
+     * recorded decisions — the same starting state a fresh impasse gives
+     * the apply step, so the phases below each exercise it from scratch
+     * without paying for another spawned fixture.
+     */
+    const forgetRecordedDecisions = () => {
+      rmSync(recordPath, { force: true });
+      writeFileSync(contractPath, contractBefore, "utf-8");
+      writeFileSync(manifestPath, manifestBefore, "utf-8");
+    };
+
+    // --- One decision does not settle a two-finding impasse (ADR 0054).
+    const partiallyDecided = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+
+    expect(partiallyDecided.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      partiallyDecided.phase === "AWAITING-ADJUDICATION"
+        ? partiallyDecided.cause.summary
+        : "",
+    ).toContain("F-02 still requires human adjudication");
+    // Nothing dispatched, nothing locked, nothing invoked; the decision is
+    // recorded and its file consumed so the next one is distinguishable.
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(0);
+    expect(plannerRounds + evaluatorRounds).toBe(invocationsBeforeRetry);
+    expect(existsSync(decisionPath)).toBe(false);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8"))).toMatchObject({
+      version: 1,
+      applied: false,
+      decisions: [{ decision: { findingId: "F-01" } }],
+    });
+    // The replacement park reaches the persisted record: same phase, new
+    // reason, naming only what is still undecided (ADR 0054 item 3). It gets
+    // there because arriving at the adjudication branch *is* the re-dispatch
+    // and reopens the park (ADR 0055 §9) — without that reopen the journal
+    // refuses a changed park outright, which is how this stays honest rather
+    // than silently keeping the stale reason (issue #141).
+    const partialParkReason = persistPark(partiallyDecided);
+    expect(partialParkReason).toContain("F-02 still requires human adjudication");
+    expect(partialParkReason).toContain("decided F-01");
+    expect(partialParkReason).not.toBe(firstParkReason);
+
+    // Re-deciding an already-decided finding is refused rather than
+    // recorded twice — it is not progress towards the undecided one.
+    const duplicate = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "EVALUATOR",
+      author: "Ada",
+    });
+    expect(duplicate.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      duplicate.phase === "AWAITING-ADJUDICATION" ? duplicate.cause.summary : "",
+    ).toContain("F-01 was already adjudicated");
+    expect(
+      JSON.parse(readFileSync(recordPath, "utf-8")).decisions,
+    ).toHaveLength(1);
+
+    // --- The completing decision applies both, and every refusal rolls the
+    // authoritative pair back byte-for-byte (ADR 0051).
+    const evaluatorDecisionRaw = JSON.stringify({
+      version: 1,
+      findingId: "F-02",
+      winningPosition: "EVALUATOR",
+      author: "Ada",
+    });
+    renumberManifestOnPlannerApply = true;
+    const beforeRenumbering = plannerRounds;
+
+    const refusedRenumbering = await decide(JSON.parse(evaluatorDecisionRaw));
+
+    expect(refusedRenumbering.phase).toBe("ADJUDICATION-LOCK-REFUSED");
+    expect(
+      refusedRenumbering.phase === "ADJUDICATION-LOCK-REFUSED"
+        ? refusedRenumbering.cause.summary
+        : "",
+    ).toContain(
+      "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
+    );
+    expect(plannerRounds).toBe(beforeRenumbering + 1);
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    expect(generatorRounds).toBe(0);
+    // The human decisions survive the mechanical refusal, unapplied.
+    expect(JSON.parse(readFileSync(recordPath, "utf-8"))).toMatchObject({
+      applied: false,
+      decisions: [
+        { decision: { findingId: "F-01" } },
+        { decision: { findingId: "F-02" } },
+      ],
+    });
+
+    renumberManifestOnPlannerApply = false;
+    gateObjection = "injected adjudication lock-gate refusal";
+    const beforeGateRefusal = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    const refusedLock = await runSliceNegotiate(ctx);
+
+    expect(refusedLock.phase).toBe("ADJUDICATION-LOCK-REFUSED");
+    expect(
+      refusedLock.phase === "ADJUDICATION-LOCK-REFUSED"
+        ? refusedLock.cause.summary
+        : "",
+    ).toContain("injected adjudication lock-gate refusal");
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    expect(plannerRounds).toBe(beforeGateRefusal.planner + 1);
+    expect(evaluatorRounds).toBe(beforeGateRefusal.evaluator);
+    expect(plannerPrompts.at(-1)).toContain(evaluatorDecisionRaw);
+    expect(plannerPrompts.at(-1)).toContain(
+      "evaluator evidence alpha, verbatim",
+    );
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(false);
+
+    gateObjection = null;
+    const beforeAcceptedLock = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeAcceptedLock.planner + 1);
+    expect(evaluatorRounds).toBe(beforeAcceptedLock.evaluator);
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+    // The lock names the impasse it settled, on its own line: the
+    // `**Status:** LOCKED` line agent prompts read is byte-identical to the
+    // one every other lock writes (ADR 0055 §4, ADR 0008).
+    const impasseFor = (raw: string) =>
+      impasseFingerprint(JSON.parse(raw) as ContractNegotiationOutcome);
+    const outcomePath = join(
+      ctx.absSliceDir,
+      "contract-negotiation-outcome.json",
+    );
+    const outcomeBefore = readFileSync(outcomePath, "utf-8");
+    expect(readFileSync(contractPath, "utf-8")).toBe(
+      contractBefore.replace(
+        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
+        `**Status:** LOCKED\n\n**Lock-Provenance:** impasse-adjudication ` +
+          `${impasseFor(outcomeBefore)}`,
+      ),
+    );
+    // The applied mark supersedes the pending-lock witness the lock exit
+    // wrote, so the witness does not outlive the window it describes.
+    const appliedRecord = readFileSync(recordPath, "utf-8");
+    expect(JSON.parse(appliedRecord).applied).toBe(true);
+    expect(appliedRecord).not.toContain("pendingLock");
+
+    // --- An implementation retry re-enters the IMPASSE branch. The applied
+    // decisions are not applied a second time — but the lock is re-attested
+    // against the current base before anything is dispatched from it, so the
+    // gate does run on this dispatch (one call for the accepted lock above,
+    // one for this re-attestation).
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeAcceptedLock.planner + 1);
+    expect(evaluatorRounds).toBe(beforeAcceptedLock.evaluator);
+    expect(lockGateCalls).toBe(beforeAcceptedLock.gateCalls + 2);
+
+    // --- The lane-successor shape: the base changed under a proven lock.
+    //
+    // The predecessor merged into the feature tip and claimed the migration
+    // prefix this contract declares, so the gate that passed at lock time
+    // objects now (ADR 0028, *why the gate is a callback*). The proven-lock
+    // shortcut used to return `LOCKED` before `onContractLocked` was
+    // consulted at all, so generation ran on a contract whose prefix
+    // belonged to another slice — the transaction's own gate-before-lock
+    // ordering cannot see it, because this path never enters the
+    // transaction.
+    const beforeRefreshedBase = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      generator: generatorRounds,
+      gateCalls: lockGateCalls,
+      contract: readFileSync(contractPath, "utf-8"),
+      record: readFileSync(recordPath, "utf-8"),
+    };
+    gateObjection = "injected post-refresh migration-prefix collision";
+
+    const refusedAfterRefresh = await runSliceNegotiate(ctx);
+
+    expect(refusedAfterRefresh.phase).toBe("ADJUDICATION-LOCK-REFUSED");
+    expect(
+      refusedAfterRefresh.phase === "ADJUDICATION-LOCK-REFUSED"
+        ? refusedAfterRefresh.cause.summary
+        : "",
+    ).toContain("injected post-refresh migration-prefix collision");
+    expect(lockGateCalls).toBe(beforeRefreshedBase.gateCalls + 1);
+    // The parked estate survives the refusal byte-for-byte — no reopen, no
+    // re-apply, no dispatch. The objection is about the base, which the next
+    // dispatch re-reads, so the refusal is idempotent rather than terminal
+    // for the decisions (ADR 0055 Seam 2).
+    expect(readFileSync(contractPath, "utf-8")).toBe(
+      beforeRefreshedBase.contract,
+    );
+    expect(readFileSync(recordPath, "utf-8")).toBe(beforeRefreshedBase.record);
+    expect(plannerRounds).toBe(beforeRefreshedBase.planner);
+    expect(evaluatorRounds).toBe(beforeRefreshedBase.evaluator);
+    expect(generatorRounds).toBe(beforeRefreshedBase.generator);
+
+    // Base fixed (the operator renumbered, or the colliding slice landed
+    // elsewhere): the same proven lock is accepted again, still without
+    // re-applying anything.
+    gateObjection = null;
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeRefreshedBase.planner);
+    expect(lockGateCalls).toBe(beforeRefreshedBase.gateCalls + 2);
+
+    // --- A third instruction reaches the planner verbatim alongside the
+    // other finding's decision.
+    forgetRecordedDecisions();
+    const instructionDecisionRaw = JSON.stringify({
+      version: 1,
+      findingId: "F-01",
+      thirdInstruction: "Keep evidence exactly as written.",
+      author: "Ada",
+    });
+    const beforeInstructionApply = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    expect(
+      (await decide(JSON.parse(instructionDecisionRaw))).phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    expect(
+      await decide({
+        version: 1,
+        findingId: "F-02",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+    ).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeInstructionApply.planner + 1);
+    expect(evaluatorRounds).toBe(beforeInstructionApply.evaluator);
+    expect(plannerPrompts.at(-1)).toContain(instructionDecisionRaw);
+    expect(plannerPrompts.at(-1)).toContain(
+      "planner evidence alpha, verbatim",
+    );
+
+    // --- Decisions the planner already satisfies lock without an
+    // invocation at all.
+    forgetRecordedDecisions();
+    const beforePlannerWins = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+    };
+
+    expect(
+      (
+        await decide({
+          version: 1,
+          findingId: "F-01",
+          winningPosition: "PLANNER",
+          author: "Ada",
+        })
+      ).phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    expect(
+      await decide({
+        version: 1,
+        findingId: "F-02",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+    ).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforePlannerWins.planner);
+    expect(evaluatorRounds).toBe(beforePlannerWins.evaluator);
+    expect(generatorRounds).toBe(0);
+
+    // --- A mixed exhaustion never reaches Phase B (ADR 0055 §1–2).
+    //
+    // Under §1 the classifier no longer produces this shape, so the record
+    // is planted: a stale or hostile artifact claiming IMPASSE over one
+    // contested and one OPEN blocker. The single completion predicate is
+    // the last line of defence — the contested finding is decidable and
+    // gets decided, the OPEN one cannot be, so the contract never locks
+    // and nothing is dispatched from it.
+    forgetRecordedDecisions();
+    const mixed = JSON.parse(outcomeBefore) as {
+      findings: Array<{ id: string; state: string; plannerPosition: unknown }>;
+    };
+    mixed.findings[1]!.state = "OPEN";
+    mixed.findings[1]!.plannerPosition = "UNRESOLVED";
+    writeFileSync(outcomePath, JSON.stringify(mixed), "utf-8");
+    const beforeMixed = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    const mixedParked = await decide({
+      version: 1,
+      findingId: "F-01",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+
+    expect(mixedParked.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      mixedParked.phase === "AWAITING-ADJUDICATION"
+        ? mixedParked.cause.summary
+        : "",
+    ).toContain("F-02");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(readFileSync(contractPath, "utf-8")).toBe(contractBefore);
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(beforeMixed.gateCalls);
+    expect(plannerRounds).toBe(beforeMixed.planner);
+    expect(evaluatorRounds).toBe(beforeMixed.evaluator);
+    // The OPEN blocker is not adjudicable, so no human decision can move
+    // this shape on: the park is refused, not merely delayed.
+    const mixedRefused = await decide({
+      version: 1,
+      findingId: "F-02",
+      winningPosition: "PLANNER",
+      author: "Ada",
+    });
+    expect(mixedRefused.phase).toBe("AWAITING-ADJUDICATION");
+    expect(
+      mixedRefused.phase === "AWAITING-ADJUDICATION"
+        ? mixedRefused.cause.summary
+        : "",
+    ).toContain("F-02 is not CONTESTED in the current IMPASSE");
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+    expect(lockGateCalls).toBe(beforeMixed.gateCalls);
+
+    writeFileSync(outcomePath, outcomeBefore, "utf-8");
+
+    // --- A stale LOCKED contract is never inherited (A2, ADR 0055 §4–5).
+    //
+    // The shape the round-5 architect found: a `LOCKED` contract from
+    // before this impasse, beside a decision log that has to be discarded.
+    // The old crash-window shortcut read the bare `LOCKED` as "already
+    // applied" and dispatched generation from a contract no human decision
+    // had ever reached.
+    forgetRecordedDecisions();
+    // The mixed phase's refused decision is still on disk — a refusal
+    // deliberately leaves the human's bytes in place — and it is valid
+    // against the restored IMPASSE. Clear it so this phase starts from a
+    // genuinely undecided park.
+    rmSync(decisionPath, { force: true });
+    writeFileSync(
+      contractPath,
+      contractBefore.replace(
+        /^\*\*Status:\*\*[ \t]*\S+[ \t]*$/m,
+        "**Status:** LOCKED",
+      ),
+      "utf-8",
+    );
+    writeFileSync(recordPath, "{ this log is not JSON", "utf-8");
+    const beforeStaleLock = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    const staleReopened = await runSliceNegotiate(ctx);
+
+    expect(staleReopened.phase).toBe("AWAITING-ADJUDICATION");
+    // Unstamped, so provably stale: reopened rather than trusted, and the
+    // slice parks for the decisions it never had.
+    expect(readContractStatus(contractPath)).toBe("NEGOTIATING");
+    expect(generatorRounds).toBe(0);
+    expect(plannerRounds).toBe(beforeStaleLock.planner);
+    expect(lockGateCalls).toBe(beforeStaleLock.gateCalls);
+
+    // Replacement decisions drive the full apply-and-lock — planner
+    // invoked, lock gate run — not an inheritance of the stale lock.
+    expect(
+      (
+        await decide({
+          version: 1,
+          findingId: "F-01",
+          winningPosition: "EVALUATOR",
+          author: "Ada",
+        })
+      ).phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    expect(
+      await decide({
+        version: 1,
+        findingId: "F-02",
+        winningPosition: "EVALUATOR",
+        author: "Ada",
+      }),
+    ).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeStaleLock.planner + 1);
+    expect(lockGateCalls).toBe(beforeStaleLock.gateCalls + 1);
+    expect(readContractLockProvenance(contractPath)).toEqual({
+      kind: "impasse-adjudication",
+      impasse: impasseFor(outcomeBefore),
+    });
+    const provenLock = readFileSync(contractPath, "utf-8");
+    const provenRecord = readFileSync(recordPath, "utf-8");
+    expect(JSON.parse(provenRecord).applied).toBe(true);
+
+    // --- Scenario Y: a corrupted receipt does not destroy a real lock.
+    //
+    // The same discarded log, but this time the lock is stamped with the
+    // current impasse — only the transaction's lock exit writes that, and
+    // only over a proven-complete decision set. The lock stands and the
+    // operator keeps their completed adjudication.
+    writeFileSync(recordPath, "{ the receipt got mangled", "utf-8");
+    const beforeLockStands = {
+      planner: plannerRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
+    expect(plannerRounds).toBe(beforeLockStands.planner);
+    // Nothing is re-applied, but this shortcut is the other way to reach
+    // generation on a lock this dispatch did not produce, so it re-attests
+    // the same way: the gate runs, and an objection refuses the dispatch
+    // while leaving the stamped lock and the mangled receipt exactly as
+    // they are for the operator to read.
+    expect(lockGateCalls).toBe(beforeLockStands.gateCalls + 1);
+    gateObjection = "injected lock-stands base objection";
+    const refusedLockStands = await runSliceNegotiate(ctx);
+    expect(refusedLockStands.phase).toBe("ADJUDICATION-LOCK-REFUSED");
+    expect(
+      refusedLockStands.phase === "ADJUDICATION-LOCK-REFUSED"
+        ? refusedLockStands.cause.summary
+        : "",
+    ).toContain("injected lock-stands base objection");
+    expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
+    expect(plannerRounds).toBe(beforeLockStands.planner);
+    gateObjection = null;
+
+    // --- The crash window is proved by the witness, not by LOCKED.
+    //
+    // `lockContract` succeeded, the applied-marker write did not. The log
+    // is valid, complete and unapplied, and its witness matches its own
+    // decision set: the decisions did reach this lock, so it is marked
+    // rather than applied a second time (ADR 0055 §5).
+    const witnessed = JSON.parse(provenRecord) as AdjudicationDecisionLog;
+    witnessed.applied = false;
+    witnessed.pendingLock = {
+      decisions: decisionSetFingerprint(witnessed.decisions),
+      impasse: witnessed.impasse,
+    };
+    writeFileSync(recordPath, JSON.stringify(witnessed), "utf-8");
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(readFileSync(contractPath, "utf-8")).toBe(provenLock);
+    expect(plannerRounds).toBe(beforeLockStands.planner);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
+
+    // Without a matching witness the same shape is A2 again: the bare
+    // LOCKED proves nothing, so the decisions are applied in full.
+    const unwitnessed = { ...witnessed, applied: false };
+    delete unwitnessed.pendingLock;
+    writeFileSync(recordPath, JSON.stringify(unwitnessed), "utf-8");
+    const beforeReapply = {
+      planner: plannerRounds,
+      gateCalls: lockGateCalls,
+    };
+
+    expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
+    expect(plannerRounds).toBe(beforeReapply.planner + 1);
+    expect(lockGateCalls).toBe(beforeReapply.gateCalls + 1);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).applied).toBe(true);
+    expect(generatorRounds).toBe(0);
+
+    // --- A redispatch into a stale unregistered parked directory refuses
+    // before it touches git or an agent (ADR 0010 item 3).
+    //
+    // Last phase of this fixture, deliberately: it unregisters the worktree
+    // for good. Deleting git's admin entry while the directory stays on disk
+    // is the ADR 0010 stale shape — a leftover a failed cleanup produces on
+    // Windows every time. The persisted IMPASSE means this dispatch routes
+    // to the adjudication branch, which merges into `ctx.worktreeDir` and can
+    // invoke the planner there; `prepareSliceWorktree`'s assertion sits in
+    // the *other* arm of that fork, so the check has to happen before it.
+    const adminDir = join(
+      repo,
+      ".git",
+      "worktrees",
+      basename(ctx.worktreeDir),
+    );
+    expect(existsSync(adminDir)).toBe(true);
+    rmSync(adminDir, { recursive: true, force: true });
+    const beforeStaleDir = {
+      planner: plannerRounds,
+      evaluator: evaluatorRounds,
+      generator: generatorRounds,
+      contract: readFileSync(contractPath, "utf-8"),
+    };
+
+    await expect(runSliceNegotiate(ctx)).rejects.toThrow(
+      /is not registered with git/,
+    );
+    expect(plannerRounds).toBe(beforeStaleDir.planner);
+    expect(evaluatorRounds).toBe(beforeStaleDir.evaluator);
+    expect(generatorRounds).toBe(beforeStaleDir.generator);
+    // Nothing was mutated on the way to the refusal, so the operator can
+    // still inspect the parked estate ADR 0055 Seam 2 preserves.
+    expect(readFileSync(contractPath, "utf-8")).toBe(beforeStaleDir.contract);
+    expect(JSON.parse(readFileSync(recordPath, "utf-8")).decisions).toHaveLength(
+      2,
+    );
+  });
+
   it("caps a converging negotiation at two rounds", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
@@ -2429,6 +4223,9 @@ describe("contract review fails closed", () => {
     slug: string,
     ghIssue: string,
     artifact: string | null,
+    onContractLocked?: (contractPath: string) => string | null,
+    /** What the planner writes into its own `**Status:**` line. */
+    plannerStatus: "NEGOTIATING" | "LOCKED" = "NEGOTIATING",
   ) {
     const repo = makeRepo();
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2442,6 +4239,8 @@ describe("contract review fails closed", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    /** Contract status each planner round found on disk before writing. */
+    const statusAtPlannerStart: Array<string | null> = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -2451,9 +4250,16 @@ describe("contract review fails closed", () => {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
+          // Read before overwriting: what a later planner round starts from
+          // is the only place a refusal's effect on disk is observable, since
+          // this stub rewrites the file on every round.
+          const contractPath = join(artifactDir, "contract.md");
+          statusAtPlannerStart.push(
+            existsSync(contractPath) ? readContractStatus(contractPath) : null,
+          );
           writeFileSync(
-            join(artifactDir, "contract.md"),
-            "# Contract\n\n**Status:** NEGOTIATING\n",
+            contractPath,
+            `# Contract\n\n**Status:** ${plannerStatus}\n`,
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
@@ -2495,6 +4301,7 @@ describe("contract review fails closed", () => {
       "- README.md",
       "pnpm test",
     );
+    if (onContractLocked) ctx.onContractLocked = onContractLocked;
     const outcome = await runSliceNegotiate(ctx);
     return {
       outcome,
@@ -2502,6 +4309,7 @@ describe("contract review fails closed", () => {
       repo,
       plannerRounds: () => plannerRounds,
       evaluatorRounds: () => evaluatorRounds,
+      statusAtPlannerStart,
     };
   }
 
@@ -2640,6 +4448,71 @@ describe("contract review fails closed", () => {
       );
       expect(plannerRounds()).toBe(1);
       expect(evaluatorRounds()).toBe(1);
+    },
+    60_000,
+  );
+
+  /**
+   * ADR 0055 §5's ordering — the gate runs before `LOCKED` is written —
+   * binds ordinary negotiation's lock too, not only the shared
+   * transaction's. `lockContract` used to run first, so a process stop
+   * between the two calls left an authoritative `LOCKED` contract whose
+   * gate had never passed, which is exactly what ADR 0008 makes the
+   * on-disk status authoritative *against*.
+   *
+   * Reuses `negotiateWithArtifact`'s fixture rather than spawning a
+   * scenario of its own. The gate callback is the only place the ordering
+   * is observable — it runs between the two operations, so what it reads on
+   * disk is the ordering — and the wave-level refusal already covered by
+   * `wave-migrations.test.ts` consults the real migration gate, which
+   * cannot be wrapped to look.
+   */
+  it.each([
+    // The ordinary case: the planner leaves the status alone, so the gate can
+    // only ever see a `LOCKED` line this orchestrator wrote.
+    ["a planner-written NEGOTIATING candidate", "NEGOTIATING" as const],
+    // The planner wrote `LOCKED` into its own candidate. Nothing here wrote
+    // it, the gate has refused it, and the generator reads that line as
+    // permission — so the refusal has to reopen it. Under the old
+    // lock-then-gate ordering that normalisation came for free from the
+    // reopen after `lockContract`; the reordering had to make it explicit.
+    ["a planner-written LOCKED candidate", "LOCKED" as const],
+  ])(
+    "consults the lock gate before locking, and leaves %s NEGOTIATING on refusal",
+    async (name, plannerStatus) => {
+      const statusesAtGate: Array<string | null> = [];
+      const {
+        outcome,
+        plannerRounds,
+        evaluatorRounds,
+        statusAtPlannerStart,
+      } = await negotiateWithArtifact(
+          `review-gate-before-lock-${plannerStatus.toLowerCase()}`,
+          "9102",
+          reviewText({ verdict: "ACCEPT", findings: [] }),
+          (contractPath) => {
+            statusesAtGate.push(readContractStatus(contractPath));
+            return "injected negotiation lock-gate refusal";
+          },
+          plannerStatus,
+        );
+
+      // The gate saw the accepted candidate before anything here locked it:
+      // no crash window between the gate and `lockContract` can forge a
+      // `LOCKED` contract the gate never passed. What the planner itself
+      // wrote is whatever the gate reads — the gate does not consult the
+      // status line, so this is an observation, not a requirement.
+      expect(statusesAtGate).toEqual([plannerStatus]);
+      // The refusal left the contract NEGOTIATING either way, so the round it
+      // bought starts from an unlocked contract. Round 1 finds no contract at
+      // all; round 2 finds what the refusal left behind.
+      expect(statusAtPlannerStart).toEqual([null, "NEGOTIATING"]);
+      expect(plannerRounds()).toBe(2);
+      expect(evaluatorRounds()).toBe(1);
+      expect(outcome.phase).toBe("ERROR");
+      expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+        /contract-response\.json is missing/,
+      );
     },
     60_000,
   );

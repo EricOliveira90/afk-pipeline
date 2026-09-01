@@ -139,6 +139,10 @@ export interface PromptRecord {
   inFlightPresent: boolean;
   /** Whether the preserved stuck.md diagnosis survived into this run (#49). */
   stuckFilePresent: boolean;
+  /** Slice artifact directory observed by this invocation. */
+  sliceArtifactDir: string;
+  /** Exact diagnosis bytes before this invocation could change them. */
+  stuckContentsAtInvocation: string;
 }
 
 /**
@@ -169,6 +173,9 @@ export function buildProvider(opts: {
     async invoke(options: InvokeOptions): Promise<InvokeResult> {
       const { role, cwd } = options;
       const sliceNumber = sliceNumberFromCwd(cwd);
+      const artifactDir = findSliceArtifactDir(cwd, sliceNumber);
+      const stuckPath =
+        artifactDir === null ? null : join(artifactDir, "stuck.md");
       opts.records?.push({
         role,
         sliceNumber,
@@ -179,12 +186,13 @@ export function buildProvider(opts: {
           existsSync(join(cwd, "supabase", "migrations", "125_slice_work.sql")) &&
           existsSync(join(cwd, "supabase", "migrations", "125_sibling.sql")),
         inFlightPresent: existsSync(join(cwd, "src", "in-flight.ts")),
-        stuckFilePresent: (() => {
-          const dir = findSliceArtifactDir(cwd, sliceNumber);
-          return dir !== null && existsSync(join(dir, "stuck.md"));
-        })(),
+        stuckFilePresent: stuckPath !== null && existsSync(stuckPath),
+        sliceArtifactDir: artifactDir ?? "",
+        stuckContentsAtInvocation:
+          stuckPath !== null && existsSync(stuckPath)
+            ? readFileSync(stuckPath, "utf-8")
+            : "",
       });
-      const artifactDir = findSliceArtifactDir(cwd, sliceNumber);
       if (role === "explorer" && artifactDir) {
         writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
       } else if (role === "planner" && artifactDir) {
@@ -276,8 +284,6 @@ export function buildProvider(opts: {
           ...(findings.length > 0 ? { findings } : {}),
         });
         if (qaResult.error) throw new Error(qaResult.error);
-      } else if (role === "generator-stuck" && artifactDir) {
-        writeFileSync(join(artifactDir, "stuck.md"), "# Stuck\n", "utf-8");
       }
       return { exitCode: 0, stdout: "", stats: {} };
     },

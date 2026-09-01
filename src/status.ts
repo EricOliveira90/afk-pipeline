@@ -257,8 +257,12 @@ export function renderStatus(model: StatusModel, snapshot: RunSnapshot): string 
           s.phase === "MERGE-PENDING" && s.collidingPrefixes.length > 0
             ? ` (colliding prefixes: ${s.collidingPrefixes.join(", ")})`
             : "";
+        const branch =
+          s.phase === "AWAITING-ADJUDICATION"
+            ? ` — branch preserved: ${s.branch}`
+            : "";
         lines.push(
-          `  ${clock(event.ts)}  #${s.ghIssue} ${s.title}: ${s.phase}${prefixes}${reason}`,
+          `  ${clock(event.ts)}  #${s.ghIssue} ${s.title}: ${s.phase}${prefixes}${branch}${reason}`,
         );
         break;
       }

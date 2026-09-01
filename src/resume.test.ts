@@ -13,6 +13,8 @@ import {
   type ResumeFacts,
 } from "./resume.js";
 import { renderPrompt } from "./prompt-template.js";
+import { formatUnresolvedQAFindings } from "./orchestrator.js";
+import type { QAReviewAttemptFinding } from "./qa-review.js";
 
 /**
  * Unit tests for the pure resume-eligibility decision (spec #33,
@@ -442,7 +444,10 @@ describe("generator-resume prompt rendering", () => {
       TEST_COMMAND: "pnpm test:run",
       COMMITS_AHEAD: 3,
       COMMIT_LOG: "abc123 feat: work",
-      FEAT_BRANCH: "feat/demo",
+      WORKTREE_STATE:
+        "The worktree was reset; uncommitted changes were discarded.",
+      BASE_REFRESH_NOTE: "The feature branch was merged.",
+      STUCK_NOTE: "",
       UNRESOLVED_FINDINGS:
         "- Finding ID: `QA-01`\n  Summary: The behavior fails",
       HANDOFF_NOTE: handoffNote,
@@ -510,67 +515,97 @@ describe("buildStuckDiagnosisNote", () => {
   });
 });
 
-/**
- * The stuck-resume prompt (#49) must state the OPPOSITE worktree facts
- * from `generator-resume`: nothing reset, nothing cleaned, diagnosis
- * kept. renderPrompt throws on missing AND unused args, so a clean
- * render with exactly this arg set locks full placeholder coverage.
- */
-describe("generator-resume-stuck prompt rendering", () => {
-  function render(
-    overrides: { stuckNote?: string; handoffNote?: string; baseNote?: string } = {},
-  ): string {
-    return renderPrompt("generator-resume-stuck", {
+describe("shared generator-resume prompt rendering", () => {
+  function render(): string {
+    return renderPrompt("generator-resume", {
       SLICE_DIR: ".kiro/specs/demo/slices/20-x",
       RELEVANT_FILES: "- README.md",
       SIBLING_HANDOFFS: "(none)",
       TEST_COMMAND: "pnpm test:run",
       COMMITS_AHEAD: 14,
-      COMMIT_LOG: "71066cc feat: round 3",
-      BASE_REFRESH_NOTE: overrides.baseNote ?? "The feature branch was merged in.",
-      STUCK_NOTE: overrides.stuckNote ?? "",
+      COMMIT_LOG: "COMMIT-HISTORY-MARKER",
+      WORKTREE_STATE: "DIRTY-TREE-STATE-MARKER",
+      BASE_REFRESH_NOTE: "FEATURE-REFRESH-OUTCOME-MARKER",
+      STUCK_NOTE: "EXISTING-DIAGNOSIS-MARKER",
       UNRESOLVED_FINDINGS:
-        "- Finding ID: `QA-01`\n  Summary: The behavior fails",
-      HANDOFF_NOTE: overrides.handoffNote ?? "",
+        "- Finding ID: `QA-OPEN-01`\n" +
+        "  Summary: UNRESOLVED-SUMMARY-MARKER\n" +
+        "  Clear condition: UNRESOLVED-CLEAR-MARKER\n" +
+        "  Artifact references:\n" +
+        "  - `UNRESOLVED-ARTIFACT-MARKER`",
+      HANDOFF_NOTE: "PRIOR-HANDOFF-MARKER",
       MIGRATION_RESERVATION: "This slice owns exactly: 144.",
     });
   }
 
-  it("tells the generator its worktree was NOT reset or cleaned", () => {
+  it("carries every STUCK-resume situation field independently", () => {
     const prompt = render();
-    expect(prompt).toContain("Your worktree was not touched.");
-    // The #33 template's post-reset warning must NOT leak in here.
-    expect(prompt).not.toMatch(/anything after your last commit is gone/i);
+    expect(prompt).toContain("DIRTY-TREE-STATE-MARKER");
+    expect(prompt).toContain("FEATURE-REFRESH-OUTCOME-MARKER");
+    expect(prompt).toContain("EXISTING-DIAGNOSIS-MARKER");
+    expect(prompt).toContain("COMMIT-HISTORY-MARKER");
+    expect(prompt).toContain("PRIOR-HANDOFF-MARKER");
+    expect(prompt).toContain("Finding ID: `QA-OPEN-01`");
+    expect(prompt).toContain("UNRESOLVED-SUMMARY-MARKER");
+    expect(prompt).toContain("UNRESOLVED-CLEAR-MARKER");
+    expect(prompt).toContain("UNRESOLVED-ARTIFACT-MARKER");
   });
+});
 
-  it("forbids deleting the preserved diagnosis", () => {
-    expect(render()).toMatch(/Never delete `.*stuck\.md`/);
-  });
+/**
+ * The repair input itself, rather than the template that carries it. The
+ * template test above supplies its own `UNRESOLVED_FINDINGS` string, so a
+ * formatter that quietly drops fields stays invisible there — this is the
+ * case that fails when one goes missing (#82 B-03).
+ */
+describe("formatUnresolvedQAFindings", () => {
+  const finding: QAReviewAttemptFinding = {
+    id: "QA-OPEN-01",
+    severity: "ADVISORY",
+    state: "OPEN",
+    unresolved: true,
+    summary: "SUMMARY-MARKER",
+    clearCondition: "CLEAR-MARKER",
+    artifactReferences: ["ARTIFACT-MARKER"],
+    remedy: "SCOPE_AMENDMENT",
+  };
 
-  it("carries the exact migration claim rule", () => {
-    const prompt = render();
-    expect(prompt).toContain("Migration instructions are authoritative");
-    expect(prompt).toContain("This slice owns exactly: 144.");
-    expect(prompt).not.toContain("renumber yours to the next free prefix");
-  });
-
-  it("splices the diagnosis and handoff notes through, or renders cleanly without them", () => {
-    expect(render({ stuckNote: "Finding 1 — precedence." })).toContain(
-      "Finding 1 — precedence.",
+  it("renders every field of an unresolved finding", () => {
+    expect(formatUnresolvedQAFindings([finding])).toBe(
+      [
+        "- Finding ID: `QA-OPEN-01`",
+        "  Severity: ADVISORY",
+        "  State: OPEN",
+        "  Unresolved: yes",
+        "  Remedy: SCOPE_AMENDMENT",
+        "  Summary: SUMMARY-MARKER",
+        "  Clear condition: CLEAR-MARKER",
+        "  Artifact references:",
+        "  - `ARTIFACT-MARKER`",
+      ].join("\n"),
     );
-    expect(render({ handoffNote: "## Prior handoff\nNotes." })).toContain("Notes.");
-    expect(render()).not.toContain("undefined");
   });
 
-  it("carries whichever base-refresh fact actually happened", () => {
-    expect(render({ baseNote: "could **not** be merged" })).toContain(
-      "could **not** be merged",
-    );
+  it("covers every declared field of the record type", () => {
+    const rendered = formatUnresolvedQAFindings([finding]);
+    for (const value of [
+      finding.id,
+      finding.severity,
+      finding.state,
+      "Unresolved: yes",
+      finding.remedy,
+      finding.summary,
+      finding.clearCondition,
+      ...finding.artifactReferences,
+    ]) {
+      expect(rendered).toContain(value);
+    }
+    // Guards the loop above against a new field arriving unrendered:
+    // eight declared keys, eight values checked.
+    expect(Object.keys(finding)).toHaveLength(8);
   });
 
-  it("routes code-derived unresolved findings without requiring prior reports", () => {
-    const prompt = render();
-    expect(prompt).toContain("Finding ID: `QA-01`");
-    expect(prompt).not.toContain("Every preserved QA report");
+  it("says so plainly when nothing is unresolved", () => {
+    expect(formatUnresolvedQAFindings([])).toBe("(none)");
   });
 });

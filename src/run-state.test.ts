@@ -168,6 +168,25 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     expect(onDisk.slices["300"].error).toBe("boom");
   });
 
+  /**
+   * Estate audit (ADR 0055 Seam 2, plan step 9). Two lifecycle operations
+   * derive their treatment of a slice's worktree from this one predicate:
+   * `--only-failed` selects every scope member that is not complete, and
+   * launch preflight retains the worktree of every incomplete manifest
+   * slice instead of refusing over it as a leftover. A park reading
+   * "complete" would strand it in both — never re-dispatched, and its
+   * worktree reported as debris to clear with `clean-failed`.
+   */
+  it("never reads a parked slice as complete — the predicate --only-failed and preflight retention share", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "parked", "8181", {
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/parked-slice-01",
+      error: "contract negotiation reached IMPASSE on F-01",
+    });
+    expect(isSliceComplete(loadRunState(repo, "parked"), "8181")).toBe(false);
+  });
+
   it("returns a fresh v1 state when no file exists", () => {
     const repo = makeRepo();
     const loaded = loadRunState(repo, "fresh");
@@ -486,5 +505,61 @@ describe("clearSliceStateForDispatch", () => {
     // A first dispatch must not leave a state file behind just to prove
     // it had nothing to clear.
     expect(existsSync(join(repo, ".afk", "state", "demo.json"))).toBe(false);
+  });
+});
+
+/**
+ * Architect blocker 2: the run records where its own slice artifacts live so
+ * the estate probe resolves instead of guessing. Optional, because state
+ * files that predate the field must stay loadable — the probe then falls back
+ * to a complete walk.
+ */
+describe("RunState.specsDir", () => {
+  it("round-trips through save and load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: 1,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      specsDir: "docs/internal/specs/demo",
+      slices: {},
+    });
+    expect(loadRunState(repo, "demo").specsDir).toBe(
+      "docs/internal/specs/demo",
+    );
+  });
+
+  it("survives a per-slice write", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: 1,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      specsDir: ".kiro/specs/demo",
+      slices: {},
+    });
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    expect(loadRunState(repo, "demo").specsDir).toBe(".kiro/specs/demo");
+  });
+
+  it.each([undefined, "", "   ", 7, null, {}])(
+    "degrades %p to absent rather than to a guessed path",
+    (value) => {
+      expect(
+        adaptLoadedState(
+          { version: 1, featureBranch: "feat/demo", specsDir: value, slices: {} },
+          "demo",
+        ).specsDir,
+      ).toBeUndefined();
+    },
+  );
+
+  it("is carried through the v0 migration too", () => {
+    expect(
+      adaptLoadedState(
+        { featureBranch: "feat/demo", specsDir: ".kiro/specs/demo", slices: {} },
+        "demo",
+      ).specsDir,
+    ).toBe(".kiro/specs/demo");
   });
 });

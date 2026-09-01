@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
 import { parseQAReview } from "./qa-review.js";
-import { readFileSync } from "node:fs";
+import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 describe("renderPrompt", () => {
   it("substitutes placeholders for the explorer template", () => {
@@ -140,6 +143,68 @@ describe("renderPrompt", () => {
     );
   });
 
+  /**
+   * #82 AC3: the shared resume template is what a STUCK repair round now
+   * reads, so the "don't touch the diagnosis" rule has to live in it. The
+   * orchestrator restores the bytes regardless, but a generator told to
+   * treat the file as read-only never makes it do the work.
+   */
+  it("tells the shared resume template to read stuck.md and leave it alone", () => {
+    const resumeTemplate = readFileSync(
+      new URL("../prompts/generator-resume.md", import.meta.url),
+      "utf-8",
+    );
+    const requiredReading = resumeTemplate.match(
+      /^# Required reading\r?\n([\s\S]*?)(?=^# |\Z)/m,
+    )?.[1];
+    expect(requiredReading).toContain("{{SLICE_DIR}}/stuck.md");
+    const invariants = resumeTemplate.match(
+      /^# Invariants\r?\n([\s\S]*?)(?=^# |\Z)/m,
+    )?.[1];
+    expect(invariants).toContain("{{SLICE_DIR}}/stuck.md");
+    expect(invariants).toMatch(/never delete, move,\s+rewrite, or edit it/i);
+  });
+
+  it("gives every generator invocation the canonical scope-escalation contract", () => {
+    const sources = [
+      new URL("../agents/generator.md", import.meta.url),
+      new URL("../prompts/generator.md", import.meta.url),
+      new URL("../prompts/generator-resume.md", import.meta.url),
+    ];
+    const escalationSections = sources.map((source) => {
+      const content = readFileSync(source, "utf-8");
+      const section = content.match(
+        /^# Scope escalation\r?\n([\s\S]*?)(?=^# |\Z)/m,
+      );
+      expect(section, source.pathname).not.toBeNull();
+      return section![1]!.trim();
+    });
+
+    expect(new Set(escalationSections)).toHaveLength(1);
+    expect(escalationSections[0]).toContain(
+      "the correct implementation requires a file path the locked contract",
+    );
+    expect(escalationSections[0]).toContain(
+      "Stop before making the undeclared edit",
+    );
+    expect(escalationSections[0]).toContain(
+      '{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}',
+    );
+    expect(escalationSections[0]).toMatch(
+      /contains no fields other than `version`, `findingIds`, `paths`,\s+and `reason`/,
+    );
+    // Both identities, and the rule that picks between them (ADR 0052).
+    // The pre-build case is the one the PRD's deadlock lives in, so it has
+    // to be authorized in the *same* canonical section every invocation
+    // gets — not only in the initial-generator template.
+    expect(escalationSections[0]).toContain(PRE_BUILD_SCOPE_FINDING_ID);
+    expect(escalationSections[0]).toContain("Nothing was cited to you");
+    expect(escalationSections[0]).toContain("Findings were cited to you");
+    expect(escalationSections[0]).toMatch(
+      /Never mix `PRE-BUILD-SCOPE` with a real finding ID/,
+    );
+  });
+
   it("loads all eight pipeline templates", () => {
     expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "" })).toBeTruthy();
     expect(
@@ -172,8 +237,88 @@ describe("renderPrompt", () => {
     ).toContain("- tests: pnpm run test");
     expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
-    expect(renderPrompt("generator-stuck", { SLICE_DIR: "d", QA_REPORTS: "- d/qa-report-r3-a1.md" })).toBeTruthy();
+    expect(renderPrompt("generator-resume", {
+      SLICE_DIR: "d",
+      RELEVANT_FILES: "",
+      SIBLING_HANDOFFS: "(none)",
+      TEST_COMMAND: "pnpm test",
+      COMMITS_AHEAD: 1,
+      COMMIT_LOG: "abc123 feat: work",
+      WORKTREE_STATE: "preserved state",
+      BASE_REFRESH_NOTE: "base refreshed",
+      STUCK_NOTE: "",
+      UNRESOLVED_FINDINGS: "(none)",
+      HANDOFF_NOTE: "",
+      MIGRATION_RESERVATION: "none",
+    })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
+  });
+
+  it("retires the STUCK prompts from active source while docs keep the history", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const retiredRole = ["generator", "stuck"].join("-");
+    const retiredResume = ["generator", "resume", "stuck"].join("-");
+    for (const name of [`${retiredRole}.md`, `${retiredResume}.md`]) {
+      expect(
+        existsSync(new URL(`../prompts/${name}`, import.meta.url)),
+      ).toBe(false);
+    }
+
+    expect(() =>
+      execFileSync(
+        "git",
+        [
+          "grep",
+          "-n",
+          "-e",
+          retiredRole,
+          "-e",
+          retiredResume,
+          "--",
+          "src",
+          "prompts",
+        ],
+        { cwd: repoRoot, stdio: "pipe" },
+      ),
+    ).toThrow();
+
+    const generatorPersona = readFileSync(
+      new URL("../agents/generator.md", import.meta.url),
+      "utf-8",
+    );
+    expect(generatorPersona).not.toMatch(
+      /(?:write|guess)[^\n]*stuck\.md/i,
+    );
+    expect(generatorPersona).not.toMatch(/best guess/i);
+
+    // #82 AC6's other half: the historical mentions under docs/ are
+    // records of what the pipeline used to do, so they stay. Asserted as
+    // presence rather than as a diff against a fixed base commit — a
+    // pinned base turns every later ADR anywhere in docs/ into a failure
+    // of this test, on this branch and on main.
+    const historicalMentions = execFileSync(
+      "git",
+      [
+        "grep",
+        "-l",
+        "-e",
+        retiredRole,
+        "-e",
+        retiredResume,
+        "--",
+        "docs/adr",
+        "docs/specs",
+      ],
+      { cwd: repoRoot, encoding: "utf-8" },
+    )
+      .split(/\r?\n/)
+      .filter((line) => line !== "");
+    expect(historicalMentions).toContain(
+      "docs/adr/0019-configurable-wall-clock-ceiling.md",
+    );
+    expect(historicalMentions).toContain(
+      "docs/specs/afk-v2-agent-roles.md",
+    );
   });
 });

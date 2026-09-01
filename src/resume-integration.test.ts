@@ -496,13 +496,17 @@ describe("retried slice resume (spec #33)", () => {
       number: "03", ghIssue: "4003", title: "Still failing",
       type: "AFK", blockedBy: [], userStories: "",
     };
+    const priorAdditionalArtifact = ".afk/gates/s03/ROUND-3-GATE.json";
     const namedBranch = `afk-stub/${slug}-slice-01-named`;
+    const firstRunRecords: PromptRecord[] = [];
     const records: PromptRecord[] = [];
     let repo: string;
     let statePath: string;
     let stuckTip: string;
     /** State after run 1, captured before run 2 overwrote it. */
     let stuckPhases: Record<string, string>;
+    /** Slice 01's diagnosis bytes as the operator read them, before run 2. */
+    let namedDiagnosisBeforeResume: string;
 
     const generatorRecord = (sliceNumber: string): PromptRecord =>
       records.find((r) => r.role === "generator" && r.sliceNumber === sliceNumber)!;
@@ -517,7 +521,7 @@ describe("retried slice resume (spec #33)", () => {
         n === "01" ? named.ghIssue : n === "02" ? unnamed.ghIssue : failing.ghIssue;
 
       // --- Run 1: both generators commit work every round but QA always
-      // fails — each slice ends STUCK with a generator-stuck stuck.md.
+      // fails — each slice ends STUCK with a code-assembled diagnosis.
       // On its LAST round the named slice also leaves an uncommitted
       // in-flight edit that nothing afterwards commits: run 2 must still
       // see it, which is what "the preserved tree is not reset" means.
@@ -526,6 +530,7 @@ describe("retried slice resume (spec #33)", () => {
         ...runConfig,
         dag,
         provider: buildProvider({
+          records: firstRunRecords,
           qaVerdict: "FAIL",
           generator: (cwd, _options, sliceNumber) => {
             const round = (rounds.get(sliceNumber) ?? 0) + 1;
@@ -561,6 +566,32 @@ describe("retried slice resume (spec #33)", () => {
       };
       stuckTip = git(repo, ["rev-parse", namedBranch]);
 
+      namedDiagnosisBeforeResume = readFileSync(
+        join(
+          firstRunRecords.find(
+            (record) =>
+              record.role === "generator" && record.sliceNumber === "01",
+          )!.sliceArtifactDir,
+          "stuck.md",
+        ),
+        "utf-8",
+      );
+
+      const failingArtifactDir = firstRunRecords.find(
+        (record) =>
+          record.role === "generator" && record.sliceNumber === "03",
+      )!.sliceArtifactDir;
+      const failingDiagnosisPath = join(failingArtifactDir, "stuck.md");
+      const failingDiagnosis = readFileSync(failingDiagnosisPath, "utf-8");
+      writeFileSync(
+        failingDiagnosisPath,
+        failingDiagnosis.replace(
+          "\n## Commit evidence",
+          `- Additional artifact: \`${priorAdditionalArtifact}\`\n\n## Commit evidence`,
+        ),
+        "utf-8",
+      );
+
       // --- Run 2: the operator read slice 01's diagnosis and granted it
       // one more attempt on the same tree. Slice 02 they left alone. QA
       // now passes for both.
@@ -578,6 +609,11 @@ describe("retried slice resume (spec #33)", () => {
                 : undefined,
           generator: (cwd, _options, sliceNumber) => {
             if (sliceNumber === "01") {
+              // A misbehaving generator: it deletes the diagnosis the
+              // prompt told it to leave alone. The orchestrator must put
+              // the operator's audit bytes back before the slice ships
+              // (#82 AC3) — a prompt rule is not a guarantee.
+              rmSync(join(findSliceArtifactDir(cwd, "01")!, "stuck.md"));
               // Resumed onto the preserved tree: finish the in-flight edit.
               writeFileSync(
                 join(cwd, "src", "in-flight.ts"),
@@ -645,6 +681,9 @@ describe("retried slice resume (spec #33)", () => {
 
     it("hands the named slice the STUCK-resume prompt, not the #33 one", () => {
       const prompt = generatorRecord("01").prompt;
+      const unresolvedFindings = prompt.match(
+        /# Current unresolved findings\r?\n\r?\n([\s\S]*?)\r?\n# Reconciling the contract/,
+      )?.[1];
       expect(prompt).toContain("Your worktree was not touched.");
       expect(prompt).not.toMatch(/anything after your last commit is gone/i);
       // Its own commit log across all three dead rounds.
@@ -659,8 +698,41 @@ describe("retried slice resume (spec #33)", () => {
       );
       expect(prompt).toContain("qa-review-r3-a1.json");
       expect(prompt).toContain("qa-report-r3-a1.md");
-      expect(prompt).not.toContain("qa-review-r1-a1.json");
-      expect(prompt).not.toContain("`qa-report-r2-a1.md`");
+      expect(unresolvedFindings).toBeDefined();
+      expect(unresolvedFindings).toContain("QA-01");
+      expect(unresolvedFindings).toContain("Fixture implementation finding");
+      expect(unresolvedFindings).toContain(
+        "The fixture evaluator observes the behavior passing",
+      );
+      expect(unresolvedFindings).toContain("qa-review-r3-a1.json");
+      expect(unresolvedFindings).toContain("qa-report-r3-a1.md");
+      expect(unresolvedFindings).not.toContain("qa-review-r1-a1.json");
+      expect(unresolvedFindings).not.toContain("`qa-report-r2-a1.md`");
+    });
+
+    /**
+     * B-03's "every unresolved-finding field": the repair input carries
+     * the whole `QAReviewAttemptFinding`, not the four fields the
+     * formatter happened to render first. Each field is asserted on its
+     * own labelled line inside the unresolved block, so dropping any one
+     * of them fails here rather than silently shrinking the repair input.
+     */
+    it("carries every unresolved-finding field into the repair input", () => {
+      const unresolvedFindings = generatorRecord("01").prompt.match(
+        /# Current unresolved findings\r?\n\r?\n([\s\S]*?)\r?\n# Reconciling the contract/,
+      )?.[1];
+      expect(unresolvedFindings).toContain("Finding ID: `QA-01`");
+      expect(unresolvedFindings).toContain("Severity: BLOCKING");
+      expect(unresolvedFindings).toContain("State: OPEN");
+      expect(unresolvedFindings).toContain("Unresolved: yes");
+      expect(unresolvedFindings).toContain("Remedy: SOURCE_CHANGE");
+      expect(unresolvedFindings).toContain(
+        "Summary: Fixture implementation finding",
+      );
+      expect(unresolvedFindings).toContain(
+        "Clear condition: The fixture evaluator observes the behavior passing",
+      );
+      expect(unresolvedFindings).toContain("Artifact references:");
     });
 
     it("continues the deterministic lifecycle in the resumed evaluator", () => {
@@ -720,6 +792,24 @@ describe("retried slice resume (spec #33)", () => {
       expect(git(repo, ["merge-base", "--is-ancestor", stuckTip, namedBranch])).toBe("");
     });
 
+    /**
+     * Present at invocation is not the same as intact at the end: this
+     * resume's generator deleted the diagnosis (see the run-2 provider),
+     * and a passing slice must still ship the operator's bytes (#82 AC3).
+     */
+    it("ships the named slice's pre-resume diagnosis byte-for-byte after PASS", () => {
+      const shipped = git(repo, [
+        "show",
+        `feat-stub/${slug}:.kiro/specs/${slug}/slices/01-named/stuck.md`,
+      ]);
+      expect(namedDiagnosisBeforeResume).not.toBe("");
+      // `git show` strips the trailing newline; compare on that basis.
+      expect(shipped).toBe(namedDiagnosisBeforeResume.trimEnd());
+      expect(sliceLogLines(repo, `${slug}-stub`, "4001")).toMatch(
+        /restored the preserved stuck\.md diagnosis/,
+      );
+    });
+
     it("records the named slice's resume distinctly from an ordinary one", () => {
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.slices["4001"].phase).toBe("PASS");
@@ -728,12 +818,13 @@ describe("retried slice resume (spec #33)", () => {
     });
 
     it("grants a failing STUCK resume exactly one implementation attempt", () => {
-      const roles = records
-        .filter((record) => record.sliceNumber === "03")
-        .map((record) => record.role);
+      const failingRecords = records.filter(
+        (record) => record.sliceNumber === "03",
+      );
+      const roles = failingRecords.map((record) => record.role);
       expect(roles.filter((role) => role === "generator")).toHaveLength(1);
       expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(1);
-      expect(roles.filter((role) => role === "generator-stuck")).toHaveLength(1);
+      expect(roles.at(-1)).toBe("evaluator-qa");
 
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.slices["4003"].phase).toBe("STUCK");
@@ -751,6 +842,31 @@ describe("retried slice resume (spec #33)", () => {
       expect(existsSync(join(reviewDir, "qa-review-r5-a1-record.json"))).toBe(
         false,
       );
+      const resumedGenerator = failingRecords.find(
+        (record) => record.role === "generator",
+      )!;
+      const rewrittenDiagnosis = readFileSync(
+        join(resumedGenerator.sliceArtifactDir, "stuck.md"),
+        "utf-8",
+      );
+      expect(rewrittenDiagnosis).not.toBe(
+        resumedGenerator.stuckContentsAtInvocation,
+      );
+      expect(resumedGenerator.stuckContentsAtInvocation).toContain(
+        priorAdditionalArtifact,
+      );
+      expect(rewrittenDiagnosis).toContain(priorAdditionalArtifact);
+      expect(rewrittenDiagnosis).toContain(
+        "Round 4 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
+      );
+      expect(rewrittenDiagnosis).toContain(
+        "qa-review-r4-a1-record.json",
+      );
+      expect(rewrittenDiagnosis).toContain("qa-report-r4-a1.md");
+      const roundEvidence = rewrittenDiagnosis
+        .split("## Round evidence\n\n")[1]!
+        .split("\n\n## Commit evidence")[0]!;
+      expect(roundEvidence).not.toContain("(none)");
     });
 
     it("audits the named slice's resume and never logs a restart for it", () => {

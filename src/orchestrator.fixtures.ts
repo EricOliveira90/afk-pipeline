@@ -18,6 +18,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   statSync,
@@ -28,7 +29,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Slice } from "./issues-parser.js";
 import { resolveBaseGateDeclarations } from "./orchestrator.js";
-import { writeContractReview, writeQAReview } from "./test-support.js";
+import {
+  writeContractResponse,
+  writeContractReview,
+  writeQAReview,
+} from "./test-support.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -36,6 +41,29 @@ import type {
 } from "./agent-provider.js";
 
 const integrationTempDirs: string[] = [];
+
+/** Message the `revisionPlannerThrows` fixture fails with. */
+export const REVISION_PLANNER_FAILURE =
+  "stub planner refused the focused revision";
+
+/** Finding ID the `revisionRejected` fixture's REVISE verdict carries. */
+export const REVISION_REJECTION_FINDING = "F-REVISION";
+
+/**
+ * Whether a planner or contract-evaluator prompt is the focused
+ * scope-revision one. Read off the notes `runFocusedScopeRevision`
+ * interpolates rather than an invocation counter: a lane successor
+ * re-negotiates from scratch, which bumps every counter without a
+ * revision having happened.
+ */
+function isFocusedRevision(prompt: string): boolean {
+  return (
+    prompt.includes("This is a focused revision of the already accepted") ||
+    prompt.includes(
+      "This is a fresh evaluation of one focused generator scope revision",
+    )
+  );
+}
 
 /**
  * Removes every test-lifetime repo `makeRepo` created since the last
@@ -58,12 +86,16 @@ export function cleanupIntegrationTempDirs(): void {
 export interface SliceFixture {
   /** Files the planner declares in `contract.md`'s "Files expected to change". */
   files: string[];
+  /** Files emitted by a focused second planner invocation, when present. */
+  revisedFiles?: string[];
   /**
    * Whether the QA evaluator should pass on the first generator round.
    * If `false`, the qa-report verdict is "FAIL" for all rounds, and the
    * slice should end up STUCK after MAX_GENERATOR_ROUNDS.
    */
   qaPasses: boolean;
+  /** Number of implementation QA failures before `qaPasses` takes effect. */
+  qaFailuresBeforePass?: number;
   /**
    * Number of leading evaluator-qa invocations that report FAIL with
    * `**Failure class:** INFRASTRUCTURE` before behaving per `qaPasses`.
@@ -79,10 +111,71 @@ export interface SliceFixture {
   /** File the generator should create in the worktree (so commits have content). */
   outputFile: string;
   outputContent: string;
+  /** Raw scope-escalation artifact emitted after generator work, when set. */
+  escalation?: string;
+  /** One-based generator invocation that emits `escalation`. Defaults to 1. */
+  escalationGeneratorInvocation?: number;
+  /**
+   * Raw escalation artifacts for successive generator invocations from
+   * `escalationGeneratorInvocation` onward, so a test can drive a
+   * generator that keeps escalating (#132). Each must name a path the
+   * locked scope does not have yet — an escalation for an already
+   * declared path is refused by validation, not by the round bound.
+   * Takes precedence over `escalation`.
+   */
+  escalations?: string[];
+  /**
+   * Worktree-relative paths the generator writes *before* emitting its
+   * escalation, none of them on the locked file scope — the protocol
+   * violation the grant guard exists to refuse (architect blocker 1, fifth
+   * adjudication gate round). A generator that edits an undeclared path and
+   * then names it in a valid escalation would otherwise have the focused
+   * revision legitimize the edit after the fact.
+   */
+  undeclaredEdits?: string[];
+  /**
+   * Extra file names the generator writes into its own slice artifact
+   * directory alongside the escalation. The grant guard exempts that
+   * directory by prefix, so an honest escalation keeps its grant with more
+   * than just `escalation.md` dirty — a filename-list exemption would not.
+   */
+  sliceArtifactEdits?: string[];
+  /**
+   * Worktree-relative path the generator smuggles into *both*
+   * orchestrator-owned slice files — `contract.md` and
+   * `acceptance-manifest.json` — before emitting its escalation, widening
+   * its own lock (architect A1, seventh gate round). The escalation itself
+   * names some other path, so the refusal cannot be mistaken for the
+   * requested-path check doing the work.
+   */
+  ownedContractWidening?: string;
+  /**
+   * File scope the planner writes on revision rounds 2, 3, ... Lets a
+   * test widen the contract one escalation at a time. Falls back to
+   * `revisedFiles`.
+   */
+  revisionFileScopes?: string[][];
+  /**
+   * Throw from the second (revision) planner invocation instead of
+   * writing a revised contract — the provider-exception half of the
+   * focused-revision rollback (ADR 0051). The message is asserted, so it
+   * is fixed here rather than per test.
+   */
+  revisionPlannerThrows?: boolean;
+  /**
+   * Make the *revision* contract evaluator return REVISE, so the focused
+   * revision is planned and then rejected — the other half of ADR 0051's
+   * rollback. Distinct from `contractImpasse`, which rejects during
+   * ordinary negotiation before any revision exists.
+   */
+  revisionRejected?: boolean;
+  /** Exhaust contract negotiation in round two with a contested finding. */
+  contractImpasse?: boolean;
 }
 
 export interface InvocationRecord {
   role: string;
+  prompt?: string;
   cwd: string;
   startedAt: number;
   finishedAt: number;
@@ -219,6 +312,7 @@ export function buildStubProvider(opts: {
   // Track per-slice generator round so the stub can write fresh content
   // and decide PASS vs FAIL based on the round.
   const generatorRounds = new Map<string, number>();
+  const plannerRounds = new Map<string, number>();
   // Per-slice count of evaluator-qa invocations, for qaInfraAttempts.
   const qaAttempts = new Map<string, number>();
 
@@ -249,20 +343,92 @@ export function buildStubProvider(opts: {
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {
-        const filesBlock = fixture.files.map((f) => `- ${f}`).join("\n");
+        const plannerRound = (plannerRounds.get(ghIssue) ?? 0) + 1;
+        plannerRounds.set(ghIssue, plannerRound);
+        if (fixture.revisionPlannerThrows && isFocusedRevision(options.prompt)) {
+          records.push({
+            role,
+            prompt: options.prompt,
+            cwd,
+            startedAt,
+            finishedAt: Date.now(),
+            ghIssue,
+          });
+          throw new Error(REVISION_PLANNER_FAILURE);
+        }
+        const files =
+          plannerRound > 1
+            ? (fixture.revisionFileScopes?.[plannerRound - 2] ??
+              fixture.revisedFiles ??
+              fixture.files)
+            : fixture.files;
+        const filesBlock = files.map((f) => `- ${f}`).join("\n");
         writeFileSync(
           join(sliceArtifactDir, "contract.md"),
-          `# Slice Contract\n\n**Status:** LOCKED\n\n## Files expected to change\n${filesBlock}\n`,
+          `# Slice Contract\n\n**Status:** ${fixture.contractImpasse ? "DRAFT" : "LOCKED"}\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
-        writeAcceptanceManifest(sliceArtifactDir, fixture.files);
-      } else if (role === "evaluator-contract" && sliceArtifactDir) {
+        writeAcceptanceManifest(sliceArtifactDir, files);
+        if (fixture.contractImpasse && plannerRound === 2) {
+          writeContractResponse(sliceArtifactDir, ["F-IMPASSE"], "CONTESTED");
+        }
+      } else if (
+        role === "evaluator-contract" &&
+        sliceArtifactDir &&
+        fixture
+      ) {
+        const feedbackRound =
+          /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "1";
+        const rejectRevision =
+          fixture.revisionRejected === true &&
+          isFocusedRevision(options.prompt);
+        const impasse = fixture.contractImpasse === true;
         writeFileSync(
-          join(sliceArtifactDir, "feedback-r1.md"),
-          "## Evaluator feedback — round 1\n\nThe contract is testable.\n",
+          join(sliceArtifactDir, `feedback-r${feedbackRound}.md`),
+          `## Evaluator feedback — round ${feedbackRound}\n\n${
+            impasse || rejectRevision
+              ? "The contract interpretation remains disputed."
+              : "The contract is testable."
+          }\n`,
           "utf-8",
         );
-        writeContractReview(sliceArtifactDir, "ACCEPT");
+        if (rejectRevision) {
+          writeContractReview(sliceArtifactDir, "REVISE", [
+            {
+              id: REVISION_REJECTION_FINDING,
+              severity: "BLOCKING",
+              behaviorIds: ["B-01"],
+              evidence: '"the revised file scope"',
+              expected: "a revision that keeps every locked term",
+              observed: "the revision changes an accepted behavior",
+              clearCondition: "the planner re-revises the contract",
+              state: "OPEN",
+            },
+          ]);
+        } else {
+          writeContractReview(
+            sliceArtifactDir,
+            impasse ? "REVISE" : "ACCEPT",
+            impasse
+              ? [
+                  {
+                    id: "F-IMPASSE",
+                    severity: "BLOCKING",
+                    behaviorIds: ["B-01"],
+                    evidence: '"the evaluator-held interpretation"',
+                    expected: "one agreed interpretation",
+                    observed:
+                      "the planner contests the evaluator interpretation",
+                    clearCondition: "a human adjudicates the finding",
+                    state:
+                      plannerRounds.get(ghIssue) === 2
+                        ? "CONTESTED"
+                        : "OPEN",
+                  },
+                ]
+              : undefined,
+          );
+        }
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         if (fixture.simulateIdleDeferral) {
           options.onIdleDeferral?.({ silentSeconds: 600, busyProcesses: 2 });
@@ -278,6 +444,59 @@ export function buildStubProvider(opts: {
           `${fixture.outputContent}\n// generator round ${round} for #${ghIssue}\n`,
           "utf-8",
         );
+        const firstEscalation = fixture.escalationGeneratorInvocation ?? 1;
+        const escalations =
+          fixture.escalations ??
+          (fixture.escalation !== undefined ? [fixture.escalation] : []);
+        const raw = escalations[round - firstEscalation];
+        if (round >= firstEscalation && raw !== undefined) {
+          for (const path of fixture.undeclaredEdits ?? []) {
+            const abs = join(cwd, path);
+            mkdirSync(join(abs, ".."), { recursive: true });
+            writeFileSync(abs, `undeclared edit for #${ghIssue}\n`, "utf-8");
+          }
+          if (fixture.ownedContractWidening !== undefined) {
+            // Both files, because widening only the manifest leaves the
+            // contract disagreeing with it and widening only the contract
+            // leaves the manifest the orchestrator actually reads. The
+            // laundering that reaches a grant is the one that rewrites the
+            // pair consistently.
+            const contractPath = join(sliceArtifactDir, "contract.md");
+            writeFileSync(
+              contractPath,
+              `${readFileSync(contractPath, "utf-8")}- ${fixture.ownedContractWidening}\n`,
+              "utf-8",
+            );
+            const manifestPath = join(
+              sliceArtifactDir,
+              "acceptance-manifest.json",
+            );
+            const manifest = JSON.parse(
+              readFileSync(manifestPath, "utf-8"),
+            ) as { fileScope: { paths: string[] } };
+            manifest.fileScope.paths = [
+              ...manifest.fileScope.paths,
+              fixture.ownedContractWidening,
+            ];
+            writeFileSync(
+              manifestPath,
+              `${JSON.stringify(manifest, null, 2)}\n`,
+              "utf-8",
+            );
+          }
+          for (const name of fixture.sliceArtifactEdits ?? []) {
+            writeFileSync(
+              join(sliceArtifactDir, name),
+              `# ${name} written in generator round ${round}\n`,
+              "utf-8",
+            );
+          }
+          writeFileSync(
+            join(sliceArtifactDir, "escalation.md"),
+            raw,
+            "utf-8",
+          );
+        }
       } else if (role === "evaluator-qa" && sliceArtifactDir && fixture) {
         const attempt = (qaAttempts.get(ghIssue) ?? 0) + 1;
         qaAttempts.set(ghIssue, attempt);
@@ -292,26 +511,51 @@ export function buildStubProvider(opts: {
             failureClass: "INFRASTRUCTURE",
           });
         } else {
-          const verdict = fixture.qaPasses ? "PASS" : "FAIL";
+          const verdict =
+            attempt > (fixture.qaFailuresBeforePass ?? 0) && fixture.qaPasses
+              ? "PASS"
+              : "FAIL";
+          const resolvedFixtureFinding =
+            verdict === "PASS" && (fixture.qaFailuresBeforePass ?? 0) > 0
+              ? [
+                  {
+                    id: "QA-01",
+                    severity: "BLOCKING" as const,
+                    behaviorIds: [],
+                    summary: "Fixture implementation finding",
+                    evidence:
+                      "The fixture evaluator observed a passing behavior",
+                    expected: "The behavior passes",
+                    observed: "The behavior passes",
+                    clearCondition:
+                      "The fixture evaluator observes the behavior passing",
+                    state: "RESOLVED" as const,
+                  },
+                ]
+              : undefined;
           writeFileSync(
             join(sliceArtifactDir, "qa-report.md"),
             `# QA Report\n\n**Verdict:** ${verdict}\n`,
             "utf-8",
           );
-          writeQAReview(sliceArtifactDir, "deterministic", { verdict });
+          writeQAReview(sliceArtifactDir, "deterministic", {
+            verdict,
+            findings: resolvedFixtureFinding,
+          });
         }
-      } else if (role === "generator-stuck" && sliceArtifactDir) {
-        writeFileSync(
-          join(sliceArtifactDir, "stuck.md"),
-          "# Stuck\n",
-          "utf-8",
-        );
       }
       // architect-review / pm-review are no-ops; verdicts will be
       // UNKNOWN, blocking PR creation. That path is fine for our tests.
 
       const finishedAt = Date.now();
-      records.push({ role, cwd, startedAt, finishedAt, ghIssue });
+      records.push({
+        role,
+        prompt: options.prompt,
+        cwd,
+        startedAt,
+        finishedAt,
+        ghIssue,
+      });
       return { exitCode: 0, stdout: "", stats: {} };
     },
   };

@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "agents/generator.md",
+      "prompts/generator.md",
+      "prompts/generator-resume.md",
+      "prompts/generator-resume-stuck.md",
+      "src/escalation.ts",
+      "src/escalation.test.ts",
+      "src/artifacts.ts",
+      "src/artifacts.test.ts",
+      "src/scope-amendment.ts",
+      "src/scope-amendment.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/orchestrator.fixtures.ts",
+      "src/prompt-template.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #80 What to build; PRD story 1",
+      "given": "an initial, repair, or resumed generator finds that a cited finding's correct fix needs an undeclared path",
+      "when": "the generator stops before making the out-of-scope edit",
+      "then": "it writes version-1 escalation.md with non-empty findingIds, paths, and reason",
+      "observableResult": "the canonical escalation artifact contains the cited findings, required paths, and explanation before any out-of-scope edit",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #80 AC2 and AC4; PRD story 13; ADR 0048",
+      "given": "escalation.md is malformed or requests an ineligible scope path",
+      "when": "the orchestrator validates it",
+      "then": "the slice ends ERROR without planner or gate execution and retains the raw artifact",
+      "observableResult": "the ERROR outcome and archived raw attempt expose every refused escalation without downstream execution",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #80 AC1 and AC5; PRD Implementation Decisions",
+      "given": "a valid escalation names findings, undeclared non-migration paths, and a reason",
+      "when": "the generator returns",
+      "then": "the orchestrator archives the attempt and sends the exact evidence through one focused planner revision and fresh contract evaluation without spending an implementation round",
+      "observableResult": "captured planner input contains the submitted findingIds, paths, and reason exactly, with an attempt archive and unchanged generator round count",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #80 AC3; PRD Implementation Decisions",
+      "given": "the revised contract and manifest declare the requested scope and the evaluator accepts them",
+      "when": "the orchestrator re-locks the contract",
+      "then": "a fresh generator runs with the evaluator-accepted complete revised fileScope and the same remaining implementation-round budget",
+      "observableResult": "captured fresh-generator input contains the accepted locked manifest's revised fileScope before generation resumes",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #80 AC2 and AC5; ADR 0048 archive convention",
+      "given": "generator invocations produce valid or malformed escalations",
+      "when": "the attempts are archived",
+      "then": "each raw file receives a round-and-attempt-stamped archive and an existing archive is never overwritten",
+      "observableResult": "all escalation-r<round>-a<attempt>.md files remain under the slice reviews archive",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-01",
+      "source": "PRD Implementation Decisions",
+      "given": "a generator emits no escalation",
+      "when": "it returns normally",
+      "then": "migration checks, base gates, QA, retries, and existing terminal outcomes proceed unchanged",
+      "observableResult": "normal generator execution retains the existing PASS, STUCK, ERROR, and CANCELLED paths",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #80 revision-template requirement; PRD dependency on PRD 1",
+      "given": "ordinary contract negotiation or revision runs",
+      "when": "planner and evaluator artifacts are processed",
+      "then": "exact validation, the two-round cap, orchestrator-owned lock transitions, and attempt archives remain intact",
+      "observableResult": "existing negotiation scenarios retain their validation, round, lock, and archive results",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #80 ADR 0048 boundary; ADR 0048",
+      "given": "QA requests SCOPE_AMENDMENT for already-written correct work",
+      "when": "QA routing runs",
+      "then": "planScopeAmendment and applyScopeAmendment retain amendment records and same-round re-grading",
+      "observableResult": "the existing QA-side amendment route behaves as specified by ADR 0048",
+      "preservation": true,
+      "gateIds": ["tests"]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { probeAdjudicationEstate } from "./adjudication-estate.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
@@ -21,6 +22,13 @@ import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
  * issue #19 and ADR 0023.
  *
  * Scope guarantees:
+ * - Targets are the slices whose phase declares its debris disposable and
+ *   whose worktree does not hold an adjudication estate. ADR 0055 Seam 2
+ *   §6 narrows ADR 0023's "every slice in a failure phase" to exactly
+ *   that: an adjudication estate is a human's pending input, so the slice
+ *   is skipped and named in the report whatever phase it ended in — the
+ *   fact is read off disk, not off the phase. Everything below is
+ *   unchanged.
  * - Only targets identified by this PRD's run state, plus on-disk
  *   leftovers matching this PRD's exact worktree/scratch naming
  *   (`<prefix>-<prdSlug>-s<NN>`) — other PRDs' and other providers'
@@ -45,20 +53,74 @@ import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
  */
 
 /**
- * Phases whose worktree is disposable but whose branch is not. Read off
- * the lifecycle's own bucketing rather than a second list here, so a new
- * deferred phase never has to be remembered in two places. Distinct from
- * `FAILURE_PHASES`: nothing deferred awaits operator repair, so its
- * branch is reported as deliberately preserved rather than assessed for
- * deletion.
+ * Every question this command asks about a phase comes off one trait —
+ * the lifecycle's cleanup-disposition axis (ADR 0055 Seam 2 §6) — and not
+ * off the presentation bucket, which is about rendering. A phase that
+ * declares its debris undisposable is undisposable here by construction,
+ * so a new preserved phase never has to be remembered in two places.
  */
-const isCleanupTarget = (phase: SlicePhase): boolean => {
-  const bucket = traitsFor(phase).bucket;
-  return bucket === "failed" || bucket === "cancelled" || bucket === "deferred";
-};
+const isCleanupTarget = (phase: SlicePhase): boolean =>
+  traitsFor(phase).debris !== "out-of-scope";
 
+/** Worktree is debris, branch is the next run's input (MERGE-PENDING). */
 const mustPreserveBranch = (phase: SlicePhase): boolean =>
-  traitsFor(phase).bucket === "deferred";
+  traitsFor(phase).debris === "preserve-branch";
+
+/**
+ * Nothing is debris — the estate belongs to a human's pending decision.
+ *
+ * Two independent sources, and the *disk* one is the authority (ADR 0055
+ * Seam 2 §6, fourth adjudication gate round). `probeAdjudicationEstate`
+ * asks the only question that matters — does this worktree still hold the
+ * impasse record or the decision log? — and so covers every terminal phase
+ * a post-decision apply can exit through, including the ordinary `ERROR`
+ * and `CONFLICT` a planner failure, a feature-refresh conflict, a
+ * cancellation mid-apply, or a flattened bookkeeping throw produce. The
+ * phase trait remains as a second, weaker term: it catches an
+ * `AWAITING-ADJUDICATION` record whose worktree an operator has already
+ * removed by hand, where there is no disk to read.
+ *
+ * A probe that could not finish preserves too, and says why (architect
+ * blocker 2, fifth round). `clean-failed` deletes worktrees; "the probe
+ * could not read this directory" is the one answer that must never be
+ * spent as "there is nothing here to lose" (ADR 0055 Seam 2 §8).
+ */
+const mustPreserveEstate = (
+  phase: SlicePhase,
+  dir: string | undefined,
+  specsDir: string | undefined,
+): { reason: string } | null => {
+  const probe = dir
+    ? probeAdjudicationEstate(dir, { specsDir })
+    : ({ status: "absent" } as const);
+  if (probe.status === "indeterminate") {
+    return {
+      reason:
+        `${phase} — refusing to remove ${dir}: whether it holds an ` +
+        `adjudication estate could not be established (${probe.reason}). ` +
+        `Absence has to be proved, never inferred (ADR 0055 Seam 2 §8), so ` +
+        `nothing here is treated as debris; fix the cause or remove the ` +
+        `worktree yourself once you have checked it`,
+    };
+  }
+  if (probe.status === "present") {
+    return {
+      reason:
+        `${phase} — preserving the adjudication estate this worktree still ` +
+        `holds (${probe.estate.evidence}): it is the operator's pending ` +
+        `input, and only this slice's own re-dispatch replaces it`,
+    };
+  }
+  if (traitsFor(phase).debris === "preserve-all") {
+    return {
+      reason:
+        `${phase} — preserving the adjudication estate (impasse record, ` +
+        `decision log, worktree, branch): it is the operator's pending input, ` +
+        `and only this slice's own re-dispatch replaces it`,
+    };
+  }
+  return null;
+};
 
 export interface CleanFailedOptions {
   repoRoot: string;
@@ -106,6 +168,10 @@ export async function runCleanFailed(
 
   const state = loadRunState(repoRoot, runSlug);
   const featureBranch = state.featureBranch;
+  // The run recorded where its slice artifacts live, so the estate probe
+  // resolves rather than walks (architect blocker 2). Absent on state files
+  // that predate the field; the probe then walks the whole worktree.
+  const specsDir = state.specsDir;
   const featureExists = git.branchExists(repoRoot, featureBranch);
 
   // ghIssue -> manifest slice number, for computing worktree dirs when
@@ -168,6 +234,27 @@ export async function runCleanFailed(
       registeredDir && computed && normalise(registeredDir) === normalise(computed)
         ? computed
         : (registeredDir ?? computed);
+
+    // A slice that owns an adjudication estate has no debris: the impasse
+    // record, the decision log, the in-flight adjudication.md, the worktree
+    // they live in and the branch under it are a human's pending input, and
+    // only the slice's own re-dispatch replaces them (ADR 0055 Seam 2). Say
+    // so — an operator who ran clean-failed to clear the way for a re-run
+    // has to be able to tell a deliberate skip from a command that missed
+    // one.
+    const preserve = mustPreserveEstate(slice.phase, dir, specsDir);
+    if (preserve) {
+      if (dir) handledDirs.add(normalise(dir));
+      report.skipped.push({
+        target: dir ?? slice.branch ?? `#${ghIssue}`,
+        reason: preserve.reason,
+      });
+      log(
+        `  kept the whole estate — ${slice.phase}, an adjudication the operator still owns`,
+      );
+      continue;
+    }
+
     if (dir) {
       // Refuse anything outside this PRD's worktree namespace — a
       // registered worktree at an unexpected path is operator territory.
@@ -240,6 +327,33 @@ export async function runCleanFailed(
           target: dir,
           reason:
             "registered worktree whose slice is not in a failure phase — not touching",
+        });
+        continue;
+      }
+      // The same disk fact pass 1 consults, asked of a directory no run
+      // state claims: state deleted by hand, a crash before the state
+      // write, a slice record that never named its branch. Ownership is a
+      // property of the worktree, so it holds here too — and this is the
+      // one pass that would otherwise delete an estate precisely because
+      // nothing recorded it.
+      const orphanProbe = probeAdjudicationEstate(dir, { specsDir });
+      if (orphanProbe.status === "indeterminate") {
+        report.skipped.push({
+          target: dir,
+          reason:
+            `unregistered leftover whose adjudication estate could not be ` +
+            `probed (${orphanProbe.reason}) — an unfinished probe is not ` +
+            `proof that this directory is disposable (ADR 0055 Seam 2 §8)`,
+        });
+        continue;
+      }
+      if (orphanProbe.status === "present") {
+        report.skipped.push({
+          target: dir,
+          reason:
+            `unregistered leftover that still holds an adjudication estate ` +
+            `(${orphanProbe.estate.evidence}) — the operator's input outlives ` +
+            `the run state that lost track of it`,
         });
         continue;
       }

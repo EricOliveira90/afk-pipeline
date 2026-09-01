@@ -15,6 +15,7 @@ import {
   archiveQAReviewAttempt,
   archiveQAReviewRecord,
   archiveQAReviewValidation,
+  archiveScopeEscalationAttempt,
   classifyReviewFailure,
   hasStuckFile,
   isFavorableReviewOutcome,
@@ -22,15 +23,231 @@ import {
   lockContract,
   reopenContract,
   readContractFiles,
+  readContractLockProvenance,
   readContractStatus,
   preserveNegotiationFailure,
   readReviewVerdict,
+  renderStuckDiagnosis,
 } from "./artifacts.js";
 import type {
   ContractNegotiationOutcome,
   ContractReviewAttemptRecord,
 } from "./contract-review.js";
 import type { QAReviewAttemptRecord } from "./qa-review.js";
+import {
+  EXPECTED_STUCK_DIAGNOSIS,
+  seedStuckDiagnosisArchive,
+  STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+  STUCK_DIAGNOSIS_REASON,
+  STUCK_DIAGNOSIS_COMMIT_LOG,
+} from "./stuck-diagnosis.fixtures.js";
+
+describe("renderStuckDiagnosis", () => {
+  function renderWithDiscoveryOrder(order: "forward" | "reverse"): string {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-render-"));
+    const reviewArchiveDir = join(root, "reviews");
+    try {
+      seedStuckDiagnosisArchive(reviewArchiveDir, {
+        reverse: order === "reverse",
+      });
+      return renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
+        reviewArchiveDir,
+        additionalArtifactReferences: STUCK_DIAGNOSIS_ADDITIONAL_ARTIFACTS,
+        commitLog: STUCK_DIAGNOSIS_COMMIT_LOG,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("renders archived evidence byte-identically in stable order", () => {
+    expect(renderWithDiscoveryOrder("forward")).toBe(
+      EXPECTED_STUCK_DIAGNOSIS,
+    );
+    expect(renderWithDiscoveryOrder("reverse")).toBe(
+      EXPECTED_STUCK_DIAGNOSIS,
+    );
+    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain("Best guess");
+    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain(
+      "SYNTHESIS-SHOULD-NOT-APPEAR",
+    );
+  });
+
+  it("leads with the reason the caller gave, not the round-exhaustion default", () => {
+    // ADR 0055 P1: the reason is the finalizer's parameter, so a late
+    // refusal (the post-commit migration gate) reads as itself.
+    const diagnosis = renderStuckDiagnosis({
+      reason: "Migration sync check failed: local migrations not applied",
+      reviewArchiveDir: join(tmpdir(), "afk-stuck-reviews-that-do-not-exist"),
+      commitLog: "",
+    });
+
+    expect(diagnosis).toContain(
+      "# Stuck diagnosis\n\n## Reason\n\nMigration sync check failed: local migrations not applied\n",
+    );
+    expect(diagnosis).not.toContain("implementation rounds");
+  });
+
+  it("does not label additional-only round evidence as empty", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-additional-only-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    try {
+      const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
+        reviewArchiveDir,
+        additionalArtifactReferences: [".afk/gates/s01/ROUND-1-GATE.json"],
+        commitLog: "",
+      });
+      const roundEvidence = diagnosis
+        .split("## Round evidence\n\n")[1]!
+        .split("\n\n## Commit evidence")[0]!;
+
+      expect(roundEvidence).toBe(
+        "- Additional artifact: `.afk/gates/s01/ROUND-1-GATE.json`",
+      );
+      expect(roundEvidence).not.toContain("(none)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("partitions the latest lifecycle state into RESOLVED and OPEN", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-lifecycle-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    const artifactReferences = (id: string) => [
+      `.afk/artifacts/lifecycle/${id}.json`,
+      `.kiro/specs/lifecycle/${id}.md`,
+    ];
+    const lifecycleRecord: QAReviewAttemptRecord = {
+      version: 2,
+      stage: "deterministic",
+      round: 3,
+      attempt: 1,
+      verdict: "FAIL",
+      failureClass: "IMPLEMENTATION",
+      findings: [
+        {
+          id: "QA-OPEN-02",
+          severity: "ADVISORY",
+          state: "OPEN",
+          unresolved: true,
+          summary: "Second open summary",
+          clearCondition: "Second open clear condition",
+          artifactReferences: artifactReferences("QA-OPEN-02"),
+          remedy: "SOURCE_CHANGE",
+        },
+        {
+          id: "QA-RESOLVED-01",
+          severity: "BLOCKING",
+          state: "RESOLVED",
+          unresolved: false,
+          summary: "Resolved summary",
+          clearCondition: "Resolved clear condition",
+          artifactReferences: artifactReferences("QA-RESOLVED-01"),
+          remedy: "SOURCE_CHANGE",
+        },
+        {
+          id: "QA-OPEN-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "First open summary",
+          clearCondition: "First open clear condition",
+          artifactReferences: artifactReferences("QA-OPEN-01"),
+          remedy: "SOURCE_CHANGE",
+        },
+      ],
+    };
+    try {
+      writeFileSync(
+        join(reviewArchiveDir, "qa-review-r3-a1-record.json"),
+        JSON.stringify(lifecycleRecord),
+        "utf-8",
+      );
+      const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
+        reviewArchiveDir,
+        commitLog: "",
+      });
+      const resolved = diagnosis.split("### RESOLVED\n\n")[1]!
+        .split("\n\n### OPEN")[0]!;
+      const open = diagnosis.split("### OPEN\n\n")[1]!
+        .split("\n\n## Scope escalations")[0]!;
+
+      expect(resolved).toContain("[QA-RESOLVED-01] BLOCKING RESOLVED");
+      expect(resolved).not.toContain("QA-OPEN-01");
+      expect(resolved).not.toContain("QA-OPEN-02");
+      expect(open).not.toContain("QA-RESOLVED-01");
+      expect(open).toContain("[QA-OPEN-01] BLOCKING OPEN");
+      expect(open).toContain("Summary: First open summary");
+      expect(open).toContain("Clear condition: First open clear condition");
+      expect(open).toContain(".afk/artifacts/lifecycle/QA-OPEN-01.json");
+      expect(open).toContain(".kiro/specs/lifecycle/QA-OPEN-01.md");
+      expect(open).toContain("[QA-OPEN-02] ADVISORY OPEN");
+      expect(open).toContain("Summary: Second open summary");
+      expect(open).toContain("Clear condition: Second open clear condition");
+      expect(open).toContain(".afk/artifacts/lifecycle/QA-OPEN-02.json");
+      expect(open).toContain(".kiro/specs/lifecycle/QA-OPEN-02.md");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("renders a malformed retained scope escalation without losing the diagnosis", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-malformed-escalation-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    const lifecycleRecord: QAReviewAttemptRecord = {
+      version: 2,
+      stage: "deterministic",
+      round: 3,
+      attempt: 1,
+      verdict: "FAIL",
+      failureClass: "IMPLEMENTATION",
+      findings: [
+        {
+          id: "QA-OPEN-01",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          summary: "The implementation is still incomplete",
+          clearCondition: "Complete the implementation",
+          artifactReferences: [".kiro/specs/demo/qa-report.md"],
+          remedy: "SOURCE_CHANGE",
+        },
+      ],
+    };
+    try {
+      writeFileSync(
+        join(reviewArchiveDir, "qa-review-r3-a1-record.json"),
+        JSON.stringify(lifecycleRecord),
+        "utf-8",
+      );
+      writeFileSync(
+        join(reviewArchiveDir, "escalation-r1-a1.md"),
+        "{not-json",
+        "utf-8",
+      );
+
+      const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
+        reviewArchiveDir,
+        commitLog: "",
+      });
+
+      expect(diagnosis).toContain("[QA-OPEN-01] BLOCKING OPEN");
+      expect(diagnosis).toContain("- Round 1 attempt 1");
+      expect(diagnosis).toContain(
+        "Invalid artifact: `escalation-r1-a1.md` is not a valid version 1 scope escalation",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 /**
  * Regression tests for the review-verdict parser.
@@ -51,6 +268,83 @@ function withTempFile(content: string, fn: (path: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe("archiveScopeEscalationAttempt", () => {
+  it("preserves two generator attempts from the same implementation round", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-escalation-archive-"));
+    const sliceDir = join(root, "slice");
+    const archiveDir = join(root, "reviews");
+    mkdirSync(sliceDir, { recursive: true });
+    const source = join(sliceDir, "escalation.md");
+    const first = '{"version":1,"findingIds":["F-01"]}';
+    const second = '{"version":1,"findingIds":["F-02"]}';
+
+    try {
+      writeFileSync(source, first, "utf-8");
+      expect(
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 1,
+          attempt: 1,
+        }),
+      ).toBe("escalation-r1-a1.md");
+
+      writeFileSync(source, second, "utf-8");
+      expect(
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 1,
+          attempt: 2,
+        }),
+      ).toBe("escalation-r1-a2.md");
+
+      expect(
+        readFileSync(join(archiveDir, "escalation-r1-a1.md"), "utf-8"),
+      ).toBe(first);
+      expect(
+        readFileSync(join(archiveDir, "escalation-r1-a2.md"), "utf-8"),
+      ).toBe(second);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a duplicate stamp without changing the archived bytes", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-escalation-archive-"));
+    const sliceDir = join(root, "slice");
+    const archiveDir = join(root, "reviews");
+    mkdirSync(sliceDir, { recursive: true });
+    const source = join(sliceDir, "escalation.md");
+    const original = Buffer.from([0x00, 0x61, 0x0d, 0x0a, 0xff]);
+    writeFileSync(source, original);
+
+    try {
+      archiveScopeEscalationAttempt({
+        sliceDir,
+        archiveDir,
+        round: 2,
+        attempt: 3,
+      });
+      writeFileSync(source, "replacement", "utf-8");
+
+      expect(() =>
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 2,
+          attempt: 3,
+        }),
+      ).toThrow();
+      expect(
+        readFileSync(join(archiveDir, "escalation-r2-a3.md")),
+      ).toEqual(original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("archiveContractReviewRecord", () => {
   it("writes a round-and-attempt-stamped lifecycle record", () => {
@@ -443,6 +737,15 @@ describe("preserveNegotiationFailure", () => {
           plannerEvidence: "the existing gate is sufficient",
           evaluatorEvidence: "the gate misses the negative path",
         },
+        {
+          id: "F-SCOPE",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the locked file list covers the implementation",
+          evaluatorEvidence: "the status projection requires one more file",
+        },
       ],
     };
     try {
@@ -462,14 +765,23 @@ describe("preserveNegotiationFailure", () => {
         negotiationOutcome,
       });
 
-      expect(
-        JSON.parse(
-          readFileSync(
-            join(sliceDir, "contract-negotiation-outcome.json"),
-            "utf-8",
-          ),
+      const working = readFileSync(
+        join(sliceDir, "contract-negotiation-outcome.json"),
+        "utf-8",
+      );
+      const archived = readFileSync(
+        join(
+          repoRoot,
+          ".afk",
+          "artifacts",
+          "impasse-stub",
+          "slice-01",
+          "contract-negotiation-outcome.json",
         ),
-      ).toEqual(negotiationOutcome);
+        "utf-8",
+      );
+      expect(JSON.parse(working)).toEqual(negotiationOutcome);
+      expect(archived).toBe(working);
       const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
       expect(stuck).toContain("Exhaustion classification: IMPASSE");
       expect(stuck).toContain("Planner position: CONTESTED");
@@ -478,6 +790,135 @@ describe("preserveNegotiationFailure", () => {
       );
       expect(stuck).toContain(
         "Evaluator evidence: the gate misses the negative path",
+      );
+      expect(stuck).toContain(
+        "Planner evidence: the locked file list covers the implementation",
+      );
+      expect(stuck).toContain(
+        "Evaluator evidence: the status projection requires one more file",
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Slice 02 [behavior:B-01a], the fourth gate round's PM finding. A mixed
+   * exhaustion — one blocking finding contested, another still OPEN — stays
+   * NON_CONVERGENCE by ADR 0055 §1: no decision a human can record closes an
+   * OPEN finding, so a park holding one could never satisfy the lock's
+   * completion predicate (ADR 0041, prefer the branch that cannot loop). The
+   * ruling that survived the round is a *visibility* one: the classification
+   * is untouched, but the operator must not have to reconstruct the contest
+   * from the raw JSON, so both held positions and the reason no adjudication
+   * happened render in stuck.md.
+   */
+  it("surfaces the contested positions when a mixed exhaustion escalates instead of parking", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    const negotiationOutcome: ContractNegotiationOutcome = {
+      version: 1,
+      classification: "NON_CONVERGENCE",
+      round: 3,
+      attempt: 1,
+      findings: [
+        {
+          id: "F-CONTEST",
+          severity: "BLOCKING",
+          state: "CONTESTED",
+          unresolved: true,
+          plannerPosition: "CONTESTED",
+          plannerEvidence: "the routing table already covers the fallback",
+          evaluatorEvidence: "the fallback lane has no acceptance clause",
+        },
+        {
+          id: "F-OPEN",
+          severity: "BLOCKING",
+          state: "OPEN",
+          unresolved: true,
+          plannerPosition: "UNRESOLVED",
+          plannerEvidence: null,
+          evaluatorEvidence: "the issue body never names the retry budget",
+        },
+      ],
+    };
+    try {
+      preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "mixed-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 3,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        negotiationOutcome,
+      });
+
+      const stuck = readFileSync(join(sliceDir, "stuck.md"), "utf-8");
+      expect(stuck).toContain("## Contested positions held at exhaustion");
+      // Both sides of the contest, so the operator can see what was argued.
+      expect(stuck).toContain(
+        "Planner evidence: the routing table already covers the fallback",
+      );
+      expect(stuck).toContain(
+        "Evaluator evidence: the fallback lane has no acceptance clause",
+      );
+      // Why it escalated rather than parked, and what unblocks it — naming the
+      // OPEN blocker that made the park impossible.
+      expect(stuck).toContain("Why no adjudication:");
+      expect(stuck).toContain("[F-OPEN]");
+      expect(stuck).toContain("ADR 0055 §1");
+      expect(stuck).toContain("rerun the slice");
+      // The section is specific to the mixed case: a pure non-convergence has
+      // no contest to report and must not grow a section explaining one away.
+      expect(stuck.indexOf("## Contested positions held at exhaustion")).
+        toBeLessThan(stuck.indexOf("## Unresolved gaps"));
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the contested-positions section for a pure non-convergence", () => {
+    const { repoRoot, sliceDir } = makeFailureFixture();
+    try {
+      preserveNegotiationFailure({
+        repoRoot,
+        runSlug: "pure-stub",
+        sliceDir,
+        sliceNumber: "01",
+        ghIssue: "7001",
+        title: "Notification foundation",
+        round: 3,
+        outcome: "ESCALATE",
+        verdict: "REVISE",
+        feedbackPath: join(sliceDir, "feedback-r2.md"),
+        contractPath: join(sliceDir, "contract.md"),
+        contextPath: join(sliceDir, "context.md"),
+        negotiationOutcome: {
+          version: 1,
+          classification: "NON_CONVERGENCE",
+          round: 3,
+          attempt: 1,
+          findings: [
+            {
+              id: "F-OPEN",
+              severity: "BLOCKING",
+              state: "OPEN",
+              unresolved: true,
+              plannerPosition: "UNRESOLVED",
+              plannerEvidence: null,
+              evaluatorEvidence: "the issue body never names the retry budget",
+            },
+          ],
+        },
+      });
+
+      expect(readFileSync(join(sliceDir, "stuck.md"), "utf-8")).not.toContain(
+        "Contested positions held at exhaustion",
       );
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
@@ -803,12 +1244,15 @@ describe("readContractStatus", () => {
   });
 });
 
+const NEGOTIATION_LOCK = { kind: "negotiation", round: 2 } as const;
+const IMPASSE = "a".repeat(64);
+
 describe("lockContract", () => {
   it("flips **Status:** NEGOTIATING to LOCKED in place", () => {
     withContractFile(
       `# Slice\n\n**Status:** NEGOTIATING\n**Negotiation round:** 1\n\n## Scope lock\nFoo.\n`,
       (p) => {
-        lockContract(p);
+        lockContract(p, NEGOTIATION_LOCK);
         expect(readContractStatus(p)).toBe("LOCKED");
         const content = readFileSync(p, "utf-8");
         expect(content).toContain("**Status:** LOCKED");
@@ -824,7 +1268,7 @@ describe("lockContract", () => {
     withContractFile(
       `# Slice\n\n**Status:** LOCKED\n\n## Scope lock\nFoo.\n`,
       (p) => {
-        lockContract(p);
+        lockContract(p, NEGOTIATION_LOCK);
         const content = readFileSync(p, "utf-8");
         expect(content.match(/\*\*Status:\*\*/g)?.length).toBe(1);
       },
@@ -833,8 +1277,70 @@ describe("lockContract", () => {
 
   it("inserts the Status field if absent (defensive — should never happen in prod)", () => {
     withContractFile(`# Slice Contract\n\n## Scope lock\nFoo.\n`, (p) => {
-      lockContract(p);
+      lockContract(p, NEGOTIATION_LOCK);
       expect(readContractStatus(p)).toBe("LOCKED");
+    });
+  });
+});
+
+/**
+ * The lock's provenance stamp (ADR 0055 Seam 1 decision 4). The whole
+ * point of the separate line is that the `**Status:** LOCKED` line agent
+ * prompts read (ADR 0008) stays byte-identical, so that is what these
+ * assert first.
+ */
+describe("lock provenance", () => {
+  it("stamps a separate line, leaving the Status line byte-identical", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n\n## Scope\nFoo.\n`, (p) => {
+      lockContract(p, { kind: "impasse-adjudication", impasse: IMPASSE });
+      expect(readFileSync(p, "utf-8")).toBe(
+        `# Slice\n\n**Status:** LOCKED\n\n` +
+          `**Lock-Provenance:** impasse-adjudication ${IMPASSE}\n\n` +
+          `## Scope\nFoo.\n`,
+      );
+      expect(readFileSync(p, "utf-8")).toMatch(/^\*\*Status:\*\* LOCKED$/m);
+    });
+  });
+
+  it("round-trips each provenance kind", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n`, (p) => {
+      for (const provenance of [
+        { kind: "impasse-adjudication", impasse: IMPASSE },
+        { kind: "focused-scope-revision", round: 3 },
+        { kind: "negotiation", round: 1 },
+      ] as const) {
+        lockContract(p, provenance);
+        expect(readContractLockProvenance(p)).toEqual(provenance);
+        // Relocking replaces the stamp rather than accumulating stamps.
+        expect(
+          readFileSync(p, "utf-8").match(/\*\*Lock-Provenance:\*\*/g)?.length,
+        ).toBe(1);
+      }
+    });
+  });
+
+  it("reads no provenance from an unstamped or unparseable lock", () => {
+    withContractFile(`# Slice\n\n**Status:** LOCKED\n`, (p) => {
+      expect(readContractLockProvenance(p)).toBeNull();
+    });
+    // Fail-closed: a stamp nothing here wrote proves nothing, so it reads
+    // exactly like no stamp at all.
+    withContractFile(
+      `# Slice\n\n**Status:** LOCKED\n\n**Lock-Provenance:** trust me\n`,
+      (p) => expect(readContractLockProvenance(p)).toBeNull(),
+    );
+    expect(readContractLockProvenance("/nonexistent/contract.md")).toBeNull();
+  });
+
+  it("takes the stamp back with the lock", () => {
+    withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n\n## Scope\nFoo.\n`, (p) => {
+      const before = readFileSync(p, "utf-8");
+      lockContract(p, NEGOTIATION_LOCK);
+      reopenContract(p);
+      // A reopened contract has no current lock, so a line naming what
+      // produced the last one could only mislead the reconciliation.
+      expect(readContractLockProvenance(p)).toBeNull();
+      expect(readFileSync(p, "utf-8")).toBe(before);
     });
   });
 });
@@ -863,9 +1369,9 @@ describe("reopenContract", () => {
 
   it("round-trips with lockContract", () => {
     withContractFile(`# Slice\n\n**Status:** NEGOTIATING\n`, (p) => {
-      lockContract(p);
+      lockContract(p, NEGOTIATION_LOCK);
       reopenContract(p);
-      lockContract(p);
+      lockContract(p, NEGOTIATION_LOCK);
       expect(readContractStatus(p)).toBe("LOCKED");
       expect(
         readFileSync(p, "utf-8").match(/\*\*Status:\*\*/g)?.length,

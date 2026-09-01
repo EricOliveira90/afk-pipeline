@@ -1,4 +1,9 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import {
   ALL_PHASES,
@@ -35,6 +40,21 @@ export interface RunState {
   version: 1;
   prdSlug: string;
   featureBranch: string;
+  /**
+   * Repo-relative specs directory this run was launched against (e.g.
+   * `.kiro/specs/<prd-slug>`), recorded so a later command can *resolve*
+   * where a slice's artifacts live instead of searching for them.
+   *
+   * `--prd-dir` is arbitrary, so the estate probe used to guess with a
+   * depth-bounded walk and reported "no estate" for any layout deeper than
+   * the default — after which `clean-failed` deleted the worktree (architect
+   * blocker 2, fifth adjudication gate round). The run is the one party that
+   * knows this without guessing, so it
+   * writes it down. Optional because state files predating the field must
+   * stay loadable: `probeAdjudicationEstate` falls back to a complete walk,
+   * which is slower but still never infers absence.
+   */
+  specsDir?: string;
   /** Immutable executable slice identities resolved at the first run. */
   scope?: PersistedRunScope;
   slices: Record<string, PersistedSliceState>;
@@ -219,6 +239,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     version?: unknown;
     prdSlug?: string;
     featureBranch?: string;
+    specsDir?: unknown;
     scope?: PersistedRunScope;
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
@@ -227,6 +248,13 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
+  // A blank or non-string value degrades to absent, which selects the
+  // complete-walk fallback in `probeAdjudicationEstate`. It never degrades
+  // to a guessed path: the whole point of the field is that it is resolved.
+  const specsDir =
+    typeof r.specsDir === "string" && r.specsDir.trim() !== ""
+      ? r.specsDir
+      : undefined;
 
   if (r.version === 1) {
     const slices: Record<string, PersistedSliceState> = {};
@@ -240,6 +268,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       version: 1,
       prdSlug,
       featureBranch,
+      ...(specsDir !== undefined ? { specsDir } : {}),
       ...(r.scope !== undefined ? { scope: r.scope } : {}),
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
@@ -277,6 +306,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     version: 1,
     prdSlug,
     featureBranch,
+    ...(specsDir !== undefined ? { specsDir } : {}),
     ...(r.scope !== undefined ? { scope: r.scope } : {}),
     slices,
   };
@@ -348,6 +378,8 @@ export function projectForPersistence(
       };
     case "STUCK":
     case "ESCALATE":
+    case "AWAITING-ADJUDICATION":
+    case "ADJUDICATION-LOCK-REFUSED":
     case "ERROR":
     case "CONFLICT":
     case "CANCELLED":

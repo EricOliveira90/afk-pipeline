@@ -9,6 +9,7 @@ import {
   readSync,
   rmSync,
   statSync,
+  writeFileSync,
   type WriteStream,
 } from "node:fs";
 import { finished } from "node:stream/promises";
@@ -19,6 +20,13 @@ import type { AgentProvider, InvokeOptions } from "./agent-provider.js";
 import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
+import {
+  captureAcceptedContractPair,
+  mutatedAcceptedContractFiles,
+  restoreAcceptedContractPair,
+  withContractTransaction,
+  type ContractTransaction,
+} from "./contract-transaction.js";
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
@@ -123,7 +131,10 @@ import {
 } from "./migration-claims.js";
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
+  acceptanceManifestPaths,
   loadAcceptanceManifest,
+  normalizeAcceptanceManifestPath,
+  type AcceptanceManifest,
   type AcceptanceManifestV2,
   validateAcceptanceManifestBindings,
   validateAcceptanceManifestCoverage,
@@ -132,6 +143,7 @@ import {
 import {
   CONTRACT_RESPONSE_FILENAME,
   CONTRACT_REVIEW_FILENAME,
+  CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
   buildContractNegotiationOutcome,
   buildContractReviewAttemptRecord,
   contractReviewGapMetrics,
@@ -150,6 +162,22 @@ import {
   validateRound2ContractReview,
 } from "./contract-review.js";
 import {
+  ADJUDICATION_DECISIONS_FILENAME,
+  ADJUDICATION_FILENAME,
+  adjudicatedLockIsProven,
+  appendAdjudicationDecision,
+  impasseFingerprint,
+  loadAdjudicationDecisionLog,
+  markAdjudicationDecisionsApplied,
+  parseAdjudication,
+  reconcileDiscardedDecisionLog,
+  undecidedContestedFindingIds,
+  unresolvedBlockingFindingIds,
+  waitForAdjudication,
+  type Adjudication,
+  type AdjudicationWaitResult,
+} from "./adjudication.js";
+import {
   advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
   loadQAReview,
@@ -167,8 +195,15 @@ import {
   buildScopeAmendmentRecord,
   planScopeAmendment,
 } from "./scope-amendment.js";
+import {
+  ESCALATION_FILENAME,
+  outOfScopeChangedPaths,
+  parseScopeEscalation,
+} from "./escalation.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
+const DEFAULT_ADJUDICATION_WAIT_MS = 60_000;
+const DEFAULT_ADJUDICATION_POLL_MS = 1_000;
 
 /**
  * Scope amendments granted per QA stage per round (#112).
@@ -181,6 +216,28 @@ const MAX_GENERATOR_ROUNDS = 3;
  * generator work earns a fresh grant.
  */
 const MAX_SCOPE_AMENDMENTS_PER_ROUND = 1;
+
+/**
+ * Focused scope revisions granted per implementation round (ADR 0050).
+ *
+ * The generator's escalation loop deliberately does not spend an
+ * implementation round: the generator stopped *before* an undeclared
+ * edit, so re-dispatching it under a widened contract is the same round's
+ * work continuing. That is what made it unbounded — a generator that
+ * discovers one undeclared path at a time could run fresh generator,
+ * planner and contract-evaluator invocations forever without consuming
+ * any budget, which is the loop ADR 0041 says an uncertain branch must
+ * not take.
+ *
+ * Two, not one: unlike a QA scope amendment (ADR 0048), the tree *does*
+ * change between escalations here — the generator commits work, then
+ * stops at the next boundary — so a second genuinely distinct discovery
+ * is honest work rather than a re-report of what the first pass should
+ * have seen. A third in the same round is a generator trickling paths
+ * instead of declaring the scope it needs; the round ends with a
+ * persisted reason and the next round's escalations earn a fresh grant.
+ */
+const MAX_SCOPE_REVISIONS_PER_ROUND = 2;
 const WAVE_TRANSITION_TIMEOUT_MS = 30_000;
 /**
  * Persisted reason on every slice a cancellation stops, whether it was
@@ -417,6 +474,18 @@ export interface PipelineConfig {
   requestCancellation?: () => void;
   /** Sentinel poll interval override. Exists for tests. */
   stopSentinelIntervalMs?: number;
+  /** Bounded adjudication hold. Private test seam; not a CLI option. */
+  adjudicationWaitMs?: number;
+  /** Adjudication filesystem poll interval. Private test seam. */
+  adjudicationPollMs?: number;
+  /**
+   * Post-lock refusal injected by orchestration tests. The wave composes
+   * this after its production migration-prefix gate.
+   */
+  onContractLocked?: (
+    ghIssue: string,
+    contractPath: string,
+  ) => string | null;
   /**
    * The CLI's crash recorder (#121). Supplied only by an entry point that
    * owns the process, because the handlers behind it end the process: the
@@ -500,15 +569,40 @@ function slugify(s: string): string {
  * compat; every other provider gets its name appended.
  */
 export function sliceBranchPrefix(provider: AgentProvider): string {
-  return provider.name === "kiro" ? "afk" : `afk-${provider.name}`;
+  return sliceBranchPrefixForProviderName(provider.name);
+}
+
+/**
+ * `sliceBranchPrefix` for a caller that has a provider *name* and no
+ * provider object — the same split `runSlugForProviderName` makes below,
+ * and for the same reason. One formula, one place, so the name-keyed and
+ * object-keyed forms cannot drift.
+ */
+export function sliceBranchPrefixForProviderName(providerName: string): string {
+  return providerName === "kiro" ? "afk" : `afk-${providerName}`;
 }
 
 function featureBranchPrefix(provider: AgentProvider): string {
-  return provider.name === "kiro" ? "feat" : `feat-${provider.name}`;
+  return featureBranchPrefixForProviderName(provider.name);
+}
+
+function featureBranchPrefixForProviderName(providerName: string): string {
+  return providerName === "kiro" ? "feat" : `feat-${providerName}`;
 }
 
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
-  return provider.name === "kiro" ? prdSlug : `${prdSlug}-${provider.name}`;
+  return runSlugForProviderName(prdSlug, provider.name);
+}
+
+/**
+ * `pipelineRunSlug` for a caller that has a provider *name* and no
+ * provider object. Same rule, one place, so the two cannot drift.
+ */
+export function runSlugForProviderName(
+  prdSlug: string,
+  providerName: string,
+): string {
+  return providerName === "kiro" ? prdSlug : `${prdSlug}-${providerName}`;
 }
 
 export function sliceBranch(
@@ -531,11 +625,31 @@ export function sliceWorktreeDir(
   slice: Slice,
   provider: AgentProvider,
 ): string {
+  return sliceWorktreeDirForProviderName(
+    repoRoot,
+    prdSlug,
+    slice.number,
+    provider.name,
+  );
+}
+
+/**
+ * `sliceWorktreeDir` for a caller holding a provider name and a slice
+ * number rather than a provider object and a `Slice`. One formula, one
+ * place, so no caller can disagree with the pipeline about where a
+ * slice's worktree lives.
+ */
+export function sliceWorktreeDirForProviderName(
+  repoRoot: string,
+  prdSlug: string,
+  sliceNumber: string,
+  providerName: string,
+): string {
   return join(
     repoRoot,
     ".afk",
     "worktrees",
-    `${sliceBranchPrefix(provider)}-${prdSlug}-s${slice.number}`,
+    `${sliceBranchPrefixForProviderName(providerName)}-${prdSlug}-s${sliceNumber}`,
   );
 }
 
@@ -695,10 +809,9 @@ export interface SliceContext {
      *   from the feature branch before the generator was handed
      *   `generator-resume`.
      * - `stuck` — the operator opted in with `--resume-stuck` (#49): the
-     *   tree was left untouched, the stuck.md diagnosis survives, and
-     *   the generator is handed `generator-resume-stuck`. The two are
-     *   distinct templates because their situation sections state
-     *   opposite facts about the worktree.
+     *   tree was left untouched and the stuck.md diagnosis survives.
+     *   Both modes use `generator-resume`; explicit situation blocks
+     *   carry their opposite worktree facts without template drift.
      */
     mode: "killed" | "stuck";
     /** Commits on the slice branch beyond the feature-branch base. */
@@ -940,6 +1053,7 @@ function archiveContractReviewAttempt(
   plannerResponse: ContractResponse | null,
   revisions: ContractRevisionArtifacts | null,
   lifecyclePrevious: ContractReview | null = previousReview,
+  validateAsFresh = false,
 ): { record: ContractReviewAttemptRecord; review: ContractReview } | null {
   try {
     const archived = artifacts.archiveContractReviewAttempt({
@@ -972,7 +1086,7 @@ function archiveContractReviewAttempt(
   let review: ContractReview;
   try {
     review = loadContractReview(ctx.absSliceDir);
-    if (round === 1) {
+    if (round === 1 || validateAsFresh) {
       validateRound1ContractReview(review);
     } else if (previousReview && plannerResponse) {
       validateRound2ContractReview(
@@ -1016,6 +1130,301 @@ function archiveContractReviewAttempt(
     );
   }
   return { record, review };
+}
+
+/**
+ * A focused scope revision replaces the slice's *accepted* lock — the
+ * contract and its acceptance manifest — and ADR 0008 makes those files
+ * the orchestrator-owned single source of truth for the slice. So the
+ * revision is a transaction: nothing but an ACCEPTed, re-locked
+ * replacement is allowed to be what the operator finds on disk.
+ *
+ * `reopenContract` and the manifest delete happen before the planner
+ * runs, because the planner is what writes the replacement. Every exit
+ * short of success — a planner or provider throw, a stability/coverage/
+ * binding validation failure, an undeclared-path refusal, a malformed
+ * review artifact, an evaluator REVISE, a cancellation — therefore has to
+ * put the accepted pair back byte-for-byte. ADR 0039 decision 2 is the
+ * reason it matters: the worktree copy of a slice's contract may be the
+ * only copy, so a failure that leaves the contract reopened and the
+ * manifest deleted has destroyed the state a restart would archive.
+ *
+ * The capture/restore/announce mechanics and the lock exit are
+ * `withContractTransaction`'s, shared with the adjudication apply path
+ * (ADR 0055 Seam 1 decision 3). This function is what is left once they
+ * are factored out: the revision protocol itself.
+ *
+ * The escalation artifact is archived by the caller *before* this runs
+ * (see `runSliceExecute`), so the evidence for a hand-declaration
+ * survives the rollback either way.
+ */
+async function runFocusedScopeRevision(
+  ctx: SliceContext,
+  escalation: import("./escalation.js").ScopeEscalation,
+): Promise<
+  | { phase: "LOCKED"; manifest: AcceptanceManifest }
+  | { phase: "ERROR"; error: string }
+> {
+  return await withContractTransaction(
+    ctx,
+    {
+      reason: "focused scope revision did not complete",
+      qualifier: "the previously accepted",
+    },
+    (tx) => reviseAcceptedContract(ctx, escalation, tx),
+  );
+}
+
+async function reviseAcceptedContract(
+  ctx: SliceContext,
+  escalation: import("./escalation.js").ScopeEscalation,
+  tx: ContractTransaction,
+): Promise<
+  | { phase: "LOCKED"; manifest: AcceptanceManifest }
+  | { phase: "ERROR"; error: string }
+> {
+  const { config, slice, logger, invoke } = ctx;
+  const { contractPath, manifestPath, previousContract } = tx;
+  const previousManifest = loadAcceptanceManifest(ctx.absSliceDir);
+  // `loadAcceptanceManifest` just proved the accepted manifest exists, so
+  // the transaction captured its bytes before the reopen below.
+  const previousManifestText = tx.previousManifestText ?? "";
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
+  const revisionRound = artifacts.nextContractReviewRound(reviewArchiveDir);
+  const evidence = JSON.stringify({
+    findingIds: escalation.findingIds,
+    paths: escalation.paths,
+    reason: escalation.reason,
+  });
+
+  artifacts.reopenContract(contractPath);
+  logger.phase(
+    `${ctx.tag}: focused scope revision (contract round ${revisionRound})...`,
+    "error",
+    {
+      type: "phase-started",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      agent: "planner",
+      round: revisionRound,
+    },
+  );
+  rmSync(manifestPath, { force: true });
+  const plannerLog = logger.agentLog(
+    slice.number,
+    "planner",
+    revisionRound,
+  );
+  await invoke({
+    role: "planner",
+    prompt: renderPrompt("planner", {
+      GH_ISSUE: slice.ghIssue,
+      SPECS_DIR: ctx.relSpecsDir,
+      SLICE_DIR: ctx.relSliceDir,
+      ROUND: revisionRound,
+      RELEVANT_FILES: ctx.relevantFilesBlock,
+      SLICE_BODY:
+        `This is a focused revision of the already accepted contract. ` +
+        `The generator supplied this validated scope evidence:\n${evidence}`,
+      REVISION_NOTE:
+        `The generator stopped before an undeclared edit. Revise only the ` +
+        `contract and acceptance manifest needed to declare this request:\n` +
+        `${evidence}\n\nPreserve every other locked term.`,
+      CONTRACT_RESPONSE_NOTE:
+        `Do not write ${CONTRACT_RESPONSE_FILENAME} for this focused scope revision.`,
+      MIGRATION_RESERVATION: migrationReservationBlock(
+        config,
+        slice.ghIssue,
+      ),
+      BASE_GATE_CATALOG: formatBaseGateCatalog(
+        resolveBaseGateDeclarations(ctx.worktreeDir),
+      ),
+    }),
+    cwd: ctx.worktreeDir,
+    logStream: plannerLog,
+    maxDurationMs: config.maxAgentDurationMs,
+  }).finally(() => closeAgentLog(plannerLog));
+  logger.event({
+    type: "phase-ended",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    agent: "planner",
+    round: revisionRound,
+  });
+
+  const revisedManifest = loadAcceptanceManifest(ctx.absSliceDir);
+  validateAcceptanceManifestStability(previousManifest, revisedManifest);
+  validateAcceptanceManifestCoverage(
+    readFileSync(contractPath, "utf-8"),
+    revisedManifest,
+    contractPath,
+  );
+  const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
+  validateAcceptanceManifestBindings(revisedManifest, gateCatalog);
+  const requestedPaths = escalation.paths.map((path) =>
+    normalizeAcceptanceManifestPath(path, ESCALATION_FILENAME),
+  );
+  const revisedManifestPaths = new Set(
+    acceptanceManifestPaths(revisedManifest),
+  );
+  const revisedContractPaths = new Set(
+    (artifacts.readContractFiles(contractPath) ?? []).map((path) =>
+      normalizeAcceptanceManifestPath(path, contractPath),
+    ),
+  );
+  const missingManifestPaths = requestedPaths.filter(
+    (path) => !revisedManifestPaths.has(path),
+  );
+  const missingContractPaths = requestedPaths.filter(
+    (path) => !revisedContractPaths.has(path),
+  );
+  if (missingManifestPaths.length > 0 || missingContractPaths.length > 0) {
+    throw new Error(
+      "Focused scope revision did not declare every requested path: " +
+        `contract.md missing [${missingContractPaths.join(", ")}]; ` +
+        `${ACCEPTANCE_MANIFEST_FILENAME} missing ` +
+        `[${missingManifestPaths.join(", ")}]`,
+    );
+  }
+  // A focused scope revision is *additive*: it repairs a too-narrow lock by
+  // adding the escalation's requested paths, and Stories 1-2 (slice 01
+  // B-03/B-04) require it to preserve the accepted contract. Verifying only
+  // that the requested paths arrived left the other half unguarded — a
+  // revision could add them while silently dropping paths already locked, so
+  // the fresh generator would receive an incomplete scope and the transaction
+  // would re-lock over lost, already-contracted work. So every previously
+  // declared path must survive, in both artifacts, on top of the requested
+  // ones. (Only this path is additive-only: the adjudication apply path
+  // shares `validateAcceptanceManifestStability` but may legitimately narrow
+  // scope per a human decision — ADR 0054 — so the check lives here, not
+  // there.)
+  const droppedManifestPaths = acceptanceManifestPaths(previousManifest).filter(
+    (path) => !revisedManifestPaths.has(path),
+  );
+  const droppedContractPaths = (
+    artifacts.parseContractFiles(previousContract) ?? []
+  )
+    .map((path) => normalizeAcceptanceManifestPath(path, contractPath))
+    .filter((path) => !revisedContractPaths.has(path));
+  if (droppedManifestPaths.length > 0 || droppedContractPaths.length > 0) {
+    throw new Error(
+      "Focused scope revision dropped previously locked path(s): " +
+        `contract.md dropped [${droppedContractPaths.join(", ")}]; ` +
+        `${ACCEPTANCE_MANIFEST_FILENAME} dropped ` +
+        `[${droppedManifestPaths.join(", ")}]. A revision must preserve the ` +
+        `accepted file scope and add the requested paths, never replace it.`,
+    );
+  }
+  const revisions: ContractRevisionArtifacts = {
+    "contract.md": {
+      before: previousContract,
+      after: readFileSync(contractPath, "utf-8"),
+    },
+    "acceptance-manifest.json": {
+      before: previousManifestText,
+      after: readFileSync(manifestPath, "utf-8"),
+    },
+  };
+
+  logger.phase(
+    `${ctx.tag}: evaluating focused scope revision ` +
+      `(contract round ${revisionRound})...`,
+    "error",
+    {
+      type: "phase-started",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      agent: "evaluator-contract",
+      round: revisionRound,
+    },
+  );
+  const feedbackPath = join(
+    ctx.absSliceDir,
+    `feedback-r${revisionRound}.md`,
+  );
+  const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
+  rmSync(feedbackPath, { force: true });
+  rmSync(reviewPath, { force: true });
+  const evaluatorLog = logger.agentLog(
+    slice.number,
+    "evaluator-contract",
+    revisionRound,
+  );
+  await invoke({
+    role: "evaluator-contract",
+    prompt: renderPrompt("evaluator-contract", {
+      SPECS_DIR: ctx.relSpecsDir,
+      SLICE_DIR: ctx.relSliceDir,
+      ROUND: revisionRound,
+      RELEVANT_FILES: ctx.relevantFilesBlock,
+      PREVIOUS_REVIEW_NOTE:
+        "This is a fresh evaluation of one focused generator scope revision.",
+      ACCEPTANCE_MANIFEST: JSON.stringify(revisedManifest, null, 2),
+      BASE_GATE_CATALOG: formatBaseGateCatalog(gateCatalog),
+      CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
+      PLANNER_RESPONSE:
+        "(fresh scope revision; no contract-review finding response)",
+      REVISION_CONTEXT: JSON.stringify(
+        { scopeEscalation: escalation, revisions },
+        null,
+        2,
+      ),
+    }),
+    cwd: ctx.worktreeDir,
+    logStream: evaluatorLog,
+    maxDurationMs: config.maxAgentDurationMs,
+  }).finally(() => closeAgentLog(evaluatorLog));
+
+  archiveContractReviewAttempt(
+    ctx,
+    reviewArchiveDir,
+    revisionRound,
+    1,
+    null,
+    null,
+    revisions,
+    null,
+    true,
+  );
+  const review = loadContractReview(ctx.absSliceDir);
+  validateRound1ContractReview(review);
+  logger.event({
+    type: "phase-ended",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    agent: "evaluator-contract",
+    round: revisionRound,
+    verdict: review.verdict,
+  });
+  if (review.verdict !== "ACCEPT") {
+    return {
+      phase: "ERROR",
+      error:
+        `Focused scope revision was not accepted: ` +
+        formatContractReviewFindings(review.findings),
+    };
+  }
+
+  const locked = tx.lock({
+    provenance: { kind: "focused-scope-revision", round: revisionRound },
+  });
+  if (!locked.locked) {
+    logger.phase(
+      `${ctx.tag}: focused scope revision lock refused — ${locked.refusal}`,
+      "error",
+    );
+    return {
+      phase: "ERROR",
+      error: `Focused scope revision lock refused: ${locked.refusal}`,
+    };
+  }
+  tx.onAccepted();
+  logger.phase(`${ctx.tag}: focused scope revision LOCKED`);
+  return { phase: "LOCKED", manifest: revisedManifest };
 }
 
 /**
@@ -1085,7 +1494,15 @@ interface NegotiateFailureCause {
 export type NegotiateOutcome =
   | { phase: "LOCKED" }
   | { phase: "CANCELLED" }
-  | { phase: "STUCK" | "ESCALATE" | "ERROR"; cause: NegotiateFailureCause };
+  | {
+      phase:
+        | "STUCK"
+        | "ESCALATE"
+        | "AWAITING-ADJUDICATION"
+        | "ADJUDICATION-LOCK-REFUSED"
+        | "ERROR";
+      cause: NegotiateFailureCause;
+    };
 
 /**
  * Whether a negotiate failure is worth retrying. A genuine verdict
@@ -1251,6 +1668,61 @@ function negotiateVerdictCause(args: {
           `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
         : `negotiate: contract not locked after negotiation — last evaluator ` +
           `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+/**
+ * A NON_CONVERGENCE that also held a contest, named as such.
+ *
+ * The classification is deliberate (ADR 0055 §1: an OPEN blocker is not
+ * adjudicable, so the mixed case takes the branch that cannot loop, ADR
+ * 0041). The defect it left behind was one of *visibility* — the operator
+ * was told only "negotiation escalated, verdict REVISE" and never that a
+ * blocking finding had two held positions waiting. `null` for every other
+ * exhaustion, so the ordinary summary stays exactly as it was.
+ */
+export function negotiationMixedExhaustionCause(
+  outcome: ContractNegotiationOutcome | undefined,
+  verdict: RecordedContractVerdict,
+  round: number,
+): NegotiateFailureCause | null {
+  if (!outcome || outcome.classification !== "NON_CONVERGENCE") return null;
+  const contested = outcome.findings
+    .filter((finding) => finding.state === "CONTESTED")
+    .map((finding) => finding.id);
+  if (contested.length === 0) return null;
+  const open = outcome.findings
+    .filter((finding) => finding.state === "OPEN")
+    .map((finding) => finding.id);
+  return {
+    kind: "verdict",
+    verdict,
+    summary:
+      `negotiate: contract negotiation reached NON_CONVERGENCE after ` +
+      `${round} round(s) — contested blocking finding${contested.length === 1 ? "" : "s"} ` +
+      `${contested.join(", ")} ${contested.length === 1 ? "holds" : "hold"} two ` +
+      `positions, but unresolved OPEN blocker${open.length === 1 ? "" : "s"} ` +
+      `${open.join(", ")} cannot be settled by any human decision, so the ` +
+      `slice routes to the operator instead of parking (ADR 0055 §1); both ` +
+      `positions are in stuck.md`,
+  };
+}
+
+function negotiateImpasseCause(
+  outcome: ContractNegotiationOutcome,
+  verdict: RecordedContractVerdict,
+): NegotiateFailureCause {
+  const contestedIds = outcome.findings
+    .filter((finding) => finding.state === "CONTESTED")
+    .map((finding) => finding.id);
+  return {
+    kind: "verdict",
+    verdict,
+    summary:
+      `negotiate: contract negotiation reached IMPASSE after ${outcome.round} round(s) — ` +
+      `contested blocking finding${contestedIds.length === 1 ? "" : "s"} ` +
+      `${contestedIds.join(", ")} ` +
+      `${contestedIds.length === 1 ? "requires" : "require"} human adjudication`,
   };
 }
 
@@ -1527,8 +1999,8 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   } else if (plan.action === "resume-stuck") {
     // No resetWorktreeToHead here, deliberately: the operator opted in
     // to keep this tree exactly as they inspected it, uncommitted edits
-    // included. The generator-resume-stuck prompt tells the generator to
-    // read `git status` first rather than assuming a clean tip.
+    // included. The shared resume prompt's worktree situation block tells
+    // the generator to inspect it rather than assuming a clean tip.
     const commitLog = git.logCommitsWithStat(ctx.worktreeDir, ctx.featBranch);
     const handoffNote = buildResumeHandoffNote(
       join(ctx.absSliceDir, "handoff.md"),
@@ -1616,6 +2088,38 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
 }
 
 /**
+ * The worktree-ownership check every dispatch owes, wherever it routes
+ * afterwards (ADR 0010 decision item 3; ADR 0055 Seam 2).
+ *
+ * `prepareSliceWorktree` ends with `assertWorktreeRegistered`, but it is
+ * only reached by the *ordinary* negotiate path. A slice that arrives with
+ * a persisted IMPASSE goes straight to the adjudication branch, and an
+ * adjudicated lane successor goes straight to a merge into its parked
+ * worktree — both then run git commands, and can invoke the planner, in a
+ * directory nobody proved git still owns. That is precisely the ADR 0010
+ * corruption mode: a leaked directory no longer registered as a worktree
+ * makes git walk up to the parent repository and commit onto whatever
+ * branch the operator has checked out there.
+ *
+ * The check is deliberately narrower than `prepareSliceWorktree`: it
+ * never creates, recreates, resets or deletes anything, because the two
+ * callers that need it must preserve the parked estate byte-for-byte.
+ *
+ * A directory that does not exist at all is not a violation here — it is
+ * the ordinary first-dispatch state, and creating it is the ordinary
+ * path's job. Every state where something *is* on disk (or a branch
+ * survives without its worktree) must prove registration, and today every
+ * such state that cannot is a refusal in `prepareSliceWorktree` too; this
+ * moves the refusal ahead of the routing fork instead of behind one arm
+ * of it.
+ */
+export function assertSliceWorktreeOwnership(ctx: SliceContext): void {
+  const { repoRoot } = ctx.config;
+  if (!existsSync(ctx.worktreeDir)) return;
+  git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
+}
+
+/**
  * Report this dispatch's budgets — one `run.log` line and one typed
  * `slice-bounds` event (plan §3.9, wave item 14). See `bounds.ts` for
  * why: these four numbers decide what a struggling slice may still do,
@@ -1689,7 +2193,7 @@ export function reportSliceBounds(ctx: SliceContext): void {
 export async function runSliceNegotiate(
   ctx: SliceContext,
 ): Promise<NegotiateOutcome> {
-  const { config, slice, logger } = ctx;
+  const { config, logger } = ctx;
   const infrastructureRetries =
     config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
   if (
@@ -1699,7 +2203,484 @@ export async function runSliceNegotiate(
     throw new Error("infrastructureRetries must be a non-negative integer");
   }
 
+  // Before the routing fork, not inside one arm of it: whichever branch
+  // this dispatch takes, it may run git commands and invoke agents in
+  // `ctx.worktreeDir`, so the same ownership boundary is proved for both
+  // (ADR 0010 item 3). The ordinary path re-asserts at the end of
+  // `prepareSliceWorktree` — that assertion covers the worktree it just
+  // created or recreated, which is a different claim from this one.
+  assertSliceWorktreeOwnership(ctx);
+
+  const outcomePath = join(
+    ctx.absSliceDir,
+    CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+  );
+  if (existsSync(outcomePath)) {
+    const rawOutcome = readFileSync(outcomePath, "utf-8");
+    const outcome = JSON.parse(rawOutcome) as ContractNegotiationOutcome;
+    if (outcome.classification === "IMPASSE") {
+      return await runImpasseAdjudication(ctx, { rawOutcome, outcome });
+    }
+  }
+
   return negotiateAttempt(ctx, infrastructureRetries);
+}
+
+/**
+ * The IMPASSE branch of Phase A: collect human adjudications, then apply
+ * them in one transaction (ADR 0054).
+ *
+ * Two rules the ordinary negotiate path does not need:
+ *
+ * 1. **A decision resolves a finding, not the contract.** One
+ *    `adjudication.md` names one finding, so a multi-finding impasse needs
+ *    one decision per contested finding. Each valid decision is recorded in
+ *    `adjudication-decisions.json` and its file consumed; the slice parks
+ *    again until every contested finding has one. Only then may the
+ *    contract lock, so an on-disk `LOCKED` never claims a contract is
+ *    settled while the structured impasse still records an undecided
+ *    contested finding (ADR 0008).
+ *
+ * 2. **Applying the decisions is a transaction.** The apply step mutates
+ *    the same authoritative `contract.md` + `acceptance-manifest.json` pair
+ *    as `runFocusedScopeRevision`, so it owes the same guarantee (ADR
+ *    0051): both files are captured before the planner runs and restored
+ *    byte-for-byte on every exit that is not an accepted lock. It is
+ *    literally the same transaction now — `withContractTransaction`, shared
+ *    with the revision path (ADR 0055 Seam 1 decision 3), including the one
+ *    lock exit that runs the completion predicate and the mechanical lock
+ *    gate. A successful lock marks the record applied, so a later
+ *    implementation retry that re-enters this branch does not apply the same
+ *    decisions a second time.
+ *
+ * The decision record itself is *not* part of the transaction — like the
+ * escalation archive in ADR 0051, human input must outlive a mechanical
+ * refusal. A rolled-back apply is retried from the same decisions, not
+ * from a fresh interrogation of the human.
+ */
+/**
+ * Re-run the mechanical lock gate over an adjudication lock this dispatch
+ * did not itself produce, and refuse the dispatch if it now objects.
+ *
+ * The two shortcuts that return `LOCKED` without entering the transaction —
+ * a stamped lock beside a discarded record, and an already-applied decision
+ * log (ADR 0055 §4–5) — prove something about the *decisions*: that this
+ * exact set produced this lock. Neither proves anything about the base the
+ * lock is about to be generated against, and the gate's checks
+ * (migration-prefix allocation, run-specific claims — ADR 0028) are exactly
+ * the ones a changed base invalidates.
+ *
+ * A lane successor is where that gap bites (ADR 0028, *Why the gate is a
+ * callback*): `runWave` merges the new feature tip into the preserved parked
+ * worktree and re-negotiates, so a prefix the predecessor's merge has since
+ * claimed is a collision that only this call can see. Without it the
+ * shortcut returned `LOCKED` and generation ran on a contract whose declared
+ * migration prefix belonged to another slice.
+ *
+ * The refusal preserves the parked estate exactly as it stands — no reopen,
+ * no rollback, nothing written. There is no transaction here to roll back
+ * to, and the contract on disk is the one a passing gate did attest to at
+ * the base it was locked on; the objection is about the base, which the next
+ * dispatch re-reads anyway. So the refusal is idempotent: every dispatch
+ * re-asks the gate, and the lock cannot be consumed while it objects. It
+ * reads as a lock refusal (`ESCALATE`), the same phrasing the transaction's
+ * own gate refusal produces, because to the operator it is the same event.
+ */
+function revalidateAdjudicatedLock(
+  ctx: SliceContext,
+  contractPath: string,
+  proof: string,
+): NegotiateOutcome | null {
+  const objection = ctx.onContractLocked?.(contractPath) ?? null;
+  if (objection === null) return null;
+  ctx.logger.phase(
+    `${ctx.tag}: adjudicated contract lock refused — ${proof}, but the ` +
+      `mechanical lock gate objects on the current base: ${objection}; the ` +
+      `parked branch, decision record and lock are preserved`,
+    "error",
+  );
+  return {
+    phase: "ADJUDICATION-LOCK-REFUSED",
+    cause: {
+      kind: "verdict",
+      verdict: "REVISE",
+      summary: `adjudication: contract lock refused — ${objection}`,
+    },
+  };
+}
+
+async function runImpasseAdjudication(
+  ctx: SliceContext,
+  impasse: { rawOutcome: string; outcome: ContractNegotiationOutcome },
+): Promise<NegotiateOutcome> {
+  const { config, logger } = ctx;
+  const { rawOutcome, outcome } = impasse;
+  const decisionPath = join(ctx.absSliceDir, ADJUDICATION_FILENAME);
+  const contractPath = join(ctx.absSliceDir, "contract.md");
+  const parkedCause = negotiateImpasseCause(outcome, "REVISE");
+
+  // Re-dispatch is the reopen (ADR 0055 §9), and reaching this function *is*
+  // the re-dispatch — so the reopen belongs here, before the decision is
+  // read, not after the all-decided check. Behind that check it only fired
+  // for the dispatch that completed the adjudication; a partial decision or
+  // a refused one returned a fresh AWAITING-ADJUDICATION while the slice was
+  // still marked parked, and `recordTerminal` kept the previous park because
+  // the phase matched. The persisted reason then went on naming every
+  // finding when only some were still undecided, which is the one thing
+  // ADR 0054 item 3 requires each partial adjudication to update.
+  logger.trackSlice(
+    lifecycle.running(
+      {
+        ghIssue: ctx.slice.ghIssue,
+        title: ctx.slice.title,
+        branch: ctx.branch,
+      },
+      logger.getSliceProgress(ctx.slice.ghIssue),
+    ),
+  );
+
+  const loaded = loadAdjudicationDecisionLog(ctx.absSliceDir, outcome);
+  let decisionLog = loaded.log;
+  if (loaded.discarded) {
+    // The log is gone either way. What a `LOCKED` contract beside it means
+    // is decided by the lock's own provenance stamp, not by policy
+    // (ADR 0055 §4): blanket trust is the A2 defect, and blanket reopening
+    // would throw away a human's completed adjudication every time its
+    // receipt got corrupted.
+    const reconciliation = reconcileDiscardedDecisionLog({
+      locked: artifacts.readContractStatus(contractPath) === "LOCKED",
+      provenance: artifacts.readContractLockProvenance(contractPath),
+      outcome,
+    });
+    const discarded =
+      `${ctx.tag}: discarded ${ADJUDICATION_DECISIONS_FILENAME} — ` +
+      `${loaded.discarded}`;
+    if (reconciliation.action === "lock-stands") {
+      logger.phase(
+        `${discarded}; ${reconciliation.because}, so the lock stands — only ` +
+          `the record of which decisions produced it is lost`,
+        "error",
+      );
+      const objected = revalidateAdjudicatedLock(
+        ctx,
+        contractPath,
+        "the stamped lock stands over a discarded decision record",
+      );
+      return objected ?? { phase: "LOCKED" };
+    }
+    if (reconciliation.action === "reopen") {
+      artifacts.reopenContract(contractPath);
+      logger.phase(
+        `${discarded}; ${reconciliation.because}, so the LOCKED contract is ` +
+          `provably stale and has been reopened; every contested finding must ` +
+          `be adjudicated again`,
+        "error",
+      );
+    } else {
+      logger.phase(
+        `${discarded}; every contested finding must be adjudicated again`,
+        "error",
+      );
+    }
+  }
+
+  // --- Consume whatever the human has written since the last dispatch.
+  if (existsSync(decisionPath)) {
+    const rawDecision = readFileSync(decisionPath, "utf-8");
+    let decision: Adjudication;
+    try {
+      decision = parseAdjudication(
+        rawDecision,
+        outcome,
+        ADJUDICATION_FILENAME,
+        decisionLog.decisions.map((recorded) => recorded.decision.findingId),
+      );
+    } catch (error) {
+      const defect = error instanceof Error ? error.message : String(error);
+      logger.phase(
+        `${ctx.tag}: adjudication refused — ${defect}; slice remains parked`,
+        "error",
+      );
+      return {
+        phase: "AWAITING-ADJUDICATION",
+        cause: {
+          kind: "verdict",
+          verdict: "REVISE",
+          summary: `${parkedCause.summary}; ${defect}`,
+        },
+      };
+    }
+    // Record before consuming: a crash between the two costs a re-write of
+    // one decision, never a decision recorded nowhere.
+    decisionLog = appendAdjudicationDecision(ctx.absSliceDir, decisionLog, {
+      raw: rawDecision,
+      decision,
+    });
+    rmSync(decisionPath, { force: true });
+    logger.phase(
+      `${ctx.tag}: recorded the human decision for ${decision.findingId} in ` +
+        `${ADJUDICATION_DECISIONS_FILENAME} and consumed ${ADJUDICATION_FILENAME}`,
+    );
+  }
+
+  if (decisionLog.decisions.length === 0) {
+    return { phase: "AWAITING-ADJUDICATION", cause: parkedCause };
+  }
+
+  const decidedIds = decisionLog.decisions.map(
+    (recorded) => recorded.decision.findingId,
+  );
+  // The single completion predicate (ADR 0055 §2) is the only thing the lock
+  // path consults: every unresolved blocking finding, not just the contested
+  // ones. The contested subset is rendered alongside it because that is what
+  // the courier can still act on — and, when the two disagree, saying so is
+  // the whole point of keeping the predicate wider than the classifier.
+  const undecided = unresolvedBlockingFindingIds(outcome, decisionLog);
+  if (undecided.length > 0) {
+    const contested = undecidedContestedFindingIds(outcome, decisionLog);
+    const inadjudicable = undecided.filter((id) => !contested.includes(id));
+    const summary =
+      `${parkedCause.summary}; decided ${decidedIds.join(", ")} — ` +
+      `unresolved blocking finding${undecided.length === 1 ? "" : "s"} ` +
+      `${undecided.join(", ")} still ` +
+      `${undecided.length === 1 ? "requires" : "require"} human adjudication ` +
+      `before the contract can lock` +
+      (inadjudicable.length > 0
+        ? `; ${inadjudicable.join(", ")} ` +
+          `${inadjudicable.length === 1 ? "is" : "are"} not CONTESTED, so no ` +
+          `decision can settle ${inadjudicable.length === 1 ? "it" : "them"} ` +
+          `— this exhaustion should not have been classified IMPASSE`
+        : "");
+    logger.phase(`${ctx.tag}: ${summary}`, "error");
+    return {
+      phase: "AWAITING-ADJUDICATION",
+      cause: { kind: "verdict", verdict: "REVISE", summary },
+    };
+  }
+
+  // --- Every unresolved blocking finding is decided. Apply once, ever.
+  //
+  // A LOCKED contract with a complete record and no applied marker is the
+  // crash window between `lockContract` and the marker write — but only if
+  // the record's pending-lock witness proves it (ADR 0055 §5). A bare
+  // LOCKED is what let a stale lock be inherited (A2), so it no longer
+  // shortcuts anything: without proof the decisions are applied in full.
+  if (
+    adjudicatedLockIsProven({
+      locked: artifacts.readContractStatus(contractPath) === "LOCKED",
+      log: decisionLog,
+    })
+  ) {
+    // The lock is proven for *these decisions*; it is not proven against
+    // *this base*. Re-attest before anything is dispatched from it — the
+    // applied mark below is bookkeeping about a lock the gate has to still
+    // stand behind (see `revalidateAdjudicatedLock`).
+    const objected = revalidateAdjudicatedLock(
+      ctx,
+      contractPath,
+      `the adjudication for ${decidedIds.join(", ")} was already applied`,
+    );
+    if (objected) return objected;
+    if (!decisionLog.applied) {
+      decisionLog = markAdjudicationDecisionsApplied(
+        ctx.absSliceDir,
+        decisionLog,
+      );
+    }
+    logger.phase(
+      `${ctx.tag}: adjudication for ${decidedIds.join(", ")} already applied; ` +
+        `contract LOCKED`,
+    );
+    return { phase: "LOCKED" };
+  }
+
+  // No `trackSlice` here — the dispatch already reopened the park at the
+  // top of this function, which is where every arm of it gets the reopen.
+  const refresh = git.mergeBranchIntoWorktree(ctx.worktreeDir, ctx.featBranch);
+  if (refresh.status === "conflict") {
+    return {
+      phase: "ERROR",
+      cause: {
+        kind: "internal-error",
+        summary:
+          "adjudication: could not refresh the parked branch from " +
+          `${ctx.featBranch} without conflicts; preserved the branch and decisions`,
+      },
+    };
+  }
+
+  return await withContractTransaction(
+    ctx,
+    {
+      reason: "adjudication was not applied",
+      qualifier: "the pre-apply",
+      note:
+        `the recorded decisions for ${decidedIds.join(", ")} are ` +
+        `preserved`,
+    },
+    async (tx): Promise<NegotiateOutcome> => {
+      const lockAdjudicatedContract = (
+        previousManifest?: AcceptanceManifest,
+      ): NegotiateOutcome => {
+        try {
+          const manifest = loadAcceptanceManifest(ctx.absSliceDir);
+          if (previousManifest) {
+            validateAcceptanceManifestStability(previousManifest, manifest);
+          }
+          validateAcceptanceManifestCoverage(
+            readFileSync(contractPath, "utf-8"),
+            manifest,
+            contractPath,
+          );
+          validateAcceptanceManifestBindings(
+            manifest,
+            resolveBaseGateDeclarations(ctx.worktreeDir),
+          );
+        } catch (error) {
+          const defect = error instanceof Error ? error.message : String(error);
+          logger.phase(
+            `${ctx.tag}: adjudicated contract lock refused — ${defect}`,
+            "error",
+          );
+          return {
+            phase: "ADJUDICATION-LOCK-REFUSED",
+            cause: {
+              kind: "verdict",
+              verdict: "REVISE",
+              summary: `adjudication: contract lock refused — ${defect}`,
+            },
+          };
+        }
+
+        const locked = tx.lock({
+          provenance: {
+            kind: "impasse-adjudication",
+            impasse: impasseFingerprint(outcome),
+          },
+          completion: { outcome, log: decisionLog },
+        });
+        if (!locked.locked) {
+          logger.phase(
+            `${ctx.tag}: adjudicated contract lock refused — ${locked.refusal}`,
+            "error",
+          );
+          return {
+            phase: "ADJUDICATION-LOCK-REFUSED",
+            cause: {
+              kind: "verdict",
+              verdict: "REVISE",
+              summary: `adjudication: contract lock refused — ${locked.refusal}`,
+            },
+          };
+        }
+        logger.phase(
+          `${ctx.tag}: accepted adjudication for ${decidedIds.join(", ")}; ` +
+            `contract LOCKED`,
+        );
+        return { phase: "LOCKED" };
+      };
+
+      // A decision the planner has nothing to do for — the contract already
+      // states the planner's position — locks without an invocation. One
+      // invocation applies every other decision together.
+      const plannerApplied = decisionLog.decisions.filter(
+        (recorded) =>
+          !("winningPosition" in recorded.decision) ||
+          recorded.decision.winningPosition !== "PLANNER",
+      );
+
+      if (plannerApplied.length > 0) {
+        const localSliceContent = readSliceFile(
+          config.prdDir,
+          ctx.slice.number,
+        );
+        const sliceBodyNote = localSliceContent
+          ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
+          : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
+        const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        // An unproven LOCKED contract reaching here is stale debris the
+        // reconciliation above could not clear (its log validated, so the
+        // discard path never ran). The planner must not be handed a
+        // contract still claiming LOCKED while its impasse is being
+        // settled (ADR 0008); the rollback restores these bytes if the
+        // apply fails, so nothing is lost by reopening now.
+        if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+          artifacts.reopenContract(contractPath);
+        }
+        logger.phase(
+          `${ctx.tag}: applying ${decisionLog.decisions.length} human ` +
+            `adjudication(s) with one planner invocation...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: ctx.slice.ghIssue,
+            sliceNumber: ctx.slice.number,
+            agent: "planner",
+          },
+        );
+        const plannerLog = logger.agentLog(ctx.slice.number, "planner");
+        try {
+          await ctx
+            .invoke({
+              role: "planner",
+              prompt: renderPrompt("planner", {
+                GH_ISSUE: ctx.slice.ghIssue,
+                SPECS_DIR: ctx.relSpecsDir,
+                SLICE_DIR: ctx.relSliceDir,
+                ROUND: 2,
+                RELEVANT_FILES: ctx.relevantFilesBlock,
+                SLICE_BODY: sliceBodyNote,
+                REVISION_NOTE: [
+                  "A human has adjudicated the current contract impasse.",
+                  "Apply every decision below exactly once, and only to the",
+                  "finding each one names. Do not re-adjudicate any of them.",
+                  "",
+                  "Current IMPASSE record (verbatim):",
+                  rawOutcome,
+                  "Human adjudications (verbatim, one per decided finding):",
+                  ...decisionLog.decisions.map((recorded) => recorded.raw),
+                ].join("\n"),
+                CONTRACT_RESPONSE_NOTE:
+                  `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
+                MIGRATION_RESERVATION: migrationReservationBlock(
+                  config,
+                  ctx.slice.ghIssue,
+                ),
+                BASE_GATE_CATALOG: formatBaseGateCatalog(
+                  resolveBaseGateDeclarations(ctx.worktreeDir),
+                ),
+              }),
+              cwd: ctx.worktreeDir,
+              maxDurationMs: config.maxAgentDurationMs,
+              logStream: plannerLog,
+            })
+            .finally(() => closeAgentLog(plannerLog));
+        } catch (error) {
+          if (isCancelled(error, config.signal)) return { phase: "CANCELLED" };
+          return { phase: "ERROR", cause: internalNegotiateCause(error) };
+        }
+        logger.event({
+          type: "phase-ended",
+          ghIssue: ctx.slice.ghIssue,
+          sliceNumber: ctx.slice.number,
+          agent: "planner",
+        });
+        const locked = lockAdjudicatedContract(preApplyManifest);
+        if (locked.phase === "LOCKED") {
+          markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
+          tx.onAccepted();
+        }
+        return locked;
+      }
+
+      const locked = lockAdjudicatedContract();
+      if (locked.phase === "LOCKED") {
+        markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
+        tx.onAccepted();
+      }
+      return locked;
+    },
+  );
 }
 
 async function negotiateAttempt(
@@ -1844,31 +2825,31 @@ async function negotiateAttempt(
 
     /**
      * Objection raised by `ctx.onContractLocked` and not yet handed to a
-     * planner round. Non-null means the last contract to reach LOCKED was
-     * refused after the evaluator had accepted it.
+     * planner round. Non-null means the last contract the evaluator
+     * accepted — or the last one found already `LOCKED` on disk — was
+     * refused by the gate, so it is NEGOTIATING and owes a planner round.
      */
     let gateObjection: string | null = null;
     let previousSchemaValidManifest: AcceptanceManifestV2 | null = null;
 
     /**
-     * Consult the contract-lock gate on a contract that just reached
-     * LOCKED. `true` means the gate refused it: the contract is back to
-     * NEGOTIATING on disk and `gateObjection` holds the feedback the next
-     * planner round must address.
+     * Route a gate objection to the next planner round: the contract is
+     * NEGOTIATING, and `gateObjection` holds the feedback that round must
+     * address.
      *
-     * `lockedAt` describes where the refused lock came from, and reaches
-     * the operator through `stuck.md` — so it says "a previous run" for a
-     * contract found already locked on disk rather than inventing a
-     * round number for a round this run never ran.
+     * `refusedContract` describes which contract was refused, and reaches
+     * the operator through `stuck.md` — so it says "locked by a previous
+     * run" for a contract found already locked on disk rather than
+     * inventing a round number for a round this run never ran.
      */
-    const lockRefusedByGate = (lockedAt: string): boolean => {
-      const objection = ctx.onContractLocked?.(contractPath) ?? null;
-      if (objection === null) return false;
+    const recordGateObjection = (
+      objection: string,
+      refusedContract: string,
+    ): void => {
       gateObjection = objection;
-      artifacts.reopenContract(contractPath);
       contractStatus = "NEGOTIATING";
       capDecisions.push(
-        `The contract-lock gate refused the contract locked at ${lockedAt}: ${objection}`,
+        `The contract-lock gate refused the contract ${refusedContract}: ${objection}`,
       );
       logger.phase(
         `${ctx.tag}: contract lock refused before generation — ${objection}`,
@@ -1880,6 +2861,51 @@ async function negotiateAttempt(
           message: objection,
         },
       );
+    };
+
+    /**
+     * Consult the contract-lock gate on the contract the evaluator just
+     * accepted, *before* anything writes `LOCKED`. `true` means the gate
+     * refused it: nothing has been written, the contract still says
+     * NEGOTIATING on disk, and the objection is routed to the next round.
+     *
+     * Gate before lock is ADR 0055 §5's mandated ordering, and it is what
+     * makes `LOCKED` on disk the gate's own attestation (ADR 0008). The
+     * gate reads the declared file scope, never the status line, so it
+     * needs no lock to run.
+     */
+    const candidateRefusedByGate = (round: number): boolean => {
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection === null) return false;
+      // The planner may have written `**Status:** LOCKED` into the candidate
+      // itself. Nothing here wrote it, the gate has just refused it, and the
+      // generator reads that line as permission (ADR 0008) — so it cannot be
+      // left on disk. Under the old lock-then-gate ordering this
+      // normalisation came for free from the reopen that followed
+      // `lockContract`; with nothing written on the refusal path it has to be
+      // explicit. An agent-authored lock surviving a *non*-ACCEPT verdict is
+      // a wider hole than this one call site (architect A2 / PM P1 of the
+      // round-9 review, filed separately); this closes only the case the
+      // gate-before-lock reordering itself would otherwise have opened.
+      if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+        artifacts.reopenContract(contractPath);
+      }
+      recordGateObjection(objection, `accepted in round ${round}`);
+      return true;
+    };
+
+    /**
+     * Consult the gate on a contract that is already `LOCKED` on disk —
+     * left there by an earlier run, or written by an agent despite a
+     * non-ACCEPT verdict. `true` means the gate refused it, and the
+     * contract is reopened: a stale `LOCKED` would otherwise reach the
+     * generator, which is the divergence ADR 0008 exists to prevent.
+     */
+    const lockRefusedByGate = (lockedAt: string): boolean => {
+      const objection = ctx.onContractLocked?.(contractPath) ?? null;
+      if (objection === null) return false;
+      artifacts.reopenContract(contractPath);
+      recordGateObjection(objection, lockedAt);
       return true;
     };
 
@@ -1976,7 +3002,7 @@ async function negotiateAttempt(
           "a previous LOCKED contract",
         );
       } else {
-        lockRefusedByGate("a previous run");
+        lockRefusedByGate("locked by a previous run");
       }
     }
 
@@ -2281,15 +3307,42 @@ async function negotiateAttempt(
         lastVerdict = verdict;
         lastFindings = review.findings;
         if (verdict === "ACCEPT") {
-          artifacts.lockContract(contractPath);
-          contractStatus = "LOCKED";
+          // Gate before lock, per ADR 0055 §5's mandated ordering. With
+          // `lockContract` first, a process stop between the two calls left
+          // an authoritative `LOCKED` contract whose gate had never passed
+          // — a status ADR 0008 makes the generator trust, forged by a
+          // crash window. Evaluating the gate against the accepted
+          // candidate first means the only thing that can write `LOCKED`
+          // here is a gate that already passed, so the status on disk *is*
+          // the attestation. A refusal writes nothing at all.
+          //
+          // Deliberately not withContractTransaction: ordinary negotiation
+          // has no previously-accepted contract/manifest pair to capture
+          // and restore — the pair being written IS the first accepted
+          // one. The stamp keeps lock provenance uniform (ADR 0055 §4);
+          // the two revision paths, which do mutate an accepted pair, go
+          // through the shared transaction's single lock exit, which
+          // carries this same ordering.
+          if (!candidateRefusedByGate(round)) {
+            artifacts.lockContract(contractPath, {
+              kind: "negotiation",
+              round,
+            });
+            contractStatus = "LOCKED";
+            break;
+          }
         } else {
           contractStatus = artifacts.readContractStatus(contractPath);
+          // An agent that wrote `LOCKED` itself despite a non-ACCEPT
+          // verdict still faces the gate, and a refusal reopens it.
+          if (
+            contractStatus === "LOCKED" &&
+            !lockRefusedByGate(`locked in round ${round}`)
+          )
+            break;
         }
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.
-        if (contractStatus === "LOCKED" && !lockRefusedByGate(`round ${round}`))
-          break;
 
         if (round === allowedContractRounds) {
           const reason = gateObjection
@@ -2302,11 +3355,15 @@ async function negotiateAttempt(
           continue;
         }
 
-        logger.phase(`${ctx.tag}: ESCALATE — contract negotiation failed`);
         const negotiationOutcome =
           evaluatorRound === 2 && lastReviewAttemptRecord
             ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
             : undefined;
+        const impasse = negotiationOutcome?.classification === "IMPASSE";
+        logger.phase(
+          `${ctx.tag}: ${impasse ? "AWAITING-ADJUDICATION" : "ESCALATE"} — ` +
+            `contract negotiation failed`,
+        );
         preserveContractNegotiationFailure(
           ctx,
           "ESCALATE",
@@ -2318,11 +3375,24 @@ async function negotiateAttempt(
           negotiationOutcome,
         );
         logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
-        const cause = negotiateVerdictCause({
-          outcome: "ESCALATE",
-          verdict,
-          round,
-        });
+        if (impasse) {
+          return {
+            phase: "AWAITING-ADJUDICATION",
+            cause: negotiateImpasseCause(negotiationOutcome, verdict),
+          };
+        }
+        // A mixed exhaustion routes here on purpose (ADR 0055 §1), but the
+        // contest must not vanish from what the operator reads: the summary
+        // is the run-state reason `afk status` and the retry line show, and
+        // it was silent about a held contest until now. stuck.md carries the
+        // two positions themselves.
+        const cause =
+          negotiationMixedExhaustionCause(negotiationOutcome, verdict, round) ??
+          negotiateVerdictCause({
+            outcome: "ESCALATE",
+            verdict,
+            round,
+          });
         return { phase: "ESCALATE", cause };
       }
     }
@@ -2383,7 +3453,14 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
     };
 
-function formatUnresolvedQAFindings(
+/**
+ * The repair input a retry or resume round is handed for each finding it
+ * must clear. Exported so the field set can be asserted without spawning
+ * a pipeline: the contract is that *every* `QAReviewAttemptFinding` field
+ * reaches the generator (#82 B-03), and a silently shrinking subset here
+ * is invisible to a template test that supplies its own string.
+ */
+export function formatUnresolvedQAFindings(
   findings: readonly QAReviewAttemptFinding[],
 ): string {
   if (findings.length === 0) return "(none)";
@@ -2392,6 +3469,10 @@ function formatUnresolvedQAFindings(
       (finding) =>
         [
           `- Finding ID: \`${finding.id}\``,
+          `  Severity: ${finding.severity}`,
+          `  State: ${finding.state}`,
+          `  Unresolved: ${finding.unresolved ? "yes" : "no"}`,
+          `  Remedy: ${finding.remedy}`,
           `  Summary: ${finding.summary}`,
           `  Clear condition: ${finding.clearCondition}`,
           "  Artifact references:",
@@ -2864,10 +3945,26 @@ export async function runQAStage(
           (request) => `${request.findingId} (${request.paths.join(", ")})`,
         )
         .join("; ");
+      // Fail closed on a probe that could not answer. `planScopeAmendment`
+      // refuses any requested path that is not in `changedFiles`, so a
+      // swallowed git failure used to make every requested path look
+      // untouched and produce a refusal blaming the evaluator for a defect
+      // git had (see `ChangedFilesProbe`). Same decision as the escalation
+      // guard below and as the estate probe: prove it or refuse by name.
+      const changed = git.listChangedFiles(ctx.worktreeDir, featBranch);
+      if (!changed.ok) {
+        throw new Error(
+          `${stage} scope amendment refused in round ${round} attempt ` +
+            `${attempt}: the set of files this slice changed could not be ` +
+            `determined — ${changed.failure}. Requested: ${requested}. The ` +
+            `contract is unchanged and no work was reverted; nothing may be ` +
+            `added to or kept out of the locked scope on an unproven tree.`,
+        );
+      }
       const plan = planScopeAmendment({
         requests,
         manifest: loadAcceptanceManifest(ctx.absSliceDir),
-        changedFiles: git.listChangedFiles(ctx.worktreeDir, featBranch),
+        changedFiles: changed.paths,
         options: { migrationPathPattern: config.migrationPathPattern },
       });
       if (!plan.ok) {
@@ -2887,11 +3984,50 @@ export async function runQAStage(
             `the contract by hand before resuming.`,
         );
       }
-      applyScopeAmendment({ sliceDir: ctx.absSliceDir, plan });
-      artifacts.archiveScopeAmendment({
-        archiveDir: reviewArchiveDir,
-        record: buildScopeAmendmentRecord({ stage, round, attempt, plan }),
-      });
+      // The third path that mutates the accepted pair, and so the third
+      // caller of the one transaction (ADR 0055 Seam 1 §3). It writes the
+      // manifest first and the contract second, and the contract write can
+      // refuse (no `## Files expected to change` section) or simply fail —
+      // which left a widened manifest beside an unwidened contract, exactly
+      // the desync ADR 0048 makes the orchestrator responsible for, with a
+      // *locked* contract to boot. It never locks, so no `tx.lock` here:
+      // what it needs is the capture/restore boundary and the guarantee
+      // that the archive is only written over a coherent pair.
+      try {
+        await withContractTransaction(
+          ctx,
+          {
+            reason: `${stage} scope amendment did not complete`,
+            qualifier: "the previously accepted",
+            note:
+              `the requested path(s) were not added, and the recorded QA ` +
+              `finding(s) ${requested} still stand`,
+          },
+          async (tx) => {
+            applyScopeAmendment({ sliceDir: ctx.absSliceDir, plan });
+            artifacts.archiveScopeAmendment({
+              archiveDir: reviewArchiveDir,
+              record: buildScopeAmendmentRecord({
+                stage,
+                round,
+                attempt,
+                plan,
+              }),
+            });
+            tx.onAccepted();
+          },
+        );
+      } catch (error) {
+        throw new Error(
+          `${stage} scope amendment failed in round ${round} attempt ` +
+            `${attempt}: ${
+              error instanceof Error ? error.message : String(error)
+            }. Requested: ${requested}. The accepted contract.md and ` +
+            `acceptance-manifest.json were restored to the bytes the lock ` +
+            `accepted and no work was reverted; add the path(s) by hand or ` +
+            `renegotiate the contract before resuming.`,
+        );
+      }
       amendments++;
       const amended = plan.entries.map((entry) => entry.path).join(", ");
       const message =
@@ -2991,7 +4127,9 @@ export async function runSliceExecute(
 ): Promise<Extract<TerminalOutcome, { phase: "PASS" | "STUCK" | "ERROR" | "CANCELLED" }>> {
   const { config, slice, logger, featBranch, invoke } = ctx;
   const { signal } = config;
-  const stuckReferences: string[] = [];
+  const stuckReferences = ctx.resume
+    ? artifacts.readStuckDiagnosisAdditionalArtifactReferences(ctx.absSliceDir)
+    : [];
   const gateArtifacts: GateEvidenceArtifact[] = [];
   let deterministicHistory: readonly QAReviewLifecycleFinding[] = [];
   let deterministicUnresolved: readonly QAReviewAttemptFinding[] = [];
@@ -3000,14 +4138,54 @@ export async function runSliceExecute(
   let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
   let firstRound = 1;
   let retryNote = "";
+  const reviewArchiveDir = artifacts.contractReviewArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
+  /**
+   * The only constructor of a STUCK return in this function (ADR 0055 P1).
+   * Every reason routes through here, so every STUCK outcome ships the
+   * code-assembled `stuck.md` slice 04 promised — including the ones that
+   * refuse late, after QA passed and the work was committed.
+   */
+  const finishStuck = (
+    reason = `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
+  ): Extract<TerminalOutcome, { phase: "STUCK" }> => {
+    logger.phase(`${ctx.tag}: stuck — writing diagnosis...`, "error");
+    artifacts.writeStuckDiagnosis(ctx.absSliceDir, {
+      reason,
+      reviewArchiveDir,
+      additionalArtifactReferences: stuckReferences,
+      commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
+    });
+    return { phase: "STUCK", error: reason };
+  };
+  /**
+   * A STUCK resume's `stuck.md` is the operator's audit record of why the
+   * extra attempt was granted, so it must read the same after the attempt
+   * as before it (#82 AC3). The shared resume prompt tells the generator
+   * to leave it alone, but a prompt is guidance, not a guarantee: capture
+   * the bytes at entry and put them back on the way out.
+   *
+   * Only on success. A failed attempt legitimately rewrites the diagnosis
+   * from the new round's evidence, which is `finishStuck`'s job (B-04).
+   */
+  const stuckDiagnosisAtEntry =
+    ctx.resume?.mode === "stuck"
+      ? artifacts.readStuckDiagnosis(ctx.absSliceDir)
+      : null;
+  const restoreStuckDiagnosis = (): void => {
+    if (stuckDiagnosisAtEntry === null) return;
+    if (artifacts.restoreStuckDiagnosis(ctx.absSliceDir, stuckDiagnosisAtEntry))
+      logger.phase(
+        `${ctx.tag}: restored the preserved stuck.md diagnosis the resumed generator changed`,
+        "error",
+      );
+  };
 
   try {
     if (ctx.resume) {
-      const reviewArchiveDir = artifacts.contractReviewArchiveDir(
-        config.repoRoot,
-        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
-        slice.number,
-      );
       const restored = loadQAReviewResumeState(
         reviewArchiveDir,
         ctx.absSliceDir,
@@ -3048,79 +4226,249 @@ export async function runSliceExecute(
     ) {
       const round = firstRound + implementationAttempt - 1;
       logger.bumpGenRound(slice.ghIssue, round);
-      logger.phase(
-        `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
-        "error",
-        {
-          type: "phase-started",
+      const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
+      const heartbeatMs =
+        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+      const escalationPath = join(ctx.absSliceDir, ESCALATION_FILENAME);
+      let generatorAttempt = 0;
+      let scopeRevisions = 0;
+      let scopeRevisionNote = "";
+      while (true) {
+        generatorAttempt++;
+        logger.phase(
+          `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
+          "error",
+          {
+            type: "phase-started",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            agent: "generator",
+            round,
+          },
+        );
+        const genLog = logger.agentLog(slice.number, "generator", round);
+        const generatorPromptBase =
+          implementationAttempt === 1 && ctx.resume
+              ? renderPrompt("generator-resume", {
+                  SLICE_DIR: ctx.relSliceDir,
+                  RELEVANT_FILES: ctx.relevantFilesBlock,
+                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+                  TEST_COMMAND: ctx.testCommand,
+                  COMMITS_AHEAD: ctx.resume.commitsAhead,
+                  COMMIT_LOG: ctx.resume.commitLog,
+                  WORKTREE_STATE:
+                    ctx.resume.mode === "stuck"
+                      ? "**Your worktree was not touched.** Nothing was reset, cleaned, or dropped. Every committed change and uncommitted edit remains exactly where the previous attempt left it. Treat dirty-tree state as real work-in-progress."
+                      : "Your worktree was reset to your last commit. Uncommitted changes were discarded; anything after your last commit is gone and must be redone.",
+                  BASE_REFRESH_NOTE:
+                    ctx.resume.mode === "stuck"
+                      ? ctx.resume.baseRefreshed
+                        ? `The feature branch \`${featBranch}\` was merged into your branch just before this run, so your verification world is current.`
+                        : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`
+                      : `The feature branch \`${featBranch}\` was merged into your branch just before this run. Your verification world is current: work merged by sibling slices while you were away is now part of your tree.`,
+                  STUCK_NOTE:
+                    ctx.resume.mode === "stuck"
+                      ? ctx.resume.stuckNote ?? ""
+                      : "",
+                  UNRESOLVED_FINDINGS:
+                    formatUnresolvedQAFindings(resumedUnresolved),
+                  HANDOFF_NOTE: ctx.resume.handoffNote,
+                  MIGRATION_RESERVATION: migrationReservationBlock(
+                    config,
+                    slice.ghIssue,
+                  ),
+                })
+              : renderPrompt("generator", {
+                  SLICE_DIR: ctx.relSliceDir,
+                  RELEVANT_FILES: ctx.relevantFilesBlock,
+                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
+                  TEST_COMMAND: ctx.testCommand,
+                  RETRY_NOTE:
+                    implementationAttempt > 1 ? retryNote : "",
+                  MIGRATION_RESERVATION: migrationReservationBlock(
+                    config,
+                    slice.ghIssue,
+                  ),
+                });
+        const generatorPrompt = scopeRevisionNote
+          ? `${generatorPromptBase}\n\n${scopeRevisionNote}`
+          : generatorPromptBase;
+        rmSync(escalationPath, { force: true });
+        // The accepted pair's bytes, captured before the generator can
+        // touch them (architect A1, seventh gate round). Re-captured every
+        // iteration of this loop, because an accepted focused revision
+        // legitimately replaces the pair and the next dispatch must be
+        // measured against the *new* accepted bytes, not the round's first
+        // ones.
+        const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
+        await invoke({
+          role: "generator",
+          prompt: generatorPrompt,
+          cwd: ctx.worktreeDir,
+          logStream: genLog,
+          ...longCommandRoleBounds({
+            idleTimeoutMs: timeoutMs,
+            idleWarningIntervalMs: heartbeatMs,
+            maxDurationMs: config.maxAgentDurationMs,
+          }),
+        }).finally(() => closeAgentLog(genLog));
+        logger.event({
+          type: "phase-ended",
           ghIssue: slice.ghIssue,
           sliceNumber: slice.number,
           agent: "generator",
           round,
-        },
-      );
-      const genLog = logger.agentLog(slice.number, "generator", round);
-      const timeoutMs = config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS;
-      const heartbeatMs =
-        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-      const generatorPrompt =
-        implementationAttempt === 1 && ctx.resume?.mode === "stuck"
-          ? renderPrompt("generator-resume-stuck", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              COMMITS_AHEAD: ctx.resume.commitsAhead,
-              COMMIT_LOG: ctx.resume.commitLog,
-              BASE_REFRESH_NOTE: ctx.resume.baseRefreshed
-                ? `The feature branch \`${featBranch}\` was merged into your branch just\nbefore this run, so your verification world is current.`
-                : `The feature branch \`${featBranch}\` could **not** be merged into your\nbranch cleanly, and your tree was preserved rather than rebuilt. Your\nverification world may be behind the feature branch — do not assume\nsibling work is visible here.`,
-              STUCK_NOTE: ctx.resume.stuckNote ?? "",
-              UNRESOLVED_FINDINGS:
-                formatUnresolvedQAFindings(resumedUnresolved),
-              HANDOFF_NOTE: ctx.resume.handoffNote,
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-            })
-          : implementationAttempt === 1 && ctx.resume
-          ? renderPrompt("generator-resume", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              COMMITS_AHEAD: ctx.resume.commitsAhead,
-              COMMIT_LOG: ctx.resume.commitLog,
-              FEAT_BRANCH: featBranch,
-              UNRESOLVED_FINDINGS:
-                formatUnresolvedQAFindings(resumedUnresolved),
-              HANDOFF_NOTE: ctx.resume.handoffNote,
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-            })
-          : renderPrompt("generator", {
-              SLICE_DIR: ctx.relSliceDir,
-              RELEVANT_FILES: ctx.relevantFilesBlock,
-              SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-              TEST_COMMAND: ctx.testCommand,
-              RETRY_NOTE: implementationAttempt > 1 ? retryNote : "",
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-            });
-      await invoke({
-        role: "generator",
-        prompt: generatorPrompt,
-        cwd: ctx.worktreeDir,
-        logStream: genLog,
-        ...longCommandRoleBounds({
-          idleTimeoutMs: timeoutMs,
-          idleWarningIntervalMs: heartbeatMs,
-          maxDurationMs: config.maxAgentDurationMs,
-        }),
-      }).finally(() => closeAgentLog(genLog));
-      logger.event({
-        type: "phase-ended",
-        ghIssue: slice.ghIssue,
-        sliceNumber: slice.number,
-        agent: "generator",
-        round,
-      });
+        });
+
+        // --- The generator does not get to write its own lock (architect
+        // A1, seventh gate round). ADR 0055 Seam 1 §3 makes the shared
+        // contract transaction the only mutation path for the accepted
+        // `contract.md` / `acceptance-manifest.json` pair and ADR 0048
+        // assigns scope mutation to the orchestrator; nothing enforced it
+        // across a generator dispatch. A generator could add an undeclared
+        // source path to *both* files and then escalate for some unrelated
+        // path: the manifest read below became `lockedManifest`, the
+        // changed-set guard exempted everything under the slice directory,
+        // and `runFocusedScopeRevision` captured the generator's bytes as
+        // "the previously accepted pair" — so its additive guard preserved
+        // the smuggled path instead of catching it. The fresh generator
+        // then received a lock it had widened itself.
+        //
+        // Placed here, before `existsSync(escalationPath)`, on purpose: the
+        // pair is protected across *every* generator invocation, not only
+        // the escalating ones, and the refusal lands before escalation
+        // parsing, the focused revision's planner and evaluator, the
+        // migration claim gate, the base gates and QA. Refuses by throw
+        // like the two revision bounds below it: ERROR, and the operator
+        // gets the tree.
+        //
+        // Evidence first, then restore. The restore is what makes the
+        // refusal safe — the next dispatch, a resume, or a hand-declared
+        // scope all read the orchestrator's bytes and not the generator's —
+        // but it also erases the incident, so the attempted bytes are
+        // archived beside the round's other evidence before they go.
+        const mutatedOwned = mutatedAcceptedContractFiles(
+          ctx.absSliceDir,
+          acceptedPair,
+        );
+        if (mutatedOwned.length > 0) {
+          const archived = artifacts.archiveRejectedContractMutation({
+            sliceDir: ctx.absSliceDir,
+            archiveDir: reviewArchiveDir,
+            round,
+            attempt: generatorAttempt,
+            files: mutatedOwned,
+          });
+          restoreAcceptedContractPair(ctx.absSliceDir, acceptedPair);
+          throw new Error(
+            `Generator round ${round} attempt ${generatorAttempt} changed ` +
+              `orchestrator-owned contract file(s) ` +
+              `(${mutatedOwned.join(", ")}). The accepted contract.md and ` +
+              `${ACCEPTANCE_MANIFEST_FILENAME} pair is mutated only by the ` +
+              `orchestrator's contract transaction (ADR 0055 Seam 1, ` +
+              `ADR 0048) — a generator that rewrites its own lock has ` +
+              `widened its own file scope, so no escalation, revision, gate ` +
+              `or QA runs on this tree. The accepted bytes were restored` +
+              (archived.length > 0
+                ? `; the attempted bytes are preserved as ` +
+                  `${archived.join(", ")} in ${reviewArchiveDir}`
+                : ``) +
+              `. Review them, then either declare the path(s) in the ` +
+              `contract by hand or resume the slice.`,
+          );
+        }
+
+        if (!existsSync(escalationPath)) break;
+
+        artifacts.archiveScopeEscalationAttempt({
+          sliceDir: ctx.absSliceDir,
+          archiveDir: reviewArchiveDir,
+          round,
+          attempt: generatorAttempt,
+        });
+        const lockedManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        const escalation = parseScopeEscalation(
+          readFileSync(escalationPath, "utf-8"),
+          lockedManifest,
+          { migrationPathPattern: config.migrationPathPattern },
+          escalationPath,
+        );
+        if (scopeRevisions >= MAX_SCOPE_REVISIONS_PER_ROUND) {
+          throw new Error(
+            `Focused scope revision refused in round ${round}: round ` +
+              `${round} already spent its ${MAX_SCOPE_REVISIONS_PER_ROUND} ` +
+              `revision(s). Requested: [${escalation.paths.join(", ")}] ` +
+              `(${escalation.reason}). The escalation is archived and the ` +
+              `contract is unchanged; declare the remaining path(s) in the ` +
+              `contract by hand, or resume the slice so the next round ` +
+              `earns a fresh grant.`,
+          );
+        }
+        // --- The grant is only for an edit that has NOT happened yet
+        // (architect blocker 1, fifth adjudication gate round). ADR 0052
+        // makes this route a pre-build discovery and both generator prompts
+        // say "stop before making the undeclared edit"; nothing checked it,
+        // so a generator could edit an undeclared path, name it in a valid
+        // escalation, and have the revision legitimize the edit after the
+        // fact. The full changed set is compared, not just the requested
+        // paths — otherwise editing undeclared X and escalating for
+        // unrelated Y keeps X. See `outOfScopeChangedPaths` for the
+        // exemptions and for why this door is deliberately the mirror image
+        // of the QA amendment door.
+        //
+        // Placed after the archive above, so the raw escalation evidence
+        // survives the refusal, and before the revision, so the contract is
+        // never touched. Refuses by throw like the revision bound it sits
+        // next to: ERROR, nothing reverted, the tree left for the operator.
+        const escalationTree = git.listChangedFiles(ctx.worktreeDir, featBranch);
+        if (!escalationTree.ok) {
+          throw new Error(
+            `Focused scope revision refused in round ${round}: the set of ` +
+              `files this worktree has changed could not be determined — ` +
+              `${escalationTree.failure}. Requested: ` +
+              `[${escalation.paths.join(", ")}] (${escalation.reason}). A ` +
+              `grant may not be issued on an unproven tree; the escalation ` +
+              `is archived and the contract is unchanged.`,
+          );
+        }
+        const undeclaredChanges = outOfScopeChangedPaths({
+          changedFiles: escalationTree.paths,
+          manifest: lockedManifest,
+          sliceArtifactDir: ctx.relSliceDir,
+          // Proven above, not assumed: the integrity check threw unless
+          // both files still hold the bytes captured before dispatch. Both
+          // files show up in this changed set on every honest escalation
+          // too — they are written into the worktree during negotiation —
+          // so the guard needs the attestation to tell the honest tree from
+          // the laundered one.
+          acceptedPairIntact: true,
+          options: { migrationPathPattern: config.migrationPathPattern },
+        });
+        if (undeclaredChanges.length > 0) {
+          throw new Error(
+            `Focused scope revision refused in round ${round}: this worktree ` +
+              `already holds changes outside the locked file scope ` +
+              `(${undeclaredChanges.join(", ")}). A scope escalation is a ` +
+              `pre-build discovery (ADR 0052) — the generator must stop ` +
+              `*before* the undeclared edit — so granting a revision now ` +
+              `would authorize an edit that already happened. Requested: ` +
+              `[${escalation.paths.join(", ")}] (${escalation.reason}). The ` +
+              `escalation is archived, the contract is unchanged and nothing ` +
+              `was reverted; review the listed path(s), then either declare ` +
+              `them in the contract by hand or discard them and resume the ` +
+              `slice so the next round earns a fresh grant.`,
+          );
+        }
+        const revision = await runFocusedScopeRevision(ctx, escalation);
+        if (revision.phase === "ERROR") return revision;
+        scopeRevisions++;
+        scopeRevisionNote =
+          "# Focused scope revision accepted\n\n" +
+          "The contract was revised and re-locked without spending this " +
+          "implementation round. Continue under this complete accepted " +
+          "file scope:\n\n" +
+          JSON.stringify({ fileScope: revision.manifest.fileScope }, null, 2);
+      }
 
       if (config.manifest) {
         const gate = checkClaimedGeneratedMigrations({
@@ -3416,6 +4764,9 @@ export async function runSliceExecute(
             declarations,
             checkpoint.treeId,
           );
+          // Before the commit, so the diagnosis this slice ships is the
+          // one the operator read, not whatever the generator left.
+          restoreStuckDiagnosis();
           if (git.hasUncommittedChanges(ctx.worktreeDir)) {
             git.commitAll(
               ctx.worktreeDir,
@@ -3435,10 +4786,12 @@ export async function runSliceExecute(
               migrationMode,
             );
             if (!migrationCheck.ok) {
-              return {
-                phase: "STUCK",
-                error: `Migration sync check failed: ${migrationCheck.error}`,
-              };
+              // Late refusal: QA passed and the work is already committed,
+              // so the diagnosis describes a slice whose branch holds
+              // finished work that one check would not certify.
+              return finishStuck(
+                `Migration sync check failed: ${migrationCheck.error}`,
+              );
             }
           }
 
@@ -3450,41 +4803,10 @@ export async function runSliceExecute(
       }
 
       if (implementationAttempt === implementationAttemptLimit) {
-        logger.phase(`${ctx.tag}: stuck — running fallback generator...`, "error", {
-          type: "phase-started",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "generator-stuck",
-        });
-        const stuckLog = logger.agentLog(slice.number, "generator-stuck");
-        await invoke({
-          role: "generator-stuck",
-          prompt: renderPrompt("generator-stuck", {
-            SLICE_DIR: ctx.relSliceDir,
-            QA_REPORTS: stuckReferences
-              .map((path) => `- \`${path}\``)
-              .join("\n"),
-          }),
-          cwd: ctx.worktreeDir,
-          logStream: stuckLog,
-          maxDurationMs: config.maxAgentDurationMs,
-        }).finally(() => closeAgentLog(stuckLog));
-        logger.event({
-          type: "phase-ended",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "generator-stuck",
-        });
-        return {
-          phase: "STUCK",
-          error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-        };
+        return finishStuck();
       }
     }
-    return {
-      phase: "STUCK",
-      error: `QA failed after ${MAX_GENERATOR_ROUNDS} implementation rounds`,
-    };
+    return finishStuck();
   } catch (err) {
     if (isCancelled(err, signal)) {
       return { phase: "CANCELLED", error: CANCELLED_BY_USER };
@@ -3517,7 +4839,15 @@ async function runSlice(
   featBranch: string,
   relevantFilesBlock: string,
   testCommand: string,
-): Promise<"PASS" | "STUCK" | "ESCALATE" | "ERROR" | "CANCELLED"> {
+): Promise<
+  | "PASS"
+  | "STUCK"
+  | "ESCALATE"
+  | "AWAITING-ADJUDICATION"
+  | "ADJUDICATION-LOCK-REFUSED"
+  | "ERROR"
+  | "CANCELLED"
+> {
   const ctx = makeSliceContext(
     config,
     slice,
@@ -3809,6 +5139,12 @@ export async function runPipeline(
   );
   runState.scope = scope.persisted;
   runState.featureBranch = featBranch;
+  // Recorded so `clean-failed` can *resolve* where this
+  // run's slice artifacts live rather than search a worktree for them
+  // (architect blocker 2; see `RunState.specsDir`). Written here, beside the
+  // feature branch, because both are facts about the run that later commands
+  // read and neither can be re-derived from a worktree alone.
+  runState.specsDir = specsDir.replace(/\\/g, "/");
   saveRunState(repoRoot, runState);
   const dag = buildDAG(scope.selected);
   const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
@@ -3974,6 +5310,19 @@ export async function runPipeline(
   // branch. They are naturally re-eligible on the next run, where the
   // merge-only recovery pass tries the merge again before any agent runs.
   const mergePending = new Set<string>();
+  const awaitingAdjudication = new Set<string>();
+  // Live bounded waits, one per parked slice. Recording a park starts the
+  // wait; nothing awaits it until the scheduler runs out of runnable work
+  // (ADR 0055 §7) — a human's think-time on one slice is not a dependency
+  // of anyone else's (ADR 0024).
+  const adjudicationWaits = new Map<
+    string,
+    ReturnType<typeof waitForAdjudication>
+  >();
+  // Results of waits that have already resolved. The idle wait races the
+  // live set, then drains everything settled by then, so a wave picks up
+  // every decision that arrived rather than one per idle round-trip.
+  const settledAdjudications = new Map<string, AdjudicationWaitResult>();
 
   /**
    * A slice this run will not dispatch again, for any reason short of
@@ -3981,7 +5330,10 @@ export async function runPipeline(
    * three filter sites plus a sweep condition.
    */
   const heldBack = (id: string): boolean =>
-    failed.has(id) || laneCancelled.has(id) || mergePending.has(id);
+    failed.has(id) ||
+    laneCancelled.has(id) ||
+    mergePending.has(id) ||
+    awaitingAdjudication.has(id);
 
   // Restore completed slices from persistent state. Per-slice
   // prior-run state announcements (issue #17) and their warn events
@@ -4085,7 +5437,13 @@ export async function runPipeline(
   // signal happens to fire.
   cancellableSlices = () =>
     [...dag.slices]
-      .filter(([id, slice]) => slice.type !== "HITL" && !completed.has(id) && !failed.has(id))
+      .filter(
+        ([id, slice]) =>
+          slice.type !== "HITL" &&
+          !completed.has(id) &&
+          !failed.has(id) &&
+          !awaitingAdjudication.has(id),
+      )
       .map(([id, slice]) => ({
         ghIssue: id,
         title: slice.title,
@@ -4125,6 +5483,45 @@ export async function runPipeline(
       },
       outcome,
     );
+    if (
+      outcome.phase === "AWAITING-ADJUDICATION" &&
+      !adjudicationWaits.has(id)
+    ) {
+      awaitingAdjudication.add(id);
+      const sliceContext = makeSliceContext(
+        config,
+        slice,
+        logger,
+        featBranch,
+        relevantFilesBlock,
+        testCommand,
+      );
+      const waitMs =
+        config.adjudicationWaitMs ?? DEFAULT_ADJUDICATION_WAIT_MS;
+      logger.phase(
+        `${sliceContext.tag}: waiting up to ${waitMs}ms for ${ADJUDICATION_FILENAME}`,
+      );
+      const wait = waitForAdjudication({
+        sliceDir: sliceContext.absSliceDir,
+        waitMs,
+        pollMs:
+          config.adjudicationPollMs ?? DEFAULT_ADJUDICATION_POLL_MS,
+        signal,
+      });
+      adjudicationWaits.set(id, wait);
+      // Record the result as it lands so the idle wait can drain every
+      // decision that arrived, not just the one that won its race. The
+      // rejection arm is deliberately empty: the idle wait awaits the same
+      // promise and re-throws there, and a wait the run never reaches
+      // (abort, or an exit before idle) must not become an unhandled
+      // rejection that takes the process down after the summary.
+      void wait.then(
+        (result) => {
+          settledAdjudications.set(id, result);
+        },
+        () => {},
+      );
+    }
   };
 
   // --- Merge-only recovery, before the first wave dispatches (ADR 0029).
@@ -4232,15 +5629,12 @@ export async function runPipeline(
     recoveredMerges.add(id);
   }
 
-  let waveNumber = 0;
-  while (true) {
-    waveNumber++;
-
-    // Wave-transition watchdog: race the readiness check against a
-    // timeout. If the event loop is blocked (dangling promise,
-    // unresolved stream), the timeout rejects and we crash with
-    // diagnostics.
-    const readyResult = await Promise.race([
+  // Wave-transition watchdog: race the readiness check against a
+  // timeout. If the event loop is blocked (dangling promise,
+  // unresolved stream), the timeout rejects and we crash with
+  // diagnostics.
+  const readyOrHang = (waveNumber: number): Promise<string[]> =>
+    Promise.race([
       Promise.resolve().then(() => {
         const ready = dag.ready(completed);
         return ready.filter((id) => !heldBack(id));
@@ -4257,8 +5651,133 @@ export async function runPipeline(
       }),
     ]);
 
-    const toRun = readyResult;
-    if (toRun.length === 0) break;
+  // One abort promise for the whole run, created the first time the
+  // pipeline actually idles on a human. The idle wait races it so
+  // cancellation ends the wait immediately (ADR 0003, ADR 0055 §7);
+  // nothing is lost, because the park is durable on disk.
+  let abortSignalled: Promise<"aborted"> | undefined;
+  const abortRace = (): Promise<"aborted"> => {
+    if (!signal) {
+      // No signal to race: a promise that never settles leaves the live
+      // waits as the only arms of the race.
+      abortSignalled ??= new Promise<"aborted">(() => {});
+      return abortSignalled;
+    }
+    abortSignalled ??= new Promise<"aborted">((resolve) => {
+      if (signal.aborted) {
+        resolve("aborted");
+        return;
+      }
+      signal.addEventListener("abort", () => resolve("aborted"), {
+        once: true,
+      });
+    });
+    return abortSignalled;
+  };
+
+  /**
+   * Wait for a human decision — but only once there is nothing else to
+   * run. Every ready wave has already been dispatched by the time this is
+   * called, so the only thing a park can delay is its own dependents
+   * (ADR 0055 §7; ADR 0024's rule applied to parks).
+   *
+   * The wall-clock ceiling (ADR 0019) deliberately keeps running while the
+   * pipeline idles here: the bounded wait is already sized by
+   * configuration, and a park surviving run death is the point of the
+   * durable park — exempting human think-time from the ceiling would let a
+   * run live forever.
+   *
+   * - `"progress"` — at least one slice left `awaitingAdjudication`; its
+   *   re-dispatch on the next loop turn is the park's reopen (step 4:
+   *   `trackSlice` clears the mark and the persisted record).
+   * - `"aborted"` — cancellation won the race; the caller runs the normal
+   *   sweep and leaves every park untouched.
+   * - `"exhausted"` — no live wait remains and nothing became runnable.
+   */
+  const awaitAdjudicationAtIdle = async (): Promise<
+    "progress" | "aborted" | "exhausted"
+  > => {
+    while (adjudicationWaits.size > 0) {
+      if (signal?.aborted) return "aborted";
+      logger.phase(
+        `[afk] No runnable slices; waiting on ${adjudicationWaits.size} ` +
+          `adjudication decision(s): ` +
+          `${[...adjudicationWaits.keys()].map((id) => `#${id}`).join(", ")}`,
+      );
+      await Promise.race([...adjudicationWaits.values(), abortRace()]);
+      if (signal?.aborted) return "aborted";
+
+      // Drain everything that resolved by now, not just the race winner:
+      // several decisions can land while one wave runs, and each should
+      // reach the same next wave.
+      let progressed = false;
+      for (const [id, result] of settledAdjudications) {
+        settledAdjudications.delete(id);
+        adjudicationWaits.delete(id);
+        if (result.status === "accepted") {
+          // Dropping the hold-back is the whole reopen: the next wave
+          // dispatches the slice, and that dispatch clears the park's mark
+          // and persisted record in the journal (ADR 0055 §9).
+          awaitingAdjudication.delete(id);
+          logger.phase(
+            `[afk] Slice #${id}: valid adjudication received — redispatching`,
+          );
+          progressed = true;
+        } else if (result.status === "expired") {
+          if (result.defect) {
+            logger.phase(
+              `[afk] Slice #${id}: adjudication refused — ${result.defect}; slice remains parked`,
+            );
+          }
+          logger.phase(
+            `[afk] Slice #${id}: adjudication wait expired — slice remains AWAITING-ADJUDICATION`,
+          );
+        }
+      }
+      if (progressed) return "progress";
+    }
+    return "exhausted";
+  };
+
+  // Mark anything not yet completed/failed as CANCELLED. Worktrees are
+  // preserved on disk so a re-run resumes from the artifact state, and a
+  // parked slice keeps its own phase — its estate is durable (ADR 0003,
+  // ADR 0055 Seam 2).
+  const sweepCancelled = (): void => {
+    for (const [id, slice] of dag.slices) {
+      if (slice.type === "HITL") continue;
+      if (
+        completed.has(id) ||
+        failed.has(id) ||
+        awaitingAdjudication.has(id)
+      ) {
+        continue;
+      }
+      const branch = sliceBranch(prdSlug, slice, provider);
+      logger.recordTerminal(
+        { ghIssue: id, title: slice.title, branch },
+        { phase: "CANCELLED", error: CANCELLED_BY_USER },
+      );
+      failed.add(id);
+    }
+  };
+
+  let waveNumber = 0;
+  waves: while (true) {
+    waveNumber++;
+
+    // Nothing ready is not necessarily the end: a parked slice may be one
+    // human decision away from being runnable again. Only idle waits.
+    let toRun = await readyOrHang(waveNumber);
+    while (toRun.length === 0) {
+      const idle = await awaitAdjudicationAtIdle();
+      if (idle === "aborted") {
+        sweepCancelled();
+        break waves;
+      }
+      if (idle === "exhausted") break waves;
+      toRun = await readyOrHang(waveNumber);
+    }
 
     // Run the wave: Phase A (negotiate) → lane partition → Phase B
     // (execute + merge). Returns per-slice outcomes for persistence.
@@ -4287,6 +5806,15 @@ export async function runPipeline(
       dispatched.add(id);
       if (outcome.phase === "PASS") {
         completed.add(id);
+      } else if (outcome.phase === "AWAITING-ADJUDICATION") {
+        // The park is recorded and its bounded wait is already running
+        // (persistOutcome). Reconciliation does NOT await it: the rest of
+        // this wave's outcomes, and every wave they make ready, come first
+        // (ADR 0055 §7). `awaitAdjudicationAtIdle` collects the decision
+        // once there is nothing else to run.
+        if (!adjudicationWaits.has(id) && !settledAdjudications.has(id)) {
+          throw new Error(`Missing adjudication wait for slice #${id}`);
+        }
       } else if (outcome.phase === "LANE-CANCELLED") {
         laneCancelled.add(id);
       } else if (outcome.phase === "MERGE-PENDING") {
@@ -4298,26 +5826,15 @@ export async function runPipeline(
     logger.event({ type: "wave-completed", wave: waveNumber });
 
     // If cancelled, mark anything not yet completed/failed as CANCELLED
-    // and exit the wave loop. Worktrees are preserved on disk so a
-    // re-run resumes from the artifact state. See ADR 0003.
+    // and exit the wave loop. See ADR 0003.
     if (signal?.aborted) {
-      for (const [id, slice] of dag.slices) {
-        if (slice.type === "HITL") continue;
-        if (completed.has(id) || failed.has(id)) continue;
-        const branch = sliceBranch(prdSlug, slice, provider);
-        logger.recordTerminal(
-          { ghIssue: id, title: slice.title, branch },
-          { phase: "CANCELLED", error: CANCELLED_BY_USER },
-        );
-        failed.add(id);
-      }
+      sweepCancelled();
       break;
     }
 
-    // If no progress was made this round, we're stuck.
-    const newReady = dag.ready(completed);
-    const newToRun = newReady.filter((id) => !heldBack(id));
-    if (newToRun.length === 0) break;
+    // No early exit when nothing is ready: the top of the loop decides
+    // that, because "nothing ready" now has a second answer — idle on the
+    // live adjudication waits before concluding the run is done.
   }
 
   // Any selected slice that never received an outcome was held back by
@@ -4348,6 +5865,20 @@ export async function runPipeline(
       `held back by unresolved ` +
       `dependenc${unresolved.length === 1 ? "y" : "ies"} [${blockerText}]`;
     notRunHolds.push({ id, title: slice.title, hold });
+    logger.recordDependencyHold(
+      {
+        ghIssue: id,
+        title: slice.title,
+        branch: sliceBranch(prdSlug, slice, provider),
+      },
+      unresolved.map((dep) => ({
+        ghIssue: dep,
+        status:
+          logger.getSlice(dep)?.phase ??
+          runState.slices[dep]?.phase ??
+          "UNKNOWN",
+      })),
+    );
     logger.phase(
       `[afk] Slice #${id} (${slice.title}): NOT-RUN — ${hold}; ` +
         `fix the blocker(s) and re-run`,

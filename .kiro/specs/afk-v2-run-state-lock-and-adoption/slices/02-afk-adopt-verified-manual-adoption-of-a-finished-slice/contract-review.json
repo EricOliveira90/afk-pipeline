@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01", "B-02"],
+      "evidence": "\"each fixture logs and asserts `HEAD^{tree}` equals M and the live feature ref still equals F; only after every gate passes does the feature ref move once\"",
+      "expected": "the passing and failing gate fixtures observe the candidate merged tree and original live feature ref during every resolved base-gate execution, and prove the feature ref changes only after all gates pass",
+      "observed": "the revised B-01 and B-02 scenarios require each gate fixture to assert candidate tree M and original feature ref F during execution, with success moving the ref only after all gates pass and failure preserving byte and ref snapshots",
+      "clearCondition": "the B-01/B-02 test plan makes every resolved base-gate fixture assert the candidate tree identity and unchanged live feature ref during execution, and permits the feature ref to move only after every gate passes",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["P-01"],
+      "evidence": "\"it invokes `status`, `stop`, `clean-failed`, a representative `--prd-dir ... --dry-run` pipeline, and `--help`, then spies or fixture effects prove the existing dispatch target and provider selection for each case, while captured stdout/stderr and exit results match current behavior\"",
+      "expected": "automated CLI entrypoint cases cover status, stop, clean-failed, a representative pipeline invocation, and help while asserting routing, provider selection, output channel, and exit behavior",
+      "observed": "the revised P-01 scenario names all five invocation categories and requires spies or fixture effects plus captured stdout, stderr, and exit results to prove every promised observable",
+      "clearCondition": "the P-01 test plan includes automated entrypoint cases for status, stop, clean-failed, a representative pipeline invocation, and help that assert dispatch target, provider selection, output channel, and exit result",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

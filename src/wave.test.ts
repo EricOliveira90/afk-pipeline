@@ -23,7 +23,12 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executionLanes, runWave, type WaveOutcome } from "./wave.js";
-import { makeAsyncMutex, sliceBranch } from "./orchestrator.js";
+import {
+  makeAsyncMutex,
+  makeSliceContext,
+  runSliceNegotiate,
+  sliceBranch,
+} from "./orchestrator.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import * as gitModule from "./git.js";
@@ -148,6 +153,263 @@ describe("runWave", () => {
       "utf-8",
     );
     expect(shared).toContain("ok");
+  }, 240_000);
+
+  it("continues a same-file independent sibling after a contract impasse parks", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "311",
+        title: "Parked",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "312",
+        title: "Continues",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "311",
+        {
+          files: ["src/shared-impasse.txt"],
+          qaPasses: true,
+          outputFile: "src/shared-impasse.txt",
+          outputContent: "parked",
+          contractImpasse: true,
+        },
+      ],
+      [
+        "312",
+        {
+          files: ["src/shared-impasse.txt"],
+          qaPasses: true,
+          outputFile: "src/shared-impasse.txt",
+          outputContent: "continued",
+        },
+      ],
+    ]);
+    const { config, dag, logger, featBranch, records } = setupWave(
+      repo,
+      "wave-impasse-continue",
+      slices,
+      fixtures,
+    );
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["311", "312"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("311")?.phase).toBe("AWAITING-ADJUDICATION");
+    expect(outcomes.get("312")?.phase).toBe("PASS");
+    expect(records).not.toContain("generator:311");
+    expect(records).toContain("generator:312");
+    git(repo, ["checkout", featBranch]);
+    expect(
+      readFileSync(join(repo, "src", "shared-impasse.txt"), "utf-8"),
+    ).toContain("continued");
+  }, 240_000);
+
+  // A new spawned scenario is necessary: existing wave fixtures either
+  // park an impasse before lane partitioning or enter a lane without an
+  // accepted human decision, so none reaches #133's destructive window.
+  it("keeps an adjudicated lane successor's decision and lock through refresh (#133)", async () => {
+    const repo = makeRepo();
+    const slices: Slice[] = [
+      {
+        number: "01",
+        ghIssue: "321",
+        title: "Lane predecessor",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+      {
+        number: "02",
+        ghIssue: "322",
+        title: "Adjudicated successor",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const sharedFile = "src/shared-adjudicated.txt";
+    const fixtures = new Map<string, SliceFixture>([
+      [
+        "321",
+        {
+          files: [sharedFile],
+          qaPasses: true,
+          outputFile: sharedFile,
+          outputContent: "predecessor",
+        },
+      ],
+      [
+        "322",
+        {
+          files: [sharedFile],
+          qaPasses: true,
+          outputFile: sharedFile,
+          outputContent: "successor",
+          contractImpasse: true,
+        },
+      ],
+    ]);
+    const { config, dag, logger, featBranch, provider } = setupWave(
+      repo,
+      "wave-adjudicated-successor",
+      slices,
+      fixtures,
+    );
+
+    // Prepare the exact Phase-A state from defect #133: the future lane
+    // successor has a complete human decision and accepted lock in its
+    // slice worktree before its predecessor executes.
+    const successor = slices[1]!;
+    const successorCtx = makeSliceContext(
+      config,
+      successor,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+    expect((await runSliceNegotiate(successorCtx)).phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+    writeFileSync(
+      join(successorCtx.absSliceDir, "adjudication.md"),
+      JSON.stringify({
+        version: 1,
+        findingId: "F-IMPASSE",
+        winningPosition: "PLANNER",
+        author: "Ada",
+      }),
+      "utf-8",
+    );
+    expect((await runSliceNegotiate(successorCtx)).phase).toBe("LOCKED");
+
+    const decisionPath = join(
+      successorCtx.absSliceDir,
+      "adjudication-decisions.json",
+    );
+    expect(JSON.parse(readFileSync(decisionPath, "utf-8"))).toMatchObject({
+      applied: true,
+      decisions: [{ decision: { findingId: "F-IMPASSE" } }],
+    });
+
+    // The estate as it stands before the lane refresh, file by file. The
+    // audit assertion is byte-identity rather than mere presence (ADR 0055
+    // Seam 2, plan step 9): lane refresh is the one operation that reaches
+    // a slice's worktree while the slice itself is not being dispatched,
+    // and `recreateWorktreeFromBase` + the stale-artifact `rmSync` beside
+    // it are what #133 aimed at these exact paths.
+    const ESTATE = [
+      "contract-negotiation-outcome.json",
+      "adjudication-decisions.json",
+      "contract.md",
+    ] as const;
+    const estateBefore = new Map(
+      ESTATE.map((name) => [
+        name,
+        readFileSync(join(successorCtx.absSliceDir, name), "utf-8"),
+      ]),
+    );
+    const branchTipBefore = git(repo, ["rev-parse", successorCtx.branch]);
+
+    // The lane refresh moves the successor's base, and the migration-prefix
+    // gate is the only thing that can see a prefix the predecessor's merge
+    // has since claimed (ADR 0028). Its proven adjudication lock therefore
+    // has to be re-attested on the refreshed tip: an `it` on this scenario
+    // rather than a spawn of its own, because the refusal behaviour itself
+    // is covered at the negotiate seam in `orchestrator.test.ts`, and what
+    // is only provable here is that the wave's own gate closure is reached
+    // through the refresh at all.
+    const gatedOnRefresh: string[] = [];
+    config.onContractLocked = (id) => {
+      gatedOnRefresh.push(id);
+      return null;
+    };
+
+    let decisionPresentAtGenerator = false;
+    let acceptedLockPresentAtGenerator = false;
+    /** Estate names whose bytes changed between negotiation and generation. */
+    let estateDriftAtGenerator: string[] | undefined;
+    config.provider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const slice = sliceFromCwd(options.cwd, slices);
+        if (slice?.ghIssue === "322" && options.role === "generator") {
+          const artifactDir = findSliceArtifactDir(options.cwd, slice.number)!;
+          const record = JSON.parse(
+            readFileSync(
+              join(artifactDir, "adjudication-decisions.json"),
+              "utf-8",
+            ),
+          ) as { applied?: boolean };
+          decisionPresentAtGenerator = record.applied === true;
+          acceptedLockPresentAtGenerator = readFileSync(
+            join(artifactDir, "contract.md"),
+            "utf-8",
+          ).includes("**Status:** LOCKED");
+          estateDriftAtGenerator = [...estateBefore]
+            .filter(([name, contents]) => {
+              const path = join(artifactDir, name);
+              return !existsSync(path) || readFileSync(path, "utf-8") !== contents;
+            })
+            .map(([name]) => name);
+        }
+        return provider.invoke(options);
+      },
+    };
+
+    const { outcomes } = await runWave({
+      waveNumber: 1,
+      readyIds: ["321", "322"],
+      config,
+      dag,
+      logger,
+      featBranch,
+      relevantFilesBlock: "- README.md",
+      testCommand: "pnpm test",
+      mergeMutex: makeAsyncMutex(),
+    });
+
+    expect(outcomes.get("321")?.phase).toBe("PASS");
+    expect(outcomes.get("322")?.phase).toBe("PASS");
+    expect(decisionPresentAtGenerator).toBe(true);
+    expect(acceptedLockPresentAtGenerator).toBe(true);
+    // Named, not incidental: every estate file reached generation with the
+    // bytes negotiation left, and the branch was refreshed by merge rather
+    // than deleted and recreated at the feature tip.
+    expect(estateDriftAtGenerator).toEqual([]);
+    // The successor's lock was proven by its applied decision record, not by
+    // this dispatch — and it still went through the gate on the refreshed
+    // tip before generation.
+    expect(gatedOnRefresh).toContain("322");
+    expect(() =>
+      git(repo, [
+        "merge-base",
+        "--is-ancestor",
+        branchTipBefore,
+        successorCtx.branch,
+      ]),
+    ).not.toThrow();
   }, 240_000);
 
   it("runs disjoint slices in parallel lanes", async () => {

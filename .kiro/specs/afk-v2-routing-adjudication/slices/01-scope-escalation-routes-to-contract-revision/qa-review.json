@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01", "B-04"],
+      "summary": "Fresh generation preserves repair context after scope revision",
+      "evidence": "src/orchestrator.ts:3291-3343 keeps the original repair or resume prompt variant and appends the accepted scope note. The shared heavy fixture at src/orchestrator.test.ts:1089-1148 escalates from implementation round 2 and asserts the fresh invocation receives the round marker, QA-01 summary and clear condition, archived QA references, and the complete accepted fileScope.",
+      "expected": "After a repair or resumed generator escalates, generation resumes under the revised lock with both the accepted complete file scope and the unresolved finding context needed to perform the cited repair.",
+      "observed": "The fresh same-round generator receives the complete accepted fileScope together with the original repair finding and retry artifact context.",
+      "clearCondition": "An orchestration test demonstrates that a repair or resumed generator can escalate and that the fresh same-round invocation receives the accepted complete fileScope plus the original unresolved finding and retry context.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-05"],
+      "summary": "Malformed escalation integration coverage verifies stamped raw archives",
+      "evidence": "The existing heavy pipeline fixture at src/orchestrator.test.ts:923-1053 now carries absent-field and malformed variants as two slices in one run, asserts each ERROR state, exactly one initial planner and generator per slice, no QA or gate execution, and exact raw bytes in reviews/escalation-r1-a1.md.",
+      "expected": "The heavy orchestration scenario covers malformed and absent-field escalation variants and proves each raw attempt is retained in its stamped reviews archive with no downstream planner, gate, or QA execution.",
+      "observed": "Both variants are exercised without another pipeline run, and their exact raw bytes and fail-closed outcomes are asserted at the orchestration boundary.",
+      "clearCondition": "The existing heavy orchestration fixture covers malformed and absent-field attempts without unnecessary extra pipeline runs and asserts the exact raw bytes in their stamped reviews archives, along with ERROR and no downstream planner, gate, or QA invocation.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

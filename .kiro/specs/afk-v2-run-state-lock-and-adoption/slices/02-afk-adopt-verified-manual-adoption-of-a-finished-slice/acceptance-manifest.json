@@ -1,0 +1,148 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/adopt-command.ts",
+      "src/adopt-command.test.ts",
+      "src/afk.ts",
+      "src/afk.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/git.ts",
+      "src/git.test.ts",
+      "src/run-journal.ts",
+      "src/run-journal.test.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/ship-gate.ts",
+      "src/ship-gate.test.ts",
+      "src/slice-lifecycle.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #129 AC1",
+      "given": "a PRD slug, slice identifier, finished slice branch, resolved non-empty adopter, and non-empty reason",
+      "when": "adopt finds a clean candidate merge and every base gate passes on that merged tree",
+      "then": "it merges the slice into the state's feature branch and writes the slice as PASS and merged with its adoption record",
+      "observableResult": "the feature branch moves once after gate success and state contains phase PASS, mergedToFeature true, branch, and adopter, reason, branch, and verified slice-tip commit provenance",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #129 AC2",
+      "given": "a clean candidate merge whose merged tree fails a base gate",
+      "when": "adoption is attempted",
+      "then": "the command exits unsuccessfully, names the failing gate, and leaves the working tree, branch refs, and run-state file unchanged",
+      "observableResult": "gate identity logs show the candidate tree and original feature ref, the refusal names the gate, and byte and ref snapshots are unchanged",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #129 AC3",
+      "given": "a slice branch that conflicts with the feature branch",
+      "when": "adoption is attempted",
+      "then": "the command exits unsuccessfully, names the merge conflict, and leaves the working tree, both branch refs, and run-state file unchanged",
+      "observableResult": "the refusal names the conflict and worktree, ref, and state snapshots remain unchanged",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #129 AC5",
+      "given": "a missing, empty, or whitespace-only reason",
+      "when": "adoption is attempted",
+      "then": "it is refused without a merge, adoption record, branch change, or state change",
+      "observableResult": "the command refuses each invalid reason and ref and state snapshots remain unchanged",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #129 AC4 and plan section 3 item 10",
+      "given": "persisted adoption metadata for a completed slice",
+      "when": "AFK writes run-summary.md or builds the draft PR body",
+      "then": "each output identifies the adopted slice and shows adopter, reason, branch, and commit",
+      "observableResult": "both rendered reporting surfaces contain all four adoption fields for the adopted slice",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "context.md Existing Behavior In Touched Files",
+      "given": "an existing status, stop, clean-failed, pipeline option, or help invocation",
+      "when": "its current CLI entry point dispatches it",
+      "then": "its routing, provider selection, output channel, and exit behavior remain available",
+      "observableResult": "entrypoint cases prove the dispatch target and provider and capture the expected stdout or stderr destination and exit result",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "context.md Existing Behavior In Touched Files for src/run-state.ts",
+      "given": "legacy or current run-state JSON without adoption",
+      "when": "it is loaded, saved, or checked by isSliceComplete",
+      "then": "v0 adaptation, optional state fields, parallel slice updates, and the PASS-plus-merged completion rule remain unchanged",
+      "observableResult": "legacy and current state fixtures retain their fields and existing completion decisions",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "context.md Existing Behavior In Touched Files for src/git.ts",
+      "given": "a merge attempted through existing git helpers",
+      "when": "it succeeds or conflicts",
+      "then": "current scratch and registered-worktree handling and conflict cleanup remain unchanged for pipeline merges",
+      "observableResult": "existing merge-helper fixtures retain successful merge and clean conflict outcomes",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "context.md Existing Behavior In Touched Files for src/logger.ts",
+      "given": "a run with no adopted slices",
+      "when": "its stable and per-run summaries are written",
+      "then": "lifecycle labels, branch dispositions, dependency holds, base-gate attempts, totals, and both output locations retain their current rendering",
+      "observableResult": "ordinary summary fixtures keep their existing content and both files are written",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "context.md Existing Behavior In Touched Files for src/ship-gate.ts",
+      "given": "draft-PR planning with no adopted slices",
+      "when": "guardian verdicts and optional override are evaluated",
+      "then": "open or refuse behavior, override disclosure, artifact links, and Closes lines remain unchanged",
+      "observableResult": "ordinary draft-PR fixtures retain their current decision and body projections",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

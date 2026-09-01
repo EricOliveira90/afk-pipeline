@@ -24,6 +24,17 @@ export interface SliceTotals {
   toolCallCount: number;
 }
 
+export interface DependencyBlocker {
+  ghIssue: string;
+  status: string;
+}
+
+interface DependencyHold {
+  ghIssue: string;
+  title: string;
+  blockers: DependencyBlocker[];
+}
+
 export type { SanityGateResult };
 
 /**
@@ -82,6 +93,7 @@ export function runDirNameFor(startedAt: Date, parentDir: string): string {
 export class Logger {
   private logDir: string;
   private runLog: RunLog;
+  private readonly dependencyHolds: DependencyHold[] = [];
   /**
    * Per-run log directory (`.afk/logs/<prd-slug>/run-<timestamp>/`).
    * Agent invocation logs and run.log live here, so a file's mtime and
@@ -180,6 +192,24 @@ export class Logger {
     this.runLog.prUrl = url;
   }
 
+  recordDependencyHold(
+    slice: Pick<SliceLifecycle, "ghIssue" | "title">,
+    blockers: DependencyBlocker[],
+  ) {
+    if (
+      !blockers.some(
+        (blocker) => blocker.status === "AWAITING-ADJUDICATION",
+      )
+    ) {
+      return;
+    }
+    this.dependencyHolds.push({
+      ghIssue: slice.ghIssue,
+      title: slice.title,
+      blockers: [...blockers],
+    });
+  }
+
   writeSummary() {
     this.runLog.finishedAt = new Date();
     const {
@@ -206,6 +236,10 @@ export class Logger {
       .map((s) => {
         const icon = statusIconFor(s.phase);
         const label = summaryStatusLabel(s.phase);
+        const status =
+          s.phase === "AWAITING-ADJUDICATION"
+            ? `${icon} ${label} — ${s.error}`
+            : `${icon} ${label}`;
         const rounds = roundsCellFor(s);
         const branchInfo = branchInfoFor(s);
         const t = totals.get(s.ghIssue);
@@ -215,7 +249,7 @@ export class Logger {
           runCost += t.costUsd;
           runToolCalls += t.toolCallCount;
         }
-        return `| ${s.ghIssue} ${s.title} | ${icon} ${label} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
+        return `| ${s.ghIssue} ${s.title} | ${status} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
       })
       .join("\n");
 
@@ -239,7 +273,24 @@ export class Logger {
 |-------|-------|------|--------|---------|----------|-----|
 ${gateRows}
 `;
+    const dependencyRows = this.dependencyHolds
+      .map(
+        (hold) =>
+          `| #${hold.ghIssue} ${hold.title} | ${hold.blockers
+            .map((blocker) => `#${blocker.ghIssue} (${blocker.status})`)
+            .join(", ")} |`,
+      )
+      .join("\n");
+    const dependencySection =
+      dependencyRows.length === 0
+        ? ""
+        : `
+## Dependency Holds
 
+| Slice | Blocked by |
+|-------|------------|
+${dependencyRows}
+`;
     const summary = `# Run Summary — ${prdSlug}
 
 Started: ${startedAt.toISOString()}
@@ -249,6 +300,7 @@ Finished: ${finishedAt!.toISOString()}
 |-------|--------|--------|--------|------|------------|
 ${rows}
 ${totalsRow}
+${dependencySection}
 ${gateSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
@@ -468,6 +520,8 @@ function roundsCellFor(s: SliceLifecycle): string {
     case "PASS":
     case "STUCK":
     case "ESCALATE":
+    case "AWAITING-ADJUDICATION":
+    case "ADJUDICATION-LOCK-REFUSED":
     case "ERROR":
     case "CONFLICT":
     case "MERGE-PENDING":

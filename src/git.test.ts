@@ -839,19 +839,56 @@ describe("git.listChangedFiles", () => {
   });
 
   it("reports committed, uncommitted, and untracked changes against the base", () => {
-    expect(listChangedFiles(repoDir, "main")).toEqual([
-      "committed.ts",
-      "src/new.ts",
-      "tracked.ts",
-    ]);
+    expect(listChangedFiles(repoDir, "main")).toEqual({
+      ok: true,
+      paths: ["committed.ts", "src/new.ts", "tracked.ts"],
+    });
   });
 
-  it("returns nothing for a base that does not exist", () => {
+  /**
+   * Found by the fifth adjudication gate round's self-probe pass. git's
+   * default `core.quotePath` prints any non-ASCII path C-quoted and wrapped
+   * in double quotes (`"caf\303\251.ts"`), which matches no declared path.
+   * The scope-amendment door then refused an honest request for such a file
+   * ("not among the files this slice changed") and the escalation guard would
+   * report it as an out-of-scope change — both of them a false accusation
+   * produced by an output convention.
+   */
+  it("reports a non-ASCII path as the path, not as git's quoted spelling", () => {
+    const unicode = mkdtempSync(join(tmpdir(), "afk-git-unicode-"));
+    try {
+      git(unicode, ["init", "--initial-branch=main"]);
+      git(unicode, ["commit", "--allow-empty", "-m", "root"]);
+      writeFileSync(join(unicode, "café.ts"), "export const a = 1;\n");
+      expect(listChangedFiles(unicode, "main")).toEqual({
+        ok: true,
+        paths: ["café.ts"],
+      });
+    } finally {
+      rmDirWithRetry(unicode);
+    }
+  });
+
+  /**
+   * The probe distinguishes "git could not tell me" from "nothing changed"
+   * (fifth adjudication gate round, the shared decision behind architect
+   * blocker 1). It used to swallow each command's failure and return the
+   * partial union, so a failed `diff` read as an empty change set — which
+   * the QA amendment caller spends as "the requested path was never
+   * touched" and the escalation caller would spend as "there is nothing
+   * out of scope, grant the revision". Both callers now fail closed on
+   * `ok: false`.
+   */
+  it("reports failure, not an empty change set, for a base that does not exist", () => {
     const clean = mkdtempSync(join(tmpdir(), "afk-git-clean-"));
     try {
       git(clean, ["init", "--initial-branch=main"]);
       git(clean, ["commit", "--allow-empty", "-m", "root"]);
-      expect(listChangedFiles(clean, "no/such/ref")).toEqual([]);
+      const probe = listChangedFiles(clean, "no/such/ref");
+      expect(probe.ok).toBe(false);
+      expect((probe as { failure: string }).failure).toContain(
+        "git diff --name-only no/such/ref...HEAD",
+      );
     } finally {
       rmDirWithRetry(clean);
     }

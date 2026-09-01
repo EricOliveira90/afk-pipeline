@@ -204,13 +204,60 @@
     "_total": "691.7s of suite time, 1287s budget",
     "_alone": "Post-fix alone-runs, same machine: qa 71.7s, resume 106.1s"
   },
+  "_measured2026_08_31_prd2_gate6@feat-codex/afk-v2-routing-adjudication": {
+    "_note": [
+      "Full chain, in the PRD 2 gate's review worktree on the run host,",
+      "at the round-4 blocker fix (adjudication estate ownership read off",
+      "disk). clean-failed came in at 23.9s against a 23s budget and",
+      "failed the gate; the three prior gate rounds on this same host",
+      "measured 11.9 / 11.1 / 16.6s in chain. The growth is real and",
+      "structural: the estate-ownership fix needs a slice worktree",
+      "materialised per post-decision exit (park, lock refusal, planner",
+      "failure, refresh conflict, cancellation mid-apply) and each `git",
+      "worktree add` is seconds on this host. The AGENTS.md ladder was",
+      "applied first — the pass-2 namespace-sweep scenario was folded into",
+      "the existing fixture instead of paying for its own temp repo, which",
+      "took the suite alone from 14.1s to 12.0s (9 tests) — and the budget",
+      "is raised for what remains: 30s, ~30% above the 23.9s in-chain",
+      "measurement recorded here."
+    ],
+    "fast": 123.3,
+    "orchestrator": 334.3,
+    "wave": 208.3,
+    "resume-integration": 84.3,
+    "qa-orchestration": 61.3,
+    "clean-failed": 23.9,
+    "_total": "835.3s of suite time, 14m18s of the gate's `pnpm test`",
+    "_alone": "clean-failed alone on the launcher host: 14.1s before the fold, 12.0s after"
+  },
+  "_measured2026_08_31_slice06_excision@fix/prd2-excise-slice06": {
+    "_note": [
+      "After excising slice 06 (`afk adopt`) from PRD 2: adopt-command.ts and",
+      "its 1523-line test deleted, adoption provenance stripped from",
+      "ship-gate/logger/run-journal/run-state/slice-lifecycle/orchestrator.",
+      "Suites run individually on the launcher host with an agent session",
+      "resident, not as one `pnpm test` chain, so these are alone-runs and",
+      "read LOW against the in-chain numbers a budget covers — do not use",
+      "them to lower a budget. Recorded because the tree lost 1523 test",
+      "lines and the datapoint is worth having. No budget raised or lowered;",
+      "every suite passed with headroom. Compare with the gate6 block above,",
+      "measured in-chain on the branch this merges into."
+    ],
+    "fast": 80.4,
+    "orchestrator": 329.7,
+    "wave": 194.4,
+    "resume-integration": 108.7,
+    "qa-orchestration": 75.1,
+    "clean-failed": 16.4,
+    "_total": "804.8s of suite time, 1604 tests (1294 fast + 310 heavy)"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
     "wave": 295,
     "resume-integration": 152,
     "qa-orchestration": 87,
-    "clean-failed": 23
+    "clean-failed": 30
   },
-  "totalSeconds": 1287
+  "totalSeconds": 1294
 }

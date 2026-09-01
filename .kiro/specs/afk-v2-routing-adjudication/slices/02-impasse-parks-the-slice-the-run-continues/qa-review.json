@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "B-04",
+        "P-03"
+      ],
+      "summary": "Dependency-hold summaries preserve ordinary failure runs",
+      "evidence": "src/logger.ts:195-205 now returns without recording a hold unless a blocker is AWAITING-ADJUDICATION. src/logger.test.ts:206-220 and src/orchestrator-runs.test.ts:1129-1132 assert that ordinary STUCK runs do not gain a Dependency Holds section. The authorized full test gate passed on tree ddbce6d20cc6b5b4efc59d26646c3e9f45fbf41a.",
+      "expected": "The summary records the new dependency-hold projection only when an unresolved blocker is AWAITING-ADJUDICATION, while ordinary failure summaries remain unchanged.",
+      "observed": "The logger filters holds to AWAITING-ADJUDICATION blockers, and unit plus existing spawned-scenario assertions preserve ordinary failure summary output.",
+      "clearCondition": "The summary records the new dependency-hold projection only when an unresolved blocker is AWAITING-ADJUDICATION, with a regression assertion that ordinary failure summaries remain unchanged.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": [
+        "B-03"
+      ],
+      "summary": "The new spawned wave lacks the required cost-justification comment",
+      "evidence": "src/wave.test.ts:153 adds a new spawned wave scenario that measured 6474ms in the authorized test log, but the test has no comment explaining why an existing spawned scenario cannot reach the required state.",
+      "expected": "AGENTS.md requires every genuinely necessary new spawned scenario to include a comment explaining why its distinct fixture state cannot be covered more cheaply.",
+      "observed": "The impasse wave scenario is behaviorally meaningful and passes, but its required cost rationale is implicit rather than recorded.",
+      "clearCondition": "Add a concise comment beside the scenario explaining why the contract-impasse-before-lane-partition state requires this separate spawned wave, or consolidate it into an existing spawned fixture without losing coverage.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

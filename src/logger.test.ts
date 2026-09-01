@@ -122,6 +122,36 @@ describe("Logger.bumpGenRound / bumpEvalRound", () => {
 });
 
 describe("Logger.writeSummary (run-summary.md byte stability)", () => {
+  it("preserves every byte of a summary for a restored completed slice", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-29T12:00:00.000Z"));
+      const repo = makeRepo();
+      const log = new Logger(repo, "ordinary");
+      log.restoreCompleted(id("130", "Pipeline finish", "afk/demo-02"));
+
+      expect(log.writeSummary()).toBe(`# Run Summary — ordinary
+
+Started: 2026-08-29T12:00:00.000Z
+Finished: 2026-08-29T12:00:00.000Z
+
+| Slice | Status | Rounds | Branch | Cost | Tool calls |
+|-------|--------|--------|--------|------|------------|
+| 130 Pipeline finish | ✅ PASS | gen:0 eval:0 | merged | — | — |
+| **Run totals** | | | | **—** | **0** |
+
+
+
+Pre-ship sanity gate: N/A
+Architect review: N/A
+PM review: N/A
+
+`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders ESCALATE and ERROR as STUCK in the markdown table", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "summary");
@@ -183,6 +213,42 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
     expect(log.writeSummary()).toContain(
       "Pre-ship sanity gate: FAIL (typecheck, tests)",
     );
+  });
+
+  it("names dependents held by a parked adjudication issue", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "impasse-hold");
+    recordTerminal(log, id("81", "Parked", "afk/81"), {
+      phase: "AWAITING-ADJUDICATION",
+      error: "contract impasse on F-01",
+    });
+    log.recordDependencyHold(
+      id("82", "Dependent", "afk/82"),
+      [{ ghIssue: "81", status: "AWAITING-ADJUDICATION" }],
+    );
+
+    const md = log.writeSummary();
+
+    expect(md).toContain("#82 Dependent");
+    expect(md).toContain("#81 (AWAITING-ADJUDICATION)");
+  });
+
+  it("omits dependency holds for ordinary failures", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "ordinary-failure");
+    recordTerminal(log, id("81", "Failed", "afk/81"), {
+      phase: "STUCK",
+      error: "QA failed",
+    });
+    log.recordDependencyHold(
+      id("82", "Dependent", "afk/82"),
+      [{ ghIssue: "81", status: "STUCK" }],
+    );
+
+    const md = log.writeSummary();
+
+    expect(md).not.toContain("## Dependency Holds");
+    expect(md).not.toContain("#82 Dependent");
   });
 });
 

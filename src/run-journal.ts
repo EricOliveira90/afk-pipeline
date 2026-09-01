@@ -1,7 +1,11 @@
 import { appendFileSync, type WriteStream } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
-import { Logger, type SanityGateResult } from "./logger.js";
+import {
+  Logger,
+  type DependencyBlocker,
+  type SanityGateResult,
+} from "./logger.js";
 import {
   EVENTS_FILE,
   EVENTS_SCHEMA_VERSION,
@@ -16,6 +20,7 @@ import {
 } from "./stage-durations.js";
 import {
   lifecycle,
+  traitsFor,
   type FailurePhase,
   type SliceIdentity,
   type SliceLifecycle,
@@ -46,6 +51,12 @@ export type TerminalOutcome =
 export class RunJournal {
   private readonly slices = new Map<string, SliceLifecycle>();
   private readonly terminalSlices = new Set<string>();
+  /**
+   * Slices closed by a *replaceable* outcome — the adjudication park (ADR
+   * 0055 §9). Recorded exactly like a terminal, but a dispatch may replace
+   * it, so it is marked here instead of in `terminalSlices`.
+   */
+  private readonly parkedSlices = new Set<string>();
   private readonly logger: Logger;
   private featureBranch?: string;
   private fatalStreamError?: (error: unknown, origin: string) => void;
@@ -176,7 +187,12 @@ export class RunJournal {
         `RunJournal.trackSlice: terminal phase ${next.phase} must use recordTerminal`,
       );
     }
-    if (next.phase === "RUNNING") this.clearRecordsOnDispatch(next);
+    if (next.phase === "RUNNING") {
+      // Re-dispatch is the reopen (ADR 0055 §9): the parked mark goes here,
+      // and `clearRecordsOnDispatch` takes the persisted park with it.
+      this.parkedSlices.delete(next.ghIssue);
+      this.clearRecordsOnDispatch(next);
+    }
     this.slices.set(next.ghIssue, next);
   }
 
@@ -195,7 +211,11 @@ export class RunJournal {
    *
    * Nothing is cleared for a slice this run has already closed
    * (`recordTerminal`): a re-dispatch after a decided outcome would
-   * otherwise wipe a record this run is entitled to.
+   * otherwise wipe a record this run is entitled to. An adjudication park
+   * is not closed in that sense and *is* cleared here: per ADR 0055 §9 the
+   * park's durable estate is the slice directory and its branch, and the
+   * state record is only the announcement, so a dispatch that supersedes
+   * the park supersedes its record too.
    *
    * Best effort. A failed clear warns and the slice runs anyway — the
    * cost is the misleading record we already live with, and refusing to
@@ -238,10 +258,7 @@ export class RunJournal {
 
   /** Restore an already-persisted PASS for this run's summary. */
   restoreCompleted(sliceId: SliceIdentity) {
-    this.slices.set(
-      sliceId.ghIssue,
-      lifecycle.pass(sliceId, ZERO_PROGRESS, true),
-    );
+    this.slices.set(sliceId.ghIssue, lifecycle.pass(sliceId, ZERO_PROGRESS, true));
   }
 
   /**
@@ -309,9 +326,25 @@ export class RunJournal {
   }
 
   /**
-   * Persist one terminal outcome. State lands first (ADR 0018), then the
-   * in-memory lifecycle, run.log line, and unchanged slice-outcome event.
-   * A completed call is idempotent for the rest of this run.
+   * Persist one terminal or parked outcome. State lands first (ADR 0018),
+   * then the in-memory lifecycle, run.log line, and unchanged
+   * slice-outcome event — one ordering for both classes.
+   *
+   * A completed terminal call is idempotent for the rest of this run. A
+   * park (ADR 0055 §9) is idempotent the same way for a re-record of the
+   * *same* park, but it is replaceable: a **different** outcome may only
+   * follow an intervening `trackSlice` dispatch, and asking for one
+   * without that dispatch throws rather than silently overwriting the
+   * record a human is being asked to act on (ADR 0031's protection).
+   *
+   * "Same park" means the whole record, phase and reason alike — not the
+   * phase alone. Phase-only idempotency looked like ADR 0031's retry rule
+   * and behaved like a data-loss bug: a partial adjudication parks again
+   * naming only the findings still undecided (ADR 0054 item 3), same phase,
+   * different reason, and the phase check silently kept the stale reason
+   * listing findings the human had already decided. A caller that reaches
+   * here with a changed park has skipped its reopen; that is a defect in
+   * the caller, so it is raised, not absorbed.
    */
   recordTerminal(
     sliceId: SliceIdentity,
@@ -319,6 +352,29 @@ export class RunJournal {
   ): SliceLifecycle {
     const existing = this.slices.get(sliceId.ghIssue);
     if (this.terminalSlices.has(sliceId.ghIssue) && existing) return existing;
+    if (this.parkedSlices.has(sliceId.ghIssue) && existing) {
+      const sameError =
+        ("error" in existing ? existing.error : undefined) ===
+        ("error" in outcome ? outcome.error : undefined);
+      // "The same park" is the whole record (ADR 0055 §9): phase, reason, and
+      // branch identity. Branch naming is deterministic within a run today,
+      // so comparing it changes no current behaviour — but the invariant is
+      // stated over the whole record, and a re-park onto a different branch
+      // with no intervening dispatch is a missing reopen in the caller, not a
+      // retry, so it must throw rather than silently keep the old branch.
+      const sameBranch = existing.branch === sliceId.branch;
+      if (existing.phase === outcome.phase && sameError && sameBranch)
+        return existing;
+      const replacement =
+        existing.phase === outcome.phase
+          ? `a changed ${outcome.phase}`
+          : outcome.phase;
+      throw new Error(
+        `RunJournal.recordTerminal: slice ${sliceId.ghIssue} is parked ` +
+          `(lifecycle shows ${existing.phase}); ${replacement} may only ` +
+          `follow a trackSlice dispatch that reopens the park`,
+      );
+    }
 
     const progress = progressOf(existing);
     const next = terminalLifecycle(sliceId, progress, outcome);
@@ -342,7 +398,11 @@ export class RunJournal {
       "error",
       { type: "slice-outcome", slice: next },
     );
-    this.terminalSlices.add(sliceId.ghIssue);
+    if (traitsFor(next.phase).replaceableThisRun) {
+      this.parkedSlices.add(sliceId.ghIssue);
+    } else {
+      this.terminalSlices.add(sliceId.ghIssue);
+    }
     return next;
   }
 
@@ -421,6 +481,13 @@ export class RunJournal {
     this.logger.setPrUrl(url);
   }
 
+  recordDependencyHold(
+    sliceId: SliceIdentity,
+    blockers: DependencyBlocker[],
+  ) {
+    this.logger.recordDependencyHold(sliceId, blockers);
+  }
+
   writeSummary() {
     return this.logger.writeSummary();
   }
@@ -464,6 +531,14 @@ function terminalLifecycle(
       return lifecycle.stuck(sliceId, progress, outcome.error);
     case "ESCALATE":
       return lifecycle.escalate(sliceId, progress, outcome.error);
+    case "AWAITING-ADJUDICATION":
+      return lifecycle.awaitingAdjudication(sliceId, progress, outcome.error);
+    case "ADJUDICATION-LOCK-REFUSED":
+      return lifecycle.adjudicationLockRefused(
+        sliceId,
+        progress,
+        outcome.error,
+      );
     case "ERROR":
       return lifecycle.error(sliceId, progress, outcome.error);
     case "CONFLICT":

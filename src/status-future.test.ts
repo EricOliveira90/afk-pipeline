@@ -297,6 +297,25 @@ describe("buildFutureSection", () => {
     ]);
   });
 
+  it("names a parked adjudication issue as the dependent's blocker", () => {
+    const snapshot = snapshotFixture();
+    addOutcome(snapshot, "100", {
+      phase: "AWAITING-ADJUDICATION",
+      source: "event",
+      branch: "afk/100",
+      error: "contract impasse on F-01",
+    });
+
+    const future = build(snapshot);
+
+    expect(pendingFor(future, "101").waitsOn).toEqual([
+      { ghIssue: "100", status: "AWAITING-ADJUDICATION" },
+    ]);
+    expect(renderFutureSection(future).join("\n")).toContain(
+      "#101 — waits on #100 (AWAITING-ADJUDICATION)",
+    );
+  });
+
   it("degrades to observed snapshot slices when issues.md is missing", () => {
     const future = build(snapshotFixture(), {
       status: "missing",

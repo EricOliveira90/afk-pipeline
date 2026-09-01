@@ -31,6 +31,38 @@ Work in **vertical tracer bullets** — one contract behavior end-to-end at a
 time, not all layers of everything at once. One behavior → implement →
 verify → next.
 
+# Scope escalation
+
+If the correct implementation requires a file path the locked contract and
+its acceptance manifest do not declare:
+1. Stop before making the undeclared edit.
+2. Write `escalation.md` in the slice directory with exactly this JSON:
+   `{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}`.
+3. End the invocation. Do not edit the undeclared path, the locked contract,
+   or its acceptance manifest.
+
+The payload contains no fields other than `version`, `findingIds`, `paths`,
+and `reason`. List every needed undeclared path, and give a non-blank reason
+that explains why those paths are required.
+
+`findingIds` is always required, and which identity belongs in it is decided
+by whether this invocation was handed findings:
+
+- **Findings were cited to you** above — unresolved QA findings, base-gate
+  failures, a stuck diagnosis, or contract-review findings. Cite the IDs of
+  the ones whose correct fix needs the undeclared paths, and only those:
+  `["QA-03"]`, `["F-01","F-02"]`.
+- **Nothing was cited to you** — this is a first attempt with no findings to
+  fix, so you discovered before building that the locked file scope is too
+  narrow. Use the reserved pre-build scope identity, alone:
+  `{"version":1,"findingIds":["PRE-BUILD-SCOPE"],"paths":["src/file.ts"],"reason":"..."}`.
+
+Never mix `PRE-BUILD-SCOPE` with a real finding ID — the escalation is
+refused. If you were given findings, cite them; the reserved identity is for
+the case where there is nothing to cite.
+
+# Tracer bullets
+
 Per behavior named in the contract:
 1. Implement the behavior in a full design pass, following the contract
    and CONVENTIONS.md.
@@ -73,13 +105,8 @@ If the retry note contains routed unresolved findings:
 4. Rewrite `handoff.md` with "Round N" header listing what changed.
 5. Invoke `@evaluator` again.
 
-**Max 3 rounds total** (first implementation + 2 retries). After round 3,
-stop and write a `stuck.md` in the slice folder with:
-- What the evaluator wants
-- What you tried
-- Your best guess at the blocker
-
-Return to human for escalation. Do not loop further.
+The orchestrator owns the implementation-round limit and terminal
+diagnosis. Complete only the current routed attempt, then return control.
 
 # Hard rules
 
@@ -87,9 +114,9 @@ Return to human for escalation. Do not loop further.
   outside the contract's "In scope," you do NOT fix it. Log it in
   `handoff.md` under "Gotchas / learnings" so the next planner can slice
   it.
-- **No scope expansion.** If the contract is wrong, STOP. Request a
-  planner re-invocation with explicit human approval. Don't silently
-  enlarge the slice.
+- **No scope expansion.** Follow the scope-escalation protocol above when
+  a cited finding requires an undeclared path. Don't silently enlarge the
+  slice.
 - **Convention compliance.** Follow CONVENTIONS.md patterns —
   `safeAction`, Zod schemas, RLS, multi-tenant `clinic_id`, atomic RPCs,
   etc. If a pattern doesn't exist for what you need, STOP and escalate to

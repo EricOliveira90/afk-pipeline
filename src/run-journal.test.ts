@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { RunJournal } from "./run-journal.js";
 import { loadRunState } from "./run-state.js";
 import { lifecycle, type SliceIdentity } from "./slice-lifecycle.js";
+import { runStatus } from "./status.js";
 
 const tempDirs: string[] = [];
 const SLICE: SliceIdentity = {
@@ -139,6 +140,227 @@ describe("RunJournal.recordTerminal", () => {
     expect(
       eventsOf(journal).find((event) => event.type === "slice-outcome")?.slice,
     ).toEqual(recorded);
+  });
+
+  it("projects an adjudication park with its branch and reason everywhere", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "impasse");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    journal.event({
+      type: "run-started",
+      provider: "stub",
+      runSlug: "impasse",
+    });
+    const reason =
+      "contract negotiation reached IMPASSE on contested finding F-01";
+
+    const recorded = journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: reason,
+    });
+    const summary = journal.writeSummary();
+    const status = runStatus(["--run", journal.runDir], repo);
+
+    expect(loadRunState(repo, "impasse").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: reason,
+    });
+    expect(
+      eventsOf(journal).find((event) => event.type === "slice-outcome")?.slice,
+    ).toEqual(recorded);
+    for (const projection of [summary, status.output]) {
+      expect(projection).toContain("AWAITING-ADJUDICATION");
+      expect(projection).toContain(SLICE.branch);
+      expect(projection).toContain(reason);
+    }
+  });
+
+});
+
+/**
+ * The park is the journal's third transition class (ADR 0055 §9): recorded
+ * exactly like a terminal, but replaceable — and only by a dispatch.
+ * PENDING → RUNNING → parked; parked → RUNNING (re-dispatch) → terminal.
+ * These assert the machine at the journal's own interface, which is where
+ * the ADR 0031/0047 exception used to live as `reopenAdjudication`.
+ */
+describe("RunJournal park transition", () => {
+  const PARK = {
+    phase: "AWAITING-ADJUDICATION",
+    error: "waiting on F-01",
+  } as const;
+
+  function parkedJournal(repo: string, slug: string): RunJournal {
+    const journal = new RunJournal(repo, slug);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    journal.trackSlice(lifecycle.running(SLICE));
+    journal.recordTerminal(SLICE, PARK);
+    return journal;
+  }
+
+  function outcomeEvents(journal: RunJournal) {
+    return eventsOf(journal).filter((event) => event.type === "slice-outcome");
+  }
+
+  function parkLines(journal: RunJournal): string[] {
+    return readFileSync(join(journal.runDir, "run.log"), "utf-8")
+      .split("\n")
+      .filter((line) => line.includes("AWAITING-ADJUDICATION"));
+  }
+
+  it("re-recording the identical park changes nothing observable", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "re-park");
+
+    const again = journal.recordTerminal(SLICE, { ...PARK });
+
+    expect(again).toEqual(journal.getSlice("40"));
+    expect(again.phase).toBe("AWAITING-ADJUDICATION");
+    expect(outcomeEvents(journal)).toHaveLength(1);
+    expect(parkLines(journal)).toHaveLength(1);
+    expect(loadRunState(repo, "re-park").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: PARK.error,
+    });
+  });
+
+  /**
+   * Idempotency is over the whole record, not the phase. A partial
+   * adjudication parks again with the same phase and a *different* reason —
+   * the findings still undecided (ADR 0054 item 3) — and phase-only
+   * idempotency silently kept the stale reason, which is issue #141. It is
+   * the caller's missing reopen that is the defect, so the journal raises
+   * it instead of absorbing it.
+   */
+  it("refuses a changed park with no dispatch between, rather than discarding it", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "changed-park");
+
+    expect(() =>
+      journal.recordTerminal(SLICE, {
+        ...PARK,
+        error: "waiting on F-02 (F-01 decided)",
+      }),
+    ).toThrow(
+      /slice 40 is parked \(lifecycle shows AWAITING-ADJUDICATION\); a changed AWAITING-ADJUDICATION may only follow a trackSlice dispatch/,
+    );
+    expect(outcomeEvents(journal)).toHaveLength(1);
+    expect(loadRunState(repo, "changed-park").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: PARK.error,
+    });
+  });
+
+  /**
+   * The shape the orchestrator now produces for a partial adjudication: the
+   * re-dispatch reopens the park, so the replacement reason — naming only
+   * what remains undecided — reaches state, events and the run log.
+   */
+  it("persists the replacement park after the re-dispatch reopens it", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "partial-park");
+    const remaining = "waiting on F-02 (F-01 decided)";
+
+    journal.trackSlice(lifecycle.running(SLICE));
+    expect(loadRunState(repo, "partial-park").slices["40"]).toBeUndefined();
+    journal.recordTerminal(SLICE, { ...PARK, error: remaining });
+
+    expect(loadRunState(repo, "partial-park").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: remaining,
+    });
+    expect(outcomeEvents(journal)).toHaveLength(2);
+    expect(parkLines(journal).at(-1)).toContain(remaining);
+    // Still parked, not terminal: the replacement is replaceable too.
+    expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+      /is parked/,
+    );
+  });
+
+  it("refuses a different terminal for a parked slice with no dispatch between", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "no-dispatch");
+
+    expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+      /slice 40 is parked \(lifecycle shows AWAITING-ADJUDICATION\); PASS may only follow a trackSlice dispatch/,
+    );
+    expect(loadRunState(repo, "no-dispatch").slices["40"]).toMatchObject({
+      phase: "AWAITING-ADJUDICATION",
+    });
+    expect(outcomeEvents(journal)).toHaveLength(1);
+  });
+
+  it("accepts a terminal after a dispatch, which cleared the persisted park", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "redispatch");
+
+    journal.trackSlice(lifecycle.running(SLICE));
+    // ADR 0047: the dispatch owns the record from here, so the park's
+    // announcement is gone before this run's next outcome lands.
+    expect(loadRunState(repo, "redispatch").slices["40"]).toBeUndefined();
+
+    journal.recordTerminal(SLICE, { phase: "PASS" });
+
+    expect(loadRunState(repo, "redispatch").slices["40"]).toMatchObject({
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+    expect(outcomeEvents(journal)).toHaveLength(2);
+  });
+
+  /**
+   * Estate audit (plan step 9). The park-mark clear lives in `trackSlice`'s
+   * RUNNING branch alone, so "re-dispatch is the reopen" holds only while
+   * no other tracked phase clears it. PENDING and SKIPPED are tracking
+   * states, not dispatches: a slice queued or skipped after a park is
+   * still parked, and a terminal after one of them must still be refused.
+   * Pinned here rather than left to inspection — a future `trackSlice`
+   * caller that reached for PENDING would otherwise silently reopen a park
+   * that no run has re-dispatched.
+   */
+  it("only a RUNNING dispatch reopens a park — PENDING and SKIPPED leave the mark standing", () => {
+    for (const [phase, tracked] of [
+      ["PENDING", lifecycle.pending(SLICE)],
+      ["SKIPPED", lifecycle.skipped(SLICE)],
+    ] as const) {
+      const repo = makeRepo();
+      const journal = parkedJournal(repo, `non-running-${phase}`);
+
+      journal.trackSlice(tracked);
+
+      // The persisted park survives: only a dispatch clears the record.
+      expect(loadRunState(repo, `non-running-${phase}`).slices["40"]).toMatchObject({
+        phase: "AWAITING-ADJUDICATION",
+      });
+      // And the in-memory mark survives, so ADR 0031's protection still
+      // refuses a terminal that no dispatch earned. Matched loosely: the
+      // message renders the phase `trackSlice` last set, so it reads
+      // "parked (PENDING)" here — the refusal is the invariant, its
+      // wording is not.
+      expect(() => journal.recordTerminal(SLICE, { phase: "PASS" })).toThrow(
+        /slice 40 is parked .*PASS may only follow a trackSlice dispatch/,
+      );
+    }
+  });
+
+  it("keeps a terminal after re-dispatch immutable — the park was the only replaceable class", () => {
+    const repo = makeRepo();
+    const journal = parkedJournal(repo, "terminal-final");
+    journal.trackSlice(lifecycle.running(SLICE));
+    journal.recordTerminal(SLICE, { phase: "STUCK", error: "still stuck" });
+
+    const again = journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: "second park attempt",
+    });
+
+    expect(again).toMatchObject({ phase: "STUCK", error: "still stuck" });
+    expect(outcomeEvents(journal)).toHaveLength(2);
   });
 });
 
@@ -323,6 +545,46 @@ describe("RunJournal.markCancelledInFlight", () => {
       phase: "PASS",
       mergedToFeature: true,
     });
+  });
+
+  it("leaves an adjudication park and its artifacts unchanged", () => {
+    const repo = makeRepo();
+    const journal = new RunJournal(repo, "cancel-impasse");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const working = join(repo, "slice", "contract-negotiation-outcome.json");
+    const archived = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "cancel-impasse",
+      "slice-01",
+      "contract-negotiation-outcome.json",
+    );
+    mkdirSync(join(working, ".."), { recursive: true });
+    mkdirSync(join(archived, ".."), { recursive: true });
+    const artifact = '{"classification":"IMPASSE","findings":["F-01"]}\n';
+    writeFileSync(working, artifact, "utf-8");
+    writeFileSync(archived, artifact, "utf-8");
+    journal.recordTerminal(SLICE, {
+      phase: "AWAITING-ADJUDICATION",
+      error: "contract impasse on F-01",
+    });
+    journal.trackSlice(lifecycle.running(OTHER));
+
+    expect(
+      journal.markCancelledInFlight([SLICE, OTHER], "Cancelled by user"),
+    ).toEqual(["41"]);
+
+    expect(loadRunState(repo, "cancel-impasse").slices["40"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      branch: SLICE.branch,
+      error: "contract impasse on F-01",
+    });
+    expect(loadRunState(repo, "cancel-impasse").slices["41"]?.phase).toBe(
+      "CANCELLED",
+    );
+    expect(readFileSync(working, "utf-8")).toBe(artifact);
+    expect(readFileSync(archived, "utf-8")).toBe(artifact);
   });
 
   it("is provisional: a real outcome landing during the wind-down still wins", () => {
