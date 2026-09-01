@@ -72,6 +72,16 @@ the PR body. Only a real `FIX-BEFORE-SHIP` PM verdict can be overridden,
 and only when the architect verdict is favorable — an override records
 disagreement with a judgment, not the absence of one.
 
+> **Amended 2026-08-31 — the override is symmetric, not unconditional.**
+> `--open-pr-on-override` opens the draft PR when exactly one guardian
+> returns `FIX-BEFORE-SHIP` and the other guardian returns a favorable
+> verdict (`SHIP` or `ACCEPT-WITH-NOTES`). The rule applies identically to
+> an architect-only block and a PM-only block. When both guardians return
+> `FIX-BEFORE-SHIP`, the draft PR never opens, with or without the flag.
+> Missing, unparseable, and infrastructure outcomes remain non-overridable:
+> the flag records disagreement with one judgment, not the absence of one
+> or rejection by both guardians.
+
 **Review artifacts always committed.** `review-architect.md`,
 `review-pm.md`, and any governance-log change the guardians made are
 committed to the feature branch regardless of verdict. They are
@@ -128,12 +138,14 @@ The gate is the decision to open the draft PR, not the `git push` /
 remote or an unauthenticated `gh` is an operator environment problem, not
 a verdict — so they do not move the exit signal.
 
-The one exception is the override this ADR already defines. When
-`--open-pr-on-override` cleared the gate despite an unfavorable PM
-verdict, the run stays successful: the override note recorded in the PR
-body and the run summary is the operator's acknowledgement, so reporting
-it as a failure would contradict a decision the operator made
-deliberately.
+The one exception is the override this ADR already defines, including its
+2026-08-31 symmetric form. When `--open-pr-on-override` cleared the gate
+despite one unfavorable guardian verdict and a favorable verdict from the
+other guardian, the run stays successful: the override note recorded in
+the PR body and the run summary is the operator's acknowledgement, so
+reporting it as a failure would contradict a decision the operator made
+deliberately. Two unfavorable guardian verdicts never reach this exception
+because the override does not open a PR for them.
 
 Cancellation keeps its own exit path: a second Ctrl-C still hard-exits
 before any of this is read, and a cancelled run's unstarted slices are

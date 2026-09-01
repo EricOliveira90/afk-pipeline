@@ -2895,11 +2895,9 @@ async function negotiateAttempt(
     };
 
     /**
-     * Consult the gate on a contract that is already `LOCKED` on disk —
-     * left there by an earlier run, or written by an agent despite a
-     * non-ACCEPT verdict. `true` means the gate refused it, and the
-     * contract is reopened: a stale `LOCKED` would otherwise reach the
-     * generator, which is the divergence ADR 0008 exists to prevent.
+     * Consult the gate on a contract that is already `LOCKED` on disk — left
+     * there by an earlier run. A refusal reopens the stale lock before it can
+     * reach the generator, preserving ADR 0008's on-disk authority.
      */
     const lockRefusedByGate = (lockedAt: string): boolean => {
       const objection = ctx.onContractLocked?.(contractPath) ?? null;
@@ -3333,13 +3331,16 @@ async function negotiateAttempt(
           }
         } else {
           contractStatus = artifacts.readContractStatus(contractPath);
-          // An agent that wrote `LOCKED` itself despite a non-ACCEPT
-          // verdict still faces the gate, and a refusal reopens it.
-          if (
-            contractStatus === "LOCKED" &&
-            !lockRefusedByGate(`locked in round ${round}`)
-          )
-            break;
+          // Only the ACCEPT branch above may produce a lock, after the
+          // mechanical gate has passed. A planner-authored `LOCKED` beside a
+          // non-ACCEPT verdict has neither evaluator approval nor gate
+          // attestation, so it spends the round as the REVISE it is. Reopen
+          // the file as well as the in-memory status: ADR 0008 makes the disk
+          // field authoritative to recovery paths and the generator.
+          if (contractStatus === "LOCKED") {
+            artifacts.reopenContract(contractPath);
+            contractStatus = "NEGOTIATING";
+          }
         }
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.

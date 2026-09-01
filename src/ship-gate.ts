@@ -264,7 +264,8 @@ export interface PrCreationPlan {
 
 /**
  * Decide whether the draft PR opens and build its content. An override records
- * disagreement with a real PM judgment; it never replaces a missing verdict.
+ * disagreement with one real guardian judgment; it never replaces a missing
+ * verdict or clears two blocking judgments.
  */
 export function buildPrCreationPlan(args: {
   prdSlug: string;
@@ -276,12 +277,13 @@ export function buildPrCreationPlan(args: {
 }): PrCreationPlan {
   const architectOk = artifacts.isFavorableReviewOutcome(args.architect);
   const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
+  const architectBlocked = args.architect === "FIX-BEFORE-SHIP";
+  const pmBlocked = args.pm === "FIX-BEFORE-SHIP";
   const overridden =
     args.openPrOnOverride &&
-    architectOk &&
-    !pmOk &&
-    args.pm === "FIX-BEFORE-SHIP";
+    ((architectBlocked && pmOk) || (pmBlocked && architectOk));
   const open = (architectOk && pmOk) || overridden;
+  const overriddenGuardian = architectBlocked ? "architect" : "PM";
   const specsPath = args.specsDir.replace(/\\/g, "/");
 
   const sections: string[] = [
@@ -293,12 +295,12 @@ export function buildPrCreationPlan(args: {
       [
         "## Human override (--open-pr-on-override)",
         "",
-        "This draft PR was opened by explicit operator override despite an unfavorable PM verdict.",
+        `This draft PR was opened by explicit operator override despite an unfavorable ${overriddenGuardian} verdict.`,
         "",
-        `- Architect review: **${args.architect}**`,
-        `- PM review: **${args.pm}** (overridden)`,
+        `- Architect review: **${args.architect}**${architectBlocked ? " (overridden)" : ""}`,
+        `- PM review: **${args.pm}**${pmBlocked ? " (overridden)" : ""}`,
         "",
-        `Read ${specsPath}/review-pm.md for the blocking findings before merging.`,
+        `Read ${specsPath}/review-${overriddenGuardian.toLowerCase()}.md for the blocking findings before merging.`,
       ].join("\n"),
     );
   }
@@ -312,7 +314,7 @@ export function buildPrCreationPlan(args: {
     title: `feat: ${args.prdSlug}`,
     body: sections.join("\n\n"),
     overrideNote: overridden
-      ? `PR opened via --open-pr-on-override despite PM verdict ${args.pm} (architect: ${args.architect}).`
+      ? `PR opened via --open-pr-on-override despite ${overriddenGuardian} verdict FIX-BEFORE-SHIP (architect: ${args.architect}, PM: ${args.pm}).`
       : undefined,
   };
 }

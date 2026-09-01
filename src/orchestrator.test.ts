@@ -5105,6 +5105,81 @@ describe("orchestrator-owned contract status", () => {
     );
     expect(contractAtGeneratorTime!).not.toContain("## Evaluator feedback");
   }, 240_000);
+
+  it("reopens a planner-written LOCKED contract when the evaluator returns REVISE", async () => {
+    const repo = makeRepo();
+    const slug = "planner-lock-revise";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "149",
+      title: "Planner lock cannot override evaluator",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            [
+              "# Contract",
+              "",
+              "**Status:** LOCKED",
+              "",
+              "## Files expected to change",
+              "- src/foo.txt",
+              "",
+            ].join("\n"),
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir, ["src/foo.txt"]);
+          if (plannerRounds === 2) {
+            writeContractResponse(artifactDir, ["F-01"]);
+          }
+        } else if (opts.role === "evaluator-contract") {
+          writeContractReview(artifactDir, "REVISE");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+
+    expect(outcome.phase).toBe("ESCALATE");
+    expect(plannerRounds).toBe(2);
+    expect(readContractStatus(join(ctx.absSliceDir, "contract.md"))).toBe(
+      "NEGOTIATING",
+    );
+  });
 });
 
 

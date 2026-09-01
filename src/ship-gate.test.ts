@@ -268,6 +268,89 @@ describe("runShipGate", () => {
     expect(fixture.setPrOverrideNote).toHaveBeenCalledOnce();
   });
 
+  it("opens an override PR for an architect block with a favorable PM", async () => {
+    const repo = makeRepo();
+    const slug = "architect-override";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      writeReview(
+        options,
+        slug,
+        options.role === "architect-review" ? "architect" : "pm",
+        options.role === "architect-review"
+          ? "FIX-BEFORE-SHIP"
+          : "ACCEPT-WITH-NOTES",
+      );
+      return invokeResult();
+    });
+    let createBody = "";
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) => {
+      if (command === "gh" && args[1] === "create") {
+        createBody = args[args.indexOf("--body") + 1] ?? "";
+        return "https://github.com/acme/repo/pull/53\n";
+      }
+      return "";
+    });
+    const args = makeArgs(
+      repo,
+      slug,
+      fixture.journal,
+      invoke,
+      runCommand,
+    );
+    args.options.openPrOnOverride = true;
+
+    const result = await runShipGate(args);
+
+    expect(result).toMatchObject({
+      verdict: "SHIP",
+      pr: {
+        requested: true,
+        overridden: true,
+        url: "https://github.com/acme/repo/pull/53",
+        number: 53,
+      },
+    });
+    expect(createBody).toContain(
+      "Architect review: **FIX-BEFORE-SHIP** (overridden)",
+    );
+    expect(createBody).toContain("PM review: **ACCEPT-WITH-NOTES**");
+    expect(createBody).toContain("review-architect.md");
+    expect(fixture.setPrOverrideNote).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the PR closed when both guardians block under either override setting", async () => {
+    for (const openPrOnOverride of [false, true]) {
+      const repo = makeRepo();
+      const slug = `both-block-${openPrOnOverride}`;
+      const fixture = makeJournal();
+      const invoke = vi.fn(async (options: InvokeOptions) => {
+        writeReview(
+          options,
+          slug,
+          options.role === "architect-review" ? "architect" : "pm",
+          "FIX-BEFORE-SHIP",
+        );
+        return invokeResult();
+      });
+      const runCommand = vi.fn<ShipCommandRunner>(() => "");
+      const args = makeArgs(
+        repo,
+        slug,
+        fixture.journal,
+        invoke,
+        runCommand,
+      );
+      args.options.openPrOnOverride = openPrOnOverride;
+
+      const result = await runShipGate(args);
+
+      expect(result.verdict).toBe("BLOCKED");
+      expect(runCommand).not.toHaveBeenCalled();
+      expect(fixture.setPrOverrideNote).not.toHaveBeenCalled();
+    }
+  });
+
   it("recovers an existing PR when draft creation fails", async () => {
     const repo = makeRepo();
     const slug = "existing-pr";
