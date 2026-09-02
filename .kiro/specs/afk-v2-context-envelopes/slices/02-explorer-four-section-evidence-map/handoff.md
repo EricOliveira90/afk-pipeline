@@ -16,7 +16,8 @@
 - Explorer manifest version `1` uses a 65,536-byte default inline budget, matching the established generator-envelope precedent.
 - Evidence maps use exact level-two headings, with optional `Data and integration` placed between `Patterns and test harness` and required `Unknowns`.
 - Duplicate ADR numbers remain separate deterministic index lines keyed by filename; ADR headings enter the prompt, while ADR bodies do not.
+- Markdown section discovery ignores heading-shaped lines inside tilde or backtick fenced code blocks so samples remain evidence content rather than structure.
 
 ## Gotchas / learnings
 
-- The generator projector keeps the legacy full-context fallback only when the new `Patterns and test harness` heading is absent; valid new evidence maps project that complete section byte-for-byte.
+- The validator and generator projector share one fence-aware section scan; keep their boundary logic aligned when adding Markdown syntax support.

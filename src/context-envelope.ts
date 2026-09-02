@@ -171,14 +171,57 @@ export interface GeneratorEnvelopeResult {
 }
 
 function markdownSections(content: string): MarkdownSection[] {
-  const headings = [
-    ...content.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
-  ].map((match) => ({
-    title: match[2]!,
-    level: match[1]!.length,
-    headingStart: match.index,
-    bodyStart: match.index + match[0].length - match[3]!.length,
-  }));
+  const headings: Omit<MarkdownSection, "bodyEnd">[] = [];
+  let lineStart = 0;
+  let fence: { marker: "`" | "~"; length: number } | undefined;
+
+  while (lineStart < content.length) {
+    const lineFeed = content.indexOf("\n", lineStart);
+    const nextLineStart =
+      lineFeed === -1 ? content.length : lineFeed + 1;
+    const lineEnd =
+      lineFeed === -1
+        ? content.length
+        : lineFeed > lineStart && content[lineFeed - 1] === "\r"
+          ? lineFeed - 1
+          : lineFeed;
+    const line = content.slice(lineStart, lineEnd);
+    const fenceMatch = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+
+    if (fence !== undefined) {
+      if (
+        fenceMatch !== null &&
+        fenceMatch[1]![0] === fence.marker &&
+        fenceMatch[1]!.length >= fence.length &&
+        /^[ \t]*$/.test(fenceMatch[2]!)
+      ) {
+        fence = undefined;
+      }
+    } else if (
+      fenceMatch !== null &&
+      !(
+        fenceMatch[1]![0] === "`" &&
+        fenceMatch[2]!.includes("`")
+      )
+    ) {
+      fence = {
+        marker: fenceMatch[1]![0] as "`" | "~",
+        length: fenceMatch[1]!.length,
+      };
+    } else {
+      const headingMatch = /^(#{1,6})[ \t]+(.+?)$/.exec(line);
+      if (headingMatch !== null) {
+        headings.push({
+          title: headingMatch[2]!,
+          level: headingMatch[1]!.length,
+          headingStart: lineStart,
+          bodyStart: lineEnd,
+        });
+      }
+    }
+
+    lineStart = nextLineStart;
+  }
 
   return headings.map((heading, index) => ({
     ...heading,

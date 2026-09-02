@@ -110,6 +110,46 @@ describe("explorer context envelope", () => {
     );
   });
 
+  it("B-01 B-02 QA-01 preserves heading-shaped lines inside fenced samples", () => {
+    const context = [
+      "## Files and current behavior\n",
+      "\n",
+      "FILES-MARKER\n",
+      "\n",
+      "## Patterns and test harness\n",
+      "\n",
+      "~~~md\n",
+      "## Example heading inside a fenced sample\n",
+      "\n",
+      "SAMPLE-MARKER\n",
+      "~~~\n",
+      "\n",
+      "PATTERNS-MARKER\n",
+      "\n",
+      "## Unknowns\n",
+      "\n",
+      "UNKNOWNS-MARKER\n",
+    ].join("");
+    const expected = [
+      "## Patterns and test harness\n",
+      "\n",
+      "~~~md\n",
+      "## Example heading inside a fenced sample\n",
+      "\n",
+      "SAMPLE-MARKER\n",
+      "~~~\n",
+      "\n",
+      "PATTERNS-MARKER\n",
+      "\n",
+    ].join("");
+    const projected = projectGeneratorPatternsAndHarness(context);
+
+    expect(() => validateExplorerEvidenceMap(context)).not.toThrow();
+    expect(Buffer.from(projected)).toEqual(Buffer.from(expected));
+    expect(projected).not.toContain("FILES-MARKER");
+    expect(projected).not.toContain("UNKNOWNS-MARKER");
+  });
+
   it("B-03 indexes every ADR file including both 0029 entries and includes architecture without ADR bodies", () => {
     const repoRoot = fileURLToPath(new URL("..", import.meta.url));
     const repositoryContext = buildExplorerRepositoryContext(repoRoot);
