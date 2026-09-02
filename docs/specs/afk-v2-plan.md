@@ -74,10 +74,10 @@ misleads the next actor.**
 |---|---|---|---|---|
 | 1 (#69) | Evidence backbone | — | #75–#79 | run-ID provenance fields land at assembly (§3 item 11) |
 | 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #129 (AFK) + #94 (manual courier follow-up after #89) | carries `afk adopt` (§3 item 10, ticket #129); **defer story 14** (babysit-skill packaging; #94 rescoped to courier-only, manual) |
-| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5), the ADR-index envelope entry, the `ARCHITECTURE.md` envelope entry, and the §3c escalation-criteria prompt text; **defer story 16** (live cross-provider parity matrix) with the fence: envelope *assembly* and stub-provider parity stay provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it); the approved cheap-check → candidate-QA → full-suite sequence ships during this PRD as early #86 delivery |
+| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5), the ADR-index envelope entry, the `ARCHITECTURE.md` envelope entry, and the §3c escalation-criteria prompt text; **defer story 16** (live cross-provider parity matrix) with the fence: envelope *assembly* and stub-provider parity stay provider-agnostic at the interface (ADR 0002; #71 story 17's determinism requirement depends on it); the approved cheap-check → candidate-QA → full-suite sequence ships during this PRD as early #86 delivery |
 | 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86, #132 | carries §3 items 2, 5 (artifact), 12, 15 (#132), and 17; #86 credits PRD 3's early sequence but still owns policy selection, caching, prerequisites, and advisory gates; **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
 | 5 (#73) | Quality loops | 4 | #87, #92, #97 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20 |
-| 6 (#74) | Aggregate: guardians and remediator | 4, 7 for item 19 | #88, #93, #98 plus item 19 slice to ticket | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13); recurring-finding proposals use PRD 7's versioned eval format |
+| 6 (#74) | Aggregate: guardians and remediator | 4, 7 | #88, #93, #98 plus item 19 slice to ticket | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13); recurring-finding proposals use PRD 7's versioned learning-proposal schema (shared with rumo-app #809) |
 | 7 (#152) | Agent-behavior eval harness | 4 | slices to ticket after PRD 4 | carries §3 item 18: report-only `afk eval`, versioned scenario packs, recorded-envelope and prompt-plus-disposition scenarios, and consumer-owned packs |
 
 The dependency logic: PRD 1 makes control-plane facts
@@ -89,7 +89,8 @@ PRDs 1–2 landed; #71 names PRD 2's escalation instruction and computed
 unresolved sets as inputs) and the two PRDs overlap maximally on prompts
 and orchestrator files, so a concurrent launch fails §3c policy 5's
 overlap condition. After PRD 4, **PRD 5 and PRD 7** may run concurrently.
-PRD 6 then consumes PRD 7's versioned proposal shape for item 19.
+PRD 6 launches only after PRD 7 merges: it is the final implementation
+run, and item 19 consumes PRD 7's versioned learning-proposal schema.
 
 ---
 
@@ -244,12 +245,15 @@ not debate-rated.
 
 These additions extend the debate set without renumbering items 1–16.
 The approved intent files under `docs/intent/` hold the source decisions.
+Same provenance note as §3b: approved in the 2026-09-02 founder review,
+not debate-rated; the L/C/E/R ratings are the proposer's own, recorded
+for comparability.
 
 | # | Item | Placement | L/C/E/R | Recurring cost | Failure mode |
 |---|---|---|---|---|---|
 | 17 | **Feedback integrity gate:** detect deleted tests and protected-path changes in #84; use project-declared test-skip detection in #86. A structured waive-with-reason record is required. File scope alone never implies a waiver. AFK may ship a TypeScript/Vitest detector, not a universal language regex. | PRD 4, extends #84 and #86 | 5/2/4/4 | one changed-tree check | a project lacks a skip detector, so the gate fails closed until policy declares one or records a waiver |
-| 18 | **Agent-behavior eval harness:** separate `afk eval` runner; versioned scenario-pack schema; recorded-envelope and prompt-plus-disposition cases; AFK owns the runner and consumers own packs. Run weekly and manually on relevant changes. Compare exact structured dispositions in v1, enforce a model-call cap, and report `INCOMPLETE` when the cap stops a run. Results are measurements and never gate merges. | new PRD 7, after PRD 4 | 4/4/4/4 | scheduled model calls | noisy or incomplete results mislead maintainers — exact outputs and non-gating reports bound the risk |
-| 19 | **Recurring-finding proposal loop:** on the second exact stable finding class, write `learning-proposals.json`, then render it in the run summary and draft PR. Each proposal carries class, count, target asset, and proposed diff. Commit proposals; never edit steering files automatically. Classifier similarity is out of scope for v1. | PRD 6, after item 18 defines the format | 3/2/3/4 | one history scan/run | exact classes miss semantically similar repeats — accepted for deterministic v1 |
+| 18 | **Agent-behavior eval harness:** separate `afk eval` runner; versioned scenario-pack schema; recorded-envelope and prompt-plus-disposition cases; AFK owns the runner and consumers own packs. The AFK-owned pack is seeded with 20–50 scenarios from recorded PRD 1 envelopes, the #111–#121 reliability-wave incidents, and evaluator and classifier verdict cases. Run weekly and manually on relevant changes; weekly runs are operator-invoked — CI scheduling waits for item 21's filtered-environment pattern. Compare exact structured dispositions in v1, enforce a model-call cap, and report `INCOMPLETE` when the cap stops a run. Results are measurements and never gate merges. The runner also defines the versioned learning-proposal schema item 19 consumes. | new PRD 7, after PRD 4 | 4/4/4/4 | scheduled model calls | noisy or incomplete results mislead maintainers — exact outputs and non-gating reports bound the risk |
+| 19 | **Recurring-finding proposal loop:** on the second exact stable finding class, write `learning-proposals.json`, then render it in the run summary and draft PR. Each proposal carries class, count, target asset, and proposed diff. The proposal shape is shared with rumo-app's Close learning pass (rumo-app #809); changing its fields requires cross-repo coordination. Commit proposals; never edit steering files automatically. Classifier similarity is out of scope for v1. | PRD 6, after item 18 defines the format | 3/2/3/4 | one history scan/run | exact classes miss semantically similar repeats — accepted for deterministic v1 |
 | 20 | **Structured guardian review policy:** named review passes, a concrete Important definition, evidence-bound blockers, at most three non-blocking notes, and a do-not-report list. Add this to the deferred guardian-convergence follow-up after PRD 3's measured guardian run, not to live PRD 3. | guardian-convergence follow-up | 4/1/4/5 | prompt text only | an over-tight list hides a useful note — the three-note allowance preserves bounded judgment |
 | 21 | **Provider environment minimization:** #135 inventories inherited keys, then passes a provider-specific filtered environment. Record allowed key names, never values. This cheap half excludes OS sandboxing, network allowlists, and role-specific environment policy. | manual security work after PRD 3, before PRD 4 | 4/2/3/4 | one environment projection/invocation | a needed key is omitted — provider-specific tests and a named allowlist make the failure visible |
 
@@ -298,7 +302,8 @@ GATE: PRD 1 closed + wave merged + tickets linted
        (ticket inputs + maximal file overlap — see §2): prep PRD 3 during
        PRD 2's run, then launch it when PRD 2 merges.
        During PRD 3, ship the approved early #86 test sequence without
-       adding the rest of PRD 4's scope.
+       adding the rest of PRD 4's scope. Remaining PRD 3 launches use
+       the 8 GB disk floor (§3d); the global 5 GB default is unchanged.
   → MANUAL: guardian-convergence policy (item 20, after measured guardian evidence)
             + #135 provider environment filtering (item 21)
   → AFK: PRD 4 (item 2, item 5 artifact, item 12 attribute, provenance story 1;
@@ -362,7 +367,7 @@ The rule of thumb the debate converged on:
 | Hand-finishing stuck slices (until item 10 exists) | **Manual, documented procedure** | Verify with the full suite, merge, then edit state — and prefer waiting for `afk adopt` over fresh JSON surgery on `isSliceComplete` (`run-state.ts:416`). |
 | PRDs 2–7 | **AFK** | Multi-slice, contract-sized feature work where negotiation, lock validation, and gate evidence earn their cost. PRD 7 also supplies the shared eval format that PRD 6 item 19 consumes. |
 | PRD-embedded hardening (items 2, 5, 10, 12, 13, provenance story 1) | **AFK**, as slices of their PRDs | Each is genuine feature work inside a PRD's contract, not pipeline first-aid; splitting them out would re-create the double-counting the debate removed. |
-| Guardian policy (item 20) and provider environment filtering (item 21) | **Manual, between PRDs 3 and 4** | Both changes are small. The guardian change must use PRD 3's measured evidence, and the environment change is security work that should not depend on the pipeline it constrains. |
+| Guardian policy (item 20) and provider environment filtering (item 21) | **Manual, between PRDs 3 and 4** | Both changes are small. The guardian change must use PRD 3's measured evidence, and the environment change is security work that should not depend on the pipeline it constrains. Item 21 is sequenced after PRD 3 only to avoid concurrent edits to the provider dispatch files (`src/claude.ts`, `src/codex.ts`, `src/kiro.ts`) while PRD 3's run is live; nothing in it consumes PRD 3's output. |
 
 Boundary case, decided: `afk adopt` (item 10) stays an AFK-built PRD 2
 slice, but if #79 or the PRD 2 run itself needs a fifth adoption before it
@@ -416,7 +421,8 @@ What remains is not open questions but **standing triggers**:
   deterministic deny-only: no `ask`, no LLM-evaluated policy, no stop
   loops, no per-edit test runs.
 - **PRD 5 and PRD 7** may run concurrently under §3c policy 5 after
-  PRD 4 merges. PRD 6 waits for PRD 7's versioned format only for item 19.
+  PRD 4 merges. PRD 6 launches only after PRD 7 merges; the versioned
+  learning-proposal schema item 19 consumes is a PRD 7 deliverable.
 - **Agent-eval merge gating** stays rejected. Re-open it only after
   repeated evidence shows stable results with an agreed false-positive rate.
 - **Durable process supervision** stays cut. The approved plan keeps the

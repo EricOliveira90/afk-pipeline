@@ -15,7 +15,7 @@ A changed-tree gate on the generator diff. It fires a surfaced finding, fail-clo
 - Edits the gate catalog.
 - Touches suite-budgets.json outside its contract.
 
-Override path is waive-with-reason, same as item 6. The gate rides item 2's gate-derivation machinery and closes the loop under policy 6 (deterministic checks belong in the gate catalog, not hooks).
+Override path is waive-with-reason, same as item 6. Detection lands in the file-scope gate (#84) and project-declared skip detection in the gate policy (#86) — see resolved decisions below — closing the loop under policy 6 (deterministic checks belong in the gate catalog, not hooks).
 
 ## Affected users and systems
 
