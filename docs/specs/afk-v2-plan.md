@@ -1,6 +1,6 @@
 # AFK v2 — the single plan
 
-One document: where the work stands, the six PRDs in dependency order, the
+One document: where the work stands, the seven PRDs in dependency order, the
 agreed hardening set from the plan debate, and a sequencing that pays the
 next runs first.
 
@@ -42,7 +42,7 @@ Wave session s7 (clear-on-dispatch) must read the #123 fix (`8cccd2d`)
 before designing — same behavioral area, different scope.
 
 Three of five slices needed human hands. That is the headline fact for
-planning PRDs 2–6: **the pipeline could not yet deliver its own evidence
+planning the remaining PRDs: **the pipeline could not yet deliver its own evidence
 backbone unattended**, and every failure that stopped it was an
 infrastructure or governance defect, not a coding one. The debate's joint
 finding compresses it further: *the pipeline does not lack checking; it
@@ -68,27 +68,28 @@ misleads the next actor.**
 
 ---
 
-## 2. The six PRDs, in dependency order — with the agreed deferrals
+## 2. The seven PRDs, in dependency order — with the agreed deferrals
 
 | PRD | Theme | Depends on | Slices | Debate changes |
 |---|---|---|---|---|
 | 1 (#69) | Evidence backbone | — | #75–#79 | run-ID provenance fields land at assembly (§3 item 11) |
 | 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #129 (AFK) + #94 (manual courier follow-up after #89) | carries `afk adopt` (§3 item 10, ticket #129); **defer story 14** (babysit-skill packaging; #94 rescoped to courier-only, manual) |
-| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5), the ADR-index envelope entry, the `ARCHITECTURE.md` envelope entry, and the §3c escalation-criteria prompt text; **defer story 16** (cross-provider parity matrix) with the fence: envelope *assembly* stays provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it) |
-| 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86, #132 | carries §3 items 2, 5 (artifact), 12, and item 15 (#132); **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
+| 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5), the ADR-index envelope entry, the `ARCHITECTURE.md` envelope entry, and the §3c escalation-criteria prompt text; **defer story 16** (live cross-provider parity matrix) with the fence: envelope *assembly* and stub-provider parity stay provider-agnostic at the interface (ADR 0002; story 17's determinism requirement depends on it); the approved cheap-check → candidate-QA → full-suite sequence ships during this PRD as early #86 delivery |
+| 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86, #132 | carries §3 items 2, 5 (artifact), 12, 15 (#132), and 17; #86 credits PRD 3's early sequence but still owns policy selection, caching, prerequisites, and advisory gates; **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
 | 5 (#73) | Quality loops | 4 | #87, #92, #97 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20 |
-| 6 (#74) | Aggregate: guardians and remediator | 4 | #88, #93, #98 | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13) |
+| 6 (#74) | Aggregate: guardians and remediator | 4, 7 for item 19 | #88, #93, #98 plus item 19 slice to ticket | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13); recurring-finding proposals use PRD 7's versioned eval format |
+| 7 (#152) | Agent-behavior eval harness | 4 | slices to ticket after PRD 4 | carries §3 item 18: report-only `afk eval`, versioned scenario packs, recorded-envelope and prompt-plus-disposition scenarios, and consumer-owned packs |
 
-Why this order holds, unchanged: PRD 1 makes control-plane facts
+The dependency logic: PRD 1 makes control-plane facts
 machine-readable; PRD 3 shapes what each role receives before PRD 4 adds
-roles; PRD 4 establishes the baseline PRDs 5–6 preserve. PRDs 2 and 3 are
+roles; PRD 4 establishes the baseline that PRDs 5–7 build on. PRDs 2 and 3 are
 dependency-independent **at the contract level only**: in practice they
 serialize, because PRD 3's tickets consume PRD 2 outputs (#83 assumes
 PRDs 1–2 landed; #71 names PRD 2's escalation instruction and computed
 unresolved sets as inputs) and the two PRDs overlap maximally on prompts
 and orchestrator files, so a concurrent launch fails §3c policy 5's
-overlap condition. The first true concurrent pair is **PRDs 5 and 6**,
-which both hang off PRD 4 — §4 exploits that.
+overlap condition. After PRD 4, **PRD 5 and PRD 7** may run concurrently.
+PRD 6 then consumes PRD 7's versioned proposal shape for item 19.
 
 ---
 
@@ -106,7 +107,7 @@ Nothing on this list adds minutes to the happy path.
 | 3 | **`afk stop` sentinel** (new; both debaters independently): orchestrator polls a run-namespaced sentinel file, routes through the existing `AbortSignal` path so ADR 0040 records fire. *Shipped variant (ADR 0043): the preflight sweep of stale sentinels was dropped as unnecessary — run-dir names are never reused, each run clears its own directory at launch, and the poller ignores a sentinel naming another run, so a stale sentinel is structurally inert.* | wave | 5/1/5/5 | one `existsSync`/tick | sentinel unseen if the tick loop is wedged — fallback is today's status quo |
 | 4 | **Crash records** (§3.6): `uncaughtException`/`unhandledRejection`/fatal stream errors → cancellation bookkeeping, cause `CRASHED`, best-effort (ENOSPC may defeat it; no reserved-space machinery), item 11's clear-on-dispatch as backstop. | wave | 5/1/5/5 | zero | the handler may be unable to write under the very condition it records — accepted |
 | 5 | **Change-summary-first candidate-evaluator envelope** (new): PRD 4's final-evaluator change-summary artifact gets a second consumer — one manifest entry leads the candidate evaluator's envelope with the slice diff summary + manifest; worktree stays available. Attacks the largest measured recurring cost. **Rider:** if item 13's metric shows no material drop in evaluator nonCommandTime within two PRD runs, the leverage claim was wrong and the ordering is revisited. | PRD 4 artifact, PRD 3 manifest entry | 5/2/4/5 | ms/round | diff-anchoring under-reads preservation — bounded by the full-suite gate and the explorer's preservation catalog |
-| 6 | **Ticket lint** (§3.1, narrowed): checks 2 (criterion names a state/field/artifact absent from the referenced schemas) and 3 (recording obligation without a named channel) gate with recorded waive-with-reason; check 4 (summarised field lists) warns via lexicon lint; check 1 (compound predicates) is an authoring-checklist item, not a lint — free-prose detection is NL parsing and the structural rescue (a mandatory ticket field) was cut as a forever-tax. **Must run against PRDs 2–6 before they enter AFK.** | pre-AFK tool | 4/2/5/5 | zero per slice | waive-with-reason decays into a rubber stamp — the waiver is recorded text |
+| 6 | **Ticket lint** (§3.1, narrowed): checks 2 (criterion names a state/field/artifact absent from the referenced schemas) and 3 (recording obligation without a named channel) gate with recorded waive-with-reason; check 4 (summarised field lists) warns via lexicon lint; check 1 (compound predicates) is an authoring-checklist item, not a lint — free-prose detection is NL parsing and the structural rescue (a mandatory ticket field) was cut as a forever-tax. **Must run against every prepared PRD ticket before it enters AFK.** | pre-AFK tool | 4/2/5/5 | zero per slice | waive-with-reason decays into a rubber stamp — the waiver is recorded text |
 | 7 | **Preflight — detection + report + fail-fast only** (§3.7, narrowed): disk floor, leftover registered worktrees, live handles/processes holding run-namespace paths (named PID list for the operator), empty-shell sweep. Auto-kill in *both* debated forms is cut (see debate §2); so is the launch-time state↔branch audit. | wave | 4/2/5/5 | seconds/launch | a false "leftover" report delays a launch — operator-visible and overridable |
 | 8 | **Role-cost governance** (new rider): cleaner + hardener default off until #73 story 17 ROI evidence; any enable/disable recorded in run evidence and the draft PR; #72 story 13 makes the final evaluator free while they are off. | PRDs 5–6 policy | 4/1/3/5 | one config line/run | useful cleaner passes forgone until evidence exists — the point |
 | 9 | **QA-dedup resequenced** (new): before #96 lands, the orchestrator injects base-gate evidence + exact tree sha into the QA prompt as a citable skip authorization (recovery plan Phase D step 14). Exact-sha match else re-run, fail closed; the verdict artifact records the citation; the ADR 0012 amendment lands *with* it. ~13 measured min back per QA round, starting with PRD 2's run. | wave | 4/2/5/3 | one sha compare/round | sha mismatch falls closed to today's behaviour — strictly no worse |
@@ -124,7 +125,10 @@ tree divergence — 3/1/5/5, wave) and the **stage-duration journal event**
 Cut, with the killing argument recorded in the debate doc: the watchdog
 ping, auto-kill (both forms), the launch-time state audit, the mandatory
 `rejection-cases` ticket field, the keyed measurement store, the general
-finding rule. Each carries a re-open trigger; do not re-propose without it.
+finding rule, a durable process supervisor, and plan-interrogation prompt
+text. Each carries a re-open trigger where §6 names one; do not re-propose
+without it. Agent-eval pass rate is also explicitly non-blocking: it never
+gates a merge.
 
 ### 3b. Parallelism additions (2026-08-28, outside the debate)
 
@@ -229,8 +233,33 @@ not debate-rated.
    handles credentials: a gitleaks-style changed-tree secret-scan gate
    riding item 2's derivation. The review's one uncovered finding —
    provider processes inherit the operator's full environment under
-   trust flags — is filed as #135, unscheduled, competing on §3 terms.
+   trust flags — is filed as #135. Its cheap environment-filtering half
+   now ships before PRD 4 under item 21; OS sandboxing and network policy
+   stay out of scope.
    Re-opening hooks themselves is governed by the §6 trigger.
+
+---
+
+### 3d. Approved additions from the SDLC playbook review (2026-09-02)
+
+These additions extend the debate set without renumbering items 1–16.
+The approved intent files under `docs/intent/` hold the source decisions.
+
+| # | Item | Placement | L/C/E/R | Recurring cost | Failure mode |
+|---|---|---|---|---|---|
+| 17 | **Feedback integrity gate:** detect deleted tests and protected-path changes in #84; use project-declared test-skip detection in #86. A structured waive-with-reason record is required. File scope alone never implies a waiver. AFK may ship a TypeScript/Vitest detector, not a universal language regex. | PRD 4, extends #84 and #86 | 5/2/4/4 | one changed-tree check | a project lacks a skip detector, so the gate fails closed until policy declares one or records a waiver |
+| 18 | **Agent-behavior eval harness:** separate `afk eval` runner; versioned scenario-pack schema; recorded-envelope and prompt-plus-disposition cases; AFK owns the runner and consumers own packs. Run weekly and manually on relevant changes. Compare exact structured dispositions in v1, enforce a model-call cap, and report `INCOMPLETE` when the cap stops a run. Results are measurements and never gate merges. | new PRD 7, after PRD 4 | 4/4/4/4 | scheduled model calls | noisy or incomplete results mislead maintainers — exact outputs and non-gating reports bound the risk |
+| 19 | **Recurring-finding proposal loop:** on the second exact stable finding class, write `learning-proposals.json`, then render it in the run summary and draft PR. Each proposal carries class, count, target asset, and proposed diff. Commit proposals; never edit steering files automatically. Classifier similarity is out of scope for v1. | PRD 6, after item 18 defines the format | 3/2/3/4 | one history scan/run | exact classes miss semantically similar repeats — accepted for deterministic v1 |
+| 20 | **Structured guardian review policy:** named review passes, a concrete Important definition, evidence-bound blockers, at most three non-blocking notes, and a do-not-report list. Add this to the deferred guardian-convergence follow-up after PRD 3's measured guardian run, not to live PRD 3. | guardian-convergence follow-up | 4/1/4/5 | prompt text only | an over-tight list hides a useful note — the three-note allowance preserves bounded judgment |
+| 21 | **Provider environment minimization:** #135 inventories inherited keys, then passes a provider-specific filtered environment. Record allowed key names, never values. This cheap half excludes OS sandboxing, network allowlists, and role-specific environment policy. | manual security work after PRD 3, before PRD 4 | 4/2/3/4 | one environment projection/invocation | a needed key is omitted — provider-specific tests and a named allowlist make the failure visible |
+
+PRD 3 also ships one approved delivery-order change from
+`prd3-test-gate-sequencing.intent.md`: run cheap or related checks, then
+candidate QA, then the full slice suite. A full-suite failure returns to the
+bounded repair loop. The aggregate full suite remains. Candidate-tree
+authorization uses the orchestrator's tree ID, not `HEAD`. The 8 GB launch
+floor applies only to the remaining PRD 3 launches; the global 5 GB default
+does not change.
 
 ---
 
@@ -258,7 +287,7 @@ NOW, three tracks in parallel (Track 1 — PRD 1 / PR #125 — DONE, merged 2026
 │    All sessions base on main — PRD 1 is merged, so the s5/s7 base-branch
 │    checks in their prompts now resolve to main.
 │
-├─ Track 3 (manual)           item 6 ticket lint tool → lint PRDs 2–6 tickets, fix what it flags
+├─ Track 3 (manual)           item 6 ticket lint tool → lint each prepared PRD ticket, fix what it flags
 └─ Track 4 (manual, docs)     loaded-in-chain budget ADR (item 12's half) · AGENTS.md
                               launch-command correction — DONE (interim command until item 2)
 
@@ -267,13 +296,18 @@ GATE: PRD 1 closed + wave merged + tickets linted
   → AFK: PRD 3 (item 5 manifest entry, item 13; story 16 deferred, assembly fence kept)
        PRDs 2 and 3 are contract-independent but serialize in practice
        (ticket inputs + maximal file overlap — see §2): prep PRD 3 during
-       PRD 2's run, launch it when PRD 2 merges. First true concurrent
-       pair under §3c policy 5 is PRD 5 ∥ PRD 6.
+       PRD 2's run, then launch it when PRD 2 merges.
+       During PRD 3, ship the approved early #86 test sequence without
+       adding the rest of PRD 4's scope.
+  → MANUAL: guardian-convergence policy (item 20, after measured guardian evidence)
+            + #135 provider environment filtering (item 21)
   → AFK: PRD 4 (item 2, item 5 artifact, item 12 attribute, provenance story 1;
-                item 15 merge-resolution round (#132);
+                item 15 merge-resolution round (#132), item 17 tamper guard;
                 stories 9 and 15 deferred)
-  → AFK: PRD 5 (cleaner only, default-off, story 17 ROI experiment)  ∥  PRD 6
-       both depend only on PRD 4 — parallel-eligible, serialized only by the machine.
+  → AFK: PRD 5 (cleaner only, default-off, story 17 ROI experiment)
+       ∥ PRD 7 (item 18 report-only eval harness)
+  → AFK: PRD 6 (guardians, remediator, item 19 proposal loop)
+       item 19 starts only after PRD 7 fixes the versioned format.
 ```
 
 What each stage banks for the runs after it:
@@ -284,9 +318,12 @@ What each stage banks for the runs after it:
 - **The lint** protects the scarce round cap: #77 and #78 each lost rounds
   to lintable defects in tickets that looked fine to a human.
 - **PRD 4** lands the two big recurring-cost attacks (items 2 and 5,
-  ~35–43 min/round combined with item 9) plus the advisory-gate attribute.
+  ~35–43 min/round combined with item 9), the advisory-gate attribute,
+  and the feedback-integrity gate.
 - **PRD 5's run** is itself the experiment: story 17 produces the ROI
   evidence that decides whether cleaner/hardener ever default on.
+- **PRD 7** makes prompt and role changes replayable without turning a
+  noisy eval result into a merge gate.
 
 ### Per-wave discipline, learned the hard way (unchanged, one update)
 
@@ -320,11 +357,12 @@ The rule of thumb the debate converged on:
 | Work | Mode | Why |
 |---|---|---|
 | Reliability wave (items 1, 3, 4, 7, 9, 11-wave-half, 14, reader-side check, #112) | **Manual**, parallel worktrees | Pipeline-safety fixes are precisely the changes not to depend on the pipeline to deliver — a wave item failing inside AFK could take down the run that was delivering it. Each item is also smaller than one round's overhead (base gates alone are 12.4–14.8 min/round); a run per 10-line fix is negative ROI. Wave 1 (#113/#114) already proved the parallel-manual pattern. |
-| Ticket lint tool + linting PRDs 2–6 (item 6) | **Manual** | It must exist *before* AFK ingests the tickets it gates; it is a small deterministic tool with no contract worth negotiating. |
+| Ticket lint tool + linting prepared PRD tickets (item 6) | **Manual** | It must run *before* AFK ingests each ticket; it is a small deterministic tool with no contract worth negotiating. |
 | ADRs (classifier, loaded-in-chain budget, ADR 0012 amendment) and the `AGENTS.md` correction | **Manual** | Documents. Zero benefit from the pipeline. |
 | Hand-finishing stuck slices (until item 10 exists) | **Manual, documented procedure** | Verify with the full suite, merge, then edit state — and prefer waiting for `afk adopt` over fresh JSON surgery on `isSliceComplete` (`run-state.ts:416`). |
-| PRD 2 (routing, `afk adopt`), PRD 3 (envelopes), PRD 4 (gates), PRD 5 (cleaner + ROI), PRD 6 (guardians) | **AFK** | Multi-slice, contract-sized feature work where negotiation, lock validation and gate evidence earn their cost — and every run is also the measurement the plan needs (items 13–14 evidence, story 17 ROI). These are the runs the wave exists to protect. |
+| PRDs 2–7 | **AFK** | Multi-slice, contract-sized feature work where negotiation, lock validation, and gate evidence earn their cost. PRD 7 also supplies the shared eval format that PRD 6 item 19 consumes. |
 | PRD-embedded hardening (items 2, 5, 10, 12, 13, provenance story 1) | **AFK**, as slices of their PRDs | Each is genuine feature work inside a PRD's contract, not pipeline first-aid; splitting them out would re-create the double-counting the debate removed. |
+| Guardian policy (item 20) and provider environment filtering (item 21) | **Manual, between PRDs 3 and 4** | Both changes are small. The guardian change must use PRD 3's measured evidence, and the environment change is security work that should not depend on the pipeline it constrains. |
 
 Boundary case, decided: `afk adopt` (item 10) stays an AFK-built PRD 2
 slice, but if #79 or the PRD 2 run itself needs a fifth adoption before it
@@ -377,5 +415,9 @@ What remains is not open questions but **standing triggers**:
   ADR 0016 action-space-reduction pattern — over hooks, and start
   deterministic deny-only: no `ask`, no LLM-evaluated policy, no stop
   loops, no per-edit test runs.
-- **PRDs 5 and 6** run concurrently under the same §3c policy 5
-  conditions once PRD 4 merges; nothing further needs to be true.
+- **PRD 5 and PRD 7** may run concurrently under §3c policy 5 after
+  PRD 4 merges. PRD 6 waits for PRD 7's versioned format only for item 19.
+- **Agent-eval merge gating** stays rejected. Re-open it only after
+  repeated evidence shows stable results with an agreed false-positive rate.
+- **Durable process supervision** stays cut. The approved plan keeps the
+  journal and restart evidence but does not auto-restart a vanished process.

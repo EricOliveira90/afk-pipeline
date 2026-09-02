@@ -130,9 +130,12 @@ both evidences, no summary bias), and writes the validated
 
 ### M6. Test cost policy
 
-- Two test gates: `test:related` (required, every checkpoint) and
-  `test:full` (required, final checkpoint before merge, plus the
-  aggregate pre-ship gate).
+- Run cheap prerequisites and `test:related` before candidate QA.
+- Run `test:full` only after candidate QA accepts that exact tree.
+  A failure returns to the bounded repair loop and invalidates the QA
+  authorization for the changed tree.
+- Run the aggregate full suite before guardian review and draft-PR
+  creation.
 - Tree-identity caching: a green gate result on an identical tree is
   never re-paid.
 - Gate prerequisites: expensive gates (coverage, mutation) declare
@@ -646,6 +649,10 @@ Decisions:
 - Guardian rerun after remediation uses the revision-template rule:
   prior blockers plus a change summary; a new blocker must cite
   remediation-changed code.
+- The deferred guardian-convergence follow-up adds named review passes,
+  a concrete Important definition, evidence-bound blockers, at most
+  three non-blocking notes, and a do-not-report list. This policy uses
+  PRD 3's measured guardian evidence and does not expand live PRD 3.
 
 Architect skeleton (PM differs in lens and inputs):
 
@@ -786,10 +793,9 @@ the run ends as a blocked ship with your explanation attached.
    status; expensive checks scoped to changed modules; mutation tools
    listed (Stryker, PIT, Infection, Mutmut) as project choices.
 3. Guardian review artifacts adopt attention-control style.
-4. After the live run ends, profile the test suite
-   (`pnpm vitest run --reporter=verbose`, per-file durations); then
-   decide fixture reuse against test demotion with data. Implement the
-   `test:related` / `test:full` split.
+4. Complete PRD 4's M6 policy after PRD 3's early sequence ships:
+   policy-owned related-test selection, exact-tree caching, gate
+   prerequisites, and advisory attributes.
 5. Amend the parent spec's section 6 role table: explorer evidence
    sections enter the generator, candidate evaluator, and contract
    evaluator include lists.
