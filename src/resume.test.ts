@@ -12,9 +12,13 @@ import {
   restartOrRefuse,
   type ResumeFacts,
 } from "./resume.js";
-import { renderPrompt } from "./prompt-template.js";
 import { formatUnresolvedQAFindings } from "./orchestrator.js";
 import type { QAReviewAttemptFinding } from "./qa-review.js";
+import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
+import {
+  assembleGeneratorEnvelope,
+  type GeneratorFailureSet,
+} from "./context-envelope.js";
 
 /**
  * Unit tests for the pure resume-eligibility decision (spec #33,
@@ -429,46 +433,56 @@ describe("buildResumeHandoffNote", () => {
   });
 });
 
-/**
- * The rendered resume prompt must carry the exact migration claim rule,
- * with every placeholder
- * filled — renderPrompt throws on missing AND unused args, so a clean
- * render with exactly this arg set locks full placeholder coverage.
- */
-describe("generator-resume prompt rendering", () => {
-  function render(handoffNote = ""): string {
-    return renderPrompt("generator-resume", {
-      SLICE_DIR: ".kiro/specs/demo/slices/01-x",
-      RELEVANT_FILES: "- README.md",
-      SIBLING_HANDOFFS: "(none)",
-      TEST_COMMAND: "pnpm test:run",
-      COMMITS_AHEAD: 3,
-      COMMIT_LOG: "abc123 feat: work",
-      WORKTREE_STATE:
-        "The worktree was reset; uncommitted changes were discarded.",
-      BASE_REFRESH_NOTE: "The feature branch was merged.",
-      STUCK_NOTE: "",
-      UNRESOLVED_FINDINGS:
-        "- Finding ID: `QA-01`\n  Summary: The behavior fails",
-      HANDOFF_NOTE: handoffNote,
-      MIGRATION_RESERVATION: "This slice owns exactly: 144.",
-    });
-  }
+const resumeAcceptanceManifest: AcceptanceManifestV2 = {
+  version: 2,
+  fileScope: { kind: "paths", paths: ["README.md"] },
+  migrationCount: 1,
+  behaviors: [],
+};
 
-  it("makes AFK's migration claim authoritative", () => {
-    const prompt = render();
-    expect(prompt).toContain("Migration instructions are authoritative");
+function renderRepairEnvelope(
+  repairSituation: string,
+  failureSet: GeneratorFailureSet = { findings: [], gates: [] },
+): string {
+  return assembleGeneratorEnvelope({
+    mode: "repair",
+    sliceDir: ".kiro/specs/demo/slices/01-x",
+    contractView: "LOCKED-CONTRACT",
+    acceptanceManifest: resumeAcceptanceManifest,
+    patternsAndHarness: "PATTERNS",
+    testCommand: "pnpm test:run",
+    migrationReservation: "This slice owns exactly: 144.",
+    repairSituation,
+    failureSet,
+  }).prompt;
+}
+
+describe("generator repair prompt rendering", () => {
+  it("preserves AFK's migration claim verbatim", () => {
+    const prompt = renderRepairEnvelope("RESUME-SITUATION");
     expect(prompt).toContain("This slice owns exactly: 144.");
     expect(prompt).not.toContain("renumber yours to the next free prefix");
   });
 
   it("splices the handoff note through, or renders cleanly without one", () => {
-    expect(render("## Prior handoff\nFresh notes.")).toContain("Fresh notes.");
-    expect(render("")).not.toContain("undefined");
+    expect(renderRepairEnvelope("## Prior handoff\nFresh notes.")).toContain(
+      "Fresh notes.",
+    );
+    expect(renderRepairEnvelope("(no handoff)")).not.toContain("undefined");
   });
 
   it("routes the code-derived unresolved findings", () => {
-    expect(render()).toContain("QA-01");
+    const prompt = renderRepairEnvelope("RESUME-SITUATION", {
+      findings: [
+        {
+          id: "QA-01",
+          clearCondition: "The behavior passes",
+          artifactReferences: ["reviews/qa-01.json"],
+        },
+      ],
+      gates: [],
+    });
+    expect(prompt).toContain("QA-01");
   });
 });
 
@@ -515,27 +529,28 @@ describe("buildStuckDiagnosisNote", () => {
   });
 });
 
-describe("shared generator-resume prompt rendering", () => {
+describe("resumed generator repair prompt rendering", () => {
   function render(): string {
-    return renderPrompt("generator-resume", {
-      SLICE_DIR: ".kiro/specs/demo/slices/20-x",
-      RELEVANT_FILES: "- README.md",
-      SIBLING_HANDOFFS: "(none)",
-      TEST_COMMAND: "pnpm test:run",
-      COMMITS_AHEAD: 14,
-      COMMIT_LOG: "COMMIT-HISTORY-MARKER",
-      WORKTREE_STATE: "DIRTY-TREE-STATE-MARKER",
-      BASE_REFRESH_NOTE: "FEATURE-REFRESH-OUTCOME-MARKER",
-      STUCK_NOTE: "EXISTING-DIAGNOSIS-MARKER",
-      UNRESOLVED_FINDINGS:
-        "- Finding ID: `QA-OPEN-01`\n" +
-        "  Summary: UNRESOLVED-SUMMARY-MARKER\n" +
-        "  Clear condition: UNRESOLVED-CLEAR-MARKER\n" +
-        "  Artifact references:\n" +
-        "  - `UNRESOLVED-ARTIFACT-MARKER`",
-      HANDOFF_NOTE: "PRIOR-HANDOFF-MARKER",
-      MIGRATION_RESERVATION: "This slice owns exactly: 144.",
-    });
+    return renderRepairEnvelope(
+      [
+        "Commits ahead of base: 14.",
+        "COMMIT-HISTORY-MARKER",
+        "DIRTY-TREE-STATE-MARKER",
+        "FEATURE-REFRESH-OUTCOME-MARKER",
+        "EXISTING-DIAGNOSIS-MARKER",
+        "PRIOR-HANDOFF-MARKER",
+      ].join("\n\n"),
+      {
+        findings: [
+          {
+            id: "QA-OPEN-01",
+            clearCondition: "UNRESOLVED-CLEAR-MARKER",
+            artifactReferences: ["UNRESOLVED-ARTIFACT-MARKER"],
+          },
+        ],
+        gates: [],
+      },
+    );
   }
 
   it("carries every STUCK-resume situation field independently", () => {
@@ -546,7 +561,6 @@ describe("shared generator-resume prompt rendering", () => {
     expect(prompt).toContain("COMMIT-HISTORY-MARKER");
     expect(prompt).toContain("PRIOR-HANDOFF-MARKER");
     expect(prompt).toContain("Finding ID: `QA-OPEN-01`");
-    expect(prompt).toContain("UNRESOLVED-SUMMARY-MARKER");
     expect(prompt).toContain("UNRESOLVED-CLEAR-MARKER");
     expect(prompt).toContain("UNRESOLVED-ARTIFACT-MARKER");
   });

@@ -1927,9 +1927,8 @@ describe("focused generator scope revision", () => {
     expect(freshGeneratorPrompt).toContain("src/declared.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-a.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-b.ts");
-    expect(freshGeneratorPrompt).toContain("This is implementation round 2");
+    expect(freshGeneratorPrompt).toContain("Implementation round: 2 of 3.");
     expect(freshGeneratorPrompt).toContain("QA-01");
-    expect(freshGeneratorPrompt).toContain("Fixture implementation finding");
     expect(freshGeneratorPrompt).toContain(
       "The fixture evaluator observes the behavior passing",
     );
@@ -1956,6 +1955,37 @@ describe("focused generator scope revision", () => {
 
     expect(generatorStarts.map(({ round }) => round)).toEqual([1, 2, 2]);
     expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
+  });
+
+  it("B-06 journals assembly evidence for every generator dispatch", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const events = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assemblies = events.filter(
+      (event) => event.type === "prompt-assembly",
+    );
+
+    expect(assemblies).toHaveLength(3);
+    for (const event of assemblies) {
+      expect(event).toMatchObject({
+        ghIssue: "1081",
+        sliceNumber: "01",
+        contextManifestVersion: 1,
+      });
+      expect(event.assembledByteSize).toBeGreaterThan(0);
+      expect(event.includedArtifactIds).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("contract.md"),
+          expect.stringContaining("acceptance-manifest.json"),
+        ]),
+      );
+      expect(event.omittedArtifactClasses).toContain("prior-conversation");
+    }
   });
 
   it("continues through QA after fresh generation", () => {

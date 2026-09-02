@@ -41,6 +41,36 @@ import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
 const dirs: string[] = [];
 const fixtureChildren = new Set<ChildProcess>();
+const GENERATOR_FIXTURE_CONTRACT = [
+  "# Slice Contract",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "## Scope lock",
+  "Exercise QA orchestration.",
+  "",
+  "### In scope",
+  "- [behavior:B-01] Run the generator before QA.",
+  "",
+  "### Non-goals (explicit out-of-scope)",
+  "- Production behavior.",
+  "",
+  "### Existing behavior to preserve",
+  "- None.",
+  "",
+  "### Changes to existing behavior (only if the issue asks for it)",
+  "- None.",
+  "",
+  "## New patterns / deps / schema (if any)",
+  "- None.",
+  "",
+  "## Files expected to change",
+  "- README.md",
+  "",
+  "## Migration requirements",
+  "- New migration files: 0",
+  "",
+].join("\n");
 
 beforeEach(() => {
   vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -121,6 +151,32 @@ function makeContext(
   };
   const absSliceDir = join(repo, "specs", "slices", "01-prd-070-regression");
   mkdirSync(absSliceDir, { recursive: true });
+  writeFileSync(
+    join(absSliceDir, "contract.md"),
+    GENERATOR_FIXTURE_CONTRACT,
+    "utf-8",
+  );
+  writeFileSync(
+    join(absSliceDir, "acceptance-manifest.json"),
+    JSON.stringify({
+      version: 2,
+      fileScope: { kind: "paths", paths: ["README.md"] },
+      migrationCount: 0,
+      behaviors: [
+        {
+          id: "B-01",
+          source: "QA orchestration fixture",
+          given: "a locked fixture slice",
+          when: "the generator runs",
+          then: "QA evaluates its candidate",
+          observableResult: "the fixture reaches QA",
+          preservation: false,
+          gateIds: ["tests"],
+        },
+      ],
+    }),
+    "utf-8",
+  );
   const config: PipelineConfig = {
     repoRoot: repo,
     prdSlug: "prd-070",
@@ -519,7 +575,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(roles.filter((role) => role === "generator")).toHaveLength(2);
     expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(2);
     expect(roles.at(-1)).toBe("evaluator-qa");
-    expect(generatorPrompts[1]).toContain("This is implementation round 3");
+    expect(generatorPrompts[1]).toContain("Implementation round: 3 of 3.");
     expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
@@ -835,7 +891,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
   });
 
-  it("blocks evaluation until every required checkpoint gate passes", async () => {
+  it("keeps current QA findings when a later required gate fails", async () => {
     const repo = makeRepo();
     const gateScript =
       "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
@@ -874,7 +930,12 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
-          writeQAReview(artifactDir, "deterministic");
+          writeQAReview(artifactDir, "deterministic", {
+            findings: stuckDiagnosisReviewFindings(1).map((finding) => ({
+              ...finding,
+              state: "RESOLVED",
+            })),
+          });
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -884,10 +945,36 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       heartbeatIntervalMs: 20,
     });
     artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    seedStuckDiagnosisArchive(reviewDir, {
+      rounds: [1],
+      includeEscalation: false,
+    });
+    ctx.resume = {
+      mode: "killed",
+      commitsAhead: 1,
+      commitLog: "abc1234 feat(#70): round-1 work",
+      handoffNote: "",
+    };
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generators).toBe(2);
     expect(evaluators).toBe(1);
+    expect(generatorPrompts[0]).toContain("QA-ALPHA");
+    expect(generatorPrompts[0]).toContain("Alpha clear condition");
+    expect(generatorPrompts[0]).toContain("qa-review-r1-a1.json");
+    expect(generatorPrompts[0]).toContain("qa-report-r1-a1.md");
+    expect(generatorPrompts[1]).toContain("QA-ALPHA");
+    expect(generatorPrompts[1]).toContain("Alpha clear condition");
+    expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
+    expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
     expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
     expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
     expect(generatorPrompts[1]).toMatch(/tests\.log/);
@@ -962,7 +1049,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           "prd-070-stub",
           "slice-01",
           "reviews",
-          "qa-review-r2-a1-record.json",
+          "qa-review-r3-a1-record.json",
         ),
         "utf-8",
       ),
@@ -1193,10 +1280,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts).toHaveLength(3);
 
     expect(generatorPrompts[1]).toContain("QA-BLOCKING");
-    expect(generatorPrompts[1]).toContain("Blocking summary");
+    expect(generatorPrompts[1]).not.toContain("Blocking summary");
     expect(generatorPrompts[1]).toContain("Blocking condition");
     expect(generatorPrompts[1]).toContain("QA-ADVISORY");
-    expect(generatorPrompts[1]).toContain("Advisory summary");
+    expect(generatorPrompts[1]).not.toContain("Advisory summary");
     expect(generatorPrompts[1]).toContain("Advisory condition");
     expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
@@ -1208,10 +1295,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
     expect(generatorPrompts[2]).not.toContain("QA-BLOCKING");
     expect(generatorPrompts[2]).toContain("QA-ADVISORY");
-    expect(generatorPrompts[2]).toContain("Advisory summary");
+    expect(generatorPrompts[2]).not.toContain("Advisory summary");
     expect(generatorPrompts[2]).toContain("Advisory condition");
     expect(generatorPrompts[2]).toContain("QA-FRESH");
-    expect(generatorPrompts[2]).toContain("Fresh summary");
+    expect(generatorPrompts[2]).not.toContain("Fresh summary");
     expect(generatorPrompts[2]).toContain("Fresh condition");
     expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
@@ -1782,7 +1869,7 @@ describe("shared-preview QA", () => {
     expect(uatPrompts).toHaveLength(2);
 
     expect(generatorPrompts[1]).toContain("UAT-OPEN");
-    expect(generatorPrompts[1]).toContain("UAT-OPEN summary");
+    expect(generatorPrompts[1]).not.toContain("UAT-OPEN summary");
     expect(generatorPrompts[1]).toContain("UAT-OPEN condition");
     expect(generatorPrompts[1]).toContain("uat-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("uat-report-r1-a1.md");

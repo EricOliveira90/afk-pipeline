@@ -1,6 +1,6 @@
 # Objective
 
-Implement every locked acceptance-manifest behavior for this slice inside the
+Repair every current failure against the locked acceptance manifest inside the
 declared file scope, and commit the candidate.
 
 # Write boundary
@@ -17,9 +17,9 @@ acceptance manifest, or review artifacts.
 
 # Stop condition
 
-Stop after the candidate is committed and the required handoff exists, or
-after writing a required escalation. Gates, not this prompt or the handoff,
-report verification status.
+Stop after the repaired candidate is committed and the required handoff
+exists, or after writing a required escalation. Gates, not this prompt or the
+handoff, report verification status.
 
 # Scope escalation
 
@@ -31,6 +31,15 @@ use `PRE-BUILD-SCOPE` alone. Never mix `PRE-BUILD-SCOPE` with a real finding
 ID. Then stop; the pipeline routes the request to contract revision.
 Also escalate a spec contradiction (including recorded ADRs), load-bearing
 silence, or a declared risk class. Decide and record otherwise.
+
+# Repair situation
+
+Fix causes, not only listed examples.
+
+{{REPAIR_SITUATION}}
+
+When the situation includes preserved `stuck.md` evidence, treat that file as
+read-only. Never delete, move, rewrite, or edit it.
 
 # Locked contract view
 
