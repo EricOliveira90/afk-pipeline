@@ -30,9 +30,11 @@ import {
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
 import {
+  assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
+  validateExplorerEvidenceMap,
   type GeneratorFailureSet,
 } from "./context-envelope.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
@@ -445,6 +447,8 @@ export interface PipelineConfig {
   testCommand?: string;
   /** Effective inline byte limit for each assembled generator prompt. */
   generatorInlineSizeBudgetBytes?: number;
+  /** Effective inline byte limit for each assembled explorer prompt. */
+  explorerInlineSizeBudgetBytes?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -2789,7 +2793,31 @@ async function negotiateAttempt(
       ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
       : `No local issue manifest was found. Fetch the issue body with: gh issue view ${slice.ghIssue}`;
     const contextPath = join(ctx.absSliceDir, "context.md");
-    if (!existsSync(contextPath)) {
+    let hasValidContext = false;
+    if (existsSync(contextPath)) {
+      try {
+        validateExplorerEvidenceMap(readFileSync(contextPath, "utf-8"));
+        hasValidContext = true;
+      } catch {
+        // A malformed prior artifact is not accepted for planner dispatch.
+        // The explorer gets one chance to replace it with the current format.
+      }
+    }
+    if (!hasValidContext) {
+      const assembled = assembleExplorerEnvelope({
+        repoRoot: ctx.worktreeDir,
+        ghIssue: slice.ghIssue,
+        title: slice.title,
+        sliceDir: ctx.relSliceDir,
+        relevantFiles: relevantFilesBlock,
+        sliceBody: sliceBodyNote,
+        ...(config.explorerInlineSizeBudgetBytes !== undefined
+          ? {
+              inlineSizeBudgetBytes:
+                config.explorerInlineSizeBudgetBytes,
+            }
+          : {}),
+      });
       logger.phase(`${ctx.tag}: exploring...`, "error", {
         type: "phase-started",
         ghIssue: slice.ghIssue,
@@ -2799,13 +2827,7 @@ async function negotiateAttempt(
       await invokeAgent(
         {
           role: "explorer",
-          prompt: renderPrompt("explorer", {
-            GH_ISSUE: slice.ghIssue,
-            TITLE: slice.title,
-            SLICE_DIR: ctx.relSliceDir,
-            RELEVANT_FILES: relevantFilesBlock,
-            SLICE_BODY: sliceBodyNote,
-          }),
+          prompt: assembled.prompt,
           cwd: ctx.worktreeDir,
           maxDurationMs: config.maxAgentDurationMs,
         },
@@ -2818,6 +2840,12 @@ async function negotiateAttempt(
         agent: "explorer",
       });
     }
+    if (!existsSync(contextPath)) {
+      throw new Error(
+        `Explorer did not write required artifact ${ctx.relSliceDir}/context.md`,
+      );
+    }
+    validateExplorerEvidenceMap(readFileSync(contextPath, "utf-8"));
 
     // --- Step 2: Planner (contract negotiation) ---
     const contractPath = join(ctx.absSliceDir, "contract.md");
