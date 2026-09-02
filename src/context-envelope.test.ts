@@ -97,6 +97,12 @@ describe("generator context envelope", () => {
       "#### Nested detail\r\n",
       "NESTED-IN-SCOPE-MARKER\r\n",
       "\r\n",
+      "#### In scope\r\n",
+      "NESTED-RESERVED-IN-SCOPE-MARKER\r\n",
+      "\r\n",
+      "#### Test plan\r\n",
+      "NESTED-RESERVED-TEST-PLAN-MARKER\r\n",
+      "\r\n",
       "### Non-goals (explicit out-of-scope)\r\n",
       "non-goals body\r\n",
       "\r\n",
@@ -119,7 +125,7 @@ describe("generator context envelope", () => {
     expect(projectGeneratorContractView(contract)).toBe(
       [
         "\r\nscope body\r\n\r\n",
-        "\r\nin-scope body\r\n\r\n#### Nested detail\r\nNESTED-IN-SCOPE-MARKER\r\n\r\n",
+        "\r\nin-scope body\r\n\r\n#### Nested detail\r\nNESTED-IN-SCOPE-MARKER\r\n\r\n#### In scope\r\nNESTED-RESERVED-IN-SCOPE-MARKER\r\n\r\n#### Test plan\r\nNESTED-RESERVED-TEST-PLAN-MARKER\r\n\r\n",
         "\r\nnon-goals body\r\n\r\n",
         "\r\npreservation body\r\n\r\n",
         "\r\nchanges body\r\n\r\n",

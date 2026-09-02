@@ -10,12 +10,17 @@ const GENERATOR_CONTRACT_SECTIONS = new Set([
   "New patterns / deps / schema (if any)",
 ]);
 
-const CONTRACT_SECTIONS = new Set([
-  ...GENERATOR_CONTRACT_SECTIONS,
-  "Files expected to change",
-  "Migration requirements",
-  "Test plan",
-  "Definition of done",
+const CONTRACT_SECTION_LEVELS = new Map([
+  ["Scope lock", 2],
+  ["In scope", 3],
+  ["Non-goals (explicit out-of-scope)", 3],
+  ["Existing behavior to preserve", 3],
+  ["Changes to existing behavior (only if the issue asks for it)", 3],
+  ["Files expected to change", 2],
+  ["Migration requirements", 2],
+  ["New patterns / deps / schema (if any)", 2],
+  ["Test plan", 2],
+  ["Definition of done", 2],
 ]);
 
 export const GENERATOR_CONTEXT_MANIFEST = {
@@ -106,12 +111,14 @@ export function projectGeneratorContractView(contract: string): string {
     ...contract.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
   ].map((match) => ({
     title: match[2]!,
+    level: match[1]!.length,
     headingStart: match.index,
     bodyStart: match.index + match[0].length - match[3]!.length,
   }));
 
-  const standardSections = headings.filter((heading) =>
-    CONTRACT_SECTIONS.has(heading.title),
+  const standardSections = headings.filter(
+    (heading) =>
+      CONTRACT_SECTION_LEVELS.get(heading.title) === heading.level,
   );
   const selected = standardSections
     .map((heading, index) => ({
