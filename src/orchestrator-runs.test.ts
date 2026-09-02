@@ -1664,7 +1664,7 @@ describe("generator verification command (ADR 0038)", () => {
     };
   }
 
-  it("hands the override to the generator and the full sanity set to QA", async () => {
+  it("hands the override only to the generator and keeps the full suite out of QA", async () => {
     const slug = "generator-test-command";
     const { repo, prdDir, specsDir, slices, baseProvider } = makeSetup(
       slug,
@@ -1689,11 +1689,13 @@ describe("generator verification command (ADR 0038)", () => {
     expect(generatorPrompt).toBeDefined();
     expect(generatorPrompt!).toContain("pnpm test:fast");
 
-    // QA is told the gate's command set and is never shown the override.
+    // QA is told only the cheap candidate checks and is never shown either
+    // the generator override or the full suite, which runs after QA accepts.
     const qaPrompt = prompts.get("evaluator-qa")?.[0];
     expect(qaPrompt).toBeDefined();
-    expect(qaPrompt!).toContain("pnpm run test:run");
+    expect(qaPrompt!).not.toContain("pnpm run test:run");
     expect(qaPrompt!).not.toContain("test:fast");
+    expect(qaPrompt!).toContain("project's full test suite");
   }, 240_000);
 
   it("leaves the generator on the project's test script when no override is given", async () => {

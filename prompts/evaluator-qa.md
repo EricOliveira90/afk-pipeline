@@ -52,21 +52,24 @@ Also read:
 
 # Pass 1: Functional Correctness
 
-For deterministic slice QA, run every sanity command below in order:
+For deterministic slice QA, run every pre-QA command below in order:
 
 {{SANITY_COMMANDS}}
 
-That list is the complete command set for this pass — it already includes
-the project's tests. Do not run the project tests twice, and do not
-substitute a command the list does not name.
+That list contains only the cheap checks candidate QA may need. Do not run the
+project's full test suite: the orchestrator runs that suite on the authorized
+candidate tree only after this QA stage accepts. Do not substitute a command
+the list does not name.
 
 {{BASE_GATE_AUTHORIZATION}}
 
+The authorization identifies a Git tree object, not a commit. Do not compare
+its tree ID with `git rev-parse HEAD`; a commit ID and its tree ID are different
+Git objects. The orchestrator owns the exact-tree comparison.
+
 Launch any command you expect to run for more than a few minutes as a
 background job and poll it to completion, rather than invoking it directly
-and waiting. Your command wrapper may enforce a ceiling on a single
-invocation's total runtime that a long test suite exceeds; a suite killed
-that way produces no verdict and no usable evidence for this pass.
+and waiting.
 For shared-preview UAT, skip the sanity list and run only remote scenarios from
 the contract.
 
@@ -170,7 +173,7 @@ Write this shape to `{{REPORT_PATH}}`:
 **Failure class:** NONE | IMPLEMENTATION | INFRASTRUCTURE
 
 ## Pass 1: Functional Correctness
-- Sanity commands: PASS | FAIL | NOT IN SCOPE
+- Pre-QA commands: PASS | FAIL | NOT IN SCOPE
 - UAT verification: PASS | FAIL | NOT IN SCOPE
 - Boundary compliance: PASS | FAIL
 - Preservation check: PASS | FAIL

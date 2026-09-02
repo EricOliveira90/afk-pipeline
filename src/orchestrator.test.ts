@@ -33,6 +33,8 @@ import {
   makeAsyncMutex,
   makeSliceContext,
   resolveBaseGateDeclarations,
+  resolveFullSuiteGateDeclarations,
+  resolvePreQAGateDeclarations,
   runPipeline,
   runSliceNegotiate,
   assertSliceWorktreeOwnership,
@@ -45,6 +47,7 @@ import {
   buildReviewScopeBlock,
 } from "./ship-gate.js";
 import {
+  resolveCandidateQACommands,
   resolveGeneratorTestCommand,
   resolveSanityCommands,
   resolveTestCommand,
@@ -479,16 +482,11 @@ describe("resolveGeneratorTestCommand", () => {
 });
 
 /**
- * Drift test: the command set the evaluator-qa is told to run MUST equal
- * the command set the post-merge sanity gate runs. If they diverge, a
- * slice can pass QA on code the gate then rejects (the failure mode that
- * motivated this fix: typecheck/lint violations passing through QA
- * because QA only ran tests). Walks several package.json shapes; for
- * each, the commands `runPreShipSanity` attempts must exactly match — same
- * commands, same order, dependency install included — what
- * `resolveSanityCommands` reports.
+ * Candidate sequencing projects one discovery result into cheap pre-QA gates
+ * and a post-acceptance full suite. The aggregate gate deliberately keeps the
+ * complete command set and order.
  */
-describe("evaluator-qa sanity command set matches the post-merge gate", () => {
+describe("candidate and aggregate sanity sequencing", () => {
   // Records the real invocation sequence through the subprocess seam, so the
   // comparison covers every command the gate runs — including the install
   // prep, which is not a `pnpm run` script and would otherwise be invisible
@@ -524,6 +522,26 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
       "pnpm run typecheck",
       "pnpm run test",
     ]);
+    expect(resolvePreQAGateDeclarations(dir)).toEqual([
+      {
+        id: "typecheck",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "typecheck"],
+      },
+      { id: "lint", stage: "base", required: false },
+    ]);
+    expect(resolveFullSuiteGateDeclarations(dir)).toEqual([
+      {
+        id: "tests",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "test"],
+      },
+    ]);
+    expect(resolveCandidateQACommands(dir)).toEqual(["pnpm run typecheck"]);
   });
 
   it("matches when all three steps are defined", () => {
@@ -5614,13 +5632,14 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       expect(result.failureReason).toContain("PM: UNPARSEABLE");
     }, 240_000);
 
-    it("is unsuccessful when cancellation landed after the last merge but before the ship gates", async () => {
+    it("is unsuccessful when cancellation lands after candidate QA", async () => {
       const slug = "exit-cancelled-preship";
       const { repo, prdDir, specsDir, slices, baseProvider } =
         makePassingSliceSetup(slug, "7406");
 
-      // Cancel as soon as the slice's QA lands: the merge completes, so
-      // every slice is PASS, but the sanity gate and guardians never run.
+      // Cancel as soon as candidate QA lands. The post-QA full suite observes
+      // the signal and the slice never merges, so its outcome explains the
+      // failure.
       const controller = new AbortController();
       const provider: AgentProvider = {
         name: baseProvider.name,
@@ -5642,7 +5661,8 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.failureReason).toContain("cancelled");
+      expect(result.failureReason).toBeUndefined();
+      expect(result.summary).toContain("CANCELLED");
     }, 240_000);
 
     it("is unsuccessful when the pre-ship sanity gate failed, naming the failing step", async () => {

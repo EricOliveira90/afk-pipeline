@@ -162,7 +162,7 @@ describe("authorizeBaseGateSkip grants only on an exact tree match", () => {
       expect(authorizeBaseGateSkip(input({ reviewTreeId }))).toEqual({
         authorized: false,
         reason:
-          "the tree under review could not be hashed, so no sha comparison is possible",
+          "the tree under review could not be hashed, so no tree comparison is possible",
       });
     }
   });
@@ -246,6 +246,10 @@ describe("formatBaseGateSkipAuthorization", () => {
     expect(block).toContain(`\`${EVIDENCE_ID}\``);
     expect(block).toContain(`\`${REVIEW_TREE}\``);
     expect(block).toContain("`attempt-abc`");
+    expect(block).toContain("Git tree ID under review");
+    expect(block).toContain("Do not");
+    expect(block).toContain("`git rev-parse HEAD`");
+    expect(block).toContain("HEAD resolves to a commit");
     // The install ran in the gate's own checkout, so it is never covered.
     expect(block).toContain("including the dependency install");
   });

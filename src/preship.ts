@@ -135,6 +135,24 @@ export function resolveSanityCommands(cwd: string): string[] {
 }
 
 /**
+ * Commands candidate QA may need before it judges behavior.
+ *
+ * The full test suite is deliberately absent: the orchestrator runs it only
+ * after candidate QA accepts the exact candidate tree. This is the narrow
+ * early delivery of M6's test:related/test:full sequencing; the policy-owned
+ * gate catalog and automatic related-test selection remain PRD 4 work.
+ */
+export function resolveCandidateQACommands(cwd: string): string[] {
+  const plan = resolveSanityPlan(cwd);
+  const cheapSteps = plan.steps.filter((step) => step.name !== "tests");
+  const entries =
+    plan.prepare && cheapSteps.length > 0
+      ? [plan.prepare, ...cheapSteps]
+      : cheapSteps;
+  return entries.map(formatSanityCommand);
+}
+
+/**
  * How one sanity command ended. Mirrors the gate-runner's execution
  * classification: a command that ran and exited non-zero is a failure of the
  * reviewed tree; a command that could never be spawned (`pnpm` absent from

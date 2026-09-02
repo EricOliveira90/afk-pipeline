@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -856,7 +857,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       JSON.stringify({
         name: "active-gate-fixture",
         scripts: {
-          test: "node -e \"let ticks=0; const timer=setInterval(()=>console.log(++ticks),50); setTimeout(()=>clearInterval(timer),2500)\"",
+          // Keep the command alive beyond the inactivity limit while emitting
+          // frequent output. Five seconds leaves enough scheduler margin for
+          // this heavy suite on loaded Windows runners.
+          test: "node -e \"let ticks=0; const timer=setInterval(()=>console.log(++ticks),50); setTimeout(()=>clearInterval(timer),6500)\"",
         },
       }),
       "utf-8",
@@ -882,7 +886,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       },
     };
     const ctx = makeContext(repo, provider, {
-      commandTimeoutMs: 2_000,
+      commandTimeoutMs: 5_000,
       heartbeatIntervalMs: 20,
     });
     artifactDir = ctx.absSliceDir;
@@ -893,13 +897,17 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
   it("keeps current QA findings when a later required gate fails", async () => {
     const repo = makeRepo();
-    const gateScript =
-      "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
+    const sequencePath = join(repo, "gate-sequence.txt").replace(/\\/g, "/");
+    const cheapScript =
+      `node -e "require('fs').appendFileSync('${sequencePath}','cheap\\n')"`;
+    const fullSuiteScript =
+      `node -e "const fs=require('fs'); fs.appendFileSync('${sequencePath}','full\\n'); ` +
+      `process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)"`;
     writeFileSync(
       join(repo, "package.json"),
       JSON.stringify({
         name: "gate-fixture",
-        scripts: { typecheck: gateScript, test: gateScript },
+        scripts: { typecheck: cheapScript, test: fullSuiteScript },
       }),
       "utf-8",
     );
@@ -925,16 +933,20 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         } else if (options.role === "evaluator-qa") {
           evaluators++;
           evaluatorPrompts.push(options.prompt);
+          appendFileSync(sequencePath, "qa\n", "utf-8");
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
             "utf-8",
           );
           writeQAReview(artifactDir, "deterministic", {
-            findings: stuckDiagnosisReviewFindings(1).map((finding) => ({
-              ...finding,
-              state: "RESOLVED",
-            })),
+            findings:
+              evaluators === 1
+                ? stuckDiagnosisReviewFindings(1).map((finding) => ({
+                    ...finding,
+                    state: "RESOLVED",
+                  }))
+                : [],
           });
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -966,7 +978,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generators).toBe(2);
-    expect(evaluators).toBe(1);
+    expect(evaluators).toBe(2);
+    expect(readFileSync(sequencePath, "utf-8")).toBe(
+      "cheap\nqa\nfull\ncheap\nqa\nfull\n",
+    );
     expect(generatorPrompts[0]).toContain("QA-ALPHA");
     expect(generatorPrompts[0]).toContain("Alpha clear condition");
     expect(generatorPrompts[0]).toContain("qa-review-r1-a1.json");
@@ -976,14 +991,13 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
     expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
-    expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
     expect(generatorPrompts[1]).toMatch(/tests\.log/);
 
     const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
     const evidenceFiles = readdirSync(evidenceDir)
       .filter((name) => name.endsWith(".json"))
       .sort();
-    expect(evidenceFiles).toHaveLength(2);
+    expect(evidenceFiles).toHaveLength(4);
     expect(evidenceFiles.every((name) => name.length <= 32)).toBe(true);
     expect(existsSync(join(artifactDir, "gate-evidence"))).toBe(false);
     expect(
@@ -995,8 +1009,16 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const attempts = evidenceFiles.map((name) =>
       JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
     );
-    expect(attempts[0].results.map((gate: { gateId: string }) => gate.gateId))
-      .toEqual(["typecheck", "lint", "tests"]);
+    expect(
+      attempts.map((attempt) =>
+        attempt.results.map((gate: { gateId: string }) => gate.gateId),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        ["typecheck", "lint"],
+        ["tests"],
+      ]),
+    );
     expect(
       attempts.some(
         (attempt) =>
@@ -1004,15 +1026,16 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             (gate: { status: string; failureKind: string }) =>
               gate.status === "FAIL" &&
               gate.failureKind === "COMMAND",
-          ).length === 2,
+          ).length === 1,
       ),
     ).toBe(true);
     expect(
       attempts.some(
         (attempt) =>
-          attempt.results.filter(
-            (gate: { status: string }) => gate.status === "PASS",
-          ).length === 2,
+          attempt.results.some(
+            (gate: { gateId: string; status: string }) =>
+              gate.gateId === "tests" && gate.status === "PASS",
+          ),
       ),
     ).toBe(true);
 
@@ -1024,21 +1047,22 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     // spawned run can prove is that the tree sha the orchestrator hashes at
     // QA dispatch still equals the one the gates ran on, so the grant is
     // reachable at all and not permanently fail-closed.
-    const passingIndex = attempts.findIndex((attempt) =>
-      attempt.results.every(
-        (gate: { status: string }) => gate.status !== "FAIL",
-      ),
-    );
-    const passingAttempt = attempts[passingIndex];
     const qaPrompt = evaluatorPrompts[0] ?? "";
+    const passingIndex = attempts.findIndex((attempt) =>
+      qaPrompt.includes(attempt.attemptId),
+    );
+    expect(passingIndex).toBeGreaterThanOrEqual(0);
+    const passingAttempt = attempts[passingIndex];
     expect(qaPrompt).toContain("Skip authorization");
     expect(qaPrompt).toContain(`\`${passingAttempt.treeId}\``);
     expect(qaPrompt).toContain(`\`${passingAttempt.attemptId}\``);
-    // `lint` has no script in this fixture, so the gate never ran it and the
-    // authorization must not vouch for it.
+    // Candidate QA is authorized only for the cheap phase. The full suite has
+    // not run yet and must never appear in its citation.
     expect(qaPrompt).toContain("- typecheck — `pnpm run typecheck` — PASS at");
-    expect(qaPrompt).toContain("- tests — `pnpm run test` — PASS at");
+    expect(qaPrompt).not.toContain("- tests —");
     expect(qaPrompt).not.toContain("- lint —");
+    expect(qaPrompt).toContain("Git tree ID under review");
+    expect(qaPrompt).toContain("`git rev-parse HEAD`");
 
     const record = JSON.parse(
       readFileSync(
@@ -1054,14 +1078,20 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         "utf-8",
       ),
     );
+    const recordedPrompt = evaluatorPrompts[1] ?? "";
+    const recordedIndex = attempts.findIndex((attempt) =>
+      recordedPrompt.includes(attempt.attemptId),
+    );
+    expect(recordedIndex).toBeGreaterThanOrEqual(0);
+    const recordedAttempt = attempts[recordedIndex];
     expect(record.baseGateCitation).toEqual({
       evidenceArtifactId: relative(
         repo,
-        join(evidenceDir, evidenceFiles[passingIndex]!),
+        join(evidenceDir, evidenceFiles[recordedIndex]!),
       ).replace(/\\/g, "/"),
-      attemptId: passingAttempt.attemptId,
-      treeId: passingAttempt.treeId,
-      gateIds: ["typecheck", "tests"],
+      attemptId: recordedAttempt.attemptId,
+      treeId: recordedAttempt.treeId,
+      gateIds: ["typecheck"],
     });
   });
 
@@ -1176,6 +1206,20 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
   it("routes only the current unresolved findings to QA and generator retries", async () => {
     const repo = makeRepo();
+    const sequencePath = join(repo, "qa-sequence.txt").replace(/\\/g, "/");
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "qa-sequencing-fixture",
+        scripts: {
+          test:
+            `node -e "require('fs').appendFileSync('${sequencePath}','full\\n')"`,
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add full-suite marker"]);
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
     let artifactDir = "";
@@ -1187,6 +1231,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           writeFileSync(join(repo, "change.txt"), `${generatorPrompts.length}\n`, "utf-8");
         } else if (options.role === "evaluator-qa") {
           evaluatorPrompts.push(options.prompt);
+          appendFileSync(sequencePath, "qa\n", "utf-8");
           const round = evaluatorPrompts.length;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
@@ -1278,6 +1323,11 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
     expect(generatorPrompts).toHaveLength(3);
     expect(evaluatorPrompts).toHaveLength(3);
+    // The first two candidate-QA failures do not start the suite. The accepted
+    // third candidate starts it exactly once.
+    expect(readFileSync(sequencePath, "utf-8")).toBe(
+      "qa\nqa\nqa\nfull\n",
+    );
 
     expect(generatorPrompts[1]).toContain("QA-BLOCKING");
     expect(generatorPrompts[1]).not.toContain("Blocking summary");
@@ -1678,23 +1728,33 @@ describe("provider-independent policy-less base gates", () => {
       await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
       expect(evaluators).toBe(1);
       const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
-      const evidenceFile = readdirSync(evidenceDir).find((name) =>
-        name.endsWith(".json"),
-      )!;
-      const evidence = JSON.parse(
-        readFileSync(join(evidenceDir, evidenceFile), "utf-8"),
-      );
-      expect(evidence.results.map((gate: { gateId: string }) => gate.gateId))
-        .toEqual(["typecheck", "lint", "tests"]);
+      const evidence = readdirSync(evidenceDir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) =>
+          JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
+        );
       expect(
-        evidence.results.every(
-          (gate: { status: string }) => gate.status === "PASS",
+        evidence.map((attempt) =>
+          attempt.results.map((gate: { gateId: string }) => gate.gateId),
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          ["typecheck", "lint"],
+          ["tests"],
+        ]),
+      );
+      expect(
+        evidence.every((attempt) =>
+          attempt.results.every(
+            (gate: { status: string }) => gate.status === "PASS",
+          ),
         ),
       ).toBe(true);
+      expect(new Set(evidence.map((attempt) => attempt.treeId)).size).toBe(1);
       expect(
         execFileSync(
           "git",
-          ["show", `${evidence.treeId}:provider-output.txt`],
+          ["show", `${evidence[0].treeId}:provider-output.txt`],
           { cwd: repo, encoding: "utf-8" },
         ),
       ).toBe(providerName);
