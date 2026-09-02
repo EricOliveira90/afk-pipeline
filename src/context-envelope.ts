@@ -1,5 +1,68 @@
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import { renderPrompt } from "./prompt-template.js";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { basename, join } from "node:path";
+
+const EXPLORER_REQUIRED_SECTIONS = [
+  "Files and current behavior",
+  "Patterns and test harness",
+  "Unknowns",
+] as const;
+const EXPLORER_OPTIONAL_SECTION = "Data and integration";
+
+interface MarkdownSection {
+  title: string;
+  level: number;
+  headingStart: number;
+  bodyStart: number;
+  bodyEnd: number;
+}
+
+export const EXPLORER_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "explorer",
+  objective:
+    "Build a cited four-section evidence map for planner and generator use.",
+  allowedWriteScope: "slice/context.md",
+  outputArtifact: "four-section-evidence-map",
+  inputOrder: [
+    "objective",
+    "write-boundary",
+    "stop-condition",
+    "citation-rule",
+    "four-section-task",
+    "slice-inputs",
+    "repository-context",
+    "budget",
+  ],
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    "persona",
+    "full-adr-bodies",
+    "prior-conversation",
+    "other-role-conversation",
+  ],
+} as const;
+
+export interface ExplorerEnvelopeInput {
+  repoRoot: string;
+  ghIssue: string;
+  title: string;
+  sliceDir: string;
+  relevantFiles: string;
+  sliceBody: string;
+  inlineSizeBudgetBytes?: number;
+}
+
+export interface ExplorerEnvelopeResult {
+  prompt: string;
+  evidence: {
+    assembledByteSize: number;
+    includedArtifactIds: string[];
+    omittedArtifactClasses: string[];
+    contextManifestVersion: number;
+  };
+}
 
 const GENERATOR_CONTRACT_SECTIONS = new Set([
   "Scope lock",
@@ -107,6 +170,151 @@ export interface GeneratorEnvelopeResult {
   evidence: GeneratorEnvelopeEvidence;
 }
 
+function markdownSections(content: string): MarkdownSection[] {
+  const headings = [
+    ...content.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
+  ].map((match) => ({
+    title: match[2]!,
+    level: match[1]!.length,
+    headingStart: match.index,
+    bodyStart: match.index + match[0].length - match[3]!.length,
+  }));
+
+  return headings.map((heading, index) => ({
+    ...heading,
+    bodyEnd:
+      headings
+        .slice(index + 1)
+        .find((candidate) => candidate.level <= heading.level)?.headingStart ??
+      content.length,
+  }));
+}
+
+function explorerEvidenceSections(content: string): MarkdownSection[] {
+  return markdownSections(content).filter((heading) => heading.level === 2);
+}
+
+export function validateExplorerEvidenceMap(content: string): void {
+  const actual = explorerEvidenceSections(content).map(
+    (section) => section.title,
+  );
+  const withoutOptional = actual.filter(
+    (title) => title !== EXPLORER_OPTIONAL_SECTION,
+  );
+  const optionalCount = actual.filter(
+    (title) => title === EXPLORER_OPTIONAL_SECTION,
+  ).length;
+  const requiredMatches =
+    withoutOptional.length === EXPLORER_REQUIRED_SECTIONS.length &&
+    withoutOptional.every(
+      (title, index) => title === EXPLORER_REQUIRED_SECTIONS[index],
+    );
+  const optionalPositionIsValid =
+    optionalCount === 0 ||
+    (optionalCount === 1 &&
+      actual[2] === EXPLORER_OPTIONAL_SECTION &&
+      actual[3] === "Unknowns");
+
+  if (!requiredMatches || !optionalPositionIsValid) {
+    throw new Error(
+      "Explorer evidence map requires exactly these level-two sections in order: " +
+        "Files and current behavior, Patterns and test harness, optional Data and integration, Unknowns; " +
+        `found: ${actual.length > 0 ? actual.join(", ") : "(none)"}`,
+    );
+  }
+}
+
+function adrTitle(path: string): string {
+  const firstLine = readFileSync(path, "utf-8").split(/\r?\n/, 1)[0] ?? "";
+  return firstLine
+    .replace(/^#[ \t]+/, "")
+    .replace(/^ADR[ \t]+\d+[ \t]+[—-][ \t]+/i, "")
+    .trim();
+}
+
+export function buildExplorerRepositoryContext(repoRoot: string): {
+  content: string;
+  includedArtifactIds: string[];
+} {
+  const blocks: string[] = [];
+  const includedArtifactIds: string[] = [];
+  const adrDir = join(repoRoot, "docs", "adr");
+  if (existsSync(adrDir)) {
+    const adrFiles = readdirSync(adrDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (adrFiles.length > 0) {
+      blocks.push(
+        [
+          "## ADR index",
+          "",
+          ...adrFiles.map((entry) => {
+            const number =
+              /^(\d+)/.exec(entry.name)?.[1] ??
+              basename(entry.name, ".md");
+            const relativePath = `docs/adr/${entry.name}`;
+            includedArtifactIds.push(relativePath);
+            return `- ${number} — ${adrTitle(join(adrDir, entry.name))} (\`${relativePath}\`)`;
+          }),
+        ].join("\n"),
+      );
+    }
+  }
+
+  const architecturePath = join(repoRoot, "ARCHITECTURE.md");
+  if (existsSync(architecturePath)) {
+    includedArtifactIds.push("ARCHITECTURE.md");
+    blocks.push(
+      [
+        "## ARCHITECTURE.md",
+        "",
+        readFileSync(architecturePath, "utf-8").trimEnd(),
+      ].join("\n"),
+    );
+  }
+
+  return {
+    content: blocks.length > 0 ? blocks.join("\n\n") : "(none available)",
+    includedArtifactIds,
+  };
+}
+
+export function assembleExplorerEnvelope(
+  input: ExplorerEnvelopeInput,
+): ExplorerEnvelopeResult {
+  const allowedByteSize =
+    input.inlineSizeBudgetBytes ??
+    EXPLORER_CONTEXT_MANIFEST.inlineSizeBudgetBytes;
+  const repositoryContext = buildExplorerRepositoryContext(input.repoRoot);
+  const prompt = renderPrompt("explorer", {
+    GH_ISSUE: input.ghIssue,
+    TITLE: input.title,
+    SLICE_DIR: input.sliceDir,
+    RELEVANT_FILES: input.relevantFiles,
+    SLICE_BODY: input.sliceBody,
+    REPOSITORY_CONTEXT: repositoryContext.content,
+    INLINE_SIZE_BUDGET_BYTES: allowedByteSize,
+  });
+  const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
+  if (assembledByteSize > allowedByteSize) {
+    throw new Error(
+      `Explorer prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
+    );
+  }
+
+  return {
+    prompt,
+    evidence: {
+      assembledByteSize,
+      includedArtifactIds: repositoryContext.includedArtifactIds,
+      omittedArtifactClasses: [
+        ...EXPLORER_CONTEXT_MANIFEST.omittedArtifactClasses,
+      ],
+      contextManifestVersion: EXPLORER_CONTEXT_MANIFEST.version,
+    },
+  };
+}
+
 export function projectGeneratorContractView(contract: string): string {
   const headings = [
     ...contract.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
@@ -147,27 +355,11 @@ export function projectGeneratorContractView(contract: string): string {
 }
 
 export function projectGeneratorPatternsAndHarness(context: string): string {
-  const selectedTitles = new Set(["Patterns in Use", "Test Infrastructure"]);
-  const headings = [
-    ...context.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
-  ].map((match) => ({
-    title: match[2]!,
-    headingStart: match.index,
-    bodyStart: match.index + match[0].length - match[3]!.length,
-  }));
-  const sections = headings
-    .map((heading, index) => ({
-      ...heading,
-      bodyEnd: headings[index + 1]?.headingStart ?? context.length,
-    }))
-    .filter((heading) => selectedTitles.has(heading.title));
-  if (sections.length === 0) return context;
-  return sections
-    .map(
-      ({ title, bodyStart, bodyEnd }) =>
-        `## ${title}${context.slice(bodyStart, bodyEnd)}`,
-    )
-    .join("");
+  const section = explorerEvidenceSections(context).find(
+    (heading) => heading.title === "Patterns and test harness",
+  );
+  if (section === undefined) return context;
+  return context.slice(section.headingStart, section.bodyEnd);
 }
 
 export function assembleGeneratorEnvelope(
