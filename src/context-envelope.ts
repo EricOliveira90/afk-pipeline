@@ -10,6 +10,14 @@ const GENERATOR_CONTRACT_SECTIONS = new Set([
   "New patterns / deps / schema (if any)",
 ]);
 
+const CONTRACT_SECTIONS = new Set([
+  ...GENERATOR_CONTRACT_SECTIONS,
+  "Files expected to change",
+  "Migration requirements",
+  "Test plan",
+  "Definition of done",
+]);
+
 export const GENERATOR_CONTEXT_MANIFEST = {
   version: 1,
   role: "generator",
@@ -102,10 +110,13 @@ export function projectGeneratorContractView(contract: string): string {
     bodyStart: match.index + match[0].length - match[3]!.length,
   }));
 
-  const selected = headings
+  const standardSections = headings.filter((heading) =>
+    CONTRACT_SECTIONS.has(heading.title),
+  );
+  const selected = standardSections
     .map((heading, index) => ({
       ...heading,
-      bodyEnd: headings[index + 1]?.headingStart ?? contract.length,
+      bodyEnd: standardSections[index + 1]?.headingStart ?? contract.length,
     }))
     .filter((heading) => GENERATOR_CONTRACT_SECTIONS.has(heading.title));
   const counts = new Map<string, number>();
