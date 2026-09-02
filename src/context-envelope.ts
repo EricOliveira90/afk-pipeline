@@ -91,6 +91,7 @@ export interface GeneratorEnvelopeInput {
   migrationReservation: string;
   failureSet: GeneratorFailureSet;
   repairSituation?: string;
+  additionalArtifactIds?: readonly string[];
   inlineSizeBudgetBytes?: number;
 }
 
@@ -224,6 +225,7 @@ export function assembleGeneratorEnvelope(
         `${input.sliceDir}/contract.md`,
         `${input.sliceDir}/acceptance-manifest.json`,
         `${input.sliceDir}/context.md`,
+        ...(input.additionalArtifactIds ?? []),
         ...new Set(failureArtifactIds),
       ],
       omittedArtifactClasses: [

@@ -4334,6 +4334,14 @@ export async function runSliceExecute(
             slice.ghIssue,
           ),
           failureSet: generatorFailureSet,
+          additionalArtifactIds: [
+            ...(ctx.resume?.mode === "stuck" && ctx.resume.stuckNote
+              ? [`${ctx.relSliceDir}/stuck.md`]
+              : []),
+            ...(ctx.resume?.handoffNote
+              ? [`${ctx.relSliceDir}/handoff.md`]
+              : []),
+          ],
           ...(config.generatorInlineSizeBudgetBytes !== undefined
             ? {
                 inlineSizeBudgetBytes:

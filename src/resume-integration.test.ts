@@ -48,6 +48,29 @@ afterEach(() => {
   cleanupResumeTempDirs();
 });
 
+function promptAssemblyEvents(
+  repo: string,
+  loggerSlug: string,
+  ghIssue: string,
+): Array<Record<string, unknown>> {
+  const logsRoot = join(repo, ".afk", "logs", loggerSlug);
+  return readdirSync(logsRoot)
+    .filter((entry) => entry.startsWith("run-"))
+    .sort()
+    .flatMap((entry) => {
+      const eventsPath = join(logsRoot, entry, "events.jsonl");
+      if (!existsSync(eventsPath)) return [];
+      return readFileSync(eventsPath, "utf-8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    })
+    .filter(
+      (event) =>
+        event.type === "prompt-assembly" && event.ghIssue === ghIssue,
+    );
+}
+
 describe("retried slice resume (spec #33)", () => {
   /**
    * One death, four verdicts. Every slice here dies mid-run with the
@@ -421,6 +444,20 @@ describe("retried slice resume (spec #33)", () => {
       expect(prompt).toContain("renumber yours to the next free prefix");
     });
 
+    it("records the fresh handoff in resumed prompt-assembly evidence", () => {
+      const assembly = promptAssemblyEvents(
+        repo,
+        `${slug}-stub`,
+        "4001",
+      ).at(-1);
+      expect(assembly?.includedArtifactIds).toEqual([
+        `.kiro/specs/${slug}/slices/01-resumable/contract.md`,
+        `.kiro/specs/${slug}/slices/01-resumable/acceptance-manifest.json`,
+        `.kiro/specs/${slug}/slices/01-resumable/context.md`,
+        `.kiro/specs/${slug}/slices/01-resumable/handoff.md`,
+      ]);
+    });
+
     it("refuses slice 02 when its feature merge conflicts, keeping the commits (#35, #113)", () => {
       // No agent resolves merges it has no context for — and the old
       // fallback's from-base restart threw away exactly the commits that
@@ -707,6 +744,17 @@ describe("retried slice resume (spec #33)", () => {
       expect(failureSet).toContain("qa-report-r3-a1.md");
       expect(failureSet).not.toContain("qa-review-r1-a1.json");
       expect(failureSet).not.toContain("`qa-report-r2-a1.md`");
+    });
+
+    it("records preserved STUCK evidence in resumed prompt assembly", () => {
+      const assembly = promptAssemblyEvents(
+        repo,
+        `${slug}-stub`,
+        "4001",
+      ).at(-1);
+      expect(assembly?.includedArtifactIds).toContain(
+        `.kiro/specs/${slug}/slices/01-named/stuck.md`,
+      );
     });
 
     it("carries only the allowed open-finding fields into repair", () => {
