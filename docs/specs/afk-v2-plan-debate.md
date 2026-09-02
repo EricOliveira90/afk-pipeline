@@ -10,6 +10,11 @@ a fixed four-axis scale, convergence. The orchestrator refereed for evidence
 discipline and did not vote. This document is a **recommendation for the
 human to decide on**; it changes nothing by itself.
 
+> **Roadmap amendment (2026-09-02).** The human accepted this debate's
+> items 1–16, then added items 17–21 and PRD 7. The current sequence lives
+> in `afk-v2-plan.md` §§2–4. Section 5 below remains the historical
+> recommendation that preceded that amendment.
+
 Rating scale used throughout: **L**everage (1–5, failure prevented in the
 currency of the measured incidents), **C**ost (1–5, higher = more costly:
 implementation slices plus recurring per-slice/per-run wall-clock),
@@ -161,7 +166,7 @@ until someone runs the ROI experiment).
 
 ---
 
-## 5. Recommended changes to PRD sequencing and PRDs 2–6 content
+## 5. Historical recommendation for PRDs 2–6
 
 **Ladder** (confirms the plan's §4, with insertions):
 

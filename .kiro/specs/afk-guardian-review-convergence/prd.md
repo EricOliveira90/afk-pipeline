@@ -1,8 +1,8 @@
 # PRD: The guardian review converges
 
 **GH issue:** TBD (parent). Every slice issue is TBD — see `issues.md`.
-**Parent design:** none. This PRD is about the review gate itself, not a
-`docs/specs/afk-v2-plan.md` item.
+**Parent design:** `docs/specs/afk-v2-plan.md` item 20. This PRD is the
+deferred guardian-convergence follow-up; it does not expand live PRD 3.
 **Amends:** `docs/adr/0015-guardian-review-failure-classes-and-overrides.md`
 **Written:** 2026-08-31, after PRD `afk-v2-routing-adjudication` spent nine
 post-implementation guardian rounds without converging.
@@ -19,6 +19,17 @@ Landed by hand on `integration/pre-prd3`:
 - architect findings now state impact, recovery, and diff attribution;
 - `--open-pr-on-override` can override exactly one blocking guardian when the
   other guardian is favorable; two blocking guardians still close the gate.
+
+Approved for this deferred follow-up after PRD 3's measured run:
+
+- named review passes;
+- a concrete definition of Important;
+- blockers bound to cited evidence;
+- at most three non-blocking notes;
+- a do-not-report list.
+
+These prompt-policy changes do not create automatic success and do not weaken
+the temporary three-blocked-invocation stop rule.
 
 Deferred: the round ledger, later-round review scoping, an automatic round cap,
 and note filing. The original delta-only rule and successful unattended cap
