@@ -1414,7 +1414,7 @@ async function reviseAcceptedContract(
     "evaluator-contract",
     revisionRound,
   );
-  const assembledEvaluator = assembleContractEvaluatorRevisionEnvelope({
+  const assembledEvaluator = assembleContractEvaluatorInitialEnvelope({
     sliceDir: ctx.relSliceDir,
     round: revisionRound,
     contractReviewFile: CONTRACT_REVIEW_FILENAME,
@@ -1425,12 +1425,6 @@ async function reviseAcceptedContract(
       join(ctx.absSliceDir, "context.md"),
       "utf-8",
     ),
-    previousFindings: [],
-    plannerResponse: null,
-    revisions,
-    controlSituation:
-      `This is a fresh evaluation of one focused generator scope revision.\n` +
-      JSON.stringify({ scopeEscalation: escalation }, null, 2),
     ...(config.contractEvaluatorInlineSizeBudgetBytes !== undefined
       ? {
           inlineSizeBudgetBytes:

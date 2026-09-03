@@ -1810,44 +1810,85 @@ describe("generator scope escalation", () => {
         escalation: escalation(slice),
       });
 
+      const fixtures = new Map<string, SliceFixture>([
+        [
+          slices[0]!.ghIssue,
+          { ...fixture(slices[0]!), revisionPlannerThrows: true },
+        ],
+        [slices[1]!.ghIssue, fixture(slices[1]!)],
+        [slices[2]!.ghIssue, fixture(slices[2]!)],
+        // The revision drops the accepted path instead of adding to it:
+        // it declares only the escalation's requested path, so the
+        // requested-path check passes but the additive guard must catch
+        // the lost `declared-04` (finding 3).
+        [
+          slices[3]!.ghIssue,
+          { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
+        ],
+        // Widens both orchestrator-owned files with a path its
+        // escalation never mentions, then escalates for `extra-05`.
+        [
+          slices[4]!.ghIssue,
+          {
+            ...fixture(slices[4]!),
+            ownedContractWidening: "src/smuggled-05.ts",
+          },
+        ],
+      ]);
+      const baseProvider = buildStubProvider({
+        slices,
+        records,
+        fixtures,
+      });
+
       await runPipeline({
         repoRoot: repo,
         prdSlug: slug,
         prdDir,
         specsDir,
         dag: buildDAG(slices),
-        provider: buildStubProvider({
-          slices,
-          records,
-          fixtures: new Map<string, SliceFixture>([
-            [
-              slices[0]!.ghIssue,
-              { ...fixture(slices[0]!), revisionPlannerThrows: true },
-            ],
-            [
-              slices[1]!.ghIssue,
-              { ...fixture(slices[1]!), revisionRejected: true },
-            ],
-            [slices[2]!.ghIssue, fixture(slices[2]!)],
-            // The revision drops the accepted path instead of adding to it:
-            // it declares only the escalation's requested path, so the
-            // requested-path check passes but the additive guard must catch
-            // the lost `declared-04` (finding 3).
-            [
-              slices[3]!.ghIssue,
-              { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
-            ],
-            // Widens both orchestrator-owned files with a path its
-            // escalation never mentions, then escalates for `extra-05`.
-            [
-              slices[4]!.ghIssue,
-              {
-                ...fixture(slices[4]!),
-                ownedContractWidening: "src/smuggled-05.ts",
-              },
-            ],
-          ]),
-        }),
+        provider: {
+          ...baseProvider,
+          async invoke(options): Promise<InvokeResult> {
+            const result = await baseProvider.invoke(options);
+            const slice = sliceFromCwd(options.cwd, slices);
+            const evaluatorInvocations = records.filter(
+              (record) =>
+                record.role === "evaluator-contract" &&
+                record.ghIssue === slice?.ghIssue,
+            ).length;
+            if (
+              options.role === "evaluator-contract" &&
+              slice?.ghIssue === slices[1]!.ghIssue &&
+              evaluatorInvocations === 2
+            ) {
+              const artifactDir = findSliceArtifactDir(
+                options.cwd,
+                slice.number,
+              )!;
+              const feedbackRound =
+                /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "2";
+              writeFileSync(
+                join(artifactDir, `feedback-r${feedbackRound}.md`),
+                "## Evaluator feedback\n\nThe focused revision is rejected.\n",
+                "utf-8",
+              );
+              writeContractReview(artifactDir, "REVISE", [
+                {
+                  id: REVISION_REJECTION_FINDING,
+                  severity: "BLOCKING",
+                  behaviorIds: ["B-01"],
+                  evidence: '"the revised file scope"',
+                  expected: "a revision that keeps every locked term",
+                  observed: "the revision changes an accepted behavior",
+                  clearCondition: "the planner re-revises the contract",
+                  state: "OPEN",
+                },
+              ]);
+            }
+            return result;
+          },
+        },
         onContractLocked: (() => {
           const calls = new Map<string, number>();
           return (ghIssue) => {
@@ -2149,7 +2190,7 @@ describe("focused generator scope revision", () => {
     expect(planners[1]!.prompt!).not.toContain("sibling handoffs");
   });
 
-  it("evaluates the revised manifest after the focused planner", () => {
+  it("B-05 QA-01 evaluates the focused scope revision with an initial evaluator envelope", () => {
     const relevant = records.filter(({ role }) =>
       ["planner", "evaluator-contract", "generator"].includes(role),
     );
@@ -2162,6 +2203,14 @@ describe("focused generator scope revision", () => {
       "evaluator-contract",
       "generator",
     ]);
+    const evaluatorPrompts = relevant
+      .filter(({ role }) => role === "evaluator-contract")
+      .map(({ prompt }) => prompt!);
+    expect(evaluatorPrompts).toHaveLength(2);
+    expect(evaluatorPrompts[1]).toContain("# Proposed contract");
+    expect(evaluatorPrompts[1]).toContain("# Judgment boundary");
+    expect(evaluatorPrompts[1]).not.toContain("# Prior OPEN findings");
+    expect(evaluatorPrompts[1]).not.toContain("# Exact revision evidence");
     const freshGeneratorPrompt = relevant.at(-1)!.prompt!;
     expect(freshGeneratorPrompt).toContain('"fileScope"');
     expect(freshGeneratorPrompt).toContain("src/declared.ts");
