@@ -2576,7 +2576,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 3,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -2683,7 +2683,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 3,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -3926,7 +3926,7 @@ describe("round-scoped contract feedback", () => {
     );
   });
 
-  it("caps a converging negotiation at two rounds", async () => {
+  it("grants the PRD 3 final response when round two first raises fresh cited blockers", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -3940,6 +3940,8 @@ describe("round-scoped contract feedback", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    const plannerPrompts: string[] = [];
+    let roundThreeResponse: unknown = null;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -3949,6 +3951,7 @@ describe("round-scoped contract feedback", () => {
           writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
+          plannerPrompts.push(opts.prompt);
           writeFileSync(
             join(artifactDir, "contract.md"),
             "# Contract\n\n**Status:** NEGOTIATING\n",
@@ -3974,6 +3977,25 @@ describe("round-scoped contract feedback", () => {
               "CONDITION_MET",
             );
           }
+          if (plannerRounds === 3) {
+            writeFileSync(
+              join(artifactDir, "contract.md"),
+              "# Contract\n\n**Status:** NEGOTIATING\n\nRound 3\n",
+              "utf-8",
+            );
+            writeContractResponse(
+              artifactDir,
+              ["F-r2-1", "F-r2-2"],
+              "CONDITION_MET",
+              3,
+            );
+            roundThreeResponse = JSON.parse(
+              readFileSync(
+                join(artifactDir, "contract-response.json"),
+                "utf-8",
+              ),
+            );
+          }
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           // Gap counts are derived from the findings, so convergence is
@@ -3992,7 +4014,18 @@ describe("round-scoped contract feedback", () => {
                   clearCondition: `gap ${index + 1} names a failing command`,
                   state: "RESOLVED" as const,
                 }))
-              : [];
+              : evaluatorRounds === 3
+                ? Array.from({ length: 2 }, (_unused, index) => ({
+                    id: `F-r2-${index + 1}`,
+                    severity: "BLOCKING" as const,
+                    behaviorIds: ["B-01"],
+                    evidence: '"it reaches review"',
+                    expected: "a falsifiable observable result",
+                    observed: `round-2 gap ${index + 1} was cleared`,
+                    clearCondition: `gap ${index + 1} names a failing command`,
+                    state: "RESOLVED" as const,
+                  }))
+                : [];
           writeContractReview(
             artifactDir,
             gaps === 0 ? "ACCEPT" : "REVISE",
@@ -4005,7 +4038,10 @@ describe("round-scoped contract feedback", () => {
                 evidence: '"it reaches review"',
                 expected: "a falsifiable observable result",
                 observed: `unfalsifiable gap ${index + 1}`,
-                clearCondition: `gap ${index + 1} names a failing command`,
+                clearCondition:
+                  evaluatorRounds === 2
+                    ? `late gap ${index + 1} names the newly required stub seam`
+                    : `gap ${index + 1} names a failing command`,
                 revisionCitation:
                   evaluatorRounds === 2
                     ? {
@@ -4033,7 +4069,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 7,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -4043,28 +4079,43 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+      expect((await runSliceNegotiate(ctx)).phase).toBe("LOCKED");
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(plannerRounds).toBe(2);
-      expect(evaluatorRounds).toBe(2);
-      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
-        "granting contract round",
+      expect(plannerRounds).toBe(3);
+      expect(evaluatorRounds).toBe(3);
+      expect(plannerPrompts[2]).toContain("F-r2-1");
+      expect(plannerPrompts[2]).toContain("F-r2-2");
+      expect(plannerPrompts[2]).toContain(
+        "Keep this relevant resolved history satisfied",
+      );
+      expect(plannerPrompts[2]).toContain("F-r1-1");
+      expect(roundThreeResponse).toMatchObject({
+        version: 1,
+        round: 3,
+        responses: [
+          { findingId: "F-r2-1", position: "CONDITION_MET" },
+          { findingId: "F-r2-2", position: "CONDITION_MET" },
+        ],
+      });
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain(
+        "granting final contract response",
       );
       expect(
         JSON.parse(
           readFileSync(
-            join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
+            join(repo, ".afk", "state", `${slug}.json`),
             "utf-8",
           ),
         ),
       ).toMatchObject({
-        version: 1,
-        classification: "NON_CONVERGENCE",
-        round: 2,
-        findings: [
-          { id: "F-r2-1", state: "OPEN", unresolved: true },
-          { id: "F-r2-2", state: "OPEN", unresolved: true },
-        ],
+        version: 2,
+        contractConvergence: {
+          "9003": {
+            version: 1,
+            extensionUsed: true,
+            revision: 3,
+          },
+        },
       });
     } finally {
       errorSpy.mockRestore();
@@ -4180,6 +4231,10 @@ describe("round-scoped contract feedback", () => {
       expect(errorSpy.mock.calls.flat().join(" ")).toContain(
         "failed to archive negotiation artifacts",
       );
+      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
+        "granting final contract response",
+      );
+      expect(plannerRounds).toBe(2);
     } finally {
       errorSpy.mockRestore();
     }
@@ -4864,7 +4919,7 @@ describe("contract review fails closed", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 3,
+        maxContractRounds: 2,
       },
       slice,
       logger,

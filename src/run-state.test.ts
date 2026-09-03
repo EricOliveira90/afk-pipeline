@@ -430,6 +430,14 @@ describe("clearSliceStateForDispatch", () => {
             round: 2,
           },
         },
+        contractConvergence: {
+          "75": {
+            version: 1,
+            extensionUsed: false,
+            revision: 1,
+            findings: {},
+          },
+        },
         migrations: { pool: ["0042"], claims: { "76": ["0042"] } },
       }),
       "utf-8",
@@ -471,7 +479,7 @@ describe("clearSliceStateForDispatch", () => {
     expect(JSON.stringify(raw)).not.toContain("migration prefix collision");
   });
 
-  it("leaves resume bookkeeping, scope, and migration claims alone", () => {
+  it("leaves resume bookkeeping, checkpoints, convergence, scope, and migration claims alone", () => {
     const repo = makeRepo();
     staleStateFile(repo);
 
@@ -484,6 +492,9 @@ describe("clearSliceStateForDispatch", () => {
     expect(state.resume?.["75"]?.lastDecision).toBe("resumed from 3 commits");
     expect(state.stageCheckpoints).toMatchObject({
       "75": { nextPendingStage: "post-qa-deterministic" },
+    });
+    expect(state.contractConvergence).toMatchObject({
+      "75": { version: 1, revision: 1 },
     });
     expect(state.scope).toEqual({ members: ["01", "02"] });
     expect(state.migrations).toEqual({ pool: ["0042"], claims: { "76": ["0042"] } });

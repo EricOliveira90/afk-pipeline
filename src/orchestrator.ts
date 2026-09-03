@@ -105,6 +105,14 @@ import {
   type CompletedCandidateStage,
 } from "./exact-stage-resume.js";
 import {
+  advanceContractFindingLineage,
+  contractPlannerContext,
+  decideContractContinuation,
+  loadContractFindingLineage,
+  saveContractFindingLineage,
+  validateContractReviewAgainstLineage,
+} from "./contract-convergence.js";
+import {
   resolveRunScope,
   type ResolvedRunScope,
 } from "./slice-scope.js";
@@ -2805,10 +2813,14 @@ async function negotiateAttempt(
     if (!Number.isSafeInteger(maxContractRounds) || maxContractRounds < 1) {
       throw new Error("maxContractRounds must be a positive integer");
     }
-    const allowedContractRounds = Math.min(
-      maxContractRounds,
-      DEFAULT_MAX_CONTRACT_ROUNDS,
-    );
+    if (maxContractRounds > DEFAULT_MAX_CONTRACT_ROUNDS) {
+      throw new Error(
+        `maxContractRounds supports 1-${DEFAULT_MAX_CONTRACT_ROUNDS}; ` +
+          "the evidence-qualified final response is controlled by AFK",
+      );
+    }
+    const allowedContractRounds = maxContractRounds;
+    let contractRoundLimit = allowedContractRounds;
     let evaluatorRound = 0;
     let lastRound = 0;
     let lastVerdict: RecordedContractVerdict = "NONE";
@@ -2820,7 +2832,14 @@ async function negotiateAttempt(
      * evaluator's word.
      */
     let previousReview: ContractReview | null = null;
-    let lastFindings: readonly ContractReviewFinding[] = [];
+    const convergenceLocation = {
+      repoRoot: config.repoRoot,
+      prdSlug: config.prdSlug,
+      ghIssue: slice.ghIssue,
+    };
+    let findingLineage = loadContractFindingLineage(convergenceLocation);
+    let lastFindings: readonly ContractReviewFinding[] =
+      contractPlannerContext(findingLineage).open;
     let lastReviewAttemptRecord: ContractReviewAttemptRecord | null = null;
     let plannerResponse: ContractResponse | null = null;
     let revisionArtifacts: ContractRevisionArtifacts | null = null;
@@ -2950,12 +2969,19 @@ async function negotiateAttempt(
      * carrier of the gaps.
      */
     const revisionNote = (objection: string | null): string => {
-      const openFindings = openContractReviewFindings(lastFindings);
+      const plannerContext = contractPlannerContext(findingLineage);
+      const openFindings = plannerContext.open;
+      const resolvedHistory =
+        plannerContext.relevantResolved.length > 0
+          ? `\n\nKeep this relevant resolved history satisfied to avoid regression:\n\n` +
+            formatContractReviewFindings(plannerContext.relevantResolved)
+          : "";
       const priorFindings =
         openFindings.length > 0
           ? `The contract review returned REVISE with these findings. ` +
             `Respond to each clear-condition:\n\n` +
-            `${formatContractReviewFindings(openFindings)}`
+            `${formatContractReviewFindings(openFindings)}` +
+            resolvedHistory
           : null;
       if (objection === null) {
         return priorFindings ?? "";
@@ -3012,7 +3038,7 @@ async function negotiateAttempt(
     }
 
     if (contractStatus !== "LOCKED") {
-      for (let round = 1; round <= allowedContractRounds; round++) {
+      for (let round = 1; round <= contractRoundLimit; round++) {
         // Consume any pending gate objection: it belongs to this round's
         // planner prompt only. Leaving it set would re-deliver it after a
         // later ordinary REVISE, and would make the round-cap branch
@@ -3020,8 +3046,8 @@ async function negotiateAttempt(
         const pendingObjection = gateObjection;
         gateObjection = null;
         const routedFindings =
-          round === 2 ? openContractReviewFindings(lastFindings) : [];
-        const requiresPlannerResponse = round === 2 && previousReview !== null;
+          round > 1 ? openContractReviewFindings(lastFindings) : [];
+        const requiresPlannerResponse = round > 1 && previousReview !== null;
         const previousArtifactText = requiresPlannerResponse
           ? {
               contract: readFileSync(contractPath, "utf-8"),
@@ -3033,7 +3059,7 @@ async function negotiateAttempt(
           : null;
 
         logger.phase(
-          `${ctx.tag}: planning (round ${round}/${allowedContractRounds})...`,
+          `${ctx.tag}: planning (round ${round}/${contractRoundLimit})...`,
           "error",
           {
             type: "phase-started",
@@ -3061,7 +3087,7 @@ async function negotiateAttempt(
                 ? [
                     `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
                     "Use exactly this schema:",
-                    '{"version":1,"round":2,"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}',
+                    `{"version":1,"round":${round},"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}`,
                     `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
                     "CONDITION_MET and CONTESTED require non-blank evidence.",
                   ].join("\n")
@@ -3144,6 +3170,7 @@ async function negotiateAttempt(
             plannerResponse = loadContractResponse(
               ctx.absSliceDir,
               routedFindings.map(({ id }) => id),
+              round,
             );
             revisionArtifacts = {
               "contract.md": {
@@ -3180,7 +3207,7 @@ async function negotiateAttempt(
 
         evaluatorRound++;
         logger.phase(
-          `${ctx.tag}: evaluating contract (round ${round}/${allowedContractRounds})...`,
+          `${ctx.tag}: evaluating contract (round ${round}/${contractRoundLimit})...`,
           "error",
           {
             type: "phase-started",
@@ -3197,6 +3224,22 @@ async function negotiateAttempt(
         const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
         let latestValidAttemptReview: ContractReview | null = null;
         let attemptLifecyclePrevious: ContractReview | null = null;
+        const durableReviewContext = contractPlannerContext(findingLineage);
+        const durableReviewHistory =
+          durableReviewContext.open.length > 0 ||
+          durableReviewContext.relevantResolved.length > 0
+            ? [
+                "Durable finding lineage for this slice:",
+                "",
+                "Current open findings:",
+                formatContractReviewFindings(durableReviewContext.open),
+                "",
+                "Relevant resolved history:",
+                formatContractReviewFindings(
+                  durableReviewContext.relevantResolved,
+                ),
+              ].join("\n")
+            : "No durable finding lineage exists for this slice.";
         await invokeAgent(
           {
             role: "evaluator-contract",
@@ -3210,8 +3253,14 @@ async function negotiateAttempt(
                   ? `A previous round's findings were handed to the planner. ` +
                     `Its prose companion is ${ctx.relSliceDir}/feedback-r${evaluatorRound - 1}.md. ` +
                     `Reuse a finding's exact \`id\` when the same gap still stands — ` +
-                    `the orchestrator measures repeated gaps by ID.`
-                  : "This is the first review round; every finding ID is new.",
+                    `the orchestrator measures repeated gaps by ID.\n\n` +
+                    durableReviewHistory
+                  : findingLineage.revision > 0
+                    ? `This is a fresh attempt with durable finding lineage. ` +
+                      `Reuse stable IDs and disposition every still-open finding. ` +
+                      `Resolved history relevant to this revision is already in the planner context.\n\n` +
+                      durableReviewHistory
+                    : "This is the first review round; every finding ID is new.",
               ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
               BASE_GATE_CATALOG: baseGateCatalogBlock,
               CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
@@ -3263,7 +3312,8 @@ async function negotiateAttempt(
         let review: ContractReview;
         try {
           review = loadContractReview(ctx.absSliceDir);
-          if (evaluatorRound === 1) {
+          validateContractReviewAgainstLineage(findingLineage, review);
+          if (evaluatorRound === 1 && findingLineage.revision === 0) {
             validateRound1ContractReview(review);
           } else if (previousReview && plannerResponse) {
             validateRound2ContractReview(
@@ -3295,9 +3345,16 @@ async function negotiateAttempt(
         }
 
         const verdict = review.verdict;
+        const lineageBeforeReview = findingLineage;
+        const convergence = advanceContractFindingLineage(
+          lineageBeforeReview,
+          review,
+        );
+        findingLineage = convergence.lineage;
+        saveContractFindingLineage(convergenceLocation, findingLineage);
         const metrics = contractReviewGapMetrics(review, previousReview);
         logger.phase(
-          `${ctx.tag}: contract verdict ${verdict} (round ${round}/${allowedContractRounds})` +
+          `${ctx.tag}: contract verdict ${verdict} (round ${round}/${contractRoundLimit})` +
             ` — ${metrics.gapCount} blocking finding(s)`,
           "error",
           {
@@ -3352,10 +3409,44 @@ async function negotiateAttempt(
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.
 
-        if (round === allowedContractRounds) {
+        if (round === contractRoundLimit) {
+          if (round === allowedContractRounds) {
+            const continuation = decideContractContinuation({
+              before: lineageBeforeReview,
+              update: convergence,
+              review,
+              gateObjection: gateObjection !== null,
+              revisionCitationValidated: revisionArtifacts !== null,
+            });
+            if (continuation.action === "extend") {
+              findingLineage = {
+                ...findingLineage,
+                extensionUsed: true,
+              };
+              saveContractFindingLineage(
+                convergenceLocation,
+                findingLineage,
+              );
+              contractRoundLimit = allowedContractRounds + 1;
+              capDecisions.push(
+                `Granted one final contract response for fresh blocking ` +
+                  `finding(s) ${continuation.findingIds.join(", ")}.`,
+              );
+              logger.phase(
+                `${ctx.tag}: granting final contract response for fresh ` +
+                  `blocking finding(s) ${continuation.findingIds.join(", ")}`,
+                "error",
+              );
+              previousReview = review;
+              continue;
+            }
+            capDecisions.push(
+              `No final contract response granted: ${continuation.reason}.`,
+            );
+          }
           const reason = gateObjection
             ? "the contract-lock gate refused the final round's contract"
-            : `the negotiation reached its hard cap of ${allowedContractRounds} planner round(s)`;
+            : `the negotiation reached its hard cap of ${contractRoundLimit} planner round(s)`;
           capDecisions.push(`Negotiation stopped because ${reason}.`);
           logger.phase(`${ctx.tag}: contract negotiation stopped: ${reason}`);
         } else {
@@ -3364,7 +3455,7 @@ async function negotiateAttempt(
         }
 
         const negotiationOutcome =
-          evaluatorRound === 2 && lastReviewAttemptRecord
+          evaluatorRound >= 2 && lastReviewAttemptRecord
             ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
             : undefined;
         const impasse = negotiationOutcome?.classification === "IMPASSE";
