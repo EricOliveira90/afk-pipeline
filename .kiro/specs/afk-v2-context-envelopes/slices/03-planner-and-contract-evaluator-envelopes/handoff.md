@@ -4,7 +4,7 @@
 - `B-02`: `src/context-envelope.ts:assemblePlannerRevisionEnvelope`
 - `B-03`: `src/context-envelope.ts:assembleContractEvaluatorInitialEnvelope`
 - `B-04`: `prompts/evaluator-contract-revision.md:fresh finding revisionCitation contract`
-- `B-05`: `src/orchestrator.ts:runSliceNegotiate and reviseAcceptedContract`
+- `B-05`: `src/contract-prompt-orchestration.ts:assembleNegotiationPlannerPrompt and assembleNegotiationEvaluatorPrompt`
 - `B-06`: `src/run-events.ts:RunEventPayload`
 - `P-01`: `prompts/planner.md:Contract rules`
 - `P-02`: `src/orchestrator.ts:runSliceNegotiate`
@@ -25,4 +25,3 @@
 - Focused scope fixtures identify the control situation by stable wording; keep that wording inside the separate revision control block.
 - Locked slice review artifacts share this directory and remain untracked; stage `handoff.md` explicitly.
 - The shared rollback fixture formerly detected focused evaluator reviews from revision-only prompt text; its scoped test wrapper now targets the second evaluator invocation directly.
-- Manual QA-03 recovery passed `pnpm typecheck`, `pnpm test:fast`, `pnpm run test:heavy:orchestrator`, and `pnpm run test:heavy:wave`.
