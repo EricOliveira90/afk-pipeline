@@ -728,11 +728,16 @@ function restoreQAReviewStage(
   let lastImplementationRound: number | null = null;
 
   for (const record of records) {
-    history = advanceQAReviewLifecycle(
-      history,
-      record.failureClass,
-      record.findings,
-    );
+    if (record.failureClass !== "INFRASTRUCTURE") {
+      const currentIds = new Set(record.findings.map(({ id }) => id));
+      history = [
+        ...history.filter(
+          (finding) =>
+            finding.state === "RESOLVED" && !currentIds.has(finding.id),
+        ),
+        ...record.findings.map(({ id, state }) => ({ id, state })),
+      ];
+    }
     if (record.failureClass === "INFRASTRUCTURE") continue;
     unresolved = record.findings.filter((finding) => finding.unresolved);
     lastImplementationRound =

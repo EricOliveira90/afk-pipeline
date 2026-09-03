@@ -193,7 +193,6 @@ import {
   type AdjudicationWaitResult,
 } from "./adjudication.js";
 import {
-  advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
   loadQAReview,
   loadQAReviewResumeState,
@@ -205,6 +204,20 @@ import {
   type QAReviewLifecycleFinding,
   type QAReviewStage,
 } from "./qa-review.js";
+import {
+  advanceQAFindingLineage,
+  decideQAFinalRepair,
+  formatQAGeneratorContext,
+  hasPendingQAFinalRepair,
+  loadQAConvergenceState,
+  markQAFinalRepairUsed,
+  qaLifecycleHistory,
+  resolveQAScopeAmendments,
+  saveQAConvergenceState,
+  type QAConvergenceState,
+  type QAFinalRepairDecision,
+  type QAConvergenceUpdate,
+} from "./qa-convergence.js";
 import {
   applyScopeAmendment,
   buildScopeAmendmentRecord,
@@ -3544,12 +3557,16 @@ export type QAStageResult =
       report: string;
       history: readonly QAReviewLifecycleFinding[];
       unresolved: QAReviewAttemptFinding[];
+      convergence: QAConvergenceState;
+      finalRepair: null;
     }
   | {
       outcome: "IMPLEMENTATION";
       report: string;
       history: readonly QAReviewLifecycleFinding[];
       unresolved: QAReviewAttemptFinding[];
+      convergence: QAConvergenceState;
+      finalRepair: QAFinalRepairDecision | null;
     };
 
 /**
@@ -3601,8 +3618,18 @@ export async function runQAStage(
   history: readonly QAReviewLifecycleFinding[],
   previousUnresolved: readonly QAReviewAttemptFinding[] = [],
   baseGate: QABaseGateEvidence | null = null,
+  options: {
+    candidateTreeId?: string;
+    allowFinalRepair?: boolean;
+  } = {},
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke, featBranch } = ctx;
+  const convergenceLocation = {
+    repoRoot: config.repoRoot,
+    prdSlug: config.prdSlug,
+    ghIssue: slice.ghIssue,
+  };
+  let convergenceState = loadQAConvergenceState(convergenceLocation);
   const infrastructureRetries = config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
   if (!Number.isSafeInteger(infrastructureRetries) || infrastructureRetries < 0) {
     throw new Error("infrastructureRetries must be a non-negative integer");
@@ -3704,7 +3731,6 @@ export async function runQAStage(
       reviewResult:
         | {
             review: QAReview;
-            nextHistory: readonly QAReviewLifecycleFinding[];
           }
         | { error: string };
     };
@@ -3714,6 +3740,8 @@ export async function runQAStage(
       unresolved: QAReviewAttemptFinding[];
       reportArchived: boolean;
       archiveDisplayPath: string;
+      convergenceBefore: QAConvergenceState;
+      convergenceUpdate: QAConvergenceUpdate;
     };
 
     const archiveAttemptEvidence = (): AttemptEvidence => {
@@ -3748,7 +3776,6 @@ export async function runQAStage(
           validationArchiveError: null,
           reviewResult: {
             review,
-            nextHistory: advanceQAReviewHistory(currentHistory, review),
           },
         };
       } catch (error) {
@@ -3814,7 +3841,7 @@ export async function runQAStage(
       if ("error" in evidence.reviewResult) return null;
 
       const archiveDisplayPath = `${ctx.relSliceDir}/${archiveName}`;
-      const { review, nextHistory } = evidence.reviewResult;
+      const { review } = evidence.reviewResult;
       const expectedRawArchiveName =
         `${stage === "deterministic" ? "qa" : "uat"}-review-r${round}-a${attempt}.json`;
       const canonicalArchivePath = relative(
@@ -3852,6 +3879,22 @@ export async function runQAStage(
             `preserve its lifecycle record in ${reviewArchiveDir}: ${message}`,
         );
       }
+      const convergenceBefore = convergenceState;
+      const candidateTreeId =
+        options.candidateTreeId ?? resolveCandidateTreeId(ctx.worktreeDir);
+      const convergenceUpdate = advanceQAFindingLineage(
+        convergenceBefore,
+        {
+          stage,
+          review,
+          attemptFindings: record.findings,
+          candidateTreeId,
+          restoredOpenFindings: currentUnresolved,
+        },
+      );
+      convergenceState = convergenceUpdate.state;
+      saveQAConvergenceState(convergenceLocation, convergenceState);
+      const nextHistory = qaLifecycleHistory(convergenceState, stage);
       const unresolved =
         review.failureClass === "INFRASTRUCTURE"
           ? [...currentUnresolved]
@@ -3864,6 +3907,8 @@ export async function runQAStage(
         unresolved,
         reportArchived: evidence.reportArchived,
         archiveDisplayPath,
+        convergenceBefore,
+        convergenceUpdate,
       };
     };
 
@@ -4127,6 +4172,13 @@ export async function runQAStage(
             `renegotiate the contract before resuming.`,
         );
       }
+      convergenceState = resolveQAScopeAmendments(
+        convergenceState,
+        stage,
+        requests.map(({ findingId }) => findingId),
+      );
+      saveQAConvergenceState(convergenceLocation, convergenceState);
+      currentHistory = qaLifecycleHistory(convergenceState, stage);
       amendments++;
       const amended = plan.entries.map((entry) => entry.path).join(", ");
       const message =
@@ -4148,6 +4200,8 @@ export async function runQAStage(
         report: archiveDisplayPath,
         history: nextHistory,
         unresolved,
+        convergence: convergenceState,
+        finalRepair: null,
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
@@ -4166,11 +4220,27 @@ export async function runQAStage(
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
     }
+    let finalRepair: QAFinalRepairDecision | null = null;
+    if (options.allowFinalRepair && options.candidateTreeId) {
+      finalRepair = decideQAFinalRepair({
+        before: validAttempt.convergenceBefore,
+        update: validAttempt.convergenceUpdate,
+        review,
+        stage,
+        candidateTreeId: options.candidateTreeId,
+      });
+      if (finalRepair.action === "extend") {
+        convergenceState = markQAFinalRepairUsed(convergenceState);
+        saveQAConvergenceState(convergenceLocation, convergenceState);
+      }
+    }
     return {
       outcome: "IMPLEMENTATION",
       report: archiveDisplayPath,
       history: nextHistory,
       unresolved,
+      convergence: convergenceState,
+      finalRepair,
     };
   }
 
@@ -4235,6 +4305,7 @@ export async function runSliceExecute(
   let sharedPreviewHistory: readonly QAReviewLifecycleFinding[] = [];
   let sharedPreviewUnresolved: readonly QAReviewAttemptFinding[] = [];
   let resumedUnresolved: readonly QAReviewAttemptFinding[] = [];
+  let repairStage: QAReviewStage | null = null;
   let firstRound = 1;
   let retryNote = "";
   const reviewArchiveDir = artifacts.contractReviewArchiveDir(
@@ -4287,6 +4358,7 @@ export async function runSliceExecute(
     prdSlug: config.prdSlug,
     ghIssue: slice.ghIssue,
   };
+  let qaConvergence = loadQAConvergenceState(exactStageLocation);
   const completedCandidateStage: CompletedCandidateStage =
     config.sharedPreview ? "shared-preview-uat" : "deterministic-qa";
   /**
@@ -4329,7 +4401,7 @@ export async function runSliceExecute(
         ...exactStageLocation,
         currentCandidateTreeId,
         expectedCompletedStage: completedCandidateStage,
-        maximumRound: MAX_GENERATOR_ROUNDS,
+        maximumRound: MAX_GENERATOR_ROUNDS + 1,
       });
       if (exactStage.action === "resume") {
         logger.phase(
@@ -4365,6 +4437,7 @@ export async function runSliceExecute(
           : restored.retryStage === "shared-preview"
             ? sharedPreviewUnresolved
             : [];
+      repairStage = restored.retryStage;
       firstRound = restored.nextRound;
     }
     // The three-round cap is global across a slice's lives (ADR 0014):
@@ -4377,12 +4450,23 @@ export async function runSliceExecute(
     //
     // Shared with the dispatch bounds line so the number the operator
     // was told at dispatch is the number this loop runs on.
-    const implementationAttemptLimit = implementationRoundsRemaining({
+    let implementationAttemptLimit = implementationRoundsRemaining({
       limit: MAX_GENERATOR_ROUNDS,
       spent: firstRound - 1,
       resumeMode: ctx.resume?.mode,
     });
-    const finalRound = firstRound + implementationAttemptLimit - 1;
+    if (
+      ctx.resume?.mode !== "stuck" &&
+      implementationAttemptLimit === 0 &&
+      hasPendingQAFinalRepair({
+        state: qaConvergence,
+        nextRound: firstRound,
+        normalRoundLimit: MAX_GENERATOR_ROUNDS,
+      })
+    ) {
+      implementationAttemptLimit = 1;
+    }
+    let finalRound = firstRound + implementationAttemptLimit - 1;
 
     for (
       let implementationAttempt = 1;
@@ -4436,7 +4520,13 @@ export async function runSliceExecute(
                       ? ctx.resume.stuckNote ?? ""
                       : "",
                   UNRESOLVED_FINDINGS:
-                    formatUnresolvedQAFindings(resumedUnresolved),
+                    qaConvergence.revision > 0
+                      ? formatQAGeneratorContext(
+                          qaConvergence,
+                          [],
+                          repairStage ?? undefined,
+                        )
+                      : formatUnresolvedQAFindings(resumedUnresolved),
                   HANDOFF_NOTE: ctx.resume.handoffNote,
                   MIGRATION_RESERVATION: migrationReservationBlock(
                     config,
@@ -4817,10 +4907,12 @@ export async function runSliceExecute(
         stuckReferences.push(...baseGateRepairReferences);
         retryNote =
           `This is implementation round ${round + 1}. Fix every unresolved ` +
-          `base-gate failure in these preserved artifacts:\n` +
-          baseGateRepairReferences
-            .map((path) => `- \`${path}\``)
-            .join("\n");
+          `base-gate failure and preserve prior resolved QA behavior:\n` +
+          formatQAGeneratorContext(
+            qaConvergence,
+            baseGateRepairReferences,
+            repairStage ?? undefined,
+          );
         if (implementationAttempt < implementationAttemptLimit) continue;
       } else {
         assertGateEvidenceReleasesEvaluation(
@@ -4859,9 +4951,14 @@ export async function runSliceExecute(
           deterministicHistory,
           deterministicUnresolved,
           qaBaseGate,
+          {
+            candidateTreeId: checkpoint.treeId,
+            allowFinalRepair: round === MAX_GENERATOR_ROUNDS,
+          },
         );
         deterministicHistory = deterministic.history;
         deterministicUnresolved = deterministic.unresolved;
+        qaConvergence = deterministic.convergence;
         logger.event({
           type: "phase-ended",
           ghIssue: slice.ghIssue,
@@ -4873,11 +4970,17 @@ export async function runSliceExecute(
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
+        let finalRepair = deterministic.finalRepair;
         if (implementationFailed) {
+          repairStage = "deterministic";
           retryNote =
-            `This is implementation round ${round + 1}. Fix every current ` +
-            `unresolved deterministic QA finding:\n` +
-            formatUnresolvedQAFindings(deterministic.unresolved);
+            `This is implementation round ${round + 1}. Repair the current ` +
+            `QA findings while preserving relevant resolved behavior:\n` +
+            formatQAGeneratorContext(
+              qaConvergence,
+              [],
+              "deterministic",
+            );
         }
         if (
           deterministic.outcome !== "IMPLEMENTATION" &&
@@ -4900,9 +5003,15 @@ export async function runSliceExecute(
             "shared-preview",
             sharedPreviewHistory,
             sharedPreviewUnresolved,
+            null,
+            {
+              candidateTreeId: checkpoint.treeId,
+              allowFinalRepair: round === MAX_GENERATOR_ROUNDS,
+            },
           );
           sharedPreviewHistory = remote.history;
           sharedPreviewUnresolved = remote.unresolved;
+          qaConvergence = remote.convergence;
           logger.event({
             type: "phase-ended",
             ghIssue: slice.ghIssue,
@@ -4914,10 +5023,16 @@ export async function runSliceExecute(
           stuckReferences.push(remote.report);
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
+            repairStage = "shared-preview";
+            finalRepair = remote.finalRepair;
             retryNote =
-              `This is implementation round ${round + 1}. Fix every current ` +
-              `unresolved shared-preview UAT finding:\n` +
-              formatUnresolvedQAFindings(remote.unresolved);
+              `This is implementation round ${round + 1}. Repair the current ` +
+              `QA findings while preserving relevant resolved behavior:\n` +
+              formatQAGeneratorContext(
+                qaConvergence,
+                [],
+                "shared-preview",
+              );
           }
         }
 
@@ -4946,6 +5061,25 @@ export async function runSliceExecute(
             round,
           });
           return finalizeAcceptedCandidate();
+        }
+        if (finalRepair?.action === "extend") {
+          implementationAttemptLimit++;
+          finalRound++;
+          logger.phase(
+            `${ctx.tag}: granting one final candidate-QA repair for fresh ` +
+              `blocking finding(s) ${finalRepair.findingIds.join(", ")}`,
+            "error",
+          );
+        } else if (
+          implementationFailed &&
+          round === MAX_GENERATOR_ROUNDS &&
+          finalRepair?.action === "stop"
+        ) {
+          logger.phase(
+            `${ctx.tag}: no final candidate-QA repair granted — ` +
+              finalRepair.reason,
+            "error",
+          );
         }
       }
 

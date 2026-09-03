@@ -82,6 +82,11 @@ export interface RunState {
    * independently from, exact-stage checkpoints.
    */
   contractConvergence?: unknown;
+  /**
+   * Per-slice compact candidate-QA finding lineage. The QA convergence
+   * module owns this raw schema and the one progress-qualified extension.
+   */
+  qaConvergence?: unknown;
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
 }
@@ -260,6 +265,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     resume?: unknown;
     stageCheckpoints?: unknown;
     contractConvergence?: unknown;
+    qaConvergence?: unknown;
     migrations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
@@ -294,6 +300,9 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         : {}),
       ...(r.version === 2 && r.contractConvergence !== undefined
         ? { contractConvergence: r.contractConvergence }
+        : {}),
+      ...(r.version === 2 && r.qaConvergence !== undefined
+        ? { qaConvergence: r.qaConvergence }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
     };
@@ -457,8 +466,8 @@ export function saveSliceState(
  * Deliberately NOT cleared: `resume` bookkeeping (its `attempts` is the
  * poison-tree cap, and the dispatch this clearing accompanies is about
  * to increment it), exact-stage checkpoints (the resumed dispatch must
- * inspect one before any agent runs), contract convergence lineage (fresh
- * attempts must retain prior findings), `scope`, `migrations`, and
+ * inspect one before any agent runs), contract and QA convergence lineage
+ * (fresh attempts must retain prior findings), `scope`, `migrations`, and
  * `reviewPhase`. None of those is a per-attempt terminal outcome claim.
  */
 export function clearSliceStateForDispatch(

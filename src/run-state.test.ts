@@ -438,6 +438,14 @@ describe("clearSliceStateForDispatch", () => {
             findings: {},
           },
         },
+        qaConvergence: {
+          "75": {
+            version: 1,
+            extensionUsed: true,
+            revision: 3,
+            findings: {},
+          },
+        },
         migrations: { pool: ["0042"], claims: { "76": ["0042"] } },
       }),
       "utf-8",
@@ -495,6 +503,9 @@ describe("clearSliceStateForDispatch", () => {
     });
     expect(state.contractConvergence).toMatchObject({
       "75": { version: 1, revision: 1 },
+    });
+    expect(state.qaConvergence).toMatchObject({
+      "75": { version: 1, extensionUsed: true, revision: 3 },
     });
     expect(state.scope).toEqual({ members: ["01", "02"] });
     expect(state.migrations).toEqual({ pool: ["0042"], claims: { "76": ["0042"] } });
