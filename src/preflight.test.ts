@@ -102,6 +102,7 @@ function namespace(
     { path: S01, branch: BRANCH01 },
   ],
   retained?: Array<{ path: string; branch: string }>,
+  cleanable?: Array<{ path: string; branch: string }>,
 ): RunNamespace {
   return buildRunNamespace({
     repoRoot: REPO,
@@ -110,6 +111,7 @@ function namespace(
     featBranch: "feat-codex/demo",
     intended,
     retained,
+    cleanable,
   });
 }
 
@@ -120,6 +122,7 @@ function preflight(
   overrides: {
     intended?: Array<{ path: string; branch: string }>;
     retained?: Array<{ path: string; branch: string }>;
+    cleanable?: Array<{ path: string; branch: string }>;
     worktrees?: Array<{ path: string; branch: string | null }>;
     listWorktrees?: () => never;
     freeBytes?: number | undefined;
@@ -132,7 +135,11 @@ function preflight(
   return runLaunchPreflight(
     {
       repoRoot: REPO,
-      namespace: namespace(overrides.intended, overrides.retained),
+      namespace: namespace(
+        overrides.intended,
+        overrides.retained,
+        overrides.cleanable,
+      ),
       minFreeBytes: overrides.minFreeBytes ?? gbToBytes(5),
       reportOnly: overrides.reportOnly,
     },
@@ -216,6 +223,19 @@ describe("preflight — leftover registered worktrees", () => {
     expect(checks(report)).toEqual(["leftover-worktree"]);
     expect(report.refuse).toBe(true);
     expect(refusals(report)[0]!.message).toContain(S02);
+    expect(refusals(report)[0]!.message).toContain("git worktree remove");
+    expect(refusals(report)[0]!.message).not.toContain("afk clean-failed");
+  });
+
+  it("prescribes clean-failed only for a completed clean slice it can remove", async () => {
+    const report = await preflight({
+      intended: [],
+      retained: [],
+      cleanable: [{ path: S02, branch: BRANCH02 }],
+      worktrees: [{ path: S02, branch: BRANCH02 }],
+    });
+    expect(checks(report)).toEqual(["leftover-worktree"]);
+    expect(report.refuse).toBe(true);
     expect(refusals(report)[0]!.message).toContain("afk clean-failed");
   });
 

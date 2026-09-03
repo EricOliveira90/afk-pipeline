@@ -20,6 +20,8 @@ import {
   getResumeAttempts,
   recordRetryDecision,
   clearSliceStateForDispatch,
+  savePendingSliceStage,
+  clearPendingSliceStage,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
@@ -386,6 +388,37 @@ describe("resume-attempt tracking", () => {
     const state = loadRunState(repo, "demo");
     expect(getResumeAttempts(state, "100")).toBe(0);
     expect(getResumeAttempts(state, "200")).toBe(1);
+  });
+});
+
+describe("pending deterministic slice stage", () => {
+  const pending = {
+    version: 1 as const,
+    completedStage: "candidate-qa" as const,
+    nextStage: "full-suite" as const,
+    candidateTreeId: "tree-abc",
+    round: 2,
+  };
+
+  it("persists the exact candidate tree and next stage across reloads", () => {
+    const repo = makeRepo();
+    savePendingSliceStage(repo, "demo", "100", pending);
+    expect(loadRunState(repo, "demo").pendingStages?.["100"]).toEqual(pending);
+  });
+
+  it("survives dispatch clearing because it is the resume instruction", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "100", { phase: "CANCELLED", error: "stop" });
+    savePendingSliceStage(repo, "demo", "100", pending);
+    clearSliceStateForDispatch(repo, "demo", "100");
+    expect(loadRunState(repo, "demo").pendingStages?.["100"]).toEqual(pending);
+  });
+
+  it("can be cleared after the pending gate reaches a decision", () => {
+    const repo = makeRepo();
+    savePendingSliceStage(repo, "demo", "100", pending);
+    clearPendingSliceStage(repo, "demo", "100");
+    expect(loadRunState(repo, "demo").pendingStages).toBeUndefined();
   });
 });
 

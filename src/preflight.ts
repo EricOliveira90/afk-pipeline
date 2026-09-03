@@ -138,6 +138,11 @@ export interface RunNamespace {
    * when the recorded branch and the derived one differ.
    */
   retained: ReadonlyArray<{ path: string; branch: string }>;
+  /**
+   * Completed, merged, clean worktrees that `clean-failed` is eligible to
+   * remove. Advice names that command only for entries in this set.
+   */
+  cleanable: ReadonlyArray<{ path: string; branch: string }>;
 }
 
 export interface PreflightRequest {
@@ -285,17 +290,27 @@ export async function runLaunchPreflight(
     request.namespace.retained.filter(
       (entry) => normalise(entry.path) === normalise(path),
     );
+  const cleanableAt = (path: string) =>
+    request.namespace.cleanable.filter(
+      (entry) => normalise(entry.path) === normalise(path),
+    );
   for (const wt of registeredInNamespace) {
     const retained = retainedAt(wt.path);
     if (retained.length === 0) {
+      const cleanable = cleanableAt(wt.path).some(
+        (entry) => entry.branch === wt.branch,
+      );
       findings.push({
         check: "leftover-worktree",
         severity: "refuse",
         message:
           `${wt.path} is a registered worktree in this run's namespace that ` +
           `no live slice of this PRD owns (branch ${wt.branch ?? "detached"}) — ` +
-          `leftover from a previous run; clear it with ` +
-          `\`afk clean-failed --prd-dir <prd-dir>\``,
+          `leftover from a previous run; ` +
+          (cleanable
+            ? `clear it with \`afk clean-failed --prd-dir <prd-dir>\``
+            : `inspect it, then remove it with \`git worktree remove\`; ` +
+              `clean-failed is not eligible to remove this recorded state`),
       });
     } else if (!retained.some((entry) => entry.branch === wt.branch)) {
       findings.push({

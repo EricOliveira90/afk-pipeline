@@ -4,6 +4,7 @@ import { probeAdjudicationEstate } from "./adjudication-estate.js";
 import type { AgentProvider } from "./agent-provider.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
+import { cleanupEligibility } from "./cleanup-eligibility.js";
 import {
   pipelineRunSlug,
   scratchMergeNamePattern,
@@ -59,9 +60,6 @@ import { traitsFor, type SlicePhase } from "./slice-lifecycle.js";
  * declares its debris undisposable is undisposable here by construction,
  * so a new preserved phase never has to be remembered in two places.
  */
-const isCleanupTarget = (phase: SlicePhase): boolean =>
-  traitsFor(phase).debris !== "out-of-scope";
-
 /** Worktree is debris, branch is the next run's input (MERGE-PENDING). */
 const mustPreserveBranch = (phase: SlicePhase): boolean =>
   traitsFor(phase).debris === "preserve-branch";
@@ -220,9 +218,6 @@ export async function runCleanFailed(
   // phases whose worktree is debris but whose branch is not. ---
   const handledDirs = new Set<string>();
   for (const [ghIssue, slice] of Object.entries(state.slices)) {
-    if (!isCleanupTarget(slice.phase)) continue;
-    log(`Slice #${ghIssue} (${slice.phase}):`);
-
     // Worktree: the registered location wins when git knows one for the
     // branch; the naming formula covers unregistered leftovers. When
     // both agree (git reports forward slashes), keep the native form.
@@ -234,6 +229,30 @@ export async function runCleanFailed(
       registeredDir && computed && normalise(registeredDir) === normalise(computed)
         ? computed
         : (registeredDir ?? computed);
+    const worktreeIsClean =
+      !dir ||
+      (!existsSync(dir) && !registeredPaths.has(normalise(dir))) ||
+      !git.hasUncommittedChanges(dir);
+    const eligibility = cleanupEligibility(slice, worktreeIsClean);
+    if (!eligibility) {
+      if (
+        slice.phase === "PASS" &&
+        slice.mergedToFeature === true &&
+        dir &&
+        (existsSync(dir) || registeredPaths.has(normalise(dir)))
+      ) {
+        handledDirs.add(normalise(dir));
+        report.skipped.push({
+          target: dir,
+          reason:
+            "completed merged slice has uncommitted work — preserving the worktree; " +
+            "commit or remove those edits before running clean-failed again",
+        });
+        log(`Slice #${ghIssue} (PASS): kept dirty completed worktree ${dir}`);
+      }
+      continue;
+    }
+    log(`Slice #${ghIssue} (${slice.phase}):`);
 
     // A slice that owns an adjudication estate has no debris: the impasse
     // record, the decision log, the in-flight adjudication.md, the worktree

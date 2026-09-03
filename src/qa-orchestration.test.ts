@@ -30,6 +30,7 @@ import {
 } from "./orchestrator.js";
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
+import { loadRunState } from "./run-state.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
@@ -1218,7 +1219,34 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       }),
       "utf-8",
     );
-    git(repo, ["add", "package.json"]);
+    writeFileSync(
+      join(repo, "afk.config.json"),
+      JSON.stringify({
+        version: 1,
+        relatedGates: {
+          gates: {
+            "heavy:fixture": {
+              command: "node",
+              args: [
+                "-e",
+                `require('fs').appendFileSync('${sequencePath}','related\\n')`,
+              ],
+              expectedCostMs: 1,
+              timeoutMs: 30_000,
+            },
+          },
+          mappings: [
+            {
+              patterns: ["README.md"],
+              gates: ["heavy:fixture"],
+            },
+          ],
+          coverage: [],
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json", "afk.config.json"]);
     git(repo, ["commit", "-m", "add full-suite marker"]);
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
@@ -1326,7 +1354,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     // The first two candidate-QA failures do not start the suite. The accepted
     // third candidate starts it exactly once.
     expect(readFileSync(sequencePath, "utf-8")).toBe(
-      "qa\nqa\nqa\nfull\n",
+      "related\nqa\nrelated\nqa\nrelated\nqa\nfull\n",
     );
 
     expect(generatorPrompts[1]).toContain("QA-BLOCKING");
@@ -1363,6 +1391,97 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
   });
+
+  it("resumes the exact pending full-suite tree before invoking another generator", async () => {
+    const repo = makeRepo();
+    const marker = join(repo, ".afk", "pending-full-started.txt").replace(
+      /\\/g,
+      "/",
+    );
+    const allow = join(repo, ".afk", "allow-pending-full.txt").replace(
+      /\\/g,
+      "/",
+    );
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "pending-stage-fixture",
+        scripts: {
+          test:
+            `node -e "const fs=require('fs'); fs.appendFileSync('${marker}','start\\n'); ` +
+            `if(fs.existsSync('${allow}')) process.exit(0); setInterval(()=>{},1000)"`,
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add pending full-suite gate"]);
+
+    const controller = new AbortController();
+    let artifactDir = "";
+    let providerCalls = 0;
+    const firstProvider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        providerCalls++;
+        if (options.role === "generator") {
+          writeFileSync(join(repo, "candidate.txt"), "ready\n", "utf-8");
+        } else if (options.role === "evaluator-qa") {
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const first = makeContext(repo, firstProvider, {
+      signal: controller.signal,
+      commandTimeoutMs: 30_000,
+      heartbeatIntervalMs: 20,
+    });
+    artifactDir = first.absSliceDir;
+    const stopAtFullSuite = new Promise<void>((resolve) => {
+      const timer = setInterval(() => {
+        if (!existsSync(marker)) return;
+        clearInterval(timer);
+        controller.abort();
+        resolve();
+      }, 20);
+    });
+
+    const firstResult = runSliceExecute(first);
+    await stopAtFullSuite;
+    await expect(firstResult).resolves.toEqual({
+      phase: "CANCELLED",
+      error: "Cancelled by user",
+    });
+    expect(providerCalls).toBe(2);
+    const pending = loadRunState(repo, "prd-070-stub").pendingStages?.["70"];
+    expect(pending).toMatchObject({
+      completedStage: "candidate-qa",
+      nextStage: "full-suite",
+      round: 1,
+    });
+
+    writeFileSync(allow, "pass\n", "utf-8");
+    const secondProvider: AgentProvider = {
+      name: "stub",
+      async invoke(): Promise<InvokeResult> {
+        throw new Error("provider must not run before the pending gate");
+      },
+    };
+    const second = makeContext(repo, secondProvider, {
+      commandTimeoutMs: 30_000,
+      heartbeatIntervalMs: 20,
+    });
+
+    await expect(runSliceExecute(second)).resolves.toEqual({ phase: "PASS" });
+    expect(loadRunState(repo, "prd-070-stub").pendingStages).toBeUndefined();
+    expect(readFileSync(marker, "utf-8")).toBe("start\nstart\n");
+  }, 60_000);
 
   it("cancels a base gate process tree without evaluator or repair", async () => {
     const repo = makeRepo();
@@ -1750,7 +1869,10 @@ describe("provider-independent policy-less base gates", () => {
           ),
         ),
       ).toBe(true);
-      expect(new Set(evidence.map((attempt) => attempt.treeId)).size).toBe(1);
+      // Cheap gates authorize QA on the pre-review tree. The full suite is
+      // then checkpointed from the exact post-QA tree whose pending stage can
+      // survive a restart, so the two phases deliberately have distinct IDs.
+      expect(new Set(evidence.map((attempt) => attempt.treeId)).size).toBe(2);
       expect(
         execFileSync(
           "git",

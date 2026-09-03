@@ -52,6 +52,7 @@ import {
   lifecycle,
   type SliceIdentity,
 } from "./slice-lifecycle.js";
+import { cleanupEligibility } from "./cleanup-eligibility.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 import {
   computeSliceBounds,
@@ -103,6 +104,8 @@ import {
   isSliceComplete,
   getResumeAttempts,
   recordRetryDecision,
+  savePendingSliceStage,
+  clearPendingSliceStage,
   type RunState,
 } from "./run-state.js";
 import {
@@ -208,6 +211,10 @@ import {
   outOfScopeChangedPaths,
   parseScopeEscalation,
 } from "./escalation.js";
+import {
+  loadRelatedGatePolicy,
+  selectRelatedGateDeclarations,
+} from "./related-gates.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const DEFAULT_ADJUDICATION_WAIT_MS = 60_000;
@@ -762,6 +769,7 @@ export function buildRunNamespace(args: {
   featBranch: string;
   intended: ReadonlyArray<{ path: string; branch: string }>;
   retained?: ReadonlyArray<{ path: string; branch: string }>;
+  cleanable?: ReadonlyArray<{ path: string; branch: string }>;
 }): RunNamespace {
   const slicePattern = sliceWorktreeNamePattern(args.prdSlug, args.provider);
   const scratchPattern = scratchMergeNamePattern(args.prdSlug, args.provider);
@@ -779,6 +787,7 @@ export function buildRunNamespace(args: {
     ],
     intended: args.intended,
     retained: args.retained ?? args.intended,
+    cleanable: args.cleanable ?? [],
   };
 }
 
@@ -4367,6 +4376,129 @@ export async function runSliceExecute(
         "error",
       );
   };
+  const runSlug = pipelineRunSlug(
+    config.prdSlug,
+    config.provider ?? kiroProvider,
+  );
+  const gatePrepareFor = (cwd: string): GateDeclaration | undefined => {
+    const plan = resolveSanityPlan(cwd);
+    return plan.prepare
+      ? {
+          id: plan.prepare.name,
+          stage: "base",
+          required: true,
+          command: plan.prepare.command,
+          args: [...plan.prepare.args],
+        }
+      : undefined;
+  };
+  const runFullSuite = async (args: {
+    round: number;
+    treeId: string;
+    cwd: string;
+    evidenceDir: string;
+    prepare?: GateDeclaration;
+  }) => {
+    const declarations = resolveFullSuiteGateDeclarations(ctx.worktreeDir);
+    const run = await runCandidateGatePhase({
+      ctx,
+      round: args.round,
+      treeId: args.treeId,
+      cwd: args.cwd,
+      evidenceDir: args.evidenceDir,
+      declarations,
+      ...(args.prepare ? { prepare: args.prepare } : {}),
+      label: "full slice suite",
+    });
+    gateArtifacts.push(...run.artifacts);
+    if (signal?.aborted) return { kind: "cancelled" as const };
+    const requiredIds = new Set(
+      declarations
+        .filter((declaration) => declaration.required)
+        .map((declaration) => declaration.id),
+    );
+    const infrastructure = run.evidence.results.filter(
+      (gate) =>
+        requiredIds.has(gate.gateId) && gate.status === "INFRASTRUCTURE",
+    );
+    if (infrastructure.length > 0) {
+      return {
+        kind: "error" as const,
+        error:
+          `Full slice suite infrastructure failed: ` +
+          `${infrastructure.map((gate) => gate.gateId).join(", ")} ` +
+          `(${run.evidencePath.replace(/\\/g, "/")})`,
+      };
+    }
+    const failures = collectRequiredGateFailures(run.attempts, declarations);
+    if (failures.length > 0) {
+      return { kind: "failed" as const, failures };
+    }
+    assertGateEvidenceReleasesEvaluation(
+      run.evidence,
+      declarations,
+      args.treeId,
+    );
+    return { kind: "pass" as const };
+  };
+  const applyFullSuiteFailures = (
+    failures: Array<{ evidencePath: string; result: GateResult }>,
+    evidenceDir: string,
+  ): void => {
+    stuckReferences.push(
+      ...new Set(
+        failures.map(({ evidencePath }) =>
+          evidencePath.replace(/\\/g, "/"),
+        ),
+      ),
+      ...failures.map(({ result }) =>
+        join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+      ),
+    );
+    generatorFailureSet = {
+      findings: generatorFailureSet.findings,
+      gates: failures.map(({ evidencePath, result }) => ({
+        id: result.gateId,
+        evidence: [
+          evidencePath.replace(/\\/g, "/"),
+          join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+        ],
+      })),
+    };
+  };
+  const finishPass = (): Extract<TerminalOutcome, { phase: "PASS" | "STUCK" }> => {
+    for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+    restoreStuckDiagnosis();
+    if (git.hasUncommittedChanges(ctx.worktreeDir)) {
+      git.commitAll(
+        ctx.worktreeDir,
+        `feat(#${slice.ghIssue}): ${slice.title}`,
+      );
+    }
+
+    const migrationMode =
+      config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
+    if (
+      !config.sharedPreview &&
+      migrationMode !== "skip" &&
+      sliceTouchedMigrations(ctx.worktreeDir, featBranch)
+    ) {
+      const migrationCheck = verifyMigrationSync(
+        ctx.worktreeDir,
+        migrationMode,
+      );
+      if (!migrationCheck.ok) {
+        return finishStuck(
+          `Migration sync check failed: ${migrationCheck.error}`,
+        );
+      }
+    }
+
+    logger.phase(
+      `${ctx.tag}: deterministic QA and configured UAT pass — committed`,
+    );
+    return { phase: "PASS" };
+  };
 
   try {
     if (ctx.resume) {
@@ -4393,6 +4525,70 @@ export async function runSliceExecute(
         gates: [],
       };
       firstRound = restored.nextRound;
+    }
+    const pendingStage =
+      loadRunState(config.repoRoot, runSlug).pendingStages?.[slice.ghIssue];
+    if (pendingStage) {
+      const currentTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+      if (currentTreeId !== pendingStage.candidateTreeId) {
+        return {
+          phase: "ERROR",
+          error:
+            `Pending ${pendingStage.nextStage} for slice #${slice.ghIssue} ` +
+            `is authorized only for tree ${pendingStage.candidateTreeId}, but ` +
+            `the preserved worktree is ${currentTreeId}. Refusing to invoke ` +
+            `a provider or run the gate on a different tree.`,
+        };
+      }
+      logger.phase(
+        `${ctx.tag}: resuming pending full slice suite for exact tree ${currentTreeId}`,
+      );
+      const checkpointDir = join(
+        config.repoRoot,
+        ".afk",
+        "checkpoints",
+        `${config.prdSlug}-s${slice.number}-pending-${randomUUID()}`,
+      );
+      const checkpoint = createCandidateCheckpoint(
+        ctx.worktreeDir,
+        checkpointDir,
+      );
+      if (checkpoint.treeId !== pendingStage.candidateTreeId) {
+        throw new Error(
+          `Pending-stage checkpoint changed while materializing: expected ` +
+            `${pendingStage.candidateTreeId}, got ${checkpoint.treeId}`,
+        );
+      }
+      const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
+      try {
+        const decision = await runFullSuite({
+          round: pendingStage.round,
+          treeId: checkpoint.treeId,
+          cwd: checkpoint.worktreeDir,
+          evidenceDir,
+          prepare: gatePrepareFor(ctx.worktreeDir),
+        });
+        if (decision.kind === "cancelled") {
+          return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+        }
+        if (decision.kind === "error") {
+          return { phase: "ERROR", error: decision.error };
+        }
+        clearPendingSliceStage(config.repoRoot, runSlug, slice.ghIssue);
+        if (decision.kind === "pass") return finishPass();
+        applyFullSuiteFailures(decision.failures, evidenceDir);
+        firstRound = Math.max(firstRound, pendingStage.round + 1);
+      } finally {
+        await git.removeWorktreeOrWarn(
+          ctx.worktreeDir,
+          checkpoint.worktreeDir,
+          {
+            label: "pending-stage checkpoint worktree",
+            warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
+          },
+          { signal },
+        );
+      }
     }
     // The three-round cap is global across a slice's lives (ADR 0014):
     // an ordinary resume restores the round counter from archived
@@ -4731,17 +4927,41 @@ export async function runSliceExecute(
         "checkpoints",
         `${config.prdSlug}-s${slice.number}-r${round}-${randomUUID()}`,
       );
-      const basePlan = resolveSanityPlan(ctx.worktreeDir);
-      const gatePrepare: GateDeclaration | undefined = basePlan.prepare
-        ? {
-            id: basePlan.prepare.name,
-            stage: "base",
-            required: true,
-            command: basePlan.prepare.command,
-            args: [...basePlan.prepare.args],
-          }
-        : undefined;
-      const preQaDeclarations = resolvePreQAGateDeclarations(ctx.worktreeDir);
+      const gatePrepare = gatePrepareFor(ctx.worktreeDir);
+      const changedForRelatedGates = git.listChangedFiles(
+        ctx.worktreeDir,
+        featBranch,
+      );
+      if (!changedForRelatedGates.ok) {
+        return {
+          phase: "ERROR",
+          error:
+            "Related-gate selection refused because the actual changed paths " +
+            `could not be determined: ${changedForRelatedGates.failure}`,
+        };
+      }
+      let relatedDeclarations: GateDeclaration[];
+      try {
+        const candidateManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        relatedDeclarations = selectRelatedGateDeclarations(
+          loadRelatedGatePolicy(config.repoRoot),
+          {
+            lockedPaths: acceptanceManifestPaths(candidateManifest),
+            changedPaths: changedForRelatedGates.paths,
+          },
+        );
+      } catch (error) {
+        return {
+          phase: "ERROR",
+          error:
+            "Related-gate policy is invalid for this candidate: " +
+            (error instanceof Error ? error.message : String(error)),
+        };
+      }
+      const preQaDeclarations = [
+        ...resolvePreQAGateDeclarations(ctx.worktreeDir),
+        ...relatedDeclarations,
+      ];
       const fullSuiteDeclarations =
         resolveFullSuiteGateDeclarations(ctx.worktreeDir);
       const preQaHasExecutable = preQaDeclarations.some(
@@ -4929,113 +5149,67 @@ export async function runSliceExecute(
 
         logger.bumpEvalRound(slice.ghIssue, round);
         if (!implementationFailed) {
-          const fullSuiteRun = await runCandidateGatePhase({
-            ctx,
+          const fullSuiteTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+          savePendingSliceStage(config.repoRoot, runSlug, slice.ghIssue, {
+            version: 1,
+            completedStage: "candidate-qa",
+            nextStage: "full-suite",
+            candidateTreeId: fullSuiteTreeId,
             round,
-            treeId: checkpoint.treeId,
-            cwd: gateCwd,
-            evidenceDir,
-            declarations: fullSuiteDeclarations,
-            ...(gatePrepare && !preQaHasExecutable
-              ? { prepare: gatePrepare }
-              : {}),
-            label: "full slice suite",
           });
-          gateArtifacts.push(...fullSuiteRun.artifacts);
-          if (signal?.aborted) {
+          const fullSuiteCheckpointDir = join(
+            config.repoRoot,
+            ".afk",
+            "checkpoints",
+            `${config.prdSlug}-s${slice.number}-full-r${round}-${randomUUID()}`,
+          );
+          const fullSuiteCheckpoint = createCandidateCheckpoint(
+            ctx.worktreeDir,
+            fullSuiteCheckpointDir,
+          );
+          if (fullSuiteCheckpoint.treeId !== fullSuiteTreeId) {
+            throw new Error(
+              `Full-suite checkpoint changed while materializing: expected ` +
+                `${fullSuiteTreeId}, got ${fullSuiteCheckpoint.treeId}`,
+            );
+          }
+          let fullSuiteDecision;
+          try {
+            fullSuiteDecision = await runFullSuite({
+              round,
+              treeId: fullSuiteCheckpoint.treeId,
+              cwd: fullSuiteCheckpoint.worktreeDir,
+              evidenceDir,
+              prepare: gatePrepare,
+            });
+          } finally {
+            await git.removeWorktreeOrWarn(
+              ctx.worktreeDir,
+              fullSuiteCheckpoint.worktreeDir,
+              {
+                label: "full-suite checkpoint worktree",
+                warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
+              },
+              { signal },
+            );
+          }
+          if (fullSuiteDecision.kind === "cancelled") {
             return { phase: "CANCELLED", error: CANCELLED_BY_USER };
           }
-          const requiredFullSuiteIds = new Set(
-            fullSuiteDeclarations
-              .filter((declaration) => declaration.required)
-              .map((declaration) => declaration.id),
-          );
-          const fullSuiteInfrastructure = fullSuiteRun.evidence.results.filter(
-            (gate) =>
-              requiredFullSuiteIds.has(gate.gateId) &&
-              gate.status === "INFRASTRUCTURE",
-          );
-          if (fullSuiteInfrastructure.length > 0) {
+          if (fullSuiteDecision.kind === "error") {
             return {
               phase: "ERROR",
-              error:
-                `Full slice suite infrastructure failed: ` +
-                `${fullSuiteInfrastructure.map((gate) => gate.gateId).join(", ")} ` +
-                `(${fullSuiteRun.evidencePath.replace(/\\/g, "/")})`,
+              error: fullSuiteDecision.error,
             };
           }
-          const fullSuiteFailures = collectRequiredGateFailures(
-            fullSuiteRun.attempts,
-            fullSuiteDeclarations,
-          );
-          if (fullSuiteFailures.length > 0) {
-            const fullSuiteRepairReferences = [
-              ...new Set(
-                fullSuiteFailures.map(({ evidencePath }) =>
-                  evidencePath.replace(/\\/g, "/"),
-                ),
-              ),
-              ...fullSuiteFailures.map(({ result }) =>
-                join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
-              ),
-            ];
-            stuckReferences.push(...fullSuiteRepairReferences);
-            generatorFailureSet = {
-              findings: generatorFailureSet.findings,
-              gates: fullSuiteFailures.map(({ evidencePath, result }) => ({
-                id: result.gateId,
-                evidence: [
-                  evidencePath.replace(/\\/g, "/"),
-                  join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
-                ],
-              })),
-            };
+          clearPendingSliceStage(config.repoRoot, runSlug, slice.ghIssue);
+          if (fullSuiteDecision.kind === "failed") {
+            applyFullSuiteFailures(fullSuiteDecision.failures, evidenceDir);
             implementationFailed = true;
             if (implementationAttempt < implementationAttemptLimit) continue;
-          } else {
-            assertGateEvidenceReleasesEvaluation(
-              fullSuiteRun.evidence,
-              fullSuiteDeclarations,
-              checkpoint.treeId,
-            );
           }
           if (!implementationFailed) {
-            for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
-            // Before the commit, so the diagnosis this slice ships is the
-            // one the operator read, not whatever the generator left.
-            restoreStuckDiagnosis();
-            if (git.hasUncommittedChanges(ctx.worktreeDir)) {
-              git.commitAll(
-                ctx.worktreeDir,
-                `feat(#${slice.ghIssue}): ${slice.title}`,
-              );
-            }
-
-            const migrationMode =
-              config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
-            if (
-              !config.sharedPreview &&
-              migrationMode !== "skip" &&
-              sliceTouchedMigrations(ctx.worktreeDir, featBranch)
-            ) {
-              const migrationCheck = verifyMigrationSync(
-                ctx.worktreeDir,
-                migrationMode,
-              );
-              if (!migrationCheck.ok) {
-                // Late refusal: QA passed and the work is already committed,
-                // so the diagnosis describes a slice whose branch holds
-                // finished work that one check would not certify.
-                return finishStuck(
-                  `Migration sync check failed: ${migrationCheck.error}`,
-                );
-              }
-            }
-
-            logger.phase(
-              `${ctx.tag}: deterministic QA and configured UAT pass — committed`,
-            );
-            return { phase: "PASS" };
+            return finishPass();
           }
         }
       }
@@ -5434,6 +5608,20 @@ export async function runPipeline(
             ? [derived, { path: derived.path, branch: recorded }]
             : [derived];
         }),
+      cleanable: [...manifestDag.slices.values()].flatMap((slice) => {
+        const persisted = runState.slices[slice.ghIssue];
+        if (!persisted) return [];
+        const derived = worktreePathFor(slice);
+        const branch = persisted.branch ?? derived.branch;
+        const registeredDir = git.findWorktreeForBranch(repoRoot, branch);
+        const path = registeredDir ?? derived.path;
+        const worktreeIsClean =
+          !existsSync(path) || !git.hasUncommittedChanges(path);
+        return cleanupEligibility(persisted, worktreeIsClean) ===
+          "completed-clean"
+          ? [{ path, branch }]
+          : [];
+      }),
     }),
     minFreeBytes: gbToBytes(config.minFreeDiskGb ?? DEFAULT_MIN_FREE_DISK_GB),
     reportOnly: config.preflightReportOnly,

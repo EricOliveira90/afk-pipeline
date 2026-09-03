@@ -45,7 +45,6 @@ import {
   makeRepo,
   setupWave,
   sliceFromCwd,
-  validExplorerContext,
   writeAcceptanceManifest,
   type ProviderDeath,
   type SliceFixture,
@@ -388,7 +387,18 @@ describe("runWave — contract-lock migration prefix gate", () => {
         if (role === "explorer" && dir) {
           writeFileSync(
             join(dir, "context.md"),
-            validExplorerContext(`Migration context for ${ghIssue}`),
+            [
+              "## Files and current behavior",
+              "",
+              `- Migration context for ${ghIssue}`,
+              "",
+              "## Patterns and test harness",
+              "",
+              "- Migration fixture patterns",
+              "",
+              "## Unknowns",
+              "",
+            ].join("\n"),
             "utf-8",
           );
         } else if (role === "planner" && dir) {
@@ -461,7 +471,18 @@ describe("runWave — contract-lock migration prefix gate", () => {
         if (role === "explorer" && dir) {
           writeFileSync(
             join(dir, "context.md"),
-            validExplorerContext(`Reserved migration context for ${ghIssue}`),
+            [
+              "## Files and current behavior",
+              "",
+              `- Reserved migration context for ${ghIssue}`,
+              "",
+              "## Patterns and test harness",
+              "",
+              "- Reserved-prefix fixture patterns",
+              "",
+              "## Unknowns",
+              "",
+            ].join("\n"),
             "utf-8",
           );
         } else if (role === "planner" && dir) {
@@ -1035,7 +1056,18 @@ describe("runWave — contract-lock migration prefix gate", () => {
           if (options.role === "explorer" && dir) {
             writeFileSync(
               join(dir, "context.md"),
-              validExplorerContext("Invalid prior lock context"),
+              [
+                "## Files and current behavior",
+                "",
+                "- Invalid prior migration lock context",
+                "",
+                "## Patterns and test harness",
+                "",
+                "- Prior-lock migration fixture patterns",
+                "",
+                "## Unknowns",
+                "",
+              ].join("\n"),
               "utf-8",
             );
           } else if (options.role === "planner") {

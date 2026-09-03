@@ -69,8 +69,22 @@ export interface RunState {
    * state files that predate the field stay loadable unchanged.
    */
   resume?: Record<string, SliceResumeState>;
+  /**
+   * Deterministic work still owed on an exact candidate tree. Kept outside
+   * `slices` so dispatch clearing and cancellation records cannot erase the
+   * instruction that must run before another provider invocation.
+   */
+  pendingStages?: Record<string, PendingSliceStage>;
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
+}
+
+export interface PendingSliceStage {
+  version: 1;
+  completedStage: "candidate-qa";
+  nextStage: "full-suite";
+  candidateTreeId: string;
+  round: number;
 }
 
 export interface MigrationClaimState {
@@ -166,6 +180,42 @@ export function sanitizeResumeMap(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+export function sanitizePendingStages(
+  value: unknown,
+): Record<string, PendingSliceStage> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const out: Record<string, PendingSliceStage> = {};
+  for (const [id, entry] of Object.entries(value as Record<string, unknown>)) {
+    const stage = (entry ?? {}) as {
+      version?: unknown;
+      completedStage?: unknown;
+      nextStage?: unknown;
+      candidateTreeId?: unknown;
+      round?: unknown;
+    };
+    if (
+      stage.version !== 1 ||
+      stage.completedStage !== "candidate-qa" ||
+      stage.nextStage !== "full-suite" ||
+      typeof stage.candidateTreeId !== "string" ||
+      stage.candidateTreeId.trim() === "" ||
+      typeof stage.round !== "number" ||
+      !Number.isSafeInteger(stage.round) ||
+      stage.round < 1
+    ) {
+      continue;
+    }
+    out[id] = {
+      version: 1,
+      completedStage: "candidate-qa",
+      nextStage: "full-suite",
+      candidateTreeId: stage.candidateTreeId,
+      round: stage.round,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /**
  * Structural half of migration-claim validation: the pool is a
  * duplicate-free string array and claims map issue keys to string
@@ -244,6 +294,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
     resume?: unknown;
+    pendingStages?: unknown;
     migrations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
@@ -263,6 +314,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     }
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     const resume = sanitizeResumeMap(r.resume);
+    const pendingStages = sanitizePendingStages(r.pendingStages);
     const migrations = sanitizeMigrationClaims(r.migrations);
     return {
       version: 1,
@@ -273,6 +325,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
       ...(resume !== undefined ? { resume } : {}),
+      ...(pendingStages !== undefined ? { pendingStages } : {}),
       ...(migrations !== undefined ? { migrations } : {}),
     };
   }
@@ -434,8 +487,9 @@ export function saveSliceState(
  *
  * Deliberately NOT cleared: `resume` bookkeeping (its `attempts` is the
  * poison-tree cap, and the dispatch this clearing accompanies is about
- * to increment it), `scope`, `migrations`, and `reviewPhase`. None of
- * those is a per-attempt outcome claim.
+ * to increment it), `pendingStages` (the exact-tree instruction dispatch
+ * must honor before another provider call), `scope`, `migrations`, and
+ * `reviewPhase`. None of those is a per-attempt outcome claim.
  */
 export function clearSliceStateForDispatch(
   repoRoot: string,
@@ -456,6 +510,35 @@ export function saveRunState(repoRoot: string, state: RunState) {
   const p = statePath(repoRoot, state.prdSlug);
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(state, null, 2));
+}
+
+export function savePendingSliceStage(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  stage: PendingSliceStage,
+): void {
+  const p = statePath(repoRoot, prdSlug);
+  mkdirSync(dirname(p), { recursive: true });
+  const current = loadRunState(repoRoot, prdSlug);
+  current.pendingStages = { ...current.pendingStages, [ghIssue]: stage };
+  writeFileSync(p, JSON.stringify(current, null, 2));
+}
+
+export function clearPendingSliceStage(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+): void {
+  const p = statePath(repoRoot, prdSlug);
+  if (!existsSync(p)) return;
+  const current = loadRunState(repoRoot, prdSlug);
+  if (!current.pendingStages?.[ghIssue]) return;
+  delete current.pendingStages[ghIssue];
+  if (Object.keys(current.pendingStages).length === 0) {
+    delete current.pendingStages;
+  }
+  writeFileSync(p, JSON.stringify(current, null, 2));
 }
 
 /**

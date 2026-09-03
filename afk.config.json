@@ -3,5 +3,85 @@
   "resourceKeys": {
     "orchestrator-core": "^src/(orchestrator|wave)\\.ts$"
   },
-  "architectureDoc": "ARCHITECTURE.md"
+  "architectureDoc": "ARCHITECTURE.md",
+  "relatedGates": {
+    "gates": {
+      "test:fast": {
+        "command": "pnpm",
+        "args": ["test:fast"],
+        "expectedCostMs": 180000,
+        "timeoutMs": 600000
+      },
+      "test:heavy:orchestrator": {
+        "command": "pnpm",
+        "args": ["run", "test:heavy:orchestrator"],
+        "expectedCostMs": 240000,
+        "timeoutMs": 600000
+      },
+      "test:heavy:wave": {
+        "command": "pnpm",
+        "args": ["run", "test:heavy:wave"],
+        "expectedCostMs": 240000,
+        "timeoutMs": 600000
+      },
+      "test:heavy:resume": {
+        "command": "pnpm",
+        "args": ["run", "test:heavy:resume"],
+        "expectedCostMs": 180000,
+        "timeoutMs": 600000
+      },
+      "test:heavy:qa": {
+        "command": "pnpm",
+        "args": ["run", "test:heavy:qa"],
+        "expectedCostMs": 180000,
+        "timeoutMs": 600000
+      },
+      "test:heavy:clean": {
+        "command": "pnpm",
+        "args": ["run", "test:heavy:clean"],
+        "expectedCostMs": 120000,
+        "timeoutMs": 600000
+      }
+    },
+    "mappings": [
+      {
+        "patterns": ["src/orchestrator*.ts"],
+        "gates": ["test:heavy:orchestrator", "test:heavy:qa"]
+      },
+      {
+        "patterns": ["src/wave*.ts"],
+        "gates": ["test:heavy:wave"]
+      },
+      {
+        "patterns": ["src/resume*.ts", "src/run-state.ts"],
+        "gates": ["test:heavy:resume"]
+      },
+      {
+        "patterns": ["src/qa*.ts"],
+        "gates": ["test:heavy:qa"]
+      },
+      {
+        "patterns": ["src/clean-failed*.ts", "src/preflight*.ts"],
+        "gates": ["test:heavy:clean"]
+      }
+    ],
+    "coverage": [
+      {
+        "pattern": "src/**",
+        "fallbackGates": ["test:fast"]
+      },
+      {
+        "pattern": "prompts/**",
+        "fallbackGates": ["test:fast"]
+      },
+      {
+        "pattern": "package.json",
+        "fallbackGates": ["test:fast"]
+      },
+      {
+        "pattern": "pnpm-lock.yaml",
+        "fallbackGates": ["test:fast"]
+      }
+    ]
+  }
 }

@@ -20,6 +20,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { validExplorerContext } from "./explorer-test-fixtures.js";
 import {
   rmDirWithRetry,
   writeContractResponse,
@@ -101,21 +102,7 @@ export interface SliceFixture {
   contractImpasse?: boolean;
 }
 
-/** Canonical valid explorer artifact for wave scenarios unrelated to parsing. */
-export function validExplorerContext(label = "wave fixture"): string {
-  return [
-    "## Files and current behavior",
-    "",
-    `- ${label}`,
-    "",
-    "## Patterns and test harness",
-    "",
-    "- Existing wave fixture patterns",
-    "",
-    "## Unknowns",
-    "",
-  ].join("\n");
-}
+export { validExplorerContext } from "./explorer-test-fixtures.js";
 
 /**
  * Write the version-2 acceptance manifest a planner stub declares for a
