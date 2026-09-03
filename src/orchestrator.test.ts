@@ -78,6 +78,7 @@ import {
   REVISION_PLANNER_FAILURE,
   REVISION_REJECTION_FINDING,
   sliceFromCwd,
+  validExplorerContext,
   writePrdFixture,
   type InvocationRecord,
   type SliceFixture,
@@ -672,6 +673,223 @@ describe("assertSliceWorktreeOwnership", () => {
     );
     // Never deletes: ADR 0010 leaves a stale directory for the operator.
     expect(existsSync(ctx.worktreeDir)).toBe(true);
+  });
+});
+
+describe("explorer negotiation envelope", () => {
+  interface ExplorerRunOptions {
+    architecture?: boolean;
+    adrs?: boolean;
+    existingContext?: boolean;
+    inlineSizeBudgetBytes?: number;
+    explorerOutput?: string;
+  }
+
+  async function runExplorerNegotiation(
+    slug: string,
+    options: ExplorerRunOptions,
+  ) {
+    const repo = makeRepo();
+    if (options.architecture) {
+      writeFileSync(
+        join(repo, "ARCHITECTURE.md"),
+        "# Fixture architecture\n\nARCHITECTURE-BODY\n",
+        "utf-8",
+      );
+    }
+    if (options.adrs) {
+      mkdirSync(join(repo, "docs", "adr"), { recursive: true });
+      writeFileSync(
+        join(repo, "docs", "adr", "0001-fixture.md"),
+        "# Fixture ADR title\n\nADR-BODY-MUST-NOT-APPEAR\n",
+        "utf-8",
+      );
+    }
+    if (options.architecture || options.adrs) {
+      git(repo, ["add", "."]);
+      git(repo, ["commit", "-m", "add explorer repository context"]);
+    }
+
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9090",
+      title: "Explorer envelope",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const invocations: InvokeOptions[] = [];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(invokeOptions): Promise<InvokeResult> {
+        invocations.push(invokeOptions);
+        const artifactDir = findSliceArtifactDir(
+          invokeOptions.cwd,
+          slice.number,
+        );
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (invokeOptions.role === "explorer") {
+          writeFileSync(
+            join(artifactDir, "context.md"),
+            options.explorerOutput ?? validExplorerContext(),
+            "utf-8",
+          );
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        throw new Error("stop fixture after explorer");
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        infrastructureRetries: 0,
+        ...(options.inlineSizeBudgetBytes !== undefined
+          ? {
+              explorerInlineSizeBudgetBytes:
+                options.inlineSizeBudgetBytes,
+            }
+          : {}),
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+    if (options.existingContext) {
+      createWorktree(repo, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+      mkdirSync(ctx.absSliceDir, { recursive: true });
+      writeFileSync(
+        join(ctx.absSliceDir, "context.md"),
+        validExplorerContext("existing"),
+        "utf-8",
+      );
+      git(ctx.worktreeDir, ["add", ctx.relSliceDir + "/context.md"]);
+      git(ctx.worktreeDir, ["commit", "-m", "persist explorer context"]);
+    }
+
+    const outcome = await runSliceNegotiate(ctx);
+    return { ctx, invocations, outcome };
+  }
+
+  // These repositories genuinely differ at explorer assembly time, so the
+  // independent omission cases cannot share one spawned worktree.
+  it.each([
+    {
+      label: "architecture and ADR index",
+      options: { architecture: true, adrs: true },
+      present: ["## ARCHITECTURE.md", "## ADR index"],
+      absent: [],
+    },
+    {
+      label: "architecture only",
+      options: { architecture: true },
+      present: ["## ARCHITECTURE.md"],
+      absent: ["## ADR index"],
+    },
+    {
+      label: "ADR index only",
+      options: { adrs: true },
+      present: ["## ADR index"],
+      absent: ["## ARCHITECTURE.md"],
+    },
+    {
+      label: "neither repository entry",
+      options: {},
+      present: ["(none available)"],
+      absent: ["## ARCHITECTURE.md", "## ADR index"],
+    },
+  ])(
+    "B-03 B-04 B-05 P-02 invokes explorer once through the provider seam with $label",
+    async ({ label, options, present, absent }) => {
+      const { ctx, invocations } = await runExplorerNegotiation(
+        `explorer-${label.replaceAll(" ", "-")}`,
+        options,
+      );
+      const explorerInvocations = invocations.filter(
+        (invocation) => invocation.role === "explorer",
+      );
+
+      expect(explorerInvocations).toHaveLength(1);
+      const prompt = explorerInvocations[0]!.prompt;
+      const requiredBlockOrder = [
+        "# Objective",
+        "# Write boundary",
+        "# Stop condition",
+        "# Citation rule",
+        "# Four-section task",
+        "# Slice inputs",
+        "# Repository context",
+        "# Budget",
+      ];
+      let previousBlockIndex = -1;
+      for (const block of requiredBlockOrder) {
+        const blockIndex = prompt.indexOf(block);
+        expect(blockIndex, block).toBeGreaterThan(previousBlockIndex);
+        previousBlockIndex = blockIndex;
+      }
+      for (const marker of present) expect(prompt).toContain(marker);
+      for (const marker of absent) expect(prompt).not.toContain(marker);
+      expect(prompt).not.toContain("ADR-BODY-MUST-NOT-APPEAR");
+      const writeBoundary = prompt.match(
+        /^# Write boundary\r?\n([\s\S]*?)(?=^# )/m,
+      )?.[1];
+      expect(writeBoundary).toContain(`${ctx.relSliceDir}/context.md`);
+      expect(writeBoundary).not.toContain("contract.md");
+      expect(writeBoundary).not.toContain("acceptance-manifest.json");
+    },
+  );
+
+  it("P-01 skips explorer when an existing context is a valid evidence map", async () => {
+    const { invocations } = await runExplorerNegotiation(
+      "explorer-existing-context",
+      { existingContext: true },
+    );
+    expect(
+      invocations.filter((invocation) => invocation.role === "explorer"),
+    ).toHaveLength(0);
+    expect(
+      invocations.filter((invocation) => invocation.role === "planner"),
+    ).toHaveLength(1);
+  });
+
+  it("B-01 rejects malformed explorer output before planner dispatch", async () => {
+    const { invocations, outcome } = await runExplorerNegotiation(
+      "explorer-malformed-output",
+      { explorerOutput: "# Legacy context\n" },
+    );
+    expect(
+      invocations.filter((invocation) => invocation.role === "explorer"),
+    ).toHaveLength(1);
+    expect(
+      invocations.filter((invocation) => invocation.role === "planner"),
+    ).toHaveLength(0);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /Explorer evidence map requires exactly these level-two sections/,
+    );
+  });
+
+  it("B-06 rejects an over-budget explorer prompt before provider invocation", async () => {
+    const { invocations, outcome } = await runExplorerNegotiation(
+      "explorer-over-budget",
+      { inlineSizeBudgetBytes: 1 },
+    );
+    expect(invocations).toHaveLength(0);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /Explorer prompt exceeds inline-size budget: actual \d+ bytes, allowed 1 bytes/,
+    );
   });
 });
 
@@ -2577,7 +2795,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           const round = plannerPrompts.length;
@@ -2664,7 +2882,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           const round = plannerPrompts.length;
@@ -2771,7 +2989,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           writeFileSync(
@@ -2852,7 +3070,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           writeFileSync(
@@ -2988,7 +3206,7 @@ describe("round-scoped contract feedback", () => {
           const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
           if (!artifactDir) throw new Error("slice artifact directory missing");
           if (opts.role === "explorer") {
-            writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+            writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
           } else if (opts.role === "planner") {
             plannerRounds++;
             plannerPrompts.push(opts.prompt);
@@ -3062,7 +3280,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -3140,7 +3358,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           plannerPrompts.push(opts.prompt);
@@ -3265,7 +3483,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           plannerPrompts.push(opts.prompt);
@@ -3994,7 +4212,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -4138,7 +4356,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -4295,7 +4513,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           // Read before overwriting: what a later planner round starts from
@@ -4584,7 +4802,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           writeFileSync(
             join(artifactDir, "contract.md"),
@@ -4715,7 +4933,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -4881,7 +5099,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           writeFileSync(
             join(artifactDir, "contract.md"),
@@ -4951,7 +5169,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           writeFileSync(
             join(artifactDir, "contract.md"),
@@ -5173,7 +5391,7 @@ describe("orchestrator-owned contract status", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(

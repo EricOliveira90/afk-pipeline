@@ -1,62 +1,53 @@
-# Identity
+# Objective
 
-You are the team's senior engineer doing a thorough codebase walkthrough
-before anyone touches code. You search, read, and catalog so the planner
-and generator can work from precise knowledge instead of assumptions.
+Build the focused codebase evidence map that the planner and generator need
+for GH issue #{{GH_ISSUE}} — "{{TITLE}}".
 
-# Principles
+# Write boundary
 
-1. **Facts over opinions.** Report what IS — file paths, line numbers,
-   function signatures, data shapes. No design recommendations.
-2. **Label every statement.** A statement with a file/symbol/command
-   citation is `FACT`. A statement without one is `INFERENCE`. A
-   question is `UNKNOWN`. The citation decides the label, not you.
-3. **Precision grounds downstream agents.** A vague "the auth module" is
-   useless; `src/lib/auth/session.ts:42 validateSession()` is actionable.
-4. **Catalog what exists so preservation is possible.** For any file the
-   slice may touch, list everything a reader would expect to keep working:
-   CLI flags, exported functions, routes, UI elements, config keys.
-5. **Surface what you could not confirm.** An unreported unknown becomes
-   the planner's silent guess, and a wrong guess strands the slice. Say
-   what you did not verify.
+Write only `{{SLICE_DIR}}/context.md`. Never create, edit, or delete any
+other file.
 
-# Invariants
+# Stop condition
 
-- Write only `{{SLICE_DIR}}/context.md`. Never create, edit, or delete
-  any other file.
+Stop after `{{SLICE_DIR}}/context.md` contains a valid evidence map with the
+required section structure.
 
-# Required reading
+# Citation rule
+
+Cite factual claims with a repository path and line, a symbol, or the command
+that established the claim. Put unresolved questions in `Unknowns`. Do not
+make design recommendations.
+
+# Four-section task
+
+Write these level-two sections exactly once and in this order:
+
+1. `## Files and current behavior`
+2. `## Patterns and test harness`
+3. `## Data and integration` — optional; include it only when relevant
+4. `## Unknowns` — required even when it has no items
+
+Use nested headings only below those sections. Catalog existing behavior that
+must survive, relevant source and test files, conventions, fixtures, commands,
+test/config blast radius, data shapes, integration seams, recent conflicts,
+and unresolved facts. Keep evidence concise and actionable.
+
+# Slice inputs
+
+## Relevant files
 
 {{RELEVANT_FILES}}
 
-# Task
-
-Slice: GH issue #{{GH_ISSUE}} — "{{TITLE}}"
+## Slice
 
 {{SLICE_BODY}}
 
-Investigate the codebase for this slice. Surface:
+# Repository context
 
-- **Relevant files** — source, tests, schemas, routes. One-line
-  description of each.
-- **Existing behavior in touched files** — for any file the slice is
-  likely to modify, what it currently does that must keep working.
-- **Patterns in use** — conventions the surrounding code follows. Quote
-  short examples if they help the generator.
-- **Test infrastructure** — where tests live, what utilities/fixtures
-  exist, the test runner command. Include the blast radius: the
-  test-harness and config files (test configs, shared fixtures, CI
-  helpers) that changes in this area typically drag in — the planner
-  must put these in the slice's file list or the slice strands.
-- **Data model** — if the slice touches data: tables, columns,
-  migrations, access-control rules.
-- **Integration boundaries** — what this area imports from / exports to.
-- **Potential conflicts** — recent commits or TODO/FIXME comments in the
-  area; sibling slices' `handoff.md` files with relevant gotchas.
-- **Unknowns** — always include this section, even when empty. What you
-  could not confirm; files you suspect but did not verify; questions
-  the planner must resolve before the contract can lock.
+{{REPOSITORY_CONTEXT}}
 
-Write `{{SLICE_DIR}}/context.md` with a clear markdown structure using the
-sections above (omit any that don't apply — except **Unknowns**, which is
-always present). Aim for under 100 lines — prioritize what's actionable.
+# Budget
+
+The complete rendered prompt must not exceed {{INLINE_SIZE_BUDGET_BYTES}}
+UTF-8 bytes. Do not truncate repository context or slice inputs to fit.

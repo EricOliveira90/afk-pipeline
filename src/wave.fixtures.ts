@@ -101,6 +101,22 @@ export interface SliceFixture {
   contractImpasse?: boolean;
 }
 
+/** Canonical valid explorer artifact for wave scenarios unrelated to parsing. */
+export function validExplorerContext(label = "wave fixture"): string {
+  return [
+    "## Files and current behavior",
+    "",
+    `- ${label}`,
+    "",
+    "## Patterns and test harness",
+    "",
+    "- Existing wave fixture patterns",
+    "",
+    "## Unknowns",
+    "",
+  ].join("\n");
+}
+
 /**
  * Write the version-2 acceptance manifest a planner stub declares for a
  * slice (#76): one behavior bound to a gate the fixture repo's derived
@@ -260,7 +276,7 @@ export function buildStubProvider(opts: {
       if (role === "explorer" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "context.md"),
-          `# Context for ${ghIssue}\n`,
+          validExplorerContext(`Context for ${ghIssue}`),
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {

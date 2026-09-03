@@ -45,6 +45,7 @@ import {
   makeRepo,
   setupWave,
   sliceFromCwd,
+  validExplorerContext,
   writeAcceptanceManifest,
   type ProviderDeath,
   type SliceFixture,
@@ -385,7 +386,11 @@ describe("runWave — contract-lock migration prefix gate", () => {
         await new Promise((r) => setTimeout(r, 5));
 
         if (role === "explorer" && dir) {
-          writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(
+            join(dir, "context.md"),
+            validExplorerContext(`Migration context for ${ghIssue}`),
+            "utf-8",
+          );
         } else if (role === "planner" && dir) {
           const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
           plannerRounds.set(ghIssue, round);
@@ -454,7 +459,11 @@ describe("runWave — contract-lock migration prefix gate", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
 
         if (role === "explorer" && dir) {
-          writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(
+            join(dir, "context.md"),
+            validExplorerContext(`Reserved migration context for ${ghIssue}`),
+            "utf-8",
+          );
         } else if (role === "planner" && dir) {
           observedPrompts.push(prompt);
           const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
@@ -1024,7 +1033,11 @@ describe("runWave — contract-lock migration prefix gate", () => {
         async invoke(options: InvokeOptions): Promise<InvokeResult> {
           const dir = findSliceArtifactDir(options.cwd, "01");
           if (options.role === "explorer" && dir) {
-            writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+            writeFileSync(
+              join(dir, "context.md"),
+              validExplorerContext("Invalid prior lock context"),
+              "utf-8",
+            );
           } else if (options.role === "planner") {
             plannerPrompts.push(options.prompt);
           } else if (options.role === "evaluator-contract") {

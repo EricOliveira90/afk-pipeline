@@ -7,13 +7,15 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 describe("renderPrompt", () => {
-  it("substitutes placeholders for the explorer template", () => {
+  it("P-03 substitutes placeholders for the explorer template", () => {
     const out = renderPrompt("explorer", {
       GH_ISSUE: "42",
       TITLE: "Contact list",
       SLICE_DIR: ".kiro/specs/contacts/slices/01-foo",
       SLICE_BODY: "Implement the contact list component",
       RELEVANT_FILES: "src/app.ts\nsrc/util.ts",
+      REPOSITORY_CONTEXT: "(none available)",
+      INLINE_SIZE_BUDGET_BYTES: 65536,
     });
     expect(out).toContain("#42");
     expect(out).toContain('"Contact list"');
@@ -37,7 +39,7 @@ describe("renderPrompt", () => {
     expect(out).not.toContain("{{");
   });
 
-  it("throws on missing placeholder values", () => {
+  it("P-03 throws on missing placeholder values", () => {
     expect(() =>
       renderPrompt("explorer", {
         GH_ISSUE: "1",
@@ -48,7 +50,7 @@ describe("renderPrompt", () => {
     ).toThrow(/SLICE_DIR/);
   });
 
-  it("throws on extra unused args", () => {
+  it("P-03 throws on extra unused args", () => {
     expect(() =>
       renderPrompt("evaluator-qa", {
         SLICE_DIR: "x",
@@ -201,7 +203,7 @@ describe("renderPrompt", () => {
   });
 
   it("loads all eight pipeline templates", () => {
-    expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "" })).toBeTruthy();
+    expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "", REPOSITORY_CONTEXT: "(none available)", INLINE_SIZE_BUDGET_BYTES: 65536 })).toBeTruthy();
     expect(
       renderPrompt("planner", {
         GH_ISSUE: "1",

@@ -183,6 +183,21 @@ export interface InvocationRecord {
   ghIssue: string;
 }
 
+export function validExplorerContext(label = "fixture"): string {
+  return [
+    "## Files and current behavior",
+    "",
+    `- ${label}`,
+    "",
+    "## Patterns and test harness",
+    "",
+    "- Existing fixture patterns",
+    "",
+    "## Unknowns",
+    "",
+  ].join("\n");
+}
+
 export function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
 }
@@ -339,7 +354,7 @@ export function buildStubProvider(opts: {
       if (role === "explorer" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "context.md"),
-          `# Context for ${ghIssue}\n`,
+          validExplorerContext(`Context for ${ghIssue}`),
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {

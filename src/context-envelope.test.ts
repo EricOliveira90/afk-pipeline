@@ -2,10 +2,16 @@ import { describe, expect, it } from "vitest";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
 import {
+  EXPLORER_CONTEXT_MANIFEST,
   GENERATOR_CONTEXT_MANIFEST,
+  assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
+  buildExplorerRepositoryContext,
   projectGeneratorContractView,
+  projectGeneratorPatternsAndHarness,
+  validateExplorerEvidenceMap,
 } from "./context-envelope.js";
+import { fileURLToPath } from "node:url";
 
 const acceptanceManifest: AcceptanceManifestV2 = {
   version: 2,
@@ -27,6 +33,212 @@ const acceptanceManifest: AcceptanceManifestV2 = {
     },
   ],
 };
+
+describe("explorer context envelope", () => {
+  it("B-01 accepts only the ordered evidence-map sections and requires Unknowns", () => {
+    const minimal = [
+      "## Files and current behavior",
+      "",
+      "- files",
+      "",
+      "## Patterns and test harness",
+      "",
+      "- tests",
+      "",
+      "## Unknowns",
+      "",
+    ].join("\n");
+    const withData = minimal.replace(
+      "## Unknowns",
+      "## Data and integration\n\n- data\n\n## Unknowns",
+    );
+
+    expect(() => validateExplorerEvidenceMap(minimal)).not.toThrow();
+    expect(() => validateExplorerEvidenceMap(withData)).not.toThrow();
+    for (const malformed of [
+      minimal.replace("## Unknowns\n", ""),
+      minimal.replace(
+        "## Patterns and test harness",
+        "## Unknowns\n\n## Patterns and test harness",
+      ),
+      minimal.replace(
+        "## Unknowns",
+        "## Extra\n\n- no\n\n## Unknowns",
+      ),
+      minimal.concat("\n## Unknowns\n"),
+    ]) {
+      expect(() => validateExplorerEvidenceMap(malformed)).toThrow(
+        /requires exactly these level-two sections in order/,
+      );
+    }
+  });
+
+  it("B-02 projects only the complete Patterns and test harness section byte-for-byte", () => {
+    const context = [
+      "## Files and current behavior\r\n",
+      "\r\n",
+      "FILES-MARKER\r\n",
+      "\r\n",
+      "## Patterns and test harness\r\n",
+      "\r\n",
+      "PATTERNS-MARKER\r\n",
+      "\r\n",
+      "### Nested harness\r\n",
+      "NESTED-MARKER\r\n",
+      "\r\n",
+      "## Data and integration\r\n",
+      "\r\n",
+      "DATA-MARKER\r\n",
+      "\r\n",
+      "## Unknowns\r\n",
+      "\r\n",
+      "UNKNOWNS-MARKER\r\n",
+    ].join("");
+    const expected = [
+      "## Patterns and test harness\r\n",
+      "\r\n",
+      "PATTERNS-MARKER\r\n",
+      "\r\n",
+      "### Nested harness\r\n",
+      "NESTED-MARKER\r\n",
+      "\r\n",
+    ].join("");
+
+    validateExplorerEvidenceMap(context);
+    expect(Buffer.from(projectGeneratorPatternsAndHarness(context))).toEqual(
+      Buffer.from(expected),
+    );
+  });
+
+  it("B-01 B-02 QA-01 preserves heading-shaped lines inside fenced samples", () => {
+    const context = [
+      "## Files and current behavior\n",
+      "\n",
+      "FILES-MARKER\n",
+      "\n",
+      "## Patterns and test harness\n",
+      "\n",
+      "~~~md\n",
+      "## Example heading inside a fenced sample\n",
+      "\n",
+      "SAMPLE-MARKER\n",
+      "~~~\n",
+      "\n",
+      "PATTERNS-MARKER\n",
+      "\n",
+      "## Unknowns\n",
+      "\n",
+      "UNKNOWNS-MARKER\n",
+    ].join("");
+    const expected = [
+      "## Patterns and test harness\n",
+      "\n",
+      "~~~md\n",
+      "## Example heading inside a fenced sample\n",
+      "\n",
+      "SAMPLE-MARKER\n",
+      "~~~\n",
+      "\n",
+      "PATTERNS-MARKER\n",
+      "\n",
+    ].join("");
+    const projected = projectGeneratorPatternsAndHarness(context);
+
+    expect(() => validateExplorerEvidenceMap(context)).not.toThrow();
+    expect(Buffer.from(projected)).toEqual(Buffer.from(expected));
+    expect(projected).not.toContain("FILES-MARKER");
+    expect(projected).not.toContain("UNKNOWNS-MARKER");
+  });
+
+  it("B-03 indexes every ADR file including both 0029 entries and includes architecture without ADR bodies", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const repositoryContext = buildExplorerRepositoryContext(repoRoot);
+
+    expect(repositoryContext.content).toContain(
+      "0029 — Guardian prompts use Bash for file writes",
+    );
+    expect(repositoryContext.content).toContain(
+      "0029 — Recoverable merge deferral: the MERGE-PENDING phase",
+    );
+    expect(repositoryContext.content).toContain("## ARCHITECTURE.md");
+    expect(repositoryContext.content).toContain(
+      "AFK is a standalone CLI that orchestrates multi-agent pipelines",
+    );
+    expect(repositoryContext.content).not.toContain(
+      "PRD 031 in `rumo-app` produced two consecutive guardian-review runs",
+    );
+    expect(repositoryContext.content).not.toContain(
+      "In the PRD 076 babysit session a slice negotiated its contract",
+    );
+    expect(
+      repositoryContext.includedArtifactIds.filter((path) =>
+        path.startsWith("docs/adr/"),
+      ),
+    ).toHaveLength(55);
+  });
+
+  it("B-04 assembles the ordered focused prompt without a persona or role tags", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const result = assembleExplorerEnvelope({
+      repoRoot,
+      ghIssue: "90",
+      title: "Explorer context",
+      sliceDir: ".kiro/specs/demo/slices/02-explorer",
+      relevantFiles: "RELEVANT-FILES-MARKER",
+      sliceBody: "SLICE-BODY-MARKER",
+    });
+
+    expect(EXPLORER_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "explorer",
+      inlineSizeBudgetBytes: 65_536,
+    });
+    const orderedMarkers = [
+      "# Objective",
+      "# Write boundary",
+      "# Stop condition",
+      "# Citation rule",
+      "# Four-section task",
+      "# Slice inputs",
+      "RELEVANT-FILES-MARKER",
+      "SLICE-BODY-MARKER",
+      "# Repository context",
+      "# Budget",
+    ];
+    let previous = -1;
+    for (const marker of orderedMarkers) {
+      const index = result.prompt.indexOf(marker);
+      expect(index, marker).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(result.prompt).not.toContain("senior engineer");
+    expect(result.prompt).not.toMatch(/\bFACT\b|\bINFERENCE\b|\bUNKNOWN\b/);
+    expect(result.prompt).not.toContain("Label every statement");
+  });
+
+  it("B-06 fails closed with actual and allowed explorer byte counts", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const input = {
+      repoRoot,
+      ghIssue: "90",
+      title: "Explorer context",
+      sliceDir: ".kiro/specs/demo/slices/02-explorer",
+      relevantFiles: "RELEVANT-FILES-MARKER",
+      sliceBody: "SLICE-BODY-MARKER",
+    };
+    const requiredBytes = assembleExplorerEnvelope(input).evidence
+      .assembledByteSize;
+
+    expect(() =>
+      assembleExplorerEnvelope({
+        ...input,
+        inlineSizeBudgetBytes: requiredBytes - 1,
+      }),
+    ).toThrow(
+      `Explorer prompt exceeds inline-size budget: actual ${requiredBytes} bytes, allowed ${requiredBytes - 1} bytes`,
+    );
+  });
+});
 
 describe("generator context envelope", () => {
   it("B-01 assembles the focused initial envelope in manifest order", () => {
@@ -280,5 +492,28 @@ describe("generator context envelope", () => {
 
     expect(Buffer.from(second.prompt)).toEqual(Buffer.from(first.prompt));
     expect(second.evidence).toEqual(first.evidence);
+  });
+
+  it("P-04 preserves generator assembly and the legacy full-context fallback", () => {
+    const legacyContext =
+      "## Patterns in Use\n\nlegacy patterns\n\n## Test Infrastructure\n\nlegacy tests\n";
+    expect(projectGeneratorPatternsAndHarness(legacyContext)).toBe(
+      legacyContext,
+    );
+
+    const result = assembleGeneratorEnvelope({
+      mode: "initial",
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: legacyContext,
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      failureSet: { findings: [], gates: [] },
+    });
+    expect(result.prompt).toContain(legacyContext);
+    expect(result.evidence.contextManifestVersion).toBe(
+      GENERATOR_CONTEXT_MANIFEST.version,
+    );
   });
 });
