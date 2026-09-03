@@ -4804,9 +4804,24 @@ describe("contract review fails closed", () => {
       /EQUIVALENT_REPETITION/,
     );
     expect(evaluatorAttempts).toBe(5);
-    expect(
+    const intervention = JSON.parse(
       readFileSync(join(ctx.absSliceDir, "intervention.json"), "utf-8"),
-    ).toContain("recoveryRef");
+    );
+    expect(intervention).toMatchObject({
+      cause: {
+        kind: "CONTRACT_CONVERGENCE",
+        interventionClass: "PRODUCT_DECISION",
+      },
+      interventionClass: "PRODUCT_DECISION",
+      preservedCandidate: {
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
+    expect(intervention.preservedCandidate.recoveryRef).toContain(
+      `-r${intervention.preservedCandidate.revision}-` +
+        intervention.preservedCandidate.treeId,
+    );
     const reviews = join(
       repo,
       ".afk",

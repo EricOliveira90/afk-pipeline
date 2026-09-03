@@ -29,12 +29,27 @@ export type InterventionClass =
   | "RECOVERY_ACTION"
   | "IMPLEMENTATION_INTERVENTION";
 
+export type InterventionCause =
+  | {
+      kind: "CONTRACT_CONVERGENCE";
+      interventionClass: "PRODUCT_DECISION";
+    }
+  | {
+      kind: "CHECKPOINT_RECOVERY";
+      interventionClass: "RECOVERY_ACTION";
+    }
+  | {
+      kind: "QA_CONVERGENCE";
+      interventionClass: "IMPLEMENTATION_INTERVENTION";
+    };
+
 export type NonProgressReason =
   | "EQUIVALENT_REPETITION"
   | "REOPENED_WITHOUT_NEW_EVIDENCE"
   | "OSCILLATION"
   | "REGRESSION_GROWTH"
-  | "SEMANTIC_CAP_EXHAUSTED";
+  | "SEMANTIC_CAP_EXHAUSTED"
+  | "CHECKPOINT_RECOVERY_FAILED";
 
 export interface PreservedCandidate {
   branch: string;
@@ -58,6 +73,7 @@ export interface InterventionFinding {
 }
 
 export interface NonProgressObservation {
+  cause: InterventionCause;
   phase: ConvergencePhase;
   revision: number;
   candidate: PreservedCandidate;
@@ -76,6 +92,7 @@ export interface NonProgressHistory {
 
 export interface InterventionRequest {
   version: 1;
+  cause: InterventionCause;
   interventionClass: InterventionClass;
   phase: ConvergencePhase;
   reasonCodes: NonProgressReason[];
@@ -240,6 +257,10 @@ export function contractNonProgressObservation(input: {
       .map((entry) => entry.currentId),
   );
   return {
+    cause: {
+      kind: "CONTRACT_CONVERGENCE",
+      interventionClass: "PRODUCT_DECISION",
+    },
     phase: "contract",
     revision: input.update.lineage.revision,
     candidate: {
@@ -284,6 +305,10 @@ export function qaNonProgressObservation(input: {
     (entry) => entry.stage === stage,
   );
   return {
+    cause: {
+      kind: "QA_CONVERGENCE",
+      interventionClass: "IMPLEMENTATION_INTERVENTION",
+    },
     phase: input.phase,
     revision: input.update.state.revision,
     candidate: {
@@ -399,29 +424,6 @@ function bestCandidate(
     )[0]!.candidate;
 }
 
-function interventionClass(
-  observation: NonProgressObservation,
-): InterventionClass {
-  const evidence = [
-    ...observation.supportingEvidence,
-    ...observation.findings.flatMap((finding) => [
-      finding.summary,
-      finding.evidence,
-      finding.clearCondition,
-    ]),
-  ].join(" ").toLowerCase();
-  if (/\b(restore|recovery|recover|resume|checkpoint|missing candidate)\b/.test(evidence)) {
-    return "RECOVERY_ACTION";
-  }
-  if (
-    observation.phase === "contract" &&
-    /\b(decide|decision|clarify|ambigu|contradict|product requirement)\b/.test(evidence)
-  ) {
-    return "PRODUCT_DECISION";
-  }
-  return "IMPLEMENTATION_INTERVENTION";
-}
-
 function requiredAction(
   kind: InterventionClass,
   blockerIds: readonly string[],
@@ -439,6 +441,13 @@ function requiredAction(
     return (
       `Restore or select candidate tree ${candidate.treeId}, then resume the ` +
       `recorded pending stage without changing the quality gates.`
+    );
+  }
+  if (blockerIds.length === 0) {
+    return (
+      `Inspect preserved candidate tree ${candidate.treeId} and the recorded ` +
+      `gate or QA evidence, make one targeted implementation repair that ` +
+      `keeps resolved behavior intact, then resume the slice.`
     );
   }
   return (
@@ -469,10 +478,11 @@ export function decideNonProgress(
     ...observation.activeBlockingIds,
   ]);
   const preservedCandidate = bestCandidate(history, observation);
-  const kind = interventionClass(observation);
+  const kind = observation.cause.interventionClass;
   const phaseHistory = samePhaseHistory(nextHistory, observation.phase);
   const request: InterventionRequest = {
     version: 1,
+    cause: observation.cause,
     interventionClass: kind,
     phase: observation.phase,
     reasonCodes: reasons,
@@ -507,11 +517,12 @@ export function buildSemanticCapIntervention(
   if (progressed.action === "intervene") return progressed;
   const blockers = sortedUnique(observation.activeBlockingIds);
   const preservedCandidate = bestCandidate(history, observation);
-  const kind = interventionClass(observation);
+  const kind = observation.cause.interventionClass;
   return {
     history: progressed.history,
     request: {
       version: 1,
+      cause: observation.cause,
       interventionClass: kind,
       phase: observation.phase,
       reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
@@ -535,6 +546,68 @@ export function buildSemanticCapIntervention(
       ]),
       requiredOperatorAction: requiredAction(kind, blockers, preservedCandidate),
     },
+  };
+}
+
+export function buildRecoveryIntervention(input: {
+  phase: Exclude<ConvergencePhase, "contract">;
+  candidate: PreservedCandidate;
+  summary: string;
+  supportingEvidence?: readonly string[];
+}): InterventionRequest {
+  const cause: InterventionCause = {
+    kind: "CHECKPOINT_RECOVERY",
+    interventionClass: "RECOVERY_ACTION",
+  };
+  return {
+    version: 1,
+    cause,
+    interventionClass: cause.interventionClass,
+    phase: input.phase,
+    reasonCodes: ["CHECKPOINT_RECOVERY_FAILED"],
+    blockerIds: [],
+    summary: input.summary,
+    findingLineage: [],
+    attemptedRepairs: [],
+    preservedCandidate: input.candidate,
+    supportingEvidence: sortedUnique(input.supportingEvidence ?? []),
+    requiredOperatorAction: requiredAction(
+      cause.interventionClass,
+      [],
+      input.candidate,
+    ),
+  };
+}
+
+export function buildExecutionIntervention(input: {
+  phase: Exclude<ConvergencePhase, "contract">;
+  candidate: PreservedCandidate;
+  summary: string;
+  blockerIds?: readonly string[];
+  supportingEvidence?: readonly string[];
+}): InterventionRequest {
+  const cause: InterventionCause = {
+    kind: "QA_CONVERGENCE",
+    interventionClass: "IMPLEMENTATION_INTERVENTION",
+  };
+  const blockerIds = sortedUnique(input.blockerIds ?? []);
+  return {
+    version: 1,
+    cause,
+    interventionClass: cause.interventionClass,
+    phase: input.phase,
+    reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+    blockerIds,
+    summary: input.summary,
+    findingLineage: [],
+    attemptedRepairs: [],
+    preservedCandidate: input.candidate,
+    supportingEvidence: sortedUnique(input.supportingEvidence ?? []),
+    requiredOperatorAction: requiredAction(
+      cause.interventionClass,
+      blockerIds,
+      input.candidate,
+    ),
   };
 }
 
@@ -570,10 +643,38 @@ export function parseNonProgressHistory(value: unknown): NonProgressHistory {
     candidate.every(
       (entry) => typeof entry === "string" && entry.trim() !== "",
     );
-  for (const observation of input.observations) {
+  const observations: NonProgressObservation[] = [];
+  for (const rawObservation of input.observations) {
     if (
-      !observation ||
-      typeof observation !== "object" ||
+      !rawObservation ||
+      typeof rawObservation !== "object" ||
+      Array.isArray(rawObservation)
+    ) {
+      throw new Error("persisted non-progress observation is malformed");
+    }
+    const observation = rawObservation as NonProgressObservation;
+    const migratedCause: InterventionCause =
+      observation.cause ??
+      (observation.phase === "contract"
+        ? {
+            kind: "CONTRACT_CONVERGENCE",
+            interventionClass: "PRODUCT_DECISION",
+          }
+        : {
+            kind: "QA_CONVERGENCE",
+            interventionClass: "IMPLEMENTATION_INTERVENTION",
+          });
+    if (
+      typeof migratedCause !== "object" ||
+      !(
+        (migratedCause.kind === "CONTRACT_CONVERGENCE" &&
+          migratedCause.interventionClass === "PRODUCT_DECISION") ||
+        (migratedCause.kind === "CHECKPOINT_RECOVERY" &&
+          migratedCause.interventionClass === "RECOVERY_ACTION") ||
+        (migratedCause.kind === "QA_CONVERGENCE" &&
+          migratedCause.interventionClass ===
+            "IMPLEMENTATION_INTERVENTION")
+      ) ||
       !validPhases.includes(observation.phase) ||
       !Number.isSafeInteger(observation.revision) ||
       observation.revision < 1 ||
@@ -613,8 +714,12 @@ export function parseNonProgressHistory(value: unknown): NonProgressHistory {
     ) {
       throw new Error("persisted non-progress observation is malformed");
     }
+    observations.push({
+      ...structuredClone(observation),
+      cause: migratedCause,
+    });
   }
-  return structuredClone(input as NonProgressHistory);
+  return { version: 1, observations };
 }
 
 export function loadNonProgressHistory(location: Location): NonProgressHistory {
@@ -650,11 +755,11 @@ export function writeInterventionRequest(
       value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "");
     const recoveryRef =
       `refs/afk/recovery/${safe(preservation.runSlug)}/` +
-      `${safe(preservation.ghIssue)}/${safe(request.phase)}`;
+      `${safe(preservation.ghIssue)}/${safe(request.phase)}-` +
+      `r${request.preservedCandidate.revision}-${request.preservedCandidate.treeId}`;
     const preserved = preserveRecoveryTree(preservation.repoRoot, {
       ref: recoveryRef,
       treeId: request.preservedCandidate.treeId,
-      parentRef: request.preservedCandidate.branch,
       message:
         `AFK recovery candidate ${preservation.ghIssue} ${request.phase} ` +
         `revision ${request.preservedCandidate.revision}`,

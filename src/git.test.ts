@@ -141,6 +141,30 @@ describe("git.preserveRecoveryTree", () => {
     expect(resolveTree(repoDir, first.ref)).toBe(treeId);
     expect(git(repoDir, ["cat-file", "-t", first.commit])).toBe("commit");
   });
+
+  it("refuses to repoint an immutable recovery ref", () => {
+    const ref = "refs/afk/recovery/demo/157/immutable-r1-candidate";
+    const firstTree = git(repoDir, ["rev-parse", "HEAD^{tree}"]);
+    preserveRecoveryTree(repoDir, {
+      ref,
+      treeId: firstTree,
+      parentRef: "main",
+      message: "first candidate",
+    });
+    writeFileSync(join(repoDir, "candidate.txt"), "different\n");
+    git(repoDir, ["add", "-A"]);
+    const secondTree = git(repoDir, ["write-tree"]);
+
+    expect(() =>
+      preserveRecoveryTree(repoDir, {
+        ref,
+        treeId: secondTree,
+        parentRef: "main",
+        message: "different candidate",
+      }),
+    ).toThrow(/cannot be repointed/);
+    expect(resolveTree(repoDir, ref)).toBe(firstTree);
+  });
 });
 
 describe("git.getDefaultBranch", () => {

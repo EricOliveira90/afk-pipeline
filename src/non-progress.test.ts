@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildRecoveryIntervention,
   contractNonProgressObservation,
   buildSemanticCapIntervention,
   decideNonProgress,
@@ -24,6 +25,10 @@ function observation(
 ): NonProgressObservation {
   const treeId = [TREE_A, TREE_B, TREE_C][revision - 1] ?? TREE_C;
   return {
+    cause: {
+      kind: "QA_CONVERGENCE",
+      interventionClass: "IMPLEMENTATION_INTERVENTION",
+    },
     phase: "deterministic-qa",
     revision,
     candidate: {
@@ -161,10 +166,14 @@ describe("non-progress policy", () => {
     expect(regressing.request.requiredOperatorAction).toContain(TREE_A);
   });
 
-  it("derives all intervention classes from blocker and recovery semantics", () => {
+  it("derives intervention classes only from typed terminal causes", () => {
     const product = decideNonProgress(
       emptyNonProgressHistory(),
       observation(1, ["F-01"], {
+        cause: {
+          kind: "CONTRACT_CONVERGENCE",
+          interventionClass: "PRODUCT_DECISION",
+        },
         phase: "contract",
         candidate: {
           branch: "afk/demo-slice-01",
@@ -173,10 +182,6 @@ describe("non-progress policy", () => {
           revision: 1,
         },
         reopenedWithoutNewEvidenceIds: ["F-01"],
-        findings: [{
-          ...observation(1, ["F-01"]).findings[0]!,
-          clearCondition: "A product decision must clarify the requirement",
-        }],
       }),
     );
     expect(product).toMatchObject({
@@ -184,16 +189,35 @@ describe("non-progress policy", () => {
       request: { interventionClass: "PRODUCT_DECISION" },
     });
 
-    const recovery = decideNonProgress(
+    const recovery = buildRecoveryIntervention({
+      phase: "deterministic-qa",
+      candidate: observation(1, ["QA-01"]).candidate,
+      summary: "The pending deterministic checkpoint failed",
+    });
+    expect(recovery).toMatchObject({
+      cause: {
+        kind: "CHECKPOINT_RECOVERY",
+        interventionClass: "RECOVERY_ACTION",
+      },
+      interventionClass: "RECOVERY_ACTION",
+    });
+
+    const implementation = decideNonProgress(
       emptyNonProgressHistory(),
       observation(1, ["QA-01"], {
         reopenedWithoutNewEvidenceIds: ["QA-01"],
-        supportingEvidence: ["Restore the exact checkpoint before resume"],
+        supportingEvidence: ["This prose says product decision and restore"],
       }),
     );
-    expect(recovery).toMatchObject({
+    expect(implementation).toMatchObject({
       action: "intervene",
-      request: { interventionClass: "RECOVERY_ACTION" },
+      request: {
+        cause: {
+          kind: "QA_CONVERGENCE",
+          interventionClass: "IMPLEMENTATION_INTERVENTION",
+        },
+        interventionClass: "IMPLEMENTATION_INTERVENTION",
+      },
     });
   });
 

@@ -559,9 +559,11 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       },
     );
 
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
-      error: "QA failed after 3 implementation rounds",
+      error: expect.stringContaining(
+        "AFK reached the implementation cap without a QA result",
+      ),
     });
     expect(roles).toEqual(rolesAfterExhaustion);
     expect(
@@ -571,6 +573,21 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         "falling back to normal re-evaluation",
     );
     expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
+    expect(
+      JSON.parse(
+        readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+      ),
+    ).toMatchObject({
+      cause: {
+        kind: "QA_CONVERGENCE",
+        interventionClass: "IMPLEMENTATION_INTERVENTION",
+      },
+      reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+      preservedCandidate: {
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
     expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toContain(
       "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
     );
@@ -1131,16 +1148,32 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       commitLog: "accepted candidate",
       handoffNote: "",
     };
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
-      error:
+      error: expect.stringContaining(
         "Migration sync check failed: local migrations not applied to remote: 001",
+      ),
     });
     expect(migrationAttempts).toBe(2);
     expect(generators).toBe(1);
     expect(evaluators).toBe(1);
     expect(ctx.logger.getSliceProgress("70")).toEqual(progressBeforeResume);
     expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
+    expect(
+      JSON.parse(
+        readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+      ),
+    ).toMatchObject({
+      cause: {
+        kind: "CHECKPOINT_RECOVERY",
+        interventionClass: "RECOVERY_ACTION",
+      },
+      interventionClass: "RECOVERY_ACTION",
+      preservedCandidate: {
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
 
     // The resumed deterministic failure still carries the existing
     // diagnosis and exact quality-gate behavior.
@@ -1319,7 +1352,13 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     });
   });
 
-  it("stops an equivalent repeated QA blocker before a third generator dispatch", async () => {
+  /**
+   * Reuses the existing non-progress runSliceExecute scenario. Three rounds
+   * are necessary to observe A-B-A state oscillation; renaming the reopened
+   * finding in that same third round also proves regression growth without a
+   * second spawned pipeline fixture.
+   */
+  it("stops QA on oscillation and regression growth in one existing scenario", async () => {
     const repo = makeRepo();
     let artifactDir = "";
     let generators = 0;
@@ -1341,21 +1380,35 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             "# QA Report\n\n**Verdict:** FAIL\n",
             "utf-8",
           );
+          const cycle = {
+            id: evaluators === 3 ? "QA-CYCLE-RENAMED" : "QA-CYCLE",
+            severity: "BLOCKING" as const,
+            behaviorIds: ["B-CYCLE"],
+            summary: "The cycling blocker",
+            evidence: "src/change.ts alternates behavior",
+            expected: "The value remains correct",
+            observed: "The value regressed",
+            clearCondition: "The focused behavior test remains green",
+            state: (evaluators === 2 ? "RESOLVED" : "OPEN") as
+              | "OPEN"
+              | "RESOLVED",
+          };
+          const next = {
+            id: "QA-NEXT",
+            severity: "BLOCKING" as const,
+            behaviorIds: ["B-NEXT"],
+            summary: "The next blocker",
+            evidence: "src/change.ts has a second issue",
+            expected: "The second behavior is correct",
+            observed: "The second behavior is wrong",
+            clearCondition: "The second focused test remains green",
+            state: (evaluators === 2 ? "OPEN" : "RESOLVED") as
+              | "OPEN"
+              | "RESOLVED",
+          };
           writeQAReview(artifactDir, "deterministic", {
             verdict: "FAIL",
-            findings: [
-              {
-                id: "QA-REPEAT",
-                severity: "BLOCKING",
-                behaviorIds: ["B-01"],
-                summary: "The same blocker still stands",
-                evidence: "src/change.ts still returns the wrong value",
-                expected: "The value is correct",
-                observed: "The value is still wrong",
-                clearCondition: "The focused behavior test passes",
-                state: "OPEN",
-              },
-            ],
+            findings: evaluators === 1 ? [cycle] : [cycle, next],
           });
         }
         return { exitCode: 0, stdout: "", stats: {} };
@@ -1368,10 +1421,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
     expect(result.phase).toBe("STUCK");
     expect(result).toMatchObject({
-      error: expect.stringContaining("EQUIVALENT_REPETITION"),
+      error: expect.stringContaining("OSCILLATION"),
     });
-    expect(generators).toBe(2);
-    expect(evaluators).toBe(2);
+    expect(generators).toBe(3);
+    expect(evaluators).toBe(3);
     const intervention = JSON.parse(
       readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
     );
@@ -1379,16 +1432,22 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       version: 1,
       interventionClass: "IMPLEMENTATION_INTERVENTION",
       phase: "deterministic-qa",
-      reasonCodes: ["EQUIVALENT_REPETITION"],
-      blockerIds: ["QA-REPEAT"],
+      reasonCodes: ["OSCILLATION", "REGRESSION_GROWTH"],
+      blockerIds: ["QA-CYCLE-RENAMED"],
       preservedCandidate: {
         branch: "main",
         recoveryRef: expect.stringContaining("refs/afk/recovery/"),
         recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
       },
     });
-    expect(intervention.attemptedRepairs).toHaveLength(2);
-    expect(intervention.requiredOperatorAction).toContain("QA-REPEAT");
+    expect(intervention.preservedCandidate.recoveryRef).toContain(
+      `-r${intervention.preservedCandidate.revision}-` +
+        intervention.preservedCandidate.treeId,
+    );
+    expect(intervention.attemptedRepairs).toHaveLength(3);
+    expect(intervention.requiredOperatorAction).toContain(
+      "QA-CYCLE-RENAMED",
+    );
     const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
     expect(diagnosis).toContain("intervention.json");
     expect(diagnosis).not.toContain(
