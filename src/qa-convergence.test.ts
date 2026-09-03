@@ -180,8 +180,13 @@ describe("candidate-QA finding lineage", () => {
     const rendered = formatQAGeneratorContext(state, ["gate.json", "test.log"]);
     expect(rendered).toContain("Current deterministic gate failures");
     expect(rendered).toContain("QA-03");
+    expect(rendered).toContain("State: OPEN");
+    expect(rendered).toContain("Unresolved: yes");
+    expect(rendered).toContain("Remedy: SOURCE_CHANGE");
     expect(rendered).toContain("Relevant resolved QA findings");
     expect(rendered).toContain("QA-01");
+    expect(rendered).toContain("State: RESOLVED");
+    expect(rendered).toContain("Unresolved: no");
     expect(rendered).not.toContain("QA-02");
   });
 
