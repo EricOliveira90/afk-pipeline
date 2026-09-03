@@ -559,6 +559,8 @@ export function buildRecoveryIntervention(input: {
   phase: Exclude<ConvergencePhase, "contract">;
   candidate: PreservedCandidate;
   summary: string;
+  blockerIds: readonly string[];
+  attemptedRepairs: InterventionRequest["attemptedRepairs"];
   supportingEvidence?: readonly string[];
 }): InterventionRequest {
   const cause: InterventionCause = {
@@ -571,68 +573,62 @@ export function buildRecoveryIntervention(input: {
     interventionClass: cause.interventionClass,
     phase: input.phase,
     reasonCodes: ["CHECKPOINT_RECOVERY_FAILED"],
-    blockerIds: [],
+    blockerIds: sortedUnique(input.blockerIds),
     summary: input.summary,
     findingLineage: [],
-    attemptedRepairs: [],
+    attemptedRepairs: input.attemptedRepairs.map((attempt) => ({
+      ...attempt,
+      activeBlockingIds: sortedUnique(attempt.activeBlockingIds),
+    })),
     preservedCandidate: input.candidate,
     supportingEvidence: sortedUnique(input.supportingEvidence ?? []),
     requiredOperatorAction: requiredAction(
       cause.interventionClass,
-      [],
+      input.blockerIds,
       input.candidate,
     ),
   };
 }
 
-export function buildPersistedQAExhaustionIntervention(input: {
+function persistedQAInterventionContext(input: {
   phase: Exclude<ConvergencePhase, "contract">;
-  candidate: PreservedCandidate;
   convergence: QAConvergenceState;
   history: NonProgressHistory;
   archivedFindings?: readonly QAReviewAttemptFinding[];
-  supportingEvidence?: readonly string[];
-  summary: string;
-}): InterventionRequest {
+}): {
+  blockerIds: string[];
+  findingLineage: InterventionFinding[];
+  attemptedRepairs: InterventionRequest["attemptedRepairs"];
+  supportingEvidence: string[];
+} {
   const stage =
     input.phase === "deterministic-qa" ? "deterministic" : "shared-preview";
   const entries = Object.values(input.convergence.findings)
     .filter((entry) => entry.stage === stage)
     .sort((left, right) => left.stableId.localeCompare(right.stableId));
-  const activeIds = activeQAIds(entries);
   const archivedFindings = input.archivedFindings ?? [];
-  const blockers = sortedUnique([
-    ...activeIds,
+  const phaseHistory = samePhaseHistory(input.history, input.phase);
+  const blockerIds = sortedUnique([
+    ...activeQAIds(entries),
+    ...entries
+      .filter((entry) => entry.disposition === "REGRESSED")
+      .map((entry) => entry.currentId),
+    ...phaseHistory.flatMap((entry) => [
+      ...entry.activeBlockingIds,
+      ...entry.regressedBlockingIds,
+    ]),
     ...archivedFindings
       .filter((finding) => finding.unresolved && finding.severity === "BLOCKING")
       .map(({ id }) => id),
   ]);
-  const phaseHistory = samePhaseHistory(input.history, input.phase);
-  const attemptedRepairs =
-    phaseHistory.length > 0
-      ? phaseHistory.map((entry) => ({
-          phase: entry.phase,
-          revision: entry.revision,
-          candidateTreeId: entry.candidate.treeId,
-          activeBlockingIds: [...entry.activeBlockingIds],
-        }))
-      : blockers.length > 0
-        ? [
-            {
-              phase: input.phase,
-              revision: Math.max(input.convergence.revision, 1),
-              candidateTreeId: input.candidate.treeId,
-              activeBlockingIds: blockers,
-            },
-          ]
-        : [];
-  const cause: InterventionCause = {
-    kind: "QA_CONVERGENCE",
-    interventionClass: "IMPLEMENTATION_INTERVENTION",
-  };
   const lineageById = new Map(
     entries.map((entry) => [entry.currentId, qaFinding(entry)]),
   );
+  for (const observation of phaseHistory) {
+    for (const finding of observation.findings) {
+      lineageById.set(finding.currentId, finding);
+    }
+  }
   for (const finding of archivedFindings) {
     if (lineageById.has(finding.id)) continue;
     lineageById.set(finding.id, {
@@ -648,6 +644,57 @@ export function buildPersistedQAExhaustionIntervention(input: {
       artifactReferences: [...finding.artifactReferences],
     });
   }
+  return {
+    blockerIds,
+    findingLineage: [...lineageById.values()].sort((left, right) =>
+      left.stableId.localeCompare(right.stableId),
+    ),
+    attemptedRepairs: phaseHistory.map((entry) => ({
+      phase: entry.phase,
+      revision: entry.revision,
+      candidateTreeId: entry.candidate.treeId,
+      activeBlockingIds: [...entry.activeBlockingIds],
+    })),
+    supportingEvidence: sortedUnique([
+      ...entries.flatMap((entry) => entry.artifactReferences),
+      ...archivedFindings.flatMap((finding) => finding.artifactReferences),
+      ...phaseHistory.flatMap((entry) => [
+        ...entry.supportingEvidence,
+        ...entry.findings.flatMap((finding) => finding.artifactReferences),
+      ]),
+    ]),
+  };
+}
+
+export function buildPersistedQAExhaustionIntervention(input: {
+  phase: Exclude<ConvergencePhase, "contract">;
+  candidate: PreservedCandidate;
+  convergence: QAConvergenceState;
+  history: NonProgressHistory;
+  archivedFindings?: readonly QAReviewAttemptFinding[];
+  supportingEvidence?: readonly string[];
+  summary: string;
+}): InterventionRequest {
+  const context = persistedQAInterventionContext(input);
+  const blockers = context.blockerIds;
+  const phaseHistory = samePhaseHistory(input.history, input.phase);
+  const attemptedRepairs =
+    context.attemptedRepairs.length > 0
+      ? context.attemptedRepairs
+      : blockers.length > 0
+        ? [
+            {
+              phase: input.phase,
+              revision: Math.max(input.convergence.revision, 1),
+              candidateTreeId: input.candidate.treeId,
+              activeBlockingIds: blockers,
+            },
+          ]
+        : [];
+  const cause: InterventionCause = {
+    kind: "QA_CONVERGENCE",
+    interventionClass: "IMPLEMENTATION_INTERVENTION",
+  };
   const preservedCandidate =
     phaseHistory.length > 0
       ? bestCandidate(input.history, {
@@ -663,16 +710,12 @@ export function buildPersistedQAExhaustionIntervention(input: {
     reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
     blockerIds: blockers,
     summary: input.summary,
-    findingLineage: [...lineageById.values()].sort((left, right) =>
-      left.stableId.localeCompare(right.stableId),
-    ),
+    findingLineage: context.findingLineage,
     attemptedRepairs,
     preservedCandidate,
     supportingEvidence: sortedUnique([
       ...(input.supportingEvidence ?? []),
-      ...entries.flatMap((entry) => entry.artifactReferences),
-      ...archivedFindings.flatMap((finding) => finding.artifactReferences),
-      ...phaseHistory.flatMap((entry) => entry.supportingEvidence),
+      ...context.supportingEvidence,
     ]),
     requiredOperatorAction: requiredAction(
       cause.interventionClass,
@@ -688,12 +731,22 @@ export function buildDeterministicGateIntervention(input: {
   attemptedRepairs: InterventionRequest["attemptedRepairs"];
   supportingEvidence: readonly string[];
   summary: string;
+  convergence: QAConvergenceState;
+  history: NonProgressHistory;
 }): InterventionRequest {
   const cause: InterventionCause = {
     kind: "DETERMINISTIC_GATE_EXHAUSTION",
     interventionClass: "IMPLEMENTATION_INTERVENTION",
   };
-  const blockerIds = sortedUnique(input.failedGateIds);
+  const context = persistedQAInterventionContext({
+    phase: input.candidate.phase as Exclude<ConvergencePhase, "contract">,
+    convergence: input.convergence,
+    history: input.history,
+  });
+  const blockerIds = sortedUnique([
+    ...input.failedGateIds,
+    ...context.blockerIds,
+  ]);
   return {
     version: 1,
     cause,
@@ -702,13 +755,18 @@ export function buildDeterministicGateIntervention(input: {
     reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
     blockerIds,
     summary: input.summary,
-    findingLineage: [],
-    attemptedRepairs: input.attemptedRepairs.map((attempt) => ({
-      ...attempt,
-      activeBlockingIds: sortedUnique(attempt.activeBlockingIds),
-    })),
+    findingLineage: context.findingLineage,
+    attemptedRepairs: [...context.attemptedRepairs, ...input.attemptedRepairs].map(
+      (attempt) => ({
+        ...attempt,
+        activeBlockingIds: sortedUnique(attempt.activeBlockingIds),
+      }),
+    ),
     preservedCandidate: input.candidate,
-    supportingEvidence: sortedUnique(input.supportingEvidence),
+    supportingEvidence: sortedUnique([
+      ...input.supportingEvidence,
+      ...context.supportingEvidence,
+    ]),
     requiredOperatorAction: requiredAction(
       cause.interventionClass,
       blockerIds,

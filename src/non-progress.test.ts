@@ -193,6 +193,16 @@ describe("non-progress policy", () => {
       phase: "deterministic-qa",
       candidate: observation(1, ["QA-01"]).candidate,
       summary: "The pending deterministic checkpoint failed",
+      blockerIds: ["post-qa-deterministic"],
+      attemptedRepairs: [
+        {
+          phase: "deterministic-qa",
+          revision: 1,
+          candidateTreeId: TREE_A,
+          activeBlockingIds: ["post-qa-deterministic"],
+        },
+      ],
+      supportingEvidence: ["state.json#/stageCheckpoints/01"],
     });
     expect(recovery).toMatchObject({
       cause: {
@@ -200,6 +210,13 @@ describe("non-progress policy", () => {
         interventionClass: "RECOVERY_ACTION",
       },
       interventionClass: "RECOVERY_ACTION",
+      blockerIds: ["post-qa-deterministic"],
+      attemptedRepairs: [
+        expect.objectContaining({
+          activeBlockingIds: ["post-qa-deterministic"],
+        }),
+      ],
+      supportingEvidence: ["state.json#/stageCheckpoints/01"],
     });
 
     const implementation = decideNonProgress(

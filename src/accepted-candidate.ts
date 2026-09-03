@@ -154,6 +154,8 @@ export class AcceptedCandidateLifecycle {
     if (result.ok) return { action: "PASS" };
     const convergence = loadQAConvergenceState(this.target);
     const phase = phaseFor(this.completedStage);
+    const blockerId = "post-qa-deterministic";
+    const revision = Math.max(convergence.revision, 1);
     return {
       action: "INTERVENE",
       request: this.persist(
@@ -163,11 +165,25 @@ export class AcceptedCandidateLifecycle {
             branch: this.target.branch,
             treeId: candidateTreeId,
             phase,
-            revision: Math.max(convergence.revision, 1),
+            revision,
           },
           summary:
             `AFK could not complete the pending deterministic stage for ` +
             `an already accepted candidate: ${result.error}`,
+          blockerIds: [blockerId],
+          attemptedRepairs: [
+            {
+              phase,
+              revision,
+              candidateTreeId,
+              activeBlockingIds: [blockerId],
+            },
+          ],
+          supportingEvidence: [
+            `candidate-tree:${candidateTreeId}`,
+            `pending-stage:${blockerId}`,
+            `pending-stage-error:${result.error}`,
+          ],
         }),
       ),
     };
@@ -235,6 +251,8 @@ export class AcceptedCandidateLifecycle {
       summary:
         `AFK exhausted deterministic base-gate repair capacity with failed ` +
         `gate(s) ${[...new Set(input.failedGateIds)].sort().join(", ")}.`,
+      convergence: loadQAConvergenceState(this.target),
+      history: loadNonProgressHistory(this.target),
     });
     return { action: "INTERVENE", request: this.persist(request) };
   }

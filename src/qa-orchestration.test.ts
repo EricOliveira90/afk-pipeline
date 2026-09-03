@@ -32,6 +32,8 @@ import * as migrationGate from "./migration-gate.js";
 import { loadRunState, saveRunState } from "./run-state.js";
 import { resolveCandidateTreeId } from "./gate-runner.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
+import { saveQAConvergenceState } from "./qa-convergence.js";
+import { saveNonProgressHistory } from "./non-progress.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
@@ -1041,7 +1043,87 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     });
 
     // Reuse the same real-gate fixture to prove the terminal branch too.
-    // No new repository or scenario is needed: only the gate outcome changes.
+    // Seed durable prior QA evidence in that same fixture so gate exhaustion
+    // must merge semantic lineage instead of replacing it with gate-only data.
+    const priorTreeId = resolveCandidateTreeId(repo);
+    const priorArtifact =
+      ".afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-prior.json";
+    const priorReport =
+      "specs/slices/01-prd-070-regression/qa-report-prior.md";
+    saveQAConvergenceState(
+      { repoRoot: repo, prdSlug: "prd-070", ghIssue: "70" },
+      {
+        version: 1,
+        extensionUsed: false,
+        revision: 1,
+        findings: {
+          "deterministic:QA-PRIOR": {
+            stableId: "QA-PRIOR",
+            currentId: "QA-PRIOR",
+            stage: "deterministic",
+            disposition: "REGRESSED",
+            firstSeenRevision: 1,
+            lastSeenRevision: 1,
+            occurrences: 2,
+            candidateTreeId: priorTreeId,
+            finding: {
+              id: "QA-PRIOR",
+              severity: "BLOCKING",
+              behaviorIds: ["B-PRIOR"],
+              summary: "Prior QA behavior regressed",
+              evidence: "The prior semantic assertion failed",
+              expected: "The prior behavior remains fixed",
+              observed: "The prior behavior regressed",
+              clearCondition: "The prior semantic assertion passes",
+              state: "OPEN",
+              remedy: "SOURCE_CHANGE",
+              amendmentPaths: [],
+            },
+            artifactReferences: [priorArtifact, priorReport],
+          },
+        },
+      },
+    );
+    saveNonProgressHistory(
+      { repoRoot: repo, prdSlug: "prd-070", ghIssue: "70" },
+      {
+        version: 1,
+        observations: [
+          {
+            cause: {
+              kind: "QA_CONVERGENCE",
+              interventionClass: "IMPLEMENTATION_INTERVENTION",
+            },
+            phase: "deterministic-qa",
+            revision: 1,
+            candidate: {
+              branch: "main",
+              treeId: priorTreeId,
+              phase: "deterministic-qa",
+              revision: 1,
+            },
+            activeBlockingIds: ["QA-PRIOR"],
+            repeatedBlockingIds: [],
+            reopenedWithoutNewEvidenceIds: [],
+            regressedBlockingIds: ["QA-PRIOR"],
+            findings: [
+              {
+                stableId: "QA-PRIOR",
+                currentId: "QA-PRIOR",
+                state: "OPEN",
+                disposition: "REGRESSED",
+                occurrences: 2,
+                summary: "Prior QA behavior regressed",
+                evidence: "The prior semantic assertion failed",
+                clearCondition: "The prior semantic assertion passes",
+                artifactReferences: [priorArtifact, priorReport],
+              },
+            ],
+            supportingEvidence: ["semantic-evidence:prior-qa"],
+          },
+        ],
+      },
+    );
     exhaustGates = true;
     await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
@@ -1060,8 +1142,19 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         interventionClass: "IMPLEMENTATION_INTERVENTION",
       },
       reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
-      blockerIds: ["tests", "typecheck"],
+      blockerIds: expect.arrayContaining(["QA-PRIOR", "tests", "typecheck"]),
+      findingLineage: expect.arrayContaining([
+        expect.objectContaining({
+          currentId: "QA-PRIOR",
+          disposition: "REGRESSED",
+          artifactReferences: [priorArtifact, priorReport],
+        }),
+      ]),
       attemptedRepairs: expect.arrayContaining([
+        expect.objectContaining({
+          candidateTreeId: priorTreeId,
+          activeBlockingIds: ["QA-PRIOR"],
+        }),
         expect.objectContaining({
           phase: "deterministic-qa",
           activeBlockingIds: ["tests", "typecheck"],
@@ -1071,6 +1164,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         expect.stringMatching(/attempt-[\w]+\.json/),
         expect.stringMatching(/typecheck\.log/),
         expect.stringMatching(/tests\.log/),
+        priorArtifact,
+        priorReport,
+        "semantic-evidence:prior-qa",
       ]),
     });
   });
@@ -1208,16 +1304,27 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
     expect(ctx.logger.getSliceProgress("70")).toEqual(progressBeforeResume);
     expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
-    expect(
-      JSON.parse(
-        readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
-      ),
-    ).toMatchObject({
+    const recovery = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(recovery).toMatchObject({
       cause: {
         kind: "CHECKPOINT_RECOVERY",
         interventionClass: "RECOVERY_ACTION",
       },
       interventionClass: "RECOVERY_ACTION",
+      blockerIds: ["post-qa-deterministic"],
+      attemptedRepairs: [
+        expect.objectContaining({
+          phase: "deterministic-qa",
+          activeBlockingIds: ["post-qa-deterministic"],
+        }),
+      ],
+      supportingEvidence: expect.arrayContaining([
+        expect.stringMatching(/^candidate-tree:[0-9a-f]{40}$/),
+        "pending-stage:post-qa-deterministic",
+        "pending-stage-error:Migration sync check failed: local migrations not applied to remote: 001",
+      ]),
       preservedCandidate: {
         recoveryRef: expect.stringContaining("refs/afk/recovery/"),
         recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),

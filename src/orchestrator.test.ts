@@ -3926,6 +3926,11 @@ describe("round-scoped contract feedback", () => {
     );
   });
 
+  // New spawned scenario, deliberately: the evidence-qualified extension
+  // requires a round-two review that introduces a fresh blocker with a valid
+  // revision citation, followed by a third planner response. Existing
+  // negotiation fixtures either stop at two rounds or reuse an old blocker,
+  // so none can reach this distinct continuation state.
   it("grants the PRD 3 final response when round two first raises fresh cited blockers", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
@@ -4702,6 +4707,10 @@ describe("contract review fails closed", () => {
     });
   });
 
+  // New spawned scenario, deliberately: this state combines provider death
+  // after a partial evaluator artifact, successful retry archival, and a
+  // later valid same-ID reopen. The adjacent archive fixture has no died
+  // attempt, while the convergence fixtures do not preserve retry artifacts.
   it("archives died attempts and routes same-ID reopening to intervention", async () => {
     const repo = makeRepo();
     const slug = "review-archive-attempts";
