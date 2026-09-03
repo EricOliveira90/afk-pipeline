@@ -577,6 +577,8 @@ describe("planner and contract-evaluator context envelopes", () => {
       Buffer.from(evaluatorFirst.prompt),
     );
     expect(evaluatorSecond.evidence).toEqual(evaluatorFirst.evidence);
+    expect(plannerFirst.prompt).not.toContain("\r");
+    expect(evaluatorFirst.prompt).not.toContain("\r");
     expect(plannerFirst.evidence.role).toBe("planner");
     expect(evaluatorFirst.evidence.role).toBe("evaluator-contract");
 

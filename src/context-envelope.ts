@@ -573,13 +573,14 @@ function roleEnvelopeResult(
   allowedByteSize: number,
   roleLabel: string,
 ): RoleEnvelopeResult {
+  const normalizedPrompt = prompt.replace(/\r\n?/g, "\n");
   return {
-    prompt,
+    prompt: normalizedPrompt,
     evidence: {
       role,
       assembledByteSize: assertEnvelopeBudget(
         roleLabel,
-        prompt,
+        normalizedPrompt,
         allowedByteSize,
       ),
       includedArtifactIds,
