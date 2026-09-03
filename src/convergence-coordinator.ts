@@ -5,7 +5,6 @@ import {
   loadContractFindingLineage,
   saveContractFindingLineage,
   validateContractReviewAgainstLineage,
-  type ContractContinuationDecision,
   type ContractFindingLineage,
 } from "./contract-convergence.js";
 import {
@@ -20,8 +19,6 @@ import {
   type ContractReviewFinding,
 } from "./contract-review.js";
 import {
-  buildExecutionIntervention,
-  buildRecoveryIntervention,
   buildSemanticCapIntervention,
   contractNonProgressObservation,
   decideNonProgress,
@@ -41,7 +38,6 @@ import {
   saveQAConvergenceState,
   type QAConvergenceState,
   type QAConvergenceUpdate,
-  type QAFinalRepairDecision,
 } from "./qa-convergence.js";
 import type {
   QAReview,
@@ -59,6 +55,35 @@ export interface ConvergenceLocation {
 export interface ConvergenceArtifacts extends ConvergenceLocation {
   sliceDir: string;
   runSlug: string;
+}
+
+declare const validatedContractReviewBrand: unique symbol;
+
+export interface ValidatedContractReview {
+  readonly review: ContractReview;
+  readonly [validatedContractReviewBrand]: true;
+}
+
+export type ContractRoundDispatch =
+  | { action: "CONTINUE" }
+  | { action: "FINAL_RESPONSE"; findingIds: string[] }
+  | {
+      action: "STOP";
+      reason: string;
+      intervention: InterventionRequest | null;
+    };
+
+export type QAAttemptDispatch =
+  | { action: "CONTINUE" }
+  | { action: "FINAL_REPAIR"; findingIds: string[] }
+  | { action: "STOP"; reason: string }
+  | { action: "INTERVENE"; request: InterventionRequest };
+
+export function validateFreshContractReview(
+  review: ContractReview,
+): ValidatedContractReview {
+  validateRound1ContractReview(review);
+  return { review } as ValidatedContractReview;
 }
 
 function persistIntervention(
@@ -158,13 +183,36 @@ export class ContractRoundLifecycle {
       : "This is the first review round; every finding ID is new.";
   }
 
-  grantFinalResponse(): void {
-    this.lineage = { ...this.lineage, extensionUsed: true };
-    saveContractFindingLineage(this.target, this.lineage);
+  validateAttempt(input: {
+    review: ContractReview;
+    evaluatorRound: number;
+    plannerResponse: ContractResponse | null;
+    revisionArtifacts: ContractRevisionArtifacts | null;
+    attemptLifecyclePrevious: ContractReview | null;
+    fresh?: boolean;
+  }): ValidatedContractReview {
+    validateContractReviewAgainstLineage(this.lineage, input.review);
+    if (
+      input.fresh ||
+      (input.evaluatorRound === 1 && this.lineage.revision === 0)
+    ) {
+      return validateFreshContractReview(input.review);
+    } else if (this.previousReview && input.plannerResponse) {
+      validateRound2ContractReview(
+        this.previousReview,
+        input.plannerResponse,
+        input.review,
+        input.revisionArtifacts ?? undefined,
+        input.attemptLifecyclePrevious ?? this.previousReview,
+      );
+    }
+    return {
+      review: input.review,
+    } as ValidatedContractReview;
   }
 
   recordRound(input: {
-    review: ContractReview;
+    validated: ValidatedContractReview;
     evaluatorRound: number;
     plannerResponse: ContractResponse | null;
     revisionArtifacts: ContractRevisionArtifacts | null;
@@ -179,24 +227,11 @@ export class ContractRoundLifecycle {
   }): {
     metrics: ReturnType<typeof contractReviewGapMetrics>;
     openFindings: readonly ContractReviewFinding[];
-    continuation: ContractContinuationDecision | null;
-    intervention: InterventionRequest | null;
+    dispatch: ContractRoundDispatch;
   } {
+    const review = input.validated.review;
     const before = this.lineage;
-    validateContractReviewAgainstLineage(before, input.review);
-    if (input.evaluatorRound === 1 && before.revision === 0) {
-      validateRound1ContractReview(input.review);
-    } else if (this.previousReview && input.plannerResponse) {
-      validateRound2ContractReview(
-        this.previousReview,
-        input.plannerResponse,
-        input.review,
-        input.revisionArtifacts ?? undefined,
-        input.attemptLifecyclePrevious ?? this.previousReview,
-      );
-    }
-
-    const update = advanceContractFindingLineage(before, input.review);
+    const update = advanceContractFindingLineage(before, review);
     this.lineage = update.lineage;
     saveContractFindingLineage(this.target, this.lineage);
     const observation = contractNonProgressObservation({
@@ -206,7 +241,7 @@ export class ContractRoundLifecycle {
       supportingEvidence: input.supportingEvidence,
     });
     const eligible =
-      input.review.verdict === "REVISE" &&
+      review.verdict === "REVISE" &&
       !input.gateObjection &&
       !input.hasContestedBlocker;
     let history = loadNonProgressHistory(this.target);
@@ -226,7 +261,7 @@ export class ContractRoundLifecycle {
       ? decideContractContinuation({
           before,
           update,
-          review: input.review,
+          review,
           gateObjection: input.gateObjection,
           revisionCitationValidated: input.revisionArtifacts !== null,
         })
@@ -247,13 +282,36 @@ export class ContractRoundLifecycle {
       saveNonProgressHistory(this.target, exhausted.history);
       intervention = persistIntervention(this.target, exhausted.request);
     }
-    const metrics = contractReviewGapMetrics(input.review, this.previousReview);
-    this.previousReview = input.review;
+    let dispatch: ContractRoundDispatch = { action: "CONTINUE" };
+    if (intervention !== null) {
+      dispatch = {
+        action: "STOP",
+        reason: intervention.summary,
+        intervention,
+      };
+    } else if (continuation?.action === "extend") {
+      this.lineage = { ...this.lineage, extensionUsed: true };
+      saveContractFindingLineage(this.target, this.lineage);
+      dispatch = {
+        action: "FINAL_RESPONSE",
+        findingIds: continuation.findingIds,
+      };
+    } else if (input.round === input.semanticRoundLimit) {
+      dispatch = {
+        action: "STOP",
+        reason:
+          continuation?.action === "stop"
+            ? continuation.reason
+            : `contract negotiation reached semantic round ${input.semanticRoundLimit}`,
+        intervention,
+      };
+    }
+    const metrics = contractReviewGapMetrics(review, this.previousReview);
+    this.previousReview = review;
     return {
       metrics,
       openFindings: this.openFindings,
-      continuation,
-      intervention,
+      dispatch,
     };
   }
 }
@@ -333,12 +391,15 @@ export class QAAttemptLifecycle {
     attempt: RecordedQAAttempt;
     candidate: { branch: string; treeId: string };
     supportingEvidence: readonly string[];
-    allowFinalRepair: boolean;
-    semanticCapReached: boolean;
+    position?: {
+      implementationAttempt: number;
+      implementationAttemptLimit: number;
+      round: number;
+      normalRoundLimit: number;
+    };
   }): {
     convergence: QAConvergenceState;
-    finalRepair: QAFinalRepairDecision | null;
-    intervention: InterventionRequest | null;
+    dispatch: QAAttemptDispatch;
   } {
     const observation = qaNonProgressObservation({
       before: input.attempt.before,
@@ -355,8 +416,15 @@ export class QAAttemptLifecycle {
       observation,
     );
     saveNonProgressHistory(this.target, decision.history);
-    let finalRepair: QAFinalRepairDecision | null = null;
-    if (decision.action === "continue" && input.allowFinalRepair) {
+    let finalRepair = null as ReturnType<typeof decideQAFinalRepair> | null;
+    const allowFinalRepair =
+      input.position !== undefined &&
+      input.position.round === input.position.normalRoundLimit;
+    const semanticCapReached =
+      input.position !== undefined &&
+      input.position.implementationAttempt ===
+        input.position.implementationAttemptLimit;
+    if (decision.action === "continue" && allowFinalRepair) {
       finalRepair = decideQAFinalRepair({
         before: input.attempt.before,
         update: input.attempt.update,
@@ -372,11 +440,13 @@ export class QAAttemptLifecycle {
     if (decision.action === "intervene") {
       return {
         convergence: this.state,
-        finalRepair,
-        intervention: persistIntervention(this.target, decision.request),
+        dispatch: {
+          action: "INTERVENE",
+          request: persistIntervention(this.target, decision.request),
+        },
       };
     }
-    if (input.semanticCapReached && finalRepair?.action !== "extend") {
+    if (semanticCapReached && finalRepair?.action !== "extend") {
       const exhausted = buildSemanticCapIntervention(
         {
           ...decision.history,
@@ -387,70 +457,20 @@ export class QAAttemptLifecycle {
       saveNonProgressHistory(this.target, exhausted.history);
       return {
         convergence: this.state,
-        finalRepair,
-        intervention: persistIntervention(this.target, exhausted.request),
+        dispatch: {
+          action: "INTERVENE",
+          request: persistIntervention(this.target, exhausted.request),
+        },
       };
     }
     return {
       convergence: this.state,
-      finalRepair,
-      intervention: null,
+      dispatch:
+        finalRepair?.action === "extend"
+          ? { action: "FINAL_REPAIR", findingIds: finalRepair.findingIds }
+          : finalRepair?.action === "stop"
+            ? { action: "STOP", reason: finalRepair.reason }
+            : { action: "CONTINUE" },
     };
   }
-}
-
-export function recordRecoveryIntervention(
-  target: ConvergenceArtifacts,
-  input: {
-    phase: "deterministic-qa" | "shared-preview-uat";
-    branch: string;
-    treeId: string;
-    revision: number;
-    summary: string;
-    supportingEvidence?: readonly string[];
-  },
-): InterventionRequest {
-  return persistIntervention(
-    target,
-    buildRecoveryIntervention({
-      phase: input.phase,
-      candidate: {
-        branch: input.branch,
-        treeId: input.treeId,
-        phase: input.phase,
-        revision: input.revision,
-      },
-      summary: input.summary,
-      supportingEvidence: input.supportingEvidence,
-    }),
-  );
-}
-
-export function recordExecutionIntervention(
-  target: ConvergenceArtifacts,
-  input: {
-    phase: "deterministic-qa" | "shared-preview-uat";
-    branch: string;
-    treeId: string;
-    revision: number;
-    summary: string;
-    blockerIds?: readonly string[];
-    supportingEvidence?: readonly string[];
-  },
-): InterventionRequest {
-  return persistIntervention(
-    target,
-    buildExecutionIntervention({
-      phase: input.phase,
-      candidate: {
-        branch: input.branch,
-        treeId: input.treeId,
-        phase: input.phase,
-        revision: input.revision,
-      },
-      summary: input.summary,
-      blockerIds: input.blockerIds,
-      supportingEvidence: input.supportingEvidence,
-    }),
-  );
 }

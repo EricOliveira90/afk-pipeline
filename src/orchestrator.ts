@@ -48,7 +48,6 @@ import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 import {
   computeSliceBounds,
   formatSliceBounds,
-  implementationRoundsRemaining,
 } from "./bounds.js";
 import {
   DEFAULT_MIN_FREE_DISK_GB,
@@ -97,13 +96,6 @@ import {
   recordRetryDecision,
   type RunState,
 } from "./run-state.js";
-import {
-  clearExactStageCheckpoint,
-  inspectExactStageCheckpoint,
-  recordExactStageCheckpoint,
-  runPendingDeterministicStage,
-  type CompletedCandidateStage,
-} from "./exact-stage-resume.js";
 import {
   resolveRunScope,
   type ResolvedRunScope,
@@ -163,8 +155,6 @@ import {
   type ContractReviewAttemptRecord,
   type ContractReviewFinding,
   type RecordedContractVerdict,
-  validateRound1ContractReview,
-  validateRound2ContractReview,
 } from "./contract-review.js";
 import {
   ADJUDICATION_DECISIONS_FILENAME,
@@ -196,10 +186,8 @@ import {
 } from "./qa-review.js";
 import {
   formatQAGeneratorContext,
-  hasPendingQAFinalRepair,
   loadQAConvergenceState,
   type QAConvergenceState,
-  type QAFinalRepairDecision,
 } from "./qa-convergence.js";
 import {
   INTERVENTION_FILENAME,
@@ -208,10 +196,12 @@ import {
 import {
   ContractRoundLifecycle,
   QAAttemptLifecycle,
-  recordExecutionIntervention,
-  recordRecoveryIntervention,
+  validateFreshContractReview,
+  type QAAttemptDispatch,
   type RecordedQAAttempt,
+  type ValidatedContractReview,
 } from "./convergence-coordinator.js";
+import { AcceptedCandidateLifecycle } from "./accepted-candidate.js";
 import {
   applyScopeAmendment,
   buildScopeAmendmentRecord,
@@ -1071,11 +1061,8 @@ function archiveContractReviewAttempt(
   archiveDir: string,
   round: number,
   attempt: number,
-  previousReview: ContractReview | null,
+  validated: ValidatedContractReview | null,
   plannerResponse: ContractResponse | null,
-  revisions: ContractRevisionArtifacts | null,
-  lifecyclePrevious: ContractReview | null = previousReview,
-  validateAsFresh = false,
 ): { record: ContractReviewAttemptRecord; review: ContractReview } | null {
   try {
     const archived = artifacts.archiveContractReviewAttempt({
@@ -1105,23 +1092,8 @@ function archiveContractReviewAttempt(
     );
   }
 
-  let review: ContractReview;
-  try {
-    review = loadContractReview(ctx.absSliceDir);
-    if (round === 1 || validateAsFresh) {
-      validateRound1ContractReview(review);
-    } else if (previousReview && plannerResponse) {
-      validateRound2ContractReview(
-        previousReview,
-        plannerResponse,
-        review,
-        revisions ?? undefined,
-        lifecyclePrevious ?? previousReview,
-      );
-    }
-  } catch {
-    return null;
-  }
+  if (validated === null) return null;
+  const review = validated.review;
 
   const record = buildContractReviewAttemptRecord(
     round,
@@ -1401,19 +1373,16 @@ async function reviseAcceptedContract(
     maxDurationMs: config.maxAgentDurationMs,
   }).finally(() => closeAgentLog(evaluatorLog));
 
+  const review = loadContractReview(ctx.absSliceDir);
+  const validated = validateFreshContractReview(review);
   archiveContractReviewAttempt(
     ctx,
     reviewArchiveDir,
     revisionRound,
     1,
+    validated,
     null,
-    null,
-    revisions,
-    null,
-    true,
   );
-  const review = loadContractReview(ctx.absSliceDir);
-  validateRound1ContractReview(review);
   logger.event({
     type: "phase-ended",
     ghIssue: slice.ghIssue,
@@ -3200,6 +3169,7 @@ async function negotiateAttempt(
         );
         const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
         let latestValidAttemptReview: ContractReview | null = null;
+        let latestValidatedReview: ValidatedContractReview | null = null;
         let attemptLifecyclePrevious: ContractReview | null = null;
         await invokeAgent(
           {
@@ -3241,17 +3211,30 @@ async function negotiateAttempt(
             rmSync(reviewPath, { force: true });
           },
           (attempt) => {
+            let validated: ValidatedContractReview | null = null;
+            try {
+              validated = contractLifecycle.validateAttempt({
+                review: loadContractReview(ctx.absSliceDir),
+                evaluatorRound,
+                plannerResponse,
+                revisionArtifacts,
+                attemptLifecyclePrevious:
+                  attemptLifecyclePrevious ?? previousReview,
+              });
+            } catch {
+              // The invocation retry policy decides whether another attempt
+              // may replace this malformed artifact.
+            }
             const archived = archiveContractReviewAttempt(
               ctx,
               reviewArchiveDir,
               evaluatorRound,
               attempt,
-              previousReview,
+              validated,
               plannerResponse,
-              revisionArtifacts,
-              attemptLifecyclePrevious ?? previousReview,
             );
             if (archived) {
+              latestValidatedReview = validated;
               latestValidAttemptReview = archived.review;
               lastReviewAttemptRecord = archived.record;
             }
@@ -3261,9 +3244,12 @@ async function negotiateAttempt(
         lastRound = round;
         lastFeedbackPath = feedbackPath;
 
-        let review: ContractReview;
+        let validatedReview: ValidatedContractReview;
         try {
-          review = loadContractReview(ctx.absSliceDir);
+          if (latestValidatedReview === null) {
+            throw new Error("contract review did not pass lifecycle validation");
+          }
+          validatedReview = latestValidatedReview;
         } catch (error) {
           // The evaluator finished but said nothing the orchestrator can
           // act on. There is no default verdict and no extra round: a
@@ -3283,6 +3269,7 @@ async function negotiateAttempt(
           logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
           return { phase: "ERROR", cause };
         }
+        const review = validatedReview.review;
 
         const verdict = review.verdict;
         lastVerdict = verdict;
@@ -3329,25 +3316,25 @@ async function negotiateAttempt(
         let coordinated: ReturnType<ContractRoundLifecycle["recordRound"]>;
         try {
           coordinated = contractLifecycle.recordRound({
-          review,
-          evaluatorRound,
-          plannerResponse,
-          revisionArtifacts,
-          attemptLifecyclePrevious,
-          candidate: {
-            branch: ctx.branch,
-            treeId: resolveCandidateTreeId(ctx.worktreeDir),
-          },
-          supportingEvidence: [
-            relative(config.repoRoot, feedbackPath).replace(/\\/g, "/"),
-            relative(config.repoRoot, reviewArchiveDir).replace(/\\/g, "/"),
-          ],
-          round,
-          normalRoundLimit: allowedContractRounds,
-          semanticRoundLimit: contractRoundLimit,
-          gateObjection: gateObjection !== null,
-          hasContestedBlocker,
-        });
+            validated: validatedReview,
+            evaluatorRound,
+            plannerResponse,
+            revisionArtifacts,
+            attemptLifecyclePrevious,
+            candidate: {
+              branch: ctx.branch,
+              treeId: resolveCandidateTreeId(ctx.worktreeDir),
+            },
+            supportingEvidence: [
+              relative(config.repoRoot, feedbackPath).replace(/\\/g, "/"),
+              relative(config.repoRoot, reviewArchiveDir).replace(/\\/g, "/"),
+            ],
+            round,
+            normalRoundLimit: allowedContractRounds,
+            semanticRoundLimit: contractRoundLimit,
+            gateObjection: gateObjection !== null,
+            hasContestedBlocker,
+          });
         } catch (error) {
           const defect = error instanceof Error ? error.message : String(error);
           const cause = reviewArtifactCause(defect);
@@ -3384,8 +3371,12 @@ async function negotiateAttempt(
           contractStatus = "LOCKED";
           break;
         }
-        if (coordinated.intervention && round < contractRoundLimit) {
-          const request = coordinated.intervention;
+        if (
+          coordinated.dispatch.action === "STOP" &&
+          coordinated.dispatch.intervention &&
+          round < contractRoundLimit
+        ) {
+          const request = coordinated.dispatch.intervention;
           const interventionPath =
             `${ctx.relSliceDir}/${INTERVENTION_FILENAME}`;
           capDecisions.push(request.summary);
@@ -3415,32 +3406,33 @@ async function negotiateAttempt(
         }
 
         if (round === contractRoundLimit) {
-          if (round === allowedContractRounds) {
-            const continuation = coordinated.continuation!;
-            if (continuation.action === "extend") {
-              contractLifecycle.grantFinalResponse();
-              contractRoundLimit = allowedContractRounds + 1;
-              capDecisions.push(
-                `Granted one final contract response for fresh blocking ` +
-                  `finding(s) ${continuation.findingIds.join(", ")}.`,
-              );
-              logger.phase(
-                `${ctx.tag}: granting final contract response for fresh ` +
-                  `blocking finding(s) ${continuation.findingIds.join(", ")}`,
-                "error",
-              );
-              previousReview = review;
-              continue;
-            }
+          if (coordinated.dispatch.action === "FINAL_RESPONSE") {
+            contractRoundLimit = allowedContractRounds + 1;
             capDecisions.push(
-              `No final contract response granted: ${continuation.reason}.`,
+              `Granted one final contract response for fresh blocking ` +
+                `finding(s) ${coordinated.dispatch.findingIds.join(", ")}.`,
+            );
+            logger.phase(
+              `${ctx.tag}: granting final contract response for fresh ` +
+                `blocking finding(s) ${coordinated.dispatch.findingIds.join(", ")}`,
+              "error",
+            );
+            previousReview = review;
+            continue;
+          }
+          if (coordinated.dispatch.action === "STOP") {
+            capDecisions.push(
+              `No final contract response granted: ${coordinated.dispatch.reason}.`,
             );
           }
-          if (coordinated.intervention) {
-            capIntervention = coordinated.intervention;
-            capDecisions.push(coordinated.intervention.summary);
+          if (
+            coordinated.dispatch.action === "STOP" &&
+            coordinated.dispatch.intervention
+          ) {
+            capIntervention = coordinated.dispatch.intervention;
+            capDecisions.push(coordinated.dispatch.intervention.summary);
             capDecisions.push(
-              `Operator action: ${coordinated.intervention.requiredOperatorAction}`,
+              `Operator action: ${coordinated.dispatch.intervention.requiredOperatorAction}`,
             );
           }
           const reason = gateObjection
@@ -3554,8 +3546,7 @@ export type QAStageResult =
       history: readonly QAReviewLifecycleFinding[];
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
-      finalRepair: null;
-      intervention: null;
+      dispatch: { action: "CONTINUE" };
     }
   | {
       outcome: "IMPLEMENTATION";
@@ -3563,8 +3554,7 @@ export type QAStageResult =
       history: readonly QAReviewLifecycleFinding[];
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
-      finalRepair: QAFinalRepairDecision | null;
-      intervention: InterventionRequest | null;
+      dispatch: QAAttemptDispatch;
     };
 
 /**
@@ -3618,8 +3608,12 @@ export async function runQAStage(
   baseGate: QABaseGateEvidence | null = null,
   options: {
     candidateTreeId?: string;
-    allowFinalRepair?: boolean;
-    semanticCapReached?: boolean;
+    position?: {
+      implementationAttempt: number;
+      implementationAttemptLimit: number;
+      round: number;
+      normalRoundLimit: number;
+    };
   } = {},
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke, featBranch } = ctx;
@@ -4193,8 +4187,7 @@ export async function runQAStage(
         history: nextHistory,
         unresolved,
         convergence: convergenceState,
-        finalRepair: null,
-        intervention: null,
+        dispatch: { action: "CONTINUE" },
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
@@ -4227,10 +4220,9 @@ export async function runQAStage(
           (finding) => finding.artifactReferences,
         ),
       ],
-      allowFinalRepair:
-        options.allowFinalRepair === true &&
-        options.candidateTreeId !== undefined,
-      semanticCapReached: options.semanticCapReached === true,
+      ...(options.candidateTreeId !== undefined && options.position
+        ? { position: options.position }
+        : {}),
     });
     convergenceState = coordinated.convergence;
     return {
@@ -4239,8 +4231,7 @@ export async function runQAStage(
       history: nextHistory,
       unresolved,
       convergence: convergenceState,
-      finalRepair: coordinated.finalRepair,
-      intervention: coordinated.intervention,
+      dispatch: coordinated.dispatch,
     };
   }
 
@@ -4382,45 +4373,21 @@ export async function runSliceExecute(
     ),
   };
   let qaConvergence = loadQAConvergenceState(exactStageLocation);
-  const completedCandidateStage: CompletedCandidateStage =
-    config.sharedPreview ? "shared-preview-uat" : "deterministic-qa";
-  /**
-   * The deterministic work that remains after candidate evaluation accepts
-   * the exact tree. Keeping it in one function lets a live run and an
-   * exact-stage restart execute the same pending stage.
-   *
-   * The checkpoint is cleared only after the stage returns a result. A hard
-   * interruption or thrown process failure leaves it durable for restart.
-   */
-  const finalizeAcceptedCandidate = (): Extract<
-    TerminalOutcome,
-    { phase: "PASS" | "STUCK" }
-  > => {
-    const result = runPendingDeterministicStage({
-      ...exactStageLocation,
-      worktreeDir: ctx.worktreeDir,
-      featureBranch: featBranch,
-      sharedPreview: config.sharedPreview !== undefined,
-      ...(config.migrationValidation !== undefined
-        ? { migrationValidation: config.migrationValidation }
-        : {}),
-    });
-    if (!result.ok) {
-      const phase =
-        completedCandidateStage === "deterministic-qa"
-          ? "deterministic-qa"
-          : "shared-preview-uat";
-      return finishIntervention(
-        recordRecoveryIntervention(convergenceTarget, {
-          phase,
-          branch: ctx.branch,
-          treeId: resolveCandidateTreeId(ctx.worktreeDir),
-          revision: Math.max(qaConvergence.revision, 1),
-          summary:
-            `AFK could not complete the pending deterministic stage for ` +
-            `an already accepted candidate: ${result.error}`,
-        }),
-      );
+  const candidateLifecycle = new AcceptedCandidateLifecycle({
+    ...convergenceTarget,
+    worktreeDir: ctx.worktreeDir,
+    featureBranch: featBranch,
+    branch: ctx.branch,
+    sharedPreview: config.sharedPreview !== undefined,
+    ...(config.migrationValidation !== undefined
+      ? { migrationValidation: config.migrationValidation }
+      : {}),
+  });
+  const dispatchAcceptedCandidate = (
+    dispatch: ReturnType<AcceptedCandidateLifecycle["finalize"]>,
+  ): Extract<TerminalOutcome, { phase: "PASS" | "STUCK" }> => {
+    if (dispatch.action === "INTERVENE") {
+      return finishIntervention(dispatch.request);
     }
     logger.phase(
       `${ctx.tag}: candidate evaluation and pending deterministic stage pass — committed`,
@@ -4436,29 +4403,28 @@ export async function runSliceExecute(
       } catch {
         // The checkpoint decision reports the fail-closed reason below.
       }
-      const exactStage = inspectExactStageCheckpoint({
-        ...exactStageLocation,
+      const exactStage = candidateLifecycle.inspectResume(
         currentCandidateTreeId,
-        expectedCompletedStage: completedCandidateStage,
-        maximumRound: MAX_GENERATOR_ROUNDS + 1,
-      });
-      if (exactStage.action === "resume") {
+        MAX_GENERATOR_ROUNDS + 1,
+      );
+      if (exactStage.action === "FINALIZE") {
         logger.phase(
           `${ctx.tag}: exact-stage resume — ${exactStage.checkpoint.completedStage} ` +
             `completed on tree ${exactStage.checkpoint.candidateTreeId}; running ` +
             `${exactStage.checkpoint.nextPendingStage} before any agent dispatch`,
           "error",
         );
-        return finalizeAcceptedCandidate();
+        return dispatchAcceptedCandidate(
+          candidateLifecycle.finalize(exactStage.checkpoint.candidateTreeId),
+        );
       }
       logger.phase(
         `${ctx.tag}: exact-stage resume unavailable — ${exactStage.reason}; ` +
           `candidate preserved, falling back to normal re-evaluation`,
         "error",
       );
-      clearExactStageCheckpoint(exactStageLocation);
     } else {
-      clearExactStageCheckpoint(exactStageLocation);
+      candidateLifecycle.resetCheckpoint();
     }
 
     if (ctx.resume) {
@@ -4489,23 +4455,14 @@ export async function runSliceExecute(
     //
     // Shared with the dispatch bounds line so the number the operator
     // was told at dispatch is the number this loop runs on.
-    let implementationAttemptLimit = implementationRoundsRemaining({
-      limit: MAX_GENERATOR_ROUNDS,
-      spent: firstRound - 1,
-      resumeMode: ctx.resume?.mode,
+    const attemptPlan = candidateLifecycle.planImplementationAttempts({
+      firstRound,
+      normalRoundLimit: MAX_GENERATOR_ROUNDS,
+      ...(ctx.resume?.mode ? { resumeMode: ctx.resume.mode } : {}),
     });
-    if (
-      ctx.resume?.mode !== "stuck" &&
-      implementationAttemptLimit === 0 &&
-      hasPendingQAFinalRepair({
-        state: qaConvergence,
-        nextRound: firstRound,
-        normalRoundLimit: MAX_GENERATOR_ROUNDS,
-      })
-    ) {
-      implementationAttemptLimit = 1;
-    }
-    let finalRound = firstRound + implementationAttemptLimit - 1;
+    let implementationAttemptLimit = attemptPlan.attemptLimit;
+    let finalRound = attemptPlan.finalRound;
+    const implementationCandidateTreeIds: string[] = [];
 
     for (
       let implementationAttempt = 1;
@@ -4806,6 +4763,7 @@ export async function runSliceExecute(
         : createCandidateCheckpoint(ctx.worktreeDir, checkpointDir, {
             materialize: false,
           });
+      implementationCandidateTreeIds.push(checkpoint.treeId);
       const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
       const infrastructureRetries =
@@ -4953,6 +4911,16 @@ export async function runSliceExecute(
             repairStage ?? undefined,
           );
         if (implementationAttempt < implementationAttemptLimit) continue;
+        logger.bumpEvalRound(slice.ghIssue, round);
+        return finishIntervention(
+          candidateLifecycle.exhaustDeterministicGates({
+            candidateTreeId: checkpoint.treeId,
+            revision: Math.max(qaConvergence.revision, round),
+            failedGateIds: requiredFailures.map(({ result }) => result.gateId),
+            attemptTreeIds: implementationCandidateTreeIds,
+            supportingEvidence: baseGateRepairReferences,
+          }).request,
+        );
       } else {
         assertGateEvidenceReleasesEvaluation(
           gateEvidence,
@@ -4992,9 +4960,12 @@ export async function runSliceExecute(
           qaBaseGate,
           {
             candidateTreeId: checkpoint.treeId,
-            allowFinalRepair: round === MAX_GENERATOR_ROUNDS,
-            semanticCapReached:
-              implementationAttempt === implementationAttemptLimit,
+            position: {
+              implementationAttempt,
+              implementationAttemptLimit,
+              round,
+              normalRoundLimit: MAX_GENERATOR_ROUNDS,
+            },
           },
         );
         deterministicHistory = deterministic.history;
@@ -5011,11 +4982,11 @@ export async function runSliceExecute(
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
-        if (deterministic.intervention) {
+        if (deterministic.dispatch.action === "INTERVENE") {
           logger.bumpEvalRound(slice.ghIssue, round);
-          return finishIntervention(deterministic.intervention);
+          return finishIntervention(deterministic.dispatch.request);
         }
-        let finalRepair = deterministic.finalRepair;
+        let qaDispatch = deterministic.dispatch;
         if (implementationFailed) {
           repairStage = "deterministic";
           retryNote =
@@ -5051,9 +5022,12 @@ export async function runSliceExecute(
             null,
             {
               candidateTreeId: checkpoint.treeId,
-              allowFinalRepair: round === MAX_GENERATOR_ROUNDS,
-              semanticCapReached:
-                implementationAttempt === implementationAttemptLimit,
+              position: {
+                implementationAttempt,
+                implementationAttemptLimit,
+                round,
+                normalRoundLimit: MAX_GENERATOR_ROUNDS,
+              },
             },
           );
           sharedPreviewHistory = remote.history;
@@ -5068,14 +5042,14 @@ export async function runSliceExecute(
             verdict: remote.outcome,
           });
           stuckReferences.push(remote.report);
-          if (remote.intervention) {
+          if (remote.dispatch.action === "INTERVENE") {
             logger.bumpEvalRound(slice.ghIssue, round);
-            return finishIntervention(remote.intervention);
+            return finishIntervention(remote.dispatch.request);
           }
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
             repairStage = "shared-preview";
-            finalRepair = remote.finalRepair;
+            qaDispatch = remote.dispatch;
             retryNote =
               `This is implementation round ${round + 1}. Repair the current ` +
               `QA findings while preserving relevant resolved behavior:\n` +
@@ -5104,66 +5078,65 @@ export async function runSliceExecute(
               `feat(#${slice.ghIssue}): ${slice.title}`,
             );
           }
-          recordExactStageCheckpoint(exactStageLocation, {
-            version: 1,
-            completedStage: completedCandidateStage,
-            candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
-            nextPendingStage: "post-qa-deterministic",
+          return dispatchAcceptedCandidate(candidateLifecycle.accept({
             round,
-          });
-          return finalizeAcceptedCandidate();
+            candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
+          }));
         }
-        if (finalRepair?.action === "extend") {
+        if (qaDispatch.action === "FINAL_REPAIR") {
           implementationAttemptLimit++;
           finalRound++;
           logger.phase(
             `${ctx.tag}: granting one final candidate-QA repair for fresh ` +
-              `blocking finding(s) ${finalRepair.findingIds.join(", ")}`,
+              `blocking finding(s) ${qaDispatch.findingIds.join(", ")}`,
             "error",
           );
         } else if (
           implementationFailed &&
           round === MAX_GENERATOR_ROUNDS &&
-          finalRepair?.action === "stop"
+          qaDispatch.action === "STOP"
         ) {
           logger.phase(
             `${ctx.tag}: no final candidate-QA repair granted — ` +
-              finalRepair.reason,
+              qaDispatch.reason,
             "error",
           );
         }
       }
 
       if (implementationAttempt === implementationAttemptLimit) {
+        const phase =
+          repairStage === "shared-preview"
+            ? "shared-preview-uat"
+            : "deterministic-qa";
+        const archivedUnresolved =
+          repairStage === "shared-preview"
+            ? sharedPreviewUnresolved
+            : deterministicUnresolved;
         return finishIntervention(
-          recordExecutionIntervention(convergenceTarget, {
-            phase:
-              repairStage === "shared-preview"
-                ? "shared-preview-uat"
-                : "deterministic-qa",
-            branch: ctx.branch,
-            treeId: resolveCandidateTreeId(ctx.worktreeDir),
-            revision: Math.max(qaConvergence.revision, round),
-            summary:
-              `AFK exhausted ${implementationAttemptLimit} implementation ` +
-              `attempt(s) without an accepted candidate.`,
+          candidateLifecycle.exhaustImplementation({
+            phase,
+            candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
+            firstRound,
+            attemptLimit: implementationAttemptLimit,
+            archivedUnresolved,
             supportingEvidence: stuckReferences,
-          }),
+          }).request,
         );
       }
     }
     return finishIntervention(
-      recordExecutionIntervention(convergenceTarget, {
+      candidateLifecycle.exhaustImplementation({
         phase:
           repairStage === "shared-preview"
             ? "shared-preview-uat"
             : "deterministic-qa",
-        branch: ctx.branch,
-        treeId: resolveCandidateTreeId(ctx.worktreeDir),
-        revision: Math.max(qaConvergence.revision, firstRound),
-        summary: "AFK reached the implementation cap without a QA result.",
+        candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
+        firstRound,
+        attemptLimit: implementationAttemptLimit,
+        archivedUnresolved: resumedUnresolved,
         supportingEvidence: stuckReferences,
-      }),
+      }).request,
     );
   } catch (err) {
     if (isCancelled(err, signal)) {

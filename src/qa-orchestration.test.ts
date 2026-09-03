@@ -562,7 +562,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
       error: expect.stringContaining(
-        "AFK reached the implementation cap without a QA result",
+        "AFK exhausted 0 implementation attempt(s) without an accepted candidate",
       ),
     });
     expect(roles).toEqual(rolesAfterExhaustion);
@@ -573,21 +573,35 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         "falling back to normal re-evaluation",
     );
     expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
-    expect(
-      JSON.parse(
-        readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
-      ),
-    ).toMatchObject({
+    const exhausted = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(exhausted).toMatchObject({
       cause: {
         kind: "QA_CONVERGENCE",
         interventionClass: "IMPLEMENTATION_INTERVENTION",
       },
       reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+      blockerIds: expect.arrayContaining(["QA-BETA"]),
+      findingLineage: expect.arrayContaining([
+        expect.objectContaining({
+          currentId: "QA-BETA",
+          artifactReferences: expect.any(Array),
+        }),
+      ]),
+      attemptedRepairs: expect.arrayContaining([
+        expect.objectContaining({
+          phase: "deterministic-qa",
+          activeBlockingIds: expect.arrayContaining(["QA-BETA"]),
+        }),
+      ]),
+      supportingEvidence: expect.any(Array),
       preservedCandidate: {
         recoveryRef: expect.stringContaining("refs/afk/recovery/"),
         recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
       },
     });
+    expect(exhausted.supportingEvidence.length).toBeGreaterThan(0);
     expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toContain(
       "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
     );
@@ -883,7 +897,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
   });
 
-  it("blocks evaluation until every required checkpoint gate passes", async () => {
+  it("blocks evaluation and emits typed evidence when required checkpoint gates exhaust", async () => {
     const repo = makeRepo();
     const gateScript =
       "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
@@ -901,6 +915,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     let generators = 0;
     let evaluators = 0;
     let artifactDir = "";
+    let exhaustGates = false;
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
@@ -911,7 +926,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           generatorPrompts.push(options.prompt);
           writeFileSync(
             join(repo, "gate-state.txt"),
-            generators === 1 ? "fail" : "pass",
+            exhaustGates || generators === 1 ? "fail" : "pass",
             "utf-8",
           );
         } else if (options.role === "evaluator-qa") {
@@ -1023,6 +1038,40 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       attemptId: passingAttempt.attemptId,
       treeId: passingAttempt.treeId,
       gateIds: ["typecheck", "tests"],
+    });
+
+    // Reuse the same real-gate fixture to prove the terminal branch too.
+    // No new repository or scenario is needed: only the gate outcome changes.
+    exhaustGates = true;
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
+      phase: "STUCK",
+      error: expect.stringContaining(
+        "AFK exhausted deterministic base-gate repair capacity",
+      ),
+    });
+    expect(generators).toBe(5);
+    expect(evaluators).toBe(1);
+    const intervention = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(intervention).toMatchObject({
+      cause: {
+        kind: "DETERMINISTIC_GATE_EXHAUSTION",
+        interventionClass: "IMPLEMENTATION_INTERVENTION",
+      },
+      reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
+      blockerIds: ["tests", "typecheck"],
+      attemptedRepairs: expect.arrayContaining([
+        expect.objectContaining({
+          phase: "deterministic-qa",
+          activeBlockingIds: ["tests", "typecheck"],
+        }),
+      ]),
+      supportingEvidence: expect.arrayContaining([
+        expect.stringMatching(/attempt-[\w]+\.json/),
+        expect.stringMatching(/typecheck\.log/),
+        expect.stringMatching(/tests\.log/),
+      ]),
     });
   });
 

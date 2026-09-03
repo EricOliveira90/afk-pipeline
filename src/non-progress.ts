@@ -10,6 +10,7 @@ import type {
   QAConvergenceUpdate,
   QAFindingLineageEntry,
 } from "./qa-convergence.js";
+import type { QAReviewAttemptFinding } from "./qa-review.js";
 import {
   loadRunState,
   saveRunState,
@@ -41,6 +42,10 @@ export type InterventionCause =
   | {
       kind: "QA_CONVERGENCE";
       interventionClass: "IMPLEMENTATION_INTERVENTION";
+    }
+  | {
+      kind: "DETERMINISTIC_GATE_EXHAUSTION";
+      interventionClass: "IMPLEMENTATION_INTERVENTION";
     };
 
 export type NonProgressReason =
@@ -49,6 +54,7 @@ export type NonProgressReason =
   | "OSCILLATION"
   | "REGRESSION_GROWTH"
   | "SEMANTIC_CAP_EXHAUSTED"
+  | "DETERMINISTIC_GATE_EXHAUSTED"
   | "CHECKPOINT_RECOVERY_FAILED";
 
 export interface PreservedCandidate {
@@ -579,30 +585,130 @@ export function buildRecoveryIntervention(input: {
   };
 }
 
-export function buildExecutionIntervention(input: {
+export function buildPersistedQAExhaustionIntervention(input: {
   phase: Exclude<ConvergencePhase, "contract">;
   candidate: PreservedCandidate;
-  summary: string;
-  blockerIds?: readonly string[];
+  convergence: QAConvergenceState;
+  history: NonProgressHistory;
+  archivedFindings?: readonly QAReviewAttemptFinding[];
   supportingEvidence?: readonly string[];
+  summary: string;
 }): InterventionRequest {
+  const stage =
+    input.phase === "deterministic-qa" ? "deterministic" : "shared-preview";
+  const entries = Object.values(input.convergence.findings)
+    .filter((entry) => entry.stage === stage)
+    .sort((left, right) => left.stableId.localeCompare(right.stableId));
+  const activeIds = activeQAIds(entries);
+  const archivedFindings = input.archivedFindings ?? [];
+  const blockers = sortedUnique([
+    ...activeIds,
+    ...archivedFindings
+      .filter((finding) => finding.unresolved && finding.severity === "BLOCKING")
+      .map(({ id }) => id),
+  ]);
+  const phaseHistory = samePhaseHistory(input.history, input.phase);
+  const attemptedRepairs =
+    phaseHistory.length > 0
+      ? phaseHistory.map((entry) => ({
+          phase: entry.phase,
+          revision: entry.revision,
+          candidateTreeId: entry.candidate.treeId,
+          activeBlockingIds: [...entry.activeBlockingIds],
+        }))
+      : blockers.length > 0
+        ? [
+            {
+              phase: input.phase,
+              revision: Math.max(input.convergence.revision, 1),
+              candidateTreeId: input.candidate.treeId,
+              activeBlockingIds: blockers,
+            },
+          ]
+        : [];
   const cause: InterventionCause = {
     kind: "QA_CONVERGENCE",
     interventionClass: "IMPLEMENTATION_INTERVENTION",
   };
-  const blockerIds = sortedUnique(input.blockerIds ?? []);
+  const lineageById = new Map(
+    entries.map((entry) => [entry.currentId, qaFinding(entry)]),
+  );
+  for (const finding of archivedFindings) {
+    if (lineageById.has(finding.id)) continue;
+    lineageById.set(finding.id, {
+      stableId: finding.id,
+      currentId: finding.id,
+      state: finding.state,
+      disposition: finding.state,
+      occurrences: 1,
+      summary: finding.summary,
+      evidence:
+        finding.artifactReferences.join(", ") || "archived QA attempt evidence",
+      clearCondition: finding.clearCondition,
+      artifactReferences: [...finding.artifactReferences],
+    });
+  }
+  const preservedCandidate =
+    phaseHistory.length > 0
+      ? bestCandidate(input.history, {
+          ...phaseHistory.at(-1)!,
+          candidate: input.candidate,
+        })
+      : input.candidate;
   return {
     version: 1,
     cause,
     interventionClass: cause.interventionClass,
     phase: input.phase,
     reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+    blockerIds: blockers,
+    summary: input.summary,
+    findingLineage: [...lineageById.values()].sort((left, right) =>
+      left.stableId.localeCompare(right.stableId),
+    ),
+    attemptedRepairs,
+    preservedCandidate,
+    supportingEvidence: sortedUnique([
+      ...(input.supportingEvidence ?? []),
+      ...entries.flatMap((entry) => entry.artifactReferences),
+      ...archivedFindings.flatMap((finding) => finding.artifactReferences),
+      ...phaseHistory.flatMap((entry) => entry.supportingEvidence),
+    ]),
+    requiredOperatorAction: requiredAction(
+      cause.interventionClass,
+      blockers,
+      preservedCandidate,
+    ),
+  };
+}
+
+export function buildDeterministicGateIntervention(input: {
+  candidate: PreservedCandidate;
+  failedGateIds: readonly string[];
+  attemptedRepairs: InterventionRequest["attemptedRepairs"];
+  supportingEvidence: readonly string[];
+  summary: string;
+}): InterventionRequest {
+  const cause: InterventionCause = {
+    kind: "DETERMINISTIC_GATE_EXHAUSTION",
+    interventionClass: "IMPLEMENTATION_INTERVENTION",
+  };
+  const blockerIds = sortedUnique(input.failedGateIds);
+  return {
+    version: 1,
+    cause,
+    interventionClass: cause.interventionClass,
+    phase: input.candidate.phase,
+    reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
     blockerIds,
     summary: input.summary,
     findingLineage: [],
-    attemptedRepairs: [],
+    attemptedRepairs: input.attemptedRepairs.map((attempt) => ({
+      ...attempt,
+      activeBlockingIds: sortedUnique(attempt.activeBlockingIds),
+    })),
     preservedCandidate: input.candidate,
-    supportingEvidence: sortedUnique(input.supportingEvidence ?? []),
+    supportingEvidence: sortedUnique(input.supportingEvidence),
     requiredOperatorAction: requiredAction(
       cause.interventionClass,
       blockerIds,
@@ -672,6 +778,9 @@ export function parseNonProgressHistory(value: unknown): NonProgressHistory {
         (migratedCause.kind === "CHECKPOINT_RECOVERY" &&
           migratedCause.interventionClass === "RECOVERY_ACTION") ||
         (migratedCause.kind === "QA_CONVERGENCE" &&
+          migratedCause.interventionClass ===
+            "IMPLEMENTATION_INTERVENTION") ||
+        (migratedCause.kind === "DETERMINISTIC_GATE_EXHAUSTION" &&
           migratedCause.interventionClass ===
             "IMPLEMENTATION_INTERVENTION")
       ) ||
