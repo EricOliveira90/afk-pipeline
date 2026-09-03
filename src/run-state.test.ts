@@ -53,14 +53,14 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v0, "demo");
-    expect(adapted.version).toBe(1);
+    expect(adapted.version).toBe(2);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
     expect(adapted.slices["100"]!.mergedToFeature).toBe(true);
     expect(adapted.slices["200"]!.phase).toBe("STUCK");
     expect(adapted.slices["300"]!.phase).toBe("ESCALATE");
   });
 
-  it("passes v1 files through unchanged", () => {
+  it("upgrades v1 files to v2", () => {
     const v1 = {
       version: 1,
       prdSlug: "demo",
@@ -70,7 +70,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v1, "demo");
-    expect(adapted.version).toBe(1);
+    expect(adapted.version).toBe(2);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
   });
 
@@ -150,7 +150,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     );
 
     const loaded = loadRunState(repo, slug);
-    expect(loaded.version).toBe(1);
+    expect(loaded.version).toBe(2);
     expect(loaded.slices["100"]!.phase).toBe("PASS");
     expect(isSliceComplete(loaded, "100")).toBe(true);
     expect(isSliceComplete(loaded, "200")).toBe(false);
@@ -162,7 +162,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.version).toBe(1);
+    expect(onDisk.version).toBe(2);
     expect(onDisk.slices["100"].phase).toBe("PASS");
     expect(onDisk.slices["300"].phase).toBe("ERROR");
     expect(onDisk.slices["300"].error).toBe("boom");
@@ -187,11 +187,11 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     expect(isSliceComplete(loadRunState(repo, "parked"), "8181")).toBe(false);
   });
 
-  it("returns a fresh v1 state when no file exists", () => {
+  it("returns a fresh v2 state when no file exists", () => {
     const repo = makeRepo();
     const loaded = loadRunState(repo, "fresh");
     expect(loaded).toEqual({
-      version: 1,
+      version: 2,
       prdSlug: "fresh",
       featureBranch: "feat/fresh",
       slices: {},
@@ -402,7 +402,7 @@ describe("clearSliceStateForDispatch", () => {
     writeFileSync(
       p,
       JSON.stringify({
-        version: 1,
+        version: 2,
         prdSlug: "demo",
         featureBranch: "feat/demo",
         scope: { members: ["01", "02"] },
@@ -421,6 +421,15 @@ describe("clearSliceStateForDispatch", () => {
           "77": { phase: "PASS", branch: "afk/demo-03", mergedToFeature: true },
         },
         resume: { "75": { attempts: 1, lastDecision: "resumed from 3 commits" } },
+        stageCheckpoints: {
+          "75": {
+            version: 1,
+            completedStage: "deterministic-qa",
+            candidateTreeId: "a".repeat(40),
+            nextPendingStage: "post-qa-deterministic",
+            round: 2,
+          },
+        },
         migrations: { pool: ["0042"], claims: { "76": ["0042"] } },
       }),
       "utf-8",
@@ -473,6 +482,9 @@ describe("clearSliceStateForDispatch", () => {
     // clearing accompanies is about to increment it (#36).
     expect(getResumeAttempts(state, "75")).toBe(1);
     expect(state.resume?.["75"]?.lastDecision).toBe("resumed from 3 commits");
+    expect(state.stageCheckpoints).toMatchObject({
+      "75": { nextPendingStage: "post-qa-deterministic" },
+    });
     expect(state.scope).toEqual({ members: ["01", "02"] });
     expect(state.migrations).toEqual({ pool: ["0042"], claims: { "76": ["0042"] } });
   });
@@ -518,7 +530,7 @@ describe("RunState.specsDir", () => {
   it("round-trips through save and load", () => {
     const repo = makeRepo();
     saveRunState(repo, {
-      version: 1,
+      version: 2,
       prdSlug: "demo",
       featureBranch: "feat/demo",
       specsDir: "docs/internal/specs/demo",
@@ -532,7 +544,7 @@ describe("RunState.specsDir", () => {
   it("survives a per-slice write", () => {
     const repo = makeRepo();
     saveRunState(repo, {
-      version: 1,
+      version: 2,
       prdSlug: "demo",
       featureBranch: "feat/demo",
       specsDir: ".kiro/specs/demo",

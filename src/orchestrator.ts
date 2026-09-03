@@ -98,6 +98,13 @@ import {
   type RunState,
 } from "./run-state.js";
 import {
+  clearExactStageCheckpoint,
+  inspectExactStageCheckpoint,
+  recordExactStageCheckpoint,
+  runPendingDeterministicStage,
+  type CompletedCandidateStage,
+} from "./exact-stage-resume.js";
+import {
   resolveRunScope,
   type ResolvedRunScope,
 } from "./slice-scope.js";
@@ -4184,8 +4191,74 @@ export async function runSliceExecute(
         "error",
       );
   };
+  const exactStageLocation = {
+    repoRoot: config.repoRoot,
+    prdSlug: config.prdSlug,
+    ghIssue: slice.ghIssue,
+  };
+  const completedCandidateStage: CompletedCandidateStage =
+    config.sharedPreview ? "shared-preview-uat" : "deterministic-qa";
+  /**
+   * The deterministic work that remains after candidate evaluation accepts
+   * the exact tree. Keeping it in one function lets a live run and an
+   * exact-stage restart execute the same pending stage.
+   *
+   * The checkpoint is cleared only after the stage returns a result. A hard
+   * interruption or thrown process failure leaves it durable for restart.
+   */
+  const finalizeAcceptedCandidate = (): Extract<
+    TerminalOutcome,
+    { phase: "PASS" | "STUCK" }
+  > => {
+    const result = runPendingDeterministicStage({
+      ...exactStageLocation,
+      worktreeDir: ctx.worktreeDir,
+      featureBranch: featBranch,
+      sharedPreview: config.sharedPreview !== undefined,
+      ...(config.migrationValidation !== undefined
+        ? { migrationValidation: config.migrationValidation }
+        : {}),
+    });
+    if (!result.ok) return finishStuck(result.error);
+    logger.phase(
+      `${ctx.tag}: candidate evaluation and pending deterministic stage pass — committed`,
+    );
+    return { phase: "PASS" };
+  };
 
   try {
+    if (ctx.resume) {
+      let currentCandidateTreeId: string | null = null;
+      try {
+        currentCandidateTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+      } catch {
+        // The checkpoint decision reports the fail-closed reason below.
+      }
+      const exactStage = inspectExactStageCheckpoint({
+        ...exactStageLocation,
+        currentCandidateTreeId,
+        expectedCompletedStage: completedCandidateStage,
+        maximumRound: MAX_GENERATOR_ROUNDS,
+      });
+      if (exactStage.action === "resume") {
+        logger.phase(
+          `${ctx.tag}: exact-stage resume — ${exactStage.checkpoint.completedStage} ` +
+            `completed on tree ${exactStage.checkpoint.candidateTreeId}; running ` +
+            `${exactStage.checkpoint.nextPendingStage} before any agent dispatch`,
+          "error",
+        );
+        return finalizeAcceptedCandidate();
+      }
+      logger.phase(
+        `${ctx.tag}: exact-stage resume unavailable — ${exactStage.reason}; ` +
+          `candidate preserved, falling back to normal re-evaluation`,
+        "error",
+      );
+      clearExactStageCheckpoint(exactStageLocation);
+    } else {
+      clearExactStageCheckpoint(exactStageLocation);
+    }
+
     if (ctx.resume) {
       const restored = loadQAReviewResumeState(
         reviewArchiveDir,
@@ -4774,32 +4847,14 @@ export async function runSliceExecute(
               `feat(#${slice.ghIssue}): ${slice.title}`,
             );
           }
-
-          const migrationMode =
-            config.migrationValidation ?? DEFAULT_MIGRATION_VALIDATION;
-          if (
-            !config.sharedPreview &&
-            migrationMode !== "skip" &&
-            sliceTouchedMigrations(ctx.worktreeDir, featBranch)
-          ) {
-            const migrationCheck = verifyMigrationSync(
-              ctx.worktreeDir,
-              migrationMode,
-            );
-            if (!migrationCheck.ok) {
-              // Late refusal: QA passed and the work is already committed,
-              // so the diagnosis describes a slice whose branch holds
-              // finished work that one check would not certify.
-              return finishStuck(
-                `Migration sync check failed: ${migrationCheck.error}`,
-              );
-            }
-          }
-
-          logger.phase(
-            `${ctx.tag}: deterministic QA and configured UAT pass — committed`,
-          );
-          return { phase: "PASS" };
+          recordExactStageCheckpoint(exactStageLocation, {
+            version: 1,
+            completedStage: completedCandidateStage,
+            candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
+            nextPendingStage: "post-qa-deterministic",
+            round,
+          });
+          return finalizeAcceptedCandidate();
         }
       }
 

@@ -29,6 +29,9 @@ import {
 } from "./orchestrator.js";
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
+import { loadRunState, saveRunState } from "./run-state.js";
+import { resolveCandidateTreeId } from "./gate-runner.js";
+import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
@@ -506,6 +509,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       commitLog: "abc1234 feat(#70): round-1 work",
       handoffNote: "",
     };
+    const malformedState = loadRunState(repo, "prd-070");
+    malformedState.stageCheckpoints = "malformed";
+    saveRunState(repo, malformedState);
     vi.spyOn(gitModule, "logCommitsWithStat").mockReturnValue(
       STUCK_DIAGNOSIS_COMMIT_LOG,
     );
@@ -531,15 +537,38 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain(
       "SYNTHESIS-SHOULD-NOT-APPEAR",
     );
+    expect(
+      readFileSync(join(ctx.logger.runDir, "run.log"), "utf-8"),
+    ).toContain(
+      "exact-stage resume unavailable — the exact-stage checkpoint collection is malformed; " +
+        "candidate preserved, falling back to normal re-evaluation",
+    );
 
     const rolesAfterExhaustion = [...roles];
     rmSync(join(artifactDir, "stuck.md"));
+    recordExactStageCheckpoint(
+      { repoRoot: repo, prdSlug: "prd-070", ghIssue: "70" },
+      {
+        version: 1,
+        completedStage: "deterministic-qa",
+        candidateTreeId: "b".repeat(40),
+        nextPendingStage: "post-qa-deterministic",
+        round: 3,
+      },
+    );
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({
       phase: "STUCK",
       error: "QA failed after 3 implementation rounds",
     });
     expect(roles).toEqual(rolesAfterExhaustion);
+    expect(
+      readFileSync(join(ctx.logger.runDir, "run.log"), "utf-8"),
+    ).toContain(
+      `does not match recorded tree ${"b".repeat(40)}; candidate preserved, ` +
+        "falling back to normal re-evaluation",
+    );
+    expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
     expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toContain(
       "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
     );
@@ -1028,7 +1057,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
    * cheapest shape that gets there: one generator round, one PASS review,
    * no package.json so no gate subprocess.
    */
-  it("ships a diagnosis when the post-commit migration gate refuses", async () => {
+  it("resumes the pending post-QA deterministic gate without another agent round", async () => {
     const repo = makeRepo();
     // The feature branch sits behind the slice's work, which is what makes
     // the migration diff — and the commit evidence in the diagnosis —
@@ -1036,13 +1065,17 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     git(repo, ["branch", "base", "main"]);
     const migration = join("supabase", "migrations", "001_orders.sql");
     let artifactDir = "";
+    let generators = 0;
+    let evaluators = 0;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (options.role === "generator") {
+          generators++;
           mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
           writeFileSync(join(repo, migration), "-- orders\n", "utf-8");
         } else if (options.role === "evaluator-qa") {
+          evaluators++;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -1058,19 +1091,57 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       featBranch: "base",
     };
     artifactDir = ctx.absSliceDir;
-    vi.spyOn(migrationGate, "verifyMigrationSync").mockReturnValue({
-      ok: false,
-      error: "local migrations not applied to remote: 001",
+    let migrationAttempts = 0;
+    vi.spyOn(migrationGate, "verifyMigrationSync").mockImplementation(() => {
+      migrationAttempts++;
+      if (migrationAttempts === 1) {
+        throw new Error(
+          "simulated process death after accepted QA and before the deterministic gate",
+        );
+      }
+      return {
+        ok: false,
+        error: "local migrations not applied to remote: 001",
+      };
     });
 
+    await expect(runSliceExecute(ctx)).resolves.toEqual({
+      phase: "ERROR",
+      error:
+        "simulated process death after accepted QA and before the deterministic gate",
+    });
+    expect(generators).toBe(1);
+    expect(evaluators).toBe(1);
+    expect(migrationAttempts).toBe(1);
+    expect(loadRunState(repo, "prd-070").stageCheckpoints).toMatchObject({
+      "70": {
+        completedStage: "deterministic-qa",
+        candidateTreeId: resolveCandidateTreeId(repo),
+        nextPendingStage: "post-qa-deterministic",
+        round: 1,
+      },
+    });
+    const progressBeforeResume = ctx.logger.getSliceProgress("70");
+
+    ctx.resume = {
+      mode: "killed",
+      commitsAhead: 1,
+      commitLog: "accepted candidate",
+      handoffNote: "",
+    };
     await expect(runSliceExecute(ctx)).resolves.toEqual({
       phase: "STUCK",
       error:
         "Migration sync check failed: local migrations not applied to remote: 001",
     });
+    expect(migrationAttempts).toBe(2);
+    expect(generators).toBe(1);
+    expect(evaluators).toBe(1);
+    expect(ctx.logger.getSliceProgress("70")).toEqual(progressBeforeResume);
+    expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
 
-    // The whole point: the outcome carries a diagnosis, and the diagnosis
-    // says which check refused rather than blaming exhausted rounds.
+    // The resumed deterministic failure still carries the existing
+    // diagnosis and exact quality-gate behavior.
     const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
     expect(diagnosis).toContain(
       "Migration sync check failed: local migrations not applied to remote: 001",

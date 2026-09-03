@@ -20,7 +20,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Agent providers | One interface, three backends (ADR 0002, 0013, 0016) | `src/agent-provider.ts` | `src/claude.ts`, `src/codex.ts`, `src/kiro.ts` |
 | Invocation runtime | Bounded process execution, liveness, retries (ADR 0030, 0021, 0022) | `src/invocation-runtime.ts` | `src/command-runtime.ts`, `src/busy-probe.ts`, `src/idle-watcher.ts`, `src/kill-tree.ts`, `src/liveness.ts`, `src/transient-retry.ts` |
 | Git operations | Worktrees, branches, atomic merge attempts (ADR 0010) | `src/git.ts` | `src/worktree-processes.ts` |
-| Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031) | `src/run-state.ts`, `src/run-journal.ts` | `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts` |
+| Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031) | `src/run-state.ts`, `src/run-journal.ts` | `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
 | Gates | Orchestrator-owned gate execution and evidence | `src/gate-runner.ts` | `src/migration-gate.ts`, `src/qa-gate-authorization.ts` |
 | Review rails | Contract and QA verdicts, findings, artifacts (PRD 1) | `src/contract-review.ts`, `src/qa-review.ts` | `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
