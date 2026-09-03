@@ -22,18 +22,17 @@ describe("renderPrompt", () => {
     expect(out).toContain(".kiro/specs/contacts/slices/01-foo/context.md");
   });
 
-  it("supports numeric values and empty-string conditionals", () => {
+  it("supports numeric values in planner templates", () => {
     const out = renderPrompt("planner", {
       GH_ISSUE: "1",
       SPECS_DIR: "specs",
       SLICE_DIR: "specs/slices/01",
       ROUND: 2,
-      REVISION_NOTE: "",
-      RELEVANT_FILES: "",
       SLICE_BODY: "Local issue body",
+      EXPLORER_CONTEXT: "Explorer evidence",
       MIGRATION_RESERVATION: "No claim yet",
       BASE_GATE_CATALOG: "- tests: pnpm run test:run",
-      CONTRACT_RESPONSE_NOTE: "Write contract-response.json",
+      REPOSITORY_CONTEXT: "(none available)",
     });
     expect(out).toContain("**Negotiation round:** 2");
     expect(out).toMatch(
@@ -205,7 +204,7 @@ describe("renderPrompt", () => {
     }
   });
 
-  it("loads all eight pipeline templates", () => {
+  it("B-05 P-01 loads planner artifact contracts in both templates", () => {
     expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "", REPOSITORY_CONTEXT: "(none available)", INLINE_SIZE_BUDGET_BYTES: 65536 })).toBeTruthy();
     expect(
       renderPrompt("planner", {
@@ -213,28 +212,54 @@ describe("renderPrompt", () => {
         SPECS_DIR: "s",
         SLICE_DIR: "d",
         ROUND: 1,
-        REVISION_NOTE: "",
-        RELEVANT_FILES: "",
         SLICE_BODY: "Fetch with gh",
+        EXPLORER_CONTEXT: "context",
         MIGRATION_RESERVATION: "No claim yet",
         BASE_GATE_CATALOG: "- tests: pnpm run test:run",
-        CONTRACT_RESPONSE_NOTE: "Do not write contract-response.json",
+        REPOSITORY_CONTEXT: "(none available)",
       }),
     ).toContain("- tests: pnpm run test:run");
     expect(
-      renderPrompt("evaluator-contract", {
+      renderPrompt("planner-revision", {
+        GH_ISSUE: "1",
         SPECS_DIR: "s",
         SLICE_DIR: "d",
+        ROUND: 2,
+        CURRENT_CONTRACT: "contract",
+        CURRENT_ACCEPTANCE_MANIFEST: '{"version":2}',
+        OPEN_FINDINGS: "(none)",
+        CONTROL_SITUATION: "(none)",
+        CONTRACT_RESPONSE_INSTRUCTIONS: "Do not write a response.",
+        MIGRATION_RESERVATION: "No claim yet",
+        BASE_GATE_CATALOG: "- tests: pnpm run test:run",
+      }),
+    ).toContain("# Routed OPEN findings");
+    expect(
+      renderPrompt("evaluator-contract", {
+        SLICE_DIR: "d",
         ROUND: 1,
-        RELEVANT_FILES: "",
-        PREVIOUS_REVIEW_NOTE: "No previous round.",
+        PROPOSED_CONTRACT: "contract",
         ACCEPTANCE_MANIFEST: '{"version":2}',
         BASE_GATE_CATALOG: "- tests: pnpm run test",
         CONTRACT_REVIEW_FILE: "contract-review.json",
-        PLANNER_RESPONSE: "(first review round; no planner response)",
-        REVISION_CONTEXT: "(first review round; no prior revision)",
+        EXPLORER_CONTEXT: "context",
       }),
     ).toContain("- tests: pnpm run test");
+    expect(
+      renderPrompt("evaluator-contract-revision", {
+        SLICE_DIR: "d",
+        ROUND: 2,
+        CONTRACT_REVIEW_FILE: "contract-review.json",
+        REVISED_CONTRACT: "contract",
+        REVISED_ACCEPTANCE_MANIFEST: '{"version":2}',
+        PRIOR_OPEN_FINDINGS: "(none)",
+        PLANNER_RESPONSE: "(none)",
+        REVISION_CONTEXT: '{"before":"old","after":"new"}',
+        CONTROL_SITUATION: "(none)",
+        BASE_GATE_CATALOG: "- tests: pnpm run test",
+        EXPLORER_CONTEXT: "context",
+      }),
+    ).toContain("# Prior OPEN findings");
     expect(renderPrompt("generator", {
       SLICE_DIR: "d",
       FILE_SCOPE: "- `src/example.ts`",

@@ -1,4 +1,14 @@
-import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
+import type {
+  AcceptanceManifest,
+  AcceptanceManifestV2,
+} from "./acceptance-manifest.js";
+import {
+  formatContractReviewFindings,
+  openContractReviewFindings,
+  type ContractResponse,
+  type ContractRevisionArtifacts,
+  type ContractReviewFinding,
+} from "./contract-review.js";
 import { renderPrompt } from "./prompt-template.js";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -57,6 +67,7 @@ export interface ExplorerEnvelopeInput {
 export interface ExplorerEnvelopeResult {
   prompt: string;
   evidence: {
+    role: "explorer";
     assembledByteSize: number;
     includedArtifactIds: string[];
     omittedArtifactClasses: string[];
@@ -159,6 +170,7 @@ export interface GeneratorEnvelopeInput {
 }
 
 export interface GeneratorEnvelopeEvidence {
+  role: "generator";
   assembledByteSize: number;
   includedArtifactIds: string[];
   omittedArtifactClasses: string[];
@@ -348,6 +360,7 @@ export function assembleExplorerEnvelope(
   return {
     prompt,
     evidence: {
+      role: "explorer",
       assembledByteSize,
       includedArtifactIds: repositoryContext.includedArtifactIds,
       omittedArtifactClasses: [
@@ -356,6 +369,375 @@ export function assembleExplorerEnvelope(
       contextManifestVersion: EXPLORER_CONTEXT_MANIFEST.version,
     },
   };
+}
+
+const ROLE_ENVELOPE_OMISSIONS = [
+  "prior-conversation",
+  "other-role-conversation",
+  "resolved-findings",
+  "sibling-handoffs",
+  "full-adr-bodies",
+] as const;
+
+export const PLANNER_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "planner",
+  objective:
+    "Define one executable slice contract and version-2 acceptance manifest.",
+  nonGoals: [
+    "Implementing the slice",
+    "Running verification commands",
+    "Changing unrelated contract sections during a revision",
+  ],
+  allowedWriteScope: [
+    "slice/contract.md",
+    "slice/acceptance-manifest.json",
+    "slice/contract-response.json on routed review revisions",
+  ],
+  stopConditions: [
+    "The required planner artifacts are rewritten in place",
+    "A specification contradiction, load-bearing silence, or declared risk requires escalation",
+  ],
+  acceptedInputArtifactClasses: [
+    "slice-request",
+    "explorer-evidence-map",
+    "base-gate-catalog",
+    "migration-reservation",
+    "adr-index",
+    "repository-architecture",
+    "current-contract-pair",
+    "open-contract-findings",
+    "control-plane-situation",
+  ],
+  outputArtifact: "negotiating-contract-pair",
+  inputOrder: {
+    initial: [
+      "slice-request",
+      "explorer-evidence-map",
+      "base-gate-catalog",
+      "migration-reservation",
+      "repository-context",
+    ],
+    revision: [
+      "current-contract-pair",
+      "open-contract-findings",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "migration-reservation",
+    ],
+  },
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: ROLE_ENVELOPE_OMISSIONS,
+} as const;
+
+export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "evaluator-contract",
+  objective:
+    "Accept or reject one proposed slice contract using only declared contract evidence.",
+  nonGoals: [
+    "Rechecking deterministic manifest validation",
+    "Reviewing implementation output",
+    "Changing the proposed contract pair",
+  ],
+  allowedWriteScope: [
+    "slice/contract-review.json",
+    "slice/feedback-rN.md",
+  ],
+  stopConditions: [
+    "The canonical review and human-readable feedback are written",
+    "An unreviewable contract is returned as a blocking REVISE finding",
+  ],
+  acceptedInputArtifactClasses: [
+    "proposed-contract-pair",
+    "base-gate-catalog",
+    "explorer-evidence-map",
+    "prior-open-contract-findings",
+    "planner-response",
+    "contract-revision-evidence",
+    "control-plane-situation",
+  ],
+  outputArtifact: "contract-review-pair",
+  inputOrder: {
+    initial: [
+      "proposed-contract",
+      "acceptance-manifest",
+      "base-gate-catalog",
+      "explorer-evidence-map",
+    ],
+    revision: [
+      "revised-contract-pair",
+      "prior-open-contract-findings",
+      "planner-response",
+      "contract-revision-evidence",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "explorer-evidence-map",
+    ],
+  },
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    ...ROLE_ENVELOPE_OMISSIONS,
+    "generator-output",
+    "cleanup-artifacts",
+  ],
+} as const;
+
+export type PromptAssemblyRole =
+  | "explorer"
+  | "planner"
+  | "evaluator-contract"
+  | "generator";
+
+export interface RoleEnvelopeEvidence {
+  role: PromptAssemblyRole;
+  assembledByteSize: number;
+  includedArtifactIds: string[];
+  omittedArtifactClasses: string[];
+  contextManifestVersion: number;
+}
+
+export interface RoleEnvelopeResult {
+  prompt: string;
+  evidence: RoleEnvelopeEvidence;
+}
+
+interface PlannerEnvelopeCommonInput {
+  ghIssue: string;
+  specsDir: string;
+  sliceDir: string;
+  round: number;
+  baseGateCatalog: string;
+  migrationReservation: string;
+  inlineSizeBudgetBytes?: number;
+}
+
+export interface PlannerInitialEnvelopeInput
+  extends PlannerEnvelopeCommonInput {
+  repoRoot: string;
+  sliceBody: string;
+  explorerContext: string;
+}
+
+export interface PlannerRevisionEnvelopeInput
+  extends PlannerEnvelopeCommonInput {
+  currentContract: string;
+  currentAcceptanceManifest: string;
+  findings: readonly ContractReviewFinding[];
+  contractResponseInstructions: string;
+  controlSituation?: string;
+}
+
+interface ContractEvaluatorEnvelopeCommonInput {
+  sliceDir: string;
+  round: number;
+  contractReviewFile: string;
+  proposedContract: string;
+  acceptanceManifest: AcceptanceManifest;
+  baseGateCatalog: string;
+  explorerContext: string;
+  inlineSizeBudgetBytes?: number;
+}
+
+export type ContractEvaluatorInitialEnvelopeInput =
+  ContractEvaluatorEnvelopeCommonInput;
+
+export interface ContractEvaluatorRevisionEnvelopeInput
+  extends ContractEvaluatorEnvelopeCommonInput {
+  previousFindings: readonly ContractReviewFinding[];
+  plannerResponse: ContractResponse | null;
+  revisions: ContractRevisionArtifacts;
+  controlSituation?: string;
+}
+
+function assertEnvelopeBudget(
+  roleLabel: string,
+  prompt: string,
+  allowedByteSize: number,
+): number {
+  const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
+  if (assembledByteSize > allowedByteSize) {
+    throw new Error(
+      `${roleLabel} prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
+    );
+  }
+  return assembledByteSize;
+}
+
+function roleEnvelopeResult(
+  prompt: string,
+  role: RoleEnvelopeEvidence["role"],
+  includedArtifactIds: string[],
+  omittedArtifactClasses: readonly string[],
+  contextManifestVersion: number,
+  allowedByteSize: number,
+  roleLabel: string,
+): RoleEnvelopeResult {
+  return {
+    prompt,
+    evidence: {
+      role,
+      assembledByteSize: assertEnvelopeBudget(
+        roleLabel,
+        prompt,
+        allowedByteSize,
+      ),
+      includedArtifactIds,
+      omittedArtifactClasses: [...omittedArtifactClasses],
+      contextManifestVersion,
+    },
+  };
+}
+
+export function assemblePlannerInitialEnvelope(
+  input: PlannerInitialEnvelopeInput,
+): RoleEnvelopeResult {
+  const repositoryContext = buildExplorerRepositoryContext(input.repoRoot);
+  const prompt = renderPrompt("planner", {
+    GH_ISSUE: input.ghIssue,
+    SPECS_DIR: input.specsDir,
+    SLICE_DIR: input.sliceDir,
+    ROUND: input.round,
+    SLICE_BODY: input.sliceBody,
+    EXPLORER_CONTEXT: input.explorerContext,
+    BASE_GATE_CATALOG: input.baseGateCatalog,
+    MIGRATION_RESERVATION: input.migrationReservation,
+    REPOSITORY_CONTEXT: repositoryContext.content,
+  });
+  return roleEnvelopeResult(
+    prompt,
+    "planner",
+    [
+      "slice-request",
+      `${input.sliceDir}/context.md`,
+      "base-gate-catalog",
+      "migration-reservation",
+      ...repositoryContext.includedArtifactIds,
+    ],
+    PLANNER_CONTEXT_MANIFEST.omittedArtifactClasses,
+    PLANNER_CONTEXT_MANIFEST.version,
+    input.inlineSizeBudgetBytes ??
+      PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    "Planner",
+  );
+}
+
+export function assemblePlannerRevisionEnvelope(
+  input: PlannerRevisionEnvelopeInput,
+): RoleEnvelopeResult {
+  const openFindings = openContractReviewFindings(input.findings);
+  const prompt = renderPrompt("planner-revision", {
+    GH_ISSUE: input.ghIssue,
+    SPECS_DIR: input.specsDir,
+    SLICE_DIR: input.sliceDir,
+    ROUND: input.round,
+    CURRENT_CONTRACT: input.currentContract,
+    CURRENT_ACCEPTANCE_MANIFEST: input.currentAcceptanceManifest,
+    OPEN_FINDINGS: formatContractReviewFindings(openFindings),
+    CONTROL_SITUATION: input.controlSituation ?? "(none)",
+    CONTRACT_RESPONSE_INSTRUCTIONS: input.contractResponseInstructions,
+    BASE_GATE_CATALOG: input.baseGateCatalog,
+    MIGRATION_RESERVATION: input.migrationReservation,
+  });
+  return roleEnvelopeResult(
+    prompt,
+    "planner",
+    [
+      `${input.sliceDir}/contract.md`,
+      `${input.sliceDir}/acceptance-manifest.json`,
+      ...(openFindings.length > 0 ? ["contract-review:open-findings"] : []),
+      ...(input.controlSituation !== undefined
+        ? ["control-plane-situation"]
+        : []),
+      "base-gate-catalog",
+      "migration-reservation",
+    ],
+    PLANNER_CONTEXT_MANIFEST.omittedArtifactClasses,
+    PLANNER_CONTEXT_MANIFEST.version,
+    input.inlineSizeBudgetBytes ??
+      PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    "Planner",
+  );
+}
+
+export function assembleContractEvaluatorInitialEnvelope(
+  input: ContractEvaluatorInitialEnvelopeInput,
+): RoleEnvelopeResult {
+  const prompt = renderPrompt("evaluator-contract", {
+    SLICE_DIR: input.sliceDir,
+    ROUND: input.round,
+    CONTRACT_REVIEW_FILE: input.contractReviewFile,
+    PROPOSED_CONTRACT: input.proposedContract,
+    ACCEPTANCE_MANIFEST: JSON.stringify(input.acceptanceManifest, null, 2),
+    BASE_GATE_CATALOG: input.baseGateCatalog,
+    EXPLORER_CONTEXT: input.explorerContext,
+  });
+  return roleEnvelopeResult(
+    prompt,
+    "evaluator-contract",
+    [
+      `${input.sliceDir}/contract.md`,
+      `${input.sliceDir}/acceptance-manifest.json`,
+      "base-gate-catalog",
+      `${input.sliceDir}/context.md`,
+    ],
+    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.version,
+    input.inlineSizeBudgetBytes ??
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    "Contract evaluator",
+  );
+}
+
+export function assembleContractEvaluatorRevisionEnvelope(
+  input: ContractEvaluatorRevisionEnvelopeInput,
+): RoleEnvelopeResult {
+  const openFindings = openContractReviewFindings(input.previousFindings);
+  const prompt = renderPrompt("evaluator-contract-revision", {
+    SLICE_DIR: input.sliceDir,
+    ROUND: input.round,
+    CONTRACT_REVIEW_FILE: input.contractReviewFile,
+    REVISED_CONTRACT: input.proposedContract,
+    REVISED_ACCEPTANCE_MANIFEST: JSON.stringify(
+      input.acceptanceManifest,
+      null,
+      2,
+    ),
+    PRIOR_OPEN_FINDINGS: formatContractReviewFindings(openFindings),
+    PLANNER_RESPONSE:
+      input.plannerResponse === null
+        ? "(none)"
+        : JSON.stringify(input.plannerResponse, null, 2),
+    REVISION_CONTEXT: JSON.stringify(input.revisions, null, 2),
+    CONTROL_SITUATION: input.controlSituation ?? "(none)",
+    BASE_GATE_CATALOG: input.baseGateCatalog,
+    EXPLORER_CONTEXT: input.explorerContext,
+  });
+  return roleEnvelopeResult(
+    prompt,
+    "evaluator-contract",
+    [
+      `${input.sliceDir}/contract.md`,
+      `${input.sliceDir}/acceptance-manifest.json`,
+      ...(openFindings.length > 0
+        ? ["contract-review:prior-open-findings"]
+        : []),
+      ...(input.plannerResponse !== null
+        ? [`${input.sliceDir}/contract-response.json`]
+        : []),
+      "contract-revision-evidence",
+      ...(input.controlSituation !== undefined
+        ? ["control-plane-situation"]
+        : []),
+      "base-gate-catalog",
+      `${input.sliceDir}/context.md`,
+    ],
+    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.version,
+    input.inlineSizeBudgetBytes ??
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    "Contract evaluator",
+  );
 }
 
 export function projectGeneratorContractView(contract: string): string {
@@ -455,6 +837,7 @@ export function assembleGeneratorEnvelope(
   return {
     prompt,
     evidence: {
+      role: "generator",
       assembledByteSize,
       includedArtifactIds: [
         `${input.sliceDir}/contract.md`,

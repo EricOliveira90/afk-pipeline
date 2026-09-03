@@ -30,8 +30,12 @@ import {
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
 import {
+  assembleContractEvaluatorInitialEnvelope,
+  assembleContractEvaluatorRevisionEnvelope,
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
+  assemblePlannerInitialEnvelope,
+  assemblePlannerRevisionEnvelope,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateExplorerEvidenceMap,
@@ -473,6 +477,10 @@ export interface PipelineConfig {
   generatorInlineSizeBudgetBytes?: number;
   /** Effective inline byte limit for each assembled explorer prompt. */
   explorerInlineSizeBudgetBytes?: number;
+  /** Effective inline byte limit for each assembled planner prompt. */
+  plannerInlineSizeBudgetBytes?: number;
+  /** Effective inline byte limit for each assembled contract-evaluator prompt. */
+  contractEvaluatorInlineSizeBudgetBytes?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -1259,31 +1267,43 @@ async function reviseAcceptedContract(
     "planner",
     revisionRound,
   );
+  const plannerSituation =
+    `This is a focused revision of the already accepted contract. ` +
+    `The generator stopped before an undeclared edit. Revise only the ` +
+    `contract and acceptance manifest needed to declare this request:\n` +
+    `${evidence}\n\nPreserve every other locked term.`;
+  const assembledPlanner = assemblePlannerRevisionEnvelope({
+    ghIssue: slice.ghIssue,
+    specsDir: ctx.relSpecsDir,
+    sliceDir: ctx.relSliceDir,
+    round: revisionRound,
+    currentContract: readFileSync(contractPath, "utf-8"),
+    currentAcceptanceManifest: previousManifestText,
+    findings: [],
+    controlSituation: plannerSituation,
+    contractResponseInstructions:
+      `Do not write ${CONTRACT_RESPONSE_FILENAME} for this focused scope revision.`,
+    migrationReservation: migrationReservationBlock(
+      config,
+      slice.ghIssue,
+    ),
+    baseGateCatalog: formatBaseGateCatalog(
+      resolveBaseGateDeclarations(ctx.worktreeDir),
+    ),
+    ...(config.plannerInlineSizeBudgetBytes !== undefined
+      ? { inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes }
+      : {}),
+  });
+  logger.event({
+    type: "prompt-assembly",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    round: revisionRound,
+    ...assembledPlanner.evidence,
+  });
   await invoke({
     role: "planner",
-    prompt: renderPrompt("planner", {
-      GH_ISSUE: slice.ghIssue,
-      SPECS_DIR: ctx.relSpecsDir,
-      SLICE_DIR: ctx.relSliceDir,
-      ROUND: revisionRound,
-      RELEVANT_FILES: ctx.relevantFilesBlock,
-      SLICE_BODY:
-        `This is a focused revision of the already accepted contract. ` +
-        `The generator supplied this validated scope evidence:\n${evidence}`,
-      REVISION_NOTE:
-        `The generator stopped before an undeclared edit. Revise only the ` +
-        `contract and acceptance manifest needed to declare this request:\n` +
-        `${evidence}\n\nPreserve every other locked term.`,
-      CONTRACT_RESPONSE_NOTE:
-        `Do not write ${CONTRACT_RESPONSE_FILENAME} for this focused scope revision.`,
-      MIGRATION_RESERVATION: migrationReservationBlock(
-        config,
-        slice.ghIssue,
-      ),
-      BASE_GATE_CATALOG: formatBaseGateCatalog(
-        resolveBaseGateDeclarations(ctx.worktreeDir),
-      ),
-    }),
+    prompt: assembledPlanner.prompt,
     cwd: ctx.worktreeDir,
     logStream: plannerLog,
     maxDurationMs: config.maxAgentDurationMs,
@@ -1394,26 +1414,40 @@ async function reviseAcceptedContract(
     "evaluator-contract",
     revisionRound,
   );
+  const assembledEvaluator = assembleContractEvaluatorRevisionEnvelope({
+    sliceDir: ctx.relSliceDir,
+    round: revisionRound,
+    contractReviewFile: CONTRACT_REVIEW_FILENAME,
+    proposedContract: readFileSync(contractPath, "utf-8"),
+    acceptanceManifest: revisedManifest,
+    baseGateCatalog: formatBaseGateCatalog(gateCatalog),
+    explorerContext: readFileSync(
+      join(ctx.absSliceDir, "context.md"),
+      "utf-8",
+    ),
+    previousFindings: [],
+    plannerResponse: null,
+    revisions,
+    controlSituation:
+      `This is a fresh evaluation of one focused generator scope revision.\n` +
+      JSON.stringify({ scopeEscalation: escalation }, null, 2),
+    ...(config.contractEvaluatorInlineSizeBudgetBytes !== undefined
+      ? {
+          inlineSizeBudgetBytes:
+            config.contractEvaluatorInlineSizeBudgetBytes,
+        }
+      : {}),
+  });
+  logger.event({
+    type: "prompt-assembly",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    round: revisionRound,
+    ...assembledEvaluator.evidence,
+  });
   await invoke({
     role: "evaluator-contract",
-    prompt: renderPrompt("evaluator-contract", {
-      SPECS_DIR: ctx.relSpecsDir,
-      SLICE_DIR: ctx.relSliceDir,
-      ROUND: revisionRound,
-      RELEVANT_FILES: ctx.relevantFilesBlock,
-      PREVIOUS_REVIEW_NOTE:
-        "This is a fresh evaluation of one focused generator scope revision.",
-      ACCEPTANCE_MANIFEST: JSON.stringify(revisedManifest, null, 2),
-      BASE_GATE_CATALOG: formatBaseGateCatalog(gateCatalog),
-      CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
-      PLANNER_RESPONSE:
-        "(fresh scope revision; no contract-review finding response)",
-      REVISION_CONTEXT: JSON.stringify(
-        { scopeEscalation: escalation, revisions },
-        null,
-        2,
-      ),
-    }),
+    prompt: assembledEvaluator.prompt,
     cwd: ctx.worktreeDir,
     logStream: evaluatorLog,
     maxDurationMs: config.maxAgentDurationMs,
@@ -2627,13 +2661,6 @@ async function runImpasseAdjudication(
       );
 
       if (plannerApplied.length > 0) {
-        const localSliceContent = readSliceFile(
-          config.prdDir,
-          ctx.slice.number,
-        );
-        const sliceBodyNote = localSliceContent
-          ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
-          : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
         const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
         // An unproven LOCKED contract reaching here is stale debris the
         // reconciliation above could not clear (its log validated, so the
@@ -2657,36 +2684,55 @@ async function runImpasseAdjudication(
         );
         const plannerLog = logger.agentLog(ctx.slice.number, "planner");
         try {
+          const assembledPlanner = assemblePlannerRevisionEnvelope({
+            ghIssue: ctx.slice.ghIssue,
+            specsDir: ctx.relSpecsDir,
+            sliceDir: ctx.relSliceDir,
+            round: 2,
+            currentContract: readFileSync(contractPath, "utf-8"),
+            currentAcceptanceManifest: JSON.stringify(
+              preApplyManifest,
+              null,
+              2,
+            ),
+            findings: [],
+            controlSituation: [
+              "A human has adjudicated the current contract impasse.",
+              "Apply every decision below exactly once, and only to the",
+              "finding each one names. Do not re-adjudicate any of them.",
+              "",
+              "Current IMPASSE record (verbatim):",
+              rawOutcome,
+              "Human adjudications (verbatim, one per decided finding):",
+              ...decisionLog.decisions.map((recorded) => recorded.raw),
+            ].join("\n"),
+            contractResponseInstructions:
+              `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
+            migrationReservation: migrationReservationBlock(
+              config,
+              ctx.slice.ghIssue,
+            ),
+            baseGateCatalog: formatBaseGateCatalog(
+              resolveBaseGateDeclarations(ctx.worktreeDir),
+            ),
+            ...(config.plannerInlineSizeBudgetBytes !== undefined
+              ? {
+                  inlineSizeBudgetBytes:
+                    config.plannerInlineSizeBudgetBytes,
+                }
+              : {}),
+          });
+          logger.event({
+            type: "prompt-assembly",
+            ghIssue: ctx.slice.ghIssue,
+            sliceNumber: ctx.slice.number,
+            round: 2,
+            ...assembledPlanner.evidence,
+          });
           await ctx
             .invoke({
               role: "planner",
-              prompt: renderPrompt("planner", {
-                GH_ISSUE: ctx.slice.ghIssue,
-                SPECS_DIR: ctx.relSpecsDir,
-                SLICE_DIR: ctx.relSliceDir,
-                ROUND: 2,
-                RELEVANT_FILES: ctx.relevantFilesBlock,
-                SLICE_BODY: sliceBodyNote,
-                REVISION_NOTE: [
-                  "A human has adjudicated the current contract impasse.",
-                  "Apply every decision below exactly once, and only to the",
-                  "finding each one names. Do not re-adjudicate any of them.",
-                  "",
-                  "Current IMPASSE record (verbatim):",
-                  rawOutcome,
-                  "Human adjudications (verbatim, one per decided finding):",
-                  ...decisionLog.decisions.map((recorded) => recorded.raw),
-                ].join("\n"),
-                CONTRACT_RESPONSE_NOTE:
-                  `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
-                MIGRATION_RESERVATION: migrationReservationBlock(
-                  config,
-                  ctx.slice.ghIssue,
-                ),
-                BASE_GATE_CATALOG: formatBaseGateCatalog(
-                  resolveBaseGateDeclarations(ctx.worktreeDir),
-                ),
-              }),
+              prompt: assembledPlanner.prompt,
               cwd: ctx.worktreeDir,
               maxDurationMs: config.maxAgentDurationMs,
               logStream: plannerLog,
@@ -2850,7 +2896,8 @@ async function negotiateAttempt(
         `Explorer did not write required artifact ${ctx.relSliceDir}/context.md`,
       );
     }
-    validateExplorerEvidenceMap(readFileSync(contextPath, "utf-8"));
+    const explorerContext = readFileSync(contextPath, "utf-8");
+    validateExplorerEvidenceMap(explorerContext);
 
     // --- Step 2: Planner (contract negotiation) ---
     const contractPath = join(ctx.absSliceDir, "contract.md");
@@ -3064,15 +3111,84 @@ async function negotiateAttempt(
         );
         const routedFindings = plannerRound.routedFindings;
         const requiresPlannerResponse = plannerRound.requiresResponse;
+        const currentContractText = existsSync(contractPath)
+          ? readFileSync(contractPath, "utf-8")
+          : "";
+        const currentManifestPath = join(
+          ctx.absSliceDir,
+          ACCEPTANCE_MANIFEST_FILENAME,
+        );
+        const currentManifestText = existsSync(currentManifestPath)
+          ? readFileSync(currentManifestPath, "utf-8")
+          : "(missing acceptance manifest)";
         const previousArtifactText = requiresPlannerResponse
           ? {
-              contract: readFileSync(contractPath, "utf-8"),
-              manifest: readFileSync(
-                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
-                "utf-8",
-              ),
+              contract: currentContractText,
+              manifest: currentManifestText,
             }
           : null;
+        const contractResponseInstructions = requiresPlannerResponse
+          ? [
+              `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
+              "Use exactly the required version-1 schema.",
+              `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
+              "CONDITION_MET and CONTESTED require non-blank evidence.",
+            ].join("\n")
+          : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`;
+        const baseGateCatalog = formatBaseGateCatalog(
+          resolveBaseGateDeclarations(ctx.worktreeDir),
+        );
+        const assembledPlanner =
+          round === 1 && pendingObjection === null
+            ? assemblePlannerInitialEnvelope({
+                repoRoot: ctx.worktreeDir,
+                ghIssue: slice.ghIssue,
+                specsDir: ctx.relSpecsDir,
+                sliceDir: ctx.relSliceDir,
+                round,
+                sliceBody: sliceBodyNote,
+                explorerContext,
+                migrationReservation: migrationReservationBlock(
+                  config,
+                  slice.ghIssue,
+                ),
+                baseGateCatalog,
+                ...(config.plannerInlineSizeBudgetBytes !== undefined
+                  ? {
+                      inlineSizeBudgetBytes:
+                        config.plannerInlineSizeBudgetBytes,
+                    }
+                  : {}),
+              })
+            : assemblePlannerRevisionEnvelope({
+                ghIssue: slice.ghIssue,
+                specsDir: ctx.relSpecsDir,
+                sliceDir: ctx.relSliceDir,
+                round,
+                currentContract: currentContractText,
+                currentAcceptanceManifest: currentManifestText,
+                findings: lastFindings,
+                ...(pendingObjection !== null
+                  ? {
+                      controlSituation:
+                        `The pipeline REJECTED the previous contract before ` +
+                        `any code was generated:\n\n${pendingObjection}\n\n` +
+                        `Resolve exactly that in this revision.`,
+                    }
+                  : {}),
+                contractResponseInstructions,
+                migrationReservation: migrationReservationBlock(
+                  config,
+                  slice.ghIssue,
+                ),
+                baseGateCatalog,
+                ...(config.plannerInlineSizeBudgetBytes !== undefined
+                  ? {
+                      inlineSizeBudgetBytes:
+                        config.plannerInlineSizeBudgetBytes,
+                    }
+                  : {}),
+              });
 
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${contractRoundLimit})...`,
@@ -3088,35 +3204,17 @@ async function negotiateAttempt(
         rmSync(join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME), {
           force: true,
         });
+        logger.event({
+          type: "prompt-assembly",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          round,
+          ...assembledPlanner.evidence,
+        });
         await invokeAgent(
           {
             role: "planner",
-            prompt: renderPrompt("planner", {
-              GH_ISSUE: slice.ghIssue,
-              SPECS_DIR: ctx.relSpecsDir,
-              SLICE_DIR: ctx.relSliceDir,
-              ROUND: round,
-              RELEVANT_FILES: relevantFilesBlock,
-              SLICE_BODY: sliceBodyNote,
-              REVISION_NOTE: plannerRound.revisionNote,
-              CONTRACT_RESPONSE_NOTE: requiresPlannerResponse
-                ? [
-                    `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
-                    "Use exactly this schema:",
-                    `{"version":1,"round":${round},"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}`,
-                    `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
-                    "CONDITION_MET and CONTESTED require non-blank evidence.",
-                  ].join("\n")
-                : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`,
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-              // The planner must bind every behavior to a gate the
-              // lock gate can verify, so it is told the same derived
-              // catalog that check reads — otherwise it can only guess
-              // IDs and burn rounds on refusals.
-              BASE_GATE_CATALOG: formatBaseGateCatalog(
-                resolveBaseGateDeclarations(ctx.worktreeDir),
-              ),
-            }),
+            prompt: assembledPlanner.prompt,
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
@@ -3138,15 +3236,11 @@ async function negotiateAttempt(
           round,
         });
 
-        let acceptanceManifestBlock = "";
         let baseGateCatalogBlock = "";
+        let evaluatedManifest: AcceptanceManifest | null = null;
         try {
           const lockArtifacts = loadBehaviorLockArtifacts();
-          acceptanceManifestBlock = JSON.stringify(
-            lockArtifacts.manifest,
-            null,
-            2,
-          );
+          evaluatedManifest = lockArtifacts.manifest;
           baseGateCatalogBlock = formatBaseGateCatalog(
             lockArtifacts.gateCatalog,
           );
@@ -3275,28 +3369,55 @@ async function negotiateAttempt(
         let latestValidatedReview: ValidatedContractReview | null = null;
         let latestValidationError: unknown = null;
         let attemptLifecyclePrevious: ContractReview | null = null;
+        const currentContract = readFileSync(contractPath, "utf-8");
+        const assembledEvaluator =
+          evaluatorRound === 1
+            ? assembleContractEvaluatorInitialEnvelope({
+                sliceDir: ctx.relSliceDir,
+                round: evaluatorRound,
+                contractReviewFile: CONTRACT_REVIEW_FILENAME,
+                proposedContract: currentContract,
+                acceptanceManifest: evaluatedManifest!,
+                baseGateCatalog: baseGateCatalogBlock,
+                explorerContext,
+                ...(config.contractEvaluatorInlineSizeBudgetBytes !==
+                undefined
+                  ? {
+                      inlineSizeBudgetBytes:
+                        config.contractEvaluatorInlineSizeBudgetBytes,
+                    }
+                  : {}),
+              })
+            : assembleContractEvaluatorRevisionEnvelope({
+                sliceDir: ctx.relSliceDir,
+                round: evaluatorRound,
+                contractReviewFile: CONTRACT_REVIEW_FILENAME,
+                proposedContract: currentContract,
+                acceptanceManifest: evaluatedManifest!,
+                baseGateCatalog: baseGateCatalogBlock,
+                explorerContext,
+                previousFindings: previousReview?.findings ?? [],
+                plannerResponse,
+                revisions: revisionArtifacts!,
+                ...(config.contractEvaluatorInlineSizeBudgetBytes !==
+                undefined
+                  ? {
+                      inlineSizeBudgetBytes:
+                        config.contractEvaluatorInlineSizeBudgetBytes,
+                    }
+                  : {}),
+              });
+        logger.event({
+          type: "prompt-assembly",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          round: evaluatorRound,
+          ...assembledEvaluator.evidence,
+        });
         await invokeAgent(
           {
             role: "evaluator-contract",
-            prompt: renderPrompt("evaluator-contract", {
-              SPECS_DIR: ctx.relSpecsDir,
-              SLICE_DIR: ctx.relSliceDir,
-              ROUND: evaluatorRound,
-              RELEVANT_FILES: relevantFilesBlock,
-              PREVIOUS_REVIEW_NOTE: contractLifecycle.evaluatorHistoryNote(
-                evaluatorRound,
-                ctx.relSliceDir,
-              ),
-              ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
-              BASE_GATE_CATALOG: baseGateCatalogBlock,
-              CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
-              PLANNER_RESPONSE: plannerResponse
-                ? JSON.stringify(plannerResponse, null, 2)
-                : "(first review round; no planner response)",
-              REVISION_CONTEXT: revisionArtifacts
-                ? JSON.stringify(revisionArtifacts, null, 2)
-                : "(first review round; no prior revision)",
-            }),
+            prompt: assembledEvaluator.prompt,
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
