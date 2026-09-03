@@ -786,25 +786,31 @@ describe("explorer negotiation envelope", () => {
   // independent omission cases cannot share one spawned worktree.
   it.each([
     {
+      label: "architecture and ADR index",
+      options: { architecture: true, adrs: true },
+      present: ["## ARCHITECTURE.md", "## ADR index"],
+      absent: [],
+    },
+    {
       label: "architecture only",
       options: { architecture: true },
-      present: "## ARCHITECTURE.md",
+      present: ["## ARCHITECTURE.md"],
       absent: ["## ADR index"],
     },
     {
       label: "ADR index only",
       options: { adrs: true },
-      present: "## ADR index",
+      present: ["## ADR index"],
       absent: ["## ARCHITECTURE.md"],
     },
     {
       label: "neither repository entry",
       options: {},
-      present: "(none available)",
+      present: ["(none available)"],
       absent: ["## ARCHITECTURE.md", "## ADR index"],
     },
   ])(
-    "B-05 P-02 invokes explorer once through the provider seam with $label",
+    "B-03 B-04 B-05 P-02 invokes explorer once through the provider seam with $label",
     async ({ label, options, present, absent }) => {
       const { ctx, invocations } = await runExplorerNegotiation(
         `explorer-${label.replaceAll(" ", "-")}`,
@@ -816,7 +822,23 @@ describe("explorer negotiation envelope", () => {
 
       expect(explorerInvocations).toHaveLength(1);
       const prompt = explorerInvocations[0]!.prompt;
-      expect(prompt).toContain(present);
+      const requiredBlockOrder = [
+        "# Objective",
+        "# Write boundary",
+        "# Stop condition",
+        "# Citation rule",
+        "# Four-section task",
+        "# Slice inputs",
+        "# Repository context",
+        "# Budget",
+      ];
+      let previousBlockIndex = -1;
+      for (const block of requiredBlockOrder) {
+        const blockIndex = prompt.indexOf(block);
+        expect(blockIndex, block).toBeGreaterThan(previousBlockIndex);
+        previousBlockIndex = blockIndex;
+      }
+      for (const marker of present) expect(prompt).toContain(marker);
       for (const marker of absent) expect(prompt).not.toContain(marker);
       expect(prompt).not.toContain("ADR-BODY-MUST-NOT-APPEAR");
       const writeBoundary = prompt.match(
