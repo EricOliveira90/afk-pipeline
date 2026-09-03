@@ -71,9 +71,20 @@ met:
 - `CONTESTED` becomes `CONTESTED` when you hold the finding or `WITHDRAWN` when
   the planner's evidence changes your judgment.
 
-Keep familiar finding IDs and use `revisionCitation: null`. Every fresh finding
-must be `OPEN` and must cite exact, unequal before/after text changed by this
-revision. A fresh finding about unchanged text is invalid.
+Keep familiar finding IDs and use `revisionCitation: null` for them. Every
+fresh finding must be `OPEN` and must use this exact citation object:
+
+```json
+"revisionCitation": {
+  "artifact": "contract.md",
+  "before": "exact text from the prior artifact",
+  "after": "exact text from the revised artifact"
+}
+```
+
+`artifact` must be exactly `contract.md` or `acceptance-manifest.json`.
+`before` and `after` must be exact, unequal text from that artifact changed by
+this revision. A fresh finding about unchanged text is invalid.
 
 Limit any fresh judgment to gate aptness, scenario honesty, evidence-backed
 scope, blocking UNKNOWNs, single-session feasibility, and explicit non-goals.

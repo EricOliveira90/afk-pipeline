@@ -286,6 +286,29 @@ describe("renderPrompt", () => {
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
   });
 
+  it("B-04 QA-02 documents the fresh revisionCitation object contract", () => {
+    const prompt = renderPrompt("evaluator-contract-revision", {
+      SLICE_DIR: "d",
+      ROUND: 2,
+      CONTRACT_REVIEW_FILE: "contract-review.json",
+      REVISED_CONTRACT: "contract",
+      REVISED_ACCEPTANCE_MANIFEST: '{"version":2}',
+      PRIOR_OPEN_FINDINGS: "(none)",
+      PLANNER_RESPONSE: "(none)",
+      REVISION_CONTEXT: '{"before":"old","after":"new"}',
+      CONTROL_SITUATION: "(none)",
+      BASE_GATE_CATALOG: "- tests: pnpm run test",
+      EXPLORER_CONTEXT: "context",
+    });
+
+    expect(prompt).toContain('"artifact": "contract.md"');
+    expect(prompt).toContain('"before": "exact text from the prior artifact"');
+    expect(prompt).toContain('"after": "exact text from the revised artifact"');
+    expect(prompt).toContain(
+      "`artifact` must be exactly `contract.md` or `acceptance-manifest.json`",
+    );
+  });
+
   it("retires the STUCK prompts from active source while docs keep the history", () => {
     const repoRoot = fileURLToPath(new URL("..", import.meta.url));
     const retiredRole = ["generator", "stuck"].join("-");

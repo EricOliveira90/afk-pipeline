@@ -467,8 +467,15 @@ describe("planner and contract-evaluator context envelopes", () => {
     expect(result.prompt).toMatch(
       /independently judge whether its clear-condition is\s+met/,
     );
-    expect(result.prompt).toMatch(
-      /Every fresh finding\s+must be `OPEN` and must cite exact, unequal before\/after text changed by this\s+revision/,
+    expect(result.prompt).toContain(
+      '"revisionCitation": {\n' +
+        '  "artifact": "contract.md",\n' +
+        '  "before": "exact text from the prior artifact",\n' +
+        '  "after": "exact text from the revised artifact"\n' +
+        "}",
+    );
+    expect(result.prompt).toContain(
+      "`artifact` must be exactly `contract.md` or `acceptance-manifest.json`",
     );
     expect(result.prompt).toContain('"before": "old contract"');
     expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
