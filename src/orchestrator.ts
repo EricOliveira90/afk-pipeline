@@ -107,7 +107,6 @@ import {
 import {
   advanceContractFindingLineage,
   contractPlannerContext,
-  decideContractContinuation,
   loadContractFindingLineage,
   saveContractFindingLineage,
   validateContractReviewAgainstLineage,
@@ -206,11 +205,9 @@ import {
 } from "./qa-review.js";
 import {
   advanceQAFindingLineage,
-  decideQAFinalRepair,
   formatQAGeneratorContext,
   hasPendingQAFinalRepair,
   loadQAConvergenceState,
-  markQAFinalRepairUsed,
   qaLifecycleHistory,
   resolveQAScopeAmendments,
   saveQAConvergenceState,
@@ -219,15 +216,14 @@ import {
   type QAConvergenceUpdate,
 } from "./qa-convergence.js";
 import {
-  contractNonProgressObservation,
-  decideNonProgress,
-  loadNonProgressHistory,
-  qaNonProgressObservation,
-  saveNonProgressHistory,
   writeInterventionRequest,
   INTERVENTION_FILENAME,
   type InterventionRequest,
 } from "./non-progress.js";
+import {
+  coordinateContractContinuation,
+  coordinateQAContinuation,
+} from "./convergence-coordinator.js";
 import {
   applyScopeAmendment,
   buildScopeAmendmentRecord,
@@ -2849,6 +2845,7 @@ async function negotiateAttempt(
     let lastVerdict: RecordedContractVerdict = "NONE";
     let lastFeedbackPath = join(ctx.absSliceDir, "feedback-r0.md");
     const capDecisions: string[] = [];
+    let capIntervention: InterventionRequest | null = null;
     /**
      * The previous round's review, kept so this round's re-raised-gap
      * count can be derived from finding IDs rather than taken from the
@@ -3406,74 +3403,6 @@ async function negotiateAttempt(
             finding.severity === "BLOCKING" &&
             finding.state === "CONTESTED",
         );
-        if (
-          verdict === "REVISE" &&
-          gateObjection === null &&
-          !hasContestedBlocker
-        ) {
-          const nonProgressLocation = {
-            repoRoot: config.repoRoot,
-            prdSlug: config.prdSlug,
-            ghIssue: slice.ghIssue,
-          };
-          const observation = contractNonProgressObservation({
-            before: lineageBeforeReview,
-            update: convergence,
-            candidate: {
-              branch: ctx.branch,
-              treeId: resolveCandidateTreeId(ctx.worktreeDir),
-            },
-            supportingEvidence: [
-              relative(config.repoRoot, feedbackPath).replace(/\\/g, "/"),
-              relative(config.repoRoot, reviewArchiveDir).replace(/\\/g, "/"),
-            ],
-          });
-          const nonProgress = decideNonProgress(
-            loadNonProgressHistory(nonProgressLocation),
-            observation,
-          );
-          saveNonProgressHistory(nonProgressLocation, nonProgress.history);
-          if (nonProgress.action === "intervene") {
-            writeInterventionRequest(ctx.absSliceDir, nonProgress.request);
-            const interventionPath =
-              `${ctx.relSliceDir}/${INTERVENTION_FILENAME}`;
-            capDecisions.push(nonProgress.request.summary);
-            capDecisions.push(
-              `Operator action: ${nonProgress.request.requiredOperatorAction}`,
-            );
-            const negotiationOutcome =
-              evaluatorRound >= 2 && lastReviewAttemptRecord
-                ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
-                : undefined;
-            preserveContractNegotiationFailure(
-              ctx,
-              "ESCALATE",
-              round,
-              verdict,
-              feedbackPath,
-              capDecisions.join(" "),
-              review.findings,
-              negotiationOutcome,
-            );
-            logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
-            logger.phase(
-              `${ctx.tag}: ESCALATE — ${nonProgress.request.summary} ` +
-                `Action: ${nonProgress.request.requiredOperatorAction}`,
-              "error",
-            );
-            return {
-              phase: "ESCALATE",
-              cause: {
-                kind: "verdict",
-                verdict,
-                summary:
-                  `negotiate: ${nonProgress.request.summary} ` +
-                  `Structured intervention: ${interventionPath}. ` +
-                  nonProgress.request.requiredOperatorAction,
-              },
-            };
-          }
-        }
         if (verdict === "ACCEPT") {
           // Gate before lock, per ADR 0055 §5's mandated ordering. With
           // `lockContract` first, a process stop between the two calls left
@@ -3502,16 +3431,71 @@ async function negotiateAttempt(
         }
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.
+        const coordinated = coordinateContractContinuation({
+          location: convergenceLocation,
+          before: lineageBeforeReview,
+          update: convergence,
+          review,
+          candidate: {
+            branch: ctx.branch,
+            treeId: resolveCandidateTreeId(ctx.worktreeDir),
+          },
+          supportingEvidence: [
+            relative(config.repoRoot, feedbackPath).replace(/\\/g, "/"),
+            relative(config.repoRoot, reviewArchiveDir).replace(/\\/g, "/"),
+          ],
+          eligibleForNonProgress:
+            verdict === "REVISE" &&
+            gateObjection === null &&
+            !hasContestedBlocker,
+          atNormalBoundary:
+            round === contractRoundLimit &&
+            round === allowedContractRounds,
+          semanticCapReached: round === contractRoundLimit,
+          gateObjection: gateObjection !== null,
+          revisionCitationValidated: revisionArtifacts !== null,
+        });
+        if (coordinated.intervention && round < contractRoundLimit) {
+          const request = coordinated.intervention;
+          writeInterventionRequest(ctx.absSliceDir, request, {
+            repoRoot: config.repoRoot,
+            runSlug: pipelineRunSlug(
+              config.prdSlug,
+              config.provider ?? kiroProvider,
+            ),
+            ghIssue: slice.ghIssue,
+          });
+          const interventionPath =
+            `${ctx.relSliceDir}/${INTERVENTION_FILENAME}`;
+          capDecisions.push(request.summary);
+          capDecisions.push(
+            `Operator action: ${request.requiredOperatorAction}`,
+          );
+          preserveContractNegotiationFailure(
+            ctx,
+            "ESCALATE",
+            round,
+            verdict,
+            feedbackPath,
+            capDecisions.join(" "),
+            review.findings,
+          );
+          logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
+          return {
+            phase: "ESCALATE",
+            cause: {
+              kind: "verdict",
+              verdict,
+              summary:
+                `negotiate: ${request.summary} Structured intervention: ` +
+                `${interventionPath}. ${request.requiredOperatorAction}`,
+            },
+          };
+        }
 
         if (round === contractRoundLimit) {
           if (round === allowedContractRounds) {
-            const continuation = decideContractContinuation({
-              before: lineageBeforeReview,
-              update: convergence,
-              review,
-              gateObjection: gateObjection !== null,
-              revisionCitationValidated: revisionArtifacts !== null,
-            });
+            const continuation = coordinated.continuation!;
             if (continuation.action === "extend") {
               findingLineage = {
                 ...findingLineage,
@@ -3536,6 +3520,25 @@ async function negotiateAttempt(
             }
             capDecisions.push(
               `No final contract response granted: ${continuation.reason}.`,
+            );
+          }
+          if (coordinated.intervention) {
+            writeInterventionRequest(
+              ctx.absSliceDir,
+              coordinated.intervention,
+              {
+              repoRoot: config.repoRoot,
+              runSlug: pipelineRunSlug(
+                config.prdSlug,
+                config.provider ?? kiroProvider,
+              ),
+              ghIssue: slice.ghIssue,
+              },
+            );
+            capIntervention = coordinated.intervention;
+            capDecisions.push(coordinated.intervention.summary);
+            capDecisions.push(
+              `Operator action: ${coordinated.intervention.requiredOperatorAction}`,
             );
           }
           const reason = gateObjection
@@ -3580,11 +3583,21 @@ async function negotiateAttempt(
         // it was silent about a held contest until now. stuck.md carries the
         // two positions themselves.
         const cause =
+          capIntervention
+            ? {
+                kind: "verdict" as const,
+                verdict,
+                summary:
+                  `negotiate: ${capIntervention.summary} Structured intervention: ` +
+                  `${ctx.relSliceDir}/${INTERVENTION_FILENAME}. ` +
+                  capIntervention.requiredOperatorAction,
+              }
+            :
           negotiationMixedExhaustionCause(negotiationOutcome, verdict, round) ??
           negotiateVerdictCause({
             outcome: "ESCALATE",
             verdict,
-            round,
+          round,
           });
         return { phase: "ESCALATE", cause };
       }
@@ -3704,6 +3717,7 @@ export async function runQAStage(
   options: {
     candidateTreeId?: string;
     allowFinalRepair?: boolean;
+    semanticCapReached?: boolean;
   } = {},
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke, featBranch } = ctx;
@@ -4304,16 +4318,14 @@ export async function runQAStage(
       }
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
     }
-    let finalRepair: QAFinalRepairDecision | null = null;
     const candidateTreeId =
       options.candidateTreeId ?? resolveCandidateTreeId(ctx.worktreeDir);
-    const nonProgressObservation = qaNonProgressObservation({
+    const coordinated = coordinateQAContinuation({
+      location: convergenceLocation,
       before: validAttempt.convergenceBefore,
       update: validAttempt.convergenceUpdate,
-      phase:
-        stage === "deterministic"
-          ? "deterministic-qa"
-          : "shared-preview-uat",
+      review,
+      stage,
       candidate: {
         branch: ctx.branch,
         treeId: candidateTreeId,
@@ -4324,38 +4336,20 @@ export async function runQAStage(
           (finding) => finding.artifactReferences,
         ),
       ],
+      allowFinalRepair:
+        options.allowFinalRepair === true &&
+        options.candidateTreeId !== undefined,
+      semanticCapReached: options.semanticCapReached === true,
     });
-    const nonProgress = decideNonProgress(
-      loadNonProgressHistory(convergenceLocation),
-      nonProgressObservation,
-    );
-    saveNonProgressHistory(convergenceLocation, nonProgress.history);
-    if (
-      nonProgress.action === "continue" &&
-      options.allowFinalRepair &&
-      options.candidateTreeId
-    ) {
-      finalRepair = decideQAFinalRepair({
-        before: validAttempt.convergenceBefore,
-        update: validAttempt.convergenceUpdate,
-        review,
-        stage,
-        candidateTreeId: options.candidateTreeId,
-      });
-      if (finalRepair.action === "extend") {
-        convergenceState = markQAFinalRepairUsed(convergenceState);
-        saveQAConvergenceState(convergenceLocation, convergenceState);
-      }
-    }
+    convergenceState = coordinated.convergence;
     return {
       outcome: "IMPLEMENTATION",
       report: archiveDisplayPath,
       history: nextHistory,
       unresolved,
       convergence: convergenceState,
-      finalRepair,
-      intervention:
-        nonProgress.action === "intervene" ? nonProgress.request : null,
+      finalRepair: coordinated.finalRepair,
+      intervention: coordinated.intervention,
     };
   }
 
@@ -4449,7 +4443,14 @@ export async function runSliceExecute(
   const finishIntervention = (
     request: InterventionRequest,
   ): Extract<TerminalOutcome, { phase: "STUCK" }> => {
-    writeInterventionRequest(ctx.absSliceDir, request);
+    writeInterventionRequest(ctx.absSliceDir, request, {
+      repoRoot: config.repoRoot,
+      runSlug: pipelineRunSlug(
+        config.prdSlug,
+        config.provider ?? kiroProvider,
+      ),
+      ghIssue: slice.ghIssue,
+    });
     const reference = `${ctx.relSliceDir}/${INTERVENTION_FILENAME}`;
     if (!stuckReferences.includes(reference)) stuckReferences.push(reference);
     logger.phase(
@@ -5085,6 +5086,8 @@ export async function runSliceExecute(
           {
             candidateTreeId: checkpoint.treeId,
             allowFinalRepair: round === MAX_GENERATOR_ROUNDS,
+            semanticCapReached:
+              implementationAttempt === implementationAttemptLimit,
           },
         );
         deterministicHistory = deterministic.history;
@@ -5142,6 +5145,8 @@ export async function runSliceExecute(
             {
               candidateTreeId: checkpoint.treeId,
               allowFinalRepair: round === MAX_GENERATOR_ROUNDS,
+              semanticCapReached:
+                implementationAttempt === implementationAttemptLimit,
             },
           );
           sharedPreviewHistory = remote.history;

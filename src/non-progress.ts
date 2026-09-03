@@ -15,6 +15,7 @@ import {
   saveRunState,
   type RunState,
 } from "./run-state.js";
+import { preserveRecoveryTree } from "./git.js";
 
 export const INTERVENTION_FILENAME = "intervention.json";
 
@@ -32,13 +33,16 @@ export type NonProgressReason =
   | "EQUIVALENT_REPETITION"
   | "REOPENED_WITHOUT_NEW_EVIDENCE"
   | "OSCILLATION"
-  | "REGRESSION_GROWTH";
+  | "REGRESSION_GROWTH"
+  | "SEMANTIC_CAP_EXHAUSTED";
 
 export interface PreservedCandidate {
   branch: string;
   treeId: string;
   phase: ConvergencePhase;
   revision: number;
+  recoveryRef?: string;
+  recoveryCommit?: string;
 }
 
 export interface InterventionFinding {
@@ -395,10 +399,27 @@ function bestCandidate(
     )[0]!.candidate;
 }
 
-function interventionClass(phase: ConvergencePhase): InterventionClass {
-  return phase === "contract"
-    ? "PRODUCT_DECISION"
-    : "IMPLEMENTATION_INTERVENTION";
+function interventionClass(
+  observation: NonProgressObservation,
+): InterventionClass {
+  const evidence = [
+    ...observation.supportingEvidence,
+    ...observation.findings.flatMap((finding) => [
+      finding.summary,
+      finding.evidence,
+      finding.clearCondition,
+    ]),
+  ].join(" ").toLowerCase();
+  if (/\b(restore|recovery|recover|resume|checkpoint|missing candidate)\b/.test(evidence)) {
+    return "RECOVERY_ACTION";
+  }
+  if (
+    observation.phase === "contract" &&
+    /\b(decide|decision|clarify|ambigu|contradict|product requirement)\b/.test(evidence)
+  ) {
+    return "PRODUCT_DECISION";
+  }
+  return "IMPLEMENTATION_INTERVENTION";
 }
 
 function requiredAction(
@@ -448,7 +469,7 @@ export function decideNonProgress(
     ...observation.activeBlockingIds,
   ]);
   const preservedCandidate = bestCandidate(history, observation);
-  const kind = interventionClass(observation.phase);
+  const kind = interventionClass(observation);
   const phaseHistory = samePhaseHistory(nextHistory, observation.phase);
   const request: InterventionRequest = {
     version: 1,
@@ -476,6 +497,45 @@ export function decideNonProgress(
     requiredOperatorAction: requiredAction(kind, blockers, preservedCandidate),
   };
   return { action: "intervene", history: nextHistory, request };
+}
+
+export function buildSemanticCapIntervention(
+  history: NonProgressHistory,
+  observation: NonProgressObservation,
+): { history: NonProgressHistory; request: InterventionRequest } {
+  const progressed = decideNonProgress(history, observation);
+  if (progressed.action === "intervene") return progressed;
+  const blockers = sortedUnique(observation.activeBlockingIds);
+  const preservedCandidate = bestCandidate(history, observation);
+  const kind = interventionClass(observation);
+  return {
+    history: progressed.history,
+    request: {
+      version: 1,
+      interventionClass: kind,
+      phase: observation.phase,
+      reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+      blockerIds: blockers,
+      summary:
+        `AFK exhausted the bounded ${observation.phase} repair capacity with ` +
+        `unresolved blocker(s) ${blockers.join(", ")}.`,
+      findingLineage: observation.findings,
+      attemptedRepairs: samePhaseHistory(progressed.history, observation.phase).map(
+        (entry) => ({
+          phase: entry.phase,
+          revision: entry.revision,
+          candidateTreeId: entry.candidate.treeId,
+          activeBlockingIds: [...entry.activeBlockingIds],
+        }),
+      ),
+      preservedCandidate,
+      supportingEvidence: sortedUnique([
+        ...observation.supportingEvidence,
+        ...observation.findings.flatMap((finding) => finding.artifactReferences),
+      ]),
+      requiredOperatorAction: requiredAction(kind, blockers, preservedCandidate),
+    },
+  };
 }
 
 function historyMap(state: RunState): Record<string, unknown> | null {
@@ -579,7 +639,35 @@ export function saveNonProgressHistory(
 export function writeInterventionRequest(
   sliceDir: string,
   request: InterventionRequest,
+  preservation?: {
+    repoRoot: string;
+    runSlug: string;
+    ghIssue: string;
+  },
 ): string {
+  if (preservation) {
+    const safe = (value: string): string =>
+      value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "");
+    const recoveryRef =
+      `refs/afk/recovery/${safe(preservation.runSlug)}/` +
+      `${safe(preservation.ghIssue)}/${safe(request.phase)}`;
+    const preserved = preserveRecoveryTree(preservation.repoRoot, {
+      ref: recoveryRef,
+      treeId: request.preservedCandidate.treeId,
+      parentRef: request.preservedCandidate.branch,
+      message:
+        `AFK recovery candidate ${preservation.ghIssue} ${request.phase} ` +
+        `revision ${request.preservedCandidate.revision}`,
+    });
+    request = {
+      ...request,
+      preservedCandidate: {
+        ...request.preservedCandidate,
+        recoveryRef: preserved.ref,
+        recoveryCommit: preserved.commit,
+      },
+    };
+  }
   const path = join(sliceDir, INTERVENTION_FILENAME);
   writeFileSync(path, `${JSON.stringify(request, null, 2)}\n`, "utf-8");
   return path;

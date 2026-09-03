@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   contractNonProgressObservation,
+  buildSemanticCapIntervention,
   decideNonProgress,
   emptyNonProgressHistory,
   parseNonProgressHistory,
@@ -158,6 +159,54 @@ describe("non-progress policy", () => {
       supportingEvidence: ["gate.json", "reviews/QA-02.json"],
     });
     expect(regressing.request.requiredOperatorAction).toContain(TREE_A);
+  });
+
+  it("derives all intervention classes from blocker and recovery semantics", () => {
+    const product = decideNonProgress(
+      emptyNonProgressHistory(),
+      observation(1, ["F-01"], {
+        phase: "contract",
+        candidate: {
+          branch: "afk/demo-slice-01",
+          treeId: TREE_A,
+          phase: "contract",
+          revision: 1,
+        },
+        reopenedWithoutNewEvidenceIds: ["F-01"],
+        findings: [{
+          ...observation(1, ["F-01"]).findings[0]!,
+          clearCondition: "A product decision must clarify the requirement",
+        }],
+      }),
+    );
+    expect(product).toMatchObject({
+      action: "intervene",
+      request: { interventionClass: "PRODUCT_DECISION" },
+    });
+
+    const recovery = decideNonProgress(
+      emptyNonProgressHistory(),
+      observation(1, ["QA-01"], {
+        reopenedWithoutNewEvidenceIds: ["QA-01"],
+        supportingEvidence: ["Restore the exact checkpoint before resume"],
+      }),
+    );
+    expect(recovery).toMatchObject({
+      action: "intervene",
+      request: { interventionClass: "RECOVERY_ACTION" },
+    });
+  });
+
+  it("turns bounded semantic exhaustion into a structured intervention", () => {
+    const exhausted = buildSemanticCapIntervention(
+      emptyNonProgressHistory(),
+      observation(1, ["QA-03"]),
+    );
+    expect(exhausted.request).toMatchObject({
+      reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+      blockerIds: ["QA-03"],
+      interventionClass: "IMPLEMENTATION_INTERVENTION",
+    });
   });
 
   it("is provider-independent and validates durable candidate identity", () => {

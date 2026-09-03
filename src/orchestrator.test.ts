@@ -4702,7 +4702,7 @@ describe("contract review fails closed", () => {
     });
   });
 
-  it("archives died attempts and rejects terminal reactivation on retry", async () => {
+  it("archives died attempts and routes same-ID reopening to intervention", async () => {
     const repo = makeRepo();
     const slug = "review-archive-attempts";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -4799,11 +4799,14 @@ describe("contract review fails closed", () => {
     );
 
     const outcome = await runSliceNegotiate(ctx);
-    expect(outcome.phase).toBe("ERROR");
-    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
-      /terminal finding F-01 cannot reactivate as OPEN/,
+    expect(outcome.phase).toBe("ESCALATE");
+    expect(outcome.phase === "ESCALATE" ? outcome.cause.summary : "").toMatch(
+      /EQUIVALENT_REPETITION/,
     );
     expect(evaluatorAttempts).toBe(5);
+    expect(
+      readFileSync(join(ctx.absSliceDir, "intervention.json"), "utf-8"),
+    ).toContain("recoveryRef");
     const reviews = join(
       repo,
       ".afk",
@@ -4812,8 +4815,8 @@ describe("contract review fails closed", () => {
       "slice-01",
       "reviews",
     );
-    // The malformed first attempt and reactivating final attempt have no
-    // invented lifecycle records. Valid died attempts retain their records.
+    // The malformed first attempt has no invented lifecycle record. The
+    // valid reopened attempt is recorded before policy stops the loop.
     expect(readdirSync(reviews).sort()).toEqual([
       "contract-review-r1-a1.json",
       "contract-review-r1-a2-record.json",
@@ -4822,6 +4825,7 @@ describe("contract review fails closed", () => {
       "contract-review-r1-a3.json",
       "contract-review-r2-a1-record.json",
       "contract-review-r2-a1.json",
+      "contract-review-r2-a2-record.json",
       "contract-review-r2-a2.json",
     ]);
     expect(

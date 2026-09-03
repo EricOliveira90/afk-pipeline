@@ -1383,6 +1383,8 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       blockerIds: ["QA-REPEAT"],
       preservedCandidate: {
         branch: "main",
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
       },
     });
     expect(intervention.attemptedRepairs).toHaveLength(2);
