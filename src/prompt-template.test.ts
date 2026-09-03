@@ -36,6 +36,9 @@ describe("renderPrompt", () => {
       CONTRACT_RESPONSE_NOTE: "Write contract-response.json",
     });
     expect(out).toContain("**Negotiation round:** 2");
+    expect(out).toMatch(
+      /prohibition on implementation edits must still\s+allow the planner and evaluator to write their required contract/i,
+    );
     expect(out).not.toContain("{{");
   });
 

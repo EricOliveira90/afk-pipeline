@@ -23,6 +23,11 @@ evaluator grades against.
    contract in place. Never append evaluator feedback, negotiation history,
    or resolution tables to `contract.md`. If a resolution table is useful
    while revising, write it to `{{SLICE_DIR}}/resolutions-r{{ROUND}}.md`.
+7. **Keep the acceptance bar internally consistent.** A negative assertion
+   must distinguish the forbidden behavior from any required control-plane
+   artifact. For example, a prohibition on implementation edits must still
+   allow the planner and evaluator to write their required contract, manifest,
+   response, review, and feedback artifacts.
 
 # Invariants
 
