@@ -2,15 +2,22 @@ import { describe, expect, it } from "vitest";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
 import {
+  CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
   EXPLORER_CONTEXT_MANIFEST,
   GENERATOR_CONTEXT_MANIFEST,
+  PLANNER_CONTEXT_MANIFEST,
+  assembleContractEvaluatorInitialEnvelope,
+  assembleContractEvaluatorRevisionEnvelope,
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
+  assemblePlannerInitialEnvelope,
+  assemblePlannerRevisionEnvelope,
   buildExplorerRepositoryContext,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateExplorerEvidenceMap,
 } from "./context-envelope.js";
+import type { ContractReviewFinding } from "./contract-review.js";
 import { fileURLToPath } from "node:url";
 
 const acceptanceManifest: AcceptanceManifestV2 = {
@@ -32,6 +39,25 @@ const acceptanceManifest: AcceptanceManifestV2 = {
       gateIds: ["tests"],
     },
   ],
+};
+
+const openFinding: ContractReviewFinding = {
+  id: "F-OPEN",
+  severity: "BLOCKING",
+  behaviorIds: ["B-01"],
+  evidence: '"old text"',
+  expected: "a falsifiable scenario",
+  observed: "the scenario is vague",
+  clearCondition: "B-01 names the command and failure signal",
+  state: "OPEN",
+  revisionCitation: null,
+};
+
+const resolvedFinding: ContractReviewFinding = {
+  ...openFinding,
+  id: "F-RESOLVED",
+  clearCondition: "RESOLVED-CLEAR-CONDITION",
+  state: "RESOLVED",
 };
 
 describe("explorer context envelope", () => {
@@ -237,6 +263,362 @@ describe("explorer context envelope", () => {
     ).toThrow(
       `Explorer prompt exceeds inline-size budget: actual ${requiredBytes} bytes, allowed ${requiredBytes - 1} bytes`,
     );
+  });
+});
+
+describe("planner and contract-evaluator context envelopes", () => {
+  const explorerContext = [
+    "## Files and current behavior",
+    "",
+    "FILES-EVIDENCE",
+    "",
+    "## Patterns and test harness",
+    "",
+    "PATTERNS-EVIDENCE",
+    "",
+    "## Data and integration",
+    "",
+    "DATA-EVIDENCE",
+    "",
+    "## Unknowns",
+    "",
+    "UNKNOWNS-EVIDENCE",
+  ].join("\n");
+
+  it("B-01 assembles planner initial evidence and outputs in manifest order", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const result = assemblePlannerInitialEnvelope({
+      repoRoot,
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      sliceBody: "SLICE-REQUEST",
+      explorerContext,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "No migration reservation is active.",
+    });
+
+    expect(PLANNER_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "planner",
+      inlineSizeBudgetBytes: 65_536,
+    });
+    const markers = [
+      "# Objective",
+      "# Write boundary",
+      "# Stop condition",
+      "# Slice request",
+      "SLICE-REQUEST",
+      "# Explorer evidence map",
+      "FILES-EVIDENCE",
+      "PATTERNS-EVIDENCE",
+      "DATA-EVIDENCE",
+      "UNKNOWNS-EVIDENCE",
+      "# Executable gate catalog",
+      "- tests: pnpm test:fast",
+      "# Migration reservation",
+      "# Repository context",
+      "## ADR index",
+      "## ARCHITECTURE.md",
+      "# Required output contract",
+      "Rewrite `.kiro/specs/demo/slices/03-envelope/contract.md`",
+      "Rewrite `.kiro/specs/demo/slices/03-envelope/acceptance-manifest.json`",
+    ];
+    let previous = -1;
+    for (const marker of markers) {
+      const index = result.prompt.indexOf(marker);
+      expect(index, marker).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(result.prompt).toContain(
+      "Copy every ADR citation the contract actually relies on",
+    );
+    expect(result.prompt).not.toContain("grep for `docs/adr/`");
+    expect(result.prompt).not.toContain("sibling handoffs");
+    expect(result.prompt).not.toContain(
+      "PRD 031 in `rumo-app` produced two consecutive guardian-review runs",
+    );
+    expect(result.evidence).toMatchObject({
+      role: "planner",
+      contextManifestVersion: 1,
+    });
+  });
+
+  it("B-02 projects each OPEN planner finding once and keeps the situation separate", () => {
+    const result = assemblePlannerRevisionEnvelope({
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 2,
+      currentContract: "CURRENT-CONTRACT",
+      currentAcceptanceManifest: '{"version":2}',
+      findings: [openFinding, resolvedFinding],
+      controlSituation: "MECHANICAL-OBJECTION",
+      contractResponseInstructions: "Write the routed response.",
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "No migration reservation is active.",
+    });
+    const findingsBlock = result.prompt
+      .split("# Routed OPEN findings")[1]!
+      .split("# Control-plane situation")[0]!;
+    const occurrences = (text: string, marker: string) =>
+      text.split(marker).length - 1;
+
+    expect(occurrences(findingsBlock, "F-OPEN")).toBe(1);
+    expect(
+      occurrences(
+        findingsBlock,
+        "B-01 names the command and failure signal",
+      ),
+    ).toBe(1);
+    expect(findingsBlock).not.toContain("F-RESOLVED");
+    expect(findingsBlock).not.toContain("RESOLVED-CLEAR-CONDITION");
+    expect(result.prompt).toContain(
+      "# Control-plane situation\n\nMECHANICAL-OBJECTION",
+    );
+    expect(result.prompt).toContain("`CONTESTED`");
+    expect(result.prompt).toContain(
+      "Revise only sections and manifest behavior entries affected",
+    );
+  });
+
+  it("B-03 limits the initial contract evaluator to declared judgment evidence", () => {
+    const result = assembleContractEvaluatorInitialEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "PROPOSED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext,
+    });
+
+    expect(CONTRACT_EVALUATOR_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "evaluator-contract",
+    });
+    const markers = [
+      "# Proposed contract",
+      "PROPOSED-CONTRACT",
+      "# Acceptance manifest",
+      '"id": "B-01"',
+      "# Executable gate catalog",
+      "- tests: pnpm test:fast",
+      "# Explorer evidence map",
+      "FILES-EVIDENCE",
+      "# Judgment boundary",
+      "Gate aptness",
+      "Scenario honesty",
+      "Evidence-backed scope",
+      "Blocking UNKNOWNs",
+      "Single-session feasibility",
+      "Explicit non-goals",
+      "# Canonical review artifacts",
+    ];
+    let previous = -1;
+    for (const marker of markers) {
+      const index = result.prompt.indexOf(marker);
+      expect(index, marker).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(result.prompt).not.toContain("generator output");
+    expect(result.prompt).not.toContain("feedback-r0.md");
+  });
+
+  it("B-04 supplies only prior OPEN findings and changed revision evidence", () => {
+    const result = assembleContractEvaluatorRevisionEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 2,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "REVISED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext,
+      previousFindings: [openFinding, resolvedFinding],
+      plannerResponse: {
+        version: 1,
+        round: 2,
+        responses: [
+          {
+            findingId: "F-OPEN",
+            position: "CONDITION_MET",
+            evidence: "the command is now named",
+          },
+        ],
+      },
+      revisions: {
+        "contract.md": {
+          before: "old contract",
+          after: "REVISED-CONTRACT",
+        },
+        "acceptance-manifest.json": {
+          before: '{"version":2,"old":true}',
+          after: JSON.stringify(acceptanceManifest),
+        },
+      },
+    });
+    const findingsBlock = result.prompt
+      .split("# Prior OPEN findings")[1]!
+      .split("# Planner response")[0]!;
+
+    expect(findingsBlock.match(/F-OPEN/g)).toHaveLength(1);
+    expect(findingsBlock).not.toContain("F-RESOLVED");
+    expect(result.prompt).toMatch(
+      /independently judge whether its clear-condition is\s+met/,
+    );
+    expect(result.prompt).toMatch(
+      /Every fresh finding\s+must be `OPEN` and must cite exact, unequal before\/after text changed by this\s+revision/,
+    );
+    expect(result.prompt).toContain('"before": "old contract"');
+    expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
+  });
+
+  it("B-05 uses distinct fresh templates and excludes undeclared context", () => {
+    const plannerInitial = assemblePlannerInitialEnvelope({
+      repoRoot: fileURLToPath(new URL("..", import.meta.url)),
+      ghIssue: "95",
+      specsDir: "specs",
+      sliceDir: "slice",
+      round: 1,
+      sliceBody: "request",
+      explorerContext,
+      baseGateCatalog: "- tests: pnpm test",
+      migrationReservation: "none",
+    }).prompt;
+    const plannerRevision = assemblePlannerRevisionEnvelope({
+      ghIssue: "95",
+      specsDir: "specs",
+      sliceDir: "slice",
+      round: 2,
+      currentContract: "contract",
+      currentAcceptanceManifest: '{"version":2}',
+      findings: [],
+      contractResponseInstructions: "none",
+      baseGateCatalog: "- tests: pnpm test",
+      migrationReservation: "none",
+    }).prompt;
+    const evaluatorInitial = assembleContractEvaluatorInitialEnvelope({
+      sliceDir: "slice",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "contract",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test",
+      explorerContext,
+    }).prompt;
+    const evaluatorRevision = assembleContractEvaluatorRevisionEnvelope({
+      sliceDir: "slice",
+      round: 2,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "contract",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test",
+      explorerContext,
+      previousFindings: [],
+      plannerResponse: null,
+      revisions: {
+        "contract.md": { before: "old", after: "new" },
+        "acceptance-manifest.json": { before: "old", after: "new" },
+      },
+    }).prompt;
+
+    expect(plannerInitial).not.toBe(plannerRevision);
+    expect(evaluatorInitial).not.toBe(evaluatorRevision);
+    expect(plannerRevision).toContain("# Routed OPEN findings");
+    expect(evaluatorRevision).toContain("# Prior OPEN findings");
+    for (const prompt of [
+      plannerInitial,
+      plannerRevision,
+      evaluatorInitial,
+      evaluatorRevision,
+    ]) {
+      expect(prompt).not.toContain("PRIOR-CONVERSATION-MARKER");
+      expect(prompt).not.toContain("sibling handoffs");
+      expect(prompt).not.toContain("grep for `docs/adr/`");
+      expect(prompt).not.toContain("prose companion is");
+    }
+  });
+
+  it("B-06 is deterministic, fail-closed, and exposes role-attributed evidence", () => {
+    const plannerInput = {
+      ghIssue: "95",
+      specsDir: "specs",
+      sliceDir: "slice",
+      round: 2,
+      currentContract: "contract",
+      currentAcceptanceManifest: '{"version":2}',
+      findings: [openFinding, resolvedFinding],
+      contractResponseInstructions: "write response",
+      baseGateCatalog: "- tests: pnpm test",
+      migrationReservation: "none",
+    };
+    const evaluatorInput = {
+      sliceDir: "slice",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "contract",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test",
+      explorerContext,
+    };
+    const plannerFirst = assemblePlannerRevisionEnvelope(plannerInput);
+    const plannerSecond = assemblePlannerRevisionEnvelope(plannerInput);
+    const evaluatorFirst =
+      assembleContractEvaluatorInitialEnvelope(evaluatorInput);
+    const evaluatorSecond =
+      assembleContractEvaluatorInitialEnvelope(evaluatorInput);
+
+    expect(Buffer.from(plannerSecond.prompt)).toEqual(
+      Buffer.from(plannerFirst.prompt),
+    );
+    expect(plannerSecond.evidence).toEqual(plannerFirst.evidence);
+    expect(Buffer.from(evaluatorSecond.prompt)).toEqual(
+      Buffer.from(evaluatorFirst.prompt),
+    );
+    expect(evaluatorSecond.evidence).toEqual(evaluatorFirst.evidence);
+    expect(plannerFirst.evidence.role).toBe("planner");
+    expect(evaluatorFirst.evidence.role).toBe("evaluator-contract");
+
+    const plannerAllowed = plannerFirst.evidence.assembledByteSize - 1;
+    expect(() =>
+      assemblePlannerRevisionEnvelope({
+        ...plannerInput,
+        inlineSizeBudgetBytes: plannerAllowed,
+      }),
+    ).toThrow(
+      `Planner prompt exceeds inline-size budget: actual ${plannerFirst.evidence.assembledByteSize} bytes, allowed ${plannerAllowed} bytes`,
+    );
+    const evaluatorAllowed = evaluatorFirst.evidence.assembledByteSize - 1;
+    expect(() =>
+      assembleContractEvaluatorInitialEnvelope({
+        ...evaluatorInput,
+        inlineSizeBudgetBytes: evaluatorAllowed,
+      }),
+    ).toThrow(
+      `Contract evaluator prompt exceeds inline-size budget: actual ${evaluatorFirst.evidence.assembledByteSize} bytes, allowed ${evaluatorAllowed} bytes`,
+    );
+
+    const events = [
+      {
+        type: "prompt-assembly",
+        ghIssue: "95",
+        sliceNumber: "03",
+        round: 2,
+        ...plannerFirst.evidence,
+      },
+      {
+        type: "prompt-assembly",
+        ghIssue: "95",
+        sliceNumber: "03",
+        round: 1,
+        ...evaluatorFirst.evidence,
+      },
+    ] satisfies RunEventPayload[];
+    expect(events.map(({ role }) => role)).toEqual([
+      "planner",
+      "evaluator-contract",
+    ]);
   });
 });
 

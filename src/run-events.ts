@@ -89,6 +89,7 @@ export type RunEventPayload =
       ghIssue: string;
       sliceNumber: string;
       round: number;
+      role: "explorer" | "planner" | "evaluator-contract" | "generator";
       assembledByteSize: number;
       includedArtifactIds: string[];
       omittedArtifactClasses: string[];

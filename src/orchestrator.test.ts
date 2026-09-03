@@ -2135,14 +2135,18 @@ describe("focused generator scope revision", () => {
     expect(records.filter(({ role }) => role === "planner")).toHaveLength(2);
   });
 
-  it("routes the exact escalation evidence through one focused planner", () => {
+  it("B-05 P-03 routes focused scope evidence through the planner revision envelope", () => {
     const planners = records.filter(({ role }) => role === "planner");
     expect(planners).toHaveLength(2);
+    expect(planners[1]!.prompt!).toContain("# Routed OPEN findings");
+    expect(planners[1]!.prompt!).toContain("# Control-plane situation");
     expect(planners[1]!.prompt!).toContain(
       JSON.stringify(escalation.findingIds),
     );
     expect(planners[1]!.prompt!).toContain(JSON.stringify(escalation.paths));
     expect(planners[1]!.prompt!).toContain(escalation.reason);
+    expect(planners[1]!.prompt!).not.toContain("grep for `docs/adr/`");
+    expect(planners[1]!.prompt!).not.toContain("sibling handoffs");
   });
 
   it("evaluates the revised manifest after the focused planner", () => {
@@ -2193,7 +2197,7 @@ describe("focused generator scope revision", () => {
     expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
   });
 
-  it("B-06 journals assembly evidence for every generator dispatch", () => {
+  it("B-06 journals role-attributed assembly evidence for every scoped dispatch", () => {
     const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
     const runDir = readdirSync(runRoot)
       .map((name) => join(runRoot, name))
@@ -2206,21 +2210,42 @@ describe("focused generator scope revision", () => {
       (event) => event.type === "prompt-assembly",
     );
 
-    expect(assemblies).toHaveLength(3);
+    expect(assemblies.map((event) => event.role)).toEqual([
+      "planner",
+      "evaluator-contract",
+      "generator",
+      "generator",
+      "planner",
+      "evaluator-contract",
+      "generator",
+    ]);
     for (const event of assemblies) {
       expect(event).toMatchObject({
         ghIssue: "1081",
         sliceNumber: "01",
         contextManifestVersion: 1,
       });
+      expect([
+        "planner",
+        "evaluator-contract",
+        "generator",
+      ]).toContain(event.role);
       expect(event.assembledByteSize).toBeGreaterThan(0);
+      expect(event.includedArtifactIds).toEqual(expect.any(Array));
+      expect(
+        (event.includedArtifactIds as unknown[]).length,
+      ).toBeGreaterThan(0);
+      expect(event.omittedArtifactClasses).toContain("prior-conversation");
+    }
+    for (const event of assemblies.filter(
+      ({ role, round }) => role !== "planner" || round !== 1,
+    )) {
       expect(event.includedArtifactIds).toEqual(
         expect.arrayContaining([
           expect.stringContaining("contract.md"),
           expect.stringContaining("acceptance-manifest.json"),
         ]),
       );
-      expect(event.omittedArtifactClasses).toContain("prior-conversation");
     }
   });
 
@@ -5388,7 +5413,7 @@ describe("contract review fails closed", () => {
  * `Status: NEGOTIATING` and bails. The orchestrator must own the flip.
  */
 describe("orchestrator-owned contract status", () => {
-  it("locks the contract on ACCEPT even when planner leaves Status NEGOTIATING", async () => {
+  it("P-02 locks the contract on ACCEPT even when planner leaves Status NEGOTIATING", async () => {
     const repo = makeRepo();
     const slug = "024-test";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
