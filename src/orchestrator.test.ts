@@ -3328,7 +3328,7 @@ describe("round-scoped contract feedback", () => {
     ).toBe(false);
   });
 
-  it("routes round 1 OPEN findings without prior feedback prose", async () => {
+  it("grants one final contract round for a fresh blocker caused by the round-two revision", async () => {
     const repo = makeRepo();
     const slug = "feedback-rounds";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -3373,21 +3373,28 @@ describe("round-scoped contract feedback", () => {
               "## Files expected to change",
               "- src/example.ts",
               "",
+              plannerRounds === 1
+                ? "The test asserts the baseline observable."
+                : "The test asserts the observable and scope plausibility.",
+              "",
             ].join("\n"),
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
-          if (plannerRounds === 2) {
+          if (plannerRounds > 1) {
             writeFileSync(
               join(artifactDir, "contract-response.json"),
               JSON.stringify({
                 version: 1,
-                round: 2,
+                round: plannerRounds,
                 responses: [
                   {
-                    findingId: "F-01",
+                    findingId: plannerRounds === 2 ? "F-01" : "F-02",
                     position: "CONDITION_MET",
-                    evidence: "B-01 now names the failing command",
+                    evidence:
+                      plannerRounds === 2
+                        ? "B-01 now names the failing command"
+                        : "B-01 now asserts scope plausibility",
                   },
                 ],
               }),
@@ -3397,29 +3404,69 @@ describe("round-scoped contract feedback", () => {
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           evaluatorPrompts.push(opts.prompt);
-          const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
+          const verdict = evaluatorRounds < 3 ? "REVISE" : "ACCEPT";
           writeFileSync(
             join(artifactDir, `feedback-r${evaluatorRounds}.md`),
             `## Evaluator feedback — round ${evaluatorRounds}\n\nProse for ${verdict}.\n`,
             "utf-8",
           );
-          writeContractReview(
-            artifactDir,
-            verdict,
-            [
+          const findings =
+            evaluatorRounds === 1
+              ? [
               {
                 id: "F-01",
-                severity: "BLOCKING",
+                severity: "BLOCKING" as const,
                 behaviorIds: ["B-01"],
                 evidence: '"it reaches review"',
                 expected: "a falsifiable observable result",
                 observed: "an unfalsifiable one",
                 clearCondition:
                   "B-01 names a command that fails when the header is absent",
-                state: verdict === "REVISE" ? "OPEN" : "RESOLVED",
+                state: "OPEN" as const,
               },
-            ],
-          );
+                ]
+              : evaluatorRounds === 2
+                ? [
+                    {
+                      id: "F-01",
+                      severity: "BLOCKING" as const,
+                      behaviorIds: ["B-01"],
+                      evidence: "the original condition is now met",
+                      expected: "a falsifiable observable result",
+                      observed: "the command is now named",
+                      clearCondition: "the named command remains present",
+                      state: "RESOLVED" as const,
+                    },
+                    {
+                      id: "F-02",
+                      severity: "BLOCKING" as const,
+                      behaviorIds: ["B-01"],
+                      evidence: "the revision added an unproved scope claim",
+                      expected: "scope plausibility is asserted",
+                      observed: "only the observable is asserted",
+                      clearCondition: "B-01 asserts scope plausibility",
+                      state: "OPEN" as const,
+                      revisionCitation: {
+                        artifact: "contract.md" as const,
+                        before: "The test asserts the baseline observable.",
+                        after:
+                          "The test asserts the observable and scope plausibility.",
+                      },
+                    },
+                  ]
+                : [
+                    {
+                      id: "F-02",
+                      severity: "BLOCKING" as const,
+                      behaviorIds: ["B-01"],
+                      evidence: "the extension condition is now met",
+                      expected: "scope plausibility is asserted",
+                      observed: "scope plausibility is asserted",
+                      clearCondition: "B-01 asserts scope plausibility",
+                      state: "RESOLVED" as const,
+                    },
+                  ];
+          writeContractReview(artifactDir, verdict, findings);
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -3439,8 +3486,8 @@ describe("round-scoped contract feedback", () => {
 
     expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(plannerRounds).toBe(2);
-    expect(evaluatorRounds).toBe(2);
+    expect(plannerRounds).toBe(3);
+    expect(evaluatorRounds).toBe(3);
     expect(plannerPrompts[0]).toContain("Local issue details");
     expect(plannerPrompts[0]).not.toContain("gh issue view 9001");
     expect(plannerPrompts[1]).not.toContain("feedback-r1.md");
@@ -3454,6 +3501,9 @@ describe("round-scoped contract feedback", () => {
     expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
     expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
+    expect(plannerPrompts[2]).toContain("[F-02] BLOCKING OPEN");
+    expect(plannerPrompts[2]).not.toContain("[F-01] BLOCKING");
+    expect(evaluatorPrompts[2]).toContain('"round": 3');
 
     const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
     expect(contract).toMatch(/^\*\*Status:\*\*\s*LOCKED\s*$/m);
@@ -4192,7 +4242,7 @@ describe("round-scoped contract feedback", () => {
     );
   });
 
-  it("caps a converging negotiation at two rounds", async () => {
+  it("extends a converging negotiation when round two leaves only fresh revision blockers", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -4228,16 +4278,28 @@ describe("round-scoped contract feedback", () => {
               "utf-8",
             );
           }
-          if (plannerRounds === 2) {
+          if (plannerRounds > 1) {
             writeFileSync(
               join(artifactDir, "contract.md"),
-              "# Contract\n\n**Status:** NEGOTIATING\n\nRound 2\n",
+              `# Contract\n\n**Status:** NEGOTIATING\n\nRound ${plannerRounds}\n`,
               "utf-8",
             );
-            writeContractResponse(
-              artifactDir,
-              ["F-r1-1", "F-r1-2", "F-r1-3", "F-r1-4"],
-              "CONDITION_MET",
+            const priorGaps = plannerRounds === 2 ? 4 : 2;
+            writeFileSync(
+              join(artifactDir, "contract-response.json"),
+              JSON.stringify({
+                version: 1,
+                round: plannerRounds,
+                responses: Array.from(
+                  { length: priorGaps },
+                  (_unused, index) => ({
+                    findingId: `F-r${plannerRounds - 1}-${index + 1}`,
+                    position: "CONDITION_MET",
+                    evidence: "the cited condition is now met",
+                  }),
+                ),
+              }),
+              "utf-8",
             );
           }
         } else if (opts.role === "evaluator-contract") {
@@ -4247,9 +4309,11 @@ describe("round-scoped contract feedback", () => {
           // round 2 fresh IDs, since a reused ID is a re-raised gap.
           const gaps = evaluatorRounds === 1 ? 4 : evaluatorRounds === 2 ? 2 : 0;
           const resolved =
-            evaluatorRounds === 2
-              ? Array.from({ length: 4 }, (_unused, index) => ({
-                  id: `F-r1-${index + 1}`,
+            evaluatorRounds > 1
+              ? Array.from(
+                  { length: evaluatorRounds === 2 ? 4 : 2 },
+                  (_unused, index) => ({
+                  id: `F-r${evaluatorRounds - 1}-${index + 1}`,
                   severity: "BLOCKING" as const,
                   behaviorIds: ["B-01"],
                   evidence: '"it reaches review"',
@@ -4257,7 +4321,8 @@ describe("round-scoped contract feedback", () => {
                   observed: `round-1 gap ${index + 1} was cleared`,
                   clearCondition: `gap ${index + 1} names a failing command`,
                   state: "RESOLVED" as const,
-                }))
+                  }),
+                )
               : [];
           writeContractReview(
             artifactDir,
@@ -4309,29 +4374,16 @@ describe("round-scoped contract feedback", () => {
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+      expect((await runSliceNegotiate(ctx)).phase).toBe("LOCKED");
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(plannerRounds).toBe(2);
-      expect(evaluatorRounds).toBe(2);
-      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
-        "granting contract round",
+      expect(plannerRounds).toBe(3);
+      expect(evaluatorRounds).toBe(3);
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain(
+        "contract convergence extension granted",
       );
-      expect(
-        JSON.parse(
-          readFileSync(
-            join(ctx.absSliceDir, "contract-negotiation-outcome.json"),
-            "utf-8",
-          ),
-        ),
-      ).toMatchObject({
-        version: 1,
-        classification: "NON_CONVERGENCE",
-        round: 2,
-        findings: [
-          { id: "F-r2-1", state: "OPEN", unresolved: true },
-          { id: "F-r2-2", state: "OPEN", unresolved: true },
-        ],
-      });
+      expect(existsSync(join(ctx.absSliceDir, "contract-negotiation-outcome.json"))).toBe(
+        false,
+      );
     } finally {
       errorSpy.mockRestore();
     }

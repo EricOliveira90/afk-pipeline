@@ -102,7 +102,7 @@ export interface ContractResponseEntry {
 
 export interface ContractResponse {
   version: 1;
-  round: 2;
+  round: number;
   responses: ContractResponseEntry[];
 }
 
@@ -403,14 +403,15 @@ export function parseContractReview(
 }
 
 /**
- * Parse the planner's round-2 positions and verify that their IDs equal
- * the routed OPEN set. Response order is presentation; identity is the
- * control boundary.
+ * Parse the planner's revision-round positions and verify that their IDs
+ * equal the routed OPEN set. Response order is presentation; identity is
+ * the control boundary.
  */
 export function parseContractResponse(
   text: string,
   routedFindingIds: readonly string[],
   source = CONTRACT_RESPONSE_FILENAME,
+  expectedRound = 2,
 ): ContractResponse {
   let parsed: unknown;
   try {
@@ -434,8 +435,8 @@ export function parseContractResponse(
   if (input.version !== 1) {
     throw new Error(`${source} must declare version 1`);
   }
-  if (input.round !== 2) {
-    throw new Error(`${source} must declare round 2`);
+  if (input.round !== expectedRound) {
+    throw new Error(`${source} must declare round ${expectedRound}`);
   }
   if (!Array.isArray(input.responses)) {
     throw new Error(`${source} responses must be an array`);
@@ -503,7 +504,7 @@ export function parseContractResponse(
       `${source} response IDs must equal routed finding IDs (${details})`,
     );
   }
-  return { version: 1, round: 2, responses };
+  return { version: 1, round: expectedRound, responses };
 }
 
 export function contractReviewPath(sliceDir: string): string {
@@ -526,6 +527,7 @@ export function loadContractReview(sliceDir: string): ContractReview {
 export function loadContractResponse(
   sliceDir: string,
   routedFindingIds: readonly string[],
+  expectedRound = 2,
 ): ContractResponse {
   const path = join(sliceDir, CONTRACT_RESPONSE_FILENAME);
   if (!existsSync(path)) {
@@ -535,6 +537,7 @@ export function loadContractResponse(
     readFileSync(path, "utf-8"),
     routedFindingIds,
     path,
+    expectedRound,
   );
 }
 
@@ -578,6 +581,58 @@ export function contractReviewGapMetrics(
     gapCount: currentIds.length,
     reRaisedGapCount: currentIds.filter((id) => previousIds.has(id)).length,
   };
+}
+
+/**
+ * Decide whether a schema-valid round-two review earns the single final
+ * convergence round from PRD 3 plan item 23.
+ *
+ * The extension is intentionally narrower than "the review found something
+ * new": every blocker routed into round two must now be terminal, and every
+ * blocker that remains must be a fresh, revision-cited finding. The caller
+ * validates those citations against the exact changed artifact text before
+ * consulting this policy.
+ */
+export function qualifiesForContractConvergenceExtension(
+  previous: ContractReview,
+  current: ContractReview,
+  extensionUsed = false,
+): boolean {
+  if (extensionUsed) return false;
+  if (current.verdict !== "REVISE") return false;
+
+  const previousById = new Map(
+    previous.findings.map((finding) => [finding.id, finding]),
+  );
+  const currentById = new Map(
+    current.findings.map((finding) => [finding.id, finding]),
+  );
+  const activeBlocking = (finding: ContractReviewFinding): boolean =>
+    finding.severity === "BLOCKING" &&
+    (finding.state === "OPEN" || finding.state === "CONTESTED");
+  const previousBlockers = previous.findings.filter(activeBlocking);
+  const currentBlockers = current.findings.filter(activeBlocking);
+
+  if (currentBlockers.length === 0) return false;
+  if (
+    previousBlockers.some((finding) => {
+      const disposition = currentById.get(finding.id);
+      return (
+        disposition === undefined ||
+        (disposition.state !== "RESOLVED" &&
+          disposition.state !== "WITHDRAWN")
+      );
+    })
+  ) {
+    return false;
+  }
+
+  return currentBlockers.every(
+    (finding) =>
+      !previousById.has(finding.id) &&
+      finding.state === "OPEN" &&
+      finding.revisionCitation !== null,
+  );
 }
 
 /**
@@ -693,7 +748,8 @@ export function validateRound1ContractReview(review: ContractReview): void {
 
 /**
  * Validate the evaluator's disposition of each routed planner position.
- * Fresh round-2 IDs are validated separately against revision citations.
+ * Fresh revision-round IDs are validated separately against revision
+ * citations.
  */
 export function validateRound2ContractReview(
   previous: ContractReview,
@@ -730,7 +786,7 @@ export function validateRound2ContractReview(
     const disposition = currentById.get(plannerPosition.findingId);
     if (!disposition) {
       throw new Error(
-        `${CONTRACT_REVIEW_FILENAME} round 2 omitted routed finding ${plannerPosition.findingId}`,
+        `${CONTRACT_REVIEW_FILENAME} revision round omitted routed finding ${plannerPosition.findingId}`,
       );
     }
     const allowed = legalStates[plannerPosition.position];

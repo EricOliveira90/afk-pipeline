@@ -8,7 +8,13 @@ export function parseMaxContractRounds(value: string | undefined): number {
   if (!Number.isSafeInteger(rounds) || rounds < 1) {
     throw new Error("--max-contract-rounds must be a positive integer");
   }
-  return Math.min(rounds, DEFAULT_MAX_CONTRACT_ROUNDS);
+  if (rounds > DEFAULT_MAX_CONTRACT_ROUNDS) {
+    throw new Error(
+      `--max-contract-rounds supports at most ${DEFAULT_MAX_CONTRACT_ROUNDS}; ` +
+        "the convergence extension is awarded automatically",
+    );
+  }
+  return rounds;
 }
 
 export function parseSliceSelection(value: string | undefined): string[] {

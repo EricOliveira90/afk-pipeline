@@ -162,6 +162,7 @@ import {
   loadContractResponse,
   loadContractReview,
   openContractReviewFindings,
+  qualifiesForContractConvergenceExtension,
   type ContractResponse,
   type ContractNegotiationOutcome,
   type ContractRevisionArtifacts,
@@ -401,7 +402,10 @@ export interface PipelineConfig {
   selectedSliceNumbers?: string[];
   /** Parsed `<prd-dir>/afk.json`; absent preserves legacy behavior. */
   manifest?: AfkManifest | null;
-  /** Contract negotiation cap, bounded by the global two-round limit. */
+  /**
+   * Normal contract negotiation cap. The one-time convergence extension is
+   * awarded by artifact evidence, never requested through this setting.
+   */
   maxContractRounds?: number;
   /**
    * Agent provider. Drives branch namespacing (via `provider.name`) and
@@ -2863,10 +2867,11 @@ async function negotiateAttempt(
     if (!Number.isSafeInteger(maxContractRounds) || maxContractRounds < 1) {
       throw new Error("maxContractRounds must be a positive integer");
     }
-    const allowedContractRounds = Math.min(
+    let allowedContractRounds = Math.min(
       maxContractRounds,
       DEFAULT_MAX_CONTRACT_ROUNDS,
     );
+    let contractExtensionUsed = false;
     let evaluatorRound = 0;
     let lastRound = 0;
     let lastVerdict: RecordedContractVerdict = "NONE";
@@ -3078,8 +3083,8 @@ async function negotiateAttempt(
         const pendingObjection = gateObjection;
         gateObjection = null;
         const routedFindings =
-          round === 2 ? openContractReviewFindings(lastFindings) : [];
-        const requiresPlannerResponse = round === 2 && previousReview !== null;
+          round > 1 ? openContractReviewFindings(lastFindings) : [];
+        const requiresPlannerResponse = round > 1 && previousReview !== null;
         const previousArtifactText = requiresPlannerResponse
           ? {
               contract: readFileSync(contractPath, "utf-8"),
@@ -3119,7 +3124,7 @@ async function negotiateAttempt(
                 ? [
                     `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
                     "Use exactly this schema:",
-                    '{"version":1,"round":2,"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}',
+                    `{"version":1,"round":${round},"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}`,
                     `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
                     "CONDITION_MET and CONTESTED require non-blank evidence.",
                   ].join("\n")
@@ -3202,6 +3207,7 @@ async function negotiateAttempt(
             plannerResponse = loadContractResponse(
               ctx.absSliceDir,
               routedFindings.map(({ id }) => id),
+              round,
             );
             revisionArtifacts = {
               "contract.md": {
@@ -3410,6 +3416,32 @@ async function negotiateAttempt(
         // A refused lock falls through to the round-spending logic
         // below: the gate costs exactly what an evaluator REVISE costs.
 
+        if (
+          round === DEFAULT_MAX_CONTRACT_ROUNDS &&
+          allowedContractRounds === DEFAULT_MAX_CONTRACT_ROUNDS &&
+          !contractExtensionUsed &&
+          gateObjection === null &&
+          previousReview !== null &&
+          qualifiesForContractConvergenceExtension(
+            previousReview,
+            review,
+            contractExtensionUsed,
+          )
+        ) {
+          contractExtensionUsed = true;
+          allowedContractRounds++;
+          capDecisions.push(
+            "Granted one final contract convergence round because round 2 " +
+              "resolved every earlier blocker and raised only fresh, " +
+              "revision-cited blockers.",
+          );
+          logger.phase(
+            `${ctx.tag}: contract convergence extension granted (round 3/3 is final)`,
+          );
+          previousReview = review;
+          continue;
+        }
+
         if (round === allowedContractRounds) {
           const reason = gateObjection
             ? "the contract-lock gate refused the final round's contract"
@@ -3422,7 +3454,7 @@ async function negotiateAttempt(
         }
 
         const negotiationOutcome =
-          evaluatorRound === 2 && lastReviewAttemptRecord
+          evaluatorRound >= 2 && lastReviewAttemptRecord
             ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
             : undefined;
         const impasse = negotiationOutcome?.classification === "IMPASSE";

@@ -20,6 +20,7 @@ import {
   openContractReviewFindings,
   parseContractResponse,
   parseContractReview,
+  qualifiesForContractConvergenceExtension,
   validateRound2ContractReview,
   type ContractReview,
   type ContractReviewFinding,
@@ -506,6 +507,62 @@ describe("contractReviewGapMetrics", () => {
       gapCount: 1,
       reRaisedGapCount: 0,
     });
+  });
+});
+
+describe("qualifiesForContractConvergenceExtension", () => {
+  const previous: ContractReview = {
+    version: 2,
+    verdict: "REVISE",
+    findings: [FINDING],
+  };
+  const resolved = { ...FINDING, state: "RESOLVED" as const };
+  const fresh = {
+    ...FINDING,
+    id: "F-02",
+    revisionCitation: {
+      artifact: "contract.md" as const,
+      before: "old exact text",
+      after: "new exact text",
+    },
+  };
+
+  it("grants only when every earlier blocker resolved and every live blocker is fresh and cited", () => {
+    expect(
+      qualifiesForContractConvergenceExtension(previous, {
+        version: 2,
+        verdict: "REVISE",
+        findings: [resolved, fresh],
+      }),
+    ).toBe(true);
+    expect(
+      qualifiesForContractConvergenceExtension(previous, {
+        version: 2,
+        verdict: "REVISE",
+        findings: [FINDING, fresh],
+      }),
+    ).toBe(false);
+    expect(
+      qualifiesForContractConvergenceExtension(previous, {
+        version: 2,
+        verdict: "REVISE",
+        findings: [resolved, { ...fresh, revisionCitation: null }],
+      }),
+    ).toBe(false);
+  });
+
+  it("cannot grant the extension twice", () => {
+    expect(
+      qualifiesForContractConvergenceExtension(
+        previous,
+        {
+          version: 2,
+          verdict: "REVISE",
+          findings: [resolved, fresh],
+        },
+        true,
+      ),
+    ).toBe(false);
   });
 });
 
