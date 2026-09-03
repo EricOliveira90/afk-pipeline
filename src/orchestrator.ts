@@ -3485,14 +3485,21 @@ async function negotiateAttempt(
         // two positions themselves.
         const cause =
           capIntervention
-            ? {
-                kind: "verdict" as const,
-                verdict,
-                summary:
-                  `negotiate: ${capIntervention.summary} Structured intervention: ` +
-                  `${ctx.relSliceDir}/${INTERVENTION_FILENAME}. ` +
-                  capIntervention.requiredOperatorAction,
-              }
+            ? (() => {
+                const verdictCause = negotiateVerdictCause({
+                  outcome: "ESCALATE",
+                  verdict,
+                  round,
+                });
+                return {
+                  ...verdictCause,
+                  summary:
+                    `${verdictCause.summary}. ${capIntervention.summary} ` +
+                    `Structured intervention: ` +
+                    `${ctx.relSliceDir}/${INTERVENTION_FILENAME}. ` +
+                    capIntervention.requiredOperatorAction,
+                };
+              })()
             :
           negotiationMixedExhaustionCause(negotiationOutcome, verdict, round) ??
           negotiateVerdictCause({
