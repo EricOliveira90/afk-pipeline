@@ -483,6 +483,52 @@ export function validateAcceptanceManifestRevisionScope(
       `allowed behavior IDs: ${[...allowed].sort().join(", ") || "none"}`,
   );
 }
+
+export function restoreAcceptanceManifestRevisionScope(
+  previous: AcceptanceManifest,
+  current: AcceptanceManifest,
+  allowedBehaviorIds: readonly string[],
+): { manifest: AcceptanceManifest; restoredBehaviorIds: string[] } {
+  if (previous.version !== 2 || current.version !== 2) {
+    return { manifest: current, restoredBehaviorIds: [] };
+  }
+
+  const allowed = new Set(allowedBehaviorIds);
+  const previousById = new Map(
+    previous.behaviors.map((behavior) => [behavior.id, behavior]),
+  );
+  const currentById = new Map(
+    current.behaviors.map((behavior) => [behavior.id, behavior]),
+  );
+  const restoredBehaviorIds: string[] = [];
+  const behaviors = previous.behaviors.map((previousBehavior) => {
+    if (allowed.has(previousBehavior.id)) {
+      return currentById.get(previousBehavior.id) ?? previousBehavior;
+    }
+    const candidate = currentById.get(previousBehavior.id);
+    if (
+      candidate === undefined ||
+      JSON.stringify(candidate) !== JSON.stringify(previousBehavior)
+    ) {
+      restoredBehaviorIds.push(previousBehavior.id);
+    }
+    return previousBehavior;
+  });
+
+  for (const behavior of current.behaviors) {
+    if (previousById.has(behavior.id)) continue;
+    if (allowed.has(behavior.id)) {
+      behaviors.push(behavior);
+    } else {
+      restoredBehaviorIds.push(behavior.id);
+    }
+  }
+
+  return {
+    manifest: { ...current, behaviors },
+    restoredBehaviorIds: [...new Set(restoredBehaviorIds)].sort(),
+  };
+}
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 

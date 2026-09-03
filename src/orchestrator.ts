@@ -146,6 +146,7 @@ import {
   loadAcceptanceManifest,
   normalizeAcceptanceManifestPath,
   parseAcceptanceManifest,
+  restoreAcceptanceManifestRevisionScope,
   type AcceptanceManifest,
   type AcceptanceManifestV2,
   validateAcceptanceManifestBindings,
@@ -3231,14 +3232,38 @@ async function negotiateAttempt(
                 ),
               },
             };
+            const allowedBehaviorIds = [
+              ...new Set(
+                routedFindings.flatMap(({ behaviorIds }) => behaviorIds),
+              ),
+            ];
+            const restoredRevision =
+              restoreAcceptanceManifestRevisionScope(
+                parseAcceptanceManifest(previousArtifactText!.manifest),
+                loadAcceptanceManifest(ctx.absSliceDir),
+                allowedBehaviorIds,
+              );
+            if (restoredRevision.restoredBehaviorIds.length > 0) {
+              writeFileSync(
+                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                `${JSON.stringify(restoredRevision.manifest, null, 2)}\n`,
+                "utf-8",
+              );
+              revisionArtifacts["acceptance-manifest.json"].after =
+                readFileSync(
+                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                  "utf-8",
+                );
+              logger.phase(
+                `${ctx.tag}: restored unrelated planner revision drift in ` +
+                  `${restoredRevision.restoredBehaviorIds.join(", ")}`,
+                "error",
+              );
+            }
             validateAcceptanceManifestRevisionScope(
               parseAcceptanceManifest(previousArtifactText!.manifest),
               loadAcceptanceManifest(ctx.absSliceDir),
-              [
-                ...new Set(
-                  routedFindings.flatMap(({ behaviorIds }) => behaviorIds),
-                ),
-              ],
+              allowedBehaviorIds,
             );
           } catch (error) {
             const defect =
