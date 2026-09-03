@@ -87,6 +87,12 @@ export interface RunState {
    * module owns this raw schema and the one progress-qualified extension.
    */
   qaConvergence?: unknown;
+  /**
+   * Compact provider-independent observations used to stop repeated,
+   * oscillating, or regressing semantic work before another dispatch.
+   * The focused non-progress module owns validation and policy.
+   */
+  nonProgress?: unknown;
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
 }
@@ -266,6 +272,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     stageCheckpoints?: unknown;
     contractConvergence?: unknown;
     qaConvergence?: unknown;
+    nonProgress?: unknown;
     migrations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
@@ -303,6 +310,9 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         : {}),
       ...(r.version === 2 && r.qaConvergence !== undefined
         ? { qaConvergence: r.qaConvergence }
+        : {}),
+      ...(r.version === 2 && r.nonProgress !== undefined
+        ? { nonProgress: r.nonProgress }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
     };

@@ -516,9 +516,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       STUCK_DIAGNOSIS_COMMIT_LOG,
     );
 
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
-      error: "QA failed after 3 implementation rounds",
+      error: expect.stringContaining("EQUIVALENT_REPETITION"),
     });
     // Rounds 2 and 3 only — the fourth implementation round the QA
     // finding demonstrated is not reachable through an ordinary resume.
@@ -530,11 +530,13 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
     expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(false);
-    expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toBe(
-      EXPECTED_STUCK_DIAGNOSIS,
-    );
-    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain("Best guess");
-    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain(
+    const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
+    expect(diagnosis).toContain("EQUIVALENT_REPETITION");
+    expect(diagnosis).toContain("intervention.json");
+    expect(diagnosis).toContain("Round 3 attempt 1 (deterministic)");
+    expect(diagnosis).toContain(STUCK_DIAGNOSIS_COMMIT_LOG);
+    expect(diagnosis).not.toContain("Best guess");
+    expect(diagnosis).not.toContain(
       "SYNTHESIS-SHOULD-NOT-APPEAR",
     );
     expect(
@@ -1315,6 +1317,81 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       extensionUsed: true,
       revision: 4,
     });
+  });
+
+  it("stops an equivalent repeated QA blocker before a third generator dispatch", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let generators = 0;
+    let evaluators = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          generators++;
+          writeFileSync(
+            join(repo, "change.txt"),
+            `${generators}\n`,
+            "utf-8",
+          );
+        } else if (options.role === "evaluator-qa") {
+          evaluators++;
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** FAIL\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic", {
+            verdict: "FAIL",
+            findings: [
+              {
+                id: "QA-REPEAT",
+                severity: "BLOCKING",
+                behaviorIds: ["B-01"],
+                summary: "The same blocker still stands",
+                evidence: "src/change.ts still returns the wrong value",
+                expected: "The value is correct",
+                observed: "The value is still wrong",
+                clearCondition: "The focused behavior test passes",
+                state: "OPEN",
+              },
+            ],
+          });
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    const result = await runSliceExecute(ctx);
+
+    expect(result.phase).toBe("STUCK");
+    expect(result).toMatchObject({
+      error: expect.stringContaining("EQUIVALENT_REPETITION"),
+    });
+    expect(generators).toBe(2);
+    expect(evaluators).toBe(2);
+    const intervention = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(intervention).toMatchObject({
+      version: 1,
+      interventionClass: "IMPLEMENTATION_INTERVENTION",
+      phase: "deterministic-qa",
+      reasonCodes: ["EQUIVALENT_REPETITION"],
+      blockerIds: ["QA-REPEAT"],
+      preservedCandidate: {
+        branch: "main",
+      },
+    });
+    expect(intervention.attemptedRepairs).toHaveLength(2);
+    expect(intervention.requiredOperatorAction).toContain("QA-REPEAT");
+    const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
+    expect(diagnosis).toContain("intervention.json");
+    expect(diagnosis).not.toContain(
+      "QA failed after 3 implementation rounds",
+    );
   });
 
   it("cancels a base gate process tree without evaluator or repair", async () => {

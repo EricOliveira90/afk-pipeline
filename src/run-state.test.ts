@@ -446,6 +446,12 @@ describe("clearSliceStateForDispatch", () => {
             findings: {},
           },
         },
+        nonProgress: {
+          "75": {
+            version: 1,
+            observations: [],
+          },
+        },
         migrations: { pool: ["0042"], claims: { "76": ["0042"] } },
       }),
       "utf-8",
@@ -506,6 +512,9 @@ describe("clearSliceStateForDispatch", () => {
     });
     expect(state.qaConvergence).toMatchObject({
       "75": { version: 1, extensionUsed: true, revision: 3 },
+    });
+    expect(state.nonProgress).toMatchObject({
+      "75": { version: 1, observations: [] },
     });
     expect(state.scope).toEqual({ members: ["01", "02"] });
     expect(state.migrations).toEqual({ pool: ["0042"], claims: { "76": ["0042"] } });

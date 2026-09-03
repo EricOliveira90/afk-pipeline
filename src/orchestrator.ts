@@ -219,6 +219,16 @@ import {
   type QAConvergenceUpdate,
 } from "./qa-convergence.js";
 import {
+  contractNonProgressObservation,
+  decideNonProgress,
+  loadNonProgressHistory,
+  qaNonProgressObservation,
+  saveNonProgressHistory,
+  writeInterventionRequest,
+  INTERVENTION_FILENAME,
+  type InterventionRequest,
+} from "./non-progress.js";
+import {
   applyScopeAmendment,
   buildScopeAmendmentRecord,
   planScopeAmendment,
@@ -3381,6 +3391,89 @@ async function negotiateAttempt(
         );
         lastVerdict = verdict;
         lastFindings = review.findings;
+        if (verdict !== "ACCEPT") {
+          contractStatus = artifacts.readContractStatus(contractPath);
+          // Only an ACCEPT may leave a lock. Normalize the candidate before
+          // any terminal non-progress return so recovery never trusts a
+          // planner-authored lock that the evaluator rejected.
+          if (contractStatus === "LOCKED") {
+            artifacts.reopenContract(contractPath);
+            contractStatus = "NEGOTIATING";
+          }
+        }
+        const hasContestedBlocker = review.findings.some(
+          (finding) =>
+            finding.severity === "BLOCKING" &&
+            finding.state === "CONTESTED",
+        );
+        if (
+          verdict === "REVISE" &&
+          gateObjection === null &&
+          !hasContestedBlocker
+        ) {
+          const nonProgressLocation = {
+            repoRoot: config.repoRoot,
+            prdSlug: config.prdSlug,
+            ghIssue: slice.ghIssue,
+          };
+          const observation = contractNonProgressObservation({
+            before: lineageBeforeReview,
+            update: convergence,
+            candidate: {
+              branch: ctx.branch,
+              treeId: resolveCandidateTreeId(ctx.worktreeDir),
+            },
+            supportingEvidence: [
+              relative(config.repoRoot, feedbackPath).replace(/\\/g, "/"),
+              relative(config.repoRoot, reviewArchiveDir).replace(/\\/g, "/"),
+            ],
+          });
+          const nonProgress = decideNonProgress(
+            loadNonProgressHistory(nonProgressLocation),
+            observation,
+          );
+          saveNonProgressHistory(nonProgressLocation, nonProgress.history);
+          if (nonProgress.action === "intervene") {
+            writeInterventionRequest(ctx.absSliceDir, nonProgress.request);
+            const interventionPath =
+              `${ctx.relSliceDir}/${INTERVENTION_FILENAME}`;
+            capDecisions.push(nonProgress.request.summary);
+            capDecisions.push(
+              `Operator action: ${nonProgress.request.requiredOperatorAction}`,
+            );
+            const negotiationOutcome =
+              evaluatorRound >= 2 && lastReviewAttemptRecord
+                ? buildContractNegotiationOutcome(lastReviewAttemptRecord)
+                : undefined;
+            preserveContractNegotiationFailure(
+              ctx,
+              "ESCALATE",
+              round,
+              verdict,
+              feedbackPath,
+              capDecisions.join(" "),
+              review.findings,
+              negotiationOutcome,
+            );
+            logger.bumpEvalRound(slice.ghIssue, evaluatorRound);
+            logger.phase(
+              `${ctx.tag}: ESCALATE — ${nonProgress.request.summary} ` +
+                `Action: ${nonProgress.request.requiredOperatorAction}`,
+              "error",
+            );
+            return {
+              phase: "ESCALATE",
+              cause: {
+                kind: "verdict",
+                verdict,
+                summary:
+                  `negotiate: ${nonProgress.request.summary} ` +
+                  `Structured intervention: ${interventionPath}. ` +
+                  nonProgress.request.requiredOperatorAction,
+              },
+            };
+          }
+        }
         if (verdict === "ACCEPT") {
           // Gate before lock, per ADR 0055 §5's mandated ordering. With
           // `lockContract` first, a process stop between the two calls left
@@ -3405,18 +3498,6 @@ async function negotiateAttempt(
             });
             contractStatus = "LOCKED";
             break;
-          }
-        } else {
-          contractStatus = artifacts.readContractStatus(contractPath);
-          // Only the ACCEPT branch above may produce a lock, after the
-          // mechanical gate has passed. A planner-authored `LOCKED` beside a
-          // non-ACCEPT verdict has neither evaluator approval nor gate
-          // attestation, so it spends the round as the REVISE it is. Reopen
-          // the file as well as the in-memory status: ADR 0008 makes the disk
-          // field authoritative to recovery paths and the generator.
-          if (contractStatus === "LOCKED") {
-            artifacts.reopenContract(contractPath);
-            contractStatus = "NEGOTIATING";
           }
         }
         // A refused lock falls through to the round-spending logic
@@ -3559,6 +3640,7 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
       finalRepair: null;
+      intervention: null;
     }
   | {
       outcome: "IMPLEMENTATION";
@@ -3567,6 +3649,7 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
       finalRepair: QAFinalRepairDecision | null;
+      intervention: InterventionRequest | null;
     };
 
 /**
@@ -4202,6 +4285,7 @@ export async function runQAStage(
         unresolved,
         convergence: convergenceState,
         finalRepair: null,
+        intervention: null,
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
@@ -4221,7 +4305,36 @@ export async function runQAStage(
       throw new Error(`${stage} infrastructure findings persisted after ${attempt} attempt(s)`);
     }
     let finalRepair: QAFinalRepairDecision | null = null;
-    if (options.allowFinalRepair && options.candidateTreeId) {
+    const candidateTreeId =
+      options.candidateTreeId ?? resolveCandidateTreeId(ctx.worktreeDir);
+    const nonProgressObservation = qaNonProgressObservation({
+      before: validAttempt.convergenceBefore,
+      update: validAttempt.convergenceUpdate,
+      phase:
+        stage === "deterministic"
+          ? "deterministic-qa"
+          : "shared-preview-uat",
+      candidate: {
+        branch: ctx.branch,
+        treeId: candidateTreeId,
+      },
+      supportingEvidence: [
+        validAttempt.archiveDisplayPath,
+        ...validAttempt.unresolved.flatMap(
+          (finding) => finding.artifactReferences,
+        ),
+      ],
+    });
+    const nonProgress = decideNonProgress(
+      loadNonProgressHistory(convergenceLocation),
+      nonProgressObservation,
+    );
+    saveNonProgressHistory(convergenceLocation, nonProgress.history);
+    if (
+      nonProgress.action === "continue" &&
+      options.allowFinalRepair &&
+      options.candidateTreeId
+    ) {
       finalRepair = decideQAFinalRepair({
         before: validAttempt.convergenceBefore,
         update: validAttempt.convergenceUpdate,
@@ -4241,6 +4354,8 @@ export async function runQAStage(
       unresolved,
       convergence: convergenceState,
       finalRepair,
+      intervention:
+        nonProgress.action === "intervene" ? nonProgress.request : null,
     };
   }
 
@@ -4330,6 +4445,22 @@ export async function runSliceExecute(
       commitLog: git.logCommitsWithStat(ctx.worktreeDir, featBranch),
     });
     return { phase: "STUCK", error: reason };
+  };
+  const finishIntervention = (
+    request: InterventionRequest,
+  ): Extract<TerminalOutcome, { phase: "STUCK" }> => {
+    writeInterventionRequest(ctx.absSliceDir, request);
+    const reference = `${ctx.relSliceDir}/${INTERVENTION_FILENAME}`;
+    if (!stuckReferences.includes(reference)) stuckReferences.push(reference);
+    logger.phase(
+      `${ctx.tag}: non-progress intervention — ${request.summary} ` +
+        `Action: ${request.requiredOperatorAction}`,
+      "error",
+    );
+    return finishStuck(
+      `${request.summary} Structured intervention: ${reference}. ` +
+        request.requiredOperatorAction,
+    );
   };
   /**
    * A STUCK resume's `stuck.md` is the operator's audit record of why the
@@ -4970,6 +5101,10 @@ export async function runSliceExecute(
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
+        if (deterministic.intervention) {
+          logger.bumpEvalRound(slice.ghIssue, round);
+          return finishIntervention(deterministic.intervention);
+        }
         let finalRepair = deterministic.finalRepair;
         if (implementationFailed) {
           repairStage = "deterministic";
@@ -5021,6 +5156,10 @@ export async function runSliceExecute(
             verdict: remote.outcome,
           });
           stuckReferences.push(remote.report);
+          if (remote.intervention) {
+            logger.bumpEvalRound(slice.ghIssue, round);
+            return finishIntervention(remote.intervention);
+          }
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
             repairStage = "shared-preview";
