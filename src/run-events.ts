@@ -19,6 +19,7 @@ import type {
   GateFailureKind,
   GateStatus,
 } from "./gate-runner.js";
+import type { PromptAssemblyRole } from "./context-envelope.js";
 
 export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
@@ -89,7 +90,7 @@ export type RunEventPayload =
       ghIssue: string;
       sliceNumber: string;
       round: number;
-      role: "explorer" | "planner" | "evaluator-contract" | "generator";
+      role: PromptAssemblyRole;
       assembledByteSize: number;
       includedArtifactIds: string[];
       omittedArtifactClasses: string[];

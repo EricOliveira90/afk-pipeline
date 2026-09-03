@@ -17,6 +17,7 @@
 - Keep role byte budgets in the versioned context manifests with optional pipeline overrides, matching the existing envelope configuration seam.
 - Use an initial evaluator envelope until evaluator findings exist, even when a mechanical planner revision preceded that evaluation.
 - Evaluator envelope mode follows prior evaluator finding history, so a focused scope review with no findings uses the initial template even at contract round 2.
+- Extract planner and contract-evaluator prompt wiring into `src/contract-prompt-orchestration.ts`; this keeps the orchestration hub smaller while preserving one call site per contract workflow.
 
 ## Gotchas / learnings
 
@@ -24,3 +25,4 @@
 - Focused scope fixtures identify the control situation by stable wording; keep that wording inside the separate revision control block.
 - Locked slice review artifacts share this directory and remain untracked; stage `handoff.md` explicitly.
 - The shared rollback fixture formerly detected focused evaluator reviews from revision-only prompt text; its scoped test wrapper now targets the second evaluator invocation directly.
+- Manual QA-03 recovery passed `pnpm typecheck`, `pnpm test:fast`, `pnpm run test:heavy:orchestrator`, and `pnpm run test:heavy:wave`.
