@@ -145,10 +145,12 @@ import {
   acceptanceManifestPaths,
   loadAcceptanceManifest,
   normalizeAcceptanceManifestPath,
+  parseAcceptanceManifest,
   type AcceptanceManifest,
   type AcceptanceManifestV2,
   validateAcceptanceManifestBindings,
   validateAcceptanceManifestCoverage,
+  validateAcceptanceManifestRevisionScope,
   validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
 import {
@@ -3014,11 +3016,18 @@ async function negotiateAttempt(
      */
     const revisionNote = (objection: string | null): string => {
       const openFindings = openContractReviewFindings(lastFindings);
+      const routedBehaviorIds = [
+        ...new Set(openFindings.flatMap(({ behaviorIds }) => behaviorIds)),
+      ].sort();
       const priorFindings =
         openFindings.length > 0
           ? `The contract review returned REVISE with these findings. ` +
             `Respond to each clear-condition:\n\n` +
-            `${formatContractReviewFindings(openFindings)}`
+            `${formatContractReviewFindings(openFindings)}\n\n` +
+            `Revision scope is mechanically enforced. You may edit contract ` +
+            `behavior anchors and acceptance-manifest behavior entries only ` +
+            `for these routed behavior IDs: ${routedBehaviorIds.join(", ")}. ` +
+            `Preserve every other behavior entry exactly.`
           : null;
       if (objection === null) {
         return priorFindings ?? "";
@@ -3222,6 +3231,15 @@ async function negotiateAttempt(
                 ),
               },
             };
+            validateAcceptanceManifestRevisionScope(
+              parseAcceptanceManifest(previousArtifactText!.manifest),
+              loadAcceptanceManifest(ctx.absSliceDir),
+              [
+                ...new Set(
+                  routedFindings.flatMap(({ behaviorIds }) => behaviorIds),
+                ),
+              ],
+            );
           } catch (error) {
             const defect =
               error instanceof Error ? error.message : String(error);
