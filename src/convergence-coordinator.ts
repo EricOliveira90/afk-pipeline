@@ -124,16 +124,23 @@ export class ContractRoundLifecycle {
     revisionNote: string;
   } {
     const context = contractPlannerContext(this.lineage);
+    // A same-run planner response answers the exact review it was handed.
+    // Durable lineage may coalesce equivalent findings across revisions, but
+    // distinct findings in one review still require distinct responses.
+    const currentRoundFindings =
+      round > 1 && this.previousReview !== null
+        ? openContractReviewFindings(this.previousReview.findings)
+        : context.open;
     const resolvedHistory =
       context.relevantResolved.length > 0
         ? `\n\nKeep this relevant resolved history satisfied to avoid regression:\n\n` +
           formatContractReviewFindings(context.relevantResolved)
         : "";
     const priorFindings =
-      context.open.length > 0
+      currentRoundFindings.length > 0
         ? `The contract review returned REVISE with these findings. ` +
           `Respond to each clear-condition:\n\n` +
-          `${formatContractReviewFindings(context.open)}` +
+          `${formatContractReviewFindings(currentRoundFindings)}` +
           resolvedHistory
         : null;
     const revisionNote =
@@ -146,8 +153,7 @@ export class ContractRoundLifecycle {
             : "");
     return {
       requiresResponse: round > 1 && this.previousReview !== null,
-      routedFindings:
-        round > 1 ? openContractReviewFindings(context.open) : [],
+      routedFindings: round > 1 ? currentRoundFindings : [],
       revisionNote,
     };
   }

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   ContractReview,
   ContractReviewFinding,
 } from "./contract-review.js";
+import { ContractRoundLifecycle } from "./convergence-coordinator.js";
 import {
   advanceContractFindingLineage,
   contractPlannerContext,
@@ -110,6 +114,68 @@ describe("contract finding lineage", () => {
         },
       }),
     ).toThrow(/clearCondition must be a non-blank string/);
+  });
+});
+
+describe("contract round routing", () => {
+  it("routes every distinct finding from the exact previous review", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-contract-routing-"));
+    try {
+      const lifecycle = new ContractRoundLifecycle({
+        repoRoot,
+        prdSlug: "contract-routing",
+        ghIssue: "9081",
+        sliceDir: repoRoot,
+        runSlug: "contract-routing",
+      });
+      const firstReview = review([
+        finding("F-01", "OPEN", {
+          expected: "one agreed interpretation",
+          observed: "planner and evaluator disagree",
+          clearCondition: "a human adjudicates",
+        }),
+        finding("F-02", "OPEN", {
+          expected: "one agreed interpretation",
+          observed: "planner and evaluator disagree",
+          clearCondition: "a human adjudicates",
+        }),
+      ]);
+      const validated = lifecycle.validateAttempt({
+        review: firstReview,
+        evaluatorRound: 1,
+        plannerResponse: null,
+        revisionArtifacts: null,
+        attemptLifecyclePrevious: null,
+      });
+      lifecycle.recordRound({
+        validated,
+        evaluatorRound: 1,
+        plannerResponse: null,
+        revisionArtifacts: null,
+        attemptLifecyclePrevious: null,
+        candidate: {
+          branch: "fix/contract-routing",
+          treeId: "1111111111111111111111111111111111111111",
+        },
+        supportingEvidence: ["feedback-r1.md"],
+        round: 1,
+        normalRoundLimit: 2,
+        semanticRoundLimit: 2,
+        gateObjection: false,
+        hasContestedBlocker: false,
+      });
+
+      const next = lifecycle.preparePlannerRound(2, null);
+
+      expect(next.routedFindings.map(({ id }) => id)).toEqual([
+        "F-01",
+        "F-02",
+      ]);
+      expect(next.revisionNote).toContain("[F-01]");
+      expect(next.revisionNote).toContain("[F-02]");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 });
 

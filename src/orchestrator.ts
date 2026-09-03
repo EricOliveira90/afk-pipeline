@@ -3170,6 +3170,7 @@ async function negotiateAttempt(
         const reviewPath = join(ctx.absSliceDir, CONTRACT_REVIEW_FILENAME);
         let latestValidAttemptReview: ContractReview | null = null;
         let latestValidatedReview: ValidatedContractReview | null = null;
+        let latestValidationError: unknown = null;
         let attemptLifecyclePrevious: ContractReview | null = null;
         await invokeAgent(
           {
@@ -3221,7 +3222,8 @@ async function negotiateAttempt(
                 attemptLifecyclePrevious:
                   attemptLifecyclePrevious ?? previousReview,
               });
-            } catch {
+            } catch (error) {
+              latestValidationError = error;
               // The invocation retry policy decides whether another attempt
               // may replace this malformed artifact.
             }
@@ -3247,7 +3249,12 @@ async function negotiateAttempt(
         let validatedReview: ValidatedContractReview;
         try {
           if (latestValidatedReview === null) {
-            throw new Error("contract review did not pass lifecycle validation");
+            throw (
+              latestValidationError ??
+              new Error(
+                `${reviewPath} did not produce a lifecycle-valid review artifact`,
+              )
+            );
           }
           validatedReview = latestValidatedReview;
         } catch (error) {
