@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import * as git from "./git.js";
+import { matchesSliceSelector } from "./slice-selector.js";
 
 /**
  * Resume-a-dead-slice eligibility (spec #33, design note on issue #15).
@@ -244,26 +245,6 @@ export function collectResumeFacts(
     forceRestart: context.forceRestart,
     resumeStuck: context.resumeStuck,
   };
-}
-
-/**
- * True when a list of operator-supplied slice selectors names this
- * slice — by slice number (zero padding optional: `5` matches `05`) or
- * by GH issue id. Shared by `--force-restart` (#37) and
- * `--resume-stuck` (#49) so the two flags cannot drift apart in what
- * "naming a slice" means.
- */
-export function matchesSliceSelector(
-  selectors: readonly string[] | undefined,
-  slice: { number: string; ghIssue: string },
-): boolean {
-  if (!selectors) return false;
-  return selectors.some(
-    (v) =>
-      v === slice.ghIssue ||
-      v === slice.number ||
-      Number(v) === Number(slice.number),
-  );
 }
 
 /**

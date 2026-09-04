@@ -20,6 +20,13 @@ export interface SliceProgress {
   evalRounds: number;
 }
 
+export interface SliceAdoption {
+  adopter: string;
+  reason: string;
+  branch: string;
+  commit: string;
+}
+
 /** Phases that carry an `error` payload. Used to widen union helpers. */
 export type FailurePhase =
   | "STUCK"
@@ -37,6 +44,7 @@ export type SliceLifecycle =
   | ({ phase: "PASS" } & SliceIdentity & {
       progress: SliceProgress;
       mergedToFeature: boolean;
+      adoption?: SliceAdoption;
     })
   | ({ phase: FailurePhase } & SliceIdentity & {
       progress: SliceProgress;
@@ -92,11 +100,13 @@ export const lifecycle = {
     id: SliceIdentity,
     progress: SliceProgress,
     mergedToFeature: boolean,
+    adoption?: SliceAdoption,
   ): SliceLifecycle => ({
     phase: "PASS",
     ...id,
     progress,
     mergedToFeature,
+    ...(adoption ? { adoption } : {}),
   }),
   stuck: (id: SliceIdentity, progress: SliceProgress, error: string): SliceLifecycle => ({
     phase: "STUCK",
@@ -304,15 +314,15 @@ export const PHASE_TRAITS = {
     // does (failed bucket, STUCK label).
     //
     // The estate that refusal leaves behind must still survive
-    // clean-failed — but the phase is not what says so. This
+    // clean-failed and adopt — but the phase is not what says so. This
     // phase carried `preserve-all` for one round and it was the wrong
     // place for it: ownership of an adjudication estate is a fact about
     // the worktree, and every *other* post-decision apply exit (planner or
     // provider failure, feature-refresh conflict, cancellation mid-apply,
     // a post-lock bookkeeping throw the wave flattens) lands in ordinary
     // `ERROR` or `CONFLICT` with the same estate on disk. So the phase is
-    // presentation-only again, exactly like ESCALATE, and clean-failed
-    // reads ownership from `findAdjudicationEstate` (ADR 0055 Seam 2
+    // presentation-only again, exactly like ESCALATE, and clean-failed and
+    // adopt read ownership from `findAdjudicationEstate` (ADR 0055 Seam 2
     // §6, fourth adjudication gate round).
     bucket: "failed",
     icon: "🔴",

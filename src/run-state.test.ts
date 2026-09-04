@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { describe, it, expect, afterEach } from "vitest";
 import {
   existsSync,
@@ -20,11 +21,16 @@ import {
   getResumeAttempts,
   recordRetryDecision,
   clearSliceStateForDispatch,
+  saveSliceStateIfUnchanged,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
+const childProcesses: ChildProcess[] = [];
 
 afterEach(() => {
+  while (childProcesses.length > 0) {
+    childProcesses.pop()!.kill("SIGKILL");
+  }
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     try {
@@ -41,6 +47,88 @@ function makeRepo(): string {
   return dir;
 }
 
+const CHILD_SCRIPT = `
+  import { existsSync, writeFileSync } from "node:fs";
+  import { saveSliceState, updateRunState } from "./src/run-state.ts";
+  const [mode, repo, ready, release] = process.argv.slice(1);
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  if (mode === "hold") {
+    updateRunState(repo, "concurrent", (state) => {
+      writeFileSync(ready, "ready");
+      while (!existsSync(release)) Atomics.wait(sleeper, 0, 0, 20);
+      state.slices["100"] = { phase: "ERROR", error: "first writer" };
+    });
+  } else if (mode === "die") {
+    updateRunState(repo, "concurrent", () => {
+      writeFileSync(ready, "ready");
+      while (true) Atomics.wait(sleeper, 0, 0, 1000);
+    });
+  } else if (mode === "write") {
+    saveSliceState(repo, "concurrent", "200", {
+      phase: "STUCK",
+      error: "second writer",
+    });
+  }
+`;
+
+function spawnStateChild(
+  mode: "hold" | "die" | "write",
+  repo: string,
+  ready: string,
+  release: string,
+): ChildProcess {
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      CHILD_SCRIPT,
+      mode,
+      repo,
+      ready,
+      release,
+    ],
+    {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  childProcesses.push(child);
+  return child;
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null) {
+    if (child.exitCode !== 0) throw new Error(`Child exited ${child.exitCode}`);
+    return;
+  }
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+  child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+  const result = await new Promise<{ code: number | null; signal: string | null }>(
+    (resolve) =>
+      child.once("exit", (code, signal) => resolve({ code, signal })),
+  );
+  if (result.code !== 0) {
+    throw new Error(
+      `Child exited ${result.code ?? result.signal}\n` +
+        Buffer.concat(stdout).toString("utf-8") +
+        Buffer.concat(stderr).toString("utf-8"),
+    );
+  }
+}
+
 describe("adaptLoadedState", () => {
   it("loads a v0 (unversioned) file by renaming status -> phase", () => {
     const v0 = {
@@ -53,14 +141,14 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v0, "demo");
-    expect(adapted.version).toBe(2);
+    expect(adapted.version).toBe(3);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
     expect(adapted.slices["100"]!.mergedToFeature).toBe(true);
     expect(adapted.slices["200"]!.phase).toBe("STUCK");
     expect(adapted.slices["300"]!.phase).toBe("ESCALATE");
   });
 
-  it("upgrades v1 files to v2", () => {
+  it("upgrades v1 files to v3", () => {
     const v1 = {
       version: 1,
       prdSlug: "demo",
@@ -70,7 +158,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v1, "demo");
-    expect(adapted.version).toBe(2);
+    expect(adapted.version).toBe(3);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
   });
 
@@ -150,7 +238,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     );
 
     const loaded = loadRunState(repo, slug);
-    expect(loaded.version).toBe(2);
+    expect(loaded.version).toBe(3);
     expect(loaded.slices["100"]!.phase).toBe("PASS");
     expect(isSliceComplete(loaded, "100")).toBe(true);
     expect(isSliceComplete(loaded, "200")).toBe(false);
@@ -162,7 +250,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.version).toBe(2);
+    expect(onDisk.version).toBe(3);
     expect(onDisk.slices["100"].phase).toBe("PASS");
     expect(onDisk.slices["300"].phase).toBe("ERROR");
     expect(onDisk.slices["300"].error).toBe("boom");
@@ -187,11 +275,11 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     expect(isSliceComplete(loadRunState(repo, "parked"), "8181")).toBe(false);
   });
 
-  it("returns a fresh v2 state when no file exists", () => {
+  it("returns a fresh v3 state when no file exists", () => {
     const repo = makeRepo();
     const loaded = loadRunState(repo, "fresh");
     expect(loaded).toEqual({
-      version: 2,
+      version: 3,
       prdSlug: "fresh",
       featureBranch: "feat/fresh",
       slices: {},
@@ -212,6 +300,23 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     expect(loadRunState(repo, "scoped").scope).toEqual(state.scope);
+  });
+
+  it("refuses a stale whole-state replacement without losing a concurrent update", () => {
+    const repo = makeRepo();
+    const stale = loadRunState(repo, "whole-state");
+    saveSliceState(repo, "whole-state", "129", {
+      phase: "AWAITING-ADJUDICATION",
+      error: "concurrent park",
+    });
+
+    expect(() => saveRunState(repo, stale)).toThrow(
+      /Refusing to replace existing run state/,
+    );
+    expect(loadRunState(repo, "whole-state").slices["129"]).toEqual({
+      phase: "AWAITING-ADJUDICATION",
+      error: "concurrent park",
+    });
   });
 });
 
@@ -552,6 +657,99 @@ describe("clearSliceStateForDispatch", () => {
 });
 
 /**
+ * Architect blocker 3, fifth adjudication gate round. `saveSliceState`
+ * replaces a slice's record unconditionally, which is right for the pipeline
+ * (it owns the slice it is writing) and wrong for `afk adopt` — which reads
+ * the record, runs base gates for minutes, and only then writes.
+ */
+describe("saveSliceStateIfUnchanged", () => {
+  const write = (
+    repo: string,
+    expected: Parameters<typeof saveSliceStateIfUnchanged>[4],
+  ) =>
+    saveSliceStateIfUnchanged(
+      repo,
+      "demo",
+      "75",
+      { phase: "PASS", mergedToFeature: true, branch: "manual/x" },
+      expected,
+    );
+
+  it("writes when the record is still the one that was observed", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    const observed = loadRunState(repo, "demo").slices["75"];
+
+    expect(write(repo, observed)).toEqual({ ok: true });
+    expect(loadRunState(repo, "demo").slices["75"]!.phase).toBe("PASS");
+  });
+
+  it("writes when nothing was observed and nothing is there", () => {
+    const repo = makeRepo();
+    expect(write(repo, undefined)).toEqual({ ok: true });
+    expect(loadRunState(repo, "demo").slices["75"]!.phase).toBe("PASS");
+  });
+
+  /**
+   * The exact race: adoption observed no record (or a failure), a concurrent
+   * run parked the slice while the gates ran, and the blind write turned
+   * `AWAITING-ADJUDICATION` into `PASS` and stranded a live estate.
+   */
+  it("refuses when a concurrent park replaced the observed record", () => {
+    const repo = makeRepo();
+    const observed = loadRunState(repo, "demo").slices["75"];
+    expect(observed).toBeUndefined();
+    saveSliceState(repo, "demo", "75", {
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/demo-slice-01-x",
+      error: "one contested finding awaits a human decision",
+    });
+
+    const result = write(repo, observed);
+    expect(result.ok).toBe(false);
+    expect(
+      (result as { found: { phase: string } }).found.phase,
+    ).toBe("AWAITING-ADJUDICATION");
+    // The park survives byte-for-byte: nothing was overwritten.
+    expect(loadRunState(repo, "demo").slices["75"]!.phase).toBe(
+      "AWAITING-ADJUDICATION",
+    );
+  });
+
+  it("refuses when the observed record was cleared for a re-dispatch", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    const observed = loadRunState(repo, "demo").slices["75"];
+    clearSliceStateForDispatch(repo, "demo", "75");
+
+    const result = write(repo, observed);
+    expect(result.ok).toBe(false);
+    expect((result as { found: unknown }).found).toBeUndefined();
+    expect(loadRunState(repo, "demo").slices["75"]).toBeUndefined();
+  });
+
+  it("refuses on a changed field even when the phase is unchanged", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "boom" });
+    const observed = loadRunState(repo, "demo").slices["75"];
+    saveSliceState(repo, "demo", "75", { phase: "ERROR", error: "different" });
+
+    expect(write(repo, observed).ok).toBe(false);
+  });
+
+  it("does not clobber a sibling slice's parallel update", () => {
+    const repo = makeRepo();
+    const observed = loadRunState(repo, "demo").slices["75"];
+    saveSliceState(repo, "demo", "76", { phase: "ERROR", error: "sibling" });
+
+    expect(write(repo, observed)).toEqual({ ok: true });
+    const state = loadRunState(repo, "demo");
+    expect(state.slices["75"]!.phase).toBe("PASS");
+    expect(state.slices["76"]!.phase).toBe("ERROR");
+  });
+});
+
+/**
  * Architect blocker 2: the run records where its own slice artifacts live so
  * the estate probe resolves instead of guessing. Optional, because state
  * files that predate the field must stay loadable — the probe then falls back
@@ -561,7 +759,7 @@ describe("RunState.specsDir", () => {
   it("round-trips through save and load", () => {
     const repo = makeRepo();
     saveRunState(repo, {
-      version: 2,
+      version: 3,
       prdSlug: "demo",
       featureBranch: "feat/demo",
       specsDir: "docs/internal/specs/demo",
@@ -575,7 +773,7 @@ describe("RunState.specsDir", () => {
   it("survives a per-slice write", () => {
     const repo = makeRepo();
     saveRunState(repo, {
-      version: 2,
+      version: 3,
       prdSlug: "demo",
       featureBranch: "feat/demo",
       specsDir: ".kiro/specs/demo",
@@ -604,5 +802,95 @@ describe("RunState.specsDir", () => {
         "demo",
       ).specsDir,
     ).toBe(".kiro/specs/demo");
+  });
+});
+
+describe("cross-process run-state locking", () => {
+  it("serializes real processes without losing either writer's mutation", async () => {
+    const repo = makeRepo();
+    const ready = join(repo, "holder-ready");
+    const release = join(repo, "holder-release");
+    const holder = spawnStateChild("hold", repo, ready, release);
+    await waitForFile(ready);
+
+    const writer = spawnStateChild("write", repo, ready, release);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(writer.exitCode).toBeNull();
+
+    writeFileSync(release, "release");
+    await Promise.all([waitForChild(holder), waitForChild(writer)]);
+
+    expect(loadRunState(repo, "concurrent").slices).toEqual({
+      "100": { phase: "ERROR", error: "first writer" },
+      "200": { phase: "STUCK", error: "second writer" },
+    });
+  });
+
+  it("reclaims a lock left by a killed owner process", async () => {
+    const repo = makeRepo();
+    const ready = join(repo, "dead-owner-ready");
+    const release = join(repo, "unused-release");
+    const owner = spawnStateChild("die", repo, ready, release);
+    await waitForFile(ready);
+
+    owner.kill("SIGKILL");
+    await new Promise<void>((resolve) => owner.once("exit", () => resolve()));
+
+    saveSliceState(repo, "concurrent", "200", {
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+
+    expect(isSliceComplete(loadRunState(repo, "concurrent"), "200")).toBe(true);
+    expect(
+      existsSync(join(repo, ".afk", "state", "concurrent.json.lock")),
+    ).toBe(false);
+  });
+
+  it("cleans a quarantined stale lock left by a killed reaper", () => {
+    const repo = makeRepo();
+    const stateDir = join(repo, ".afk", "state");
+    const reaper = join(stateDir, "concurrent.json.lock-reaper");
+    mkdirSync(reaper, { recursive: true });
+    writeFileSync(join(reaper, "owner.json"), "abandoned stale lock");
+
+    saveSliceState(repo, "concurrent", "200", {
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+
+    expect(isSliceComplete(loadRunState(repo, "concurrent"), "200")).toBe(true);
+    expect(existsSync(reaper)).toBe(false);
+  });
+
+  it("compares and commits a conditional slice write inside one lock", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "conditional", "129", {
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/conditional-slice-01",
+    });
+    const before = readFileSync(
+      join(repo, ".afk", "state", "conditional.json"),
+      "utf-8",
+    );
+
+    const result = saveSliceStateIfUnchanged(
+      repo,
+      "conditional",
+      "129",
+      { phase: "PASS", mergedToFeature: true },
+      undefined,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      found: {
+        phase: "AWAITING-ADJUDICATION",
+        branch: "afk/conditional-slice-01",
+      },
+    });
+    expect(
+      readFileSync(join(repo, ".afk", "state", "conditional.json"), "utf-8"),
+    ).toBe(before);
   });
 });
