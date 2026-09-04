@@ -45,6 +45,11 @@ export const EXPLORER_CONTEXT_MANIFEST = {
     "repository-context",
     "budget",
   ],
+  acceptedInputArtifactClasses: [
+    "slice-request",
+    "repository-adr",
+    "repository-architecture",
+  ],
   inlineSizeBudgetBytes: 65_536,
   omittedArtifactClasses: [
     "persona",
@@ -66,13 +71,7 @@ export interface ExplorerEnvelopeInput {
 
 export interface ExplorerEnvelopeResult {
   prompt: string;
-  evidence: {
-    role: "explorer";
-    assembledByteSize: number;
-    includedArtifactIds: string[];
-    omittedArtifactClasses: string[];
-    contextManifestVersion: number;
-  };
+  evidence: RoleEnvelopeEvidence & { role: "explorer" };
 }
 
 const GENERATOR_CONTRACT_SECTIONS = new Set([
@@ -121,8 +120,15 @@ export const GENERATOR_CONTEXT_MANIFEST = {
   acceptedInputArtifactClasses: [
     "contract-view",
     "acceptance-manifest",
+    "file-scope",
     "patterns-and-harness",
+    "verification-command",
+    "migration-reservation",
     "failure-set",
+    "repair-situation",
+    "repair-context",
+    "finding-evidence",
+    "gate-evidence",
   ],
   outputArtifact: "committed-candidate-and-handoff",
   inputOrder: [
@@ -174,6 +180,7 @@ export interface GeneratorEnvelopeInput {
 export interface GeneratorEnvelopeEvidence {
   role: "generator";
   assembledByteSize: number;
+  includedArtifactClasses: string[];
   includedArtifactIds: string[];
   omittedArtifactClasses: string[];
   contextManifestVersion: number;
@@ -339,9 +346,6 @@ export function buildExplorerRepositoryContext(repoRoot: string): {
 export function assembleExplorerEnvelope(
   input: ExplorerEnvelopeInput,
 ): ExplorerEnvelopeResult {
-  const allowedByteSize =
-    input.inlineSizeBudgetBytes ??
-    EXPLORER_CONTEXT_MANIFEST.inlineSizeBudgetBytes;
   const repositoryContext = buildExplorerRepositoryContext(input.repoRoot);
   const prompt = renderPrompt("explorer", {
     GH_ISSUE: input.ghIssue,
@@ -350,27 +354,28 @@ export function assembleExplorerEnvelope(
     RELEVANT_FILES: input.relevantFiles,
     SLICE_BODY: input.sliceBody,
     REPOSITORY_CONTEXT: repositoryContext.content,
-    INLINE_SIZE_BUDGET_BYTES: allowedByteSize,
+    INLINE_SIZE_BUDGET_BYTES:
+      input.inlineSizeBudgetBytes ??
+      EXPLORER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
   });
-  const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
-  if (assembledByteSize > allowedByteSize) {
-    throw new Error(
-      `Explorer prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
-    );
-  }
-
-  return {
+  return assembleContextEnvelope({
     prompt,
-    evidence: {
-      role: "explorer",
-      assembledByteSize,
-      includedArtifactIds: repositoryContext.includedArtifactIds,
-      omittedArtifactClasses: [
-        ...EXPLORER_CONTEXT_MANIFEST.omittedArtifactClasses,
-      ],
-      contextManifestVersion: EXPLORER_CONTEXT_MANIFEST.version,
-    },
-  };
+    manifest: EXPLORER_CONTEXT_MANIFEST,
+    includedArtifacts: [
+      {
+        artifactClass: "slice-request",
+        artifactId: `issue:${input.ghIssue}`,
+      },
+      ...repositoryContext.includedArtifactIds.map((artifactId) => ({
+        artifactClass: artifactId.startsWith("docs/adr/")
+          ? "repository-adr"
+          : "repository-architecture",
+        artifactId,
+      })),
+    ],
+    inlineSizeBudgetBytes: input.inlineSizeBudgetBytes,
+    roleLabel: "Explorer",
+  }) as ExplorerEnvelopeResult;
 }
 
 const ROLE_ENVELOPE_OMISSIONS = [
@@ -405,7 +410,7 @@ export const PLANNER_CONTEXT_MANIFEST = {
     "explorer-evidence-map",
     "base-gate-catalog",
     "migration-reservation",
-    "adr-index",
+    "repository-adr",
     "repository-architecture",
     "current-contract-pair",
     "open-contract-findings",
@@ -456,8 +461,12 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
   ],
   acceptedInputArtifactClasses: [
     "proposed-contract-pair",
+    "proposed-contract",
+    "acceptance-manifest",
     "base-gate-catalog",
     "explorer-evidence-map",
+    "revised-contract",
+    "revised-acceptance-manifest",
     "prior-open-contract-findings",
     "planner-response",
     "contract-revision-evidence",
@@ -498,6 +507,7 @@ export type PromptAssemblyRole =
 export interface RoleEnvelopeEvidence {
   role: PromptAssemblyRole;
   assembledByteSize: number;
+  includedArtifactClasses: string[];
   includedArtifactIds: string[];
   omittedArtifactClasses: string[];
   contextManifestVersion: number;
@@ -506,6 +516,28 @@ export interface RoleEnvelopeEvidence {
 export interface RoleEnvelopeResult {
   prompt: string;
   evidence: RoleEnvelopeEvidence;
+}
+
+export interface ContextArtifactReference {
+  artifactClass: string;
+  artifactId: string;
+}
+
+export interface ContextEnvelopeManifest {
+  version: number;
+  role: PromptAssemblyRole;
+  acceptedInputArtifactClasses: readonly string[];
+  inlineSizeBudgetBytes: number;
+  omittedArtifactClasses: readonly string[];
+}
+
+export class ContextEnvelopeConfigurationError extends Error {
+  readonly failureKind = "CONFIGURATION";
+
+  constructor(message: string) {
+    super(`CONFIGURATION: ${message}`);
+    this.name = "ContextEnvelopeConfigurationError";
+  }
 }
 
 interface PlannerEnvelopeCommonInput {
@@ -557,44 +589,134 @@ export interface ContractEvaluatorRevisionEnvelopeInput
   controlSituation?: string;
 }
 
-function assertEnvelopeBudget(
+export function assertEnvelopeBudget(
   roleLabel: string,
   prompt: string,
   allowedByteSize: number,
 ): number {
   const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
   if (assembledByteSize > allowedByteSize) {
-    throw new Error(
+    throw new ContextEnvelopeConfigurationError(
       `${roleLabel} prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
     );
   }
   return assembledByteSize;
 }
 
-function roleEnvelopeResult(
-  prompt: string,
-  role: RoleEnvelopeEvidence["role"],
-  includedArtifactIds: string[],
-  omittedArtifactClasses: readonly string[],
-  contextManifestVersion: number,
-  allowedByteSize: number,
-  roleLabel: string,
-): RoleEnvelopeResult {
-  const normalizedPrompt = prompt.replace(/\r\n?/g, "\n");
+export function assembleContextEnvelope(input: {
+  prompt: string;
+  manifest: ContextEnvelopeManifest;
+  includedArtifacts: readonly ContextArtifactReference[];
+  inlineSizeBudgetBytes?: number;
+  roleLabel?: string;
+}): RoleEnvelopeResult {
+  const accepted = new Set(input.manifest.acceptedInputArtifactClasses);
+  const undeclared = input.includedArtifacts.find(
+    ({ artifactClass }) => !accepted.has(artifactClass),
+  );
+  if (undeclared !== undefined) {
+    throw new ContextEnvelopeConfigurationError(
+      `${input.manifest.role} context class "${undeclared.artifactClass}" is not declared by manifest version ${input.manifest.version}`,
+    );
+  }
+  const normalizedPrompt = input.prompt.replace(/\r\n?/g, "\n");
   return {
     prompt: normalizedPrompt,
     evidence: {
-      role,
+      role: input.manifest.role,
       assembledByteSize: assertEnvelopeBudget(
-        roleLabel,
+        input.roleLabel ?? input.manifest.role,
         normalizedPrompt,
-        allowedByteSize,
+        input.inlineSizeBudgetBytes ??
+          input.manifest.inlineSizeBudgetBytes,
       ),
-      includedArtifactIds,
-      omittedArtifactClasses: [...omittedArtifactClasses],
-      contextManifestVersion,
+      includedArtifactClasses: input.includedArtifacts.map(
+        ({ artifactClass }) => artifactClass,
+      ),
+      includedArtifactIds: input.includedArtifacts.map(
+        ({ artifactId }) => artifactId,
+      ),
+      omittedArtifactClasses: [
+        ...input.manifest.omittedArtifactClasses,
+      ],
+      contextManifestVersion: input.manifest.version,
     },
   };
+}
+
+function artifactClassFor(
+  role: PromptAssemblyRole,
+  artifactId: string,
+): string {
+  if (role === "planner") {
+    if (artifactId === "slice-request") return "slice-request";
+    if (artifactId.endsWith("/context.md")) {
+      return "explorer-evidence-map";
+    }
+    if (artifactId === "base-gate-catalog") return "base-gate-catalog";
+    if (artifactId === "migration-reservation") {
+      return "migration-reservation";
+    }
+    if (artifactId.startsWith("docs/adr/")) return "repository-adr";
+    if (artifactId === "ARCHITECTURE.md") {
+      return "repository-architecture";
+    }
+    if (artifactId === "contract-review:open-findings") {
+      return "open-contract-findings";
+    }
+    if (artifactId === "contract-review:relevant-resolved-findings") {
+      return "relevant-resolved-contract-findings";
+    }
+    if (artifactId === "control-plane-situation") {
+      return "control-plane-situation";
+    }
+    return "current-contract-pair";
+  }
+  if (role === "evaluator-contract") {
+    if (artifactId === "base-gate-catalog") return "base-gate-catalog";
+    if (artifactId.endsWith("/context.md")) {
+      return "explorer-evidence-map";
+    }
+    if (artifactId === "contract-review:prior-open-findings") {
+      return "prior-open-contract-findings";
+    }
+    if (artifactId.endsWith("/contract-response.json")) {
+      return "planner-response";
+    }
+    if (artifactId === "contract-revision-evidence") {
+      return "contract-revision-evidence";
+    }
+    if (artifactId === "control-plane-situation") {
+      return "control-plane-situation";
+    }
+    return "proposed-contract-pair";
+  }
+  throw new Error(`No artifact-class mapping for role ${role}`);
+}
+
+function roleEnvelopeResult(
+  prompt: string,
+  role: "planner" | "evaluator-contract",
+  includedArtifactIds: string[],
+  _omittedArtifactClasses: readonly string[],
+  _contextManifestVersion: number,
+  allowedByteSize: number,
+  roleLabel: string,
+): RoleEnvelopeResult {
+  const manifest =
+    role === "planner"
+      ? PLANNER_CONTEXT_MANIFEST
+      : CONTRACT_EVALUATOR_CONTEXT_MANIFEST;
+  return assembleContextEnvelope({
+    prompt,
+    manifest,
+    includedArtifacts: includedArtifactIds.map((artifactId) => ({
+      artifactClass: artifactClassFor(role, artifactId),
+      artifactId,
+    })),
+    inlineSizeBudgetBytes: allowedByteSize,
+    roleLabel,
+  });
 }
 
 export function assemblePlannerInitialEnvelope(
@@ -834,45 +956,78 @@ export function assembleGeneratorEnvelope(
           REPAIR_SITUATION: input.repairSituation!,
         })
       : renderPrompt("generator", commonArgs);
-  const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
-  const allowedByteSize =
-    input.inlineSizeBudgetBytes ??
-    GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes;
-  if (assembledByteSize > allowedByteSize) {
-    throw new Error(
-      `Generator prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
-    );
-  }
-  const failureArtifactIds = [
-    ...input.failureSet.findings.flatMap(
-      (finding) => finding.artifactReferences,
-    ),
-    ...input.failureSet.gates.flatMap((gate) => gate.evidence),
-  ];
-
-  return {
-    prompt,
-    evidence: {
-      role: "generator",
-      assembledByteSize,
-      includedArtifactIds: [
-        `${input.sliceDir}/contract.md`,
-        `${input.sliceDir}/acceptance-manifest.json`,
-        ...(input.patternsAndHarnessArtifactId === null
-          ? []
-          : [
-              input.patternsAndHarnessArtifactId ??
-                `${input.sliceDir}/context.md`,
-            ]),
-        ...(input.additionalArtifactIds ?? []),
-        ...new Set(failureArtifactIds),
-      ],
-      omittedArtifactClasses: [
-        ...GENERATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
-      ],
-      contextManifestVersion: GENERATOR_CONTEXT_MANIFEST.version,
+  const includedArtifacts: ContextArtifactReference[] = [
+    {
+      artifactClass: "contract-view",
+      artifactId: `${input.sliceDir}/contract.md`,
     },
-  };
+    {
+      artifactClass: "acceptance-manifest",
+      artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+    },
+    {
+      artifactClass: "file-scope",
+      artifactId: "acceptance-manifest:file-scope",
+    },
+    ...(input.patternsAndHarnessArtifactId === null
+      ? []
+      : [{
+          artifactClass: "patterns-and-harness",
+          artifactId:
+            input.patternsAndHarnessArtifactId ??
+            `${input.sliceDir}/context.md`,
+        }]),
+    {
+      artifactClass: "verification-command",
+      artifactId: "generator:test-command",
+    },
+    {
+      artifactClass: "migration-reservation",
+      artifactId: "migration-reservation",
+    },
+    {
+      artifactClass: "failure-set",
+      artifactId: "generator:failure-set",
+    },
+    ...(input.repairSituation === undefined
+      ? []
+      : [{
+          artifactClass: "repair-situation",
+          artifactId: "generator:repair-situation",
+        }]),
+    ...(input.additionalArtifactIds ?? []).map((artifactId) => ({
+      artifactClass: "repair-context",
+      artifactId,
+    })),
+    ...input.failureSet.findings.flatMap((finding) =>
+      finding.artifactReferences.map((artifactId) => ({
+        artifactClass: "finding-evidence",
+        artifactId,
+      })),
+    ),
+    ...input.failureSet.gates.flatMap((gate) =>
+      gate.evidence.map((artifactId) => ({
+        artifactClass: "gate-evidence",
+        artifactId,
+      })),
+    ),
+  ];
+  const deduplicatedArtifacts = includedArtifacts.filter(
+    (artifact, index) =>
+      includedArtifacts.findIndex(
+        (candidate) =>
+          candidate.artifactClass === artifact.artifactClass &&
+          candidate.artifactId === artifact.artifactId,
+      ) === index,
+  );
+
+  return assembleContextEnvelope({
+    prompt,
+    manifest: GENERATOR_CONTEXT_MANIFEST,
+    includedArtifacts: deduplicatedArtifacts,
+    inlineSizeBudgetBytes: input.inlineSizeBudgetBytes,
+    roleLabel: "Generator",
+  }) as GeneratorEnvelopeResult;
 }
 
 export function formatGeneratorFailureSet(

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AgentProvider } from "./agent-provider.js";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
 import {
@@ -8,6 +9,7 @@ import {
   PLANNER_CONTEXT_MANIFEST,
   assembleContractEvaluatorInitialEnvelope,
   assembleContractEvaluatorRevisionEnvelope,
+  assembleContextEnvelope,
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
   assemblePlannerInitialEnvelope,
@@ -487,7 +489,7 @@ describe("planner and contract-evaluator context envelopes", () => {
     expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
   });
 
-  it("B-05 uses distinct fresh templates and excludes undeclared context", () => {
+  it("P-02 uses distinct fresh templates and excludes undeclared context", () => {
     const plannerInitial = assemblePlannerInitialEnvelope({
       repoRoot: fileURLToPath(new URL("..", import.meta.url)),
       ghIssue: "95",
@@ -553,7 +555,7 @@ describe("planner and contract-evaluator context envelopes", () => {
     }
   });
 
-  it("B-06 is deterministic, fail-closed, and exposes role-attributed evidence", () => {
+  it("B-03 is deterministic, fail-closed, and exposes role-attributed evidence", () => {
     const plannerInput = {
       ghIssue: "95",
       specsDir: "specs",
@@ -635,9 +637,105 @@ describe("planner and contract-evaluator context envelopes", () => {
       "evaluator-contract",
     ]);
   });
+
+  it("B-04 rejects an undeclared context class as CONFIGURATION before dispatch", () => {
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "required prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "other-role-conversation",
+            artifactId: "conversation:generator",
+          },
+        ],
+      }),
+    ).toThrow(
+      'CONFIGURATION: planner context class "other-role-conversation" is not declared by manifest version 1',
+    );
+  });
+
+  it("P-01 fails closed one byte over budget without truncating required content", () => {
+    const prompt = "required-content";
+    expect(() =>
+      assembleContextEnvelope({
+        prompt,
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          { artifactClass: "slice-request", artifactId: "slice-request" },
+        ],
+        inlineSizeBudgetBytes: Buffer.byteLength(prompt) - 1,
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      `actual ${Buffer.byteLength(prompt)} bytes, allowed ${Buffer.byteLength(prompt) - 1} bytes`,
+    );
+  });
 });
 
 describe("generator context envelope", () => {
+  it("B-02 has identical logical evidence across Kiro, Claude, and Codex stubs and preserves stable IDs", async () => {
+    const result = assembleGeneratorEnvelope({
+      mode: "repair",
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "checkpointId: CHECKPOINT-07",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      repairSituation: "Repair FINDING-09 without changing CHECKPOINT-07.",
+      failureSet: {
+        findings: [
+          {
+            id: "FINDING-09",
+            clearCondition: "Preserve behavior B-01.",
+            artifactReferences: ["reviews/FINDING-09.json"],
+          },
+        ],
+        gates: [
+          {
+            id: "tests",
+            evidence: ["gates/tests-attempt-1.json"],
+          },
+        ],
+      },
+    });
+    const captures = new Map<
+      string,
+      { prompt: string; evidence: typeof result.evidence }
+    >();
+    const adapters: AgentProvider[] = ["kiro", "claude", "codex"].map(
+      (name) => ({
+        name,
+        async invoke(options) {
+          captures.set(name, {
+            prompt: options.prompt,
+            evidence: result.evidence,
+          });
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      }),
+    );
+
+    for (const adapter of adapters) {
+      await adapter.invoke({
+        role: "generator",
+        prompt: result.prompt,
+        cwd: "/stub",
+      });
+    }
+
+    expect([...captures.values()].map(({ evidence }) => evidence)).toEqual([
+      result.evidence,
+      result.evidence,
+      result.evidence,
+    ]);
+    expect(result.prompt).toContain('"id": "B-01"');
+    expect(result.prompt).toContain('"tests"');
+    expect(result.prompt).toContain("FINDING-09");
+    expect(result.prompt).toContain("CHECKPOINT-07");
+  });
+
   it("B-01 assembles the focused initial envelope in manifest order", () => {
     const result = assembleGeneratorEnvelope({
       mode: "initial",
@@ -856,7 +954,7 @@ describe("generator context envelope", () => {
     expect(event).toMatchObject(result.evidence);
   });
 
-  it("B-07 produces byte-identical prompts and evidence for identical inputs", () => {
+  it("B-03 produces byte-identical prompts and evidence for identical inputs", () => {
     const input = {
       mode: "repair" as const,
       sliceDir: ".kiro/specs/demo/slices/01-focused",
@@ -891,7 +989,7 @@ describe("generator context envelope", () => {
     expect(second.evidence).toEqual(first.evidence);
   });
 
-  it("P-04 preserves generator assembly and the legacy full-context fallback", () => {
+  it("P-03 preserves generator assembly and the legacy full-context fallback", () => {
     const legacyContext =
       "## Patterns in Use\n\nlegacy patterns\n\n## Test Infrastructure\n\nlegacy tests\n";
     expect(projectGeneratorPatternsAndHarness(legacyContext)).toBe(
