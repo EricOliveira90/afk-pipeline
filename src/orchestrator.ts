@@ -90,7 +90,7 @@ import {
 } from "./qa-gate-authorization.js";
 import {
   loadRunState,
-  saveRunState,
+  updateRunState,
   isSliceComplete,
   getResumeAttempts,
   recordRetryDecision,
@@ -5464,8 +5464,6 @@ export async function runPipeline(
   };
 
   try {
-  const runState = loadRunState(repoRoot, loggerSlug);
-  initializeMigrationClaims(runState, config.manifest ?? null);
   const requestedSliceNumbers =
     config.selectedSliceNumbers ?? config.manifest?.selectedSlices;
   if (config.manifest && requestedSliceNumbers) {
@@ -5477,20 +5475,22 @@ export async function runPipeline(
         `Run scope conflicts with afk.json selectedSlices: ${conflicting.join(", ")}`,
     });
   }
-  scope = resolveRunScope(
-    [...manifestDag.slices.values()],
-    requestedSliceNumbers,
-    runState.scope,
-  );
-  runState.scope = scope.persisted;
-  runState.featureBranch = featBranch;
-  // Recorded so `clean-failed` can *resolve* where this
-  // run's slice artifacts live rather than search a worktree for them
-  // (architect blocker 2; see `RunState.specsDir`). Written here, beside the
-  // feature branch, because both are facts about the run that later commands
-  // read and neither can be re-derived from a worktree alone.
-  runState.specsDir = specsDir.replace(/\\/g, "/");
-  saveRunState(repoRoot, runState);
+  const initialized = updateRunState(repoRoot, loggerSlug, (current) => {
+    initializeMigrationClaims(current, config.manifest ?? null);
+    const resolvedScope = resolveRunScope(
+      [...manifestDag.slices.values()],
+      requestedSliceNumbers,
+      current.scope,
+    );
+    current.scope = resolvedScope.persisted;
+    current.featureBranch = featBranch;
+    // Recorded so `clean-failed` can *resolve* where this run's slice
+    // artifacts live rather than search a worktree for them.
+    current.specsDir = specsDir.replace(/\\/g, "/");
+    return { runState: current, scope: resolvedScope };
+  });
+  const runState = initialized.runState;
+  scope = initialized.scope;
   const dag = buildDAG(scope.selected);
   const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
 
@@ -6299,23 +6299,29 @@ export async function runPipeline(
 
       try {
         if (config.manifest) {
-          const latestState = loadRunState(repoRoot, loggerSlug);
-          // Keep only prefixes whose slice merged; a failed or descoped
-          // slice's reservation must not ride into the verified draft
-          // (#65). Releasing its claim record here keeps run state
-          // consistent with the trimmed pool below.
-          const release = releaseUnmergedMigrationClaims(latestState);
-          const trimmed = trimUnclaimedMigrationPrefixes(
-            join(reviewDir, specsDir),
-            release.retained,
+          const { trimmed } = updateRunState(
+            repoRoot,
+            loggerSlug,
+            (latestState) => {
+              // Keep only prefixes whose slice merged; a failed or descoped
+              // slice's reservation must not ride into the verified draft
+              // (#65).
+              const release = releaseUnmergedMigrationClaims(latestState);
+              const trimmed = trimUnclaimedMigrationPrefixes(
+                join(reviewDir, specsDir),
+                release.retained,
+              );
+              if (
+                latestState.migrations &&
+                (trimmed.changed || release.released.length > 0)
+              ) {
+                latestState.migrations.pool = [
+                  ...trimmed.manifest.migrationPrefixes,
+                ];
+              }
+              return { trimmed };
+            },
           );
-          // Save on either half. A release with no trim happens when the
-          // manifest already lists exactly the retained prefixes; gating
-          // the save on the trim alone drops the claim in memory only.
-          if (latestState.migrations && (trimmed.changed || release.released.length > 0)) {
-            latestState.migrations.pool = [...trimmed.manifest.migrationPrefixes];
-            saveRunState(repoRoot, latestState);
-          }
           if (trimmed.changed) {
             git.commitAll(
               reviewDir,

@@ -2,9 +2,8 @@ import {
   readFileSync,
   writeFileSync,
   existsSync,
-  mkdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import {
   ALL_PHASES,
   traitsFor,
@@ -12,6 +11,7 @@ import {
   type SlicePhase,
 } from "./slice-lifecycle.js";
 import type { PersistedRunScope } from "./slice-scope.js";
+import { withFileLock } from "./file-lock.js";
 
 /** Phases that get persisted. RUNNING / PENDING never touch disk. */
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
@@ -243,6 +243,50 @@ function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
 }
 
+export function withRunStateLock<T>(
+  repoRoot: string,
+  prdSlug: string,
+  action: () => T,
+): T {
+  return withFileLock(statePath(repoRoot, prdSlug), action);
+}
+
+function writeRunState(path: string, state: RunState): void {
+  writeFileSync(path, JSON.stringify(state, null, 2));
+}
+
+/**
+ * The shared read-modify-write transaction for run state.
+ *
+ * Every caller loads, compares or mutates, and commits while holding the
+ * same per-file cross-process lock. `changed: false` supports conditional
+ * operations without rewriting bytes after a refused comparison.
+ */
+export function transactRunState<T>(
+  repoRoot: string,
+  prdSlug: string,
+  transaction: (state: RunState) => { changed: boolean; result: T },
+): T {
+  const p = statePath(repoRoot, prdSlug);
+  return withRunStateLock(repoRoot, prdSlug, () => {
+    const state = loadRunState(repoRoot, prdSlug);
+    const outcome = transaction(state);
+    if (outcome.changed) writeRunState(p, state);
+    return outcome.result;
+  });
+}
+
+export function updateRunState<T>(
+  repoRoot: string,
+  prdSlug: string,
+  update: (state: RunState) => T,
+): T {
+  return transactRunState(repoRoot, prdSlug, (state) => ({
+    changed: true,
+    result: update(state),
+  }));
+}
+
 /**
  * Load run state, adapting unversioned (v0) and v1 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
@@ -444,11 +488,46 @@ export function saveSliceState(
   ghIssue: string,
   result: PersistedSliceState,
 ) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  current.slices[ghIssue] = result;
-  writeFileSync(p, JSON.stringify(current, null, 2));
+  updateRunState(repoRoot, prdSlug, (current) => {
+    current.slices[ghIssue] = result;
+  });
+}
+
+export function saveSliceStateIfUnchanged(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  result: PersistedSliceState,
+  expected: PersistedSliceState | undefined,
+): { ok: true } | { ok: false; found: PersistedSliceState | undefined } {
+  type Result =
+    | { ok: true }
+    | { ok: false; found: PersistedSliceState | undefined };
+  return transactRunState<Result>(repoRoot, prdSlug, (current) => {
+    const found = current.slices[ghIssue];
+    if (!sameSliceRecord(found, expected)) {
+      return { changed: false, result: { ok: false as const, found } };
+    }
+    current.slices[ghIssue] = result;
+    return { changed: true, result: { ok: true as const } };
+  });
+}
+
+export function sameSliceRecord(
+  a: PersistedSliceState | undefined,
+  b: PersistedSliceState | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    JSON.stringify(canonicalSliceRecord(a)) ===
+    JSON.stringify(canonicalSliceRecord(b))
+  );
+}
+
+function canonicalSliceRecord(record: PersistedSliceState): unknown {
+  return Object.entries(record as unknown as Record<string, unknown>).sort(
+    ([x], [y]) => (x < y ? -1 : x > y ? 1 : 0),
+  );
 }
 
 /**
@@ -485,20 +564,17 @@ export function clearSliceStateForDispatch(
   prdSlug: string,
   ghIssue: string,
 ): PersistedSliceState | null {
-  const p = statePath(repoRoot, prdSlug);
-  if (!existsSync(p)) return null;
-  const current = loadRunState(repoRoot, prdSlug);
-  const previous = current.slices[ghIssue];
-  if (!previous) return null;
-  delete current.slices[ghIssue];
-  writeFileSync(p, JSON.stringify(current, null, 2));
-  return previous;
+  return transactRunState(repoRoot, prdSlug, (current) => {
+    const previous = current.slices[ghIssue];
+    if (!previous) return { changed: false, result: null };
+    delete current.slices[ghIssue];
+    return { changed: true, result: previous };
+  });
 }
 
 export function saveRunState(repoRoot: string, state: RunState) {
   const p = statePath(repoRoot, state.prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(state, null, 2));
+  withRunStateLock(repoRoot, state.prdSlug, () => writeRunState(p, state));
 }
 
 /**
@@ -511,15 +587,13 @@ export function saveReviewPhase(
   prdSlug: string,
   reviewPhase: PersistedReviewPhase | undefined,
 ) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  if (reviewPhase === undefined) {
-    delete current.reviewPhase;
-  } else {
-    current.reviewPhase = reviewPhase;
-  }
-  writeFileSync(p, JSON.stringify(current, null, 2));
+  updateRunState(repoRoot, prdSlug, (current) => {
+    if (reviewPhase === undefined) {
+      delete current.reviewPhase;
+    } else {
+      current.reviewPhase = reviewPhase;
+    }
+  });
 }
 
 export function markSliceComplete(
@@ -552,9 +626,7 @@ export function recordRetryDecision(
   ghIssue: string,
   decision: SliceResumeState,
 ) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  current.resume = { ...current.resume, [ghIssue]: decision };
-  writeFileSync(p, JSON.stringify(current, null, 2));
+  updateRunState(repoRoot, prdSlug, (current) => {
+    current.resume = { ...current.resume, [ghIssue]: decision };
+  });
 }

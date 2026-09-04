@@ -8,7 +8,7 @@ import {
 } from "./acceptance-manifest.js";
 import {
   loadRunState,
-  saveRunState,
+  updateRunState,
   assertMigrationClaimShape,
   isSliceComplete,
   type MigrationClaimState,
@@ -82,46 +82,45 @@ export function claimMigrationPrefixes(args: {
   if (!Number.isSafeInteger(args.count) || args.count < 0) {
     throw new Error(`Invalid migration count for #${args.ghIssue}`);
   }
-  // Synchronous read-modify-write makes allocation atomic inside one run.
-  const state = loadRunState(args.repoRoot, args.runSlug);
-  if (!state.migrations) {
-    state.migrations = { pool: [...args.expectedPool], claims: {} };
-  }
-  validateClaimState(state.migrations);
-  if (
-    state.migrations.pool.length !== args.expectedPool.length ||
-    state.migrations.pool.some(
-      (prefix, index) => prefix !== args.expectedPool[index],
-    )
-  ) {
-    throw new Error(
-      "Persisted migration pool does not match the current afk.json reservation",
-    );
-  }
-
-  const existing = state.migrations.claims[args.ghIssue];
-  if (existing) {
-    if (existing.length !== args.count) {
+  return updateRunState(args.repoRoot, args.runSlug, (state) => {
+    if (!state.migrations) {
+      state.migrations = { pool: [...args.expectedPool], claims: {} };
+    }
+    validateClaimState(state.migrations);
+    if (
+      state.migrations.pool.length !== args.expectedPool.length ||
+      state.migrations.pool.some(
+        (prefix, index) => prefix !== args.expectedPool[index],
+      )
+    ) {
       throw new Error(
-        `Slice #${args.ghIssue} already owns ${existing.length} migration prefix(es), ` +
-          `but its contract now declares ${args.count}`,
+        "Persisted migration pool does not match the current afk.json reservation",
       );
     }
-    return [...existing];
-  }
 
-  const claimed = new Set(Object.values(state.migrations.claims).flat());
-  const free = state.migrations.pool.filter((prefix) => !claimed.has(prefix));
-  if (free.length < args.count) {
-    throw new Error(
-      `Migration prefix pool exhausted before generation for #${args.ghIssue}: ` +
-        `needs ${args.count}, only ${free.length} remain`,
-    );
-  }
-  const allocation = free.slice(0, args.count);
-  state.migrations.claims[args.ghIssue] = allocation;
-  saveRunState(args.repoRoot, state);
-  return [...allocation];
+    const existing = state.migrations.claims[args.ghIssue];
+    if (existing) {
+      if (existing.length !== args.count) {
+        throw new Error(
+          `Slice #${args.ghIssue} already owns ${existing.length} migration prefix(es), ` +
+            `but its contract now declares ${args.count}`,
+        );
+      }
+      return [...existing];
+    }
+
+    const claimed = new Set(Object.values(state.migrations.claims).flat());
+    const free = state.migrations.pool.filter((prefix) => !claimed.has(prefix));
+    if (free.length < args.count) {
+      throw new Error(
+        `Migration prefix pool exhausted before generation for #${args.ghIssue}: ` +
+          `needs ${args.count}, only ${free.length} remain`,
+      );
+    }
+    const allocation = free.slice(0, args.count);
+    state.migrations.claims[args.ghIssue] = allocation;
+    return [...allocation];
+  });
 }
 
 export function migrationClaimFor(

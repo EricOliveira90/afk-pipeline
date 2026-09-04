@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { describe, it, expect, afterEach } from "vitest";
 import {
   existsSync,
@@ -20,11 +21,16 @@ import {
   getResumeAttempts,
   recordRetryDecision,
   clearSliceStateForDispatch,
+  saveSliceStateIfUnchanged,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
+const childProcesses: ChildProcess[] = [];
 
 afterEach(() => {
+  while (childProcesses.length > 0) {
+    childProcesses.pop()!.kill("SIGKILL");
+  }
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     try {
@@ -39,6 +45,88 @@ function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-runstate-"));
   tempDirs.push(dir);
   return dir;
+}
+
+const CHILD_SCRIPT = `
+  import { existsSync, writeFileSync } from "node:fs";
+  import { saveSliceState, updateRunState } from "./src/run-state.ts";
+  const [mode, repo, ready, release] = process.argv.slice(1);
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  if (mode === "hold") {
+    updateRunState(repo, "concurrent", (state) => {
+      writeFileSync(ready, "ready");
+      while (!existsSync(release)) Atomics.wait(sleeper, 0, 0, 20);
+      state.slices["100"] = { phase: "ERROR", error: "first writer" };
+    });
+  } else if (mode === "die") {
+    updateRunState(repo, "concurrent", () => {
+      writeFileSync(ready, "ready");
+      while (true) Atomics.wait(sleeper, 0, 0, 1000);
+    });
+  } else if (mode === "write") {
+    saveSliceState(repo, "concurrent", "200", {
+      phase: "STUCK",
+      error: "second writer",
+    });
+  }
+`;
+
+function spawnStateChild(
+  mode: "hold" | "die" | "write",
+  repo: string,
+  ready: string,
+  release: string,
+): ChildProcess {
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      CHILD_SCRIPT,
+      mode,
+      repo,
+      ready,
+      release,
+    ],
+    {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  childProcesses.push(child);
+  return child;
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null) {
+    if (child.exitCode !== 0) throw new Error(`Child exited ${child.exitCode}`);
+    return;
+  }
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+  child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+  const result = await new Promise<{ code: number | null; signal: string | null }>(
+    (resolve) =>
+      child.once("exit", (code, signal) => resolve({ code, signal })),
+  );
+  if (result.code !== 0) {
+    throw new Error(
+      `Child exited ${result.code ?? result.signal}\n` +
+        Buffer.concat(stdout).toString("utf-8") +
+        Buffer.concat(stderr).toString("utf-8"),
+    );
+  }
 }
 
 describe("adaptLoadedState", () => {
@@ -604,5 +692,79 @@ describe("RunState.specsDir", () => {
         "demo",
       ).specsDir,
     ).toBe(".kiro/specs/demo");
+  });
+});
+
+describe("cross-process run-state locking", () => {
+  it("serializes real processes without losing either writer's mutation", async () => {
+    const repo = makeRepo();
+    const ready = join(repo, "holder-ready");
+    const release = join(repo, "holder-release");
+    const holder = spawnStateChild("hold", repo, ready, release);
+    await waitForFile(ready);
+
+    const writer = spawnStateChild("write", repo, ready, release);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(writer.exitCode).toBeNull();
+
+    writeFileSync(release, "release");
+    await Promise.all([waitForChild(holder), waitForChild(writer)]);
+
+    expect(loadRunState(repo, "concurrent").slices).toEqual({
+      "100": { phase: "ERROR", error: "first writer" },
+      "200": { phase: "STUCK", error: "second writer" },
+    });
+  });
+
+  it("reclaims a lock left by a killed owner process", async () => {
+    const repo = makeRepo();
+    const ready = join(repo, "dead-owner-ready");
+    const release = join(repo, "unused-release");
+    const owner = spawnStateChild("die", repo, ready, release);
+    await waitForFile(ready);
+
+    owner.kill("SIGKILL");
+    await new Promise<void>((resolve) => owner.once("exit", () => resolve()));
+
+    saveSliceState(repo, "concurrent", "200", {
+      phase: "PASS",
+      mergedToFeature: true,
+    });
+
+    expect(isSliceComplete(loadRunState(repo, "concurrent"), "200")).toBe(true);
+    expect(
+      existsSync(join(repo, ".afk", "state", "concurrent.json.lock")),
+    ).toBe(false);
+  });
+
+  it("compares and commits a conditional slice write inside one lock", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "conditional", "129", {
+      phase: "AWAITING-ADJUDICATION",
+      branch: "afk/conditional-slice-01",
+    });
+    const before = readFileSync(
+      join(repo, ".afk", "state", "conditional.json"),
+      "utf-8",
+    );
+
+    const result = saveSliceStateIfUnchanged(
+      repo,
+      "conditional",
+      "129",
+      { phase: "PASS", mergedToFeature: true },
+      undefined,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      found: {
+        phase: "AWAITING-ADJUDICATION",
+        branch: "afk/conditional-slice-01",
+      },
+    });
+    expect(
+      readFileSync(join(repo, ".afk", "state", "conditional.json"), "utf-8"),
+    ).toBe(before);
   });
 });

@@ -7,7 +7,7 @@ import {
 } from "./qa-review.js";
 import {
   loadRunState,
-  saveRunState,
+  updateRunState,
   type RunState,
 } from "./run-state.js";
 
@@ -685,11 +685,11 @@ export function saveQAConvergenceState(
   location: ConvergenceLocation,
   convergence: QAConvergenceState,
 ): void {
-  const state = loadRunState(location.repoRoot, location.prdSlug);
-  const existing = convergenceMap(state) ?? {};
-  state.qaConvergence = {
-    ...existing,
-    [location.ghIssue]: convergence,
-  };
-  saveRunState(location.repoRoot, state);
+  updateRunState(location.repoRoot, location.prdSlug, (state) => {
+    const existing = convergenceMap(state) ?? {};
+    state.qaConvergence = {
+      ...existing,
+      [location.ghIssue]: convergence,
+    };
+  });
 }
