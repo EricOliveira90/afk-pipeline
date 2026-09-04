@@ -131,13 +131,30 @@ export const GENERATOR_CONTEXT_MANIFEST = {
     "gate-evidence",
   ],
   outputArtifact: "committed-candidate-and-handoff",
-  inputOrder: [
-    "contract-view",
-    "acceptance-manifest",
-    "file-scope",
-    "patterns-and-harness",
-    "failure-set",
-  ],
+  inputOrder: {
+    initial: [
+      "file-scope",
+      "migration-reservation",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+    ],
+    repair: [
+      "file-scope",
+      "migration-reservation",
+      "repair-situation",
+      "repair-context",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+      "finding-evidence",
+      "gate-evidence",
+    ],
+  },
   inlineSizeBudgetBytes: 65_536,
   omittedArtifactClasses: [
     "resolved-findings",
@@ -460,7 +477,6 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
     "An unreviewable contract is returned as a blocking REVISE finding",
   ],
   acceptedInputArtifactClasses: [
-    "proposed-contract-pair",
     "proposed-contract",
     "acceptance-manifest",
     "base-gate-catalog",
@@ -481,7 +497,8 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
       "explorer-evidence-map",
     ],
     revision: [
-      "revised-contract-pair",
+      "revised-contract",
+      "revised-acceptance-manifest",
       "prior-open-contract-findings",
       "planner-response",
       "contract-revision-evidence",
@@ -644,62 +661,10 @@ export function assembleContextEnvelope(input: {
   };
 }
 
-function artifactClassFor(
-  role: PromptAssemblyRole,
-  artifactId: string,
-): string {
-  if (role === "planner") {
-    if (artifactId === "slice-request") return "slice-request";
-    if (artifactId.endsWith("/context.md")) {
-      return "explorer-evidence-map";
-    }
-    if (artifactId === "base-gate-catalog") return "base-gate-catalog";
-    if (artifactId === "migration-reservation") {
-      return "migration-reservation";
-    }
-    if (artifactId.startsWith("docs/adr/")) return "repository-adr";
-    if (artifactId === "ARCHITECTURE.md") {
-      return "repository-architecture";
-    }
-    if (artifactId === "contract-review:open-findings") {
-      return "open-contract-findings";
-    }
-    if (artifactId === "contract-review:relevant-resolved-findings") {
-      return "relevant-resolved-contract-findings";
-    }
-    if (artifactId === "control-plane-situation") {
-      return "control-plane-situation";
-    }
-    return "current-contract-pair";
-  }
-  if (role === "evaluator-contract") {
-    if (artifactId === "base-gate-catalog") return "base-gate-catalog";
-    if (artifactId.endsWith("/context.md")) {
-      return "explorer-evidence-map";
-    }
-    if (artifactId === "contract-review:prior-open-findings") {
-      return "prior-open-contract-findings";
-    }
-    if (artifactId.endsWith("/contract-response.json")) {
-      return "planner-response";
-    }
-    if (artifactId === "contract-revision-evidence") {
-      return "contract-revision-evidence";
-    }
-    if (artifactId === "control-plane-situation") {
-      return "control-plane-situation";
-    }
-    return "proposed-contract-pair";
-  }
-  throw new Error(`No artifact-class mapping for role ${role}`);
-}
-
 function roleEnvelopeResult(
   prompt: string,
   role: "planner" | "evaluator-contract",
-  includedArtifactIds: string[],
-  _omittedArtifactClasses: readonly string[],
-  _contextManifestVersion: number,
+  includedArtifacts: readonly ContextArtifactReference[],
   allowedByteSize: number,
   roleLabel: string,
 ): RoleEnvelopeResult {
@@ -710,10 +675,7 @@ function roleEnvelopeResult(
   return assembleContextEnvelope({
     prompt,
     manifest,
-    includedArtifacts: includedArtifactIds.map((artifactId) => ({
-      artifactClass: artifactClassFor(role, artifactId),
-      artifactId,
-    })),
+    includedArtifacts,
     inlineSizeBudgetBytes: allowedByteSize,
     roleLabel,
   });
@@ -738,14 +700,26 @@ export function assemblePlannerInitialEnvelope(
     prompt,
     "planner",
     [
-      "slice-request",
-      `${input.sliceDir}/context.md`,
-      "base-gate-catalog",
-      "migration-reservation",
-      ...repositoryContext.includedArtifactIds,
+      { artifactClass: "slice-request", artifactId: "slice-request" },
+      {
+        artifactClass: "explorer-evidence-map",
+        artifactId: `${input.sliceDir}/context.md`,
+      },
+      {
+        artifactClass: "base-gate-catalog",
+        artifactId: "base-gate-catalog",
+      },
+      {
+        artifactClass: "migration-reservation",
+        artifactId: "migration-reservation",
+      },
+      ...repositoryContext.includedArtifactIds.map((artifactId) => ({
+        artifactClass: artifactId.startsWith("docs/adr/")
+          ? "repository-adr"
+          : "repository-architecture",
+        artifactId,
+      })),
     ],
-    PLANNER_CONTEXT_MANIFEST.omittedArtifactClasses,
-    PLANNER_CONTEXT_MANIFEST.version,
     input.inlineSizeBudgetBytes ??
       PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
     "Planner",
@@ -778,20 +752,41 @@ export function assemblePlannerRevisionEnvelope(
     prompt,
     "planner",
     [
-      `${input.sliceDir}/contract.md`,
-      `${input.sliceDir}/acceptance-manifest.json`,
-      ...(openFindings.length > 0 ? ["contract-review:open-findings"] : []),
+      {
+        artifactClass: "current-contract-pair",
+        artifactId: `${input.sliceDir}/contract.md`,
+      },
+      {
+        artifactClass: "current-contract-pair",
+        artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+      },
+      ...(openFindings.length > 0
+        ? [{
+            artifactClass: "open-contract-findings",
+            artifactId: "contract-review:open-findings",
+          }]
+        : []),
       ...(resolvedFindings.length > 0
-        ? ["contract-review:relevant-resolved-findings"]
+        ? [{
+            artifactClass: "relevant-resolved-contract-findings",
+            artifactId: "contract-review:relevant-resolved-findings",
+          }]
         : []),
       ...(input.controlSituation !== undefined
-        ? ["control-plane-situation"]
+        ? [{
+            artifactClass: "control-plane-situation",
+            artifactId: "control-plane-situation",
+          }]
         : []),
-      "base-gate-catalog",
-      "migration-reservation",
+      {
+        artifactClass: "base-gate-catalog",
+        artifactId: "base-gate-catalog",
+      },
+      {
+        artifactClass: "migration-reservation",
+        artifactId: "migration-reservation",
+      },
     ],
-    PLANNER_CONTEXT_MANIFEST.omittedArtifactClasses,
-    PLANNER_CONTEXT_MANIFEST.version,
     input.inlineSizeBudgetBytes ??
       PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
     "Planner",
@@ -814,13 +809,23 @@ export function assembleContractEvaluatorInitialEnvelope(
     prompt,
     "evaluator-contract",
     [
-      `${input.sliceDir}/contract.md`,
-      `${input.sliceDir}/acceptance-manifest.json`,
-      "base-gate-catalog",
-      `${input.sliceDir}/context.md`,
+      {
+        artifactClass: "proposed-contract",
+        artifactId: `${input.sliceDir}/contract.md`,
+      },
+      {
+        artifactClass: "acceptance-manifest",
+        artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+      },
+      {
+        artifactClass: "base-gate-catalog",
+        artifactId: "base-gate-catalog",
+      },
+      {
+        artifactClass: "explorer-evidence-map",
+        artifactId: `${input.sliceDir}/context.md`,
+      },
     ],
-    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
-    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.version,
     input.inlineSizeBudgetBytes ??
       CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
     "Contract evaluator",
@@ -855,23 +860,45 @@ export function assembleContractEvaluatorRevisionEnvelope(
     prompt,
     "evaluator-contract",
     [
-      `${input.sliceDir}/contract.md`,
-      `${input.sliceDir}/acceptance-manifest.json`,
+      {
+        artifactClass: "revised-contract",
+        artifactId: `${input.sliceDir}/contract.md`,
+      },
+      {
+        artifactClass: "revised-acceptance-manifest",
+        artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+      },
       ...(openFindings.length > 0
-        ? ["contract-review:prior-open-findings"]
+        ? [{
+            artifactClass: "prior-open-contract-findings",
+            artifactId: "contract-review:prior-open-findings",
+          }]
         : []),
       ...(input.plannerResponse !== null
-        ? [`${input.sliceDir}/contract-response.json`]
+        ? [{
+            artifactClass: "planner-response",
+            artifactId: `${input.sliceDir}/contract-response.json`,
+          }]
         : []),
-      "contract-revision-evidence",
+      {
+        artifactClass: "contract-revision-evidence",
+        artifactId: "contract-revision-evidence",
+      },
       ...(input.controlSituation !== undefined
-        ? ["control-plane-situation"]
+        ? [{
+            artifactClass: "control-plane-situation",
+            artifactId: "control-plane-situation",
+          }]
         : []),
-      "base-gate-catalog",
-      `${input.sliceDir}/context.md`,
+      {
+        artifactClass: "base-gate-catalog",
+        artifactId: "base-gate-catalog",
+      },
+      {
+        artifactClass: "explorer-evidence-map",
+        artifactId: `${input.sliceDir}/context.md`,
+      },
     ],
-    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
-    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.version,
     input.inlineSizeBudgetBytes ??
       CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
     "Contract evaluator",
@@ -958,36 +985,12 @@ export function assembleGeneratorEnvelope(
       : renderPrompt("generator", commonArgs);
   const includedArtifacts: ContextArtifactReference[] = [
     {
-      artifactClass: "contract-view",
-      artifactId: `${input.sliceDir}/contract.md`,
-    },
-    {
-      artifactClass: "acceptance-manifest",
-      artifactId: `${input.sliceDir}/acceptance-manifest.json`,
-    },
-    {
       artifactClass: "file-scope",
       artifactId: "acceptance-manifest:file-scope",
-    },
-    ...(input.patternsAndHarnessArtifactId === null
-      ? []
-      : [{
-          artifactClass: "patterns-and-harness",
-          artifactId:
-            input.patternsAndHarnessArtifactId ??
-            `${input.sliceDir}/context.md`,
-        }]),
-    {
-      artifactClass: "verification-command",
-      artifactId: "generator:test-command",
     },
     {
       artifactClass: "migration-reservation",
       artifactId: "migration-reservation",
-    },
-    {
-      artifactClass: "failure-set",
-      artifactId: "generator:failure-set",
     },
     ...(input.repairSituation === undefined
       ? []
@@ -999,6 +1002,30 @@ export function assembleGeneratorEnvelope(
       artifactClass: "repair-context",
       artifactId,
     })),
+    {
+      artifactClass: "contract-view",
+      artifactId: `${input.sliceDir}/contract.md`,
+    },
+    {
+      artifactClass: "acceptance-manifest",
+      artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+    },
+    {
+      artifactClass: "verification-command",
+      artifactId: "generator:test-command",
+    },
+    ...(input.patternsAndHarnessArtifactId === null
+      ? []
+      : [{
+          artifactClass: "patterns-and-harness",
+          artifactId:
+            input.patternsAndHarnessArtifactId ??
+            `${input.sliceDir}/context.md`,
+        }]),
+    {
+      artifactClass: "failure-set",
+      artifactId: "generator:failure-set",
+    },
     ...input.failureSet.findings.flatMap((finding) =>
       finding.artifactReferences.map((artifactId) => ({
         artifactClass: "finding-evidence",

@@ -69,6 +69,18 @@ describe("contract prompt orchestration", () => {
       round: 2,
       role: "planner",
     });
+    expect(prompt.contextEnvelope.includedArtifactClasses).toEqual([
+      "current-contract-pair",
+      "current-contract-pair",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
+    expect(prompt.contextEnvelope.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
   });
 
   it("B-05 prepares evaluator evidence for completion-time journaling", () => {
@@ -93,8 +105,18 @@ describe("contract prompt orchestration", () => {
     expect(events).toHaveLength(0);
     expect(prompt.contextEnvelope).toMatchObject({
       role: "evaluator-contract",
-      includedArtifactClasses: expect.any(Array),
-      includedArtifactIds: expect.any(Array),
     });
+    expect(prompt.contextEnvelope.includedArtifactClasses).toEqual([
+      "proposed-contract",
+      "acceptance-manifest",
+      "base-gate-catalog",
+      "explorer-evidence-map",
+    ]);
+    expect(prompt.contextEnvelope.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "base-gate-catalog",
+      ".kiro/specs/demo/slices/03-envelope/context.md",
+    ]);
   });
 });

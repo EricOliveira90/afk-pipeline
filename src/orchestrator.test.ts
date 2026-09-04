@@ -2277,6 +2277,134 @@ describe("focused generator scope revision", () => {
       "evaluator-contract",
       "generator",
     ]);
+    const relSliceDir = join(
+      ".kiro",
+      "specs",
+      slug,
+      "slices",
+      "01-focused-scope-revision",
+    ).replace(/\\/g, "/");
+    const contractId = `${relSliceDir}/contract.md`;
+    const manifestId = `${relSliceDir}/acceptance-manifest.json`;
+    const contextId = `${relSliceDir}/context.md`;
+    const qaFindingIds = [
+      `.afk/artifacts/${slug}-stub/slice-01/reviews/qa-review-r1-a1.json`,
+      `${relSliceDir}/qa-report-r1-a1.md`,
+    ];
+    const initialEvaluatorClasses = [
+      "proposed-contract",
+      "acceptance-manifest",
+      "base-gate-catalog",
+      "explorer-evidence-map",
+    ];
+    const initialEvaluatorIds = [
+      contractId,
+      manifestId,
+      "base-gate-catalog",
+      contextId,
+    ];
+    const generatorBaseClasses = [
+      "file-scope",
+      "migration-reservation",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+    ];
+    const generatorBaseIds = [
+      "acceptance-manifest:file-scope",
+      "migration-reservation",
+      contractId,
+      manifestId,
+      "generator:test-command",
+      contextId,
+      "generator:failure-set",
+    ];
+    const repairGeneratorClasses = [
+      "file-scope",
+      "migration-reservation",
+      "repair-situation",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+      "finding-evidence",
+      "finding-evidence",
+    ];
+    const repairGeneratorIds = [
+      "acceptance-manifest:file-scope",
+      "migration-reservation",
+      "generator:repair-situation",
+      contractId,
+      manifestId,
+      "generator:test-command",
+      contextId,
+      "generator:failure-set",
+      ...qaFindingIds,
+    ];
+    expect(
+      assemblies.map((event) => ({
+        classes: event.includedArtifactClasses,
+        ids: event.includedArtifactIds,
+      })),
+    ).toEqual([
+      {
+        classes: ["slice-request"],
+        ids: ["issue:1081"],
+      },
+      {
+        classes: [
+          "slice-request",
+          "explorer-evidence-map",
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+        ids: [
+          "slice-request",
+          contextId,
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+      },
+      {
+        classes: initialEvaluatorClasses,
+        ids: initialEvaluatorIds,
+      },
+      {
+        classes: generatorBaseClasses,
+        ids: generatorBaseIds,
+      },
+      {
+        classes: repairGeneratorClasses,
+        ids: repairGeneratorIds,
+      },
+      {
+        classes: [
+          "current-contract-pair",
+          "current-contract-pair",
+          "control-plane-situation",
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+        ids: [
+          contractId,
+          manifestId,
+          "control-plane-situation",
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+      },
+      {
+        classes: initialEvaluatorClasses,
+        ids: initialEvaluatorIds,
+      },
+      {
+        classes: repairGeneratorClasses,
+        ids: repairGeneratorIds,
+      },
+    ]);
     for (const event of assemblies) {
       expect(event).toMatchObject({
         ghIssue: "1081",
@@ -2290,8 +2418,6 @@ describe("focused generator scope revision", () => {
         "generator",
       ]).toContain(event.role);
       expect(event.assembledByteSize).toBeGreaterThan(0);
-      expect(event.includedArtifactClasses).toEqual(expect.any(Array));
-      expect(event.includedArtifactIds).toEqual(expect.any(Array));
       expect(event.includedArtifactClasses).toHaveLength(
         (event.includedArtifactIds as unknown[]).length,
       );

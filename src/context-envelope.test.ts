@@ -211,8 +211,9 @@ describe("explorer context envelope", () => {
     ).toEqual(expectedAdrPaths);
   });
 
-  it("B-04 assembles the ordered focused prompt without a persona or role tags", () => {
+  it("B-04 QA-01 assembles the ordered focused prompt and exact evidence", () => {
     const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const repositoryContext = buildExplorerRepositoryContext(repoRoot);
     const result = assembleExplorerEnvelope({
       repoRoot,
       ghIssue: "90",
@@ -248,6 +249,18 @@ describe("explorer context envelope", () => {
     expect(result.prompt).not.toContain("senior engineer");
     expect(result.prompt).not.toMatch(/\bFACT\b|\bINFERENCE\b|\bUNKNOWN\b/);
     expect(result.prompt).not.toContain("Label every statement");
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "slice-request",
+      ...repositoryContext.includedArtifactIds.map((artifactId) =>
+        artifactId.startsWith("docs/adr/")
+          ? "repository-adr"
+          : "repository-architecture",
+      ),
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      "issue:90",
+      ...repositoryContext.includedArtifactIds,
+    ]);
   });
 
   it("B-06 fails closed with actual and allowed explorer byte counts", () => {
@@ -293,8 +306,9 @@ describe("planner and contract-evaluator context envelopes", () => {
     "UNKNOWNS-EVIDENCE",
   ].join("\n");
 
-  it("B-01 assembles planner initial evidence and outputs in manifest order", () => {
+  it("B-01 QA-01 assembles planner initial evidence in exact prompt order", () => {
     const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const repositoryContext = buildExplorerRepositoryContext(repoRoot);
     const result = assemblePlannerInitialEnvelope({
       repoRoot,
       ghIssue: "95",
@@ -351,9 +365,27 @@ describe("planner and contract-evaluator context envelopes", () => {
       role: "planner",
       contextManifestVersion: 1,
     });
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "slice-request",
+      "explorer-evidence-map",
+      "base-gate-catalog",
+      "migration-reservation",
+      ...repositoryContext.includedArtifactIds.map((artifactId) =>
+        artifactId.startsWith("docs/adr/")
+          ? "repository-adr"
+          : "repository-architecture",
+      ),
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      "slice-request",
+      ".kiro/specs/demo/slices/03-envelope/context.md",
+      "base-gate-catalog",
+      "migration-reservation",
+      ...repositoryContext.includedArtifactIds,
+    ]);
   });
 
-  it("B-02 projects each OPEN planner finding once and keeps the situation separate", () => {
+  it("B-02 QA-01 projects planner revision evidence in exact prompt order", () => {
     const result = assemblePlannerRevisionEnvelope({
       ghIssue: "95",
       specsDir: ".kiro/specs/demo",
@@ -362,6 +394,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       currentContract: "CURRENT-CONTRACT",
       currentAcceptanceManifest: '{"version":2}',
       findings: [openFinding, resolvedFinding],
+      resolvedFindings: [resolvedFinding],
       controlSituation: "MECHANICAL-OBJECTION",
       contractResponseInstructions: "Write the routed response.",
       baseGateCatalog: "- tests: pnpm test:fast",
@@ -369,6 +402,9 @@ describe("planner and contract-evaluator context envelopes", () => {
     });
     const findingsBlock = result.prompt
       .split("# Routed OPEN findings")[1]!
+      .split("# Relevant resolved history")[0]!;
+    const resolvedHistoryBlock = result.prompt
+      .split("# Relevant resolved history")[1]!
       .split("# Control-plane situation")[0]!;
     const occurrences = (text: string, marker: string) =>
       text.split(marker).length - 1;
@@ -382,6 +418,9 @@ describe("planner and contract-evaluator context envelopes", () => {
     ).toBe(1);
     expect(findingsBlock).not.toContain("F-RESOLVED");
     expect(findingsBlock).not.toContain("RESOLVED-CLEAR-CONDITION");
+    expect(resolvedHistoryBlock).toContain("F-RESOLVED");
+    expect(resolvedHistoryBlock).toContain("RESOLVED-CLEAR-CONDITION");
+    expect(resolvedHistoryBlock).not.toContain("F-OPEN");
     expect(result.prompt).toContain(
       "# Control-plane situation\n\nMECHANICAL-OBJECTION",
     );
@@ -389,9 +428,27 @@ describe("planner and contract-evaluator context envelopes", () => {
     expect(result.prompt).toContain(
       "Revise only sections and manifest behavior entries affected",
     );
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "current-contract-pair",
+      "current-contract-pair",
+      "open-contract-findings",
+      "relevant-resolved-contract-findings",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "contract-review:open-findings",
+      "contract-review:relevant-resolved-findings",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
   });
 
-  it("B-03 limits the initial contract evaluator to declared judgment evidence", () => {
+  it("B-03 QA-01 records exact initial evaluator classes in prompt order", () => {
     const result = assembleContractEvaluatorInitialEnvelope({
       sliceDir: ".kiro/specs/demo/slices/03-envelope",
       round: 1,
@@ -406,6 +463,9 @@ describe("planner and contract-evaluator context envelopes", () => {
       version: 1,
       role: "evaluator-contract",
     });
+    expect(
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).not.toContain("proposed-contract-pair");
     const markers = [
       "# Proposed contract",
       "PROPOSED-CONTRACT",
@@ -432,9 +492,21 @@ describe("planner and contract-evaluator context envelopes", () => {
     }
     expect(result.prompt).not.toContain("generator output");
     expect(result.prompt).not.toContain("feedback-r0.md");
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "proposed-contract",
+      "acceptance-manifest",
+      "base-gate-catalog",
+      "explorer-evidence-map",
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "base-gate-catalog",
+      ".kiro/specs/demo/slices/03-envelope/context.md",
+    ]);
   });
 
-  it("B-04 supplies only prior OPEN findings and changed revision evidence", () => {
+  it("B-04 QA-01 records exact evaluator revision classes in prompt order", () => {
     const result = assembleContractEvaluatorRevisionEnvelope({
       sliceDir: ".kiro/specs/demo/slices/03-envelope",
       round: 2,
@@ -465,6 +537,7 @@ describe("planner and contract-evaluator context envelopes", () => {
           after: JSON.stringify(acceptanceManifest),
         },
       },
+      controlSituation: "REVISION-CONTROL-SITUATION",
     });
     const findingsBlock = result.prompt
       .split("# Prior OPEN findings")[1]!
@@ -487,6 +560,26 @@ describe("planner and contract-evaluator context envelopes", () => {
     );
     expect(result.prompt).toContain('"before": "old contract"');
     expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "revised-contract",
+      "revised-acceptance-manifest",
+      "prior-open-contract-findings",
+      "planner-response",
+      "contract-revision-evidence",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "explorer-evidence-map",
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "contract-review:prior-open-findings",
+      ".kiro/specs/demo/slices/03-envelope/contract-response.json",
+      "contract-revision-evidence",
+      "control-plane-situation",
+      "base-gate-catalog",
+      ".kiro/specs/demo/slices/03-envelope/context.md",
+    ]);
   });
 
   it("P-02 uses distinct fresh templates and excludes undeclared context", () => {
@@ -736,7 +829,7 @@ describe("generator context envelope", () => {
     expect(result.prompt).toContain("CHECKPOINT-07");
   });
 
-  it("B-01 assembles the focused initial envelope in manifest order", () => {
+  it("B-01 QA-01 assembles exact initial generator evidence in prompt order", () => {
     const result = assembleGeneratorEnvelope({
       mode: "initial",
       sliceDir: ".kiro/specs/demo/slices/01-focused",
@@ -751,13 +844,30 @@ describe("generator context envelope", () => {
     expect(GENERATOR_CONTEXT_MANIFEST).toMatchObject({
       version: 1,
       role: "generator",
-      inputOrder: [
-        "contract-view",
-        "acceptance-manifest",
-        "file-scope",
-        "patterns-and-harness",
-        "failure-set",
-      ],
+      inputOrder: {
+        initial: [
+          "file-scope",
+          "migration-reservation",
+          "contract-view",
+          "acceptance-manifest",
+          "verification-command",
+          "patterns-and-harness",
+          "failure-set",
+        ],
+        repair: [
+          "file-scope",
+          "migration-reservation",
+          "repair-situation",
+          "repair-context",
+          "contract-view",
+          "acceptance-manifest",
+          "verification-command",
+          "patterns-and-harness",
+          "failure-set",
+          "finding-evidence",
+          "gate-evidence",
+        ],
+      },
     });
 
     const orderedMarkers = [
@@ -787,6 +897,24 @@ describe("generator context envelope", () => {
     expect(result.prompt).not.toContain("Reasoning Protocol");
     expect(result.prompt).not.toContain("sibling handoffs");
     expect(result.prompt).not.toContain("grep for `docs/adr/`");
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "file-scope",
+      "migration-reservation",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      "acceptance-manifest:file-scope",
+      "migration-reservation",
+      ".kiro/specs/demo/slices/01-focused/contract.md",
+      ".kiro/specs/demo/slices/01-focused/acceptance-manifest.json",
+      "generator:test-command",
+      ".kiro/specs/demo/slices/01-focused/context.md",
+      "generator:failure-set",
+    ]);
   });
 
   it("B-02 projects the six complete contract section bodies byte-for-byte", () => {
@@ -841,7 +969,7 @@ describe("generator context envelope", () => {
     );
   });
 
-  it("B-03 ends a repair envelope with only open findings and failed gates", () => {
+  it("B-03 QA-01 records exact repair generator evidence in prompt order", () => {
     const input = {
       mode: "repair" as const,
       sliceDir: ".kiro/specs/demo/slices/01-focused",
@@ -851,6 +979,10 @@ describe("generator context envelope", () => {
       testCommand: "pnpm test:focused",
       migrationReservation: "NO-MIGRATIONS",
       repairSituation: "ROUND-TWO-SITUATION",
+      additionalArtifactIds: [
+        ".kiro/specs/demo/slices/01-focused/stuck.md",
+        ".kiro/specs/demo/slices/01-focused/handoff.md",
+      ],
       failureSet: {
         findings: [
           {
@@ -906,6 +1038,38 @@ describe("generator context envelope", () => {
     expect(result.prompt).not.toContain("PASSING-LOG-MARKER");
     expect(result.prompt).not.toContain("PRIOR-CONVERSATION-MARKER");
     expect(result.prompt).not.toContain("OTHER-ROLE-CONVERSATION-MARKER");
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "file-scope",
+      "migration-reservation",
+      "repair-situation",
+      "repair-context",
+      "repair-context",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+      "finding-evidence",
+      "finding-evidence",
+      "gate-evidence",
+      "gate-evidence",
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      "acceptance-manifest:file-scope",
+      "migration-reservation",
+      "generator:repair-situation",
+      ".kiro/specs/demo/slices/01-focused/stuck.md",
+      ".kiro/specs/demo/slices/01-focused/handoff.md",
+      ".kiro/specs/demo/slices/01-focused/contract.md",
+      ".kiro/specs/demo/slices/01-focused/acceptance-manifest.json",
+      "generator:test-command",
+      ".kiro/specs/demo/slices/01-focused/context.md",
+      "generator:failure-set",
+      "reviews/qa-open.json",
+      "reviews/qa-open.md",
+      "gates/attempt-2.json",
+      "gates/typecheck-attempt-2.log",
+    ]);
   });
 
   it("B-05 fails closed one byte below the required prompt size", () => {
