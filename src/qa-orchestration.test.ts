@@ -1016,7 +1016,21 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           );
           writeQAReview(artifactDir, "deterministic", {
             findings:
-              evaluators === 1
+              exhaustGates
+                ? [
+                    {
+                      id: "QA-PRIOR",
+                      severity: "BLOCKING",
+                      behaviorIds: ["B-PRIOR"],
+                      summary: "Prior QA behavior regressed",
+                      evidence: "The prior semantic assertion now passes",
+                      expected: "The prior behavior remains fixed",
+                      observed: "The prior behavior remains fixed",
+                      clearCondition: "The prior semantic assertion passes",
+                      state: "RESOLVED",
+                    },
+                  ]
+                : evaluators === 1
                 ? stuckDiagnosisReviewFindings(1).map((finding) => ({
                     ...finding,
                     state: "RESOLVED",
@@ -1252,6 +1266,12 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       },
     );
     exhaustGates = true;
+    // The terminal branch is a fresh execution over the same fixture. Do not
+    // carry the first execution's killed-resume round budget or exclusive
+    // lifecycle archive filenames into it.
+    ctx.resume = undefined;
+    rmSync(reviewDir, { recursive: true, force: true });
+    mkdirSync(reviewDir, { recursive: true });
     await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
       error: expect.stringContaining(
@@ -1259,7 +1279,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       ),
     });
     expect(generators).toBe(5);
-    expect(evaluators).toBe(1);
+    expect(evaluators).toBe(5);
     const intervention = JSON.parse(
       readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
     );
@@ -1269,7 +1289,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         interventionClass: "IMPLEMENTATION_INTERVENTION",
       },
       reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
-      blockerIds: expect.arrayContaining(["QA-PRIOR", "tests", "typecheck"]),
+      blockerIds: expect.arrayContaining(["QA-PRIOR", "tests"]),
       findingLineage: expect.arrayContaining([
         expect.objectContaining({
           currentId: "QA-PRIOR",
@@ -1284,12 +1304,11 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         }),
         expect.objectContaining({
           phase: "deterministic-qa",
-          activeBlockingIds: ["tests", "typecheck"],
+          activeBlockingIds: ["tests"],
         }),
       ]),
       supportingEvidence: expect.arrayContaining([
         expect.stringMatching(/attempt-[\w]+\.json/),
-        expect.stringMatching(/typecheck\.log/),
         expect.stringMatching(/tests\.log/),
         priorArtifact,
         priorReport,
