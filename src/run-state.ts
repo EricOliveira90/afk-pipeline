@@ -552,6 +552,10 @@ export function saveSliceStateIfUnchanged(
   ghIssue: string,
   result: PersistedSliceState,
   expected: PersistedSliceState | undefined,
+  hooks: {
+    /** Test seam: the expected record matched and the run-state lock is held. */
+    afterComparison?: () => void;
+  } = {},
 ): { ok: true } | { ok: false; found: PersistedSliceState | undefined } {
   type Result =
     | { ok: true }
@@ -561,6 +565,7 @@ export function saveSliceStateIfUnchanged(
     if (!sameSliceRecord(found, expected)) {
       return { changed: false, result: { ok: false as const, found } };
     }
+    hooks.afterComparison?.();
     current.slices[ghIssue] = result;
     return { changed: true, result: { ok: true as const } };
   });

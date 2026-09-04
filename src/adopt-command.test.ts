@@ -80,25 +80,34 @@ afterAll(() => {
 const COMPETING_WRITER_SCRIPT = `
   import { execFileSync } from "node:child_process";
   import { writeFileSync } from "node:fs";
-  import { updateRunState } from "./src/run-state.ts";
+  import { saveSliceStateIfUnchanged } from "./src/run-state.ts";
   const [repo, expectedFeature, ready] = process.argv.slice(1);
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
-  updateRunState(repo, "demo", (state) => {
-    writeFileSync(ready, "ready");
-    while (
-      execFileSync("git", ["rev-parse", "feat/demo"], {
-        cwd: repo,
-        encoding: "utf-8",
-      }).trim() === expectedFeature
-    ) {
-      Atomics.wait(sleeper, 0, 0, 20);
-    }
-    state.slices["129"] = {
+  const result = saveSliceStateIfUnchanged(
+    repo,
+    "demo",
+    "129",
+    {
       phase: "AWAITING-ADJUDICATION",
       branch: "afk/demo-slice-06-afk-adopt",
       error: "IMPASSE: competing writer parked the slice",
-    };
-  });
+    },
+    undefined,
+    {
+      afterComparison: () => {
+        writeFileSync(ready, "ready");
+        while (
+          execFileSync("git", ["rev-parse", "feat/demo"], {
+            cwd: repo,
+            encoding: "utf-8",
+          }).trim() === expectedFeature
+        ) {
+          Atomics.wait(sleeper, 0, 0, 20);
+        }
+      },
+    },
+  );
+  if (!result.ok) throw new Error("competing conditional write lost");
 `;
 
 async function startCompetingWriter(
