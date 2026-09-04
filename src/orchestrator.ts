@@ -4704,6 +4704,14 @@ export async function runSliceExecute(
           : restored.retryStage === "shared-preview"
             ? sharedPreviewUnresolved
             : [];
+      generatorFailureSet = {
+        findings: resumedUnresolved.map((finding) => ({
+          id: finding.id,
+          clearCondition: finding.clearCondition,
+          artifactReferences: finding.artifactReferences,
+        })),
+        gates: [],
+      };
       repairStage = restored.retryStage;
       firstRound = restored.nextRound;
     }
@@ -5158,6 +5166,16 @@ export async function runSliceExecute(
           ),
         ];
         stuckReferences.push(...baseGateRepairReferences);
+        generatorFailureSet = {
+          findings: generatorFailureSet.findings,
+          gates: requiredFailures.map(({ evidencePath, result }) => ({
+            id: result.gateId,
+            evidence: [
+              evidencePath.replace(/\\/g, "/"),
+              join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+            ],
+          })),
+        };
         retryNote =
           `This is implementation round ${round + 1}. Fix every unresolved ` +
           `base-gate failure and preserve prior resolved QA behavior:\n` +
@@ -5245,6 +5263,14 @@ export async function runSliceExecute(
         }
         let qaDispatch = deterministic.dispatch;
         if (implementationFailed) {
+          generatorFailureSet = {
+            findings: deterministic.unresolved.map((finding) => ({
+              id: finding.id,
+              clearCondition: finding.clearCondition,
+              artifactReferences: finding.artifactReferences,
+            })),
+            gates: [],
+          };
           repairStage = "deterministic";
           retryNote =
             `This is implementation round ${round + 1}. Repair the current ` +
@@ -5305,6 +5331,14 @@ export async function runSliceExecute(
           }
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
+            generatorFailureSet = {
+              findings: remote.unresolved.map((finding) => ({
+                id: finding.id,
+                clearCondition: finding.clearCondition,
+                artifactReferences: finding.artifactReferences,
+              })),
+              gates: [],
+            };
             repairStage = "shared-preview";
             qaDispatch = remote.dispatch;
             retryNote =
