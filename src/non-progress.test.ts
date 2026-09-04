@@ -74,19 +74,78 @@ describe("non-progress policy", () => {
     if (repeated.action !== "intervene") return;
     expect(repeated.request.reasonCodes).toContain("EQUIVALENT_REPETITION");
     expect(repeated.request.attemptedRepairs).toHaveLength(2);
+    expect(repeated.request.attemptedRepairs[0]).toMatchObject({
+      revision: 1,
+      findingLineage: [
+        expect.objectContaining({
+          stableId: "QA-01",
+          state: "OPEN",
+          disposition: "OPEN",
+          evidence: "QA-01 evidence",
+        }),
+      ],
+      supportingEvidence: ["gate.json", "reviews/QA-01.json"],
+    });
   });
 
   it("classifies reopened findings, A-B-A oscillation, and regression growth", () => {
-    const reopened = decideNonProgress(
+    const resolved = decideNonProgress(
       emptyNonProgressHistory(),
       observation(1, ["QA-01"], {
+        activeBlockingIds: [],
+        findings: [
+          {
+            ...observation(1, ["QA-01"]).findings[0]!,
+            state: "RESOLVED",
+            disposition: "RESOLVED",
+          },
+        ],
+        supportingEvidence: ["revision-1-gate.json"],
+      }),
+    );
+    const reopened = decideNonProgress(
+      resolved.history,
+      observation(2, ["QA-01"], {
         reopenedWithoutNewEvidenceIds: ["QA-01"],
+        supportingEvidence: ["revision-2-gate.json"],
       }),
     );
     expect(reopened).toMatchObject({
       action: "intervene",
       request: {
         reasonCodes: ["REOPENED_WITHOUT_NEW_EVIDENCE"],
+        attemptedRepairs: [
+          {
+            revision: 1,
+            findingLineage: [
+              expect.objectContaining({
+                stableId: "QA-01",
+                state: "RESOLVED",
+                disposition: "RESOLVED",
+                evidence: "QA-01 evidence",
+              }),
+            ],
+            supportingEvidence: [
+              "reviews/QA-01.json",
+              "revision-1-gate.json",
+            ],
+          },
+          {
+            revision: 2,
+            findingLineage: [
+              expect.objectContaining({
+                stableId: "QA-01",
+                state: "OPEN",
+                disposition: "OPEN",
+                evidence: "QA-01 evidence",
+              }),
+            ],
+            supportingEvidence: [
+              "reviews/QA-01.json",
+              "revision-2-gate.json",
+            ],
+          },
+        ],
       },
     });
 
@@ -120,7 +179,38 @@ describe("non-progress policy", () => {
     );
     expect(oscillating).toMatchObject({
       action: "intervene",
-      request: { reasonCodes: ["OSCILLATION"] },
+      request: {
+        reasonCodes: ["OSCILLATION"],
+        attemptedRepairs: [
+          {
+            findingLineage: expect.arrayContaining([
+              expect.objectContaining({
+                stableId: "QA-01",
+                state: "OPEN",
+                evidence: "QA-01 evidence",
+              }),
+            ]),
+          },
+          {
+            findingLineage: expect.arrayContaining([
+              expect.objectContaining({
+                stableId: "QA-01",
+                state: "RESOLVED",
+                evidence: "QA-01 evidence",
+              }),
+            ]),
+          },
+          {
+            findingLineage: expect.arrayContaining([
+              expect.objectContaining({
+                stableId: "QA-01",
+                state: "OPEN",
+                evidence: "QA-01 evidence",
+              }),
+            ]),
+          },
+        ],
+      },
     });
 
     const regressing = decideNonProgress(
@@ -139,7 +229,38 @@ describe("non-progress policy", () => {
     );
     expect(regressing).toMatchObject({
       action: "intervene",
-      request: { reasonCodes: ["REGRESSION_GROWTH"] },
+      request: {
+        reasonCodes: ["REGRESSION_GROWTH"],
+        attemptedRepairs: [
+          {
+            revision: 1,
+            findingLineage: [
+              expect.objectContaining({
+                stableId: "QA-01",
+                state: "OPEN",
+                evidence: "QA-01 evidence",
+              }),
+            ],
+          },
+          {
+            revision: 2,
+            findingLineage: expect.arrayContaining([
+              expect.objectContaining({
+                stableId: "QA-02",
+                state: "OPEN",
+                disposition: "OPEN",
+                evidence: "QA-02 evidence",
+              }),
+              expect.objectContaining({
+                stableId: "QA-OLD",
+                state: "RESOLVED",
+                disposition: "RESOLVED",
+                evidence: "QA-OLD evidence",
+              }),
+            ]),
+          },
+        ],
+      },
     });
   });
 
@@ -239,14 +360,58 @@ describe("non-progress policy", () => {
   });
 
   it("turns bounded semantic exhaustion into a structured intervention", () => {
-    const exhausted = buildSemanticCapIntervention(
+    const first = decideNonProgress(
       emptyNonProgressHistory(),
-      observation(1, ["QA-03"]),
+      observation(1, ["QA-01"], {
+        supportingEvidence: ["revision-1-gate.json"],
+      }),
+    );
+    const exhausted = buildSemanticCapIntervention(
+      first.history,
+      observation(2, ["QA-03"], {
+        supportingEvidence: ["revision-2-gate.json"],
+      }),
     );
     expect(exhausted.request).toMatchObject({
       reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
       blockerIds: ["QA-03"],
       interventionClass: "IMPLEMENTATION_INTERVENTION",
+      attemptedRepairs: [
+        {
+          revision: 1,
+          findingLineage: [
+            expect.objectContaining({
+              stableId: "QA-01",
+              state: "OPEN",
+              evidence: "QA-01 evidence",
+            }),
+          ],
+          supportingEvidence: [
+            "reviews/QA-01.json",
+            "revision-1-gate.json",
+          ],
+        },
+        {
+          revision: 2,
+          findingLineage: [
+            expect.objectContaining({
+              stableId: "QA-03",
+              state: "OPEN",
+              evidence: "QA-03 evidence",
+            }),
+          ],
+          supportingEvidence: [
+            "reviews/QA-03.json",
+            "revision-2-gate.json",
+          ],
+        },
+      ],
+      supportingEvidence: [
+        "reviews/QA-01.json",
+        "reviews/QA-03.json",
+        "revision-1-gate.json",
+        "revision-2-gate.json",
+      ],
     });
   });
 

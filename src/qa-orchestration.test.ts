@@ -595,6 +595,14 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         expect.objectContaining({
           phase: "deterministic-qa",
           activeBlockingIds: expect.arrayContaining(["QA-BETA"]),
+          findingLineage: expect.arrayContaining([
+            expect.objectContaining({
+              currentId: "QA-BETA",
+              state: "OPEN",
+              evidence: expect.any(String),
+            }),
+          ]),
+          supportingEvidence: expect.any(Array),
         }),
       ]),
       supportingEvidence: expect.any(Array),
@@ -604,6 +612,8 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       },
     });
     expect(exhausted.supportingEvidence.length).toBeGreaterThan(0);
+    expect(exhausted.attemptedRepairs[0].supportingEvidence.length)
+      .toBeGreaterThan(0);
     expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toContain(
       "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
     );

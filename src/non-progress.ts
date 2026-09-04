@@ -110,6 +110,8 @@ export interface InterventionRequest {
     revision: number;
     candidateTreeId: string;
     activeBlockingIds: string[];
+    findingLineage?: InterventionFinding[];
+    supportingEvidence?: string[];
   }>;
   preservedCandidate: PreservedCandidate;
   supportingEvidence: string[];
@@ -385,6 +387,40 @@ function samePhaseHistory(
   return history.observations.filter((entry) => entry.phase === phase);
 }
 
+function attemptedRepair(
+  observation: NonProgressObservation,
+): InterventionRequest["attemptedRepairs"][number] {
+  return {
+    phase: observation.phase,
+    revision: observation.revision,
+    candidateTreeId: observation.candidate.treeId,
+    activeBlockingIds: [...observation.activeBlockingIds],
+    findingLineage: observation.findings.map((finding) => ({
+      ...finding,
+      artifactReferences: [...finding.artifactReferences],
+    })),
+    supportingEvidence: sortedUnique([
+      ...observation.supportingEvidence,
+      ...observation.findings.flatMap((finding) =>
+        finding.artifactReferences
+      ),
+    ]),
+  };
+}
+
+function historicalSupportingEvidence(
+  observations: readonly NonProgressObservation[],
+): string[] {
+  return sortedUnique(
+    observations.flatMap((observation) => [
+      ...observation.supportingEvidence,
+      ...observation.findings.flatMap((finding) =>
+        finding.artifactReferences
+      ),
+    ]),
+  );
+}
+
 function reasonCodes(
   history: NonProgressHistory,
   observation: NonProgressObservation,
@@ -497,19 +533,9 @@ export function decideNonProgress(
       `AFK stopped ${observation.phase} before another equivalent dispatch: ` +
       `${reasons.join(", ")} for ${blockers.join(", ")}.`,
     findingLineage: observation.findings,
-    attemptedRepairs: phaseHistory.map((entry) => ({
-      phase: entry.phase,
-      revision: entry.revision,
-      candidateTreeId: entry.candidate.treeId,
-      activeBlockingIds: [...entry.activeBlockingIds],
-    })),
+    attemptedRepairs: phaseHistory.map(attemptedRepair),
     preservedCandidate,
-    supportingEvidence: sortedUnique([
-      ...observation.supportingEvidence,
-      ...observation.findings.flatMap((finding) =>
-        finding.artifactReferences,
-      ),
-    ]),
+    supportingEvidence: historicalSupportingEvidence(phaseHistory),
     requiredOperatorAction: requiredAction(kind, blockers, preservedCandidate),
   };
   return { action: "intervene", history: nextHistory, request };
@@ -524,6 +550,10 @@ export function buildSemanticCapIntervention(
   const blockers = sortedUnique(observation.activeBlockingIds);
   const preservedCandidate = bestCandidate(history, observation);
   const kind = observation.cause.interventionClass;
+  const phaseHistory = samePhaseHistory(
+    progressed.history,
+    observation.phase,
+  );
   return {
     history: progressed.history,
     request: {
@@ -537,19 +567,9 @@ export function buildSemanticCapIntervention(
         `AFK exhausted the bounded ${observation.phase} repair capacity with ` +
         `unresolved blocker(s) ${blockers.join(", ")}.`,
       findingLineage: observation.findings,
-      attemptedRepairs: samePhaseHistory(progressed.history, observation.phase).map(
-        (entry) => ({
-          phase: entry.phase,
-          revision: entry.revision,
-          candidateTreeId: entry.candidate.treeId,
-          activeBlockingIds: [...entry.activeBlockingIds],
-        }),
-      ),
+      attemptedRepairs: phaseHistory.map(attemptedRepair),
       preservedCandidate,
-      supportingEvidence: sortedUnique([
-        ...observation.supportingEvidence,
-        ...observation.findings.flatMap((finding) => finding.artifactReferences),
-      ]),
+      supportingEvidence: historicalSupportingEvidence(phaseHistory),
       requiredOperatorAction: requiredAction(kind, blockers, preservedCandidate),
     },
   };
@@ -649,19 +669,11 @@ function persistedQAInterventionContext(input: {
     findingLineage: [...lineageById.values()].sort((left, right) =>
       left.stableId.localeCompare(right.stableId),
     ),
-    attemptedRepairs: phaseHistory.map((entry) => ({
-      phase: entry.phase,
-      revision: entry.revision,
-      candidateTreeId: entry.candidate.treeId,
-      activeBlockingIds: [...entry.activeBlockingIds],
-    })),
+    attemptedRepairs: phaseHistory.map(attemptedRepair),
     supportingEvidence: sortedUnique([
       ...entries.flatMap((entry) => entry.artifactReferences),
       ...archivedFindings.flatMap((finding) => finding.artifactReferences),
-      ...phaseHistory.flatMap((entry) => [
-        ...entry.supportingEvidence,
-        ...entry.findings.flatMap((finding) => finding.artifactReferences),
-      ]),
+      ...historicalSupportingEvidence(phaseHistory),
     ]),
   };
 }
