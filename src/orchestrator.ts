@@ -5220,12 +5220,8 @@ export async function runSliceExecute(
             qaDispatch = remote.dispatch;
             retryNote =
               `This is implementation round ${round + 1}. Repair the current ` +
-              `QA findings while preserving relevant resolved behavior:\n` +
-              formatQAGeneratorContext(
-                qaConvergence,
-                [],
-                "shared-preview",
-              );
+              `shared-preview QA findings using the compact current failure ` +
+              `set below. Preserve deterministic behavior that already passed.`;
           }
         }
 
@@ -5237,53 +5233,83 @@ export async function runSliceExecute(
           const fullSuiteHasExecutable = fullSuiteDeclarations.some(
             (declaration) => declaration.command != null,
           );
-          const fullSuiteRun = await runCandidateGatePhase({
-            ctx,
-            round,
-            treeId: checkpoint.treeId,
-            cwd: gateCwd,
-            evidenceDir,
-            declarations: fullSuiteDeclarations,
-            ...(gatePrepare && fullSuiteHasExecutable
-              ? { prepare: gatePrepare }
-              : {}),
-            label: "full slice suite",
-          });
-          gateArtifacts.push(...fullSuiteRun.artifacts);
-          if (signal?.aborted) {
-            return { phase: "CANCELLED", error: CANCELLED_BY_USER };
-          }
-          const fullSuiteDecision = decideCandidateGatePhase({
-            run: fullSuiteRun,
-            declarations: fullSuiteDeclarations,
-            evidenceDir,
-            nextRound: round + 1,
-            convergence: qaConvergence,
-            ...(repairStage ? { repairStage } : {}),
-          });
-          if (fullSuiteDecision.action === "ERROR") {
-            return { phase: "ERROR", error: fullSuiteDecision.error };
-          }
-          if (fullSuiteDecision.action === "REPAIR") {
-            stuckReferences.push(...fullSuiteDecision.references);
-            retryNote = fullSuiteDecision.retryNote;
-            if (implementationAttempt < implementationAttemptLimit) continue;
-            return finishIntervention(
-              candidateLifecycle.exhaustDeterministicGates({
-                candidateTreeId: checkpoint.treeId,
-                revision: Math.max(qaConvergence.revision, round),
-                failedGateIds: fullSuiteDecision.failedGateIds,
-                attemptTreeIds: implementationCandidateTreeIds,
-                supportingEvidence: fullSuiteDecision.references,
-              }).request,
-            );
-          }
-          assertGateEvidenceReleasesEvaluation(
-            fullSuiteRun.evidence,
-            fullSuiteDeclarations,
-            checkpoint.treeId,
+          const postQaCheckpointDir = join(
+            config.repoRoot,
+            ".afk",
+            "checkpoints",
+            `${config.prdSlug}-s${slice.number}-r${round}-post-qa-${randomUUID()}`,
           );
-          for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+          const postQaCheckpoint = fullSuiteHasExecutable
+            ? createCandidateCheckpoint(ctx.worktreeDir, postQaCheckpointDir)
+            : createCandidateCheckpoint(ctx.worktreeDir, postQaCheckpointDir, {
+                materialize: false,
+              });
+          const fullSuiteCwd =
+            postQaCheckpoint.worktreeDir ?? postQaCheckpointDir;
+          try {
+            const fullSuiteRun = await runCandidateGatePhase({
+              ctx,
+              round,
+              treeId: postQaCheckpoint.treeId,
+              cwd: fullSuiteCwd,
+              evidenceDir,
+              declarations: fullSuiteDeclarations,
+              ...(gatePrepare && fullSuiteHasExecutable
+                ? { prepare: gatePrepare }
+                : {}),
+              label: "full slice suite",
+            });
+            gateArtifacts.push(...fullSuiteRun.artifacts);
+            if (signal?.aborted) {
+              return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+            }
+            const fullSuiteDecision = decideCandidateGatePhase({
+              run: fullSuiteRun,
+              declarations: fullSuiteDeclarations,
+              evidenceDir,
+              nextRound: round + 1,
+              convergence: qaConvergence,
+              ...(repairStage ? { repairStage } : {}),
+            });
+            if (fullSuiteDecision.action === "ERROR") {
+              return { phase: "ERROR", error: fullSuiteDecision.error };
+            }
+            if (fullSuiteDecision.action === "REPAIR") {
+              stuckReferences.push(...fullSuiteDecision.references);
+              retryNote = fullSuiteDecision.retryNote;
+              if (implementationAttempt < implementationAttemptLimit) continue;
+              return finishIntervention(
+                candidateLifecycle.exhaustDeterministicGates({
+                  candidateTreeId: postQaCheckpoint.treeId,
+                  revision: Math.max(qaConvergence.revision, round),
+                  failedGateIds: fullSuiteDecision.failedGateIds,
+                  attemptTreeIds: [
+                    ...implementationCandidateTreeIds.slice(0, -1),
+                    postQaCheckpoint.treeId,
+                  ],
+                  supportingEvidence: fullSuiteDecision.references,
+                }).request,
+              );
+            }
+            assertGateEvidenceReleasesEvaluation(
+              fullSuiteRun.evidence,
+              fullSuiteDeclarations,
+              postQaCheckpoint.treeId,
+            );
+            for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+          } finally {
+            if (postQaCheckpoint.worktreeDir) {
+              await git.removeWorktreeOrWarn(
+                ctx.worktreeDir,
+                postQaCheckpoint.worktreeDir,
+                {
+                  label: "post-QA checkpoint worktree",
+                  warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
+                },
+                { signal },
+              );
+            }
+          }
           // Before the commit, so the diagnosis this slice ships is the
           // one the operator read, not whatever the generator left.
           restoreStuckDiagnosis();
