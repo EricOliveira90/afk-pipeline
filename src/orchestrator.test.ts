@@ -2842,7 +2842,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 3,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -2949,7 +2949,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 3,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -4242,7 +4242,12 @@ describe("round-scoped contract feedback", () => {
     );
   });
 
-  it("extends a converging negotiation when round two leaves only fresh revision blockers", async () => {
+  // New spawned scenario, deliberately: the evidence-qualified extension
+  // requires a round-two review that introduces a fresh blocker with a valid
+  // revision citation, followed by a third planner response. Existing
+  // negotiation fixtures either stop at two rounds or reuse an old blocker,
+  // so none can reach this distinct continuation state.
+  it("grants the PRD 3 final response when round two first raises fresh cited blockers", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -4256,6 +4261,8 @@ describe("round-scoped contract feedback", () => {
     };
     let plannerRounds = 0;
     let evaluatorRounds = 0;
+    const plannerPrompts: string[] = [];
+    let roundThreeResponse: unknown = null;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(opts: InvokeOptions): Promise<InvokeResult> {
@@ -4265,6 +4272,7 @@ describe("round-scoped contract feedback", () => {
           writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
+          plannerPrompts.push(opts.prompt);
           writeFileSync(
             join(artifactDir, "contract.md"),
             "# Contract\n\n**Status:** NEGOTIATING\n",
@@ -4302,6 +4310,25 @@ describe("round-scoped contract feedback", () => {
               "utf-8",
             );
           }
+          if (plannerRounds === 3) {
+            writeFileSync(
+              join(artifactDir, "contract.md"),
+              "# Contract\n\n**Status:** NEGOTIATING\n\nRound 3\n",
+              "utf-8",
+            );
+            writeContractResponse(
+              artifactDir,
+              ["F-r2-1", "F-r2-2"],
+              "CONDITION_MET",
+              3,
+            );
+            roundThreeResponse = JSON.parse(
+              readFileSync(
+                join(artifactDir, "contract-response.json"),
+                "utf-8",
+              ),
+            );
+          }
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           // Gap counts are derived from the findings, so convergence is
@@ -4321,9 +4348,19 @@ describe("round-scoped contract feedback", () => {
                   observed: `round-1 gap ${index + 1} was cleared`,
                   clearCondition: `gap ${index + 1} names a failing command`,
                   state: "RESOLVED" as const,
-                  }),
-                )
-              : [];
+                }))
+              : evaluatorRounds === 3
+                ? Array.from({ length: 2 }, (_unused, index) => ({
+                    id: `F-r2-${index + 1}`,
+                    severity: "BLOCKING" as const,
+                    behaviorIds: ["B-01"],
+                    evidence: '"it reaches review"',
+                    expected: "a falsifiable observable result",
+                    observed: `round-2 gap ${index + 1} was cleared`,
+                    clearCondition: `gap ${index + 1} names a failing command`,
+                    state: "RESOLVED" as const,
+                  }))
+                : [];
           writeContractReview(
             artifactDir,
             gaps === 0 ? "ACCEPT" : "REVISE",
@@ -4336,7 +4373,10 @@ describe("round-scoped contract feedback", () => {
                 evidence: '"it reaches review"',
                 expected: "a falsifiable observable result",
                 observed: `unfalsifiable gap ${index + 1}`,
-                clearCondition: `gap ${index + 1} names a failing command`,
+                clearCondition:
+                  evaluatorRounds === 2
+                    ? `late gap ${index + 1} names the newly required stub seam`
+                    : `gap ${index + 1} names a failing command`,
                 revisionCitation:
                   evaluatorRounds === 2
                     ? {
@@ -4364,7 +4404,7 @@ describe("round-scoped contract feedback", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 7,
+        maxContractRounds: 2,
       },
       slice,
       logger,
@@ -4378,12 +4418,40 @@ describe("round-scoped contract feedback", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(plannerRounds).toBe(3);
       expect(evaluatorRounds).toBe(3);
+      expect(plannerPrompts[2]).toContain("F-r2-1");
+      expect(plannerPrompts[2]).toContain("F-r2-2");
+      expect(plannerPrompts[2]).toContain(
+        "Keep this relevant resolved history satisfied",
+      );
+      expect(plannerPrompts[2]).toContain("F-r1-1");
+      expect(roundThreeResponse).toMatchObject({
+        version: 1,
+        round: 3,
+        responses: [
+          { findingId: "F-r2-1", position: "CONDITION_MET" },
+          { findingId: "F-r2-2", position: "CONDITION_MET" },
+        ],
+      });
       expect(errorSpy.mock.calls.flat().join(" ")).toContain(
-        "contract convergence extension granted",
+        "granting final contract response",
       );
-      expect(existsSync(join(ctx.absSliceDir, "contract-negotiation-outcome.json"))).toBe(
-        false,
-      );
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(repo, ".afk", "state", `${slug}.json`),
+            "utf-8",
+          ),
+        ),
+      ).toMatchObject({
+        version: 2,
+        contractConvergence: {
+          "9003": {
+            version: 1,
+            extensionUsed: true,
+            revision: 3,
+          },
+        },
+      });
     } finally {
       errorSpy.mockRestore();
     }
@@ -4498,6 +4566,10 @@ describe("round-scoped contract feedback", () => {
       expect(errorSpy.mock.calls.flat().join(" ")).toContain(
         "failed to archive negotiation artifacts",
       );
+      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
+        "granting final contract response",
+      );
+      expect(plannerRounds).toBe(2);
     } finally {
       errorSpy.mockRestore();
     }
@@ -4965,7 +5037,11 @@ describe("contract review fails closed", () => {
     });
   });
 
-  it("archives died attempts and rejects terminal reactivation on retry", async () => {
+  // New spawned scenario, deliberately: this state combines provider death
+  // after a partial evaluator artifact, successful retry archival, and a
+  // later valid same-ID reopen. The adjacent archive fixture has no died
+  // attempt, while the convergence fixtures do not preserve retry artifacts.
+  it("archives died attempts and routes same-ID reopening to intervention", async () => {
     const repo = makeRepo();
     const slug = "review-archive-attempts";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -5062,11 +5138,29 @@ describe("contract review fails closed", () => {
     );
 
     const outcome = await runSliceNegotiate(ctx);
-    expect(outcome.phase).toBe("ERROR");
-    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
-      /terminal finding F-01 cannot reactivate as OPEN/,
+    expect(outcome.phase).toBe("ESCALATE");
+    expect(outcome.phase === "ESCALATE" ? outcome.cause.summary : "").toMatch(
+      /EQUIVALENT_REPETITION/,
     );
     expect(evaluatorAttempts).toBe(5);
+    const intervention = JSON.parse(
+      readFileSync(join(ctx.absSliceDir, "intervention.json"), "utf-8"),
+    );
+    expect(intervention).toMatchObject({
+      cause: {
+        kind: "CONTRACT_CONVERGENCE",
+        interventionClass: "PRODUCT_DECISION",
+      },
+      interventionClass: "PRODUCT_DECISION",
+      preservedCandidate: {
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
+    expect(intervention.preservedCandidate.recoveryRef).toContain(
+      `-r${intervention.preservedCandidate.revision}-` +
+        intervention.preservedCandidate.treeId,
+    );
     const reviews = join(
       repo,
       ".afk",
@@ -5075,8 +5169,8 @@ describe("contract review fails closed", () => {
       "slice-01",
       "reviews",
     );
-    // The malformed first attempt and reactivating final attempt have no
-    // invented lifecycle records. Valid died attempts retain their records.
+    // The malformed first attempt has no invented lifecycle record. The
+    // valid reopened attempt is recorded before policy stops the loop.
     expect(readdirSync(reviews).sort()).toEqual([
       "contract-review-r1-a1.json",
       "contract-review-r1-a2-record.json",
@@ -5085,6 +5179,7 @@ describe("contract review fails closed", () => {
       "contract-review-r1-a3.json",
       "contract-review-r2-a1-record.json",
       "contract-review-r2-a1.json",
+      "contract-review-r2-a2-record.json",
       "contract-review-r2-a2.json",
     ]);
     expect(
@@ -5182,7 +5277,7 @@ describe("contract review fails closed", () => {
         specsDir,
         dag,
         provider,
-        maxContractRounds: 3,
+        maxContractRounds: 2,
       },
       slice,
       logger,

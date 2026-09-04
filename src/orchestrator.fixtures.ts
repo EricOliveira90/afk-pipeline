@@ -97,6 +97,8 @@ export interface SliceFixture {
   qaPasses: boolean;
   /** Number of implementation QA failures before `qaPasses` takes effect. */
   qaFailuresBeforePass?: number;
+  /** A PASS explicitly dispositions durable fixture finding QA-01 as resolved. */
+  qaResolvesPriorFindingOnPass?: boolean;
   /**
    * Number of leading evaluator-qa invocations that report FAIL with
    * `**Failure class:** INFRASTRUCTURE` before behaving per `qaPasses`.
@@ -519,7 +521,9 @@ export function buildStubProvider(opts: {
               ? "PASS"
               : "FAIL";
           const resolvedFixtureFinding =
-            verdict === "PASS" && (fixture.qaFailuresBeforePass ?? 0) > 0
+            verdict === "PASS" &&
+            ((fixture.qaFailuresBeforePass ?? 0) > 0 ||
+              fixture.qaResolvesPriorFindingOnPass === true)
               ? [
                   {
                     id: "QA-01",

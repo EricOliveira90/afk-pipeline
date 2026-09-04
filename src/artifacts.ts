@@ -853,6 +853,7 @@ export function sliceArtifactNames(sliceDir: string): string[] {
     ...rounds,
     "handoff.md",
     CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
+    "intervention.json",
     "stuck.md",
   ];
 }

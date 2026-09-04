@@ -66,13 +66,14 @@ export function writeContractResponse(
   sliceDir: string,
   findingIds: readonly string[],
   position: ContractResponsePosition = "UNRESOLVED",
+  round = 2,
 ): void {
   writeFileSync(
     join(sliceDir, CONTRACT_RESPONSE_FILENAME),
     JSON.stringify(
       {
         version: 1,
-        round: 2,
+        round,
         responses: findingIds.map((findingId) => ({
           findingId,
           position,

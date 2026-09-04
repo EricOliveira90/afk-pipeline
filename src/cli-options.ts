@@ -10,8 +10,8 @@ export function parseMaxContractRounds(value: string | undefined): number {
   }
   if (rounds > DEFAULT_MAX_CONTRACT_ROUNDS) {
     throw new Error(
-      `--max-contract-rounds supports at most ${DEFAULT_MAX_CONTRACT_ROUNDS}; ` +
-        "the convergence extension is awarded automatically",
+      `--max-contract-rounds supports 1-${DEFAULT_MAX_CONTRACT_ROUNDS}; ` +
+        "the evidence-qualified final response is controlled by AFK",
     );
   }
   return rounds;
