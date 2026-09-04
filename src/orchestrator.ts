@@ -4545,10 +4545,11 @@ export async function runSliceExecute(
             "Generator envelope requires an acceptance manifest with behavior bindings",
           );
         }
-        const context = readFileSync(
-          join(ctx.absSliceDir, "context.md"),
-          "utf-8",
-        );
+        const contextPath = join(ctx.absSliceDir, "context.md");
+        const hasExplorerContext = existsSync(contextPath);
+        const context = hasExplorerContext
+          ? readFileSync(contextPath, "utf-8")
+          : "(no explorer context artifact is available for this legacy direct-execution path)";
         const mode =
           implementationAttempt === 1 &&
           !ctx.resume &&
@@ -4598,6 +4599,9 @@ export async function runSliceExecute(
           contractView: projectGeneratorContractView(contract),
           acceptanceManifest,
           patternsAndHarness: projectGeneratorPatternsAndHarness(context),
+          ...(!hasExplorerContext
+            ? { patternsAndHarnessArtifactId: null }
+            : {}),
           testCommand: ctx.testCommand,
           migrationReservation: migrationReservationBlock(
             config,
