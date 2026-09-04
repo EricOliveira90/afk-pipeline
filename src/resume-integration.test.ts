@@ -444,18 +444,39 @@ describe("retried slice resume (spec #33)", () => {
       expect(prompt).toContain("renumber yours to the next free prefix");
     });
 
-    it("records the fresh handoff in resumed prompt-assembly evidence", () => {
+    it("B-05 QA-01 records exact resumed generator evidence in prompt order", () => {
       const assembly = promptAssemblyEvents(
         repo,
         `${slug}-stub`,
         "4001",
       ).at(-1);
-      expect(assembly?.includedArtifactIds).toEqual([
-        `.kiro/specs/${slug}/slices/01-resumable/contract.md`,
-        `.kiro/specs/${slug}/slices/01-resumable/acceptance-manifest.json`,
-        `.kiro/specs/${slug}/slices/01-resumable/context.md`,
-        `.kiro/specs/${slug}/slices/01-resumable/handoff.md`,
-      ]);
+      expect({
+        classes: assembly?.includedArtifactClasses,
+        ids: assembly?.includedArtifactIds,
+      }).toEqual({
+        classes: [
+          "file-scope",
+          "migration-reservation",
+          "repair-situation",
+          "repair-context",
+          "contract-view",
+          "acceptance-manifest",
+          "verification-command",
+          "patterns-and-harness",
+          "failure-set",
+        ],
+        ids: [
+          "acceptance-manifest:file-scope",
+          "migration-reservation",
+          "generator:repair-situation",
+          `.kiro/specs/${slug}/slices/01-resumable/handoff.md`,
+          `.kiro/specs/${slug}/slices/01-resumable/contract.md`,
+          `.kiro/specs/${slug}/slices/01-resumable/acceptance-manifest.json`,
+          "generator:test-command",
+          `.kiro/specs/${slug}/slices/01-resumable/context.md`,
+          "generator:failure-set",
+        ],
+      });
     });
 
     it("refuses slice 02 when its feature merge conflicts, keeping the commits (#35, #113)", () => {
