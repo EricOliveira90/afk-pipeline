@@ -87,7 +87,7 @@ export function resolveGeneratorTestCommand(
  * themselves.
  *
  * This is the single source ADR 0012 requires. `resolveSanityCommands`
- * (evaluator QA's `{{SANITY_COMMANDS}}`), `resolveBaseGateDeclarations`, and
+ * (evaluator QA's `{{SANITY_COMMANDS}}`), the base-gate catalog, and
  * `runPreShipSanity` all read this one plan, so QA cannot be told a
  * different command set than the gate runs.
  */

@@ -36,7 +36,7 @@ import type {
 } from "./agent-provider.js";
 import { TransientProviderError } from "./agent-provider.js";
 import type { PipelineConfig } from "./orchestrator.js";
-import { resolveBaseGateDeclarations } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 
 const tempDirs: string[] = [];
 

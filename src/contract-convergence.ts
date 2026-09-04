@@ -5,7 +5,7 @@ import type {
 import { parseContractReview } from "./contract-review.js";
 import {
   loadRunState,
-  saveRunState,
+  updateRunState,
   type RunState,
 } from "./run-state.js";
 
@@ -523,11 +523,11 @@ export function saveContractFindingLineage(
   location: LineageLocation,
   lineage: ContractFindingLineage,
 ): void {
-  const state = loadRunState(location.repoRoot, location.prdSlug);
-  const existing = convergenceMap(state) ?? {};
-  state.contractConvergence = {
-    ...existing,
-    [location.ghIssue]: lineage,
-  };
-  saveRunState(location.repoRoot, state);
+  updateRunState(location.repoRoot, location.prdSlug, (state) => {
+    const existing = convergenceMap(state) ?? {};
+    state.contractConvergence = {
+      ...existing,
+      [location.ghIssue]: lineage,
+    };
+  });
 }
