@@ -161,6 +161,8 @@ export interface GeneratorEnvelopeInput {
   contractView: string;
   acceptanceManifest: AcceptanceManifestV2;
   patternsAndHarness: string;
+  /** Null when a legacy direct-execution caller has no explorer artifact. */
+  patternsAndHarnessArtifactId?: string | null;
   testCommand: string;
   migrationReservation: string;
   failureSet: GeneratorFailureSet;
@@ -856,7 +858,12 @@ export function assembleGeneratorEnvelope(
       includedArtifactIds: [
         `${input.sliceDir}/contract.md`,
         `${input.sliceDir}/acceptance-manifest.json`,
-        `${input.sliceDir}/context.md`,
+        ...(input.patternsAndHarnessArtifactId === null
+          ? []
+          : [
+              input.patternsAndHarnessArtifactId ??
+                `${input.sliceDir}/context.md`,
+            ]),
         ...(input.additionalArtifactIds ?? []),
         ...new Set(failureArtifactIds),
       ],
