@@ -5,7 +5,7 @@ import { foldEvents } from "./run-snapshot.js";
 import { lifecycle } from "./slice-lifecycle.js";
 
 const EMPTY_STATE: RunState = {
-  version: 2,
+  version: 3,
   prdSlug: "demo-stub",
   featureBranch: "feat/demo",
   slices: {},

@@ -32,11 +32,11 @@ import {
   isCancelled,
   makeAsyncMutex,
   makeSliceContext,
-  resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
   assertSliceWorktreeOwnership,
 } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import type { NegotiateOutcome } from "./orchestrator.js";
 import { loadRunState } from "./run-state.js";
 import { createWorktree } from "./git.js";
@@ -4113,7 +4113,7 @@ describe("round-scoped contract feedback", () => {
           ),
         ),
       ).toMatchObject({
-        version: 2,
+        version: 3,
         contractConvergence: {
           "9003": {
             version: 1,

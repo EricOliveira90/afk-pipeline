@@ -32,10 +32,10 @@ import {
   isCancelled,
   makeAsyncMutex,
   makeSliceContext,
-  resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
 } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import {
   buildPrCreationPlan,
   buildReviewScopeBlock,
@@ -567,7 +567,7 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       ).not.toBe("LOCKED");
       // A refused adjudicated lock preserves the parked estate rather than
       // reading as disposable ESCALATE debris (ADR 0055 Seam 2): the human
-      // decisions and the worktree survive clean-failed so the
+      // decisions and the worktree survive clean-failed and adopt so the
       // operator can fix the base and let the next run re-run the gate.
       expect(state.slices[refusal.ghIssue]).toMatchObject({
         phase: "ADJUDICATION-LOCK-REFUSED",

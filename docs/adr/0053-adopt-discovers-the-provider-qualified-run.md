@@ -1,14 +1,5 @@
 # `afk adopt` discovers the provider-qualified run, and names its refusals
 
-> **Deferred to PRD `afk-v2-run-state-lock-and-adoption` (2026-08-31).** The
-> code this ADR describes is **not in the tree.** `afk adopt` was excised from
-> PRD 2 after blocking its guardian gate in three consecutive rounds; the last
-> finding requires a cross-process lock shared by every run-state writer, which
-> is a persistence-layer change. The decisions below are kept verbatim because
-> they were earned over five gate rounds and the new PRD builds on them — but
-> nothing here is implemented until that PRD ships. Read this as accepted
-> *design*, not as a description of `src/`.
-
 Extends ADR 0002 (branch and state namespacing is keyed off the provider
 name) to the adoption bypass valve shipped by PRD 2 slice 06 (#129).
 Evidence: the PRD 2 product guardian review, round 2, blocking finding 2 —

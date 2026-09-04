@@ -40,6 +40,7 @@ import {
   isForceRestarted,
   isResumeStuckRequested,
 } from "./resume.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import {
   lifecycle,
   type SliceIdentity,
@@ -90,7 +91,7 @@ import {
 } from "./qa-gate-authorization.js";
 import {
   loadRunState,
-  saveRunState,
+  updateRunState,
   isSliceComplete,
   getResumeAttempts,
   recordRetryDecision,
@@ -118,6 +119,18 @@ import {
   type MigrationValidation,
 } from "./migration-gate.js";
 import type { AfkManifest } from "./afk-manifest.js";
+import {
+  featureBranchPrefixForProviderName,
+  featureBranchForProviderName,
+  providerNameFromRunSlug,
+  runSlugForProviderName,
+  sliceBranchPrefixForProviderName,
+  sliceWorktreeDirForProviderName,
+} from "./run-identity.js";
+import {
+  adoptedSlices,
+  adoptionForCompletedSlice,
+} from "./adoption-provenance.js";
 import {
   assertWithinManifestScope,
   trimUnclaimedMigrationPrefixes,
@@ -322,29 +335,6 @@ function longCommandRoleBounds(bounds: {
     maxDurationMs: bounds.maxDurationMs ?? SLOW_AGENT_MAX_DURATION_MS,
     deferIdleKillWhenBusy: true,
   };
-}
-
-const BASE_GATE_IDS = ["typecheck", "lint", "tests"] as const;
-
-/**
- * Derive the policy-less base gate set shared by every agent provider. Reads
- * the same sanity plan the pre-ship gate executes (ADR 0012), so a gate and
- * the aggregate check cannot disagree about which script backs a step.
- */
-export function resolveBaseGateDeclarations(cwd: string): GateDeclaration[] {
-  const stepsByGate = new Map(
-    resolveSanityPlan(cwd).steps.map((step) => [step.name, step]),
-  );
-
-  return BASE_GATE_IDS.map((id) => {
-    const step = stepsByGate.get(id);
-    return {
-      id,
-      stage: "base",
-      required: step != null,
-      ...(step ? { command: step.command, args: [...step.args] } : {}),
-    };
-  });
 }
 
 function formatBaseGateCatalog(catalog: readonly GateDeclaration[]): string {
@@ -584,37 +574,12 @@ export function sliceBranchPrefix(provider: AgentProvider): string {
   return sliceBranchPrefixForProviderName(provider.name);
 }
 
-/**
- * `sliceBranchPrefix` for a caller that has a provider *name* and no
- * provider object — the same split `runSlugForProviderName` makes below,
- * and for the same reason. One formula, one place, so the name-keyed and
- * object-keyed forms cannot drift.
- */
-export function sliceBranchPrefixForProviderName(providerName: string): string {
-  return providerName === "kiro" ? "afk" : `afk-${providerName}`;
-}
-
 function featureBranchPrefix(provider: AgentProvider): string {
   return featureBranchPrefixForProviderName(provider.name);
 }
 
-function featureBranchPrefixForProviderName(providerName: string): string {
-  return providerName === "kiro" ? "feat" : `feat-${providerName}`;
-}
-
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
   return runSlugForProviderName(prdSlug, provider.name);
-}
-
-/**
- * `pipelineRunSlug` for a caller that has a provider *name* and no
- * provider object. Same rule, one place, so the two cannot drift.
- */
-export function runSlugForProviderName(
-  prdSlug: string,
-  providerName: string,
-): string {
-  return providerName === "kiro" ? prdSlug : `${prdSlug}-${providerName}`;
 }
 
 export function sliceBranch(
@@ -642,26 +607,6 @@ export function sliceWorktreeDir(
     prdSlug,
     slice.number,
     provider.name,
-  );
-}
-
-/**
- * `sliceWorktreeDir` for a caller holding a provider name and a slice
- * number rather than a provider object and a `Slice`. One formula, one
- * place, so no caller can disagree with the pipeline about where a
- * slice's worktree lives.
- */
-export function sliceWorktreeDirForProviderName(
-  repoRoot: string,
-  prdSlug: string,
-  sliceNumber: string,
-  providerName: string,
-): string {
-  return join(
-    repoRoot,
-    ".afk",
-    "worktrees",
-    `${sliceBranchPrefixForProviderName(providerName)}-${prdSlug}-s${sliceNumber}`,
   );
 }
 
@@ -5464,8 +5409,6 @@ export async function runPipeline(
   };
 
   try {
-  const runState = loadRunState(repoRoot, loggerSlug);
-  initializeMigrationClaims(runState, config.manifest ?? null);
   const requestedSliceNumbers =
     config.selectedSliceNumbers ?? config.manifest?.selectedSlices;
   if (config.manifest && requestedSliceNumbers) {
@@ -5477,20 +5420,22 @@ export async function runPipeline(
         `Run scope conflicts with afk.json selectedSlices: ${conflicting.join(", ")}`,
     });
   }
-  scope = resolveRunScope(
-    [...manifestDag.slices.values()],
-    requestedSliceNumbers,
-    runState.scope,
-  );
-  runState.scope = scope.persisted;
-  runState.featureBranch = featBranch;
-  // Recorded so `clean-failed` can *resolve* where this
-  // run's slice artifacts live rather than search a worktree for them
-  // (architect blocker 2; see `RunState.specsDir`). Written here, beside the
-  // feature branch, because both are facts about the run that later commands
-  // read and neither can be re-derived from a worktree alone.
-  runState.specsDir = specsDir.replace(/\\/g, "/");
-  saveRunState(repoRoot, runState);
+  const initialized = updateRunState(repoRoot, loggerSlug, (current) => {
+    initializeMigrationClaims(current, config.manifest ?? null);
+    const resolvedScope = resolveRunScope(
+      [...manifestDag.slices.values()],
+      requestedSliceNumbers,
+      current.scope,
+    );
+    current.scope = resolvedScope.persisted;
+    current.featureBranch = featBranch;
+    // Recorded so `clean-failed` can *resolve* where this run's slice
+    // artifacts live rather than search a worktree for them.
+    current.specsDir = specsDir.replace(/\\/g, "/");
+    return { runState: current, scope: resolvedScope };
+  });
+  const runState = initialized.runState;
+  scope = initialized.scope;
   const dag = buildDAG(scope.selected);
   const selectedIssues = new Set(scope.selected.map((slice) => slice.ghIssue));
 
@@ -5690,7 +5635,10 @@ export async function runPipeline(
       alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
-      logger.restoreCompleted({ ghIssue: id, title: slice.title, branch });
+      logger.restoreCompleted(
+        { ghIssue: id, title: slice.title, branch },
+        adoptionForCompletedSlice(runState, id),
+      );
       logger.phase(
         `  Skipping #${id} ${slice.title} (already completed)`,
         "log",
@@ -6256,6 +6204,7 @@ export async function runPipeline(
         relevantFilesBlock,
         reviewScope: buildReviewScopeBlock(scope!),
         closesIssues: scope!.selected.map((slice) => slice.ghIssue),
+        adoptions: adoptedSlices(runState),
         cachedReviewPhase: runState.reviewPhase,
         invoke,
         journal: logger,
@@ -6299,23 +6248,29 @@ export async function runPipeline(
 
       try {
         if (config.manifest) {
-          const latestState = loadRunState(repoRoot, loggerSlug);
-          // Keep only prefixes whose slice merged; a failed or descoped
-          // slice's reservation must not ride into the verified draft
-          // (#65). Releasing its claim record here keeps run state
-          // consistent with the trimmed pool below.
-          const release = releaseUnmergedMigrationClaims(latestState);
-          const trimmed = trimUnclaimedMigrationPrefixes(
-            join(reviewDir, specsDir),
-            release.retained,
+          const { trimmed } = updateRunState(
+            repoRoot,
+            loggerSlug,
+            (latestState) => {
+              // Keep only prefixes whose slice merged; a failed or descoped
+              // slice's reservation must not ride into the verified draft
+              // (#65).
+              const release = releaseUnmergedMigrationClaims(latestState);
+              const trimmed = trimUnclaimedMigrationPrefixes(
+                join(reviewDir, specsDir),
+                release.retained,
+              );
+              if (
+                latestState.migrations &&
+                (trimmed.changed || release.released.length > 0)
+              ) {
+                latestState.migrations.pool = [
+                  ...trimmed.manifest.migrationPrefixes,
+                ];
+              }
+              return { trimmed };
+            },
           );
-          // Save on either half. A release with no trim happens when the
-          // manifest already lists exactly the retained prefixes; gating
-          // the save on the trim alone drops the claim in memory only.
-          if (latestState.migrations && (trimmed.changed || release.released.length > 0)) {
-            latestState.migrations.pool = [...trimmed.manifest.migrationPrefixes];
-            saveRunState(repoRoot, latestState);
-          }
           if (trimmed.changed) {
             git.commitAll(
               reviewDir,

@@ -122,7 +122,7 @@ describe("Logger.bumpGenRound / bumpEvalRound", () => {
 });
 
 describe("Logger.writeSummary (run-summary.md byte stability)", () => {
-  it("preserves every byte of a summary for a restored completed slice", () => {
+  it("preserves every byte of a summary without adopted slices", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-08-29T12:00:00.000Z"));
@@ -150,6 +150,28 @@ PM review: N/A
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("renders provenance for an adopted completed slice only", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "adopted");
+    log.restoreCompleted(id("129", "Manual finish", "manual/demo-01"), {
+      adopter: "Ada Lovelace",
+      reason: "finished the slice manually",
+      branch: "manual/demo-01",
+      commit: "abc123",
+    });
+    log.restoreCompleted(id("130", "Pipeline finish", "afk/demo-02"));
+
+    const md = log.writeSummary();
+    const adoptedSection = md.slice(md.indexOf("## Adopted Slices"));
+
+    expect(adoptedSection).toContain("129 Manual finish");
+    expect(adoptedSection).toContain("Ada Lovelace");
+    expect(adoptedSection).toContain("finished the slice manually");
+    expect(adoptedSection).toContain("manual/demo-01");
+    expect(adoptedSection).toContain("abc123");
+    expect(adoptedSection).not.toContain("130 Pipeline finish");
   });
 
   it("renders ESCALATE and ERROR as STUCK in the markdown table", () => {

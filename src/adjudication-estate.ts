@@ -43,7 +43,7 @@ import { CONTRACT_NEGOTIATION_OUTCOME_FILENAME } from "./contract-review.js";
  * "I could not complete the walk". A `--prd-dir` deeper than the assumed
  * default layout blew the depth bound, and an unreadable directory was
  * swallowed — and both then read as *proved absence*, after which
- * `clean-failed` deletes the worktree.
+ * `clean-failed` deletes the worktree and `adopt` overwrites the park.
  * Inferring absence from an incomplete probe is precisely what Seam 2 §8
  * forbids, and the defect was introduced by the code that exists to honour
  * it.
@@ -102,8 +102,8 @@ export interface AdjudicationEstate {
  * `absent` is a claim the probe has earned: it looked everywhere it was
  * asked to look and every enumeration succeeded. `indeterminate` carries
  * the reason, which every caller puts in its refusal — an operator who is
- * told "clean-failed skipped X: the estate probe could not read it" can fix
- * X, where a silent deletion left them nothing.
+ * told "adoption refused: the estate probe could not read X" can fix X,
+ * where a silent deletion left them nothing.
  */
 export type AdjudicationEstateProbe =
   | { status: "present"; estate: AdjudicationEstate }

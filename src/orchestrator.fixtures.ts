@@ -28,7 +28,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Slice } from "./issues-parser.js";
-import { resolveBaseGateDeclarations } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import {
   writeContractResponse,
   writeContractReview,

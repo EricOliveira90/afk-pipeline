@@ -251,12 +251,27 @@
     "clean-failed": 16.4,
     "_total": "804.8s of suite time, 1604 tests (1294 fast + 310 heavy)"
   },
+  "_measured2026_09_04_run_state_lock_adoption@feat/run-state-lock-and-adoption": {
+    "_note": [
+      "Full chain on the run-state lock and adoption PR measured QA at",
+      "94.0s against the 87s budget with all 29 tests passing. Immediate",
+      "same-machine alone-runs measured 92.3s on this branch and exactly",
+      "92.3s on unchanged main, proving the overage was current host",
+      "variance rather than PR cost. Raised QA to 123s, approximately 30%",
+      "above the in-chain measurement, per this file's documented rule.",
+      "The same chain's anomalous fast result was not used: after adoption",
+      "fixture consolidation, fast passed alone at 150.0s under its existing",
+      "170s budget."
+    ],
+    "qa-orchestration": 94.0,
+    "_same_machine_alone": "PR head 92.3s; main at 8126c44 92.3s"
+  },
   "suites": {
     "fast": 170,
     "orchestrator": 560,
     "wave": 295,
     "resume-integration": 152,
-    "qa-orchestration": 87,
+    "qa-orchestration": 123,
     "clean-failed": 30
   },
   "totalSeconds": 1294

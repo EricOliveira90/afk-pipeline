@@ -1,6 +1,7 @@
 import {
   loadRunState,
-  saveRunState,
+  transactRunState,
+  updateRunState,
   type RunState,
 } from "./run-state.js";
 import {
@@ -116,13 +117,13 @@ export function recordExactStageCheckpoint(
   location: CheckpointLocation,
   checkpoint: ExactStageCheckpoint,
 ): void {
-  const state = loadRunState(location.repoRoot, location.prdSlug);
-  const existing = checkpointMap(state) ?? {};
-  state.stageCheckpoints = {
-    ...existing,
-    [location.ghIssue]: checkpoint,
-  };
-  saveRunState(location.repoRoot, state);
+  updateRunState(location.repoRoot, location.prdSlug, (state) => {
+    const existing = checkpointMap(state) ?? {};
+    state.stageCheckpoints = {
+      ...existing,
+      [location.ghIssue]: checkpoint,
+    };
+  });
 }
 
 /**
@@ -178,23 +179,27 @@ export function inspectExactStageCheckpoint(
 export function clearExactStageCheckpoint(
   location: CheckpointLocation,
 ): void {
-  const state = loadRunState(location.repoRoot, location.prdSlug);
-  const checkpoints = checkpointMap(state);
-  if (checkpoints === null) {
-    if (state.stageCheckpoints === undefined) return;
-    delete state.stageCheckpoints;
-    saveRunState(location.repoRoot, state);
-    return;
-  }
-  if (!(location.ghIssue in checkpoints)) return;
-  const next = { ...checkpoints };
-  delete next[location.ghIssue];
-  if (Object.keys(next).length === 0) {
-    delete state.stageCheckpoints;
-  } else {
-    state.stageCheckpoints = next;
-  }
-  saveRunState(location.repoRoot, state);
+  transactRunState(location.repoRoot, location.prdSlug, (state) => {
+    const checkpoints = checkpointMap(state);
+    if (checkpoints === null) {
+      if (state.stageCheckpoints === undefined) {
+        return { changed: false, result: undefined };
+      }
+      delete state.stageCheckpoints;
+      return { changed: true, result: undefined };
+    }
+    if (!(location.ghIssue in checkpoints)) {
+      return { changed: false, result: undefined };
+    }
+    const next = { ...checkpoints };
+    delete next[location.ghIssue];
+    if (Object.keys(next).length === 0) {
+      delete state.stageCheckpoints;
+    } else {
+      state.stageCheckpoints = next;
+    }
+    return { changed: true, result: undefined };
+  });
 }
 
 /**

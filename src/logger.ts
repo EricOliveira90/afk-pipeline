@@ -291,6 +291,31 @@ ${gateRows}
 |-------|------------|
 ${dependencyRows}
 `;
+    const adoptedEntries = [...slices.values()].flatMap((slice) =>
+      slice.phase === "PASS" && slice.adoption
+        ? [{ slice, adoption: slice.adoption }]
+        : [],
+    );
+    const adoptionSection =
+      adoptedEntries.length === 0
+        ? ""
+        : `
+## Adopted Slices
+
+${adoptedEntries
+  .map(({ slice, adoption }) =>
+    [
+      `### #${slice.ghIssue} ${inlineMarkdown(slice.title)}`,
+      "",
+      `- Adopter: ${inlineMarkdown(adoption.adopter)}`,
+      `- Reason: ${inlineMarkdown(adoption.reason)}`,
+      `- Branch: ${inlineMarkdown(adoption.branch)}`,
+      `- Commit: ${inlineMarkdown(adoption.commit)}`,
+    ].join("\n"),
+  )
+  .join("\n\n")}
+`;
+
     const summary = `# Run Summary — ${prdSlug}
 
 Started: ${startedAt.toISOString()}
@@ -300,7 +325,7 @@ Finished: ${finishedAt!.toISOString()}
 |-------|--------|--------|--------|------|------------|
 ${rows}
 ${totalsRow}
-${dependencySection}
+${dependencySection}${adoptionSection}
 ${gateSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
@@ -509,6 +534,10 @@ function sanitizeDetail(detail: string | undefined): string | undefined {
   const collapsed = detail.replace(/\s+/g, " ").trim();
   if (collapsed.length === 0) return undefined;
   return collapsed.length > 400 ? `${collapsed.slice(0, 397)}...` : collapsed;
+}
+
+function inlineMarkdown(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function roundsCellFor(s: SliceLifecycle): string {
