@@ -4,6 +4,7 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { runAdoptCli } from "./adopt-command.js";
 import type { GateDeclaration, GateResult } from "./gate-runner.js";
 import {
@@ -42,6 +43,24 @@ import { parseIssuesMd } from "./issues-parser.js";
 
 const tempDirs: string[] = [];
 const childProcesses: ChildProcess[] = [];
+let seedDir: string | undefined;
+let seedRepo: string | undefined;
+
+beforeAll(() => {
+  seedDir = mkdtempSync(join(tmpdir(), "afk-adopt-seed-"));
+  seedRepo = join(seedDir, "repo");
+  mkdirSync(seedRepo);
+  git(seedRepo, ["init", "--initial-branch=main"]);
+  writeIssuesMd(seedRepo, "demo");
+  writeFileSync(join(seedRepo, "base.txt"), "base\n");
+  git(seedRepo, ["add", "."]);
+  git(seedRepo, ["commit", "-m", "base"]);
+  git(seedRepo, ["checkout", "-b", "manual/demo-01"]);
+  writeFileSync(join(seedRepo, "slice.txt"), "finished manually\n");
+  git(seedRepo, ["add", "."]);
+  git(seedRepo, ["commit", "-m", "finish slice"]);
+  git(seedRepo, ["checkout", "main"]);
+});
 
 afterEach(() => {
   while (childProcesses.length > 0) {
@@ -49,6 +68,12 @@ afterEach(() => {
   }
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
+});
+
+afterAll(() => {
+  if (seedDir !== undefined) {
+    rmSync(seedDir, { recursive: true, force: true });
   }
 });
 
@@ -172,20 +197,15 @@ function addRun(repo: string, provider: string): void {
 }
 
 function makeRepo(provider = "kiro"): string {
-  const repo = mkdtempSync(join(tmpdir(), "afk-adopt-"));
-  tempDirs.push(repo);
-  git(repo, ["init", "--initial-branch=main"]);
-  git(repo, ["config", "user.name", "AFK Test"]);
-  git(repo, ["config", "user.email", "afk@example.test"]);
-  writeIssuesMd(repo, "demo");
-  writeFileSync(join(repo, "base.txt"), "base\n");
-  git(repo, ["add", "."]);
-  git(repo, ["commit", "-m", "base"]);
-  git(repo, ["checkout", "-b", "manual/demo-01"]);
-  writeFileSync(join(repo, "slice.txt"), "finished manually\n");
-  git(repo, ["add", "."]);
-  git(repo, ["commit", "-m", "finish slice"]);
-  git(repo, ["checkout", "main"]);
+  if (seedRepo === undefined) {
+    throw new Error("Adoption fixture seed was not initialized");
+  }
+  const parent = mkdtempSync(join(tmpdir(), "afk-adopt-"));
+  tempDirs.push(parent);
+  const repo = join(parent, "repo");
+  // Copying the immutable seed preserves per-test repository isolation while
+  // avoiding the same init, checkout, and commit processes in every case.
+  cpSync(seedRepo, repo, { recursive: true });
   addRun(repo, provider);
   return repo;
 }
@@ -1525,6 +1545,8 @@ describe("afk adopt", () => {
      * back, exactly as a throwing write is.
      */
     it("rolls the feature ref back when a real competing writer wins the locked state transaction", async () => {
+      // This requires a spawned scenario: only an independent OS process can
+      // contend for the cross-process state lock during finalization.
       const repo = makeRepo();
       const featureBefore = resolveCommit(repo, "feat/demo")!;
       const competingWriter = await startCompetingWriter(repo, featureBefore);
