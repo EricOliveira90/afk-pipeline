@@ -496,7 +496,7 @@ describe("retried slice resume (spec #33)", () => {
       number: "03", ghIssue: "4003", title: "Still failing",
       type: "AFK", blockedBy: [], userStories: "",
     };
-    const priorAdditionalArtifact = ".afk/gates/s03/ROUND-3-GATE.json";
+    const priorAdditionalArtifact = ".afk/gates/s03/ROUND-2-GATE.json";
     const namedBranch = `afk-stub/${slug}-slice-01-named`;
     const firstRunRecords: PromptRecord[] = [];
     const records: PromptRecord[] = [];
@@ -520,9 +520,10 @@ describe("retried slice resume (spec #33)", () => {
       const ghIssueOf = (n: string) =>
         n === "01" ? named.ghIssue : n === "02" ? unnamed.ghIssue : failing.ghIssue;
 
-      // --- Run 1: both generators commit work every round but QA always
-      // fails — each slice ends STUCK with a code-assembled diagnosis.
-      // On its LAST round the named slice also leaves an uncommitted
+      // --- Run 1: both generators commit work until equivalent QA repeats,
+      // so the circuit breaker stops each slice before round 3 and writes a
+      // code-assembled STUCK diagnosis. On its LAST dispatched round the
+      // named slice also leaves an uncommitted
       // in-flight edit that nothing afterwards commits: run 2 must still
       // see it, which is what "the preserved tree is not reset" means.
       const rounds = new Map<string, number>();
@@ -547,7 +548,7 @@ describe("retried slice resume (spec #33)", () => {
               "-m",
               `feat(#${ghIssueOf(sliceNumber)}): round ${round}`,
             ]);
-            if (sliceNumber === "01" && round === 3) {
+            if (sliceNumber === "01" && round === 2) {
               writeFileSync(
                 join(cwd, "src", "in-flight.ts"),
                 "export const inFlight =",
@@ -649,7 +650,7 @@ describe("retried slice resume (spec #33)", () => {
               return;
             }
             // The unnamed slice must never get here: its branch holds
-            // three STUCK-life commits, so worktree preparation refuses
+            // two STUCK-life commits, so worktree preparation refuses
             // before any agent is dispatched (#113).
             throw new Error("slice 02 reached the generator — the refusal did not hold");
           },
@@ -686,9 +687,9 @@ describe("retried slice resume (spec #33)", () => {
       )?.[1];
       expect(prompt).toContain("Your worktree was not touched.");
       expect(prompt).not.toMatch(/anything after your last commit is gone/i);
-      // Its own commit log across all three dead rounds.
+      // Its own commit log across both rounds dispatched before intervention.
       expect(prompt).toContain("feat(#4001): round 1");
-      expect(prompt).toContain("feat(#4001): round 3");
+      expect(prompt).toContain("feat(#4001): round 2");
       // The preserved diagnosis rode into the prompt.
       expect(prompt).toMatch(/declared STUCK/i);
       expect(prompt).toContain("QA-01");
@@ -696,18 +697,17 @@ describe("retried slice resume (spec #33)", () => {
       expect(prompt).toContain(
         "The fixture evaluator observes the behavior passing",
       );
-      expect(prompt).toContain("qa-review-r3-a1.json");
-      expect(prompt).toContain("qa-report-r3-a1.md");
+      expect(prompt).toContain("qa-review-r2-a1.json");
+      expect(prompt).toContain("qa-report-r2-a1.md");
       expect(unresolvedFindings).toBeDefined();
       expect(unresolvedFindings).toContain("QA-01");
       expect(unresolvedFindings).toContain("Fixture implementation finding");
       expect(unresolvedFindings).toContain(
         "The fixture evaluator observes the behavior passing",
       );
-      expect(unresolvedFindings).toContain("qa-review-r3-a1.json");
-      expect(unresolvedFindings).toContain("qa-report-r3-a1.md");
+      expect(unresolvedFindings).toContain("qa-review-r2-a1.json");
+      expect(unresolvedFindings).toContain("qa-report-r2-a1.md");
       expect(unresolvedFindings).not.toContain("qa-review-r1-a1.json");
-      expect(unresolvedFindings).not.toContain("`qa-report-r2-a1.md`");
     });
 
     /**
@@ -741,12 +741,12 @@ describe("retried slice resume (spec #33)", () => {
           record.role === "evaluator-qa" && record.sliceNumber === "01",
       )!.prompt;
       expect(prompt).toContain("QA-01");
-      expect(prompt).toContain("qa-review-r3-a1.json");
-      expect(prompt).toContain("qa-report-r3-a1.md");
+      expect(prompt).toContain("qa-review-r2-a1.json");
+      expect(prompt).toContain("qa-report-r2-a1.md");
       expect(prompt).not.toContain("qa-review-r1-a1.json");
     });
 
-    it("preserves prior QA evidence and archives the resumed attempt as round 4", () => {
+    it("preserves prior QA evidence and archives the resumed attempt as round 3", () => {
       const reportPath = `.kiro/specs/${slug}/slices/01-named`;
       const reviewDir = join(
         repo,
@@ -765,19 +765,19 @@ describe("retried slice resume (spec #33)", () => {
       expect(
         git(repo, [
           "show",
-          `feat-stub/${slug}:${reportPath}/qa-report-r4-a1.md`,
+          `feat-stub/${slug}:${reportPath}/qa-report-r3-a1.md`,
         ]),
       ).toContain("PASS");
-      expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(true);
+      expect(existsSync(join(reviewDir, "qa-review-r3-a1.json"))).toBe(true);
       const resumedRecord = JSON.parse(
         readFileSync(
-          join(reviewDir, "qa-review-r4-a1-record.json"),
+          join(reviewDir, "qa-review-r3-a1-record.json"),
           "utf-8",
         ),
       );
       expect(resumedRecord).toMatchObject({
         stage: "deterministic",
-        round: 4,
+        round: 3,
         attempt: 1,
         verdict: "PASS",
         findings: [{ id: "QA-01", state: "RESOLVED", unresolved: false }],
@@ -836,10 +836,10 @@ describe("retried slice resume (spec #33)", () => {
         "slice-03",
         "reviews",
       );
-      expect(existsSync(join(reviewDir, "qa-review-r4-a1-record.json"))).toBe(
+      expect(existsSync(join(reviewDir, "qa-review-r3-a1-record.json"))).toBe(
         true,
       );
-      expect(existsSync(join(reviewDir, "qa-review-r5-a1-record.json"))).toBe(
+      expect(existsSync(join(reviewDir, "qa-review-r4-a1-record.json"))).toBe(
         false,
       );
       const resumedGenerator = failingRecords.find(
@@ -857,12 +857,12 @@ describe("retried slice resume (spec #33)", () => {
       );
       expect(rewrittenDiagnosis).toContain(priorAdditionalArtifact);
       expect(rewrittenDiagnosis).toContain(
-        "Round 4 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
+        "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
       );
       expect(rewrittenDiagnosis).toContain(
-        "qa-review-r4-a1-record.json",
+        "qa-review-r3-a1-record.json",
       );
-      expect(rewrittenDiagnosis).toContain("qa-report-r4-a1.md");
+      expect(rewrittenDiagnosis).toContain("qa-report-r3-a1.md");
       const roundEvidence = rewrittenDiagnosis
         .split("## Round evidence\n\n")[1]!
         .split("\n\n## Commit evidence")[0]!;
@@ -871,7 +871,7 @@ describe("retried slice resume (spec #33)", () => {
 
     it("audits the named slice's resume and never logs a restart for it", () => {
       const logs = sliceLogLines(repo, `${slug}-stub`, "4001");
-      expect(logs).toMatch(/resuming STUCK slice from 3 commit\(s\)/);
+      expect(logs).toMatch(/resuming STUCK slice from 2 commit\(s\)/);
       expect(logs).toMatch(/tree not reset, diagnosis preserved/);
       expect(logs).not.toMatch(/restarting from base \(stuck\.md present/);
     });
@@ -884,11 +884,11 @@ describe("retried slice resume (spec #33)", () => {
       expect(logs).toMatch(
         /refusing to restart .* \(stuck\.md present \(terminal diagnosis\)\)/,
       );
-      // Both ways out are named, and the branch still holds its 3 commits.
+      // Both ways out are named, and the branch still holds its 2 commits.
       expect(logs).toMatch(/--force-restart 4002/);
       expect(logs).toMatch(/--resume-stuck 4002/);
       expect(git(repo, ["rev-list", "--count", `feat-stub/${slug}..afk-stub/${slug}-slice-02-unnamed`]))
-        .toBe("3");
+        .toBe("2");
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.slices["4002"].phase).toBe("ERROR");
     });
@@ -896,7 +896,7 @@ describe("retried slice resume (spec #33)", () => {
     it("lands the named slice's surviving work, and nothing from the refused one", () => {
       const tracked = git(repo, ["ls-tree", "-r", "--name-only", `feat-stub/${slug}`]);
       // The named slice kept its STUCK-life commits and the finished edit.
-      for (const file of ["round-1.ts", "round-3.ts", "cleared.ts", "in-flight.ts"]) {
+      for (const file of ["round-1.ts", "round-2.ts", "cleared.ts", "in-flight.ts"]) {
         expect(tracked).toContain(`src/${file}`);
       }
       // The refused slice never merged — its work sits on its own branch,

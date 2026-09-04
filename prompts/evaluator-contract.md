@@ -121,12 +121,13 @@ Field rules:
   instead.
 - `clearCondition` — the observable change that resolves the finding.
 - `state` — `"OPEN"`, `"RESOLVED"`, `"CONTESTED"`, or `"WITHDRAWN"`.
-  Every round-1 finding is `"OPEN"`.
-- `revisionCitation` — `null` for a familiar finding ID. Fresh round-2
-  findings cite changed contract or acceptance-manifest text; round-2
-  rules are supplied in the machine-validated review context.
+  Every finding in the slice's first-ever review is `"OPEN"`. A fresh
+  attempt with durable lineage dispositions the supplied prior IDs.
+- `revisionCitation` — `null` for a familiar finding ID. Fresh findings
+  after the first review cite changed contract or acceptance-manifest text;
+  the exact rules are supplied in the machine-validated review context.
 
-On round 2, disposition every planner response exactly once:
+After the first review, disposition every planner response exactly once:
 
 - `UNRESOLVED` stays `OPEN`.
 - `CONDITION_MET` is `RESOLVED` only when you judge its clear-condition
@@ -135,7 +136,7 @@ On round 2, disposition every planner response exactly once:
   when the planner's evidence changes your judgment.
 - Keep the planner's contested evidence in the response artifact and
   state your independent evidence in the review finding.
-- A fresh round-2 ID must be `OPEN` and cite unequal `before`/`after`
+- A fresh ID must be `OPEN` and cite unequal `before`/`after`
   excerpts copied exactly from the corresponding prior/current artifact
   above. Familiar IDs always use `revisionCitation: null`.
 

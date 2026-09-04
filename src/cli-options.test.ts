@@ -11,10 +11,14 @@ describe("parseMaxContractRounds", () => {
     expect(DEFAULT_MAX_CONTRACT_ROUNDS).toBe(2);
   });
 
-  it("accepts positive integers and caps them at two", () => {
+  it("accepts the supported normal range", () => {
     expect(parseMaxContractRounds("1")).toBe(1);
     expect(parseMaxContractRounds("2")).toBe(2);
-    expect(parseMaxContractRounds("4")).toBe(2);
+  });
+
+  it("rejects unsupported values instead of silently clamping them", () => {
+    expect(() => parseMaxContractRounds("3")).toThrow(/supports 1-2/);
+    expect(() => parseMaxContractRounds("4")).toThrow(/supports 1-2/);
   });
 
   it.each([undefined, "", "0", "-1", "1.5", "abc"])(

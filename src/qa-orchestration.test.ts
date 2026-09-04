@@ -29,6 +29,11 @@ import {
 } from "./orchestrator.js";
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
+import { loadRunState, saveRunState } from "./run-state.js";
+import { resolveCandidateTreeId } from "./gate-runner.js";
+import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
+import { saveQAConvergenceState } from "./qa-convergence.js";
+import { saveNonProgressHistory } from "./non-progress.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
@@ -506,13 +511,16 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       commitLog: "abc1234 feat(#70): round-1 work",
       handoffNote: "",
     };
+    const malformedState = loadRunState(repo, "prd-070");
+    malformedState.stageCheckpoints = "malformed";
+    saveRunState(repo, malformedState);
     vi.spyOn(gitModule, "logCommitsWithStat").mockReturnValue(
       STUCK_DIAGNOSIS_COMMIT_LOG,
     );
 
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
-      error: "QA failed after 3 implementation rounds",
+      error: expect.stringContaining("EQUIVALENT_REPETITION"),
     });
     // Rounds 2 and 3 only — the fourth implementation round the QA
     // finding demonstrated is not reachable through an ordinary resume.
@@ -524,22 +532,88 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
     expect(existsSync(join(reviewDir, "qa-review-r4-a1.json"))).toBe(false);
-    expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toBe(
-      EXPECTED_STUCK_DIAGNOSIS,
-    );
-    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain("Best guess");
-    expect(EXPECTED_STUCK_DIAGNOSIS).not.toContain(
+    const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
+    expect(diagnosis).toContain("EQUIVALENT_REPETITION");
+    expect(diagnosis).toContain("intervention.json");
+    expect(diagnosis).toContain("Round 3 attempt 1 (deterministic)");
+    expect(diagnosis).toContain(STUCK_DIAGNOSIS_COMMIT_LOG);
+    expect(diagnosis).not.toContain("Best guess");
+    expect(diagnosis).not.toContain(
       "SYNTHESIS-SHOULD-NOT-APPEAR",
+    );
+    expect(
+      readFileSync(join(ctx.logger.runDir, "run.log"), "utf-8"),
+    ).toContain(
+      "exact-stage resume unavailable — the exact-stage checkpoint collection is malformed; " +
+        "candidate preserved, falling back to normal re-evaluation",
     );
 
     const rolesAfterExhaustion = [...roles];
     rmSync(join(artifactDir, "stuck.md"));
+    recordExactStageCheckpoint(
+      { repoRoot: repo, prdSlug: "prd-070", ghIssue: "70" },
+      {
+        version: 1,
+        completedStage: "deterministic-qa",
+        candidateTreeId: "b".repeat(40),
+        nextPendingStage: "post-qa-deterministic",
+        round: 3,
+      },
+    );
 
-    await expect(runSliceExecute(ctx)).resolves.toEqual({
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
-      error: "QA failed after 3 implementation rounds",
+      error: expect.stringContaining(
+        "AFK exhausted 0 implementation attempt(s) without an accepted candidate",
+      ),
     });
     expect(roles).toEqual(rolesAfterExhaustion);
+    expect(
+      readFileSync(join(ctx.logger.runDir, "run.log"), "utf-8"),
+    ).toContain(
+      `does not match recorded tree ${"b".repeat(40)}; candidate preserved, ` +
+        "falling back to normal re-evaluation",
+    );
+    expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
+    const exhausted = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(exhausted).toMatchObject({
+      cause: {
+        kind: "QA_CONVERGENCE",
+        interventionClass: "IMPLEMENTATION_INTERVENTION",
+      },
+      reasonCodes: ["SEMANTIC_CAP_EXHAUSTED"],
+      blockerIds: expect.arrayContaining(["QA-BETA"]),
+      findingLineage: expect.arrayContaining([
+        expect.objectContaining({
+          currentId: "QA-BETA",
+          artifactReferences: expect.any(Array),
+        }),
+      ]),
+      attemptedRepairs: expect.arrayContaining([
+        expect.objectContaining({
+          phase: "deterministic-qa",
+          activeBlockingIds: expect.arrayContaining(["QA-BETA"]),
+          findingLineage: expect.arrayContaining([
+            expect.objectContaining({
+              currentId: "QA-BETA",
+              state: "OPEN",
+              evidence: expect.any(String),
+            }),
+          ]),
+          supportingEvidence: expect.any(Array),
+        }),
+      ]),
+      supportingEvidence: expect.any(Array),
+      preservedCandidate: {
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
+    expect(exhausted.supportingEvidence.length).toBeGreaterThan(0);
+    expect(exhausted.attemptedRepairs[0].supportingEvidence.length)
+      .toBeGreaterThan(0);
     expect(readFileSync(join(artifactDir, "stuck.md"), "utf-8")).toContain(
       "Round 3 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
     );
@@ -835,7 +909,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
   });
 
-  it("blocks evaluation until every required checkpoint gate passes", async () => {
+  it("blocks evaluation and emits typed evidence when required checkpoint gates exhaust", async () => {
     const repo = makeRepo();
     const gateScript =
       "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
@@ -853,6 +927,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     let generators = 0;
     let evaluators = 0;
     let artifactDir = "";
+    let exhaustGates = false;
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
@@ -863,7 +938,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           generatorPrompts.push(options.prompt);
           writeFileSync(
             join(repo, "gate-state.txt"),
-            generators === 1 ? "fail" : "pass",
+            exhaustGates || generators === 1 ? "fail" : "pass",
             "utf-8",
           );
         } else if (options.role === "evaluator-qa") {
@@ -976,6 +1051,134 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       treeId: passingAttempt.treeId,
       gateIds: ["typecheck", "tests"],
     });
+
+    // Reuse the same real-gate fixture to prove the terminal branch too.
+    // Seed durable prior QA evidence in that same fixture so gate exhaustion
+    // must merge semantic lineage instead of replacing it with gate-only data.
+    const priorTreeId = resolveCandidateTreeId(repo);
+    const priorArtifact =
+      ".afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-prior.json";
+    const priorReport =
+      "specs/slices/01-prd-070-regression/qa-report-prior.md";
+    saveQAConvergenceState(
+      { repoRoot: repo, prdSlug: "prd-070", ghIssue: "70" },
+      {
+        version: 1,
+        extensionUsed: false,
+        revision: 1,
+        findings: {
+          "deterministic:QA-PRIOR": {
+            stableId: "QA-PRIOR",
+            currentId: "QA-PRIOR",
+            stage: "deterministic",
+            disposition: "REGRESSED",
+            firstSeenRevision: 1,
+            lastSeenRevision: 1,
+            occurrences: 2,
+            candidateTreeId: priorTreeId,
+            finding: {
+              id: "QA-PRIOR",
+              severity: "BLOCKING",
+              behaviorIds: ["B-PRIOR"],
+              summary: "Prior QA behavior regressed",
+              evidence: "The prior semantic assertion failed",
+              expected: "The prior behavior remains fixed",
+              observed: "The prior behavior regressed",
+              clearCondition: "The prior semantic assertion passes",
+              state: "OPEN",
+              remedy: "SOURCE_CHANGE",
+              amendmentPaths: [],
+            },
+            artifactReferences: [priorArtifact, priorReport],
+          },
+        },
+      },
+    );
+    saveNonProgressHistory(
+      { repoRoot: repo, prdSlug: "prd-070", ghIssue: "70" },
+      {
+        version: 1,
+        observations: [
+          {
+            cause: {
+              kind: "QA_CONVERGENCE",
+              interventionClass: "IMPLEMENTATION_INTERVENTION",
+            },
+            phase: "deterministic-qa",
+            revision: 1,
+            candidate: {
+              branch: "main",
+              treeId: priorTreeId,
+              phase: "deterministic-qa",
+              revision: 1,
+            },
+            activeBlockingIds: ["QA-PRIOR"],
+            repeatedBlockingIds: [],
+            reopenedWithoutNewEvidenceIds: [],
+            regressedBlockingIds: ["QA-PRIOR"],
+            findings: [
+              {
+                stableId: "QA-PRIOR",
+                currentId: "QA-PRIOR",
+                state: "OPEN",
+                disposition: "REGRESSED",
+                occurrences: 2,
+                summary: "Prior QA behavior regressed",
+                evidence: "The prior semantic assertion failed",
+                clearCondition: "The prior semantic assertion passes",
+                artifactReferences: [priorArtifact, priorReport],
+              },
+            ],
+            supportingEvidence: ["semantic-evidence:prior-qa"],
+          },
+        ],
+      },
+    );
+    exhaustGates = true;
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
+      phase: "STUCK",
+      error: expect.stringContaining(
+        "AFK exhausted deterministic base-gate repair capacity",
+      ),
+    });
+    expect(generators).toBe(5);
+    expect(evaluators).toBe(1);
+    const intervention = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(intervention).toMatchObject({
+      cause: {
+        kind: "DETERMINISTIC_GATE_EXHAUSTION",
+        interventionClass: "IMPLEMENTATION_INTERVENTION",
+      },
+      reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
+      blockerIds: expect.arrayContaining(["QA-PRIOR", "tests", "typecheck"]),
+      findingLineage: expect.arrayContaining([
+        expect.objectContaining({
+          currentId: "QA-PRIOR",
+          disposition: "REGRESSED",
+          artifactReferences: [priorArtifact, priorReport],
+        }),
+      ]),
+      attemptedRepairs: expect.arrayContaining([
+        expect.objectContaining({
+          candidateTreeId: priorTreeId,
+          activeBlockingIds: ["QA-PRIOR"],
+        }),
+        expect.objectContaining({
+          phase: "deterministic-qa",
+          activeBlockingIds: ["tests", "typecheck"],
+        }),
+      ]),
+      supportingEvidence: expect.arrayContaining([
+        expect.stringMatching(/attempt-[\w]+\.json/),
+        expect.stringMatching(/typecheck\.log/),
+        expect.stringMatching(/tests\.log/),
+        priorArtifact,
+        priorReport,
+        "semantic-evidence:prior-qa",
+      ]),
+    });
   });
 
   it("retries infrastructure without consuming an implementation round", async () => {
@@ -1028,7 +1231,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
    * cheapest shape that gets there: one generator round, one PASS review,
    * no package.json so no gate subprocess.
    */
-  it("ships a diagnosis when the post-commit migration gate refuses", async () => {
+  it("resumes the pending post-QA deterministic gate without another agent round", async () => {
     const repo = makeRepo();
     // The feature branch sits behind the slice's work, which is what makes
     // the migration diff — and the commit evidence in the diagnosis —
@@ -1036,13 +1239,17 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     git(repo, ["branch", "base", "main"]);
     const migration = join("supabase", "migrations", "001_orders.sql");
     let artifactDir = "";
+    let generators = 0;
+    let evaluators = 0;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (options.role === "generator") {
+          generators++;
           mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
           writeFileSync(join(repo, migration), "-- orders\n", "utf-8");
         } else if (options.role === "evaluator-qa") {
+          evaluators++;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -1058,19 +1265,84 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       featBranch: "base",
     };
     artifactDir = ctx.absSliceDir;
-    vi.spyOn(migrationGate, "verifyMigrationSync").mockReturnValue({
-      ok: false,
-      error: "local migrations not applied to remote: 001",
+    let migrationAttempts = 0;
+    vi.spyOn(migrationGate, "verifyMigrationSync").mockImplementation(() => {
+      migrationAttempts++;
+      if (migrationAttempts === 1) {
+        throw new Error(
+          "simulated process death after accepted QA and before the deterministic gate",
+        );
+      }
+      return {
+        ok: false,
+        error: "local migrations not applied to remote: 001",
+      };
     });
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({
-      phase: "STUCK",
+      phase: "ERROR",
       error:
+        "simulated process death after accepted QA and before the deterministic gate",
+    });
+    expect(generators).toBe(1);
+    expect(evaluators).toBe(1);
+    expect(migrationAttempts).toBe(1);
+    expect(loadRunState(repo, "prd-070").stageCheckpoints).toMatchObject({
+      "70": {
+        completedStage: "deterministic-qa",
+        candidateTreeId: resolveCandidateTreeId(repo),
+        nextPendingStage: "post-qa-deterministic",
+        round: 1,
+      },
+    });
+    const progressBeforeResume = ctx.logger.getSliceProgress("70");
+
+    ctx.resume = {
+      mode: "killed",
+      commitsAhead: 1,
+      commitLog: "accepted candidate",
+      handoffNote: "",
+    };
+    await expect(runSliceExecute(ctx)).resolves.toMatchObject({
+      phase: "STUCK",
+      error: expect.stringContaining(
         "Migration sync check failed: local migrations not applied to remote: 001",
+      ),
+    });
+    expect(migrationAttempts).toBe(2);
+    expect(generators).toBe(1);
+    expect(evaluators).toBe(1);
+    expect(ctx.logger.getSliceProgress("70")).toEqual(progressBeforeResume);
+    expect(loadRunState(repo, "prd-070").stageCheckpoints).toBeUndefined();
+    const recovery = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(recovery).toMatchObject({
+      cause: {
+        kind: "CHECKPOINT_RECOVERY",
+        interventionClass: "RECOVERY_ACTION",
+      },
+      interventionClass: "RECOVERY_ACTION",
+      blockerIds: ["post-qa-deterministic"],
+      attemptedRepairs: [
+        expect.objectContaining({
+          phase: "deterministic-qa",
+          activeBlockingIds: ["post-qa-deterministic"],
+        }),
+      ],
+      supportingEvidence: expect.arrayContaining([
+        expect.stringMatching(/^candidate-tree:[0-9a-f]{40}$/),
+        "pending-stage:post-qa-deterministic",
+        "pending-stage-error:Migration sync check failed: local migrations not applied to remote: 001",
+      ]),
+      preservedCandidate: {
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
     });
 
-    // The whole point: the outcome carries a diagnosis, and the diagnosis
-    // says which check refused rather than blaming exhausted rounds.
+    // The resumed deterministic failure still carries the existing
+    // diagnosis and exact quality-gate behavior.
     const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
     expect(diagnosis).toContain(
       "Migration sync check failed: local migrations not applied to remote: 001",
@@ -1087,7 +1359,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(diagnosis).toContain("feat(#70): PRD 070 regression");
   });
 
-  it("routes only the current unresolved findings to QA and generator retries", async () => {
+  it("routes compact lineage and grants one final repair for a fresh round-three blocker", async () => {
     const repo = makeRepo();
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
@@ -1103,7 +1375,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           const round = evaluatorPrompts.length;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
-            `# QA Report\n\n**Verdict:** ${round === 3 ? "PASS" : "FAIL"}\n`,
+            `# QA Report\n\n**Verdict:** ${round === 4 ? "PASS" : "FAIL"}\n`,
             "utf-8",
           );
           const finding = (
@@ -1127,58 +1399,61 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
             round === 1
               ? [
                   finding(
-                    "QA-BLOCKING",
+                    "QA-01",
                     "BLOCKING",
-                    "Blocking summary",
-                    "Blocking condition",
+                    "First blocker",
+                    "First condition",
                   ),
                   finding(
-                    "QA-ADVISORY",
-                    "ADVISORY",
-                    "Advisory summary",
-                    "Advisory condition",
+                    "QA-02",
+                    "BLOCKING",
+                    "Second blocker",
+                    "Second condition",
                   ),
                 ]
               : round === 2
                 ? [
                     finding(
-                      "QA-BLOCKING",
+                      "QA-01",
                       "BLOCKING",
-                      "Blocking summary",
-                      "Blocking condition",
+                      "First blocker",
+                      "First condition",
                       "RESOLVED",
                     ),
                     finding(
-                      "QA-ADVISORY",
-                      "ADVISORY",
-                      "Advisory summary",
-                      "Advisory condition",
-                    ),
-                    finding(
-                      "QA-FRESH",
+                      "QA-02",
                       "BLOCKING",
-                      "Fresh summary",
-                      "Fresh condition",
+                      "Second blocker",
+                      "Second condition",
                     ),
                   ]
-                : [
+                : round === 3
+                  ? [
                     finding(
-                      "QA-ADVISORY",
-                      "ADVISORY",
-                      "Advisory summary",
-                      "Advisory condition",
-                      "RESOLVED",
-                    ),
-                    finding(
-                      "QA-FRESH",
+                      "QA-02",
                       "BLOCKING",
-                      "Fresh summary",
-                      "Fresh condition",
+                      "Second blocker",
+                      "Second condition",
                       "RESOLVED",
                     ),
-                  ];
+                    finding(
+                      "QA-03",
+                      "BLOCKING",
+                      "Fresh late blocker",
+                      "Fresh late condition",
+                    ),
+                  ]
+                  : [
+                      finding(
+                        "QA-03",
+                        "BLOCKING",
+                        "Fresh late blocker",
+                        "Fresh late condition",
+                        "RESOLVED",
+                      ),
+                    ];
           writeQAReview(artifactDir, "deterministic", {
-            verdict: round === 3 ? "PASS" : "FAIL",
+            verdict: round === 4 ? "PASS" : "FAIL",
             findings,
           });
         }
@@ -1189,42 +1464,161 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     artifactDir = ctx.absSliceDir;
 
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
-    expect(generatorPrompts).toHaveLength(3);
-    expect(evaluatorPrompts).toHaveLength(3);
+    expect(generatorPrompts).toHaveLength(4);
+    expect(evaluatorPrompts).toHaveLength(4);
 
-    expect(generatorPrompts[1]).toContain("QA-BLOCKING");
-    expect(generatorPrompts[1]).toContain("Blocking summary");
-    expect(generatorPrompts[1]).toContain("Blocking condition");
-    expect(generatorPrompts[1]).toContain("QA-ADVISORY");
-    expect(generatorPrompts[1]).toContain("Advisory summary");
-    expect(generatorPrompts[1]).toContain("Advisory condition");
+    expect(generatorPrompts[1]).toContain("QA-01");
+    expect(generatorPrompts[1]).toContain("First blocker");
+    expect(generatorPrompts[1]).toContain("First condition");
+    expect(generatorPrompts[1]).toContain("QA-02");
+    expect(generatorPrompts[1]).toContain("Second blocker");
+    expect(generatorPrompts[1]).toContain("Second condition");
     expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
 
-    expect(evaluatorPrompts[1]).toContain("QA-BLOCKING");
-    expect(evaluatorPrompts[1]).toContain("QA-ADVISORY");
+    expect(evaluatorPrompts[1]).toContain("QA-01");
+    expect(evaluatorPrompts[1]).toContain("QA-02");
     expect(evaluatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[1]).toContain("qa-report-r1-a1.md");
 
-    expect(generatorPrompts[2]).not.toContain("QA-BLOCKING");
-    expect(generatorPrompts[2]).toContain("QA-ADVISORY");
-    expect(generatorPrompts[2]).toContain("Advisory summary");
-    expect(generatorPrompts[2]).toContain("Advisory condition");
-    expect(generatorPrompts[2]).toContain("QA-FRESH");
-    expect(generatorPrompts[2]).toContain("Fresh summary");
-    expect(generatorPrompts[2]).toContain("Fresh condition");
+    expect(generatorPrompts[2]).toContain("Current open QA findings");
+    expect(generatorPrompts[2]).toContain("QA-02");
+    expect(generatorPrompts[2]).toContain("Relevant resolved QA findings");
+    expect(generatorPrompts[2]).toContain("QA-01");
     expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
-    expect(generatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
-    expect(generatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
 
-    expect(evaluatorPrompts[2]).not.toContain("QA-BLOCKING");
-    expect(evaluatorPrompts[2]).toContain("QA-ADVISORY");
-    expect(evaluatorPrompts[2]).toContain("QA-FRESH");
+    expect(evaluatorPrompts[2]).not.toContain("Finding ID: `QA-01`");
+    expect(evaluatorPrompts[2]).toContain("QA-02");
     expect(evaluatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(evaluatorPrompts[2]).toContain("qa-report-r2-a1.md");
     expect(evaluatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
+
+    expect(generatorPrompts[3]).toContain("Current open QA findings");
+    expect(generatorPrompts[3]).toContain("QA-03");
+    expect(generatorPrompts[3]).toContain("Fresh late blocker");
+    expect(generatorPrompts[3]).toContain("Relevant resolved QA findings");
+    expect(generatorPrompts[3]).toContain("QA-01");
+    expect(generatorPrompts[3]).toContain("QA-02");
+    expect(generatorPrompts[3]).toContain("qa-review-r3-a1.json");
+    expect(generatorPrompts[3]).not.toContain("qa-review-r1-a1.json");
+
+    expect(evaluatorPrompts[3]).toContain("QA-03");
+    expect(evaluatorPrompts[3]).not.toContain("Finding ID: `QA-01`");
+    expect(evaluatorPrompts[3]).not.toContain("Finding ID: `QA-02`");
+    expect(evaluatorPrompts[3]).toContain("qa-review-r3-a1.json");
+
+    const persisted = loadRunState(repo, "prd-070").qaConvergence as {
+      "70": { extensionUsed: boolean; revision: number };
+    };
+    expect(persisted["70"]).toMatchObject({
+      extensionUsed: true,
+      revision: 4,
+    });
+  });
+
+  /**
+   * Reuses the existing non-progress runSliceExecute scenario. Three rounds
+   * are necessary to observe A-B-A state oscillation; renaming the reopened
+   * finding in that same third round also proves regression growth without a
+   * second spawned pipeline fixture.
+   */
+  it("stops QA on oscillation and regression growth in one existing scenario", async () => {
+    const repo = makeRepo();
+    let artifactDir = "";
+    let generators = 0;
+    let evaluators = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          generators++;
+          writeFileSync(
+            join(repo, "change.txt"),
+            `${generators}\n`,
+            "utf-8",
+          );
+        } else if (options.role === "evaluator-qa") {
+          evaluators++;
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** FAIL\n",
+            "utf-8",
+          );
+          const cycle = {
+            id: evaluators === 3 ? "QA-CYCLE-RENAMED" : "QA-CYCLE",
+            severity: "BLOCKING" as const,
+            behaviorIds: ["B-CYCLE"],
+            summary: "The cycling blocker",
+            evidence: "src/change.ts alternates behavior",
+            expected: "The value remains correct",
+            observed: "The value regressed",
+            clearCondition: "The focused behavior test remains green",
+            state: (evaluators === 2 ? "RESOLVED" : "OPEN") as
+              | "OPEN"
+              | "RESOLVED",
+          };
+          const next = {
+            id: "QA-NEXT",
+            severity: "BLOCKING" as const,
+            behaviorIds: ["B-NEXT"],
+            summary: "The next blocker",
+            evidence: "src/change.ts has a second issue",
+            expected: "The second behavior is correct",
+            observed: "The second behavior is wrong",
+            clearCondition: "The second focused test remains green",
+            state: (evaluators === 2 ? "OPEN" : "RESOLVED") as
+              | "OPEN"
+              | "RESOLVED",
+          };
+          writeQAReview(artifactDir, "deterministic", {
+            verdict: "FAIL",
+            findings: evaluators === 1 ? [cycle] : [cycle, next],
+          });
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider);
+    artifactDir = ctx.absSliceDir;
+
+    const result = await runSliceExecute(ctx);
+
+    expect(result.phase).toBe("STUCK");
+    expect(result).toMatchObject({
+      error: expect.stringContaining("OSCILLATION"),
+    });
+    expect(generators).toBe(3);
+    expect(evaluators).toBe(3);
+    const intervention = JSON.parse(
+      readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
+    );
+    expect(intervention).toMatchObject({
+      version: 1,
+      interventionClass: "IMPLEMENTATION_INTERVENTION",
+      phase: "deterministic-qa",
+      reasonCodes: ["OSCILLATION", "REGRESSION_GROWTH"],
+      blockerIds: ["QA-CYCLE-RENAMED"],
+      preservedCandidate: {
+        branch: "main",
+        recoveryRef: expect.stringContaining("refs/afk/recovery/"),
+        recoveryCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
+    expect(intervention.preservedCandidate.recoveryRef).toContain(
+      `-r${intervention.preservedCandidate.revision}-` +
+        intervention.preservedCandidate.treeId,
+    );
+    expect(intervention.attemptedRepairs).toHaveLength(3);
+    expect(intervention.requiredOperatorAction).toContain(
+      "QA-CYCLE-RENAMED",
+    );
+    const diagnosis = readFileSync(join(artifactDir, "stuck.md"), "utf-8");
+    expect(diagnosis).toContain("intervention.json");
+    expect(diagnosis).not.toContain(
+      "QA failed after 3 implementation rounds",
+    );
   });
 
   it("cancels a base gate process tree without evaluator or repair", async () => {

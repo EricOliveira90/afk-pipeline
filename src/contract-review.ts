@@ -102,7 +102,7 @@ export interface ContractResponseEntry {
 
 export interface ContractResponse {
   version: 1;
-  round: 2;
+  round: number;
   responses: ContractResponseEntry[];
 }
 
@@ -410,6 +410,7 @@ export function parseContractReview(
 export function parseContractResponse(
   text: string,
   routedFindingIds: readonly string[],
+  expectedRound = 2,
   source = CONTRACT_RESPONSE_FILENAME,
 ): ContractResponse {
   let parsed: unknown;
@@ -434,8 +435,8 @@ export function parseContractResponse(
   if (input.version !== 1) {
     throw new Error(`${source} must declare version 1`);
   }
-  if (input.round !== 2) {
-    throw new Error(`${source} must declare round 2`);
+  if (input.round !== expectedRound) {
+    throw new Error(`${source} must declare round ${expectedRound}`);
   }
   if (!Array.isArray(input.responses)) {
     throw new Error(`${source} responses must be an array`);
@@ -503,7 +504,7 @@ export function parseContractResponse(
       `${source} response IDs must equal routed finding IDs (${details})`,
     );
   }
-  return { version: 1, round: 2, responses };
+  return { version: 1, round: expectedRound, responses };
 }
 
 export function contractReviewPath(sliceDir: string): string {
@@ -526,6 +527,7 @@ export function loadContractReview(sliceDir: string): ContractReview {
 export function loadContractResponse(
   sliceDir: string,
   routedFindingIds: readonly string[],
+  expectedRound = 2,
 ): ContractResponse {
   const path = join(sliceDir, CONTRACT_RESPONSE_FILENAME);
   if (!existsSync(path)) {
@@ -534,6 +536,7 @@ export function loadContractResponse(
   return parseContractResponse(
     readFileSync(path, "utf-8"),
     routedFindingIds,
+    expectedRound,
     path,
   );
 }
@@ -693,7 +696,7 @@ export function validateRound1ContractReview(review: ContractReview): void {
 
 /**
  * Validate the evaluator's disposition of each routed planner position.
- * Fresh round-2 IDs are validated separately against revision citations.
+ * Fresh later-round IDs are validated separately against revision citations.
  */
 export function validateRound2ContractReview(
   previous: ContractReview,
@@ -704,9 +707,6 @@ export function validateRound2ContractReview(
 ): void {
   const previousById = new Map(
     previous.findings.map((finding) => [finding.id, finding]),
-  );
-  const lifecyclePreviousById = new Map(
-    lifecyclePrevious.findings.map((finding) => [finding.id, finding]),
   );
   const currentById = new Map(
     current.findings.map((finding) => [finding.id, finding]),
@@ -750,18 +750,11 @@ export function validateRound2ContractReview(
           `${CONTRACT_REVIEW_FILENAME} familiar finding ${finding.id} must use revisionCitation null`,
         );
       }
-      const lifecyclePreviousFinding =
-        lifecyclePreviousById.get(finding.id) ?? previousFinding;
-      const wasTerminal =
-        lifecyclePreviousFinding.state === "RESOLVED" ||
-        lifecyclePreviousFinding.state === "WITHDRAWN";
-      const isActive =
-        finding.state === "OPEN" || finding.state === "CONTESTED";
-      if (wasTerminal && isActive) {
-        throw new Error(
-          `${CONTRACT_REVIEW_FILENAME} terminal finding ${finding.id} cannot reactivate as ${finding.state}`,
-        );
-      }
+      // A durable finding may legitimately reopen under the same stable ID.
+      // Its structured evidence is then compared by convergence policy,
+      // which classifies unchanged evidence as non-progress. Rejecting the
+      // transition here made that policy unreachable and turned a bounded
+      // intervention into a malformed-artifact ERROR.
       continue;
     }
 

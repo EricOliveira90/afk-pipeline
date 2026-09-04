@@ -43,6 +43,8 @@ import {
   nextFreeMigrationPrefix,
   isWorktreeBusyError,
   recreateWorktreeFromBase,
+  preserveRecoveryTree,
+  resolveTree,
   removeWorktree,
   type WorktreeBusyError,
 } from "./git.js";
@@ -108,6 +110,60 @@ describe("git.branchExists", () => {
     // before initializing feat from it. Remote-only branches should not
     // count.
     expect(branchExists(repoDir, "origin/main")).toBe(false);
+  });
+});
+
+describe("git.preserveRecoveryTree", () => {
+  let repoDir: string;
+
+  beforeAll(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "afk-recovery-ref-"));
+    git(repoDir, ["init", "--initial-branch=main"]);
+    writeFileSync(join(repoDir, "candidate.txt"), "candidate\n");
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "root"]);
+  });
+
+  afterAll(() => rmDirWithRetry(repoDir));
+
+  it("anchors the exact tree behind an idempotent reachable ref", () => {
+    const treeId = git(repoDir, ["rev-parse", "HEAD^{tree}"]);
+    const input = {
+      ref: "refs/afk/recovery/demo/157/deterministic-qa",
+      treeId,
+      parentRef: "main",
+      message: "preserve candidate",
+    };
+    const first = preserveRecoveryTree(repoDir, input);
+    const second = preserveRecoveryTree(repoDir, input);
+
+    expect(second).toEqual(first);
+    expect(resolveTree(repoDir, first.ref)).toBe(treeId);
+    expect(git(repoDir, ["cat-file", "-t", first.commit])).toBe("commit");
+  });
+
+  it("refuses to repoint an immutable recovery ref", () => {
+    const ref = "refs/afk/recovery/demo/157/immutable-r1-candidate";
+    const firstTree = git(repoDir, ["rev-parse", "HEAD^{tree}"]);
+    preserveRecoveryTree(repoDir, {
+      ref,
+      treeId: firstTree,
+      parentRef: "main",
+      message: "first candidate",
+    });
+    writeFileSync(join(repoDir, "candidate.txt"), "different\n");
+    git(repoDir, ["add", "-A"]);
+    const secondTree = git(repoDir, ["write-tree"]);
+
+    expect(() =>
+      preserveRecoveryTree(repoDir, {
+        ref,
+        treeId: secondTree,
+        parentRef: "main",
+        message: "different candidate",
+      }),
+    ).toThrow(/cannot be repointed/);
+    expect(resolveTree(repoDir, ref)).toBe(firstTree);
   });
 });
 

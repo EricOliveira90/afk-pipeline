@@ -744,7 +744,7 @@ describe("validateRound2ContractReview", () => {
     ).toThrow(/omitted routed finding F-01/);
   });
 
-  it("refuses terminal reactivation and uncited fresh findings", () => {
+  it("allows terminal reactivation but still refuses uncited fresh findings", () => {
     const noResponses = parseContractResponse(
       '{"version":1,"round":2,"responses":[]}',
       [],
@@ -777,7 +777,7 @@ describe("validateRound2ContractReview", () => {
         activeCurrent,
         revisions,
       ),
-    ).toThrow(/terminal finding F-01 cannot reactivate as OPEN/);
+    ).not.toThrow();
 
     expect(() =>
       validateRound2ContractReview(
@@ -915,6 +915,26 @@ describe("validateRound2ContractReview", () => {
         },
       ),
     ).toThrow(/familiar finding F-01 must use revisionCitation null/);
+  });
+
+  it("allows a terminal stable ID to reopen so convergence policy can classify it", () => {
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "REVISE", findings: [FINDING] },
+        responseFor("UNRESOLVED"),
+        {
+          version: 2,
+          verdict: "REVISE",
+          findings: [{ ...FINDING, state: "OPEN", revisionCitation: null }],
+        },
+        undefined,
+        {
+          version: 2,
+          verdict: "ACCEPT",
+          findings: [{ ...FINDING, state: "RESOLVED" }],
+        },
+      ),
+    ).not.toThrow();
   });
 });
 

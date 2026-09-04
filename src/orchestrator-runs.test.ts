@@ -1980,7 +1980,8 @@ describe("events.jsonl tee (spec #26)", () => {
       const stuckPrior = priorWarns.find((w) => w.ghIssue === LEAD);
       expect(stuckPrior).toBeDefined();
       expect(stuckPrior!.previousPhase).toBe("STUCK");
-      expect(stuckPrior!.previousError).toContain("QA failed");
+      expect(stuckPrior!.previousError).toContain("EQUIVALENT_REPETITION");
+      expect(stuckPrior!.previousError).toContain("intervention.json");
       const passPrior = priorWarns.find((w) => w.ghIssue === MATE);
       expect(passPrior).toBeDefined();
       expect(passPrior!.previousPhase).toBe("PASS");
@@ -2258,7 +2259,13 @@ describe("narrowed re-run of the failed slices (#41)", () => {
   function fixturesWith(dependentPasses: boolean): Map<string, SliceFixture> {
     return new Map<string, SliceFixture>([
       ["4101", { files: ["src/foundation.txt"], qaPasses: true, outputFile: "src/foundation.txt", outputContent: "foundation" }],
-      ["4102", { files: ["src/dependent.txt"], qaPasses: dependentPasses, outputFile: "src/dependent.txt", outputContent: "dependent" }],
+      ["4102", {
+        files: ["src/dependent.txt"],
+        qaPasses: dependentPasses,
+        qaResolvesPriorFindingOnPass: dependentPasses,
+        outputFile: "src/dependent.txt",
+        outputContent: "dependent",
+      }],
     ]);
   }
 

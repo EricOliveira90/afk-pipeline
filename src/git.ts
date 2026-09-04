@@ -1098,6 +1098,80 @@ export function resolveTree(cwd: string, ref = "HEAD"): string | null {
   }
 }
 
+export interface PreservedRecoveryRef {
+  ref: string;
+  commit: string;
+  treeId: string;
+}
+
+/**
+ * Anchor an exact candidate tree behind a deterministic AFK-owned ref.
+ *
+ * A raw tree ID is only diagnostic: normal git GC may prune it when no commit
+ * reaches it. The synthetic commit makes the tree durable without moving the
+ * slice branch or changing its worktree. Repeating the operation for the same
+ * ref and tree is a no-op. A recovery ref is immutable: attempting to use
+ * an existing name for a different tree is a caller defect, never a ref move.
+ */
+export function preserveRecoveryTree(
+  repoRoot: string,
+  input: {
+    ref: string;
+    treeId: string;
+    parentRef?: string;
+    message: string;
+  },
+): PreservedRecoveryRef {
+  if (!input.ref.startsWith("refs/afk/recovery/")) {
+    throw new Error(`Recovery ref must live under refs/afk/recovery/: ${input.ref}`);
+  }
+  if (resolveTree(repoRoot, input.treeId) !== input.treeId) {
+    throw new Error(`Cannot preserve missing candidate tree ${input.treeId}`);
+  }
+  const existing = resolveCommit(repoRoot, input.ref);
+  if (existing) {
+    const existingTree = resolveTree(repoRoot, input.ref);
+    if (existingTree !== input.treeId) {
+      throw new Error(
+        `Recovery ref ${input.ref} already preserves tree ${existingTree}; ` +
+          `it cannot be repointed to ${input.treeId}`,
+      );
+    }
+    return { ref: input.ref, commit: existing, treeId: input.treeId };
+  }
+  const args = ["commit-tree", input.treeId];
+  const parent = input.parentRef
+    ? resolveCommit(repoRoot, input.parentRef)
+    : null;
+  if (parent) args.push("-p", parent);
+  args.push("-m", input.message);
+  const identity = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "AFK Recovery",
+    GIT_AUTHOR_EMAIL: "afk-recovery@localhost",
+    GIT_AUTHOR_DATE: "1970-01-01T00:00:00Z",
+    GIT_COMMITTER_NAME: "AFK Recovery",
+    GIT_COMMITTER_EMAIL: "afk-recovery@localhost",
+    GIT_COMMITTER_DATE: "1970-01-01T00:00:00Z",
+  };
+  const commit = git(args, { cwd: repoRoot, env: identity });
+  try {
+    git(["update-ref", input.ref, commit, "0".repeat(40)], { cwd: repoRoot });
+  } catch (error) {
+    const raced = resolveCommit(repoRoot, input.ref);
+    if (raced && resolveTree(repoRoot, input.ref) === input.treeId) {
+      return { ref: input.ref, commit: raced, treeId: input.treeId };
+    }
+    throw error;
+  }
+  if (resolveTree(repoRoot, input.ref) !== input.treeId) {
+    throw new Error(
+      `Recovery ref ${input.ref} did not preserve candidate tree ${input.treeId}`,
+    );
+  }
+  return { ref: input.ref, commit, treeId: input.treeId };
+}
+
 /** Repo-relative migration paths added between the run base and final ref. */
 export function listAddedMigrationFiles(
   repoRoot: string,

@@ -37,7 +37,7 @@ export interface PersistedSliceState {
 }
 
 export interface RunState {
-  version: 1;
+  version: 2;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -69,6 +69,30 @@ export interface RunState {
    * state files that predate the field stay loadable unchanged.
    */
   resume?: Record<string, SliceResumeState>;
+  /**
+   * Per-slice exact-stage checkpoints. The focused checkpoint module owns
+   * the value schema and validation; run-state preserves the raw value so a
+   * malformed checkpoint can fail closed with an honest reason instead of
+   * being silently dropped during load.
+   */
+  stageCheckpoints?: unknown;
+  /**
+   * Per-slice compact contract finding lineage. The convergence module owns
+   * this raw schema and policy; run-state only preserves it beside, but
+   * independently from, exact-stage checkpoints.
+   */
+  contractConvergence?: unknown;
+  /**
+   * Per-slice compact candidate-QA finding lineage. The QA convergence
+   * module owns this raw schema and the one progress-qualified extension.
+   */
+  qaConvergence?: unknown;
+  /**
+   * Compact provider-independent observations used to stop repeated,
+   * oscillating, or regressing semantic work before another dispatch.
+   * The focused non-progress module owns validation and policy.
+   */
+  nonProgress?: unknown;
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
 }
@@ -220,15 +244,16 @@ function statePath(repoRoot: string, prdSlug: string): string {
 }
 
 /**
- * Load run state, adapting unversioned (v0) files in place. v0 files used
- * a per-slice `status` field whose values were a strict subset of v1's
- * `phase` enum, so the migration is a field rename. Throws on unknown
+ * Load run state, adapting unversioned (v0) and v1 files in memory. v0 files
+ * used a per-slice `status` field whose values were a strict subset of v1's
+ * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
+ * checkpoint storage whose focused reader owns validation. Throws on unknown
  * status strings rather than silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
   if (!existsSync(p)) {
-    return { version: 1, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
+    return { version: 2, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
   }
   const raw = JSON.parse(readFileSync(p, "utf-8")) as unknown;
   return adaptLoadedState(raw, prdSlug);
@@ -244,6 +269,10 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     slices?: Record<string, unknown>;
     reviewPhase?: unknown;
     resume?: unknown;
+    stageCheckpoints?: unknown;
+    contractConvergence?: unknown;
+    qaConvergence?: unknown;
+    nonProgress?: unknown;
     migrations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
@@ -256,7 +285,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ? r.specsDir
       : undefined;
 
-  if (r.version === 1) {
+  if (r.version === 1 || r.version === 2) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
@@ -265,7 +294,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const resume = sanitizeResumeMap(r.resume);
     const migrations = sanitizeMigrationClaims(r.migrations);
     return {
-      version: 1,
+      version: 2,
       prdSlug,
       featureBranch,
       ...(specsDir !== undefined ? { specsDir } : {}),
@@ -273,6 +302,18 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
       ...(resume !== undefined ? { resume } : {}),
+      ...(r.version === 2 && r.stageCheckpoints !== undefined
+        ? { stageCheckpoints: r.stageCheckpoints }
+        : {}),
+      ...(r.version === 2 && r.contractConvergence !== undefined
+        ? { contractConvergence: r.contractConvergence }
+        : {}),
+      ...(r.version === 2 && r.qaConvergence !== undefined
+        ? { qaConvergence: r.qaConvergence }
+        : {}),
+      ...(r.version === 2 && r.nonProgress !== undefined
+        ? { nonProgress: r.nonProgress }
+        : {}),
       ...(migrations !== undefined ? { migrations } : {}),
     };
   }
@@ -303,7 +344,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     };
   }
   return {
-    version: 1,
+    version: 2,
     prdSlug,
     featureBranch,
     ...(specsDir !== undefined ? { specsDir } : {}),
@@ -434,8 +475,10 @@ export function saveSliceState(
  *
  * Deliberately NOT cleared: `resume` bookkeeping (its `attempts` is the
  * poison-tree cap, and the dispatch this clearing accompanies is about
- * to increment it), `scope`, `migrations`, and `reviewPhase`. None of
- * those is a per-attempt outcome claim.
+ * to increment it), exact-stage checkpoints (the resumed dispatch must
+ * inspect one before any agent runs), contract and QA convergence lineage
+ * (fresh attempts must retain prior findings), `scope`, `migrations`, and
+ * `reviewPhase`. None of those is a per-attempt terminal outcome claim.
  */
 export function clearSliceStateForDispatch(
   repoRoot: string,
