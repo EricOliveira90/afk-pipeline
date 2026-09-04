@@ -1,10 +1,10 @@
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -12,7 +12,6 @@ import { dirname, join } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 20;
-const INCOMPLETE_OWNER_GRACE_MS = 1_000;
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 interface LockOwner {
@@ -39,8 +38,11 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-function readOwner(path: string): LockOwner | null {
+function readOwner(lockPath: string): LockOwner | null {
   try {
+    const path = existsSync(join(lockPath, "owner.json"))
+      ? join(lockPath, "owner.json")
+      : lockPath;
     const value = JSON.parse(readFileSync(path, "utf-8")) as Partial<LockOwner>;
     if (
       value.version !== 1 ||
@@ -59,40 +61,37 @@ function readOwner(path: string): LockOwner | null {
   }
 }
 
-function releaseOwnedLock(lockDir: string, token: string): void {
-  const owner = readOwner(join(lockDir, "owner.json"));
+function releaseOwnedLock(lockPath: string, token: string): void {
+  const owner = readOwner(lockPath);
   if (owner?.token !== token) return;
-  rmSync(lockDir, { recursive: true, force: true });
+  rmSync(lockPath, { recursive: true, force: true });
 }
 
 /**
  * Reclaim a lock whose owner process no longer exists.
  *
- * Atomically renaming the dead lock to the reaper directory closes the
- * stale-recovery race. The reaper directory is a quarantined dead lock, never
- * a live owner, so a later process may safely remove it if this reaper dies.
- * A freshly created lock with no owner record gets a short grace period for
- * the mkdir -> owner.json initialization gap.
+ * Atomically renaming the dead lock to the reaper path closes the
+ * stale-recovery race. The reaper path is a quarantined dead lock, never a
+ * live owner, so a later process may safely remove it if this reaper dies.
+ * New locks publish their complete owner record atomically, so missing or
+ * malformed ownership is never guessed stale. A legacy incomplete lock fails
+ * closed and times out rather than risking theft from a live initializer.
  */
-function reapDeadOwner(lockDir: string, reaperDir: string): void {
-  if (existsSync(reaperDir)) {
-    rmSync(reaperDir, { recursive: true, force: true });
+function reapDeadOwner(lockPath: string, reaperPath: string): void {
+  if (existsSync(reaperPath)) {
+    rmSync(reaperPath, { recursive: true, force: true });
     return;
   }
-  if (!existsSync(lockDir)) return;
-  const owner = readOwner(join(lockDir, "owner.json"));
-  if (owner && processIsAlive(owner.pid)) return;
-  if (!owner) {
-    const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-    if (ageMs < INCOMPLETE_OWNER_GRACE_MS) return;
-  }
+  if (!existsSync(lockPath)) return;
+  const owner = readOwner(lockPath);
+  if (!owner || processIsAlive(owner.pid)) return;
   try {
-    renameSync(lockDir, reaperDir);
+    renameSync(lockPath, reaperPath);
   } catch (error) {
     if (errorCode(error) === "ENOENT" || errorCode(error) === "EEXIST") return;
     throw error;
   }
-  rmSync(reaperDir, { recursive: true, force: true });
+  rmSync(reaperPath, { recursive: true, force: true });
 }
 
 /**
@@ -104,10 +103,15 @@ function reapDeadOwner(lockDir: string, reaperDir: string): void {
 export function withFileLock<T>(
   targetPath: string,
   action: () => T,
-  options: { timeoutMs?: number; pollMs?: number } = {},
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    /** Test seam after the complete owner record becomes visible. */
+    afterLockPublished?: () => void;
+  } = {},
 ): T {
-  const lockDir = `${targetPath}.lock`;
-  const reaperDir = `${targetPath}.lock-reaper`;
+  const lockPath = `${targetPath}.lock`;
+  const reaperPath = `${targetPath}.lock-reaper`;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
   const deadline = Date.now() + timeoutMs;
@@ -116,48 +120,52 @@ export function withFileLock<T>(
   while (true) {
     if (Date.now() >= deadline) {
       throw new Error(
-        `Timed out after ${timeoutMs}ms waiting for cross-process lock ${lockDir}`,
+        `Timed out after ${timeoutMs}ms waiting for cross-process lock ${lockPath}`,
       );
     }
-    if (existsSync(reaperDir)) {
-      reapDeadOwner(lockDir, reaperDir);
+    if (existsSync(reaperPath)) {
+      reapDeadOwner(lockPath, reaperPath);
       sleep(pollMs);
       continue;
     }
 
     const token = randomUUID();
+    const owner: LockOwner = {
+      version: 1,
+      pid: process.pid,
+      token,
+      acquiredAt: new Date().toISOString(),
+    };
+    const pendingPath = `${lockPath}.pending-${token}`;
+    writeFileSync(pendingPath, JSON.stringify(owner));
+    let acquired = false;
     try {
-      mkdirSync(lockDir);
-      const owner: LockOwner = {
-        version: 1,
-        pid: process.pid,
-        token,
-        acquiredAt: new Date().toISOString(),
-      };
-      try {
-        writeFileSync(join(lockDir, "owner.json"), JSON.stringify(owner));
-      } catch (error) {
-        rmSync(lockDir, { recursive: true, force: true });
-        throw error;
-      }
-
-      // A reaper can start between our first check and mkdir. Yield this
-      // acquisition so it never mistakes a new owner for the stale one.
-      if (existsSync(reaperDir)) {
-        releaseOwnedLock(lockDir, token);
-        sleep(pollMs);
-        continue;
-      }
-
-      try {
-        return action();
-      } finally {
-        releaseOwnedLock(lockDir, token);
-      }
+      linkSync(pendingPath, lockPath);
+      acquired = true;
     } catch (error) {
       if (errorCode(error) !== "EEXIST") throw error;
-      reapDeadOwner(lockDir, reaperDir);
+    } finally {
+      rmSync(pendingPath, { force: true });
+    }
+    if (!acquired) {
+      reapDeadOwner(lockPath, reaperPath);
       sleep(pollMs);
+      continue;
+    }
+
+    // A reaper can start between our first check and atomic publication.
+    // Yield this acquisition so it never overlaps the quarantined predecessor.
+    if (existsSync(reaperPath)) {
+      releaseOwnedLock(lockPath, token);
+      sleep(pollMs);
+      continue;
+    }
+
+    try {
+      options.afterLockPublished?.();
+      return action();
+    } finally {
+      releaseOwnedLock(lockPath, token);
     }
   }
 }
