@@ -5230,6 +5230,15 @@ export async function runSliceExecute(
 
         logger.bumpEvalRound(slice.ghIssue, round);
         if (!implementationFailed) {
+          // Before the commit, so the diagnosis this slice ships is the
+          // one the operator read, not whatever the generator left.
+          restoreStuckDiagnosis();
+          if (git.hasUncommittedChanges(ctx.worktreeDir)) {
+            git.commitAll(
+              ctx.worktreeDir,
+              `feat(#${slice.ghIssue}): ${slice.title}`,
+            );
+          }
           return dispatchAcceptedCandidate(candidateLifecycle.accept({
             round,
             candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
