@@ -98,13 +98,17 @@ import {
 import {
   createCandidateCheckpoint,
   resolveCandidateTreeId,
-  runGates,
   verifyGateEvidence,
   type GateDeclaration,
   type GateEvidence,
   type GateEvidenceArtifact,
   type GateResult,
 } from "./gate-runner.js";
+import {
+  assertGateEvidenceReleasesEvaluation,
+  runCandidateGatePhase,
+} from "./candidate-gate-phase.js";
+import { runPostQAGates } from "./post-qa-gates.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -4308,31 +4312,6 @@ export async function runQAStage(
   throw new Error(`${stage} QA exhausted without a result`);
 }
 
-function assertGateEvidenceReleasesEvaluation(
-  evidence: GateEvidence,
-  declarations: readonly GateDeclaration[],
-  treeId: string,
-): void {
-  const complete =
-    evidence.treeId === treeId &&
-    evidence.results.length === declarations.length &&
-    evidence.results.every((result, index) => {
-      const declaration = declarations[index];
-      return (
-        declaration != null &&
-        result.gateId === declaration.id &&
-        result.stage === declaration.stage &&
-        result.treeId === treeId &&
-        (!declaration.required || result.status === "PASS")
-      );
-    });
-  if (!complete) {
-    throw new Error(
-      `Gate evidence does not release evaluation for checkpoint ${treeId}`,
-    );
-  }
-}
-
 export function collectRequiredGateFailures(
   attempts: readonly { evidence: GateEvidence; evidencePath: string }[],
   declarations: readonly GateDeclaration[],
@@ -4350,122 +4329,6 @@ export function collectRequiredGateFailures(
       )
       .map((result) => ({ evidencePath, result })),
   );
-}
-
-interface CandidateGatePhaseResult {
-  evidence: GateEvidence;
-  evidencePath: string;
-  attempts: Array<{ evidence: GateEvidence; evidencePath: string }>;
-  artifacts: GateEvidenceArtifact[];
-}
-
-/**
- * Run one candidate gate phase with the existing bounded infrastructure retry
- * and evidence/event behavior. Sequencing stays with `runSliceExecute`: cheap
- * gates call this before QA, and the full suite calls it only after QA accepts.
- */
-async function runCandidateGatePhase(args: {
-  ctx: SliceContext;
-  round: number;
-  treeId: string;
-  cwd: string;
-  evidenceDir: string;
-  declarations: readonly GateDeclaration[];
-  prepare?: GateDeclaration;
-  label: string;
-}): Promise<CandidateGatePhaseResult> {
-  const { ctx, round, treeId, cwd, evidenceDir, declarations, prepare, label } =
-    args;
-  const { config, slice, logger } = ctx;
-  const { signal } = config;
-  const infrastructureRetries =
-    config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
-  if (
-    !Number.isSafeInteger(infrastructureRetries) ||
-    infrastructureRetries < 0
-  ) {
-    throw new Error("infrastructureRetries must be a non-negative integer");
-  }
-  const isRequired = (gateId: string) =>
-    declarations.some(
-      (declaration) =>
-        declaration.id === gateId && declaration.required,
-    );
-  let evidence: GateEvidence | undefined;
-  let evidencePath = "";
-  const attempts: CandidateGatePhaseResult["attempts"] = [];
-  const artifacts: GateEvidenceArtifact[] = [];
-
-  for (
-    let gateAttempt = 1;
-    gateAttempt <= infrastructureRetries + 1;
-    gateAttempt++
-  ) {
-    const gateRun = await runGates({
-      treeId,
-      cwd,
-      evidenceDir,
-      declarations,
-      ...(prepare ? { prepare } : {}),
-      signal,
-      inactivityTimeoutMs:
-        config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-      wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
-      heartbeatIntervalMs:
-        config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
-      onOutput: (_gateId, text) => process.stderr.write(text),
-    });
-    evidencePath = gateRun.evidencePath;
-    artifacts.push(gateRun.artifact);
-    evidence = verifyGateEvidence(gateRun.artifact);
-    attempts.push({ evidence, evidencePath });
-    const evidenceArtifactId = relative(
-      config.repoRoot,
-      evidencePath,
-    ).replace(/\\/g, "/");
-    for (const result of evidence.results) {
-      logger.event({
-        type: "gate-outcome",
-        ghIssue: slice.ghIssue,
-        sliceNumber: slice.number,
-        round,
-        attemptId: evidence.attemptId,
-        gateId: result.gateId,
-        stage: result.stage,
-        status: result.status,
-        failureKind: result.failureKind,
-        startedAt: result.startedAt,
-        endedAt: result.endedAt,
-        durationMs: result.durationMs,
-        exitCode: result.exitCode,
-        treeId: result.treeId,
-        evidenceArtifactId,
-        logArtifactId: result.logArtifactId,
-      });
-    }
-    const infrastructureFailure = evidence.results.some(
-      (gate) =>
-        isRequired(gate.gateId) && gate.status === "INFRASTRUCTURE",
-    );
-    if (!infrastructureFailure || signal?.aborted) break;
-    if (gateAttempt <= infrastructureRetries) {
-      logger.phase(
-        `${ctx.tag}: ${label} infrastructure retry ${gateAttempt}/${infrastructureRetries}`,
-        "error",
-        {
-          type: "warn",
-          reason: "infrastructure-retry",
-          ghIssue: slice.ghIssue,
-          message: `${label} infrastructure retry ${gateAttempt}/${infrastructureRetries}`,
-        },
-      );
-    }
-  }
-
-  if (!evidence) {
-    throw new Error(`${label} produced no evidence`);
-  }
-  return { evidence, evidencePath, attempts, artifacts };
 }
 
 export async function runSliceExecute(
@@ -5048,16 +4911,44 @@ export async function runSliceExecute(
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
       try {
         const preQaGateRun = await runCandidateGatePhase({
-          ctx,
+          repoRoot: config.repoRoot,
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          tag: ctx.tag,
           round,
           treeId: checkpoint.treeId,
           cwd: gateCwd,
           evidenceDir,
           declarations: preQaDeclarations,
           ...(gatePrepare && preQaHasExecutable
-            ? { prepare: gatePrepare }
-            : {}),
+              ? { prepare: gatePrepare }
+              : {}),
           label: "pre-QA gates",
+          signal,
+          infrastructureRetries:
+            config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+          inactivityTimeoutMs:
+            config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+          wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+          heartbeatIntervalMs:
+            config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+          onGateOutcome: (outcome) => {
+            logger.event({
+              type: "gate-outcome",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              round,
+              ...outcome,
+            });
+          },
+          onInfrastructureRetry: (message) => {
+            logger.phase(message, "error", {
+              type: "warn",
+              reason: "infrastructure-retry",
+              ghIssue: slice.ghIssue,
+              message,
+            });
+          },
         });
         gateArtifacts.push(...preQaGateRun.artifacts);
         const gateEvidence = preQaGateRun.evidence;
@@ -5285,85 +5176,69 @@ export async function runSliceExecute(
           if (signal?.aborted) {
             return { phase: "CANCELLED", error: CANCELLED_BY_USER };
           }
-          const fullSuiteHasExecutable = fullSuiteDeclarations.some(
-            (declaration) => declaration.command != null,
-          );
-          const postQaCheckpointDir = join(
-            config.repoRoot,
-            ".afk",
-            "checkpoints",
-            `${config.prdSlug}-s${slice.number}-r${round}-post-qa-${randomUUID()}`,
-          );
-          const postQaCheckpoint = fullSuiteHasExecutable
-            ? createCandidateCheckpoint(ctx.worktreeDir, postQaCheckpointDir)
-            : createCandidateCheckpoint(ctx.worktreeDir, postQaCheckpointDir, {
-                materialize: false,
+          const postQaGates = await runPostQAGates({
+            repoRoot: config.repoRoot,
+            worktreeDir: ctx.worktreeDir,
+            prdSlug: config.prdSlug,
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            tag: ctx.tag,
+            round,
+            evidenceDir,
+            declarations: fullSuiteDeclarations,
+            ...(gatePrepare ? { prepare: gatePrepare } : {}),
+            signal,
+            infrastructureRetries:
+              config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+            inactivityTimeoutMs:
+              config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+            wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+            heartbeatIntervalMs:
+              config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+            convergence: qaConvergence,
+            repairStage,
+            priorAttemptTreeIds: implementationCandidateTreeIds,
+            priorArtifacts: gateArtifacts,
+            onGateOutcome: (outcome) => {
+              logger.event({
+                type: "gate-outcome",
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                round,
+                ...outcome,
               });
-          const fullSuiteCwd =
-            postQaCheckpoint.worktreeDir ?? postQaCheckpointDir;
-          try {
-            const fullSuiteRun = await runCandidateGatePhase({
-              ctx,
-              round,
-              treeId: postQaCheckpoint.treeId,
-              cwd: fullSuiteCwd,
-              evidenceDir,
-              declarations: fullSuiteDeclarations,
-              ...(gatePrepare && fullSuiteHasExecutable
-                ? { prepare: gatePrepare }
-                : {}),
-              label: "full slice suite",
-            });
-            gateArtifacts.push(...fullSuiteRun.artifacts);
-            if (signal?.aborted) {
-              return { phase: "CANCELLED", error: CANCELLED_BY_USER };
-            }
-            const fullSuiteDecision = decideCandidateGatePhase({
-              run: fullSuiteRun,
-              declarations: fullSuiteDeclarations,
-              evidenceDir,
-              nextRound: round + 1,
-              convergence: qaConvergence,
-              ...(repairStage ? { repairStage } : {}),
-            });
-            if (fullSuiteDecision.action === "ERROR") {
-              return { phase: "ERROR", error: fullSuiteDecision.error };
-            }
-            if (fullSuiteDecision.action === "REPAIR") {
-              stuckReferences.push(...fullSuiteDecision.references);
-              retryNote = fullSuiteDecision.retryNote;
-              if (implementationAttempt < implementationAttemptLimit) continue;
-              return finishIntervention(
-                candidateLifecycle.exhaustDeterministicGates({
-                  candidateTreeId: postQaCheckpoint.treeId,
-                  revision: Math.max(qaConvergence.revision, round),
-                  failedGateIds: fullSuiteDecision.failedGateIds,
-                  attemptTreeIds: [
-                    ...implementationCandidateTreeIds.slice(0, -1),
-                    postQaCheckpoint.treeId,
-                  ],
-                  supportingEvidence: fullSuiteDecision.references,
-                }).request,
-              );
-            }
-            assertGateEvidenceReleasesEvaluation(
-              fullSuiteRun.evidence,
-              fullSuiteDeclarations,
-              postQaCheckpoint.treeId,
+            },
+            onInfrastructureRetry: (message) => {
+              logger.phase(message, "error", {
+                type: "warn",
+                reason: "infrastructure-retry",
+                ghIssue: slice.ghIssue,
+                message,
+              });
+            },
+            onCleanupWarning: (message) =>
+              logger.phase(`${ctx.tag}: ${message}`),
+          });
+          gateArtifacts.push(...postQaGates.artifacts);
+          if (postQaGates.action === "CANCELLED") {
+            return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+          }
+          if (postQaGates.action === "ERROR") {
+            return { phase: "ERROR", error: postQaGates.error };
+          }
+          if (postQaGates.action === "REPAIR") {
+            stuckReferences.push(...postQaGates.references);
+            retryNote = postQaGates.retryNote;
+            if (implementationAttempt < implementationAttemptLimit) continue;
+            return finishIntervention(
+              candidateLifecycle.exhaustDeterministicGates({
+                candidateTreeId: postQaGates.candidateTreeId,
+                revision: Math.max(qaConvergence.revision, round),
+                failedGateIds: postQaGates.failedGateIds,
+                attemptTreeIds: postQaGates.attemptTreeIds,
+                supportingEvidence: postQaGates.references,
+              }).request,
             );
-            for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
-          } finally {
-            if (postQaCheckpoint.worktreeDir) {
-              await git.removeWorktreeOrWarn(
-                ctx.worktreeDir,
-                postQaCheckpoint.worktreeDir,
-                {
-                  label: "post-QA checkpoint worktree",
-                  warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
-                },
-                { signal },
-              );
-            }
           }
           // Before the commit, so the diagnosis this slice ships is the
           // one the operator read, not whatever the generator left.
