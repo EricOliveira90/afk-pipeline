@@ -3576,7 +3576,11 @@ describe("round-scoped contract feedback", () => {
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
     expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
     expect(plannerPrompts[2]).toContain("[F-02] BLOCKING OPEN");
-    expect(plannerPrompts[2]).not.toContain("[F-01] BLOCKING");
+    expect(plannerPrompts[2]).toContain("# Relevant resolved history");
+    expect(plannerPrompts[2]).toContain("[F-01] BLOCKING RESOLVED");
+    expect(plannerPrompts[2]).toContain(
+      "Include one response for each routed ID and no others: F-02.",
+    );
     expect(evaluatorPrompts[2]).toContain('"round": 3');
 
     const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
