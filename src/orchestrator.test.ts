@@ -2284,6 +2284,7 @@ describe("focused generator scope revision", () => {
         contextManifestVersion: 1,
       });
       expect([
+        "explorer",
         "planner",
         "evaluator-contract",
         "generator",
