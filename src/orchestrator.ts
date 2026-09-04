@@ -5220,8 +5220,12 @@ export async function runSliceExecute(
             qaDispatch = remote.dispatch;
             retryNote =
               `This is implementation round ${round + 1}. Repair the current ` +
-              `shared-preview QA findings using the compact current failure ` +
-              `set below. Preserve deterministic behavior that already passed.`;
+              `QA findings while preserving relevant resolved behavior:\n` +
+              formatQAGeneratorContext(
+                qaConvergence,
+                [],
+                "shared-preview",
+              );
           }
         }
 
