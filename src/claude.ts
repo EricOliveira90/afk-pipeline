@@ -133,6 +133,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
           "--verbose",
         ];
     let costUsd: number | undefined;
+    let tokenCounts: Record<string, number> | undefined;
 
     return {
       command: "claude",
@@ -149,13 +150,29 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
             ) {
               costUsd = event.total_cost_usd;
             }
+            if (
+              event.type === "result" &&
+              typeof event.usage === "object" &&
+              event.usage !== null
+            ) {
+              const exposed = Object.fromEntries(
+                Object.entries(event.usage as Record<string, unknown>).filter(
+                  (entry): entry is [string, number] =>
+                    typeof entry[1] === "number",
+                ),
+              );
+              if (Object.keys(exposed).length > 0) tokenCounts = exposed;
+            }
           } catch {
             // parseStreamLine handles malformed input below.
           }
         }
         return parseStreamLine(line);
       },
-      stats: () => ({ costUsd }),
+      stats: () => ({
+        costUsd,
+        ...(tokenCounts === undefined ? {} : { tokenCounts }),
+      }),
     };
   });
 }

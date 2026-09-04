@@ -158,7 +158,7 @@ describe("Codex command construction", () => {
     spawnMock.mockReset();
   });
 
-  it("uses the exact model, ephemeral JSON mode, full trust, and stdin", async () => {
+  it("P-05 keeps the exact prompt on stdin with existing Codex flags", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);
 
@@ -307,6 +307,34 @@ describe("Codex runtime hooks", () => {
     await expect(promise).rejects.toThrow(
       "Agent planner exited with code 2: unknown model",
     );
+  });
+
+  it("B-05 preserves every exposed Codex token-count name", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "planner", prompt: "go", cwd: "/tmp" });
+    proc.stdout.push(
+      jsonLine({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 34,
+          cached_input_tokens: 13,
+          output_tokens: 9,
+        },
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    emitExit(proc, 0);
+
+    await expect(promise).resolves.toMatchObject({
+      stats: {
+        tokenCounts: {
+          input_tokens: 34,
+          cached_input_tokens: 13,
+          output_tokens: 9,
+        },
+      },
+    });
   });
 });
 describe("Codex provider metadata", () => {

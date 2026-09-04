@@ -25,6 +25,12 @@ export interface InvokeOptions {
    */
   agent?: string;
   prompt: string;
+  /**
+   * Provider-independent context evidence for scoped PRD 3 roles. The
+   * orchestrator records it after a completed invocation, enriched with any
+   * token counts the provider exposes. Providers ignore this metadata.
+   */
+  contextEnvelope?: ContextEnvelopeInvocationEvidence;
   cwd: string;
   /** Optional log stream to write raw stdout to */
   logStream?: WriteStream;
@@ -107,6 +113,20 @@ export interface InvokeOptions {
 export interface InvocationStats {
   costUsd?: number;
   toolCallCount?: number;
+  /** Provider-exposed token names and counts, preserved without renaming. */
+  tokenCounts?: Record<string, number>;
+}
+
+export interface ContextEnvelopeInvocationEvidence {
+  ghIssue: string;
+  sliceNumber: string;
+  round: number;
+  role: "explorer" | "planner" | "evaluator-contract" | "generator";
+  assembledByteSize: number;
+  includedArtifactClasses: string[];
+  includedArtifactIds: string[];
+  omittedArtifactClasses: string[];
+  contextManifestVersion: number;
 }
 
 export interface InvokeResult {

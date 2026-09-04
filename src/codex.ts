@@ -242,6 +242,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       "-",
     ];
     const preparedEnv = prepareCodexSpawnEnv(process.env);
+    let tokenCounts: Record<string, number> | undefined;
 
     return {
       command: "codex",
@@ -249,7 +250,33 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       env: preparedEnv.env,
       shell: process.platform === "win32",
       stdin: prompt,
-      parseStreamLine,
+      parseStreamLine: (line) => {
+        if (line.trimStart().startsWith("{")) {
+          try {
+            const event = JSON.parse(line) as JsonObject;
+            if (
+              event.type === "turn.completed" &&
+              typeof event.usage === "object" &&
+              event.usage !== null
+            ) {
+              const exposed = Object.fromEntries(
+                Object.entries(
+                  event.usage as Record<string, unknown>,
+                ).filter(
+                  (entry): entry is [string, number] =>
+                    typeof entry[1] === "number",
+                ),
+              );
+              if (Object.keys(exposed).length > 0) tokenCounts = exposed;
+            }
+          } catch {
+            // parseStreamLine handles malformed input below.
+          }
+        }
+        return parseStreamLine(line);
+      },
+      stats: () =>
+        tokenCounts === undefined ? {} : { tokenCounts },
       classifyExit: ({ exitCode, stderr }) => {
         const detail = stderr.trim();
         return new Error(

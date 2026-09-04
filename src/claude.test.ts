@@ -59,14 +59,15 @@ describe("invoke spawn args", () => {
     spawnMock.mockReset();
   });
 
-  it("default invocation passes --agent and skips permissions", async () => {
+  it("P-05 keeps the exact prompt on stdin with existing Claude flags", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);
+    const exactPrompt = "EXACT-CLAUDE-ENVELOPE";
 
     const promise = invoke({
       role: "planner",
       agent: "planner",
-      prompt: "go",
+      prompt: exactPrompt,
       cwd: "/tmp/x",
     });
     proc.stdout.push(null);
@@ -80,6 +81,7 @@ describe("invoke spawn args", () => {
     expect(args).toContain("--dangerously-skip-permissions");
     expect(args[args.indexOf("--model") + 1]).toBe("claude-opus-5");
     expect(args).not.toContain("--bare");
+    expect(proc.stdinText).toBe(exactPrompt);
   });
 
   it("uses Sonnet for explorer and Opus for other roles", async () => {
@@ -159,13 +161,26 @@ describe("invoke spawn args", () => {
         type: "result",
         result: "done",
         total_cost_usd: 1.25,
+        usage: {
+          input_tokens: 21,
+          output_tokens: 8,
+          cache_read_input_tokens: 5,
+        },
       }) + "\n",
     );
     await new Promise((resolve) => setImmediate(resolve));
     proc.emit("exit", 0);
 
     await expect(promise).resolves.toMatchObject({
-      stats: { costUsd: 1.25, toolCallCount: 0 },
+      stats: {
+        costUsd: 1.25,
+        toolCallCount: 0,
+        tokenCounts: {
+          input_tokens: 21,
+          output_tokens: 8,
+          cache_read_input_tokens: 5,
+        },
+      },
     });
     expect(onStreamEvent).toHaveBeenCalledWith({
       type: "result",
