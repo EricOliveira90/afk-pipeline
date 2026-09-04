@@ -18,6 +18,8 @@ import {
   validateExplorerEvidenceMap,
 } from "./context-envelope.js";
 import type { ContractReviewFinding } from "./contract-review.js";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const acceptanceManifest: AcceptanceManifestV2 = {
@@ -196,11 +198,15 @@ describe("explorer context envelope", () => {
     expect(repositoryContext.content).not.toContain(
       "In the PRD 076 babysit session a slice negotiated its contract",
     );
+    const expectedAdrPaths = readdirSync(join(repoRoot, "docs", "adr"))
+      .filter((name) => name.endsWith(".md"))
+      .map((name) => `docs/adr/${name}`)
+      .sort();
     expect(
-      repositoryContext.includedArtifactIds.filter((path) =>
-        path.startsWith("docs/adr/"),
-      ),
-    ).toHaveLength(55);
+      repositoryContext.includedArtifactIds
+        .filter((path) => path.startsWith("docs/adr/"))
+        .sort(),
+    ).toEqual(expectedAdrPaths);
   });
 
   it("B-04 assembles the ordered focused prompt without a persona or role tags", () => {
