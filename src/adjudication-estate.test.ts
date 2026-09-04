@@ -6,8 +6,8 @@ import { probeAdjudicationEstate } from "./adjudication-estate.js";
 
 /**
  * The disk fact behind estate ownership (ADR 0055 Seam 2 §6, fourth
- * adjudication gate round). Every consumer — `clean-failed` today — asks
- * this one question, so the edges belong here as unit tests and not in
+ * adjudication gate round). Every consumer — `clean-failed`, `afk adopt` —
+ * asks this one question, so the edges belong here as unit tests and not in
  * a spawned pipeline (AGENTS.md, "where a new assertion goes").
  */
 
@@ -136,7 +136,7 @@ describe("probeAdjudicationEstate", () => {
    * bounded its walk at six levels — just enough for the *default*
    * `.kiro/specs/<slug>/slices/<NN>-<slug>/` layout — and `--prd-dir` takes
    * any path. A deeper one returned `null`, which `clean-failed` spent as
-   * "nothing to lose".
+   * "nothing to lose" and `adopt` as proved absence.
    */
   it("finds an estate under a deep configurable specs path, resolved and walked", () => {
     const deep = "docs/internal/programs/2026/specs/demo";

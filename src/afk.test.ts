@@ -178,7 +178,7 @@ describe("afk entrypoint routing", () => {
     expect(result.stderr).toBe("");
   });
 
-  it("preserves help output and exit behavior", () => {
+  it("preserves help output and exit behavior while listing adopt", () => {
     const result = invoke(repo, ["--help"]);
 
     expect(result.status).toBe(2);
@@ -187,5 +187,16 @@ describe("afk entrypoint routing", () => {
     expect(result.stderr).toContain("afk status");
     expect(result.stderr).toContain("afk stop");
     expect(result.stderr).toContain("afk clean-failed");
+    expect(result.stderr).toContain("afk adopt");
+  });
+
+  it("dispatches adopt without adding provider-specific aliases", () => {
+    const result = invoke(repo, ["adopt", "demo", "100"]);
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(
+      "Usage: afk adopt <prd-slug> <slice>",
+    );
   });
 });

@@ -13,7 +13,7 @@ import type {
 import type { QAReviewAttemptFinding } from "./qa-review.js";
 import {
   loadRunState,
-  saveRunState,
+  updateRunState,
   type RunState,
 } from "./run-state.js";
 import { preserveRecoveryTree } from "./git.js";
@@ -914,10 +914,10 @@ export function saveNonProgressHistory(
   location: Location,
   history: NonProgressHistory,
 ): void {
-  const state = loadRunState(location.repoRoot, location.prdSlug);
-  const existing = historyMap(state) ?? {};
-  state.nonProgress = { ...existing, [location.ghIssue]: history };
-  saveRunState(location.repoRoot, state);
+  updateRunState(location.repoRoot, location.prdSlug, (state) => {
+    const existing = historyMap(state) ?? {};
+    state.nonProgress = { ...existing, [location.ghIssue]: history };
+  });
 }
 
 export function writeInterventionRequest(

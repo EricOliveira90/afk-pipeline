@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
-import { resolveBaseGateDeclarations } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import {
   writeContractResponse,
   writeContractReview,

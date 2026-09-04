@@ -1,17 +1,19 @@
 import {
   readFileSync,
+  readdirSync,
   writeFileSync,
   existsSync,
-  mkdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import {
   ALL_PHASES,
   traitsFor,
+  type SliceAdoption,
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
 import type { PersistedRunScope } from "./slice-scope.js";
+import { withFileLock } from "./file-lock.js";
 
 /** Phases that get persisted. RUNNING / PENDING never touch disk. */
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
@@ -34,10 +36,12 @@ export interface PersistedSliceState {
    * anything (ADR 0029).
    */
   collidingPrefixes?: string[];
+  /** Audit trail for a slice completed outside the pipeline and adopted. */
+  adoption?: SliceAdoption;
 }
 
 export interface RunState {
-  version: 2;
+  version: 3;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -47,9 +51,9 @@ export interface RunState {
    *
    * `--prd-dir` is arbitrary, so the estate probe used to guess with a
    * depth-bounded walk and reported "no estate" for any layout deeper than
-   * the default — after which `clean-failed` deleted the worktree (architect
-   * blocker 2, fifth adjudication gate round). The run is the one party that
-   * knows this without guessing, so it
+   * the default — after which `clean-failed` deleted the worktree and
+   * `adopt` overwrote the park (architect blocker 2, fifth adjudication gate
+   * round). The run is the one party that knows this without guessing, so it
    * writes it down. Optional because state files predating the field must
    * stay loadable: `probeAdjudicationEstate` falls back to a complete walk,
    * which is slower but still never infers absence.
@@ -243,17 +247,80 @@ function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
 }
 
+export function withRunStateLock<T>(
+  repoRoot: string,
+  prdSlug: string,
+  action: () => T,
+): T {
+  return withFileLock(statePath(repoRoot, prdSlug), action);
+}
+
+function writeRunState(path: string, state: RunState): void {
+  writeFileSync(path, JSON.stringify(state, null, 2));
+}
+
 /**
- * Load run state, adapting unversioned (v0) and v1 files in memory. v0 files
+ * The shared read-modify-write transaction for run state.
+ *
+ * Every caller loads, compares or mutates, and commits while holding the
+ * same per-file cross-process lock. `changed: false` supports conditional
+ * operations without rewriting bytes after a refused comparison.
+ */
+export function transactRunState<T>(
+  repoRoot: string,
+  prdSlug: string,
+  transaction: (state: RunState) => { changed: boolean; result: T },
+): T {
+  const p = statePath(repoRoot, prdSlug);
+  return withRunStateLock(repoRoot, prdSlug, () => {
+    const state = loadRunState(repoRoot, prdSlug);
+    const outcome = transaction(state);
+    if (outcome.changed) writeRunState(p, state);
+    return outcome.result;
+  });
+}
+
+export function updateRunState<T>(
+  repoRoot: string,
+  prdSlug: string,
+  update: (state: RunState) => T,
+): T {
+  return transactRunState(repoRoot, prdSlug, (state) => ({
+    changed: true,
+    result: update(state),
+  }));
+}
+
+/**
+ * Every run-state key with a file on disk.
+ *
+ * The key is a *run slug*, not a PRD slug: `pipelineRunSlug` appends the
+ * provider name for every non-kiro provider, so one PRD can have several.
+ * Callers that only know the PRD slug (`afk adopt`) need to discover which
+ * ones exist rather than assume the bare name. Sorted for a stable
+ * refusal message.
+ */
+export function listRunStateSlugs(repoRoot: string): string[] {
+  const dir = join(repoRoot, ".afk", "state");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => name.slice(0, -".json".length))
+    .sort();
+}
+
+/**
+ * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
- * checkpoint storage whose focused reader owns validation. Throws on unknown
- * status strings rather than silently producing an invalid record.
+ * checkpoint storage whose focused reader owns validation. v3 adds adoption
+ * provenance to terminal slice records. Throws on unknown status strings
+ * rather than silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
   if (!existsSync(p)) {
-    return { version: 2, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
+    return { version: 3, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
   }
   const raw = JSON.parse(readFileSync(p, "utf-8")) as unknown;
   return adaptLoadedState(raw, prdSlug);
@@ -285,7 +352,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ? r.specsDir
       : undefined;
 
-  if (r.version === 1 || r.version === 2) {
+  if (r.version === 1 || r.version === 2 || r.version === 3) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
@@ -294,7 +361,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const resume = sanitizeResumeMap(r.resume);
     const migrations = sanitizeMigrationClaims(r.migrations);
     return {
-      version: 2,
+      version: 3,
       prdSlug,
       featureBranch,
       ...(specsDir !== undefined ? { specsDir } : {}),
@@ -302,16 +369,16 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
       ...(resume !== undefined ? { resume } : {}),
-      ...(r.version === 2 && r.stageCheckpoints !== undefined
+      ...(r.version !== 1 && r.stageCheckpoints !== undefined
         ? { stageCheckpoints: r.stageCheckpoints }
         : {}),
-      ...(r.version === 2 && r.contractConvergence !== undefined
+      ...(r.version !== 1 && r.contractConvergence !== undefined
         ? { contractConvergence: r.contractConvergence }
         : {}),
-      ...(r.version === 2 && r.qaConvergence !== undefined
+      ...(r.version !== 1 && r.qaConvergence !== undefined
         ? { qaConvergence: r.qaConvergence }
         : {}),
-      ...(r.version === 2 && r.nonProgress !== undefined
+      ...(r.version !== 1 && r.nonProgress !== undefined
         ? { nonProgress: r.nonProgress }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
@@ -327,6 +394,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       mergedToFeature?: boolean;
       error?: string;
       collidingPrefixes?: unknown;
+      adoption?: unknown;
     };
     if (typeof v.status !== "string" || !PERSISTED_PHASES.has(v.status)) {
       throw new Error(
@@ -341,10 +409,11 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         : {}),
       ...(v.error !== undefined ? { error: v.error } : {}),
       ...prefixesOf(v.collidingPrefixes),
+      ...adoptionOf(v.adoption),
     };
   }
   return {
-    version: 2,
+    version: 3,
     prdSlug,
     featureBranch,
     ...(specsDir !== undefined ? { specsDir } : {}),
@@ -364,6 +433,31 @@ function prefixesOf(value: unknown): { collidingPrefixes?: string[] } {
   return prefixes.length > 0 ? { collidingPrefixes: prefixes } : {};
 }
 
+function adoptionOf(value: unknown): { adoption?: SliceAdoption } {
+  if (typeof value !== "object" || value === null) return {};
+  const adoption = value as Partial<Record<keyof SliceAdoption, unknown>>;
+  if (
+    typeof adoption.adopter !== "string" ||
+    adoption.adopter.trim() === "" ||
+    typeof adoption.reason !== "string" ||
+    adoption.reason.trim() === "" ||
+    typeof adoption.branch !== "string" ||
+    adoption.branch.trim() === "" ||
+    typeof adoption.commit !== "string" ||
+    adoption.commit.trim() === ""
+  ) {
+    return {};
+  }
+  return {
+    adoption: {
+      adopter: adoption.adopter,
+      reason: adoption.reason,
+      branch: adoption.branch,
+      commit: adoption.commit,
+    },
+  };
+}
+
 function validateV1Slice(id: string, val: unknown): PersistedSliceState {
   const v = (val ?? {}) as {
     phase?: string;
@@ -371,6 +465,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
     mergedToFeature?: boolean;
     error?: string;
     collidingPrefixes?: unknown;
+    adoption?: unknown;
   };
   if (typeof v.phase !== "string" || !PERSISTED_PHASES.has(v.phase)) {
     throw new Error(
@@ -385,6 +480,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
       : {}),
     ...(v.error !== undefined ? { error: v.error } : {}),
     ...prefixesOf(v.collidingPrefixes),
+    ...adoptionOf(v.adoption),
   };
 }
 
@@ -404,6 +500,7 @@ export function projectForPersistence(
         phase: "PASS",
         ...(s.branch ? { branch: s.branch } : {}),
         mergedToFeature: s.mergedToFeature,
+        ...(s.adoption ? { adoption: s.adoption } : {}),
       };
     case "SKIPPED":
       return {
@@ -436,7 +533,7 @@ export function projectForPersistence(
 /**
  * Atomically update a single slice in the run state.
  * Re-reads the file before writing to avoid clobbering parallel updates.
- * Auto-upgrades v0 files to v1 on next save.
+ * Auto-upgrades older files to the current schema on next save.
  */
 export function saveSliceState(
   repoRoot: string,
@@ -444,11 +541,51 @@ export function saveSliceState(
   ghIssue: string,
   result: PersistedSliceState,
 ) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  current.slices[ghIssue] = result;
-  writeFileSync(p, JSON.stringify(current, null, 2));
+  updateRunState(repoRoot, prdSlug, (current) => {
+    current.slices[ghIssue] = result;
+  });
+}
+
+export function saveSliceStateIfUnchanged(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  result: PersistedSliceState,
+  expected: PersistedSliceState | undefined,
+  hooks: {
+    /** Test seam: the expected record matched and the run-state lock is held. */
+    afterComparison?: () => void;
+  } = {},
+): { ok: true } | { ok: false; found: PersistedSliceState | undefined } {
+  type Result =
+    | { ok: true }
+    | { ok: false; found: PersistedSliceState | undefined };
+  return transactRunState<Result>(repoRoot, prdSlug, (current) => {
+    const found = current.slices[ghIssue];
+    if (!sameSliceRecord(found, expected)) {
+      return { changed: false, result: { ok: false as const, found } };
+    }
+    hooks.afterComparison?.();
+    current.slices[ghIssue] = result;
+    return { changed: true, result: { ok: true as const } };
+  });
+}
+
+export function sameSliceRecord(
+  a: PersistedSliceState | undefined,
+  b: PersistedSliceState | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    JSON.stringify(canonicalSliceRecord(a)) ===
+    JSON.stringify(canonicalSliceRecord(b))
+  );
+}
+
+function canonicalSliceRecord(record: PersistedSliceState): unknown {
+  return Object.entries(record as unknown as Record<string, unknown>).sort(
+    ([x], [y]) => (x < y ? -1 : x > y ? 1 : 0),
+  );
 }
 
 /**
@@ -485,20 +622,25 @@ export function clearSliceStateForDispatch(
   prdSlug: string,
   ghIssue: string,
 ): PersistedSliceState | null {
-  const p = statePath(repoRoot, prdSlug);
-  if (!existsSync(p)) return null;
-  const current = loadRunState(repoRoot, prdSlug);
-  const previous = current.slices[ghIssue];
-  if (!previous) return null;
-  delete current.slices[ghIssue];
-  writeFileSync(p, JSON.stringify(current, null, 2));
-  return previous;
+  return transactRunState(repoRoot, prdSlug, (current) => {
+    const previous = current.slices[ghIssue];
+    if (!previous) return { changed: false, result: null };
+    delete current.slices[ghIssue];
+    return { changed: true, result: previous };
+  });
 }
 
 export function saveRunState(repoRoot: string, state: RunState) {
   const p = statePath(repoRoot, state.prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(state, null, 2));
+  withRunStateLock(repoRoot, state.prdSlug, () => {
+    if (existsSync(p)) {
+      throw new Error(
+        `Refusing to replace existing run state ${p} from a whole-file snapshot; ` +
+          `use transactRunState or a focused writer`,
+      );
+    }
+    writeRunState(p, state);
+  });
 }
 
 /**
@@ -511,15 +653,13 @@ export function saveReviewPhase(
   prdSlug: string,
   reviewPhase: PersistedReviewPhase | undefined,
 ) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  if (reviewPhase === undefined) {
-    delete current.reviewPhase;
-  } else {
-    current.reviewPhase = reviewPhase;
-  }
-  writeFileSync(p, JSON.stringify(current, null, 2));
+  updateRunState(repoRoot, prdSlug, (current) => {
+    if (reviewPhase === undefined) {
+      delete current.reviewPhase;
+    } else {
+      current.reviewPhase = reviewPhase;
+    }
+  });
 }
 
 export function markSliceComplete(
@@ -552,9 +692,7 @@ export function recordRetryDecision(
   ghIssue: string,
   decision: SliceResumeState,
 ) {
-  const p = statePath(repoRoot, prdSlug);
-  mkdirSync(dirname(p), { recursive: true });
-  const current = loadRunState(repoRoot, prdSlug);
-  current.resume = { ...current.resume, [ghIssue]: decision };
-  writeFileSync(p, JSON.stringify(current, null, 2));
+  updateRunState(repoRoot, prdSlug, (current) => {
+    current.resume = { ...current.resume, [ghIssue]: decision };
+  });
 }
