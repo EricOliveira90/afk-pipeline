@@ -228,6 +228,7 @@ describe("renderPrompt", () => {
         CURRENT_CONTRACT: "contract",
         CURRENT_ACCEPTANCE_MANIFEST: '{"version":2}',
         OPEN_FINDINGS: "(none)",
+        RESOLVED_HISTORY: "(none)",
         CONTROL_SITUATION: "(none)",
         CONTRACT_RESPONSE_INSTRUCTIONS: "Do not write a response.",
         MIGRATION_RESERVATION: "No claim yet",

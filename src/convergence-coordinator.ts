@@ -121,6 +121,7 @@ export class ContractRoundLifecycle {
   ): {
     requiresResponse: boolean;
     routedFindings: ContractReviewFinding[];
+    relevantResolvedFindings: ContractReviewFinding[];
     revisionNote: string;
   } {
     const context = contractPlannerContext(this.lineage);
@@ -154,6 +155,7 @@ export class ContractRoundLifecycle {
     return {
       requiresResponse: round > 1 && this.previousReview !== null,
       routedFindings: round > 1 ? currentRoundFindings : [],
+      relevantResolvedFindings: context.relevantResolved,
       revisionNote,
     };
   }

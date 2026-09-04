@@ -62,6 +62,13 @@ Parent PRD: `{{SPECS_DIR}}/prd.md`
 
 {{OPEN_FINDINGS}}
 
+# Relevant resolved history
+
+This history is preservation context only. Do not respond to these IDs or add
+them to `contract-response.json`.
+
+{{RESOLVED_HISTORY}}
+
 # Control-plane situation
 
 {{CONTROL_SITUATION}}

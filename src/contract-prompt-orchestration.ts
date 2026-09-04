@@ -240,6 +240,7 @@ export function assembleNegotiationPlannerPrompt(input: {
   currentContract: string;
   currentAcceptanceManifest: string;
   findings: readonly ContractReviewFinding[];
+  resolvedFindings?: readonly ContractReviewFinding[];
   pendingObjection: string | null;
   contractResponseInstructions: string;
   migrationReservation: string;
@@ -272,6 +273,9 @@ export function assembleNegotiationPlannerPrompt(input: {
           currentContract: input.currentContract,
           currentAcceptanceManifest: input.currentAcceptanceManifest,
           findings: input.findings,
+          ...(input.resolvedFindings === undefined
+            ? {}
+            : { resolvedFindings: input.resolvedFindings }),
           ...(input.pendingObjection === null
             ? {}
             : {

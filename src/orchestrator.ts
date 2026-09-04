@@ -3061,6 +3061,8 @@ async function negotiateAttempt(
           pendingObjection,
         );
         const routedFindings = plannerRound.routedFindings;
+        const relevantResolvedFindings =
+          plannerRound.relevantResolvedFindings;
         const requiresPlannerResponse = plannerRound.requiresResponse;
         const currentContractText = existsSync(contractPath)
           ? readFileSync(contractPath, "utf-8")
@@ -3103,7 +3105,8 @@ async function negotiateAttempt(
           explorerContext,
           currentContract: currentContractText,
           currentAcceptanceManifest: currentManifestText,
-          findings: lastFindings,
+          findings: routedFindings,
+          resolvedFindings: relevantResolvedFindings,
           pendingObjection,
           contractResponseInstructions,
           migrationReservation: migrationReservationBlock(
