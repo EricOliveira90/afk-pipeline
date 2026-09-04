@@ -119,6 +119,18 @@ import {
 } from "./migration-gate.js";
 import type { AfkManifest } from "./afk-manifest.js";
 import {
+  featureBranchPrefixForProviderName,
+  featureBranchForProviderName,
+  providerNameFromRunSlug,
+  runSlugForProviderName,
+  sliceBranchPrefixForProviderName,
+  sliceWorktreeDirForProviderName,
+} from "./run-identity.js";
+import {
+  adoptedSlices,
+  adoptionForCompletedSlice,
+} from "./adoption-provenance.js";
+import {
   assertWithinManifestScope,
   trimUnclaimedMigrationPrefixes,
 } from "./afk-manifest.js";
@@ -584,37 +596,12 @@ export function sliceBranchPrefix(provider: AgentProvider): string {
   return sliceBranchPrefixForProviderName(provider.name);
 }
 
-/**
- * `sliceBranchPrefix` for a caller that has a provider *name* and no
- * provider object — the same split `runSlugForProviderName` makes below,
- * and for the same reason. One formula, one place, so the name-keyed and
- * object-keyed forms cannot drift.
- */
-export function sliceBranchPrefixForProviderName(providerName: string): string {
-  return providerName === "kiro" ? "afk" : `afk-${providerName}`;
-}
-
 function featureBranchPrefix(provider: AgentProvider): string {
   return featureBranchPrefixForProviderName(provider.name);
 }
 
-function featureBranchPrefixForProviderName(providerName: string): string {
-  return providerName === "kiro" ? "feat" : `feat-${providerName}`;
-}
-
 export function pipelineRunSlug(prdSlug: string, provider: AgentProvider): string {
   return runSlugForProviderName(prdSlug, provider.name);
-}
-
-/**
- * `pipelineRunSlug` for a caller that has a provider *name* and no
- * provider object. Same rule, one place, so the two cannot drift.
- */
-export function runSlugForProviderName(
-  prdSlug: string,
-  providerName: string,
-): string {
-  return providerName === "kiro" ? prdSlug : `${prdSlug}-${providerName}`;
 }
 
 export function sliceBranch(
@@ -642,26 +629,6 @@ export function sliceWorktreeDir(
     prdSlug,
     slice.number,
     provider.name,
-  );
-}
-
-/**
- * `sliceWorktreeDir` for a caller holding a provider name and a slice
- * number rather than a provider object and a `Slice`. One formula, one
- * place, so no caller can disagree with the pipeline about where a
- * slice's worktree lives.
- */
-export function sliceWorktreeDirForProviderName(
-  repoRoot: string,
-  prdSlug: string,
-  sliceNumber: string,
-  providerName: string,
-): string {
-  return join(
-    repoRoot,
-    ".afk",
-    "worktrees",
-    `${sliceBranchPrefixForProviderName(providerName)}-${prdSlug}-s${sliceNumber}`,
   );
 }
 
@@ -5690,7 +5657,10 @@ export async function runPipeline(
       alreadyComplete.add(id);
       const branch =
         runState.slices[id]!.branch ?? sliceBranch(prdSlug, slice, provider);
-      logger.restoreCompleted({ ghIssue: id, title: slice.title, branch });
+      logger.restoreCompleted(
+        { ghIssue: id, title: slice.title, branch },
+        adoptionForCompletedSlice(runState, id),
+      );
       logger.phase(
         `  Skipping #${id} ${slice.title} (already completed)`,
         "log",
@@ -6256,6 +6226,7 @@ export async function runPipeline(
         relevantFilesBlock,
         reviewScope: buildReviewScopeBlock(scope!),
         closesIssues: scope!.selected.map((slice) => slice.ghIssue),
+        adoptions: adoptedSlices(runState),
         cachedReviewPhase: runState.reviewPhase,
         invoke,
         journal: logger,

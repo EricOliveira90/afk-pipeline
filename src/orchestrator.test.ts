@@ -4113,7 +4113,7 @@ describe("round-scoped contract feedback", () => {
           ),
         ),
       ).toMatchObject({
-        version: 2,
+        version: 3,
         contractConvergence: {
           "9003": {
             version: 1,

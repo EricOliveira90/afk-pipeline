@@ -1,5 +1,6 @@
 import {
   readFileSync,
+  readdirSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
@@ -7,6 +8,7 @@ import { join } from "node:path";
 import {
   ALL_PHASES,
   traitsFor,
+  type SliceAdoption,
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
@@ -34,10 +36,12 @@ export interface PersistedSliceState {
    * anything (ADR 0029).
    */
   collidingPrefixes?: string[];
+  /** Audit trail for a slice completed outside the pipeline and adopted. */
+  adoption?: SliceAdoption;
 }
 
 export interface RunState {
-  version: 2;
+  version: 3;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -47,9 +51,9 @@ export interface RunState {
    *
    * `--prd-dir` is arbitrary, so the estate probe used to guess with a
    * depth-bounded walk and reported "no estate" for any layout deeper than
-   * the default — after which `clean-failed` deleted the worktree (architect
-   * blocker 2, fifth adjudication gate round). The run is the one party that
-   * knows this without guessing, so it
+   * the default — after which `clean-failed` deleted the worktree and
+   * `adopt` overwrote the park (architect blocker 2, fifth adjudication gate
+   * round). The run is the one party that knows this without guessing, so it
    * writes it down. Optional because state files predating the field must
    * stay loadable: `probeAdjudicationEstate` falls back to a complete walk,
    * which is slower but still never infers absence.
@@ -288,16 +292,35 @@ export function updateRunState<T>(
 }
 
 /**
- * Load run state, adapting unversioned (v0) and v1 files in memory. v0 files
+ * Every run-state key with a file on disk.
+ *
+ * The key is a *run slug*, not a PRD slug: `pipelineRunSlug` appends the
+ * provider name for every non-kiro provider, so one PRD can have several.
+ * Callers that only know the PRD slug (`afk adopt`) need to discover which
+ * ones exist rather than assume the bare name. Sorted for a stable
+ * refusal message.
+ */
+export function listRunStateSlugs(repoRoot: string): string[] {
+  const dir = join(repoRoot, ".afk", "state");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => name.slice(0, -".json".length))
+    .sort();
+}
+
+/**
+ * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
- * checkpoint storage whose focused reader owns validation. Throws on unknown
- * status strings rather than silently producing an invalid record.
+ * checkpoint storage whose focused reader owns validation. v3 adds adoption
+ * provenance to terminal slice records. Throws on unknown status strings
+ * rather than silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
   if (!existsSync(p)) {
-    return { version: 2, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
+    return { version: 3, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
   }
   const raw = JSON.parse(readFileSync(p, "utf-8")) as unknown;
   return adaptLoadedState(raw, prdSlug);
@@ -329,7 +352,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ? r.specsDir
       : undefined;
 
-  if (r.version === 1 || r.version === 2) {
+  if (r.version === 1 || r.version === 2 || r.version === 3) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
@@ -338,7 +361,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const resume = sanitizeResumeMap(r.resume);
     const migrations = sanitizeMigrationClaims(r.migrations);
     return {
-      version: 2,
+      version: 3,
       prdSlug,
       featureBranch,
       ...(specsDir !== undefined ? { specsDir } : {}),
@@ -346,16 +369,16 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       slices,
       ...(reviewPhase !== undefined ? { reviewPhase } : {}),
       ...(resume !== undefined ? { resume } : {}),
-      ...(r.version === 2 && r.stageCheckpoints !== undefined
+      ...(r.version !== 1 && r.stageCheckpoints !== undefined
         ? { stageCheckpoints: r.stageCheckpoints }
         : {}),
-      ...(r.version === 2 && r.contractConvergence !== undefined
+      ...(r.version !== 1 && r.contractConvergence !== undefined
         ? { contractConvergence: r.contractConvergence }
         : {}),
-      ...(r.version === 2 && r.qaConvergence !== undefined
+      ...(r.version !== 1 && r.qaConvergence !== undefined
         ? { qaConvergence: r.qaConvergence }
         : {}),
-      ...(r.version === 2 && r.nonProgress !== undefined
+      ...(r.version !== 1 && r.nonProgress !== undefined
         ? { nonProgress: r.nonProgress }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
@@ -371,6 +394,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       mergedToFeature?: boolean;
       error?: string;
       collidingPrefixes?: unknown;
+      adoption?: unknown;
     };
     if (typeof v.status !== "string" || !PERSISTED_PHASES.has(v.status)) {
       throw new Error(
@@ -385,10 +409,11 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         : {}),
       ...(v.error !== undefined ? { error: v.error } : {}),
       ...prefixesOf(v.collidingPrefixes),
+      ...adoptionOf(v.adoption),
     };
   }
   return {
-    version: 2,
+    version: 3,
     prdSlug,
     featureBranch,
     ...(specsDir !== undefined ? { specsDir } : {}),
@@ -408,6 +433,31 @@ function prefixesOf(value: unknown): { collidingPrefixes?: string[] } {
   return prefixes.length > 0 ? { collidingPrefixes: prefixes } : {};
 }
 
+function adoptionOf(value: unknown): { adoption?: SliceAdoption } {
+  if (typeof value !== "object" || value === null) return {};
+  const adoption = value as Partial<Record<keyof SliceAdoption, unknown>>;
+  if (
+    typeof adoption.adopter !== "string" ||
+    adoption.adopter.trim() === "" ||
+    typeof adoption.reason !== "string" ||
+    adoption.reason.trim() === "" ||
+    typeof adoption.branch !== "string" ||
+    adoption.branch.trim() === "" ||
+    typeof adoption.commit !== "string" ||
+    adoption.commit.trim() === ""
+  ) {
+    return {};
+  }
+  return {
+    adoption: {
+      adopter: adoption.adopter,
+      reason: adoption.reason,
+      branch: adoption.branch,
+      commit: adoption.commit,
+    },
+  };
+}
+
 function validateV1Slice(id: string, val: unknown): PersistedSliceState {
   const v = (val ?? {}) as {
     phase?: string;
@@ -415,6 +465,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
     mergedToFeature?: boolean;
     error?: string;
     collidingPrefixes?: unknown;
+    adoption?: unknown;
   };
   if (typeof v.phase !== "string" || !PERSISTED_PHASES.has(v.phase)) {
     throw new Error(
@@ -429,6 +480,7 @@ function validateV1Slice(id: string, val: unknown): PersistedSliceState {
       : {}),
     ...(v.error !== undefined ? { error: v.error } : {}),
     ...prefixesOf(v.collidingPrefixes),
+    ...adoptionOf(v.adoption),
   };
 }
 
@@ -448,6 +500,7 @@ export function projectForPersistence(
         phase: "PASS",
         ...(s.branch ? { branch: s.branch } : {}),
         mergedToFeature: s.mergedToFeature,
+        ...(s.adoption ? { adoption: s.adoption } : {}),
       };
     case "SKIPPED":
       return {
@@ -480,7 +533,7 @@ export function projectForPersistence(
 /**
  * Atomically update a single slice in the run state.
  * Re-reads the file before writing to avoid clobbering parallel updates.
- * Auto-upgrades v0 files to v1 on next save.
+ * Auto-upgrades older files to the current schema on next save.
  */
 export function saveSliceState(
   repoRoot: string,
@@ -574,7 +627,15 @@ export function clearSliceStateForDispatch(
 
 export function saveRunState(repoRoot: string, state: RunState) {
   const p = statePath(repoRoot, state.prdSlug);
-  withRunStateLock(repoRoot, state.prdSlug, () => writeRunState(p, state));
+  withRunStateLock(repoRoot, state.prdSlug, () => {
+    if (existsSync(p)) {
+      throw new Error(
+        `Refusing to replace existing run state ${p} from a whole-file snapshot; ` +
+          `use transactRunState or a focused writer`,
+      );
+    }
+    writeRunState(p, state);
+  });
 }
 
 /**

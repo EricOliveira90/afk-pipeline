@@ -68,7 +68,7 @@ describe("resolveCliRunScope", () => {
       const prdSlug = "scope-preview";
       const runSlug = pipelineRunSlug(prdSlug, agentProvider);
       saveRunState(repoRoot, {
-        version: 2,
+        version: 3,
         prdSlug: runSlug,
         featureBranch: `feat/${prdSlug}`,
         scope: {

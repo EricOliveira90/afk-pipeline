@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -67,31 +68,31 @@ function releaseOwnedLock(lockDir: string, token: string): void {
 /**
  * Reclaim a lock whose owner process no longer exists.
  *
- * The reaper directory closes the stale-recovery race: contenders refuse to
- * acquire while it exists, and the reaper re-reads the owner only after it
- * has excluded new acquisitions. A freshly created lock with no owner record
- * gets a short grace period for the mkdir -> owner.json initialization gap.
+ * Atomically renaming the dead lock to the reaper directory closes the
+ * stale-recovery race. The reaper directory is a quarantined dead lock, never
+ * a live owner, so a later process may safely remove it if this reaper dies.
+ * A freshly created lock with no owner record gets a short grace period for
+ * the mkdir -> owner.json initialization gap.
  */
 function reapDeadOwner(lockDir: string, reaperDir: string): void {
+  if (existsSync(reaperDir)) {
+    rmSync(reaperDir, { recursive: true, force: true });
+    return;
+  }
+  if (!existsSync(lockDir)) return;
+  const owner = readOwner(join(lockDir, "owner.json"));
+  if (owner && processIsAlive(owner.pid)) return;
+  if (!owner) {
+    const ageMs = Date.now() - statSync(lockDir).mtimeMs;
+    if (ageMs < INCOMPLETE_OWNER_GRACE_MS) return;
+  }
   try {
-    mkdirSync(reaperDir);
+    renameSync(lockDir, reaperDir);
   } catch (error) {
-    if (errorCode(error) === "EEXIST") return;
+    if (errorCode(error) === "ENOENT" || errorCode(error) === "EEXIST") return;
     throw error;
   }
-
-  try {
-    if (!existsSync(lockDir)) return;
-    const owner = readOwner(join(lockDir, "owner.json"));
-    if (owner && processIsAlive(owner.pid)) return;
-    if (!owner) {
-      const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-      if (ageMs < INCOMPLETE_OWNER_GRACE_MS) return;
-    }
-    rmSync(lockDir, { recursive: true, force: true });
-  } finally {
-    rmSync(reaperDir, { recursive: true, force: true });
-  }
+  rmSync(reaperDir, { recursive: true, force: true });
 }
 
 /**
@@ -119,6 +120,7 @@ export function withFileLock<T>(
       );
     }
     if (existsSync(reaperDir)) {
+      reapDeadOwner(lockDir, reaperDir);
       sleep(pollMs);
       continue;
     }

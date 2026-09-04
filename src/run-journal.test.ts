@@ -96,9 +96,8 @@ describe("RunJournal.recordTerminal", () => {
     journal.trackSlice(lifecycle.running(SLICE));
     vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const stateBlocker = join(repo, ".afk", "state");
-    mkdirSync(join(repo, ".afk"), { recursive: true });
-    writeFileSync(stateBlocker, "not a directory", "utf-8");
+    const stateBlocker = join(repo, ".afk", "state", "retry.json");
+    mkdirSync(stateBlocker, { recursive: true });
 
     const outcome = { phase: "STUCK", error: "QA failed" } as const;
     expect(() => journal.recordTerminal(SLICE, outcome)).toThrow();
@@ -106,7 +105,7 @@ describe("RunJournal.recordTerminal", () => {
     expect(eventsOf(journal).filter((event) => event.type === "slice-outcome"))
       .toHaveLength(0);
 
-    rmSync(stateBlocker, { force: true });
+    rmSync(stateBlocker, { recursive: true, force: true });
     journal.recordTerminal(SLICE, outcome);
     journal.recordTerminal(SLICE, outcome);
 
