@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "P-02"
+      ],
+      "summary": "Planner revision envelopes include resolved findings forbidden by P-02",
+      "evidence": "src/context-envelope.test.ts:388-431 supplies F-RESOLVED and RESOLVED-CLEAR-CONDITION through both finding inputs, then asserts both markers are absent from the complete prompt and that resolved-findings is omitted from the manifest and evidence. src/context-envelope.ts:725-779 formats only OPEN findings and emits no resolved-finding artifact class. The authorized test:fast and heavy orchestrator gates passed for tree 359074422d14ec126e20e0f2e5f138ed1e865aa4.",
+      "expected": "Planner revision prompts and logical evidence exclude resolved finding content and resolved-finding artifact classes even when resolved history exists upstream.",
+      "observed": "Resolved input remains accepted for legacy callers but is ignored by assembly; the prompt contains neither seeded resolved marker and the evidence contains only current contract, open finding, control, gate, and migration classes.",
+      "clearCondition": "Planner revision prompts and evidence exclude resolved finding content and artifact classes even when resolved history exists upstream, with an assertion that a supplied resolved marker is absent.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "B-02",
+        "B-03"
+      ],
+      "summary": "Provider parity is asserted by reusing one preassembled evidence object",
+      "evidence": "src/context-envelope.test.ts:777-853 calls assembleGeneratorEnvelope separately inside the loop for Kiro-, Claude-, and Codex-named stubs, captures each normalized prompt and logical evidence independently, compares prompt bytes and evidence deeply, and asserts seeded B-01, tests, FINDING-09, and CHECKPOINT-07 identifiers. The authorized test:fast gate passed for tree 359074422d14ec126e20e0f2e5f138ed1e865aa4.",
+      "expected": "Each named stub receives an independently assembled envelope from the same logical input, and captured normalized prompts and logical evidence match while preserving every seeded stable ID.",
+      "observed": "Each adapter iteration now performs a fresh assembly before invocation; all three captured prompts and evidence objects are compared and all four stable-ID classes are asserted.",
+      "clearCondition": "Independently assemble and pass the same manifest/artifact input through each named stub, then compare their captured normalized prompts and logical evidence and assert all seeded behavior, gate, finding, and checkpoint IDs.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-04",
+      "severity": "BLOCKING",
+      "behaviorIds": [
+        "B-01",
+        "B-05"
+      ],
+      "summary": "Per-invocation evidence tests do not assert all exact required values",
+      "evidence": "src/orchestrator.test.ts:2251-2488 asserts one prompt-assembly event per scoped invocation, exact prompt byte sizes against captured dispatch prompts, exact ordered included classes and IDs, exact omitted-class arrays, exact manifest metadata, tokenCounts field absence for explorer, and exact token maps for every other invocation including cache_read_input_tokens. The authorized heavy orchestrator gate passed for tree 359074422d14ec126e20e0f2e5f138ed1e865aa4.",
+      "expected": "Every scoped invocation has exact assembledByteSize, exact omittedArtifactClasses, and either the exact provider token map or an absent tokenCounts field, including at least one cache-read token name.",
+      "observed": "The full stub lifecycle now asserts exact evidence for all eight scoped invocations and includes cache_read_input_tokens with explicit field-presence and field-absence checks.",
+      "clearCondition": "Assert exact assembledByteSize and exact omittedArtifactClasses for every scoped event, expose a cache-read token name in at least one scoped stub result, and assert exact token maps or field absence for every invocation.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

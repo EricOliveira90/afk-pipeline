@@ -1,0 +1,162 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/agent-provider.ts",
+      "src/claude.ts",
+      "src/claude.test.ts",
+      "src/codex.ts",
+      "src/codex.test.ts",
+      "src/context-envelope.ts",
+      "src/context-envelope.test.ts",
+      "src/contract-prompt-orchestration.ts",
+      "src/contract-prompt-orchestration.test.ts",
+      "src/kiro.test.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.fixtures.ts",
+      "src/orchestrator.test.ts",
+      "src/resume-integration.test.ts",
+      "src/run-events.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #99 AC1",
+      "given": "a full pipeline run using stub providers",
+      "when": "the explorer, planner, contract evaluator, and generator are invoked",
+      "then": "each invocation is assembled through the provider-independent envelope path and records role-attributed evidence",
+      "observableResult": "events.jsonl contains one matching envelope evidence event for every scoped stub invocation and no scoped invocation lacks one",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #99 AC2 and Scope boundary; ADR 0002",
+      "given": "the same manifest version and declared artifact set containing behavior, gate, finding, and checkpoint IDs",
+      "when": "Kiro-, Claude-, and Codex-named stub adapters receive the envelope",
+      "then": "their logical artifact classes and order are identical and every stable ID is preserved",
+      "observableResult": "the stub captures compare equal after excluding provider wrapper syntax and still contain each seeded stable ID",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #99 AC3; PRD story 17",
+      "given": "an unchanged manifest version and artifact set",
+      "when": "the same role envelope is assembled repeatedly",
+      "then": "normalized prompt bytes and logical evidence are identical",
+      "observableResult": "repeated assembly comparisons are byte-equal and deep-equal",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #99 AC5; PRD fail-closed budgets",
+      "given": "a scoped role manifest and either an undeclared context class or content over its byte budget",
+      "when": "envelope preparation is attempted",
+      "then": "preparation fails as CONFIGURATION before provider dispatch and does not truncate content",
+      "observableResult": "the stub provider is not called and the failure names the undeclared class or actual and allowed byte sizes",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #99 What to build; PRD Size evidence",
+      "given": "completed scoped invocations with provider token-count names exposed in different combinations",
+      "when": "their run events are read",
+      "then": "each invocation records prompt bytes, ordered included artifact classes and IDs, omitted classes, manifest version, and exactly the exposed named token counts",
+      "observableResult": "every scoped event has exact envelope evidence and includes or omits each token-count name according to its provider result",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #99 AC4",
+      "given": "multiple slices whose invocations have exact prompt sizes and mixed availability of named token counts",
+      "when": "the run summary is written",
+      "then": "exact prompt-byte and available token-count totals appear per slice and for the run without synthetic unavailable fields",
+      "observableResult": "summary totals equal the fixture values and token names absent from a level's inputs are not rendered at that level",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "PRD Solution: fail-closed budgets",
+      "given": "required envelope content exceeds a role budget by at least one byte",
+      "when": "the existing budget check runs",
+      "then": "assembly fails with actual and allowed byte sizes and returns no truncated prompt",
+      "observableResult": "existing one-byte-over budget tests remain green",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "PRD Solution and Implementation Decisions: focused fresh invocations",
+      "given": "initial and applicable revision or repair inputs containing ordered role markers and forbidden historical-context markers",
+      "when": "the role envelopes are assembled",
+      "then": "role-specific order remains and prior conversations, other-role conversations, resolved findings, and passing raw logs remain excluded",
+      "observableResult": "ordered markers appear in manifest order and every forbidden marker is absent from the assembled prompts",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #99 additive scope; PRD focused assembly",
+      "given": "a legacy direct generator execution without an explorer context artifact",
+      "when": "the generator envelope is assembled",
+      "then": "the existing full-context fallback remains accepted and measured",
+      "observableResult": "the fallback prompt contains the supplied context and carries the generator manifest version",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #99 additive run-summary totals; ADR 0017",
+      "given": "a run summary with existing lifecycle, cost, tool-call, gate, stable-copy, and per-run-copy data",
+      "when": "prompt and token totals are added",
+      "then": "all existing summary fields and both output copies remain",
+      "observableResult": "logger tests still observe prior columns, gate sections, and identical stable and archived summaries",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "ADR 0002; GH #99 Scope boundary",
+      "given": "an exact assembled prompt passed through AgentProvider.invoke",
+      "when": "the Kiro, Claude, and Codex command builders prepare their invocations",
+      "then": "Kiro uses the unchanged prompt as its final argument and Claude and Codex use it unchanged on stdin while retaining provider-owned command syntax",
+      "observableResult": "adapter command-shape tests observe the exact marker at the existing argument or stdin location with existing flags intact",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}
