@@ -214,6 +214,7 @@ import {
   type ValidatedContractReview,
 } from "./convergence-coordinator.js";
 import { AcceptedCandidateLifecycle } from "./accepted-candidate.js";
+import { decideCandidateGatePhase } from "./candidate-gate-policy.js";
 import {
   applyScopeAmendment,
   buildScopeAmendmentRecord,
@@ -5302,6 +5303,68 @@ export async function runSliceExecute(
 
         logger.bumpEvalRound(slice.ghIssue, round);
         if (!implementationFailed) {
+          if (signal?.aborted) {
+            return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+          }
+          const fullSuiteHasExecutable = fullSuiteDeclarations.some(
+            (declaration) => declaration.command != null,
+          );
+          const fullSuiteRun = await runCandidateGatePhase({
+            ctx,
+            round,
+            treeId: checkpoint.treeId,
+            cwd: gateCwd,
+            evidenceDir,
+            declarations: fullSuiteDeclarations,
+            ...(gatePrepare && fullSuiteHasExecutable
+              ? { prepare: gatePrepare }
+              : {}),
+            label: "full slice suite",
+          });
+          gateArtifacts.push(...fullSuiteRun.artifacts);
+          if (signal?.aborted) {
+            return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+          }
+          const fullSuiteDecision = decideCandidateGatePhase({
+            run: fullSuiteRun,
+            declarations: fullSuiteDeclarations,
+            evidenceDir,
+            nextRound: round + 1,
+            convergence: qaConvergence,
+            ...(repairStage ? { repairStage } : {}),
+          });
+          if (fullSuiteDecision.action === "ERROR") {
+            return { phase: "ERROR", error: fullSuiteDecision.error };
+          }
+          if (fullSuiteDecision.action === "REPAIR") {
+            stuckReferences.push(...fullSuiteDecision.references);
+            retryNote = fullSuiteDecision.retryNote;
+            if (implementationAttempt < implementationAttemptLimit) continue;
+            return finishIntervention(
+              candidateLifecycle.exhaustDeterministicGates({
+                candidateTreeId: checkpoint.treeId,
+                revision: Math.max(qaConvergence.revision, round),
+                failedGateIds: fullSuiteDecision.failedGateIds,
+                attemptTreeIds: implementationCandidateTreeIds,
+                supportingEvidence: fullSuiteDecision.references,
+              }).request,
+            );
+          }
+          assertGateEvidenceReleasesEvaluation(
+            fullSuiteRun.evidence,
+            fullSuiteDeclarations,
+            checkpoint.treeId,
+          );
+          for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
+          // Before the commit, so the diagnosis this slice ships is the
+          // one the operator read, not whatever the generator left.
+          restoreStuckDiagnosis();
+          if (git.hasUncommittedChanges(ctx.worktreeDir)) {
+            git.commitAll(
+              ctx.worktreeDir,
+              `feat(#${slice.ghIssue}): ${slice.title}`,
+            );
+          }
           return dispatchAcceptedCandidate(candidateLifecycle.accept({
             round,
             candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
