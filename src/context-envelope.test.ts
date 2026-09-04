@@ -385,7 +385,7 @@ describe("planner and contract-evaluator context envelopes", () => {
     ]);
   });
 
-  it("B-02 QA-01 projects planner revision evidence in exact prompt order", () => {
+  it("B-02 P-02 QA-01 QA-02 projects planner revision evidence in exact prompt order without resolved history", () => {
     const result = assemblePlannerRevisionEnvelope({
       ghIssue: "95",
       specsDir: ".kiro/specs/demo",
@@ -402,9 +402,6 @@ describe("planner and contract-evaluator context envelopes", () => {
     });
     const findingsBlock = result.prompt
       .split("# Routed OPEN findings")[1]!
-      .split("# Relevant resolved history")[0]!;
-    const resolvedHistoryBlock = result.prompt
-      .split("# Relevant resolved history")[1]!
       .split("# Control-plane situation")[0]!;
     const occurrences = (text: string, marker: string) =>
       text.split(marker).length - 1;
@@ -418,9 +415,21 @@ describe("planner and contract-evaluator context envelopes", () => {
     ).toBe(1);
     expect(findingsBlock).not.toContain("F-RESOLVED");
     expect(findingsBlock).not.toContain("RESOLVED-CLEAR-CONDITION");
-    expect(resolvedHistoryBlock).toContain("F-RESOLVED");
-    expect(resolvedHistoryBlock).toContain("RESOLVED-CLEAR-CONDITION");
-    expect(resolvedHistoryBlock).not.toContain("F-OPEN");
+    expect(result.prompt).not.toContain("F-RESOLVED");
+    expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
+    expect(
+      PLANNER_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).not.toContain("relevant-resolved-contract-findings");
+    expect(PLANNER_CONTEXT_MANIFEST.inputOrder.revision).toEqual([
+      "current-contract-pair",
+      "open-contract-findings",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
+    expect(PLANNER_CONTEXT_MANIFEST.omittedArtifactClasses).toContain(
+      "resolved-findings",
+    );
     expect(result.prompt).toContain(
       "# Control-plane situation\n\nMECHANICAL-OBJECTION",
     );
@@ -432,7 +441,6 @@ describe("planner and contract-evaluator context envelopes", () => {
       "current-contract-pair",
       "current-contract-pair",
       "open-contract-findings",
-      "relevant-resolved-contract-findings",
       "control-plane-situation",
       "base-gate-catalog",
       "migration-reservation",
@@ -441,7 +449,6 @@ describe("planner and contract-evaluator context envelopes", () => {
       ".kiro/specs/demo/slices/03-envelope/contract.md",
       ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
       "contract-review:open-findings",
-      "contract-review:relevant-resolved-findings",
       "control-plane-situation",
       "base-gate-catalog",
       "migration-reservation",
@@ -767,8 +774,8 @@ describe("planner and contract-evaluator context envelopes", () => {
 });
 
 describe("generator context envelope", () => {
-  it("B-02 has identical logical evidence across Kiro, Claude, and Codex stubs and preserves stable IDs", async () => {
-    const result = assembleGeneratorEnvelope({
+  it("B-02 QA-03 independently assembles identical logical evidence through Kiro, Claude, and Codex stubs and preserves stable IDs", async () => {
+    const input: Parameters<typeof assembleGeneratorEnvelope>[0] = {
       mode: "repair",
       sliceDir: ".kiro/specs/demo/slices/01-focused",
       contractView: "checkpointId: CHECKPOINT-07",
@@ -792,18 +799,21 @@ describe("generator context envelope", () => {
           },
         ],
       },
-    });
+    };
+    type GeneratorResult = ReturnType<typeof assembleGeneratorEnvelope>;
     const captures = new Map<
       string,
-      { prompt: string; evidence: typeof result.evidence }
+      { prompt: string; evidence: GeneratorResult["evidence"] }
     >();
+    const independentlyAssembled = new Map<string, GeneratorResult>();
     const adapters: AgentProvider[] = ["kiro", "claude", "codex"].map(
       (name) => ({
         name,
         async invoke(options) {
+          const assembled = independentlyAssembled.get(name)!;
           captures.set(name, {
             prompt: options.prompt,
-            evidence: result.evidence,
+            evidence: assembled.evidence,
           });
           return { exitCode: 0, stdout: "", stats: {} };
         },
@@ -811,22 +821,36 @@ describe("generator context envelope", () => {
     );
 
     for (const adapter of adapters) {
+      const assembled = assembleGeneratorEnvelope(input);
+      independentlyAssembled.set(adapter.name, assembled);
       await adapter.invoke({
         role: "generator",
-        prompt: result.prompt,
+        prompt: assembled.prompt,
         cwd: "/stub",
       });
     }
 
-    expect([...captures.values()].map(({ evidence }) => evidence)).toEqual([
-      result.evidence,
-      result.evidence,
-      result.evidence,
-    ]);
-    expect(result.prompt).toContain('"id": "B-01"');
-    expect(result.prompt).toContain('"tests"');
-    expect(result.prompt).toContain("FINDING-09");
-    expect(result.prompt).toContain("CHECKPOINT-07");
+    const captured = (name: string) => {
+      const capture = captures.get(name);
+      if (capture === undefined) {
+        throw new Error(`Missing ${name} stub capture`);
+      }
+      return capture;
+    };
+    const kiro = captured("kiro");
+    const claude = captured("claude");
+    const codex = captured("codex");
+    expect(Buffer.from(claude.prompt)).toEqual(Buffer.from(kiro.prompt));
+    expect(Buffer.from(codex.prompt)).toEqual(Buffer.from(kiro.prompt));
+    expect(claude.evidence).toEqual(kiro.evidence);
+    expect(codex.evidence).toEqual(kiro.evidence);
+    for (const capture of [kiro, claude, codex]) {
+      expect(capture.prompt).not.toContain("\r");
+      expect(capture.prompt).toContain('"id": "B-01"');
+      expect(capture.prompt).toContain('"tests"');
+      expect(capture.prompt).toContain("FINDING-09");
+      expect(capture.prompt).toContain("CHECKPOINT-07");
+    }
   });
 
   it("B-01 QA-01 assembles exact initial generator evidence in prompt order", () => {

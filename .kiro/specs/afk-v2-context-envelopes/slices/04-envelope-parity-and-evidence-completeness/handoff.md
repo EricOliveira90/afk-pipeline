@@ -1,26 +1,24 @@
 ## What shipped
 
-- `B-01`: `src/orchestrator.ts:makeSliceContext`
+- `B-01`: `src/orchestrator.ts:invokeAgent`
 - `B-02`: `src/context-envelope.ts:assembleContextEnvelope`
 - `B-03`: `src/context-envelope.ts:assembleContextEnvelope`
-- `B-04`: `src/context-envelope.ts:ContextEnvelopeConfigurationError`
-- `B-05`: `src/context-envelope.ts:assembleContextEnvelope`
-- `B-06`: `src/logger.ts:Logger.writeSummary`
+- `B-04`: `src/context-envelope.ts:assertEnvelopeBudget`
+- `B-05`: `src/orchestrator.ts:invokeAgent`
+- `B-06`: `src/logger.ts:writeSummary`
 - `P-01`: `src/context-envelope.ts:assertEnvelopeBudget`
 - `P-02`: `src/context-envelope.ts:assemblePlannerRevisionEnvelope`
 - `P-03`: `src/context-envelope.ts:assembleGeneratorEnvelope`
-- `P-04`: `src/logger.ts:Logger.writeSummary`
-- `P-05`: `src/agent-provider.ts:AgentProvider.invoke`
+- `P-04`: `src/logger.ts:writeSummary`
+- `P-05`: `src/agent-provider.ts:AgentProvider`
 
 ## Decisions made during implementation
 
-- Journal envelope evidence after a successful provider invocation so exposed token counts attach to the same event without duplicate pre-dispatch evidence.
-- Preserve provider token-count field names verbatim and omit the map when a provider exposes none.
-- Declare artifact classes at each role/mode assembly call site so evidence keeps the prompt's exact order instead of inferring classes from reused file IDs.
-- Treat the focused-scope contract evaluation as an initial evaluator envelope because only negotiation feedback selects the evaluator revision manifest.
+- Planner revision keeps the existing resolved-history heading with `(none)` while excluding all resolved content and evidence, preserving prompt-template compatibility.
+- Provider parity uses a fresh assembly for each named stub so repeated-assembly divergence cannot hide behind a shared object.
+- Invocation byte evidence is compared with the exact prompt captured at the dispatch seam so the assertions stay exact when legitimate prompt text changes.
 
 ## Gotchas / learnings
 
-- `includedArtifactClasses` and `includedArtifactIds` are ordered parallel arrays; consumers must preserve their index relationship.
-- Generator repair context belongs immediately after `repair-situation` in logical evidence because both are supplied before the locked contract and acceptance manifest.
-- Repository artifact IDs in run evidence use forward slashes even when the host platform uses Windows path separators.
+- `resolvedFindings` remains accepted as an input property for legacy callers but planner revision assembly intentionally ignores it.
+- The generator stub exposes `cache_read_input_tokens`; token evidence must preserve provider-exposed names verbatim.

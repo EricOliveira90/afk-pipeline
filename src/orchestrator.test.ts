@@ -2248,7 +2248,7 @@ describe("focused generator scope revision", () => {
     expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
   });
 
-  it("B-01 B-05 journals one complete envelope event for every scoped stub invocation", () => {
+  it("B-01 B-05 QA-04 journals exact complete envelope evidence for every scoped stub invocation", () => {
     const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
     const runDir = readdirSync(runRoot)
       .map((name) => join(runRoot, name))
@@ -2405,43 +2405,86 @@ describe("focused generator scope revision", () => {
         ids: repairGeneratorIds,
       },
     ]);
-    for (const event of assemblies) {
-      expect(event).toMatchObject({
-        ghIssue: "1081",
-        sliceNumber: "01",
-        contextManifestVersion: 1,
-      });
-      expect([
-        "explorer",
-        "planner",
-        "evaluator-contract",
-        "generator",
-      ]).toContain(event.role);
-      expect(event.assembledByteSize).toBeGreaterThan(0);
-      expect(event.includedArtifactClasses).toHaveLength(
-        (event.includedArtifactIds as unknown[]).length,
-      );
-      expect(
-        (event.includedArtifactIds as unknown[]).length,
-      ).toBeGreaterThan(0);
-      expect(event.omittedArtifactClasses).toContain("prior-conversation");
-    }
+    expect(
+      assemblies.map((event) => ({
+        ghIssue: event.ghIssue,
+        sliceNumber: event.sliceNumber,
+        role: event.role,
+        contextManifestVersion: event.contextManifestVersion,
+      })),
+    ).toEqual([
+      "explorer",
+      "planner",
+      "evaluator-contract",
+      "generator",
+      "generator",
+      "planner",
+      "evaluator-contract",
+      "generator",
+    ].map((role) => ({
+      ghIssue: "1081",
+      sliceNumber: "01",
+      role,
+      contextManifestVersion: 1,
+    })));
+    expect(assemblies.map((event) => event.assembledByteSize)).toEqual(
+      scopedInvocations.map(({ prompt }) => Buffer.byteLength(prompt!)),
+    );
+    const explorerOmissions = [
+      "persona",
+      "full-adr-bodies",
+      "prior-conversation",
+      "other-role-conversation",
+    ];
+    const plannerOmissions = [
+      "prior-conversation",
+      "other-role-conversation",
+      "resolved-findings",
+      "sibling-handoffs",
+      "full-adr-bodies",
+    ];
+    const evaluatorOmissions = [
+      ...plannerOmissions,
+      "generator-output",
+      "cleanup-artifacts",
+    ];
+    const generatorOmissions = [
+      "resolved-findings",
+      "passing-logs",
+      "prior-conversation",
+      "other-role-conversation",
+      "sibling-handoffs",
+      "full-adr-bodies",
+    ];
+    expect(assemblies.map((event) => event.omittedArtifactClasses)).toEqual([
+      explorerOmissions,
+      plannerOmissions,
+      evaluatorOmissions,
+      generatorOmissions,
+      generatorOmissions,
+      plannerOmissions,
+      evaluatorOmissions,
+      generatorOmissions,
+    ]);
     expect(assemblies[0]).not.toHaveProperty("tokenCounts");
-    for (const event of assemblies.filter(({ role }) => role === "planner")) {
-      expect(event.tokenCounts).toEqual({ input_tokens: 10 });
-    }
-    for (const event of assemblies.filter(
-      ({ role }) => role === "evaluator-contract",
-    )) {
-      expect(event.tokenCounts).toEqual({
+    expect(assemblies.map((event) => event.tokenCounts)).toEqual([
+      undefined,
+      { input_tokens: 10 },
+      {
         input_tokens: 7,
         output_tokens: 3,
-      });
-    }
-    for (const event of assemblies.filter(
-      ({ role }) => role === "generator",
-    )) {
-      expect(event.tokenCounts).toEqual({ output_tokens: 5 });
+      },
+      { output_tokens: 5, cache_read_input_tokens: 2 },
+      { output_tokens: 5, cache_read_input_tokens: 2 },
+      { input_tokens: 10 },
+      {
+        input_tokens: 7,
+        output_tokens: 3,
+      },
+      { output_tokens: 5, cache_read_input_tokens: 2 },
+    ]);
+    for (const event of assemblies.slice(1)) {
+      expect(event).toHaveProperty("tokenCounts");
     }
     for (const event of assemblies.filter(
       ({ role, round }) =>
@@ -3561,7 +3604,7 @@ describe("round-scoped contract feedback", () => {
     ).toBe(false);
   });
 
-  it("grants one final contract round for a fresh blocker caused by the round-two revision", async () => {
+  it("P-02 QA-02 grants one final contract round without resolved finding history", async () => {
     const repo = makeRepo();
     const slug = "feedback-rounds";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -3736,7 +3779,10 @@ describe("round-scoped contract feedback", () => {
     expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
     expect(plannerPrompts[2]).toContain("[F-02] BLOCKING OPEN");
     expect(plannerPrompts[2]).toContain("# Relevant resolved history");
-    expect(plannerPrompts[2]).toContain("[F-01] BLOCKING RESOLVED");
+    expect(plannerPrompts[2]).not.toContain("[F-01] BLOCKING RESOLVED");
+    expect(plannerPrompts[2]).not.toContain(
+      "B-01 names a command that fails when the header is absent",
+    );
     expect(plannerPrompts[2]).toContain(
       "Include one response for each routed ID and no others: F-02.",
     );
@@ -4484,7 +4530,7 @@ describe("round-scoped contract feedback", () => {
   // revision citation, followed by a third planner response. Existing
   // negotiation fixtures either stop at two rounds or reuse an old blocker,
   // so none can reach this distinct continuation state.
-  it("grants the PRD 3 final response when round two first raises fresh cited blockers", async () => {
+  it("P-02 QA-02 grants the PRD 3 final response without resolved finding history", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -4657,10 +4703,10 @@ describe("round-scoped contract feedback", () => {
       expect(evaluatorRounds).toBe(3);
       expect(plannerPrompts[2]).toContain("F-r2-1");
       expect(plannerPrompts[2]).toContain("F-r2-2");
-      expect(plannerPrompts[2]).toContain(
+      expect(plannerPrompts[2]).not.toContain(
         "Keep this relevant resolved history satisfied",
       );
-      expect(plannerPrompts[2]).toContain("F-r1-1");
+      expect(plannerPrompts[2]).not.toContain("F-r1-1");
       expect(roundThreeResponse).toMatchObject({
         version: 1,
         round: 3,

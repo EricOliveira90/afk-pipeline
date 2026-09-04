@@ -569,7 +569,7 @@ export function buildStubProvider(opts: {
           : role === "evaluator-contract"
             ? { input_tokens: 7, output_tokens: 3 }
             : role === "generator"
-              ? { output_tokens: 5 }
+              ? { output_tokens: 5, cache_read_input_tokens: 2 }
               : undefined;
       return {
         exitCode: 0,

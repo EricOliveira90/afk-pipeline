@@ -431,7 +431,6 @@ export const PLANNER_CONTEXT_MANIFEST = {
     "repository-architecture",
     "current-contract-pair",
     "open-contract-findings",
-    "relevant-resolved-contract-findings",
     "control-plane-situation",
   ],
   outputArtifact: "negotiating-contract-pair",
@@ -446,16 +445,13 @@ export const PLANNER_CONTEXT_MANIFEST = {
     revision: [
       "current-contract-pair",
       "open-contract-findings",
-      "relevant-resolved-contract-findings",
       "control-plane-situation",
       "base-gate-catalog",
       "migration-reservation",
     ],
   },
   inlineSizeBudgetBytes: 65_536,
-  omittedArtifactClasses: ROLE_ENVELOPE_OMISSIONS.filter(
-    (artifactClass) => artifactClass !== "resolved-findings",
-  ),
+  omittedArtifactClasses: ROLE_ENVELOPE_OMISSIONS,
 } as const;
 
 export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
@@ -730,7 +726,6 @@ export function assemblePlannerRevisionEnvelope(
   input: PlannerRevisionEnvelopeInput,
 ): RoleEnvelopeResult {
   const openFindings = openContractReviewFindings(input.findings);
-  const resolvedFindings = input.resolvedFindings ?? [];
   const prompt = renderPrompt("planner-revision", {
     GH_ISSUE: input.ghIssue,
     SPECS_DIR: input.specsDir,
@@ -739,10 +734,7 @@ export function assemblePlannerRevisionEnvelope(
     CURRENT_CONTRACT: input.currentContract,
     CURRENT_ACCEPTANCE_MANIFEST: input.currentAcceptanceManifest,
     OPEN_FINDINGS: formatContractReviewFindings(openFindings),
-    RESOLVED_HISTORY:
-      resolvedFindings.length > 0
-        ? `Keep this relevant resolved history satisfied to avoid regression:\n\n${formatContractReviewFindings(resolvedFindings)}`
-        : "(none)",
+    RESOLVED_HISTORY: "(none)",
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
     CONTRACT_RESPONSE_INSTRUCTIONS: input.contractResponseInstructions,
     BASE_GATE_CATALOG: input.baseGateCatalog,
@@ -764,12 +756,6 @@ export function assemblePlannerRevisionEnvelope(
         ? [{
             artifactClass: "open-contract-findings",
             artifactId: "contract-review:open-findings",
-          }]
-        : []),
-      ...(resolvedFindings.length > 0
-        ? [{
-            artifactClass: "relevant-resolved-contract-findings",
-            artifactId: "contract-review:relevant-resolved-findings",
           }]
         : []),
       ...(input.controlSituation !== undefined
