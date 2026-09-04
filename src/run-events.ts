@@ -92,9 +92,11 @@ export type RunEventPayload =
       round: number;
       role: PromptAssemblyRole;
       assembledByteSize: number;
+      includedArtifactClasses: string[];
       includedArtifactIds: string[];
       omittedArtifactClasses: string[];
       contextManifestVersion: number;
+      tokenCounts?: Record<string, number>;
     }
   | {
       type: "gate-outcome";

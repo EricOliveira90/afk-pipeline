@@ -563,7 +563,19 @@ export function buildStubProvider(opts: {
         finishedAt,
         ghIssue,
       });
-      return { exitCode: 0, stdout: "", stats: {} };
+      const tokenCounts: Record<string, number> | undefined =
+        role === "planner"
+          ? { input_tokens: 10 }
+          : role === "evaluator-contract"
+            ? { input_tokens: 7, output_tokens: 3 }
+            : role === "generator"
+              ? { output_tokens: 5 }
+              : undefined;
+      return {
+        exitCode: 0,
+        stdout: "",
+        stats: tokenCounts === undefined ? {} : { tokenCounts },
+      };
     },
   };
 }

@@ -2248,7 +2248,7 @@ describe("focused generator scope revision", () => {
     expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
   });
 
-  it("B-06 journals role-attributed assembly evidence for every scoped dispatch", () => {
+  it("B-01 B-05 journals one complete envelope event for every scoped stub invocation", () => {
     const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
     const runDir = readdirSync(runRoot)
       .map((name) => join(runRoot, name))
@@ -2260,8 +2260,15 @@ describe("focused generator scope revision", () => {
     const assemblies = events.filter(
       (event) => event.type === "prompt-assembly",
     );
+    const scopedInvocations = records.filter(({ role }) =>
+      ["explorer", "planner", "evaluator-contract", "generator"].includes(
+        role,
+      ),
+    );
 
+    expect(assemblies).toHaveLength(scopedInvocations.length);
     expect(assemblies.map((event) => event.role)).toEqual([
+      "explorer",
       "planner",
       "evaluator-contract",
       "generator",
@@ -2282,14 +2289,37 @@ describe("focused generator scope revision", () => {
         "generator",
       ]).toContain(event.role);
       expect(event.assembledByteSize).toBeGreaterThan(0);
+      expect(event.includedArtifactClasses).toEqual(expect.any(Array));
       expect(event.includedArtifactIds).toEqual(expect.any(Array));
+      expect(event.includedArtifactClasses).toHaveLength(
+        (event.includedArtifactIds as unknown[]).length,
+      );
       expect(
         (event.includedArtifactIds as unknown[]).length,
       ).toBeGreaterThan(0);
       expect(event.omittedArtifactClasses).toContain("prior-conversation");
     }
+    expect(assemblies[0]).not.toHaveProperty("tokenCounts");
+    for (const event of assemblies.filter(({ role }) => role === "planner")) {
+      expect(event.tokenCounts).toEqual({ input_tokens: 10 });
+    }
     for (const event of assemblies.filter(
-      ({ role, round }) => role !== "planner" || round !== 1,
+      ({ role }) => role === "evaluator-contract",
+    )) {
+      expect(event.tokenCounts).toEqual({
+        input_tokens: 7,
+        output_tokens: 3,
+      });
+    }
+    for (const event of assemblies.filter(
+      ({ role }) => role === "generator",
+    )) {
+      expect(event.tokenCounts).toEqual({ output_tokens: 5 });
+    }
+    for (const event of assemblies.filter(
+      ({ role, round }) =>
+        role !== "explorer" &&
+        (role !== "planner" || round !== 1),
     )) {
       expect(event.includedArtifactIds).toEqual(
         expect.arrayContaining([

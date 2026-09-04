@@ -944,6 +944,17 @@ export function makeSliceContext(
       },
     );
     logger.addInvocationStats(slice.ghIssue, result.stats);
+    if (opts.contextEnvelope !== undefined) {
+      const tokenCounts = result.stats.tokenCounts;
+      logger.event({
+        type: "prompt-assembly",
+        ...opts.contextEnvelope,
+        ...(tokenCounts !== undefined &&
+        Object.keys(tokenCounts).length > 0
+          ? { tokenCounts }
+          : {}),
+      });
+    }
     return result;
   };
 
@@ -1224,7 +1235,8 @@ async function reviseAcceptedContract(
   });
   await invoke({
     role: "planner",
-    prompt: plannerPrompt,
+    prompt: plannerPrompt.prompt,
+    contextEnvelope: plannerPrompt.contextEnvelope,
     cwd: ctx.worktreeDir,
     logStream: plannerLog,
     maxDurationMs: config.maxAgentDurationMs,
@@ -1349,7 +1361,8 @@ async function reviseAcceptedContract(
   });
   await invoke({
     role: "evaluator-contract",
-    prompt: evaluatorPrompt,
+    prompt: evaluatorPrompt.prompt,
+    contextEnvelope: evaluatorPrompt.contextEnvelope,
     cwd: ctx.worktreeDir,
     logStream: evaluatorLog,
     maxDurationMs: config.maxAgentDurationMs,
@@ -2615,7 +2628,8 @@ async function runImpasseAdjudication(
           await ctx
             .invoke({
               role: "planner",
-              prompt: plannerPrompt,
+              prompt: plannerPrompt.prompt,
+              contextEnvelope: plannerPrompt.contextEnvelope,
               cwd: ctx.worktreeDir,
               maxDurationMs: config.maxAgentDurationMs,
               logStream: plannerLog,
@@ -2762,6 +2776,12 @@ async function negotiateAttempt(
         {
           role: "explorer",
           prompt: assembled.prompt,
+          contextEnvelope: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round: 1,
+            ...assembled.evidence,
+          },
           cwd: ctx.worktreeDir,
           maxDurationMs: config.maxAgentDurationMs,
         },
@@ -3066,7 +3086,8 @@ async function negotiateAttempt(
         await invokeAgent(
           {
             role: "planner",
-            prompt: plannerPrompt,
+            prompt: plannerPrompt.prompt,
+            contextEnvelope: plannerPrompt.contextEnvelope,
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
@@ -3245,7 +3266,8 @@ async function negotiateAttempt(
         await invokeAgent(
           {
             role: "evaluator-contract",
-            prompt: evaluatorPrompt,
+            prompt: evaluatorPrompt.prompt,
+            contextEnvelope: evaluatorPrompt.contextEnvelope,
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
@@ -4650,16 +4672,15 @@ export async function runSliceExecute(
         // measured against the *new* accepted bytes, not the round's first
         // ones.
         const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
-        logger.event({
-          type: "prompt-assembly",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          round,
-          ...assembled.evidence,
-        });
         await invoke({
           role: "generator",
           prompt: assembled.prompt,
+          contextEnvelope: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            ...assembled.evidence,
+          },
           cwd: ctx.worktreeDir,
           logStream: genLog,
           ...longCommandRoleBounds({

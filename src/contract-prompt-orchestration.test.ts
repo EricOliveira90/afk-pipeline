@@ -40,7 +40,7 @@ function captureEvents() {
 }
 
 describe("contract prompt orchestration", () => {
-  it("assembles and records a planner prompt behind one seam", () => {
+  it("B-01 prepares planner prompt evidence behind one seam", () => {
     const { events, context } = captureEvents();
     const prompt = assemblePlannerPrompt(
       {
@@ -61,10 +61,9 @@ describe("contract prompt orchestration", () => {
       context,
     );
 
-    expect(prompt).toContain("# Routed OPEN findings");
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      type: "prompt-assembly",
+    expect(prompt.prompt).toContain("# Routed OPEN findings");
+    expect(events).toHaveLength(0);
+    expect(prompt.contextEnvelope).toMatchObject({
       ghIssue: "95",
       sliceNumber: "03",
       round: 2,
@@ -72,7 +71,7 @@ describe("contract prompt orchestration", () => {
     });
   });
 
-  it("assembles and records an evaluator prompt behind the same seam", () => {
+  it("B-05 prepares evaluator evidence for completion-time journaling", () => {
     const { events, context } = captureEvents();
     const prompt = assembleContractEvaluatorPrompt(
       {
@@ -90,11 +89,12 @@ describe("contract prompt orchestration", () => {
       context,
     );
 
-    expect(prompt).toContain("# Proposed contract");
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      type: "prompt-assembly",
+    expect(prompt.prompt).toContain("# Proposed contract");
+    expect(events).toHaveLength(0);
+    expect(prompt.contextEnvelope).toMatchObject({
       role: "evaluator-contract",
+      includedArtifactClasses: expect.any(Array),
+      includedArtifactIds: expect.any(Array),
     });
   });
 });

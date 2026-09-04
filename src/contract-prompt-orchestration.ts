@@ -9,7 +9,7 @@ import {
   type PlannerRevisionEnvelopeInput,
   type RoleEnvelopeResult,
 } from "./context-envelope.js";
-import type { RunEventPayload } from "./run-events.js";
+import type { ContextEnvelopeInvocationEvidence } from "./agent-provider.js";
 import type { AcceptanceManifest } from "./acceptance-manifest.js";
 import type {
   ContractResponse,
@@ -17,22 +17,17 @@ import type {
   ContractReviewFinding,
 } from "./contract-review.js";
 
-type PromptAssemblyEvent = Extract<
-  RunEventPayload,
-  { type: "prompt-assembly" }
->;
-
-interface PromptAssemblyJournal {
-  event(payload: PromptAssemblyEvent): void;
-}
-
 export interface PromptAssemblyContext {
-  journal: PromptAssemblyJournal;
   ghIssue: string;
   sliceNumber: string;
   specsDir: string;
   sliceDir: string;
   round: number;
+}
+
+export interface PreparedEnvelopePrompt {
+  prompt: string;
+  contextEnvelope: ContextEnvelopeInvocationEvidence;
 }
 
 type WithoutBudget<T> = Omit<T, "inlineSizeBudgetBytes">;
@@ -58,14 +53,13 @@ export type ContractEvaluatorPromptRequest =
     };
 
 export function promptAssemblyContext(
-  journal: PromptAssemblyJournal,
+  _journal: unknown,
   slice: { ghIssue: string; number: string },
   specsDir: string,
   sliceDir: string,
   round: number,
 ): PromptAssemblyContext {
   return {
-    journal,
     ghIssue: slice.ghIssue,
     sliceNumber: slice.number,
     specsDir,
@@ -77,22 +71,23 @@ export function promptAssemblyContext(
 function recordPromptAssembly(
   context: PromptAssemblyContext,
   assembled: RoleEnvelopeResult,
-): string {
-  context.journal.event({
-    type: "prompt-assembly",
+): PreparedEnvelopePrompt {
+  return {
+    prompt: assembled.prompt,
+    contextEnvelope: {
     ghIssue: context.ghIssue,
     sliceNumber: context.sliceNumber,
     round: context.round,
     ...assembled.evidence,
-  });
-  return assembled.prompt;
+    },
+  };
 }
 
 export function assemblePlannerPrompt(
   request: PlannerPromptRequest,
   context: PromptAssemblyContext,
   inlineSizeBudgetBytes?: number,
-): string {
+): PreparedEnvelopePrompt {
   const budget =
     inlineSizeBudgetBytes === undefined ? {} : { inlineSizeBudgetBytes };
   const assembled =
@@ -106,7 +101,7 @@ export function assembleContractEvaluatorPrompt(
   request: ContractEvaluatorPromptRequest,
   context: PromptAssemblyContext,
   inlineSizeBudgetBytes?: number,
-): string {
+): PreparedEnvelopePrompt {
   const budget =
     inlineSizeBudgetBytes === undefined ? {} : { inlineSizeBudgetBytes };
   const assembled =
@@ -131,7 +126,7 @@ export function assembleFocusedScopePlannerPrompt(input: {
   migrationReservation: string;
   baseGateCatalog: string;
   inlineSizeBudgetBytes?: number;
-}): string {
+}): PreparedEnvelopePrompt {
   const { context } = input;
   return assemblePlannerPrompt(
     {
@@ -168,7 +163,7 @@ export function assembleFocusedScopeEvaluatorPrompt(input: {
   baseGateCatalog: string;
   explorerContext: string;
   inlineSizeBudgetBytes?: number;
-}): string {
+}): PreparedEnvelopePrompt {
   return assembleContractEvaluatorPrompt(
     {
       mode: "initial",
@@ -197,7 +192,7 @@ export function assembleAdjudicationPlannerPrompt(input: {
   migrationReservation: string;
   baseGateCatalog: string;
   inlineSizeBudgetBytes?: number;
-}): string {
+}): PreparedEnvelopePrompt {
   const { context } = input;
   return assemblePlannerPrompt(
     {
@@ -246,7 +241,7 @@ export function assembleNegotiationPlannerPrompt(input: {
   migrationReservation: string;
   baseGateCatalog: string;
   inlineSizeBudgetBytes?: number;
-}): string {
+}): PreparedEnvelopePrompt {
   const { context } = input;
   const request: PlannerPromptRequest = input.useInitialEnvelope
     ? {
@@ -308,7 +303,7 @@ export function assembleNegotiationEvaluatorPrompt(input: {
   plannerResponse: ContractResponse | null;
   revisions: ContractRevisionArtifacts | null;
   inlineSizeBudgetBytes?: number;
-}): string {
+}): PreparedEnvelopePrompt {
   const common = {
     sliceDir: input.context.sliceDir,
     round: input.context.round,
