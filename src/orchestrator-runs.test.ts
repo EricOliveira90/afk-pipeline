@@ -32,10 +32,10 @@ import {
   isCancelled,
   makeAsyncMutex,
   makeSliceContext,
-  resolveBaseGateDeclarations,
   runPipeline,
   runSliceNegotiate,
 } from "./orchestrator.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import {
   buildPrCreationPlan,
   buildReviewScopeBlock,

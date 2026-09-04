@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { probeAdjudicationEstate } from "./adjudication-estate.js";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
 import type {
   GateDeclaration,
   GateResult,
@@ -20,7 +21,6 @@ import {
 } from "./git.js";
 import type { Slice } from "./issues-parser.js";
 import { parseIssuesMd } from "./issues-parser.js";
-import { resolveBaseGateDeclarations } from "./orchestrator.js";
 import {
   featureBranchForProviderName,
   providerNameFromRunSlug,
@@ -28,7 +28,7 @@ import {
   sliceWorktreeDirForProviderName,
 } from "./run-identity.js";
 import { resolveSanityPlan } from "./preship.js";
-import { matchesSliceSelector } from "./resume.js";
+import { matchesSliceSelector } from "./slice-selector.js";
 import {
   listRunStateSlugs,
   loadRunState,
