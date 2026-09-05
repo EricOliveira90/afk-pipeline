@@ -1,52 +1,131 @@
-# Product Guardian Review — Slice 04
+# Product Guardian Review — PRD 3 selected slices
 
 **Verdict:** FIX-BEFORE-SHIP
 
 ## Scope
 
-Reviewed only slice 04, “Envelope parity and evidence completeness” (#99), against the parent PRD, slice index, locked contract, acceptance manifest, and implementation. Slices 01–03 did not affect the verdict.
+Reviewed the current tree at `0060ac6` against the PRD and selected slices 01
+(#83), 02 (#90), 03 (#95), and 04 (#99). No manifest slice was skipped. The
+pre-ship sanity result was accepted and the full suite was not rerun.
 
 ## Requirement verification
 
-| Requirement | Result | Product evidence |
+| Slice | Result | Product outcome |
 |---|---|---|
-| B-01 — every scoped role uses envelope assembly and records evidence | Delivered | `src/orchestrator.ts:894-957`, `src/orchestrator.ts:2754-2789`, `src/orchestrator.ts:3046-3094`, `src/orchestrator.ts:3246-3275`, and `src/orchestrator.ts:4636-4691` route explorer, planner, contract evaluator, and generator through the common dispatch seam. `src/orchestrator.test.ts:2251-2500` matches all eight scoped invocations to exact evidence events. |
-| B-02 — provider-independent logical parity and stable IDs | Delivered | `src/context-envelope.ts:619-657` creates provider-independent evidence. `src/context-envelope.test.ts:777-853` independently assembles Kiro-, Claude-, and Codex-named stub envelopes and checks behavior, gate, finding, and checkpoint IDs. |
-| B-03 — deterministic repeated assembly | Delivered | `src/context-envelope.ts:635-657` normalizes and derives evidence deterministically; repeated-byte/evidence assertions are at `src/context-envelope.test.ts:658-717` and `src/context-envelope.test.ts:1145-1178`. |
-| B-04 — declared classes and fail-closed configuration | Delivered | `src/context-envelope.ts:619-657` rejects undeclared classes and calls the shared byte-budget guard before dispatch. Focused assertions are at `src/context-envelope.test.ts:741-773`. |
-| B-05 — complete per-invocation evidence | Delivered | `src/orchestrator.ts:946-956` records completed logical invocations with provider token names preserved. `src/orchestrator.test.ts:2251-2488` checks exact bytes, ordered classes/IDs, omissions, manifest versions, and token presence or absence. |
-| B-06 — per-slice and run totals | Delivered | `src/logger.ts:233-291` aggregates prompt bytes and available token names without inventing absent fields. `src/logger.test.ts:276-327` verifies exact slice and run totals. |
-| P-01 — no silent truncation | Delivered | `src/context-envelope.ts:605-616` throws with actual and allowed byte sizes; the one-byte-over assertion passed at `src/context-envelope.test.ts:758-773`. |
-| P-02 — fresh focused envelopes exclude resolved findings | **Not delivered** | See blocking finding below. |
-| P-03 — legacy generator fallback | Delivered | `src/context-envelope.ts:933-938` retains the full-context fallback; `src/context-envelope.test.ts:1180-1200` verifies it remains measured. |
-| P-04 — existing summary evidence and copies remain | Delivered | Existing status, cost, tool, and gate sections remain in `src/logger.ts:251-356`; stable and per-run copies are verified at `src/logger.test.ts:443-453`. |
-| P-05 — unchanged prompt at provider seam | Delivered | Kiro receives the exact final argument and Claude/Codex receive exact stdin, verified at `src/kiro.test.ts:69-94`, `src/claude.test.ts:62-85`, and `src/codex.test.ts:161-199`. |
+| 01 — Generator runs on the focused envelope | **Partial** | Initial and repair templates, inline scope, six-section contract projection, fail-closed budgets, deterministic assembly, escalation criteria, reduced handoff, and ordinary open-only failure projection are present. Repair context is still duplicated and over-broad, `--resume-stuck` can restore resolved findings, and assembly evidence is not journaled before dispatch. |
+| 02 — Explorer four-section evidence map | **Partial** | Ordered section validation, required `Unknowns`, generator section projection, optional ADR index and `ARCHITECTURE.md`, and no per-item role tags are present. The required `FACT` / `INFERENCE` / `UNKNOWN` statement-label rule is absent. |
+| 03 — Planner and contract-evaluator envelopes | Delivered | Initial and revision envelopes are distinct, planner revisions receive open findings only, evaluator revisions receive their own prior open findings and exact revision evidence, repository context is supplied to the planner, and role evidence is recorded. |
+| 04 — Envelope parity and evidence completeness | **Partial** | Complete manifests, stricter-only budgets, undeclared-class rejection, deterministic provider-independent assembly, stable-ID preservation, exact invocation evidence, token fields, `nonCommandTimeMs`, and slice/run totals are present. The fresh-context exclusion still fails through the STUCK-resume path. |
 
 ## Fix before ship
 
-### 1. Generator repair prompts still include resolved QA findings
+### 1. Restore the explorer citation-label rule
 
-The PRD requires fresh invocations with “no resolved findings” and says a repair round receives the orchestrator-computed unresolved set so the generator does not re-read preserved reports (`prd.md`, Solution and user story 5; testing decision at lines 60–61). The locked slice requirement P-02 repeats that repair/revision envelopes exclude resolved findings.
+PRD user story 9 and slice #90 require every explorer statement to be
+distinguishable as `FACT`, `INFERENCE`, or `UNKNOWN`.
 
-- **File and location:** `src/qa-convergence.ts`, `qaGeneratorContext` and `formatQAGeneratorContext` (`290-360`).
-- **What I read:** the formatter deliberately selects resolved source-change findings that overlap open work, then serializes their ID, state, summary, expected/observed text, clear condition, and artifact references under “Relevant resolved QA findings.”
-- **File and location:** `src/orchestrator.ts`, `runSliceExecute` (`5119-5126`, then `4609-4666`).
-- **What I read:** the resolved-finding formatter becomes `retryNote`; that note is inserted into `repairSituation`, which is passed into `assembleGeneratorEnvelope`, so the resolved content reaches the actual generator prompt despite the assembler’s omission list.
-- **File and location:** `src/candidate-gate-policy.test.ts`, candidate gate repair test (`31-132`).
-- **What I ran:** `pnpm vitest run src/candidate-gate-policy.test.ts` passed while explicitly requiring `QA-PRIOR` and `State: RESOLVED` in the next generator’s retry note. This independently confirms the shipped behavior, rather than merely exposing an unused helper.
+- **File and location:** `prompts/explorer.md`, `# Citation rule`.
+- **What I read:** the prompt asks for citations and places unresolved questions
+  under `Unknowns`, but never tells the explorer to label statements as
+  `FACT`, `INFERENCE`, or `UNKNOWN`.
+- **File and location:** `src/context-envelope.test.ts`, test
+  `B-04 QA-01 assembles the ordered focused prompt and exact evidence`.
+- **What I ran:** the focused 130-test command passed while this test explicitly
+  requires the captured explorer prompt not to contain those three labels or
+  “Label every statement.”
 
-This restores the context accumulation the PRD set out to remove and materially changes the promised generator experience.
+Without the labels, downstream roles cannot reliably distinguish cited facts
+from uncited inference as promised.
 
-**Clear condition:** Build every generator repair prompt from current OPEN findings and failed-gate references only. Remove resolved finding content from retry notes and repair situations, and add an orchestration-level assertion that seeded resolved IDs, details, and report references are absent from the dispatched prompt.
+**Clear condition:** Put the three-label rule in the assembled explorer prompt
+and assert it at the captured-provider boundary.
+
+### 2. Make the compact failure set the only QA-finding block in repair prompts
+
+PRD user story 5 and slice #83 require one orchestrator-computed unresolved
+block, last in the prompt: finding IDs with clear conditions plus failed gate
+evidence.
+
+- **File and location:** `src/qa-convergence.ts`, `formatEntry` and
+  `formatQAGeneratorContext`.
+- **What I read:** the formatter serializes severity, disposition, state,
+  remedy, summary, expected, observed, clear condition, and report references.
+- **File and location:** `src/orchestrator.ts`, `runSliceExecute`, the
+  `retryNote` assignments and `repairSituation` construction.
+- **What I read:** that expanded formatter output is inserted into
+  `repairSituation`, while `assembleGeneratorEnvelope` also appends the compact
+  `generatorFailureSet` at the end. The generator therefore receives two
+  finding blocks, one broader than the promised projection.
+- **What I ran:** the focused QA-orchestration test
+  `routes compact lineage and grants one final repair for a fresh round-three blocker`
+  passed while requiring finding summaries and prior report references in the
+  repair prompt.
+
+This restores prompt detail the focused envelope was meant to remove.
+
+**Clear condition:** Keep control-plane and resume facts in `repairSituation`,
+but place all QA-finding content only in the final compact failure set.
+
+### 3. Remove resolved findings from `--resume-stuck` prompts
+
+The PRD requires fresh repair invocations with no resolved findings. That rule
+applies to resumed repair templates as well as ordinary retry rounds.
+
+- **File and location:** `src/artifacts.ts`, `renderStuckDiagnosis`.
+- **What I read:** the generated `stuck.md` includes a `### RESOLVED` section
+  with resolved finding IDs, summaries, clear conditions, and artifact
+  references.
+- **File and location:** `src/resume.ts`, `buildStuckDiagnosisNote`, and
+  `src/orchestrator.ts`, `runSliceExecute` repair-situation construction.
+- **What I read:** `stuck.md` is copied verbatim into `stuckNote`, then embedded
+  under `# Preserved STUCK evidence` in the generator repair prompt.
+- **What I ran:** the focused artifacts test passed while proving the diagnosis
+  contains separate resolved and open sections; the focused resume-integration
+  test passed while proving the preserved diagnosis rides into the resumed
+  generator prompt.
+
+The normal QA retry fix in `0060ac6` does not close this resume path.
+
+**Clear condition:** Project preserved STUCK evidence to current open findings
+and current failed gates before prompt assembly; retain resolved lifecycle
+history only in operator evidence.
+
+### 4. Journal assembly evidence before provider dispatch
+
+Slice #83 requires the stub to observe its matching `prompt-assembly` event as
+the immediately preceding journal event at provider invocation entry.
+
+- **File and location:** `src/orchestrator.ts`, `makeSliceContext`, local
+  `invoke` function.
+- **What I read:** `provider.invoke(...)` is awaited first; only after it
+  returns does the code append the `prompt-assembly` event. The role paths write
+  `phase-started` before dispatch, so the required assembly event is neither
+  present nor immediately preceding when the provider starts.
+- **File and location:** `src/orchestrator.test.ts`, test
+  `B-01 B-05 QA-04 journals exact complete envelope evidence for every scoped stub invocation`.
+- **What I read:** the test checks event count, order by role, and field values
+  after the run, but does not inspect the journal at provider entry.
+
+This loses assembly evidence when an invocation dies before returning and does
+not deliver the dispatch-order contract.
+
+**Clear condition:** Record assembly evidence immediately before every provider
+dispatch and add a stub assertion at invocation entry. Preserve post-return
+token and timing evidence without weakening that pre-dispatch record.
 
 ## Verification performed
 
-- The pre-ship sanity gate was accepted as already passed for this exact tree.
-- `pnpm vitest run src/context-envelope.test.ts src/contract-prompt-orchestration.test.ts src/logger.test.ts src/kiro.test.ts src/claude.test.ts src/codex.test.ts` — 92 tests passed.
-- `pnpm vitest run src/candidate-gate-policy.test.ts` — 1 test passed and confirmed the blocking resolved-history behavior.
+- `pnpm vitest run src/context-envelope.test.ts src/contract-prompt-orchestration.test.ts src/qa-convergence.test.ts src/candidate-gate-policy.test.ts src/logger.test.ts src/prompt-template.test.ts src/kiro.test.ts src/claude.test.ts src/codex.test.ts` — 130 tests passed.
+- Focused `src/artifacts.test.ts` STUCK lifecycle test — passed.
+- Focused `src/resume-integration.test.ts` STUCK repair-situation test — passed.
+- Focused `src/qa-orchestration.test.ts` compact-lineage repair test — passed.
 - The full suite was not rerun.
 
 ## Out-of-scope PRD gaps
 
-- Slice 01 requirements (US-1–5, US-11–14, US-17–18, US-21), slice 02 requirements (US-9–10, US-19), and slice 03 requirements (US-6–8, US-20) were explicitly excluded from this invocation and were not used to determine the verdict.
-- The live three-provider parity matrix portion of US-16 remains deferred by the slice index and parent plan. Slice 04 was correctly judged on provider-independent assembly and named stub parity.
+- The live Kiro, Claude Code, and Codex parity matrix remains explicitly
+  deferred; slice 04 covers provider-independent assembly and named stubs.
+- New assembled prompts for candidate/final evaluators, cleaner, hardener, and
+  remediator remain assigned to PRDs 4–6. The candidate-evaluator manifest-only
+  entry is present.
+- Acceptance and scope gate execution remains PRD 4 work.
