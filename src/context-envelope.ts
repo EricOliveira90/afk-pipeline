@@ -33,7 +33,18 @@ export const EXPLORER_CONTEXT_MANIFEST = {
   role: "explorer",
   objective:
     "Build a cited four-section evidence map for planner and generator use.",
+  nonGoals: [
+    "Making design recommendations",
+    "Editing any file other than the evidence map",
+    "Asserting uncited claims instead of recording them as unknowns",
+  ],
   allowedWriteScope: "slice/context.md",
+  stopConditions: [
+    "slice/context.md contains a valid evidence map with the required section structure",
+  ],
+  escalationConditions: [
+    "A factual claim cannot be cited with a path, symbol, or command; it is recorded under Unknowns instead of asserted",
+  ],
   outputArtifact: "four-section-evidence-map",
   inputOrder: [
     "objective",
@@ -45,6 +56,11 @@ export const EXPLORER_CONTEXT_MANIFEST = {
     "repository-context",
     "budget",
   ],
+  inputOrderSlots: {
+    "slice-request": "slice-inputs",
+    "repository-adr": "repository-context",
+    "repository-architecture": "repository-context",
+  },
   acceptedInputArtifactClasses: [
     "slice-request",
     "repository-adr",
@@ -57,7 +73,7 @@ export const EXPLORER_CONTEXT_MANIFEST = {
     "prior-conversation",
     "other-role-conversation",
   ],
-} as const;
+} as const satisfies ContextEnvelopeManifest;
 
 export interface ExplorerEnvelopeInput {
   repoRoot: string;
@@ -164,7 +180,7 @@ export const GENERATOR_CONTEXT_MANIFEST = {
     "sibling-handoffs",
     "full-adr-bodies",
   ],
-} as const;
+} as const satisfies ContextEnvelopeManifest;
 
 export interface GeneratorFailureSet {
   findings: readonly {
@@ -371,9 +387,11 @@ export function assembleExplorerEnvelope(
     RELEVANT_FILES: input.relevantFiles,
     SLICE_BODY: input.sliceBody,
     REPOSITORY_CONTEXT: repositoryContext.content,
-    INLINE_SIZE_BUDGET_BYTES:
+    INLINE_SIZE_BUDGET_BYTES: Math.min(
       input.inlineSizeBudgetBytes ??
+        EXPLORER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
       EXPLORER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    ),
   });
   return assembleContextEnvelope({
     prompt,
@@ -422,6 +440,11 @@ export const PLANNER_CONTEXT_MANIFEST = {
     "The required planner artifacts are rewritten in place",
     "A specification contradiction, load-bearing silence, or declared risk requires escalation",
   ],
+  escalationConditions: [
+    "The specification contradicts itself, including a recorded ADR",
+    "The specification is silent on a load-bearing decision",
+    "The specification declares the decision as a risk",
+  ],
   acceptedInputArtifactClasses: [
     "slice-request",
     "explorer-evidence-map",
@@ -450,9 +473,13 @@ export const PLANNER_CONTEXT_MANIFEST = {
       "migration-reservation",
     ],
   },
+  inputOrderSlots: {
+    "repository-adr": "repository-context",
+    "repository-architecture": "repository-context",
+  },
   inlineSizeBudgetBytes: 65_536,
   omittedArtifactClasses: ROLE_ENVELOPE_OMISSIONS,
-} as const;
+} as const satisfies ContextEnvelopeManifest;
 
 export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
   version: 1,
@@ -471,6 +498,9 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
   stopConditions: [
     "The canonical review and human-readable feedback are written",
     "An unreviewable contract is returned as a blocking REVISE finding",
+  ],
+  escalationConditions: [
+    "The contract pair cannot be reviewed as submitted; it is rejected with a blocking REVISE finding rather than judged on reconstructed evidence",
   ],
   acceptedInputArtifactClasses: [
     "proposed-contract",
@@ -509,13 +539,82 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
     "generator-output",
     "cleanup-artifacts",
   ],
-} as const;
+} as const satisfies ContextEnvelopeManifest;
+
+/**
+ * Candidate-evaluator (deterministic QA) role contract. Manifest-only for
+ * now: the candidate QA prompt is still rendered directly by the
+ * orchestrator, so nothing assembles an envelope from this entry yet. The
+ * manifest exists so the versioned schema carries the complete deferred role
+ * contract; it is validated by the same completeness checks as every other
+ * registered manifest.
+ */
+export const CANDIDATE_EVALUATOR_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "evaluator-qa",
+  objective:
+    "Independently judge one committed candidate's observable behavior against the locked slice contract and record a canonical verdict.",
+  nonGoals: [
+    "Implementing or repairing the candidate",
+    "Running the project's full test suite instead of the assigned command set",
+    "Reconstructing findings from prior reports or the other QA stage",
+    "Amending the locked file list directly",
+  ],
+  allowedWriteScope: [
+    "slice/qa-review.json",
+    "slice/qa-report.md",
+  ],
+  stopConditions: [
+    "The canonical verdict artifact and the human-readable report are written with exactly one verdict and one failure class",
+    "Pass 2 is skipped whenever Pass 1 is not clean",
+  ],
+  escalationConditions: [
+    "Direct evidence shows a failure source changes cannot fix; it is classified INFRASTRUCTURE instead of a code finding",
+    "A correct, necessary change is outside the declared file list; it is reported as a SCOPE_AMENDMENT finding for the orchestrator",
+  ],
+  acceptedInputArtifactClasses: [
+    "qa-scope",
+    "locked-contract",
+    "candidate-handoff",
+    "cited-adr",
+    "dependency-sibling-handoffs",
+    "unresolved-qa-findings",
+    "sanity-command-set",
+    "base-gate-authorization",
+  ],
+  outputArtifact: "qa-review-pair",
+  inputOrder: [
+    "qa-scope",
+    "locked-contract",
+    "candidate-handoff",
+    "cited-adr",
+    "dependency-sibling-handoffs",
+    "unresolved-qa-findings",
+    "sanity-command-set",
+    "base-gate-authorization",
+  ],
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    ...ROLE_ENVELOPE_OMISSIONS,
+    "planner-conversation",
+    "generator-conversation",
+    "other-qa-stage-findings",
+  ],
+} as const satisfies ContextEnvelopeManifest;
 
 export type PromptAssemblyRole =
   | "explorer"
   | "planner"
   | "evaluator-contract"
   | "generator";
+
+/**
+ * Roles that carry a versioned context-envelope manifest. A superset of
+ * PromptAssemblyRole: "evaluator-qa" (candidate evaluator) has a
+ * manifest-only role contract today — its prompt is still rendered directly
+ * by the orchestrator, so no assembly path consumes it yet.
+ */
+export type ContextEnvelopeRole = PromptAssemblyRole | "evaluator-qa";
 
 export interface RoleEnvelopeEvidence {
   role: PromptAssemblyRole;
@@ -536,12 +635,168 @@ export interface ContextArtifactReference {
   artifactId: string;
 }
 
+/**
+ * Ordered input slots for the assembled envelope. Either a single ordered
+ * list, or one ordered list per assembly variant (e.g. initial vs. repair).
+ */
+export type ContextEnvelopeInputOrder =
+  | readonly string[]
+  | Readonly<Record<string, readonly string[]>>;
+
+/**
+ * The authoritative, versioned role contract. Every registered role manifest
+ * declares the complete contract — objective, non-goals, write scope, stop
+ * and escalation conditions, accepted input artifact classes, output
+ * contract, input order, and invocation budget — and assembly validates
+ * against it rather than against parallel hand-maintained objects.
+ */
 export interface ContextEnvelopeManifest {
   version: number;
-  role: PromptAssemblyRole;
+  role: ContextEnvelopeRole;
+  /** What the role exists to produce. */
+  objective: string;
+  /** What the role must not do. */
+  nonGoals: readonly string[];
+  /** The only paths or scopes the role may write. */
+  allowedWriteScope: string | readonly string[];
+  /** Conditions under which the role stops. */
+  stopConditions: readonly string[];
+  /** Conditions the role escalates instead of deciding itself. */
+  escalationConditions: readonly string[];
+  /** The only artifact classes assembly may include. */
   acceptedInputArtifactClasses: readonly string[];
+  /** The output contract: the artifact the role is required to produce. */
+  outputArtifact: string;
+  /** The declared input order assembly validates included artifacts against. */
+  inputOrder: ContextEnvelopeInputOrder;
+  /**
+   * Maps an accepted artifact class onto the inputOrder slot it occupies when
+   * the slot name differs from the class name (e.g. both "repository-adr"
+   * and "repository-architecture" occupy the "repository-context" slot).
+   */
+  inputOrderSlots?: Readonly<Record<string, string>>;
+  /** The manifest invocation budget; project overrides may only tighten it. */
   inlineSizeBudgetBytes: number;
+  /** Artifact classes deliberately withheld from the role. */
   omittedArtifactClasses: readonly string[];
+}
+
+function requireNonBlank(
+  role: string,
+  field: string,
+  value: string,
+): void {
+  if (value.trim() === "") {
+    throw new ContextEnvelopeConfigurationError(
+      `${role} manifest field "${field}" must be a nonblank string`,
+    );
+  }
+}
+
+function requireNonEmptyList(
+  role: string,
+  field: string,
+  values: readonly string[],
+): void {
+  if (values.length === 0) {
+    throw new ContextEnvelopeConfigurationError(
+      `${role} manifest field "${field}" must declare at least one entry`,
+    );
+  }
+  values.forEach((value, index) =>
+    requireNonBlank(role, `${field}[${index}]`, value),
+  );
+}
+
+function inputOrderLists(
+  inputOrder: ContextEnvelopeInputOrder,
+): readonly (readonly string[])[] {
+  return Array.isArray(inputOrder)
+    ? [inputOrder as readonly string[]]
+    : Object.values(
+        inputOrder as Readonly<Record<string, readonly string[]>>,
+      );
+}
+
+/**
+ * Validates that a role manifest declares the complete role contract.
+ * Assembly runs this on every envelope so an incomplete manifest fails
+ * closed as CONFIGURATION before dispatch.
+ */
+export function validateContextEnvelopeManifest(
+  manifest: ContextEnvelopeManifest,
+): void {
+  const role = manifest.role;
+  if (!Number.isInteger(manifest.version) || manifest.version < 1) {
+    throw new ContextEnvelopeConfigurationError(
+      `${role} manifest version must be a positive integer`,
+    );
+  }
+  requireNonBlank(role, "objective", manifest.objective);
+  requireNonEmptyList(role, "nonGoals", manifest.nonGoals);
+  if (typeof manifest.allowedWriteScope === "string") {
+    requireNonBlank(role, "allowedWriteScope", manifest.allowedWriteScope);
+  } else {
+    requireNonEmptyList(role, "allowedWriteScope", manifest.allowedWriteScope);
+  }
+  requireNonEmptyList(role, "stopConditions", manifest.stopConditions);
+  requireNonEmptyList(
+    role,
+    "escalationConditions",
+    manifest.escalationConditions,
+  );
+  requireNonEmptyList(
+    role,
+    "acceptedInputArtifactClasses",
+    manifest.acceptedInputArtifactClasses,
+  );
+  requireNonBlank(role, "outputArtifact", manifest.outputArtifact);
+  const orderLists = inputOrderLists(manifest.inputOrder);
+  if (orderLists.length === 0) {
+    throw new ContextEnvelopeConfigurationError(
+      `${role} manifest field "inputOrder" must declare at least one ordered list`,
+    );
+  }
+  orderLists.forEach((list, index) =>
+    requireNonEmptyList(role, `inputOrder[${index}]`, list),
+  );
+  const orderedSlots = new Set(orderLists.flat());
+  const accepted = new Set(manifest.acceptedInputArtifactClasses);
+  for (const [artifactClass, slot] of Object.entries(
+    manifest.inputOrderSlots ?? {},
+  )) {
+    if (!accepted.has(artifactClass)) {
+      throw new ContextEnvelopeConfigurationError(
+        `${role} manifest inputOrderSlots maps undeclared class "${artifactClass}"`,
+      );
+    }
+    if (!orderedSlots.has(slot)) {
+      throw new ContextEnvelopeConfigurationError(
+        `${role} manifest inputOrderSlots maps "${artifactClass}" to slot "${slot}" absent from inputOrder`,
+      );
+    }
+  }
+  const slotFor = manifest.inputOrderSlots ?? {};
+  for (const artifactClass of manifest.acceptedInputArtifactClasses) {
+    if (!orderedSlots.has(slotFor[artifactClass] ?? artifactClass)) {
+      throw new ContextEnvelopeConfigurationError(
+        `${role} manifest accepted class "${artifactClass}" has no inputOrder slot`,
+      );
+    }
+  }
+  if (
+    !Number.isInteger(manifest.inlineSizeBudgetBytes) ||
+    manifest.inlineSizeBudgetBytes <= 0
+  ) {
+    throw new ContextEnvelopeConfigurationError(
+      `${role} manifest inlineSizeBudgetBytes must be a positive integer`,
+    );
+  }
+  requireNonEmptyList(
+    role,
+    "omittedArtifactClasses",
+    manifest.omittedArtifactClasses,
+  );
 }
 
 export class ContextEnvelopeConfigurationError extends Error {
@@ -616,13 +871,46 @@ export function assertEnvelopeBudget(
   return assembledByteSize;
 }
 
+function resolveInputOrder(
+  manifest: ContextEnvelopeManifest,
+  inputOrderKey: string | undefined,
+): readonly string[] {
+  if (Array.isArray(manifest.inputOrder)) {
+    return manifest.inputOrder as readonly string[];
+  }
+  const variants = manifest.inputOrder as Readonly<
+    Record<string, readonly string[]>
+  >;
+  if (inputOrderKey === undefined) {
+    throw new ContextEnvelopeConfigurationError(
+      `${manifest.role} manifest declares input-order variants (${Object.keys(variants).join(", ")}); assembly must name one`,
+    );
+  }
+  const order = variants[inputOrderKey];
+  if (order === undefined) {
+    throw new ContextEnvelopeConfigurationError(
+      `${manifest.role} manifest declares no input-order variant "${inputOrderKey}"`,
+    );
+  }
+  return order;
+}
+
 export function assembleContextEnvelope(input: {
   prompt: string;
-  manifest: ContextEnvelopeManifest;
+  /** Only assembly-wired roles; the evaluator-qa manifest is manifest-only. */
+  manifest: ContextEnvelopeManifest & { role: PromptAssemblyRole };
   includedArtifacts: readonly ContextArtifactReference[];
+  /** Names the manifest input-order variant when the manifest declares more than one. */
+  inputOrderKey?: string;
+  /**
+   * Project byte-budget override. Overrides are stricter-only: the effective
+   * budget is min(override, manifest budget), so an override larger than the
+   * manifest budget is silently clamped to the manifest budget.
+   */
   inlineSizeBudgetBytes?: number;
   roleLabel?: string;
 }): RoleEnvelopeResult {
+  validateContextEnvelopeManifest(input.manifest);
   const accepted = new Set(input.manifest.acceptedInputArtifactClasses);
   const undeclared = input.includedArtifacts.find(
     ({ artifactClass }) => !accepted.has(artifactClass),
@@ -632,6 +920,30 @@ export function assembleContextEnvelope(input: {
       `${input.manifest.role} context class "${undeclared.artifactClass}" is not declared by manifest version ${input.manifest.version}`,
     );
   }
+  const order = resolveInputOrder(input.manifest, input.inputOrderKey);
+  const slots = input.manifest.inputOrderSlots ?? {};
+  const rank = (artifactClass: string): number =>
+    order.indexOf(slots[artifactClass] ?? artifactClass);
+  const unordered = input.includedArtifacts.find(
+    ({ artifactClass }) => rank(artifactClass) === -1,
+  );
+  if (unordered !== undefined) {
+    throw new ContextEnvelopeConfigurationError(
+      `${input.manifest.role} context class "${unordered.artifactClass}" has no slot in the declared input order${input.inputOrderKey === undefined ? "" : ` variant "${input.inputOrderKey}"`}`,
+    );
+  }
+  const orderedArtifacts = input.includedArtifacts
+    .map((artifact, index) => ({ artifact, index }))
+    .sort(
+      (left, right) =>
+        rank(left.artifact.artifactClass) -
+          rank(right.artifact.artifactClass) || left.index - right.index,
+    )
+    .map(({ artifact }) => artifact);
+  const effectiveBudget = Math.min(
+    input.inlineSizeBudgetBytes ?? input.manifest.inlineSizeBudgetBytes,
+    input.manifest.inlineSizeBudgetBytes,
+  );
   const normalizedPrompt = input.prompt.replace(/\r\n?/g, "\n");
   return {
     prompt: normalizedPrompt,
@@ -640,13 +952,12 @@ export function assembleContextEnvelope(input: {
       assembledByteSize: assertEnvelopeBudget(
         input.roleLabel ?? input.manifest.role,
         normalizedPrompt,
-        input.inlineSizeBudgetBytes ??
-          input.manifest.inlineSizeBudgetBytes,
+        effectiveBudget,
       ),
-      includedArtifactClasses: input.includedArtifacts.map(
+      includedArtifactClasses: orderedArtifacts.map(
         ({ artifactClass }) => artifactClass,
       ),
-      includedArtifactIds: input.includedArtifacts.map(
+      includedArtifactIds: orderedArtifacts.map(
         ({ artifactId }) => artifactId,
       ),
       omittedArtifactClasses: [
@@ -660,8 +971,9 @@ export function assembleContextEnvelope(input: {
 function roleEnvelopeResult(
   prompt: string,
   role: "planner" | "evaluator-contract",
+  inputOrderKey: "initial" | "revision",
   includedArtifacts: readonly ContextArtifactReference[],
-  allowedByteSize: number,
+  inlineSizeBudgetBytes: number | undefined,
   roleLabel: string,
 ): RoleEnvelopeResult {
   const manifest =
@@ -672,7 +984,8 @@ function roleEnvelopeResult(
     prompt,
     manifest,
     includedArtifacts,
-    inlineSizeBudgetBytes: allowedByteSize,
+    inputOrderKey,
+    ...(inlineSizeBudgetBytes === undefined ? {} : { inlineSizeBudgetBytes }),
     roleLabel,
   });
 }
@@ -695,6 +1008,7 @@ export function assemblePlannerInitialEnvelope(
   return roleEnvelopeResult(
     prompt,
     "planner",
+    "initial",
     [
       { artifactClass: "slice-request", artifactId: "slice-request" },
       {
@@ -716,8 +1030,7 @@ export function assemblePlannerInitialEnvelope(
         artifactId,
       })),
     ],
-    input.inlineSizeBudgetBytes ??
-      PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    input.inlineSizeBudgetBytes,
     "Planner",
   );
 }
@@ -743,6 +1056,7 @@ export function assemblePlannerRevisionEnvelope(
   return roleEnvelopeResult(
     prompt,
     "planner",
+    "revision",
     [
       {
         artifactClass: "current-contract-pair",
@@ -773,8 +1087,7 @@ export function assemblePlannerRevisionEnvelope(
         artifactId: "migration-reservation",
       },
     ],
-    input.inlineSizeBudgetBytes ??
-      PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    input.inlineSizeBudgetBytes,
     "Planner",
   );
 }
@@ -794,6 +1107,7 @@ export function assembleContractEvaluatorInitialEnvelope(
   return roleEnvelopeResult(
     prompt,
     "evaluator-contract",
+    "initial",
     [
       {
         artifactClass: "proposed-contract",
@@ -812,8 +1126,7 @@ export function assembleContractEvaluatorInitialEnvelope(
         artifactId: `${input.sliceDir}/context.md`,
       },
     ],
-    input.inlineSizeBudgetBytes ??
-      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    input.inlineSizeBudgetBytes,
     "Contract evaluator",
   );
 }
@@ -845,6 +1158,7 @@ export function assembleContractEvaluatorRevisionEnvelope(
   return roleEnvelopeResult(
     prompt,
     "evaluator-contract",
+    "revision",
     [
       {
         artifactClass: "revised-contract",
@@ -885,8 +1199,7 @@ export function assembleContractEvaluatorRevisionEnvelope(
         artifactId: `${input.sliceDir}/context.md`,
       },
     ],
-    input.inlineSizeBudgetBytes ??
-      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    input.inlineSizeBudgetBytes,
     "Contract evaluator",
   );
 }
@@ -1038,7 +1351,10 @@ export function assembleGeneratorEnvelope(
     prompt,
     manifest: GENERATOR_CONTEXT_MANIFEST,
     includedArtifacts: deduplicatedArtifacts,
-    inlineSizeBudgetBytes: input.inlineSizeBudgetBytes,
+    inputOrderKey: input.mode,
+    ...(input.inlineSizeBudgetBytes === undefined
+      ? {}
+      : { inlineSizeBudgetBytes: input.inlineSizeBudgetBytes }),
     roleLabel: "Generator",
   }) as GeneratorEnvelopeResult;
 }

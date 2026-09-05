@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { GeneratorFailureSet } from "./context-envelope.js";
 import type {
   GateDeclaration,
   GateEvidence,
@@ -24,6 +25,16 @@ export type CandidateGateDecision =
       failedGateIds: string[];
       references: string[];
       retryNote: string;
+      /**
+       * The focused failure set for the next generator dispatch. QA already
+       * passed this candidate before the full slice suite ran, so every QA
+       * finding is RESOLVED by construction; the repair envelope carries the
+       * failed gates only. Carrying the pre-gate finding set forward would
+       * re-ship resolved lineage to a fresh generator (architect A2, PM
+       * P-02). Resolved lineage stays persisted in the QA convergence state
+       * for convergence decisions and intervention evidence.
+       */
+      failureSet: GeneratorFailureSet;
     };
 
 /**
@@ -79,9 +90,20 @@ export function decideCandidateGatePhase(input: {
     action: "REPAIR",
     failedGateIds: failures.map(({ result }) => result.gateId),
     references,
+    failureSet: {
+      findings: [],
+      gates: failures.map(({ evidencePath, result }) => ({
+        id: result.gateId,
+        evidence: [
+          evidencePath.replace(/\\/g, "/"),
+          join(input.evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+        ],
+      })),
+    },
     retryNote:
       `This is implementation round ${input.nextRound}. Fix every unresolved ` +
-      `full-suite failure and preserve prior resolved QA behavior:\n` +
+      `full-suite failure without regressing behavior the candidate already ` +
+      `delivers:\n` +
       formatQAGeneratorContext(
         input.convergence,
         references,

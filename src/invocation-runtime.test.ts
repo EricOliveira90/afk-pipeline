@@ -21,7 +21,9 @@ vi.mock("./kill-tree.js", async (importOriginal) => {
   return { ...actual, terminateProcessTree: terminateMock };
 });
 
-const { runInvocation } = await import("./invocation-runtime.js");
+const { runInvocation, createCommandTimeTracker } = await import(
+  "./invocation-runtime.js"
+);
 
 const CLEAN_KILL: TerminationReport = {
   rootDead: true,
@@ -415,5 +417,121 @@ describe("invocation runtime lifecycle", () => {
     emitExit(killed, null);
     await killedPromise;
     expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("command-time tracker (nonCommandTimeMs attribution)", () => {
+  function fakeClock(start = 0) {
+    let t = start;
+    return { now: () => t, set: (value: number) => (t = value) };
+  }
+
+  it("sums disjoint begin/end intervals", () => {
+    const clock = fakeClock();
+    const tracker = createCommandTimeTracker(clock.now);
+    clock.set(100);
+    tracker.begin("a");
+    clock.set(400);
+    tracker.end("a");
+    clock.set(1_000);
+    tracker.begin("b");
+    clock.set(1_200);
+    tracker.end("b");
+    expect(tracker.totalMs()).toBe(500);
+  });
+
+  it("merges overlapping intervals into a union instead of summing", () => {
+    const clock = fakeClock();
+    const tracker = createCommandTimeTracker(clock.now);
+    clock.set(100);
+    tracker.begin("a");
+    clock.set(200);
+    tracker.begin("b");
+    clock.set(300);
+    tracker.end("a");
+    clock.set(600);
+    tracker.end("b");
+    // Busy from 100 to 600 — 500ms, not (200 + 400).
+    expect(tracker.totalMs()).toBe(500);
+  });
+
+  it("measures zero when no commands ran — a real measurement, not a guess", () => {
+    expect(createCommandTimeTracker(fakeClock().now).totalMs()).toBe(0);
+  });
+
+  it("returns undefined while any interval is still open (incomplete attribution)", () => {
+    const clock = fakeClock();
+    const tracker = createCommandTimeTracker(clock.now);
+    tracker.begin("never-finishes");
+    clock.set(9_000);
+    expect(tracker.totalMs()).toBeUndefined();
+  });
+
+  it("returns undefined once marked unattributable", () => {
+    const tracker = createCommandTimeTracker(fakeClock().now);
+    tracker.markUnattributable();
+    expect(tracker.totalMs()).toBeUndefined();
+  });
+
+  it("ignores unknown ends and duplicate begins", () => {
+    const clock = fakeClock();
+    const tracker = createCommandTimeTracker(clock.now);
+    tracker.end("unknown");
+    clock.set(100);
+    tracker.begin("a");
+    clock.set(200);
+    tracker.begin("a");
+    clock.set(300);
+    tracker.end("a");
+    expect(tracker.totalMs()).toBe(200);
+  });
+});
+
+describe("nonCommandTimeMs derivation at the runtime seam", () => {
+  // Fake only Date: the wall clock becomes deterministic while the
+  // idle watcher and ceiling keep real timers (they never fire within
+  // these tests).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(50_000);
+  });
+
+  it("records wall clock minus provider-attributed command time", async () => {
+    const proc = makeFakeProc();
+    const promise = start(proc, {}, { commandTimeMs: () => 700 });
+    vi.setSystemTime(52_000);
+    emitExit(proc, 0);
+    const result = await promise;
+    // wall 2000ms − command 700ms
+    expect(result.stats.nonCommandTimeMs).toBe(1_300);
+  });
+
+  it("omits the field — never 0 — when attribution is unavailable", async () => {
+    const withHookUndefined = makeFakeProc();
+    const hookPromise = start(
+      withHookUndefined,
+      {},
+      { commandTimeMs: () => undefined },
+    );
+    vi.setSystemTime(51_000);
+    emitExit(withHookUndefined, 0);
+    expect(await hookPromise).toMatchObject({ stats: {} });
+    expect(
+      "nonCommandTimeMs" in (await hookPromise).stats,
+    ).toBe(false);
+
+    const withoutHook = makeFakeProc();
+    const noHookPromise = start(withoutHook);
+    emitExit(withoutHook, 0);
+    expect("nonCommandTimeMs" in (await noHookPromise).stats).toBe(false);
+  });
+
+  it("floors at zero when attributed command time exceeds the wall clock", async () => {
+    const proc = makeFakeProc();
+    const promise = start(proc, {}, { commandTimeMs: () => 10_000 });
+    vi.setSystemTime(50_500);
+    emitExit(proc, 0);
+    expect((await promise).stats.nonCommandTimeMs).toBe(0);
   });
 });

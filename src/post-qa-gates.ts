@@ -13,6 +13,7 @@ import {
   type CandidateGateOutcome,
 } from "./candidate-gate-phase.js";
 import { decideCandidateGatePhase } from "./candidate-gate-policy.js";
+import type { GeneratorFailureSet } from "./context-envelope.js";
 import type {
   QAConvergenceState,
 } from "./qa-convergence.js";
@@ -40,6 +41,8 @@ export type PostQAGateResult =
       failedGateIds: string[];
       references: string[];
       retryNote: string;
+      /** Gates-only projection for the next generator (see policy module). */
+      failureSet: GeneratorFailureSet;
       candidateTreeId: string;
       attemptTreeIds: string[];
       artifacts: GateEvidenceArtifact[];

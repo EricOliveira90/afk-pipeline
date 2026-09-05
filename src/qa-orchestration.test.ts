@@ -1512,34 +1512,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       }),
       "utf-8",
     );
-    writeFileSync(
-      join(repo, "afk.config.json"),
-      JSON.stringify({
-        version: 1,
-        relatedGates: {
-          gates: {
-            "heavy:fixture": {
-              command: "node",
-              args: [
-                "-e",
-                `require('fs').appendFileSync('${sequencePath}','related\\n')`,
-              ],
-              expectedCostMs: 1,
-              timeoutMs: 30_000,
-            },
-          },
-          mappings: [
-            {
-              patterns: ["README.md"],
-              gates: ["heavy:fixture"],
-            },
-          ],
-          coverage: [],
-        },
-      }),
-      "utf-8",
-    );
-    git(repo, ["add", "package.json", "afk.config.json"]);
+    git(repo, ["add", "package.json"]);
     git(repo, ["commit", "-m", "add full-suite marker"]);
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
@@ -1664,8 +1637,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
     expect(generatorPrompts[2]).toContain("Current open QA findings");
     expect(generatorPrompts[2]).toContain("QA-02");
-    expect(generatorPrompts[2]).toContain("Relevant resolved QA findings");
-    expect(generatorPrompts[2]).toContain("QA-01");
+    expect(generatorPrompts[2]).not.toContain("Relevant resolved QA findings");
+    expect(generatorPrompts[2]).not.toContain("Finding ID: `QA-01`");
+    expect(generatorPrompts[2]).not.toContain("First blocker");
+    expect(generatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
 
@@ -1679,9 +1654,11 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(generatorPrompts[3]).toContain("Current open QA findings");
     expect(generatorPrompts[3]).toContain("QA-03");
     expect(generatorPrompts[3]).toContain("Fresh late blocker");
-    expect(generatorPrompts[3]).toContain("Relevant resolved QA findings");
-    expect(generatorPrompts[3]).toContain("QA-01");
-    expect(generatorPrompts[3]).toContain("QA-02");
+    expect(generatorPrompts[3]).not.toContain("Relevant resolved QA findings");
+    expect(generatorPrompts[3]).not.toContain("Finding ID: `QA-01`");
+    expect(generatorPrompts[3]).not.toContain("Finding ID: `QA-02`");
+    expect(generatorPrompts[3]).not.toContain("First blocker");
+    expect(generatorPrompts[3]).not.toContain("Second blocker");
     expect(generatorPrompts[3]).toContain("qa-review-r3-a1.json");
     expect(generatorPrompts[3]).not.toContain("qa-review-r1-a1.json");
 

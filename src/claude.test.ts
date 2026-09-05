@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { TerminationReport } from "./kill-tree.js";
 import { makeFakeProc, type FakeProc } from "./test/fake-proc.js";
 
@@ -186,5 +186,104 @@ describe("invoke spawn args", () => {
       type: "result",
       result: "done",
     });
+  });
+});
+
+
+describe("nonCommandTimeMs evidence (A4)", () => {
+  // Fake only Date so line-arrival timestamps are deterministic while
+  // stream flushing keeps real setImmediate.
+  beforeEach(() => {
+    spawnMock.mockReset();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(100_000);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  function toolUseWithId(id: string): string {
+    return JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id, name: "Bash", input: { command: "ls" } },
+        ],
+      },
+    }) + "\n";
+  }
+
+  function toolResult(toolUseId: string): string {
+    return JSON.stringify({
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: toolUseId }],
+      },
+    }) + "\n";
+  }
+
+  it("computes wall clock minus tool_use→tool_result intervals", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp/x" });
+
+    vi.setSystemTime(101_000);
+    proc.stdout.push(toolUseWithId("toolu_1"));
+    await flush();
+    vi.setSystemTime(103_500);
+    proc.stdout.push(toolResult("toolu_1"));
+    await flush();
+    vi.setSystemTime(105_000);
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    // wall 5000ms − command 2500ms
+    expect(result.stats.nonCommandTimeMs).toBe(2_500);
+  });
+
+  it("omits the field when a tool_use never gets its tool_result", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp/x" });
+
+    proc.stdout.push(toolUseWithId("toolu_orphan"));
+    await flush();
+    vi.setSystemTime(104_000);
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
+  });
+
+  it("omits the field when a tool_use block carries no correlatable id", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp/x" });
+
+    // The shared fixture emits a tool_use block with no `id`.
+    proc.stdout.push(toolUseLine("Bash", "ls"));
+    await flush();
+    vi.setSystemTime(104_000);
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
+  });
+
+  it("records the full wall clock when the measured stream ran no tools", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "planner", prompt: "go", cwd: "/tmp/x" });
+
+    vi.setSystemTime(103_000);
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    // Zero command time is a measurement here, not an invented value:
+    // the stream was parsed and reported no tool executions.
+    expect(result.stats.nonCommandTimeMs).toBe(3_000);
   });
 });

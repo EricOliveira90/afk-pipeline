@@ -3,6 +3,7 @@ import type { AgentProvider } from "./agent-provider.js";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
 import {
+  CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
   CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
   EXPLORER_CONTEXT_MANIFEST,
   GENERATOR_CONTEXT_MANIFEST,
@@ -17,7 +18,9 @@ import {
   buildExplorerRepositoryContext,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
+  validateContextEnvelopeManifest,
   validateExplorerEvidenceMap,
+  type ContextEnvelopeManifest,
 } from "./context-envelope.js";
 import type { ContractReviewFinding } from "./contract-review.js";
 import { readdirSync } from "node:fs";
@@ -764,6 +767,7 @@ describe("planner and contract-evaluator context envelopes", () => {
         includedArtifacts: [
           { artifactClass: "slice-request", artifactId: "slice-request" },
         ],
+        inputOrderKey: "initial",
         inlineSizeBudgetBytes: Buffer.byteLength(prompt) - 1,
         roleLabel: "Planner",
       }),
@@ -1198,5 +1202,240 @@ describe("generator context envelope", () => {
     expect(result.evidence.contextManifestVersion).toBe(
       GENERATOR_CONTEXT_MANIFEST.version,
     );
+  });
+});
+
+
+describe("role contract manifests", () => {
+  const registeredManifests: ContextEnvelopeManifest[] = [
+    EXPLORER_CONTEXT_MANIFEST,
+    PLANNER_CONTEXT_MANIFEST,
+    CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
+    CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
+    GENERATOR_CONTEXT_MANIFEST,
+  ];
+
+  it("every registered manifest satisfies the complete role-contract schema", () => {
+    for (const manifest of registeredManifests) {
+      expect(
+        () => validateContextEnvelopeManifest(manifest),
+        manifest.role,
+      ).not.toThrow();
+      expect(manifest.objective.trim(), manifest.role).not.toBe("");
+      expect(manifest.nonGoals.length, manifest.role).toBeGreaterThan(0);
+      expect(
+        manifest.stopConditions.length,
+        manifest.role,
+      ).toBeGreaterThan(0);
+      expect(
+        manifest.escalationConditions.length,
+        manifest.role,
+      ).toBeGreaterThan(0);
+      expect(
+        manifest.acceptedInputArtifactClasses.length,
+        manifest.role,
+      ).toBeGreaterThan(0);
+      expect(manifest.outputArtifact.trim(), manifest.role).not.toBe("");
+      expect(manifest.inlineSizeBudgetBytes, manifest.role).toBeGreaterThan(0);
+      const writeScope =
+        typeof manifest.allowedWriteScope === "string"
+          ? [manifest.allowedWriteScope]
+          : manifest.allowedWriteScope;
+      expect(writeScope.length, manifest.role).toBeGreaterThan(0);
+    }
+  });
+
+  it("rejects a manifest missing part of the role contract as CONFIGURATION", () => {
+    expect(() =>
+      validateContextEnvelopeManifest({
+        ...PLANNER_CONTEXT_MANIFEST,
+        escalationConditions: [],
+      }),
+    ).toThrow(
+      'CONFIGURATION: planner manifest field "escalationConditions" must declare at least one entry',
+    );
+    expect(() =>
+      validateContextEnvelopeManifest({
+        ...PLANNER_CONTEXT_MANIFEST,
+        acceptedInputArtifactClasses: [
+          ...PLANNER_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+          "unslotted-class",
+        ],
+      }),
+    ).toThrow(
+      'CONFIGURATION: planner manifest accepted class "unslotted-class" has no inputOrder slot',
+    );
+  });
+
+  it("declares the deferred candidate-evaluator role contract as manifest-only", () => {
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "evaluator-qa",
+      outputArtifact: "qa-review-pair",
+      inlineSizeBudgetBytes: 65_536,
+    });
+    expect(
+      () => validateContextEnvelopeManifest(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST),
+    ).not.toThrow();
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).toContain("locked-contract");
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).toContain("base-gate-authorization");
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+    ).toContain("other-qa-stage-findings");
+  });
+
+  it("clamps a budget override larger than the manifest budget and applies a smaller one", () => {
+    const oversizedPrompt = "x".repeat(
+      PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes + 1,
+    );
+    // A larger override must not relax the manifest budget: min() clamps it.
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: oversizedPrompt,
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          { artifactClass: "slice-request", artifactId: "slice-request" },
+        ],
+        inputOrderKey: "initial",
+        inlineSizeBudgetBytes:
+          PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes * 10,
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      `actual ${PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes + 1} bytes, allowed ${PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes} bytes`,
+    );
+
+    // Clamping is silent: a within-budget prompt assembles under a larger override.
+    const withinBudget = assembleContextEnvelope({
+      prompt: "small prompt",
+      manifest: PLANNER_CONTEXT_MANIFEST,
+      includedArtifacts: [
+        { artifactClass: "slice-request", artifactId: "slice-request" },
+      ],
+      inputOrderKey: "initial",
+      inlineSizeBudgetBytes:
+        PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes * 10,
+      roleLabel: "Planner",
+    });
+    expect(withinBudget.evidence.assembledByteSize).toBe(
+      Buffer.byteLength("small prompt"),
+    );
+
+    // A stricter override still applies as before.
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "small prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          { artifactClass: "slice-request", artifactId: "slice-request" },
+        ],
+        inputOrderKey: "initial",
+        inlineSizeBudgetBytes: 4,
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      `actual ${Buffer.byteLength("small prompt")} bytes, allowed 4 bytes`,
+    );
+  });
+
+  it("derives evidence ordering from the manifest input order, not caller order", () => {
+    const shuffled = assembleContextEnvelope({
+      prompt: "prompt",
+      manifest: PLANNER_CONTEXT_MANIFEST,
+      includedArtifacts: [
+        {
+          artifactClass: "migration-reservation",
+          artifactId: "migration-reservation",
+        },
+        {
+          artifactClass: "base-gate-catalog",
+          artifactId: "base-gate-catalog",
+        },
+        {
+          artifactClass: "open-contract-findings",
+          artifactId: "contract-review:open-findings",
+        },
+        {
+          artifactClass: "current-contract-pair",
+          artifactId: "slice/contract.md",
+        },
+        {
+          artifactClass: "current-contract-pair",
+          artifactId: "slice/acceptance-manifest.json",
+        },
+      ],
+      inputOrderKey: "revision",
+      roleLabel: "Planner",
+    });
+
+    expect(shuffled.evidence.includedArtifactClasses).toEqual([
+      "current-contract-pair",
+      "current-contract-pair",
+      "open-contract-findings",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
+    expect(shuffled.evidence.includedArtifactIds).toEqual([
+      "slice/contract.md",
+      "slice/acceptance-manifest.json",
+      "contract-review:open-findings",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
+  });
+
+  it("rejects an artifact class with no slot in the named input-order variant", () => {
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "open-contract-findings",
+            artifactId: "contract-review:open-findings",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      'CONFIGURATION: planner context class "open-contract-findings" has no slot in the declared input order variant "initial"',
+    );
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          { artifactClass: "slice-request", artifactId: "slice-request" },
+        ],
+        inputOrderKey: "unknown-variant",
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      'CONFIGURATION: planner manifest declares no input-order variant "unknown-variant"',
+    );
+  });
+
+  it("maps grouped repository classes onto their shared input-order slot", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const result = assembleExplorerEnvelope({
+      repoRoot,
+      ghIssue: "90",
+      title: "Explorer context",
+      sliceDir: ".kiro/specs/demo/slices/02-explorer",
+      relevantFiles: "RELEVANT-FILES-MARKER",
+      sliceBody: "SLICE-BODY-MARKER",
+    });
+    // slice-request occupies the "slice-inputs" slot ahead of every
+    // repository-context artifact, so the manifest — not the caller — fixes
+    // the evidence order.
+    expect(result.evidence.includedArtifactClasses[0]).toBe("slice-request");
+    expect(
+      new Set(result.evidence.includedArtifactClasses.slice(1)),
+    ).toEqual(new Set(["repository-adr", "repository-architecture"]));
   });
 });

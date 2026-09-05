@@ -274,25 +274,16 @@ export function advanceQAFindingLineage(
   };
 }
 
-function overlaps(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
-  if (left.length === 0 || right.length === 0) return true;
-  const rightIds = new Set(right);
-  return left.some((id) => rightIds.has(id));
-}
-
 /**
- * Generator memory stays compact: active source-change findings plus only
- * resolved source-change findings whose behavior scope overlaps active work.
+ * Generator repair context contains only active source-change findings.
+ * Resolved lineage remains persisted for convergence and intervention
+ * evidence, but never returns to a fresh generator invocation.
  */
 export function qaGeneratorContext(
   state: QAConvergenceState,
   stage?: QAReviewStage,
 ): {
   open: QAFindingLineageEntry[];
-  relevantResolved: QAFindingLineageEntry[];
 } {
   const entries = Object.values(state.findings).filter(
     (entry) =>
@@ -300,14 +291,7 @@ export function qaGeneratorContext(
       (stage === undefined || entry.stage === stage),
   );
   const open = entries.filter((entry) => entry.finding.state === "OPEN");
-  const relevantResolved = entries.filter(
-    (entry) =>
-      entry.finding.state === "RESOLVED" &&
-      open.some((active) =>
-        overlaps(active.finding.behaviorIds, entry.finding.behaviorIds),
-      ),
-  );
-  return { open, relevantResolved };
+  return { open };
 }
 
 function formatEntry(entry: QAFindingLineageEntry): string {
@@ -348,14 +332,6 @@ export function formatQAGeneratorContext(
       [
         "Current open QA findings:",
         ...context.open.map(formatEntry),
-      ].join("\n"),
-    );
-  }
-  if (context.relevantResolved.length > 0) {
-    sections.push(
-      [
-        "Relevant resolved QA findings — keep these behaviors satisfied:",
-        ...context.relevantResolved.map(formatEntry),
       ].join("\n"),
     );
   }

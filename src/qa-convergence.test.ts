@@ -161,7 +161,7 @@ describe("candidate-QA finding lineage", () => {
     });
   });
 
-  it("routes active source-change findings and only overlapping resolved constraints", () => {
+  it("routes only active source-change findings to a fresh generator", () => {
     let state = advance(emptyQAConvergenceState(), [
       finding("QA-01", "OPEN", { behaviorIds: ["B-01"] }),
       finding("QA-02", "OPEN", { behaviorIds: ["B-02"] }),
@@ -174,19 +174,16 @@ describe("candidate-QA finding lineage", () => {
 
     const context = qaGeneratorContext(state);
     expect(context.open.map(({ currentId }) => currentId)).toEqual(["QA-03"]);
-    expect(
-      context.relevantResolved.map(({ currentId }) => currentId),
-    ).toEqual(["QA-01"]);
     const rendered = formatQAGeneratorContext(state, ["gate.json", "test.log"]);
     expect(rendered).toContain("Current deterministic gate failures");
     expect(rendered).toContain("QA-03");
     expect(rendered).toContain("State: OPEN");
     expect(rendered).toContain("Unresolved: yes");
     expect(rendered).toContain("Remedy: SOURCE_CHANGE");
-    expect(rendered).toContain("Relevant resolved QA findings");
-    expect(rendered).toContain("QA-01");
-    expect(rendered).toContain("State: RESOLVED");
-    expect(rendered).toContain("Unresolved: no");
+    expect(rendered).not.toContain("Relevant resolved QA findings");
+    expect(rendered).not.toContain("QA-01");
+    expect(rendered).not.toContain("State: RESOLVED");
+    expect(rendered).not.toContain("Unresolved: no");
     expect(rendered).not.toContain("QA-02");
   });
 

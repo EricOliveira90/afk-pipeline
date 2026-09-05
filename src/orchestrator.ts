@@ -254,10 +254,6 @@ import {
   outOfScopeChangedPaths,
   parseScopeEscalation,
 } from "./escalation.js";
-import {
-  loadRelatedGatePolicy,
-  selectRelatedGateDeclarations,
-} from "./related-gates.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const DEFAULT_ADJUDICATION_WAIT_MS = 60_000;
@@ -946,6 +942,10 @@ export function makeSliceContext(
     logger.addInvocationStats(slice.ghIssue, result.stats);
     if (opts.contextEnvelope !== undefined) {
       const tokenCounts = result.stats.tokenCounts;
+      // nonCommandTimeMs rides along as evidence only (ADR 0046
+      // amendment) — recorded when the provider measured it, omitted
+      // otherwise. Nothing branches on it.
+      const nonCommandTimeMs = result.stats.nonCommandTimeMs;
       logger.event({
         type: "prompt-assembly",
         ...opts.contextEnvelope,
@@ -953,6 +953,7 @@ export function makeSliceContext(
         Object.keys(tokenCounts).length > 0
           ? { tokenCounts }
           : {}),
+        ...(nonCommandTimeMs !== undefined ? { nonCommandTimeMs } : {}),
       });
     }
     return result;
@@ -4881,40 +4882,10 @@ export async function runSliceExecute(
             args: [...basePlan.prepare.args],
           }
         : undefined;
-      const changedForRelatedGates = git.listChangedFiles(
-        ctx.worktreeDir,
-        featBranch,
-      );
-      if (!changedForRelatedGates.ok) {
-        return {
-          phase: "ERROR",
-          error:
-            "Related-gate selection refused because the actual changed paths " +
-            `could not be determined: ${changedForRelatedGates.failure}`,
-        };
-      }
-      let relatedDeclarations: GateDeclaration[];
-      try {
-        const candidateManifest = loadAcceptanceManifest(ctx.absSliceDir);
-        relatedDeclarations = selectRelatedGateDeclarations(
-          loadRelatedGatePolicy(config.repoRoot),
-          {
-            lockedPaths: acceptanceManifestPaths(candidateManifest),
-            changedPaths: changedForRelatedGates.paths,
-          },
-        );
-      } catch (error) {
-        return {
-          phase: "ERROR",
-          error:
-            "Related-gate policy is invalid for this candidate: " +
-            (error instanceof Error ? error.message : String(error)),
-        };
-      }
-      const preQaDeclarations = [
-        ...resolvePreQAGateDeclarations(ctx.worktreeDir),
-        ...relatedDeclarations,
-      ];
+      // Automatic related-suite selection is PRD 4 scope (#86). PRD 3 keeps
+      // the ADR 0012 amendment sequence: cheap typecheck/lint, then candidate
+      // QA, then the full slice suite (architect A1).
+      const preQaDeclarations = resolvePreQAGateDeclarations(ctx.worktreeDir);
       const fullSuiteDeclarations =
         resolveFullSuiteGateDeclarations(ctx.worktreeDir);
       const preQaHasExecutable = preQaDeclarations.some(
@@ -5022,7 +4993,8 @@ export async function runSliceExecute(
         };
         retryNote =
           `This is implementation round ${round + 1}. Fix every unresolved ` +
-          `base-gate failure and preserve prior resolved QA behavior:\n` +
+          `base-gate failure without regressing behavior that already ` +
+          `passes:\n` +
           formatQAGeneratorContext(
             qaConvergence,
             baseGateRepairReferences,
@@ -5118,7 +5090,7 @@ export async function runSliceExecute(
           repairStage = "deterministic";
           retryNote =
             `This is implementation round ${round + 1}. Repair the current ` +
-            `QA findings while preserving relevant resolved behavior:\n` +
+            `QA findings without regressing behavior that already passes:\n` +
             formatQAGeneratorContext(
               qaConvergence,
               [],
@@ -5249,6 +5221,12 @@ export async function runSliceExecute(
           }
           if (postQaGates.action === "REPAIR") {
             stuckReferences.push(...postQaGates.references);
+            // QA passed this candidate before the full suite ran, so the
+            // finding set is resolved by construction. Replace the failure
+            // set with the gates-only projection instead of carrying the
+            // previous round's now-resolved findings into the next repair
+            // envelope (architect A2, PM P-02).
+            generatorFailureSet = postQaGates.failureSet;
             retryNote = postQaGates.retryNote;
             if (implementationAttempt < implementationAttemptLimit) continue;
             return finishIntervention(

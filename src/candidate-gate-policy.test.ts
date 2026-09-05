@@ -28,7 +28,7 @@ function gateResult(
 }
 
 describe("candidate gate repair policy", () => {
-  it("routes failed evidence and relevant resolved QA lineage to the next generator", () => {
+  it("routes failed evidence and open QA findings without resolved lineage", () => {
     const declarations: GateDeclaration[] = [
       {
         id: "tests",
@@ -127,8 +127,27 @@ describe("candidate gate repair policy", () => {
     expect(decision.retryNote).toContain("gates/attempt-failed.json");
     expect(decision.retryNote).toMatch(/gates[/\\]tests\.log/);
     expect(decision.retryNote).toContain("QA-CURRENT");
-    expect(decision.retryNote).toContain("QA-PRIOR");
-    expect(decision.retryNote).toContain("State: RESOLVED");
-    expect(decision.retryNote).toContain("The focused assertion keeps passing");
+    expect(decision.retryNote).not.toContain("QA-PRIOR");
+    expect(decision.retryNote).not.toContain("State: RESOLVED");
+    expect(decision.retryNote).not.toContain(
+      "The focused assertion keeps passing",
+    );
+    expect(decision.retryNote).not.toContain("reviews/qa-prior.json");
+    // The focused failure-set projection carries the failed gates only.
+    // Findings are empty by policy: QA passed the candidate before the full
+    // suite ran, so any finding in the convergence state is resolved lineage
+    // and must not re-enter a generator envelope (architect A2, PM P-02).
+    expect(decision.failureSet).toEqual({
+      findings: [],
+      gates: [
+        {
+          id: "tests",
+          evidence: [
+            "gates/attempt-failed.json",
+            expect.stringMatching(/gates[/\\]tests\.log$/),
+          ],
+        },
+      ],
+    });
   });
 });

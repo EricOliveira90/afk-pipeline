@@ -97,6 +97,18 @@ export type RunEventPayload =
       omittedArtifactClasses: string[];
       contextManifestVersion: number;
       tokenCounts?: Record<string, number>;
+      /**
+       * Evidence-only per-invocation non-command wall clock (PRD 3 §3
+       * item 13; ADR 0046 amendment 2026-09-05). Copied verbatim from
+       * `InvocationStats.nonCommandTimeMs` — see its TSDoc in
+       * `agent-provider.ts` for the exact clock boundaries. Absent
+       * whenever the provider could not attribute command time; a
+       * reader must treat absence as "unmeasured", never as 0. Like
+       * `stage-duration`, nothing thresholds, alerts on, or acts upon
+       * this field; its consumers are the context-envelope ROI
+       * analysis reading `events.jsonl`.
+       */
+      nonCommandTimeMs?: number;
     }
   | {
       type: "gate-outcome";

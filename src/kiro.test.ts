@@ -390,3 +390,25 @@ describe("transient exit classification", () => {
     );
   });
 });
+
+
+describe("nonCommandTimeMs evidence (A4)", () => {
+  it("never appears for kiro — no structured stream, no attribution", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({
+      role: "generator",
+      agent: "generator",
+      prompt: "go",
+      cwd: "/tmp/x",
+    });
+    proc.stdout.push("some unstructured output\n");
+    await new Promise((resolve) => setImmediate(resolve));
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    // Kiro cannot attribute command time (ADR 0004: no parseStreamLine),
+    // so the field must be ABSENT — not an invented 0.
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
+  });
+});

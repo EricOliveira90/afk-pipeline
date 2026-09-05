@@ -4,7 +4,10 @@ import type {
   InvokeResult,
   StreamEvent,
 } from "./agent-provider.js";
-import { runInvocation } from "./invocation-runtime.js";
+import {
+  createCommandTimeTracker,
+  runInvocation,
+} from "./invocation-runtime.js";
 
 const DEFAULT_MODEL = "claude-opus-5";
 const EXPLORER_MODEL = "claude-sonnet-5";
@@ -134,6 +137,39 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         ];
     let costUsd: number | undefined;
     let tokenCounts: Record<string, number> | undefined;
+    // Command-time attribution for `nonCommandTimeMs` (evidence only —
+    // see InvocationStats): every `tool_use` block opens an interval,
+    // matched to the `tool_result` block carrying its id. Blocks
+    // without an id poison the tracker so the field is omitted rather
+    // than guessed.
+    const commandTime = createCommandTimeTracker();
+
+    const trackCommandIntervals = (event: {
+      type?: unknown;
+      message?: { content?: unknown };
+    }) => {
+      if (
+        (event.type !== "assistant" && event.type !== "user") ||
+        !Array.isArray(event.message?.content)
+      ) {
+        return;
+      }
+      for (const block of event.message.content as {
+        type?: unknown;
+        id?: unknown;
+        tool_use_id?: unknown;
+      }[]) {
+        if (block.type === "tool_use") {
+          if (typeof block.id === "string") commandTime.begin(block.id);
+          else commandTime.markUnattributable();
+        } else if (
+          block.type === "tool_result" &&
+          typeof block.tool_use_id === "string"
+        ) {
+          commandTime.end(block.tool_use_id);
+        }
+      }
+    };
 
     return {
       command: "claude",
@@ -144,6 +180,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (line.startsWith("{")) {
           try {
             const event = JSON.parse(line);
+            trackCommandIntervals(event);
             if (
               event.type === "result" &&
               typeof event.total_cost_usd === "number"
@@ -173,6 +210,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         costUsd,
         ...(tokenCounts === undefined ? {} : { tokenCounts }),
       }),
+      commandTimeMs: () => commandTime.totalMs(),
     };
   });
 }
