@@ -4,7 +4,7 @@
 
 ## Scope
 
-Reviewed HEAD `1bbf2d5` against the PRD and selected slices 01 (#83), 02
+Reviewed HEAD `27a88a8` against the PRD and selected slices 01 (#83), 02
 (#90), 03 (#95), and 04 (#99). No manifest slice was skipped. I accepted the
 already-passed pre-ship sanity gate and did not rerun the full suite.
 
@@ -12,83 +12,74 @@ already-passed pre-ship sanity gate and did not rerun the full suite.
 
 | Slice | Result | Product outcome |
 |---|---|---|
-| 01 — Generator runs on the focused envelope | Delivered | Initial and repair prompts use a versioned manifest, inline file boundary, compact locked-contract and explorer projections, computed open finding/gate failures, one repair template for resume situations, stricter-only fail-closed budgets, fresh provider invocations, reduced handoffs, and the required escalation criteria. Prompt evidence is written immediately before every dispatch, including transient retries. |
-| 02 — Explorer four-section evidence map | Delivered | The explorer receives the citation-label rule, exact ordered evidence-map sections, ADR-title pushed selection, optional repository architecture, and a fail-closed budget. Its output is validated before planning, and the generator receives only the patterns/harness section. |
-| 03 — Planner and contract-evaluator envelopes | **Partial** | Initial and revision templates, open-finding convergence, judgment-only evaluator rules, manifest/gate inputs, common dispatch, and evidence recording are present. Planner revisions lose the promised repository context, and contract evaluators receive the whole explorer map rather than a role-selected section view. |
-| 04 — Envelope parity and evidence completeness | Delivered | Scoped manifests are complete and validated; undeclared classes and over-budget prompts fail before dispatch; assembly is deterministic; named provider stubs receive identical logical envelopes; stable IDs survive projection; invocation evidence records ordered artifacts and provider token fields; summaries aggregate exact prompt and token totals. |
+| 01 — Generator runs on the focused envelope | **Partial** | Initial and repair invocations use the focused envelope, computed failure set, one repair template, fail-closed budgets, fresh provider processes, reduced handoffs, and pre-dispatch evidence. The generator manifest does not declare all paths that the role is instructed to write. |
+| 02 — Explorer four-section evidence map | Delivered | The explorer receives the FACT/INFERENCE/UNKNOWN rule, exact ordered sections, ADR-title pushed selection without full ADR bodies, optional `ARCHITECTURE.md`, and a fail-closed budget. Output is validated before planning and routed downstream by section rather than per-item role tags. |
+| 03 — Planner and contract-evaluator envelopes | Delivered | Planner initial and revision rounds use focused fresh templates; both receive repository context when present, while revisions receive only open findings and affected control context. Contract evaluators receive the contract pair, manifest, gate catalog, and the selected behavior/preservation plus unknown explorer view. Revision judgment stays scoped to prior open findings and changed text. |
+| 04 — Envelope parity and evidence completeness | Delivered | Scoped manifests are complete and validated; undeclared classes, rendered-order mismatches, and over-budget prompts fail before dispatch. Assembly is deterministic, named provider stubs receive the same logical envelope, stable IDs survive projection, invocation events record exact envelope evidence and exposed token names, and summaries aggregate exact prompt and token totals. |
 
 ## Fix before ship
 
-### 1. Keep ADR and architecture context in fresh planner revision rounds
+### 1. Declare the generator's complete allowed write scope
 
-The PRD says the planner envelopes carry the ADR index and
-`ARCHITECTURE.md` when present (PRD line 22), and user story 20 promises the
-planner those placement rules in its envelope (line 45). A revision is a
-fresh planner invocation, so the initial round's memory is unavailable.
-
-- **File and location:** `src/context-envelope.ts`,
-  `PLANNER_CONTEXT_MANIFEST.inputOrder.revision` (lines 481–487),
-  `PlannerRevisionEnvelopeInput` (lines 941–950), and
-  `assemblePlannerRevisionEnvelope` (lines 1164–1226).
-- **What I read:** initial assembly derives repository context from
-  `repoRoot`, but revision input has no repository root, its declared order
-  has no repository-context slot, and its assembler includes only the
-  current contract pair, open findings/control situation, gates, and
-  migration reservation. `prompts/planner-revision.md` has no repository
-  context block.
-- **What I ran:** a direct `assemblePlannerRevisionEnvelope` probe reported
-  `hasRepositoryContext:false`, `hasAdrIndex:false`, and
-  `hasArchitecture:false`; its evidence classes contained only the contract
-  pair, gate catalog, and migration reservation.
-
-**Clear condition:** Derive and render the optional ADR index and
-`ARCHITECTURE.md` in planner revision envelopes, declare them in revision
-input order/evidence, preserve the no-entry fallback, and assert the
-dispatched revision prompt for repositories with and without those entries.
-
-### 2. Select explorer evidence by section for contract evaluators
-
-The PRD requires section-level selection (solution line 21 and user story 10)
-and gives the contract evaluator explorer sections for repository-reality
-judgment (story 8). The governing role design specifies that planners get all
-sections, generators get patterns/harness, and evaluators get the
-behavior/preservation view (`docs/specs/afk-v2-agent-roles.md`, lines
-181–183).
+The PRD promises that every versioned role manifest declares its allowed write
+scope. The generator manifest currently names only production paths from the
+acceptance manifest, while both shipped generator templates require a
+three-section handoff and permit a structured escalation artifact. A
+maintainer reading or validating the manifest therefore does not get the
+complete role boundary promised by user story 1.
 
 - **File and location:** `src/context-envelope.ts`,
-  `assembleContractEvaluatorInitialEnvelope` (lines 1228–1274) and
-  `assembleContractEvaluatorRevisionEnvelope` (lines 1276–1358).
-- **What I read:** both modes interpolate `input.explorerContext` unchanged
-  and record one aggregate `explorer-evidence-map` artifact. No projection
-  selects evaluator-relevant sections before rendering.
-- **What I ran:** a direct evaluator-envelope probe supplied distinct
-  behavior, patterns, data, and unknown markers. The assembled prompt
-  reported all four as present, including `PATTERN-ONLY` and `DATA-ONLY`.
+  `GENERATOR_CONTEXT_MANIFEST.allowedWriteScope` at line 125 and
+  `outputArtifact` at line 149; `prompts/generator.md`, Write boundary and
+  Handoff contract at lines 6–16 and 55–70; `prompts/generator-repair.md`,
+  Write boundary and Handoff contract at lines 6–16 and 64–79.
+- **What I read:** the manifest declares only
+  `acceptance-manifest.fileScope`, but its own stop condition and output
+  artifact require a handoff. Both templates instruct the generator to write
+  `{{SLICE_DIR}}/handoff.md` and, on escalation, to write
+  `{{SLICE_DIR}}/escalation.md`.
+- **What I ran:** line-numbered reads and `rg -n
+  "allowedWriteScope|handoff.md|escalation.md"` confirmed no generator
+  manifest entry for either slice artifact. The manifest completeness test at
+  `src/context-envelope.test.ts:1431` checks only that write scope is
+  non-empty, so this inaccurate boundary is not rejected.
 
-**Clear condition:** Add a deterministic contract-evaluator projection that
-includes the specified behavior/preservation and required unknown evidence
-while excluding sections assigned to other roles; record the selected
-section artifacts and test both initial and revision dispatches.
+**Clear condition:** Include the acceptance-manifest file scope,
+`slice/handoff.md`, and conditional `slice/escalation.md` in the generator
+manifest's allowed write scope, and add a focused assertion that the manifest
+matches both generator templates' actual write contract.
 
-## Verification performed
+## Evidence reviewed
 
-- Read the PRD, slice index, every file under the selected slices, the scoped
-  prompts, envelope implementation, orchestration dispatch, provider
-  adapters, event schema, summary aggregation, and focused tests.
-- Ran
-  `pnpm vitest run src/context-envelope.test.ts src/contract-prompt-orchestration.test.ts src/logger.test.ts src/kiro.test.ts src/claude.test.ts src/codex.test.ts`:
-  114 tests passed.
-- Ran the targeted transient-retry evidence test in
-  `src/orchestrator-runs.test.ts`: 1 passed.
-- Ran direct assembly probes for both blocking findings.
-- Did not rerun the full suite.
+- Read the PRD, slice index, every slice handoff and contract artifact, scoped
+  prompt templates, envelope assemblers, orchestration dispatch paths,
+  provider adapters, event schema, summary aggregation, and focused tests.
+- Verified the former planner-revision gap is closed in
+  `src/context-envelope.ts`: `PlannerRevisionEnvelopeInput`,
+  `PLANNER_CONTEXT_MANIFEST.inputOrder.revision`, and
+  `assemblePlannerRevisionEnvelope` now derive, render, order, and record the
+  ADR index and `ARCHITECTURE.md`, with a no-entry fallback.
+- Verified the former evaluator-selection gap is closed by
+  `projectContractEvaluatorEvidence` and both evaluator assemblers, which keep
+  `Files and current behavior` plus `Unknowns` and omit the patterns/harness
+  and data sections. Focused tests cover initial and revision prompts.
+- Verified all planner call sites pass the worktree root, generator failure
+  sets contain only unresolved finding fields and failed required gates, and
+  Kiro/Claude/Codex dispatch each receives the assembled prompt unchanged.
+- Verified the remaining blocker directly from the generator manifest,
+  templates, and manifest-completeness test; it is within selected slice 01.
+- `git diff --check` passed. A fresh focused Vitest run was unavailable because
+  this review worktree has no local Vitest binary; no dependency installation
+  was attempted because only this review file may be written.
 
 ## Out-of-scope PRD gaps
 
-- The live Kiro, Claude Code, and Codex parity matrix remains deferred; slice
-  04 covers provider-independent assembly and named stubs.
-- Assembled prompts for candidate/final evaluators, cleaner, hardener, and
-  remediator remain assigned to later PRDs.
+- The live Kiro, Claude Code, and Codex parity matrix remains explicitly
+  deferred; slice 04 delivers provider-independent assembly and named-stub
+  parity.
+- Prompt assembly for candidate/final evaluators, cleaner, hardener, and
+  remediator remains assigned to later PRDs. The candidate-evaluator manifest
+  entry lands here as planned, but its assembly path is deferred.
 - Acceptance/scope-gate execution remains PRD 4 work.
 - Provider model selection, authentication, and streaming changes remain out
   of scope.

@@ -2,92 +2,90 @@
 
 **Verdict:** FIX-BEFORE-SHIP
 
-Reviewed `main...HEAD` at `1bbf2d5e77347745ab3e7ea6284b870c48fc6bb2`
+Reviewed `main...HEAD` at `27a88a898877453371f06c762518193869998563`
 against base `817d663b480145ef16a02d581a67a15d4ef2ec6f`, the PRD, every
 available slice artifact, `ARCHITECTURE.md`, and the governing ADRs. I
 accepted the recorded pre-ship result and did not rerun the full suite. I
-ran only `pnpm vitest run src/post-qa-gates.test.ts`; all six focused tests
-passed.
+attempted only
+`pnpm vitest run src/post-qa-gates.test.ts src/context-envelope.test.ts`;
+it could not start because this review worktree has no installed `vitest`
+binary. I did not install dependencies because this review may write only
+this file.
 
 ## FIX-BEFORE-SHIP
 
-### A1 — A scope-amendment flag grants evaluator-written bytes orchestrator authority
+### A1 — An uncorrelatable Claude tool result is recorded as measured model time
 
-- **Convention:** ADR 0012, “Fail closed on the tree ID,” requires QA
-  authorization to describe the exact tree reviewed. ADR 0048, “The
-  orchestrator performs the amendment,” says agents never edit the locked
-  file list. ADR 0055, Seam 1 §3, makes the accepted contract pair a
-  byte-preserving orchestrator transaction.
-- **File and location:** `src/orchestrator.ts`, `runQAStage` at
-  `recordValidAttempt` (lines 4006–4013), the amendment/re-grade branch
-  (4195–4317), and `runSliceExecute` (5108–5111, 5180–5181, 5231–5245);
-  `src/post-qa-gates.ts`, `reviewArtifactViolations` (lines 51–82);
-  `src/post-qa-gates.test.ts`, “admits the accepted pair only under explicit
-  orchestrator authority” (lines 100–122).
-- **Evidence gathered:** I read the full amendment and post-QA control flow,
-  inspected the introducing diff and blame, and ran the focused test above.
-  After an amendment, `runQAStage` deliberately re-invokes the evaluator,
-  but `recordValidAttempt` continues to stamp the attempt with
-  `options.candidateTreeId`, the pre-amendment checkpoint. The stage returns
-  only `scopeAmended: true`; `runSliceExecute` converts that Boolean into
-  unrestricted path exemptions for `contract.md` and
-  `acceptance-manifest.json`. `reviewArtifactViolations` then suppresses
-  every difference on either path. The passing unit test demonstrates this
-  with arbitrary replacement contents (`# Amended` and
-  `{"amended":true}`), not bytes captured from the transaction.
-- **Concrete failure path:** QA requests a valid scope amendment; the
-  orchestrator applies it and starts the required re-grade. During that
-  later evaluator invocation, the evaluator accidentally or deliberately
-  edits either locked artifact beyond the additive amendment and writes a
-  PASS review. The post-QA guard treats all bytes on both paths as
-  orchestrator-authorized, the full suite runs, and `commitAll` ships the
-  altered pair. The recorded QA attempt still names the pre-amendment tree.
-  No later validation restores the transaction's bytes or rejects the
-  evaluator-authored changes.
-- **Attribution:** Commit `1bbf2d5e` introduced `scopeAmended`, the
-  `orchestratorAuthorizedPaths` path waiver, and the test that accepts
-  arbitrary changed bytes on those paths. This materially changed the
-  authority boundary added in `29f6946c`.
-- **Required correction:** Preserve an exact amended-tree ID or exact
-  accepted-pair digests immediately after the orchestrator transaction and
-  bind the re-grade, post-QA suite, and accepted commit to those bytes.
-  Pass typed provenance or a tree/digest comparison, not a Boolean expanded
-  into unrestricted path strings. A later evaluator edit to either artifact
-  must invalidate the verdict.
+- **Convention:** ADR 0046, “Amendment (2026-09-05): per-invocation
+  non-command time,” requires an uncorrelatable command/tool record to omit
+  `nonCommandTimeMs`, never synthesize a value. The same section identifies
+  `events.jsonl` as the durable input to the context-envelope ROI analysis.
+- **File and location:** `src/claude.ts`, `trackCommandIntervals`
+  (lines 147–170), especially the `tool_result` branch at lines 165–170;
+  `src/invocation-runtime.ts`, `createCommandTimeTracker` (lines 85–115);
+  `src/claude.test.ts`, the `nonCommandTimeMs evidence` block
+  (lines 193–289).
+- **Evidence gathered:** I read the provider parser and shared tracker,
+  searched every Claude attribution test, inspected `git blame`, and read
+  the introducing hunk with `git show 0060ac6 -- src/claude.ts
+  src/claude.test.ts`. The parser poisons attribution when a `tool_use`
+  lacks a string `id`, and the tracker poisons an unknown string completion,
+  but a `tool_result` whose `tool_use_id` is absent or non-string is silently
+  ignored. The focused tests cover an id-less `tool_use` and an unfinished
+  interval, but not an id-less `tool_result`.
+- **Concrete failure path:** Claude emits or the stream exposes a
+  `tool_result` block without a correlatable `tool_use_id`, with no open
+  tracked interval. The parser ignores the uncorrelatable record;
+  `commandTime.totalMs()` returns `0`; the runtime derives the whole
+  invocation wall clock as `nonCommandTimeMs`; and the orchestrator appends
+  that false measurement to durable run evidence. Nothing marks it
+  unmeasured or repairs the historical event, so the ROI dataset consumes a
+  value ADR 0046 requires to be absent.
+- **Attribution:** Commit `0060ac61d3363c0af430d84070cf8a9cf190b125`
+  introduced the Claude interval parser, its incomplete fail-closed branch,
+  the tests, and the ADR amendment. This behavior does not exist on `main`.
+- **Required correction:** Treat every `tool_result` without a string
+  `tool_use_id` as unattributable and add a focused regression asserting
+  that `nonCommandTimeMs` is absent.
 
-## Standards
+## Standards notes
 
-- `src/orchestrator.ts` grew from 6,193 to 6,507 lines in this diff and still
-  owns envelope routing, explorer validation, gate classification, failure
-  projection, and tree-authority policy. This conflicts with
-  `ARCHITECTURE.md`, “Hubs — do not grow these; extract instead.” The new
-  post-QA modules are useful extractions, but the hub remains the integration
-  point for several new policies.
-- `validateExplorerEvidenceMap` is an inline deterministic refusal in
-  `negotiateAttempt`, not a declared gate with evidence. That violates
+- `src/orchestrator.ts` grows from 6,193 to 6,563 lines and still contains
+  substantial envelope routing and generator situation construction around
+  `runSliceExecute`, despite useful extractions into
+  `context-envelope.ts`, `contract-prompt-orchestration.ts`, and the gate
+  modules. This conflicts with `ARCHITECTURE.md`, “Hubs — do not grow these;
+  extract instead.” It is structural debt, but I found no separate unsafe
+  shipped path beyond A1.
+- `validateExplorerEvidenceMap` is invoked directly in
+  `src/orchestrator.ts` at the negotiation boundary rather than represented
+  as a declared gate with evidence. That conflicts with
   `ARCHITECTURE.md`, “Placement rules: A new deterministic check is a gate
-  in the catalog.” It fails safely as an `ERROR`, so this is a convention
-  note rather than another ship blocker.
-- `InvokeOptions.contextEnvelope` carries run-journal metadata through every
-  provider even though providers ignore it. ADR 0002 and ADR 0030 define
-  providers as command/output adapters. Keeping envelope evidence in an
-  orchestration-owned invocation wrapper would make the provider seam deeper.
+  in the catalog.” The current check fails safely before planner dispatch,
+  so this is a convention note.
+- `InvokeOptions.contextEnvelope` in `src/agent-provider.ts` carries
+  orchestration-owned evidence through providers that explicitly ignore it.
+  ADR 0002 and ADR 0030 define providers as command/output adapters and the
+  shared runtime as the invocation lifecycle seam. Keeping this metadata on
+  an orchestration wrapper would preserve a deeper provider interface.
+- ADR 0046 says the orchestrator copies `nonCommandTimeMs` onto the
+  pre-dispatch `prompt-assembly` event, while the implementation correctly
+  learns it only after return and writes it to `invocation-completed`
+  (`src/orchestrator.ts:959–976`). Amend the ADR to match the causal event
+  model; this documentation conflict does not add a second behavior blocker.
 
-## Spec
+## Spec notes
 
-- `ContextEnvelopeManifest` declares itself authoritative, but objective,
-  write scope, stop/escalation conditions, and output contract remain
-  duplicated in prompt templates; assembly validates only their nonblank
-  manifest declarations, not their rendered presence. The current templates
-  match, so this is a drift seam rather than an actual shipped mismatch.
-- `prompt-assembly` and `invocation-completed` have no invocation-attempt ID.
-  After a transient retry, two assembly events and one completion share only
-  issue, slice, round, and role. B-05 evidence is still aggregatable because
-  the retried prompt is byte-identical, but future per-attempt analysis cannot
-  prove the pairing. Add a shared attempt identity before consumers require
-  exact joins.
-- The diff also expands `clean-failed` to remove clean, merged PASS worktrees
-  and branches. ADR 0023 describes cleanup in terms of failed slices. Because
-  the branch is already merged and dirty worktrees are preserved, recovery is
-  available; document this semantic expansion in its own decision rather
-  than leaving it attached to the context-envelope feature.
+- I did not treat the absence of an explorer revision template as a defect:
+  `docs/specs/afk-v2-agent-roles.md` §1 explicitly says there is no
+  re-exploration loop.
+- I did not treat the split pre-QA/full-suite sequencing as unapproved PRD 4
+  scope: ADR 0012’s 2026-09-02 amendment and
+  `docs/specs/afk-v2-plan.md`, “Early PRD 4 delivery during PRD 3,” explicitly
+  authorize the shipped subset.
+- `CANDIDATE_EVALUATOR_CONTEXT_MANIFEST` is manifest-only and describes
+  candidate and sibling handoffs as omitted, while the live legacy
+  `evaluator-qa` prompt still requires both. Because no assembly or dispatch
+  consumes this deferred manifest, it does not change shipped evaluation,
+  but it is speculative and should not be called a complete role contract
+  until the deferred evaluator-envelope work replaces the legacy prompt.
