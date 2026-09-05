@@ -106,16 +106,23 @@ export type RunEventPayload =
     }
   | {
       /**
-       * Post-return completion evidence for a scoped invocation, paired
-       * with the `prompt-assembly` event journaled before its dispatch
-       * (same ghIssue/sliceNumber/round/role). Emitted only for
-       * invocations that returned successfully.
+       * Post-return completion evidence for one provider invocation.
+       * For the four assembled roles it pairs with the `prompt-assembly`
+       * event journaled before its dispatch (same
+       * ghIssue/sliceNumber/round/role). Candidate-QA and shared-preview
+       * evaluator invocations emit it too — completion telemetry is
+       * decoupled from envelope assembly, because evaluator reading time
+       * is the measurement the PRD's ROI rider scores (plan §3 item 13;
+       * guardian round 6). Emitted only for invocations that returned
+       * successfully.
        */
       type: "invocation-completed";
       ghIssue: string;
       sliceNumber: string;
       round: number;
-      role: PromptAssemblyRole;
+      role: PromptAssemblyRole | "evaluator-qa" | "evaluator-uat";
+      /** Evaluator attempt within the round, when the role retries. */
+      attempt?: number;
       /** Provider-exposed token names and counts, never renamed. */
       tokenCounts?: Record<string, number>;
       /**

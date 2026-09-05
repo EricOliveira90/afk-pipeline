@@ -2487,13 +2487,38 @@ describe("focused generator scope revision", () => {
       expect(event).not.toHaveProperty("tokenCounts");
       expect(event).not.toHaveProperty("nonCommandTimeMs");
     }
-    const completions = events.filter(
+    const allCompletions = events.filter(
       (event) => event.type === "invocation-completed",
+    );
+    const completions = allCompletions.filter(
+      (event) => event.role !== "evaluator-qa" && event.role !== "evaluator-uat",
     );
     expect(completions).toHaveLength(assemblies.length);
     expect(completions.map((event) => event.role)).toEqual(
       assemblies.map((event) => event.role),
     );
+    // Completion telemetry is decoupled from envelope assembly: the
+    // candidate evaluator has no assembled envelope, yet each of its
+    // invocations lands a durable completion event with full identity.
+    // The stub reports a measured reading time only on its first
+    // attempt, so the second event proves an unmeasured provider omits
+    // the field rather than inventing 0 (plan §3 item 13; guardian
+    // round 6).
+    const evaluatorCompletions = allCompletions.filter(
+      (event) => event.role === "evaluator-qa",
+    );
+    expect(evaluatorCompletions.length).toBeGreaterThanOrEqual(2);
+    expect(evaluatorCompletions[0]).toMatchObject({
+      ghIssue: "1081",
+      sliceNumber: "01",
+      round: 1,
+      attempt: 1,
+      nonCommandTimeMs: 777,
+    });
+    for (const event of evaluatorCompletions.slice(1)) {
+      expect(event).not.toHaveProperty("nonCommandTimeMs");
+      expect(event).toMatchObject({ ghIssue: "1081", sliceNumber: "01" });
+    }
     expect(completions[0]).not.toHaveProperty("tokenCounts");
     expect(completions.map((event) => event.tokenCounts)).toEqual([
       undefined,

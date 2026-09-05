@@ -631,10 +631,21 @@ export function buildStubProvider(opts: {
             : role === "generator"
               ? { output_tokens: 5, cache_read_input_tokens: 2 }
               : undefined;
+      // The first evaluator-qa invocation per slice reports a measured
+      // reading time; later attempts report nothing — so one shared
+      // spawned scenario covers both the durable evaluator completion
+      // event and the unmeasured-omission rule (guardian round 6).
+      const nonCommandTimeMs =
+        role === "evaluator-qa" && qaAttempts.get(ghIssue) === 1
+          ? 777
+          : undefined;
       return {
         exitCode: 0,
         stdout: "",
-        stats: tokenCounts === undefined ? {} : { tokenCounts },
+        stats: {
+          ...(tokenCounts === undefined ? {} : { tokenCounts }),
+          ...(nonCommandTimeMs === undefined ? {} : { nonCommandTimeMs }),
+        },
       };
     },
   };

@@ -849,7 +849,20 @@ export interface SliceContext {
    */
   onContractLocked?: (contractPath: string) => string | null;
   invoke: (
-    opts: Parameters<AgentProvider["invoke"]>[0],
+    opts: Parameters<AgentProvider["invoke"]>[0] & {
+      /**
+       * Identity for the post-return `invocation-completed` event when the
+       * invocation carries no assembled envelope (candidate-QA and
+       * shared-preview evaluators). Stripped before the provider call.
+       */
+      completionEvidence?: {
+        ghIssue: string;
+        sliceNumber: string;
+        round: number;
+        attempt?: number;
+        role: "evaluator-qa" | "evaluator-uat";
+      };
+    },
   ) => ReturnType<AgentProvider["invoke"]>;
 }
 
@@ -889,7 +902,27 @@ export function makeSliceContext(
     ? siblingHandoffs.map((path) => `- \`${path}\``).join("\n")
     : "(none — this slice declares no AFK dependencies)";
 
-  const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
+  const invoke = async (
+    opts: Parameters<AgentProvider["invoke"]>[0] & {
+      /**
+       * Identity for the post-return `invocation-completed` event when the
+       * invocation carries no assembled envelope (candidate-QA and
+       * shared-preview evaluators). Completion telemetry — token counts,
+       * `nonCommandTimeMs` — is decoupled from PRD 3 envelope assembly
+       * because evaluator reading time is the measurement the ROI rider
+       * scores (plan §3 item 13; guardian round 6). Stripped before the
+       * provider call: providers stay command/output adapters (ADR 0002).
+       */
+      completionEvidence?: {
+        ghIssue: string;
+        sliceNumber: string;
+        round: number;
+        attempt?: number;
+        role: "evaluator-qa" | "evaluator-uat";
+      };
+    },
+  ) => {
+    const { completionEvidence, ...providerOpts } = opts;
     // Transient model outages (provider-classified) retry here with
     // backoff instead of failing the slice. See ADR 0022.
     const result = await withTransientRetry(
@@ -908,7 +941,7 @@ export function makeSliceContext(
           });
         }
         return provider.invoke({
-          ...opts,
+          ...providerOpts,
           signal,
           onIdleWarning: (minutes) => {
             if (opts.logStream) {
@@ -956,7 +989,20 @@ export function makeSliceContext(
       },
     );
     logger.addInvocationStats(slice.ghIssue, result.stats);
-    if (opts.contextEnvelope !== undefined) {
+    // Post-return completion telemetry: identity comes from the assembled
+    // envelope when there is one, or from `completionEvidence` for the
+    // evaluator invocations whose envelope path is deferred (guardian
+    // round 6 — evaluator reading time is the ROI rider's measurement).
+    const completionIdentity =
+      opts.contextEnvelope !== undefined
+        ? {
+            ghIssue: opts.contextEnvelope.ghIssue,
+            sliceNumber: opts.contextEnvelope.sliceNumber,
+            round: opts.contextEnvelope.round,
+            role: opts.contextEnvelope.role,
+          }
+        : completionEvidence;
+    if (completionIdentity !== undefined) {
       const tokenCounts = result.stats.tokenCounts;
       // nonCommandTimeMs rides along as evidence only (ADR 0046
       // amendment) — recorded when the provider measured it, omitted
@@ -964,10 +1010,7 @@ export function makeSliceContext(
       const nonCommandTimeMs = result.stats.nonCommandTimeMs;
       logger.event({
         type: "invocation-completed",
-        ghIssue: opts.contextEnvelope.ghIssue,
-        sliceNumber: opts.contextEnvelope.sliceNumber,
-        round: opts.contextEnvelope.round,
-        role: opts.contextEnvelope.role,
+        ...completionIdentity,
         ...(tokenCounts !== undefined &&
         Object.keys(tokenCounts).length > 0
           ? { tokenCounts }
@@ -4088,6 +4131,17 @@ export async function runQAStage(
       try {
         await invoke({
           role: "evaluator-qa",
+          // No assembled envelope: the candidate-evaluator prompt redesign
+          // is deferred, but completion telemetry still lands in
+          // events.jsonl with full identity (plan §3 item 13; guardian
+          // round 6).
+          completionEvidence: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            attempt,
+            role: stage === "deterministic" ? "evaluator-qa" : "evaluator-uat",
+          },
           prompt: renderPrompt("evaluator-qa", {
             SLICE_DIR: ctx.relSliceDir,
             RELEVANT_FILES: ctx.relevantFilesBlock,

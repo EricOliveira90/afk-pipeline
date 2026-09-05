@@ -132,8 +132,12 @@ of provider-attributed command/tool execution intervals. Providers that
 parse a structured stream (claude, codex) attribute command time from
 their begin/end records; the shared invocation runtime owns the wall
 clock (spawn → successful exit) and derives the difference onto
-`InvocationStats`. The orchestrator's invocation seam copies it onto
-the `prompt-assembly` event. A provider that cannot attribute command
+`InvocationStats`. The orchestrator's invocation seam records it on the
+post-return `invocation-completed` event (a post-return fact cannot ride
+the pre-dispatch `prompt-assembly` record) for the four assembled roles
+and for candidate-QA/shared-preview evaluator invocations, whose
+envelope path is deferred but whose reading time is the measurement the
+ROI rider scores. A provider that cannot attribute command
 time — no structured stream (kiro), an uncorrelatable record, an
 execution whose end never arrived — records nothing: the field is
 omitted, never zeroed. Exact clock boundaries: `InvocationStats`
