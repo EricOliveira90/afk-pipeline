@@ -484,6 +484,7 @@ export const PLANNER_CONTEXT_MANIFEST = {
       "control-plane-situation",
       "base-gate-catalog",
       "migration-reservation",
+      "repository-context",
     ],
   },
   inputOrderSlots: {
@@ -519,7 +520,7 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
     "proposed-contract",
     "acceptance-manifest",
     "base-gate-catalog",
-    "explorer-evidence-map",
+    "explorer-behavior-preservation",
     "revised-contract",
     "revised-acceptance-manifest",
     "prior-open-contract-findings",
@@ -533,7 +534,7 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
       "proposed-contract",
       "acceptance-manifest",
       "base-gate-catalog",
-      "explorer-evidence-map",
+      "explorer-behavior-preservation",
     ],
     revision: [
       "revised-contract",
@@ -543,7 +544,7 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
       "contract-revision-evidence",
       "control-plane-situation",
       "base-gate-catalog",
-      "explorer-evidence-map",
+      "explorer-behavior-preservation",
     ],
   },
   inlineSizeBudgetBytes: 65_536,
@@ -551,6 +552,11 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
     ...ROLE_ENVELOPE_OMISSIONS,
     "generator-output",
     "cleanup-artifacts",
+    // docs/specs/afk-v2-agent-roles.md §1: evaluators get the behavior and
+    // preservation evidence only. The explorer map's other level-2 sections
+    // are deliberately withheld and declared here so the omission is honest.
+    "explorer-patterns-and-harness",
+    "explorer-data-and-integration",
   ],
 } as const satisfies ContextEnvelopeManifest;
 
@@ -940,6 +946,12 @@ export interface PlannerInitialEnvelopeInput
 
 export interface PlannerRevisionEnvelopeInput
   extends PlannerEnvelopeCommonInput {
+  /**
+   * A revision is a fresh invocation: PRD line 22 / user story 20 promise the
+   * planner the ADR index and ARCHITECTURE.md whenever they exist, so the
+   * revision envelope derives repository context exactly like the initial one.
+   */
+  repoRoot: string;
   currentContract: string;
   currentAcceptanceManifest: string;
   findings: readonly ContractReviewFinding[];
@@ -1166,6 +1178,7 @@ export function assemblePlannerRevisionEnvelope(
 ): RoleEnvelopeResult {
   const openFindings = openContractReviewFindings(input.findings);
   const formattedOpenFindings = formatContractReviewFindings(openFindings);
+  const repositoryContext = buildExplorerRepositoryContext(input.repoRoot);
   const prompt = renderPrompt("planner-revision", {
     GH_ISSUE: input.ghIssue,
     SPECS_DIR: input.specsDir,
@@ -1179,6 +1192,7 @@ export function assemblePlannerRevisionEnvelope(
     CONTRACT_RESPONSE_INSTRUCTIONS: input.contractResponseInstructions,
     BASE_GATE_CATALOG: input.baseGateCatalog,
     MIGRATION_RESERVATION: input.migrationReservation,
+    REPOSITORY_CONTEXT: repositoryContext.content,
   });
   return roleEnvelopeResult(
     prompt,
@@ -1219,6 +1233,13 @@ export function assemblePlannerRevisionEnvelope(
         artifactId: "migration-reservation",
         ...contentLocator(input.migrationReservation),
       },
+      ...repositoryContext.includedArtifactIds.map((artifactId) => ({
+        artifactClass: artifactId.startsWith("docs/adr/")
+          ? "repository-adr"
+          : "repository-architecture",
+        artifactId,
+        ...contentLocator(repositoryArtifactLocator(artifactId)),
+      })),
     ],
     input.inlineSizeBudgetBytes,
     "Planner",
@@ -1233,6 +1254,9 @@ export function assembleContractEvaluatorInitialEnvelope(
     null,
     2,
   );
+  const evaluatorEvidence = projectContractEvaluatorEvidence(
+    input.explorerContext,
+  );
   const prompt = renderPrompt("evaluator-contract", {
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
@@ -1240,7 +1264,7 @@ export function assembleContractEvaluatorInitialEnvelope(
     PROPOSED_CONTRACT: input.proposedContract,
     ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
     BASE_GATE_CATALOG: input.baseGateCatalog,
-    EXPLORER_CONTEXT: input.explorerContext,
+    EXPLORER_CONTEXT: evaluatorEvidence,
   });
   return roleEnvelopeResult(
     prompt,
@@ -1263,9 +1287,9 @@ export function assembleContractEvaluatorInitialEnvelope(
         ...contentLocator(input.baseGateCatalog),
       },
       {
-        artifactClass: "explorer-evidence-map",
+        artifactClass: "explorer-behavior-preservation",
         artifactId: `${input.sliceDir}/context.md`,
-        ...contentLocator(input.explorerContext),
+        ...contentLocator(evaluatorEvidence),
       },
     ],
     input.inlineSizeBudgetBytes,
@@ -1289,6 +1313,9 @@ export function assembleContractEvaluatorRevisionEnvelope(
       ? "(none)"
       : JSON.stringify(input.plannerResponse, null, 2);
   const renderedRevisionContext = JSON.stringify(input.revisions, null, 2);
+  const evaluatorEvidence = projectContractEvaluatorEvidence(
+    input.explorerContext,
+  );
   const prompt = renderPrompt("evaluator-contract-revision", {
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
@@ -1300,7 +1327,7 @@ export function assembleContractEvaluatorRevisionEnvelope(
     REVISION_CONTEXT: renderedRevisionContext,
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
     BASE_GATE_CATALOG: input.baseGateCatalog,
-    EXPLORER_CONTEXT: input.explorerContext,
+    EXPLORER_CONTEXT: evaluatorEvidence,
   });
   return roleEnvelopeResult(
     prompt,
@@ -1349,9 +1376,9 @@ export function assembleContractEvaluatorRevisionEnvelope(
         ...contentLocator(input.baseGateCatalog),
       },
       {
-        artifactClass: "explorer-evidence-map",
+        artifactClass: "explorer-behavior-preservation",
         artifactId: `${input.sliceDir}/context.md`,
-        ...contentLocator(input.explorerContext),
+        ...contentLocator(evaluatorEvidence),
       },
     ],
     input.inlineSizeBudgetBytes,
@@ -1404,6 +1431,35 @@ export function projectGeneratorPatternsAndHarness(context: string): string {
   );
   if (section === undefined) return context;
   return context.slice(section.headingStart, section.bodyEnd);
+}
+
+/**
+ * Sections of the explorer evidence map routed to the contract evaluators:
+ * behavior and preservation evidence plus unresolved facts
+ * (docs/specs/afk-v2-agent-roles.md §1 — "planner gets all; generator gets
+ * patterns and harness; evaluators get behavior and preservation").
+ * "Patterns and test harness" and "Data and integration" are deliberately
+ * excluded and declared in the evaluator manifest's omittedArtifactClasses.
+ */
+const CONTRACT_EVALUATOR_EVIDENCE_SECTIONS = new Set([
+  "Files and current behavior",
+  "Unknowns",
+]);
+
+/**
+ * Deterministic section projection of the explorer evidence map for the
+ * contract evaluators. Mirrors projectGeneratorPatternsAndHarness: when the
+ * map carries none of the expected level-2 sections (legacy or free-form
+ * context), the whole map is passed through unchanged rather than dropped.
+ */
+export function projectContractEvaluatorEvidence(context: string): string {
+  const sections = explorerEvidenceSections(context).filter((heading) =>
+    CONTRACT_EVALUATOR_EVIDENCE_SECTIONS.has(heading.title),
+  );
+  if (sections.length === 0) return context;
+  return sections
+    .map(({ headingStart, bodyEnd }) => context.slice(headingStart, bodyEnd))
+    .join("");
 }
 
 export function assembleGeneratorEnvelope(

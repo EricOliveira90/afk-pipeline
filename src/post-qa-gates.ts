@@ -55,25 +55,38 @@ export function reviewArtifactViolations(input: {
   /** Repo-relative slice directory (forward slashes), e.g. `specs/x/slices/01-y`. */
   reviewArtifactDir: string;
   /**
-   * Repo-relative paths the orchestrator itself changed under an audited
-   * authority in this window (today: `contract.md` and
-   * `acceptance-manifest.json` after an applied scope amendment, which is
-   * archived as `qa|uat-scope-amendment-rN-aM.json` evidence).
+   * Exact bytes the orchestrator itself wrote under an audited authority in
+   * this window, as repo-relative path → git blob ID recorded immediately
+   * after the write (today: `contract.md` and `acceptance-manifest.json`
+   * after an applied scope amendment, archived as
+   * `qa|uat-scope-amendment-rN-aM.json` evidence). A path is admitted only
+   * when the candidate tree holds exactly the recorded blob — any later
+   * edit, evaluator or otherwise, is a violation (guardian round 4,
+   * architect A1: typed byte provenance, never a path waiver).
    */
-  orchestratorAuthorizedPaths?: readonly string[];
+  orchestratorAuthorizedBlobs?: Readonly<Record<string, string>>;
 }): string[] {
   if (input.fromTree === input.toTree) return [];
   const dir = input.reviewArtifactDir.replace(/\\/g, "/").replace(/\/+$/, "");
   const prefix = `${dir}/`;
-  const authorized = new Set(
-    (input.orchestratorAuthorizedPaths ?? []).map((path) =>
-      path.replace(/\\/g, "/"),
+  const authorizedBlobs = new Map(
+    Object.entries(input.orchestratorAuthorizedBlobs ?? {}).map(
+      ([path, blobId]) => [path.replace(/\\/g, "/"), blobId],
     ),
   );
   return git
     .diffTreePaths(input.cwd, input.fromTree, input.toTree)
     .filter((path) => {
-      if (authorized.has(path)) return false;
+      const authorizedBlobId = authorizedBlobs.get(path);
+      if (authorizedBlobId !== undefined) {
+        // Authorized means these exact bytes, not this path: the candidate
+        // tree must hold precisely the blob recorded at the orchestrator's
+        // transaction. `null` (entry missing) fails closed.
+        return (
+          git.treeEntryBlobId(input.cwd, input.toTree, path) !==
+          authorizedBlobId
+        );
+      }
       if (!path.startsWith(prefix)) return true;
       const name = path.slice(prefix.length);
       // Nested paths and unexpected names inside the slice directory are
@@ -142,8 +155,8 @@ export async function runPostQAGates(args: {
   qaApprovedTreeId: string;
   /** Repo-relative slice directory the QA evaluator legitimately writes. */
   reviewArtifactDir: string;
-  /** Orchestrator-authorized in-window changes (applied scope amendments). */
-  orchestratorAuthorizedPaths?: readonly string[];
+  /** Exact orchestrator-written bytes (path → blob ID) from applied scope amendments. */
+  orchestratorAuthorizedBlobs?: Readonly<Record<string, string>>;
   onGateOutcome: (outcome: CandidateGateOutcome) => void;
   onInfrastructureRetry: (message: string) => void;
   onCleanupWarning: (message: string) => void;
@@ -174,8 +187,8 @@ export async function runPostQAGates(args: {
       fromTree: args.qaApprovedTreeId,
       toTree: checkpoint.treeId,
       reviewArtifactDir: args.reviewArtifactDir,
-      ...(args.orchestratorAuthorizedPaths
-        ? { orchestratorAuthorizedPaths: args.orchestratorAuthorizedPaths }
+      ...(args.orchestratorAuthorizedBlobs
+        ? { orchestratorAuthorizedBlobs: args.orchestratorAuthorizedBlobs }
         : {}),
     });
     if (violations.length > 0) {

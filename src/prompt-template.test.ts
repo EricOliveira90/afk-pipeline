@@ -232,6 +232,7 @@ describe("renderPrompt", () => {
         CONTROL_SITUATION: "(none)",
         CONTRACT_RESPONSE_INSTRUCTIONS: "Do not write a response.",
         MIGRATION_RESERVATION: "No claim yet",
+        REPOSITORY_CONTEXT: "(none available)",
         BASE_GATE_CATALOG: "- tests: pnpm run test:run",
       }),
     ).toContain("# Routed OPEN findings");

@@ -97,14 +97,29 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
     ]);
   });
 
-  it("admits the accepted pair only under explicit orchestrator authority", () => {
+  it("admits the accepted pair only at the exact orchestrator-recorded bytes", () => {
     // An applied scope amendment is the one audited orchestrator write
-    // that changes the accepted pair inside the QA window.
+    // that changes the accepted pair inside the QA window — and the
+    // authority is byte provenance, not a path waiver: the guard admits
+    // the recorded blob and nothing else (guardian round 4, architect A1).
     const qaApproved = resolveCandidateTreeId(repo);
     writeFileSync(join(repo, sliceDir, "contract.md"), "# Amended\n");
     writeFileSync(
       join(repo, sliceDir, "acceptance-manifest.json"),
       '{"amended":true}\n',
+    );
+    // The orchestrator records the blob IDs immediately after its write.
+    const recordedBlobs = Object.fromEntries(
+      ["contract.md", "acceptance-manifest.json"].map((name) => [
+        `${sliceDir}/${name}`,
+        git(repo, [
+          "hash-object",
+          "--path",
+          `${sliceDir}/${name}`,
+          "--",
+          `${sliceDir}/${name}`,
+        ]),
+      ]),
     );
     const postQa = resolveCandidateTreeId(repo);
     expect(
@@ -113,12 +128,27 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
         fromTree: qaApproved,
         toTree: postQa,
         reviewArtifactDir: sliceDir,
-        orchestratorAuthorizedPaths: [
-          `${sliceDir}/contract.md`,
-          `${sliceDir}/acceptance-manifest.json`,
-        ],
+        orchestratorAuthorizedBlobs: recordedBlobs,
       }),
     ).toEqual([]);
+
+    // A later edit — e.g. an evaluator rewriting the contract during the
+    // post-amendment re-grade — no longer matches the recorded blob and
+    // voids the authority.
+    writeFileSync(
+      join(repo, sliceDir, "contract.md"),
+      "# Amended, then tampered\n",
+    );
+    const tampered = resolveCandidateTreeId(repo);
+    expect(
+      reviewArtifactViolations({
+        cwd: repo,
+        fromTree: qaApproved,
+        toTree: tampered,
+        reviewArtifactDir: sliceDir,
+        orchestratorAuthorizedBlobs: recordedBlobs,
+      }),
+    ).toEqual([`${sliceDir}/contract.md`]);
   });
 
   it("names every path drifting outside the slice directory, fail-closed input", () => {

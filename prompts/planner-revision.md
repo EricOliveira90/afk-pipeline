@@ -83,6 +83,10 @@ them to `contract-response.json`.
 
 {{MIGRATION_RESERVATION}}
 
+# Repository context
+
+{{REPOSITORY_CONTEXT}}
+
 # Contract response instructions
 
 {{CONTRACT_RESPONSE_INSTRUCTIONS}}

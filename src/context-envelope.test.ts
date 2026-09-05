@@ -16,6 +16,7 @@ import {
   assemblePlannerInitialEnvelope,
   assemblePlannerRevisionEnvelope,
   buildExplorerRepositoryContext,
+  projectContractEvaluatorEvidence,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateContextEnvelopeManifest,
@@ -66,6 +67,11 @@ const resolvedFinding: ContractReviewFinding = {
   clearCondition: "RESOLVED-CLEAR-CONDITION",
   state: "RESOLVED",
 };
+
+/** The repository root: carries docs/adr/*.md and ARCHITECTURE.md. */
+const repoRootWithDocs = fileURLToPath(new URL("..", import.meta.url));
+/** src/ exists but has neither docs/adr nor ARCHITECTURE.md. */
+const repoRootWithoutDocs = fileURLToPath(new URL(".", import.meta.url));
 
 describe("explorer context envelope", () => {
   it("B-01 accepts only the ordered evidence-map sections and requires Unknowns", () => {
@@ -399,6 +405,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       specsDir: ".kiro/specs/demo",
       sliceDir: ".kiro/specs/demo/slices/03-envelope",
       round: 2,
+      repoRoot: repoRootWithoutDocs,
       currentContract: "CURRENT-CONTRACT",
       currentAcceptanceManifest: '{"version":2}',
       findings: [openFinding, resolvedFinding],
@@ -434,6 +441,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       "control-plane-situation",
       "base-gate-catalog",
       "migration-reservation",
+      "repository-context",
     ]);
     expect(PLANNER_CONTEXT_MANIFEST.omittedArtifactClasses).toContain(
       "resolved-findings",
@@ -488,7 +496,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       '"id": "B-01"',
       "# Executable gate catalog",
       "- tests: pnpm test:fast",
-      "# Explorer evidence map",
+      "# Explorer behavior and preservation evidence",
       "FILES-EVIDENCE",
       "# Judgment boundary",
       "Gate aptness",
@@ -511,7 +519,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       "proposed-contract",
       "acceptance-manifest",
       "base-gate-catalog",
-      "explorer-evidence-map",
+      "explorer-behavior-preservation",
     ]);
     expect(result.evidence.includedArtifactIds).toEqual([
       ".kiro/specs/demo/slices/03-envelope/contract.md",
@@ -583,7 +591,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       "contract-revision-evidence",
       "control-plane-situation",
       "base-gate-catalog",
-      "explorer-evidence-map",
+      "explorer-behavior-preservation",
     ]);
     expect(result.evidence.includedArtifactIds).toEqual([
       ".kiro/specs/demo/slices/03-envelope/contract.md",
@@ -595,6 +603,204 @@ describe("planner and contract-evaluator context envelopes", () => {
       "base-gate-catalog",
       ".kiro/specs/demo/slices/03-envelope/context.md",
     ]);
+  });
+
+  it("PM4-1 derives repository context for the planner revision envelope when docs exist", () => {
+    const repositoryContext = buildExplorerRepositoryContext(repoRootWithDocs);
+    const result = assemblePlannerRevisionEnvelope({
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 2,
+      repoRoot: repoRootWithDocs,
+      currentContract: "CURRENT-CONTRACT",
+      currentAcceptanceManifest: '{"version":2}',
+      findings: [openFinding],
+      contractResponseInstructions: "Write the routed response.",
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "No migration reservation is active.",
+    });
+
+    // The template renders the block in the manifest's declared revision
+    // order: after the migration reservation, before the response
+    // instructions.
+    const markers = [
+      "# Migration reservation",
+      "# Repository context",
+      "## ADR index",
+      "## ARCHITECTURE.md",
+      "# Contract response instructions",
+    ];
+    let previous = -1;
+    for (const marker of markers) {
+      const index = result.prompt.indexOf(marker);
+      expect(index, marker).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(repositoryContext.includedArtifactIds.length).toBeGreaterThan(0);
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "current-contract-pair",
+      "current-contract-pair",
+      "open-contract-findings",
+      "base-gate-catalog",
+      "migration-reservation",
+      ...repositoryContext.includedArtifactIds.map((artifactId) =>
+        artifactId.startsWith("docs/adr/")
+          ? "repository-adr"
+          : "repository-architecture",
+      ),
+    ]);
+    expect(result.evidence.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "contract-review:open-findings",
+      "base-gate-catalog",
+      "migration-reservation",
+      ...repositoryContext.includedArtifactIds,
+    ]);
+  });
+
+  it("PM4-1 preserves the no-entry fallback: a repo without docs/adr or ARCHITECTURE.md renders (none available) and omits repository evidence", () => {
+    const result = assemblePlannerRevisionEnvelope({
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 2,
+      repoRoot: repoRootWithoutDocs,
+      currentContract: "CURRENT-CONTRACT",
+      currentAcceptanceManifest: '{"version":2}',
+      findings: [],
+      contractResponseInstructions: "Do not write a response.",
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "No migration reservation is active.",
+    });
+
+    expect(result.prompt).toContain(
+      "# Repository context\n\n(none available)",
+    );
+    expect(result.evidence.includedArtifactClasses).not.toContain(
+      "repository-adr",
+    );
+    expect(result.evidence.includedArtifactClasses).not.toContain(
+      "repository-architecture",
+    );
+    expect(result.evidence.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "base-gate-catalog",
+      "migration-reservation",
+    ]);
+  });
+
+  // Guardian round 4, PM 2: the contract evaluators receive only the
+  // behavior/preservation and unknowns sections of the explorer map —
+  // never the generator-facing patterns/harness or data sections.
+  const markedExplorerContext = [
+    "## Files and current behavior",
+    "",
+    "BEHAVIOR-MARKER-ONLY",
+    "",
+    "## Patterns and test harness",
+    "",
+    "PATTERN-MARKER-ONLY",
+    "",
+    "## Data and integration",
+    "",
+    "DATA-MARKER-ONLY",
+    "",
+    "## Unknowns",
+    "",
+    "UNKNOWN-MARKER-ONLY",
+  ].join("\n");
+
+  it("PM4-2 projects behavior and unknowns sections byte-for-byte and passes free-form context through", () => {
+    expect(projectContractEvaluatorEvidence(markedExplorerContext)).toBe(
+      "## Files and current behavior\n\nBEHAVIOR-MARKER-ONLY\n\n" +
+        "## Unknowns\n\nUNKNOWN-MARKER-ONLY",
+    );
+    const freeForm = "free-form legacy context without evidence sections";
+    expect(projectContractEvaluatorEvidence(freeForm)).toBe(freeForm);
+  });
+
+  it("PM4-2 keeps PATTERN-only and DATA-only content out of the initial evaluator prompt while behavior and unknown markers survive", () => {
+    const result = assembleContractEvaluatorInitialEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "PROPOSED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext: markedExplorerContext,
+    });
+
+    expect(result.prompt).toContain("BEHAVIOR-MARKER-ONLY");
+    expect(result.prompt).toContain("UNKNOWN-MARKER-ONLY");
+    expect(result.prompt).not.toContain("PATTERN-MARKER-ONLY");
+    expect(result.prompt).not.toContain("DATA-MARKER-ONLY");
+    expect(result.prompt).not.toContain("## Patterns and test harness");
+    expect(result.prompt).not.toContain("## Data and integration");
+    expect(
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).not.toContain("explorer-evidence-map");
+    expect(
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+    ).toEqual(
+      expect.arrayContaining([
+        "explorer-patterns-and-harness",
+        "explorer-data-and-integration",
+      ]),
+    );
+    expect(result.evidence.includedArtifactClasses).toContain(
+      "explorer-behavior-preservation",
+    );
+    // The artifactId still names the source evidence map on disk.
+    expect(result.evidence.includedArtifactIds).toContain(
+      ".kiro/specs/demo/slices/03-envelope/context.md",
+    );
+    expect(result.evidence.omittedArtifactClasses).toEqual(
+      expect.arrayContaining([
+        "explorer-patterns-and-harness",
+        "explorer-data-and-integration",
+      ]),
+    );
+  });
+
+  it("PM4-2 applies the same section projection to the evaluator revision prompt", () => {
+    const result = assembleContractEvaluatorRevisionEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 2,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "REVISED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext: markedExplorerContext,
+      previousFindings: [],
+      plannerResponse: null,
+      revisions: {
+        "contract.md": { before: "old", after: "REVISED-CONTRACT" },
+        "acceptance-manifest.json": {
+          before: '{"version":2,"old":true}',
+          after: JSON.stringify(acceptanceManifest),
+        },
+      },
+    });
+
+    expect(result.prompt).toContain("BEHAVIOR-MARKER-ONLY");
+    expect(result.prompt).toContain("UNKNOWN-MARKER-ONLY");
+    expect(result.prompt).not.toContain("PATTERN-MARKER-ONLY");
+    expect(result.prompt).not.toContain("DATA-MARKER-ONLY");
+    expect(result.evidence.includedArtifactClasses).toContain(
+      "explorer-behavior-preservation",
+    );
+    expect(result.evidence.includedArtifactIds).toContain(
+      ".kiro/specs/demo/slices/03-envelope/context.md",
+    );
+    expect(result.evidence.omittedArtifactClasses).toEqual(
+      expect.arrayContaining([
+        "explorer-patterns-and-harness",
+        "explorer-data-and-integration",
+      ]),
+    );
   });
 
   it("P-02 uses distinct fresh templates and excludes undeclared context", () => {
@@ -614,6 +820,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       specsDir: "specs",
       sliceDir: "slice",
       round: 2,
+      repoRoot: repoRootWithoutDocs,
       currentContract: "contract",
       currentAcceptanceManifest: '{"version":2}',
       findings: [],
@@ -669,6 +876,7 @@ describe("planner and contract-evaluator context envelopes", () => {
       specsDir: "specs",
       sliceDir: "slice",
       round: 2,
+      repoRoot: repoRootWithoutDocs,
       currentContract: "contract",
       currentAcceptanceManifest: '{"version":2}',
       findings: [openFinding, resolvedFinding],

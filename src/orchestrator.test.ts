@@ -2307,7 +2307,7 @@ describe("focused generator scope revision", () => {
       "proposed-contract",
       "acceptance-manifest",
       "base-gate-catalog",
-      "explorer-evidence-map",
+      "explorer-behavior-preservation",
     ];
     const initialEvaluatorIds = [
       contractId,
@@ -2459,6 +2459,8 @@ describe("focused generator scope revision", () => {
       ...plannerOmissions,
       "generator-output",
       "cleanup-artifacts",
+      "explorer-patterns-and-harness",
+      "explorer-data-and-integration",
     ];
     const generatorOmissions = [
       "resolved-findings",

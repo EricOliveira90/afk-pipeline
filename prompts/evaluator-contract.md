@@ -34,7 +34,11 @@ Stop after both review artifacts are written. An unreviewable contract is a
 {{BASE_GATE_CATALOG}}
 ```
 
-# Explorer evidence map
+# Explorer behavior and preservation evidence
+
+The explorer evidence map's behavior and preservation sections plus its
+unresolved unknowns. Its "Patterns and test harness" and "Data and
+integration" sections are deliberately withheld from this review.
 
 {{EXPLORER_CONTEXT}}
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import {
   assembleContractEvaluatorPrompt,
@@ -50,6 +51,9 @@ describe("contract prompt orchestration", () => {
           specsDir: ".kiro/specs/demo",
           sliceDir: ".kiro/specs/demo/slices/03-envelope",
           round: 2,
+          // src/ exists but carries no docs/adr or ARCHITECTURE.md, so the
+          // revision envelope exercises the no-entry fallback here.
+          repoRoot: fileURLToPath(new URL(".", import.meta.url)),
           currentContract: "contract",
           currentAcceptanceManifest: JSON.stringify(acceptanceManifest),
           findings: [],
@@ -110,7 +114,7 @@ describe("contract prompt orchestration", () => {
       "proposed-contract",
       "acceptance-manifest",
       "base-gate-catalog",
-      "explorer-evidence-map",
+      "explorer-behavior-preservation",
     ]);
     expect(prompt.contextEnvelope.includedArtifactIds).toEqual([
       ".kiro/specs/demo/slices/03-envelope/contract.md",

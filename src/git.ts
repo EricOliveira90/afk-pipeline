@@ -1308,6 +1308,43 @@ export function diffTreePaths(
     .sort();
 }
 
+/**
+ * The git blob ID the file at `repoRelativePath` would hash to, with the
+ * repository's attribute filters applied for that path (`--path`), so the
+ * result is comparable to the blob a checkpoint's `git add -A` produces.
+ * Callers binding an authority decision to exact bytes (ADR 0012; guardian
+ * round 4, architect A1) record this immediately after writing the bytes.
+ */
+export function hashFileAsBlob(
+  cwd: string,
+  repoRelativePath: string,
+): string {
+  return git(
+    ["hash-object", "--path", repoRelativePath, "--", repoRelativePath],
+    { cwd, stdio: ["pipe", "pipe", "pipe"] },
+  ).trim();
+}
+
+/**
+ * The blob ID at `path` inside the given tree object, or `null` when the
+ * tree has no entry there. Fail-closed callers treat `null` as "the bytes
+ * are not the recorded bytes".
+ */
+export function treeEntryBlobId(
+  cwd: string,
+  tree: string,
+  path: string,
+): string | null {
+  try {
+    return git(["rev-parse", `${tree}:${path}`], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 /** Repo-relative files added between two refs, independent of project layout. */
 export function listAddedFiles(
   repoRoot: string,

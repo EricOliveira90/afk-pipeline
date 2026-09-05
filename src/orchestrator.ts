@@ -1243,6 +1243,7 @@ async function reviseAcceptedContract(
   );
   const plannerPrompt = assembleFocusedScopePlannerPrompt({
     context: promptContext,
+    repoRoot: ctx.worktreeDir,
     currentContract: readFileSync(contractPath, "utf-8"),
     currentAcceptanceManifest: previousManifestText,
     scopeEvidence: evidence,
@@ -2627,6 +2628,7 @@ async function runImpasseAdjudication(
               ctx.relSliceDir,
               2,
             ),
+            repoRoot: ctx.worktreeDir,
             currentContract: readFileSync(contractPath, "utf-8"),
             currentAcceptanceManifest: JSON.stringify(
               preApplyManifest,
@@ -3656,13 +3658,15 @@ export type QAStageResult =
       convergence: QAConvergenceState;
       dispatch: { action: "CONTINUE" };
       /**
-       * True when this stage applied an orchestrator-owned scope amendment,
-       * which legitimately rewrites the slice's `contract.md` and
-       * `acceptance-manifest.json` inside the QA window. The post-QA
-       * tree-authority guard admits those two paths only on this authority
-       * (guardian round 3, architect A1).
+       * Exact bytes of the accepted pair as the orchestrator's scope
+       * amendment transaction left them, recorded as repo-relative path →
+       * git blob ID immediately after the write. Present only when this
+       * stage applied an amendment. The tree-authority guard admits those
+       * paths only at exactly these blobs, and the stage itself re-verifies
+       * them before returning, so a later evaluator edit to either
+       * artifact invalidates the verdict (guardian round 4, architect A1).
        */
-      scopeAmended: boolean;
+      amendedPairBlobs?: Readonly<Record<string, string>>;
     }
   | {
       outcome: "IMPLEMENTATION";
@@ -3672,7 +3676,7 @@ export type QAStageResult =
       convergence: QAConvergenceState;
       dispatch: QAAttemptDispatch;
       /** See the PASS variant. */
-      scopeAmended: boolean;
+      amendedPairBlobs?: Readonly<Record<string, string>>;
     };
 
 /**
@@ -3720,6 +3724,35 @@ export interface QABaseGateEvidence {
    * This is not a commit ID and must not be compared with HEAD.
    */
   candidateTreeId?: string;
+}
+
+/**
+ * A PASS after a scope amendment is only valid over the exact pair bytes
+ * the orchestrator's transaction wrote. The evaluator re-grade runs in the
+ * mutable worktree, so re-hash both artifacts before honoring the verdict
+ * and fail closed on any drift (guardian round 4, architect A1; ADR 0048:
+ * agents never edit the locked file list).
+ */
+function assertAmendedPairIntact(
+  ctx: SliceContext,
+  amendedPairBlobs: Readonly<Record<string, string>> | undefined,
+  stage: QAReviewStage,
+  round: number,
+): void {
+  if (!amendedPairBlobs) return;
+  const drifted = Object.entries(amendedPairBlobs).filter(
+    ([path, blobId]) =>
+      git.hashFileAsBlob(ctx.worktreeDir, path) !== blobId,
+  );
+  if (drifted.length > 0) {
+    throw new Error(
+      `${stage} PASS in round ${round} is not honored: the accepted pair ` +
+        `changed after the orchestrator's scope amendment transaction ` +
+        `(${drifted.map(([path]) => path).join(", ")}). Agents never edit ` +
+        `the locked contract pair (ADR 0048); the verdict does not ` +
+        `authorize these bytes.`,
+    );
+  }
 }
 
 export async function runQAStage(
@@ -3781,6 +3814,13 @@ export async function runQAStage(
    * Pass 2 never ran.
    */
   let amendments = 0;
+  /**
+   * Exact accepted-pair bytes as the latest amendment transaction left
+   * them (repo-relative path → git blob ID), recorded inside the
+   * transaction so no other writer can interleave. `undefined` until an
+   * amendment applies (guardian round 4, architect A1).
+   */
+  let amendedPairBlobs: Record<string, string> | undefined;
   /** Attempts this stage-round may still spend, amendments included. */
   const attemptLimit = () => infrastructureRetries + 1 + amendments;
 
@@ -4272,6 +4312,20 @@ export async function runQAStage(
                 plan,
               }),
             });
+            // Bind later authority boundaries to these exact bytes: the
+            // blob IDs are recorded inside the transaction, immediately
+            // after the orchestrator's own write, so an evaluator edit in
+            // any later re-grade cannot masquerade as the amendment
+            // (guardian round 4, architect A1).
+            amendedPairBlobs = Object.fromEntries(
+              ["contract.md", "acceptance-manifest.json"].map((name) => [
+                `${ctx.relSliceDir}/${name}`,
+                git.hashFileAsBlob(
+                  ctx.worktreeDir,
+                  `${ctx.relSliceDir}/${name}`,
+                ),
+              ]),
+            );
             tx.onAccepted();
           },
         );
@@ -4307,6 +4361,7 @@ export async function runQAStage(
     }
 
     if (review.verdict === "PASS") {
+      assertAmendedPairIntact(ctx, amendedPairBlobs, stage, round);
       return {
         outcome: "PASS",
         report: archiveDisplayPath,
@@ -4314,7 +4369,7 @@ export async function runQAStage(
         unresolved,
         convergence: convergenceState,
         dispatch: { action: "CONTINUE" },
-        scopeAmended: amendments > 0,
+        ...(amendedPairBlobs ? { amendedPairBlobs } : {}),
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
@@ -4359,7 +4414,7 @@ export async function runQAStage(
       unresolved,
       convergence: convergenceState,
       dispatch: coordinated.dispatch,
-      scopeAmended: amendments > 0,
+      ...(amendedPairBlobs ? { amendedPairBlobs } : {}),
     };
   }
 
@@ -5107,8 +5162,9 @@ export async function runSliceExecute(
         stuckReferences.push(deterministic.report);
         // An applied scope amendment is the one orchestrator-owned write
         // that legitimately changes the accepted pair inside the QA
-        // window; declare it to the tree-authority guard (architect A1).
-        let scopeAmendedThisAttempt = deterministic.scopeAmended;
+        // window; carry its exact bytes to the tree-authority guard
+        // (architect A1, rounds 3–4).
+        let amendedPairBlobsThisAttempt = deterministic.amendedPairBlobs;
         if (deterministic.dispatch.action === "INTERVENE") {
           logger.bumpEvalRound(slice.ghIssue, round);
           return finishIntervention(deterministic.dispatch.request);
@@ -5177,8 +5233,12 @@ export async function runSliceExecute(
             verdict: remote.outcome,
           });
           stuckReferences.push(remote.report);
-          scopeAmendedThisAttempt =
-            scopeAmendedThisAttempt || remote.scopeAmended;
+          amendedPairBlobsThisAttempt = remote.amendedPairBlobs
+            ? {
+                ...(amendedPairBlobsThisAttempt ?? {}),
+                ...remote.amendedPairBlobs,
+              }
+            : amendedPairBlobsThisAttempt;
           if (remote.dispatch.action === "INTERVENE") {
             logger.bumpEvalRound(slice.ghIssue, round);
             return finishIntervention(remote.dispatch.request);
@@ -5231,16 +5291,13 @@ export async function runSliceExecute(
             // The QA verdict is tied to this exact captured tree; the full
             // suite may only run on a tree that differs from it by the
             // exact expected QA-window artifacts, plus the accepted pair
-            // when this attempt applied an audited scope amendment
+            // at exactly the bytes an audited scope amendment wrote
             // (architect A1, ADR 0012).
             qaApprovedTreeId: checkpoint.treeId,
             reviewArtifactDir: ctx.relSliceDir,
-            ...(scopeAmendedThisAttempt
+            ...(amendedPairBlobsThisAttempt
               ? {
-                  orchestratorAuthorizedPaths: [
-                    `${ctx.relSliceDir}/contract.md`,
-                    `${ctx.relSliceDir}/acceptance-manifest.json`,
-                  ],
+                  orchestratorAuthorizedBlobs: amendedPairBlobsThisAttempt,
                 }
               : {}),
             onGateOutcome: (outcome) => {

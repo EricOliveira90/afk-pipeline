@@ -119,6 +119,7 @@ export function assembleContractEvaluatorPrompt(
 
 export function assembleFocusedScopePlannerPrompt(input: {
   context: PromptAssemblyContext;
+  repoRoot: string;
   currentContract: string;
   currentAcceptanceManifest: string;
   scopeEvidence: string;
@@ -136,6 +137,7 @@ export function assembleFocusedScopePlannerPrompt(input: {
         specsDir: context.specsDir,
         sliceDir: context.sliceDir,
         round: context.round,
+        repoRoot: input.repoRoot,
         currentContract: input.currentContract,
         currentAcceptanceManifest: input.currentAcceptanceManifest,
         findings: [],
@@ -184,6 +186,7 @@ export function assembleFocusedScopeEvaluatorPrompt(input: {
 
 export function assembleAdjudicationPlannerPrompt(input: {
   context: PromptAssemblyContext;
+  repoRoot: string;
   currentContract: string;
   currentAcceptanceManifest: string;
   impasseRecord: string;
@@ -202,6 +205,7 @@ export function assembleAdjudicationPlannerPrompt(input: {
         specsDir: context.specsDir,
         sliceDir: context.sliceDir,
         round: context.round,
+        repoRoot: input.repoRoot,
         currentContract: input.currentContract,
         currentAcceptanceManifest: input.currentAcceptanceManifest,
         findings: [],
@@ -265,6 +269,7 @@ export function assembleNegotiationPlannerPrompt(input: {
           specsDir: context.specsDir,
           sliceDir: context.sliceDir,
           round: context.round,
+          repoRoot: input.repoRoot,
           currentContract: input.currentContract,
           currentAcceptanceManifest: input.currentAcceptanceManifest,
           findings: input.findings,
