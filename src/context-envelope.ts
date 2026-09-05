@@ -122,7 +122,11 @@ export const GENERATOR_CONTEXT_MANIFEST = {
     "Reconstructing resolved findings or prior conversations",
     "Claiming verification status",
   ],
-  allowedWriteScope: "acceptance-manifest.fileScope",
+  allowedWriteScope: [
+    "acceptance-manifest.fileScope",
+    "slice-dir/handoff.md",
+    "slice-dir/escalation.md (only when escalating an undeclared path)",
+  ],
   stopConditions: [
     "A committed candidate and three-section handoff exist",
     "A required change is outside the declared file scope",

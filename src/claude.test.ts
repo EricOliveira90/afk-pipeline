@@ -273,6 +273,29 @@ describe("nonCommandTimeMs evidence (A4)", () => {
     expect("nonCommandTimeMs" in result.stats).toBe(false);
   });
 
+  it("omits the field when a tool_result carries no correlatable tool_use_id", async () => {
+    // ADR 0046 (guardian round 5, architect A1): an uncorrelatable
+    // completion record means the stream's attribution cannot be trusted.
+    // Ignoring it would leave zero measured command time and synthesize
+    // the whole wall clock as model time.
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp/x" });
+
+    proc.stdout.push(
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result" }] },
+      }) + "\n",
+    );
+    await flush();
+    vi.setSystemTime(104_000);
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
+  });
+
   it("records the full wall clock when the measured stream ran no tools", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);

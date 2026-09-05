@@ -24,9 +24,15 @@ import {
   type ContextEnvelopeManifest,
 } from "./context-envelope.js";
 import type { ContractReviewFinding } from "./contract-review.js";
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const PROMPTS_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "prompts",
+);
 
 const acceptanceManifest: AcceptanceManifestV2 = {
   version: 2,
@@ -1455,6 +1461,30 @@ describe("role contract manifests", () => {
           ? [manifest.allowedWriteScope]
           : manifest.allowedWriteScope;
       expect(writeScope.length, manifest.role).toBeGreaterThan(0);
+    }
+  });
+
+  it("declares the generator's complete write contract, matching both templates", () => {
+    // PRD user story 1 (guardian round 5, PM 1): the manifest's allowed
+    // write scope is the complete role boundary. Both shipped generator
+    // templates instruct writing the slice handoff and, on escalation,
+    // the structured escalation artifact — so the manifest must declare
+    // them beside the acceptance-manifest file scope.
+    const writeScope = [...GENERATOR_CONTEXT_MANIFEST.allowedWriteScope];
+    expect(writeScope).toContain("acceptance-manifest.fileScope");
+    expect(
+      writeScope.some((entry) => entry.includes("handoff.md")),
+    ).toBe(true);
+    expect(
+      writeScope.some((entry) => entry.includes("escalation.md")),
+    ).toBe(true);
+    for (const template of ["generator", "generator-repair"]) {
+      const body = readFileSync(
+        join(PROMPTS_DIR, `${template}.md`),
+        "utf-8",
+      );
+      expect(body, template).toContain("{{SLICE_DIR}}/handoff.md");
+      expect(body, template).toContain("{{SLICE_DIR}}/escalation.md");
     }
   });
 

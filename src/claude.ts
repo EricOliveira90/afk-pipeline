@@ -162,11 +162,16 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (block.type === "tool_use") {
           if (typeof block.id === "string") commandTime.begin(block.id);
           else commandTime.markUnattributable();
-        } else if (
-          block.type === "tool_result" &&
-          typeof block.tool_use_id === "string"
-        ) {
-          commandTime.end(block.tool_use_id);
+        } else if (block.type === "tool_result") {
+          // A result with no correlatable id is unattributable, the same
+          // as an id-less tool_use: the field must come out absent, never
+          // synthesized from a zero-command assumption (ADR 0046;
+          // guardian round 5, architect A1).
+          if (typeof block.tool_use_id === "string") {
+            commandTime.end(block.tool_use_id);
+          } else {
+            commandTime.markUnattributable();
+          }
         }
       }
     };
