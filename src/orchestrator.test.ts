@@ -843,11 +843,17 @@ describe("explorer negotiation envelope", () => {
       for (const marker of present) expect(prompt).toContain(marker);
       for (const marker of absent) expect(prompt).not.toContain(marker);
       // PRD story 9 / slice #90: the dispatched explorer prompt carries the
-      // three-label citation rule (guardian round 2, architect A2 / PM 1).
+      // three-label citation rule (guardian round 2, architect A2 / PM 1)
+      // and the ADR-index pushed-selection rule (guardian round 3, PM 1).
       expect(prompt).toContain("Label every statement");
       expect(prompt).toContain("`FACT`");
       expect(prompt).toContain("`INFERENCE`");
       expect(prompt).toContain("`UNKNOWN`");
+      expect(prompt).toContain("pushed selection");
+      expect(prompt).toContain(
+        "open a full ADR only when its title plausibly governs",
+      );
+      expect(prompt).toContain("cite governing ADRs by number");
       expect(prompt).not.toContain("ADR-BODY-MUST-NOT-APPEAR");
       const writeBoundary = prompt.match(
         /^# Write boundary\r?\n([\s\S]*?)(?=^# )/m,

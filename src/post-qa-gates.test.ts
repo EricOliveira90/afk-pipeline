@@ -48,10 +48,16 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
     ).toEqual([]);
   });
 
-  it("accepts drift confined to the slice's review-artifact directory", () => {
+  it("accepts drift confined to the expected QA-window artifacts", () => {
     const qaApproved = resolveCandidateTreeId(repo);
-    // The QA evaluator legitimately writes its report into the slice dir.
+    // The evaluator legitimately writes its canonical report and review;
+    // the orchestrator archives round-stamped reports and restores the
+    // operator's diagnosis.
+    writeFileSync(join(repo, sliceDir, "qa-report.md"), "PASS\n");
+    writeFileSync(join(repo, sliceDir, "qa-review.json"), "{}\n");
+    writeFileSync(join(repo, sliceDir, "uat-report-r2-a1.md"), "PASS\n");
     writeFileSync(join(repo, sliceDir, "qa-report-r1-a1.md"), "PASS\n");
+    writeFileSync(join(repo, sliceDir, "stuck.md"), "# restored\n");
     const postQa = resolveCandidateTreeId(repo);
     expect(postQa).not.toBe(qaApproved);
     expect(
@@ -64,7 +70,58 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
     ).toEqual([]);
   });
 
-  it("names every path drifting outside the allowlist, fail-closed input", () => {
+  it("rejects an edit to the locked contract or manifest inside the slice dir", () => {
+    // Guardian round 3, architect A1: the slice directory holds
+    // authority-bearing inputs, so the allowlist is exact artifacts,
+    // not the directory.
+    const qaApproved = resolveCandidateTreeId(repo);
+    writeFileSync(join(repo, sliceDir, "qa-report.md"), "PASS\n");
+    writeFileSync(join(repo, sliceDir, "contract.md"), "# Tampered\n");
+    writeFileSync(join(repo, sliceDir, "acceptance-manifest.json"), "{}\n");
+    writeFileSync(join(repo, sliceDir, "handoff.md"), "planted\n");
+    mkdirSync(join(repo, sliceDir, "nested"), { recursive: true });
+    writeFileSync(join(repo, sliceDir, "nested", "qa-report.md"), "x\n");
+    const postQa = resolveCandidateTreeId(repo);
+    expect(
+      reviewArtifactViolations({
+        cwd: repo,
+        fromTree: qaApproved,
+        toTree: postQa,
+        reviewArtifactDir: sliceDir,
+      }),
+    ).toEqual([
+      `${sliceDir}/acceptance-manifest.json`,
+      `${sliceDir}/contract.md`,
+      `${sliceDir}/handoff.md`,
+      `${sliceDir}/nested/qa-report.md`,
+    ]);
+  });
+
+  it("admits the accepted pair only under explicit orchestrator authority", () => {
+    // An applied scope amendment is the one audited orchestrator write
+    // that changes the accepted pair inside the QA window.
+    const qaApproved = resolveCandidateTreeId(repo);
+    writeFileSync(join(repo, sliceDir, "contract.md"), "# Amended\n");
+    writeFileSync(
+      join(repo, sliceDir, "acceptance-manifest.json"),
+      '{"amended":true}\n',
+    );
+    const postQa = resolveCandidateTreeId(repo);
+    expect(
+      reviewArtifactViolations({
+        cwd: repo,
+        fromTree: qaApproved,
+        toTree: postQa,
+        reviewArtifactDir: sliceDir,
+        orchestratorAuthorizedPaths: [
+          `${sliceDir}/contract.md`,
+          `${sliceDir}/acceptance-manifest.json`,
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("names every path drifting outside the slice directory, fail-closed input", () => {
     const qaApproved = resolveCandidateTreeId(repo);
     // An evaluator source edit alongside a legitimate review artifact.
     writeFileSync(join(repo, sliceDir, "qa-report-r1-a1.md"), "PASS\n");

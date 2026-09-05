@@ -16,13 +16,37 @@ import { decideCandidateGatePhase } from "./candidate-gate-policy.js";
 import type { GeneratorFailureSet } from "./context-envelope.js";
 
 /**
- * Paths by which `toTree` differs from the QA-approved `fromTree` outside
- * the slice's review-artifact directory. ADR 0012's amendment ties the QA
- * verdict to one captured candidate tree; the only tree drift a later step
- * may accept is the QA evaluator's own review artifacts inside the slice
- * directory. Anything else — an evaluator source edit, stray build output —
- * voids the verdict's authority over the new tree, and the caller must fail
- * closed (guardian round 2, architect A1).
+ * The exact artifacts that may legitimately appear or change inside the
+ * slice directory between the QA-approved checkpoint and a later authority
+ * boundary (the post-QA suite checkpoint, then the accepted commit):
+ *
+ * - `qa-report.md` / `uat-report.md` and `qa-review.json` /
+ *   `uat-review.json` — the evaluator's only instructed writes
+ *   (`prompts/evaluator-qa.md`; canonical names in `src/qa-review.ts`).
+ * - `qa-report-rN-aM.md` / `uat-report-rN-aM.md` — the orchestrator's
+ *   in-slice-dir report archives (`archiveQAReport`).
+ * - `stuck.md` — the orchestrator restores the operator's diagnosis bytes
+ *   before the accepted commit (#82 AC3).
+ *
+ * Everything else in the slice directory is authority-bearing input —
+ * `contract.md`, `acceptance-manifest.json`, `context.md`, `handoff.md` —
+ * and a change there voids the QA verdict (guardian round 3, architect
+ * A1), except when the orchestrator itself amended the locked scope and
+ * says so via `orchestratorAuthorizedPaths`.
+ */
+const QA_WINDOW_ARTIFACT_NAME =
+  /^(?:qa|uat)-report(?:-r[1-9]\d*-a[1-9]\d*)?\.md$|^(?:qa|uat)-review\.json$|^stuck\.md$/;
+
+/**
+ * Paths by which `toTree` differs from the QA-approved `fromTree` that no
+ * legitimate QA-window write explains. ADR 0012's amendment ties the QA
+ * verdict to one captured candidate tree; the evaluator may add its
+ * expected review artifacts and the orchestrator its diagnosis restore and
+ * explicitly declared scope-amendment writes — nothing else. An evaluator
+ * edit to the locked contract, the acceptance manifest, the explorer
+ * context, the handoff, or any source path voids the verdict's authority
+ * over the new tree, and the caller must fail closed (guardian rounds 2–3,
+ * architect A1).
  */
 export function reviewArtifactViolations(input: {
   cwd: string;
@@ -30,12 +54,32 @@ export function reviewArtifactViolations(input: {
   toTree: string;
   /** Repo-relative slice directory (forward slashes), e.g. `specs/x/slices/01-y`. */
   reviewArtifactDir: string;
+  /**
+   * Repo-relative paths the orchestrator itself changed under an audited
+   * authority in this window (today: `contract.md` and
+   * `acceptance-manifest.json` after an applied scope amendment, which is
+   * archived as `qa|uat-scope-amendment-rN-aM.json` evidence).
+   */
+  orchestratorAuthorizedPaths?: readonly string[];
 }): string[] {
   if (input.fromTree === input.toTree) return [];
-  const prefix = `${input.reviewArtifactDir.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
+  const dir = input.reviewArtifactDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const prefix = `${dir}/`;
+  const authorized = new Set(
+    (input.orchestratorAuthorizedPaths ?? []).map((path) =>
+      path.replace(/\\/g, "/"),
+    ),
+  );
   return git
     .diffTreePaths(input.cwd, input.fromTree, input.toTree)
-    .filter((path) => !path.startsWith(prefix));
+    .filter((path) => {
+      if (authorized.has(path)) return false;
+      if (!path.startsWith(prefix)) return true;
+      const name = path.slice(prefix.length);
+      // Nested paths and unexpected names inside the slice directory are
+      // violations too: the allowlist is exact artifacts, not a directory.
+      return !QA_WINDOW_ARTIFACT_NAME.test(name);
+    });
 }
 
 export type PostQAGateResult =
@@ -92,11 +136,14 @@ export async function runPostQAGates(args: {
   priorArtifacts: readonly GateEvidenceArtifact[];
   /**
    * The candidate tree the QA verdict is tied to. The post-QA checkpoint
-   * must equal it except under `reviewArtifactDir` (architect A1).
+   * must equal it except for the exact expected QA-window artifacts
+   * (architect A1).
    */
   qaApprovedTreeId: string;
   /** Repo-relative slice directory the QA evaluator legitimately writes. */
   reviewArtifactDir: string;
+  /** Orchestrator-authorized in-window changes (applied scope amendments). */
+  orchestratorAuthorizedPaths?: readonly string[];
   onGateOutcome: (outcome: CandidateGateOutcome) => void;
   onInfrastructureRetry: (message: string) => void;
   onCleanupWarning: (message: string) => void;
@@ -127,14 +174,17 @@ export async function runPostQAGates(args: {
       fromTree: args.qaApprovedTreeId,
       toTree: checkpoint.treeId,
       reviewArtifactDir: args.reviewArtifactDir,
+      ...(args.orchestratorAuthorizedPaths
+        ? { orchestratorAuthorizedPaths: args.orchestratorAuthorizedPaths }
+        : {}),
     });
     if (violations.length > 0) {
       return {
         action: "ERROR",
         error:
           `Post-QA candidate tree ${checkpoint.treeId} differs from the ` +
-          `QA-approved tree ${args.qaApprovedTreeId} outside the ` +
-          `review-artifact allowlist (${args.reviewArtifactDir}/): ` +
+          `QA-approved tree ${args.qaApprovedTreeId} beyond the expected ` +
+          `QA-window artifacts (${args.reviewArtifactDir}/): ` +
           `${violations.join(", ")}. The QA verdict does not authorize ` +
           `this tree (ADR 0012).`,
         candidateTreeId: checkpoint.treeId,

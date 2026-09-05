@@ -890,22 +890,24 @@ export function makeSliceContext(
     : "(none — this slice declares no AFK dependencies)";
 
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
-    // Assembly evidence is journaled BEFORE dispatch so the record exists
-    // even when the invocation dies before returning, and so a provider
-    // observes its matching `prompt-assembly` event as the immediately
-    // preceding journal event at invocation entry (slice #83; guardian
-    // round 2, PM 4). Post-return facts arrive in `invocation-completed`.
-    if (opts.contextEnvelope !== undefined) {
-      logger.event({
-        type: "prompt-assembly",
-        ...opts.contextEnvelope,
-      });
-    }
     // Transient model outages (provider-classified) retry here with
     // backoff instead of failing the slice. See ADR 0022.
     const result = await withTransientRetry(
-      () =>
-        provider.invoke({
+      () => {
+        // Assembly evidence is journaled immediately before EVERY provider
+        // dispatch — inside the retry callback, so a transient-retry
+        // re-dispatch also observes its matching `prompt-assembly` event
+        // as the immediately preceding journal entry, and the record
+        // exists even when the invocation dies before returning
+        // (slice #83; guardian round 2 PM 4, round 3 PM 2). Post-return
+        // facts arrive in `invocation-completed`.
+        if (opts.contextEnvelope !== undefined) {
+          logger.event({
+            type: "prompt-assembly",
+            ...opts.contextEnvelope,
+          });
+        }
+        return provider.invoke({
           ...opts,
           signal,
           onIdleWarning: (minutes) => {
@@ -928,7 +930,8 @@ export function makeSliceContext(
                 `deferring idle kill (wall-clock ceiling still applies)`,
             });
           },
-        }),
+        });
+      },
       {
         windowMs: config.transientRetryWindowMs,
         sleep: config.transientRetrySleep,
@@ -3652,6 +3655,14 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
       dispatch: { action: "CONTINUE" };
+      /**
+       * True when this stage applied an orchestrator-owned scope amendment,
+       * which legitimately rewrites the slice's `contract.md` and
+       * `acceptance-manifest.json` inside the QA window. The post-QA
+       * tree-authority guard admits those two paths only on this authority
+       * (guardian round 3, architect A1).
+       */
+      scopeAmended: boolean;
     }
   | {
       outcome: "IMPLEMENTATION";
@@ -3660,6 +3671,8 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
       dispatch: QAAttemptDispatch;
+      /** See the PASS variant. */
+      scopeAmended: boolean;
     };
 
 /**
@@ -4301,6 +4314,7 @@ export async function runQAStage(
         unresolved,
         convergence: convergenceState,
         dispatch: { action: "CONTINUE" },
+        scopeAmended: amendments > 0,
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
@@ -4345,6 +4359,7 @@ export async function runQAStage(
       unresolved,
       convergence: convergenceState,
       dispatch: coordinated.dispatch,
+      scopeAmended: amendments > 0,
     };
   }
 
@@ -5090,6 +5105,10 @@ export async function runSliceExecute(
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
+        // An applied scope amendment is the one orchestrator-owned write
+        // that legitimately changes the accepted pair inside the QA
+        // window; declare it to the tree-authority guard (architect A1).
+        let scopeAmendedThisAttempt = deterministic.scopeAmended;
         if (deterministic.dispatch.action === "INTERVENE") {
           logger.bumpEvalRound(slice.ghIssue, round);
           return finishIntervention(deterministic.dispatch.request);
@@ -5158,6 +5177,8 @@ export async function runSliceExecute(
             verdict: remote.outcome,
           });
           stuckReferences.push(remote.report);
+          scopeAmendedThisAttempt =
+            scopeAmendedThisAttempt || remote.scopeAmended;
           if (remote.dispatch.action === "INTERVENE") {
             logger.bumpEvalRound(slice.ghIssue, round);
             return finishIntervention(remote.dispatch.request);
@@ -5208,10 +5229,20 @@ export async function runSliceExecute(
             priorAttemptTreeIds: implementationCandidateTreeIds,
             priorArtifacts: gateArtifacts,
             // The QA verdict is tied to this exact captured tree; the full
-            // suite may only run on a tree that differs from it inside the
-            // slice's review-artifact directory (architect A1, ADR 0012).
+            // suite may only run on a tree that differs from it by the
+            // exact expected QA-window artifacts, plus the accepted pair
+            // when this attempt applied an audited scope amendment
+            // (architect A1, ADR 0012).
             qaApprovedTreeId: checkpoint.treeId,
             reviewArtifactDir: ctx.relSliceDir,
+            ...(scopeAmendedThisAttempt
+              ? {
+                  orchestratorAuthorizedPaths: [
+                    `${ctx.relSliceDir}/contract.md`,
+                    `${ctx.relSliceDir}/acceptance-manifest.json`,
+                  ],
+                }
+              : {}),
             onGateOutcome: (outcome) => {
               logger.event({
                 type: "gate-outcome",
@@ -5263,9 +5294,10 @@ export async function runSliceExecute(
           // one the operator read, not whatever the generator left.
           restoreStuckDiagnosis();
           // The accepted tree must be the one the suite just authorized,
-          // modulo the slice's own review artifacts (the restored
-          // diagnosis above is such a change). Fail closed on anything
-          // else (architect A1, ADR 0012).
+          // modulo the exact expected QA-window artifacts (the restored
+          // diagnosis above is `stuck.md`, an allowed name). Fail closed
+          // on anything else — including the accepted pair, since no
+          // amendment can occur in this window (architect A1, ADR 0012).
           const acceptedTreeId = resolveCandidateTreeId(ctx.worktreeDir);
           const acceptViolations = reviewArtifactViolations({
             cwd: ctx.worktreeDir,
@@ -5279,7 +5311,7 @@ export async function runSliceExecute(
               error:
                 `Accepted candidate tree ${acceptedTreeId} differs from ` +
                 `the suite-authorized tree ${postQaGates.candidateTreeId} ` +
-                `outside the review-artifact allowlist ` +
+                `beyond the expected QA-window artifacts ` +
                 `(${ctx.relSliceDir}/): ${acceptViolations.join(", ")}. ` +
                 `The gate evidence does not authorize this tree (ADR 0012).`,
             };

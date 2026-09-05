@@ -21,6 +21,10 @@ command that established the claim; an `INFERENCE` names the facts it is
 drawn from. Put unresolved questions in `Unknowns` as `UNKNOWN` items. Do not
 make design recommendations.
 
+Use the ADR index below as pushed selection — never grep for ADRs. Inspect
+the indexed titles, open a full ADR only when its title plausibly governs
+this slice, and cite governing ADRs by number.
+
 # Four-section task
 
 Write these level-two sections exactly once and in this order:
