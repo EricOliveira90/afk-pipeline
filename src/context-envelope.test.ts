@@ -250,8 +250,13 @@ describe("explorer context envelope", () => {
       previous = index;
     }
     expect(result.prompt).not.toContain("senior engineer");
-    expect(result.prompt).not.toMatch(/\bFACT\b|\bINFERENCE\b|\bUNKNOWN\b/);
-    expect(result.prompt).not.toContain("Label every statement");
+    // PRD story 9 / slice #90: every explorer statement must be
+    // distinguishable as FACT, INFERENCE, or UNKNOWN (guardian round 2,
+    // architect A2 / PM 1).
+    expect(result.prompt).toContain("Label every statement");
+    expect(result.prompt).toMatch(/`FACT`/);
+    expect(result.prompt).toMatch(/`INFERENCE`/);
+    expect(result.prompt).toMatch(/`UNKNOWN`/);
     expect(result.evidence.includedArtifactClasses).toEqual([
       "slice-request",
       ...repositoryContext.includedArtifactIds.map((artifactId) =>
@@ -1288,6 +1293,48 @@ describe("role contract manifests", () => {
     ).toContain("other-qa-stage-findings");
   });
 
+  it("pins the candidate-evaluator include/exclude contract to the governing docs", () => {
+    // afk-v2-agent-roles.md M7: "handoff.md is excluded from all reviewer
+    // inputs: judge the tree, not the author's story." Handoffs are
+    // deliberate omissions, never accepted classes.
+    for (const handoffClass of [
+      "candidate-handoff",
+      "dependency-sibling-handoffs",
+    ]) {
+      expect(
+        CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+        handoffClass,
+      ).not.toContain(handoffClass);
+      expect(
+        CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+        handoffClass,
+      ).toContain(handoffClass);
+    }
+    // afk-v2-plan.md §3 item 5: the slice diff change summary plus the
+    // acceptance manifest lead the candidate evaluator's envelope.
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.inputOrder.slice(0, 2),
+    ).toEqual(["change-summary", "acceptance-manifest"]);
+    // afk-v2-agent-roles.md §1: explorer evidence enters the candidate
+    // evaluator's include list — evaluators get behavior and preservation.
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).toContain("explorer-preservation-evidence");
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses,
+    ).toEqual([
+      "change-summary",
+      "acceptance-manifest",
+      "qa-scope",
+      "locked-contract",
+      "explorer-preservation-evidence",
+      "cited-adr",
+      "unresolved-qa-findings",
+      "sanity-command-set",
+      "base-gate-authorization",
+    ]);
+  });
+
   it("clamps a budget override larger than the manifest budget and applies a smaller one", () => {
     const oversizedPrompt = "x".repeat(
       PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes + 1,
@@ -1437,5 +1484,173 @@ describe("role contract manifests", () => {
     expect(
       new Set(result.evidence.includedArtifactClasses.slice(1)),
     ).toEqual(new Set(["repository-adr", "repository-architecture"]));
+  });
+});
+
+describe("rendered block order validation", () => {
+  // Guardian round 2, architect A3: the assembler must not report
+  // manifest-ordered evidence over a prompt whose rendered blocks disagree
+  // with that order.
+  it("fails closed on the guardian probe: prompt renders SECOND before FIRST while the manifest orders FIRST first", () => {
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "SECOND BEFORE FIRST",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "slice-request",
+            artifactId: "slice-request",
+            locator: "FIRST",
+          },
+          {
+            artifactClass: "explorer-evidence-map",
+            artifactId: "slice/context.md",
+            locator: "SECOND",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      'CONFIGURATION: Planner rendered prompt places artifact "slice/context.md" (explorer-evidence-map) before "slice-request" (slice-request), violating the manifest\'s declared input order',
+    );
+  });
+
+  it("accepts the same artifacts when the rendered blocks follow the manifest order", () => {
+    const result = assembleContextEnvelope({
+      prompt: "FIRST BEFORE SECOND",
+      manifest: PLANNER_CONTEXT_MANIFEST,
+      includedArtifacts: [
+        {
+          artifactClass: "explorer-evidence-map",
+          artifactId: "slice/context.md",
+          locator: "SECOND",
+        },
+        {
+          artifactClass: "slice-request",
+          artifactId: "slice-request",
+          locator: "FIRST",
+        },
+      ],
+      inputOrderKey: "initial",
+      roleLabel: "Planner",
+    });
+    expect(result.evidence.includedArtifactClasses).toEqual([
+      "slice-request",
+      "explorer-evidence-map",
+    ]);
+  });
+
+  it("rejects a locator absent from the rendered prompt as CONFIGURATION", () => {
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "prompt without the block",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "slice-request",
+            artifactId: "slice-request",
+            locator: "MISSING-BLOCK",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Planner",
+      }),
+    ).toThrow(
+      'CONFIGURATION: Planner artifact "slice-request" (slice-request) locator was not found in the rendered prompt',
+    );
+  });
+
+  it("rejects a blank locator and requires a reasoned explicit exemption instead", () => {
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "slice-request",
+            artifactId: "slice-request",
+            locator: "  ",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Planner",
+      }),
+    ).toThrow(/declares a blank locator; use an explicit locator exemption/);
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "slice-request",
+            artifactId: "slice-request",
+            locatorExemption: " ",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Planner",
+      }),
+    ).toThrow(/declares a blank locator exemption; exemption must state a reason/);
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "prompt",
+        manifest: PLANNER_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "slice-request",
+            artifactId: "slice-request",
+            locatorExemption: "artifact travels by reference only",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Planner",
+      }),
+    ).not.toThrow();
+  });
+
+  it("validates rendered order for every per-role assembler via wired locators", () => {
+    // The per-role assemblers pass a locator (or explicit exemption) for
+    // every included artifact, so the assemblies exercised across this file
+    // run the rendered-order check for real. Prove the wiring is live for a
+    // representative role: a generator assembly whose rendered block order
+    // is violated must fail closed before returning evidence.
+    const input = {
+      mode: "initial" as const,
+      sliceDir: ".kiro/specs/demo/slices/01-focused",
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:focused",
+      migrationReservation: "NO-MIGRATIONS",
+      failureSet: { findings: [], gates: [] },
+    };
+    const assembled = assembleGeneratorEnvelope(input);
+    // The genuine template renders blocks in manifest order.
+    expect(assembled.prompt.indexOf("LOCKED-CONTRACT-VIEW")).toBeLessThan(
+      assembled.prompt.indexOf("PATTERNS-AND-HARNESS"),
+    );
+    // Feeding the same locators a reversed rendering through the generic
+    // assembler throws — the check is order-sensitive, not presence-only.
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: "PATTERNS-AND-HARNESS then LOCKED-CONTRACT-VIEW",
+        manifest: GENERATOR_CONTEXT_MANIFEST,
+        includedArtifacts: [
+          {
+            artifactClass: "contract-view",
+            artifactId: "slice/contract.md",
+            locator: "LOCKED-CONTRACT-VIEW",
+          },
+          {
+            artifactClass: "patterns-and-harness",
+            artifactId: "slice/context.md",
+            locator: "PATTERNS-AND-HARNESS",
+          },
+        ],
+        inputOrderKey: "initial",
+        roleLabel: "Generator",
+      }),
+    ).toThrow(/violating the manifest's declared input order/);
   });
 });

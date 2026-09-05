@@ -5,7 +5,6 @@ import type {
   GateEvidence,
   GateResult,
 } from "./gate-runner.js";
-import { emptyQAConvergenceState } from "./qa-convergence.js";
 
 const TREE_ID = "a".repeat(40);
 
@@ -28,7 +27,7 @@ function gateResult(
 }
 
 describe("candidate gate repair policy", () => {
-  it("routes failed evidence and open QA findings without resolved lineage", () => {
+  it("routes all failure content through the compact failure set only", () => {
     const declarations: GateDeclaration[] = [
       {
         id: "tests",
@@ -42,56 +41,6 @@ describe("candidate gate repair policy", () => {
       attemptId: "attempt-failed",
       treeId: TREE_ID,
       results: [gateResult("tests", "FAIL")],
-    };
-    const convergence = emptyQAConvergenceState();
-    convergence.revision = 2;
-    convergence.findings["deterministic:QA-PRIOR"] = {
-      stableId: "QA-PRIOR",
-      currentId: "QA-PRIOR",
-      stage: "deterministic",
-      disposition: "RESOLVED",
-      firstSeenRevision: 1,
-      lastSeenRevision: 1,
-      occurrences: 1,
-      candidateTreeId: TREE_ID,
-      finding: {
-        id: "QA-PRIOR",
-        severity: "BLOCKING",
-        behaviorIds: ["B-PRIOR"],
-        summary: "Preserve the prior behavior",
-        evidence: "The focused assertion passes",
-        expected: "The prior behavior remains fixed",
-        observed: "The prior behavior remains fixed",
-        clearCondition: "The focused assertion keeps passing",
-        state: "RESOLVED",
-        remedy: "SOURCE_CHANGE",
-        amendmentPaths: [],
-      },
-      artifactReferences: ["reviews/qa-prior.json"],
-    };
-    convergence.findings["deterministic:QA-CURRENT"] = {
-      stableId: "QA-CURRENT",
-      currentId: "QA-CURRENT",
-      stage: "deterministic",
-      disposition: "OPEN",
-      firstSeenRevision: 2,
-      lastSeenRevision: 2,
-      occurrences: 1,
-      candidateTreeId: TREE_ID,
-      finding: {
-        id: "QA-CURRENT",
-        severity: "BLOCKING",
-        behaviorIds: ["B-PRIOR"],
-        summary: "Repair the current behavior",
-        evidence: "The current assertion fails",
-        expected: "The current behavior works",
-        observed: "The current behavior regressed",
-        clearCondition: "The current assertion passes",
-        state: "OPEN",
-        remedy: "SOURCE_CHANGE",
-        amendmentPaths: [],
-      },
-      artifactReferences: ["reviews/qa-current.json"],
     };
 
     const decision = decideCandidateGatePhase({
@@ -109,8 +58,6 @@ describe("candidate gate repair policy", () => {
       declarations,
       evidenceDir: "gates",
       nextRound: 2,
-      convergence,
-      repairStage: "deterministic",
     });
 
     expect(decision).toMatchObject({
@@ -123,16 +70,17 @@ describe("candidate gate repair policy", () => {
     });
     expect(decision.action).toBe("REPAIR");
     if (decision.action !== "REPAIR") return;
+    // The retry note is control-plane text only (guardian round 2, PM 2):
+    // no gate evidence paths, finding IDs, summaries, states, or report
+    // references — all failure content rides solely in the compact failure
+    // set the envelope renders as the prompt's final block.
     expect(decision.retryNote).toContain("implementation round 2");
-    expect(decision.retryNote).toContain("gates/attempt-failed.json");
-    expect(decision.retryNote).toMatch(/gates[/\\]tests\.log/);
-    expect(decision.retryNote).toContain("QA-CURRENT");
-    expect(decision.retryNote).not.toContain("QA-PRIOR");
+    expect(decision.retryNote).toContain("failure set");
+    expect(decision.retryNote).not.toContain("gates/attempt-failed.json");
+    expect(decision.retryNote).not.toMatch(/gates[/\\]tests\.log/);
+    expect(decision.retryNote).not.toContain("QA-");
     expect(decision.retryNote).not.toContain("State: RESOLVED");
-    expect(decision.retryNote).not.toContain(
-      "The focused assertion keeps passing",
-    );
-    expect(decision.retryNote).not.toContain("reviews/qa-prior.json");
+    expect(decision.retryNote).not.toContain("reviews/");
     // The focused failure-set projection carries the failed gates only.
     // Findings are empty by policy: QA passed the candidate before the full
     // suite ran, so any finding in the convergence state is resolved lineage

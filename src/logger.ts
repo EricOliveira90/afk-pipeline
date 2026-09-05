@@ -236,16 +236,29 @@ export class Logger {
     );
     const envelopeTotals = new Map<string, EnvelopeTotals>();
     for (const event of runEvents) {
-      if (event.type !== "prompt-assembly") continue;
-      const total = envelopeTotals.get(event.ghIssue) ?? {
-        promptBytes: 0,
-        tokenCounts: new Map<string, number>(),
-      };
-      total.promptBytes += event.assembledByteSize;
-      for (const [name, count] of Object.entries(event.tokenCounts ?? {})) {
-        total.tokenCounts.set(name, (total.tokenCounts.get(name) ?? 0) + count);
+      // Prompt bytes come from the pre-dispatch assembly record; token
+      // counts from the paired post-return completion record (guardian
+      // round 2, PM 4). Absent fields aggregate as absent, never as 0.
+      if (event.type === "prompt-assembly") {
+        const total = envelopeTotals.get(event.ghIssue) ?? {
+          promptBytes: 0,
+          tokenCounts: new Map<string, number>(),
+        };
+        total.promptBytes += event.assembledByteSize;
+        envelopeTotals.set(event.ghIssue, total);
+      } else if (event.type === "invocation-completed") {
+        const total = envelopeTotals.get(event.ghIssue) ?? {
+          promptBytes: 0,
+          tokenCounts: new Map<string, number>(),
+        };
+        for (const [name, count] of Object.entries(event.tokenCounts ?? {})) {
+          total.tokenCounts.set(
+            name,
+            (total.tokenCounts.get(name) ?? 0) + count,
+          );
+        }
+        envelopeTotals.set(event.ghIssue, total);
       }
-      envelopeTotals.set(event.ghIssue, total);
     }
 
     const totals = this.runLog.totals;

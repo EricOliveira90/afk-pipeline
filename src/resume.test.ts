@@ -487,9 +487,11 @@ describe("generator repair prompt rendering", () => {
 });
 
 /**
- * The preserved STUCK diagnosis (#49) rides into the prompt verbatim and
- * unconditionally — no staleness check. A stuck.md is written after the
- * slice's last commit, and it is the reason the operator opted in.
+ * The preserved STUCK diagnosis (#49) rides into the prompt unconditionally
+ * — no staleness check. A stuck.md is written after the slice's last commit,
+ * and it is the reason the operator opted in. It is projected, not verbatim:
+ * resolved lifecycle content and the round-evidence trail stay on disk for
+ * the operator (guardian round 2, PM 3).
  */
 describe("buildStuckDiagnosisNote", () => {
   let dir: string;
@@ -502,7 +504,7 @@ describe("buildStuckDiagnosisNote", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("includes the diagnosis verbatim, however old the file is", () => {
+  it("includes the diagnosis, however old the file is", () => {
     const stuckPath = join(dir, "stuck.md");
     writeFileSync(
       stuckPath,
@@ -516,6 +518,66 @@ describe("buildStuckDiagnosisNote", () => {
 
     expect(note).toContain("Finding 1 — precedence is wrong.");
     expect(note).toMatch(/declared STUCK/i);
+  });
+
+  it("projects out resolved findings and round evidence, keeping open findings", () => {
+    const stuckPath = join(dir, "stuck.md");
+    writeFileSync(
+      stuckPath,
+      [
+        "# Stuck diagnosis",
+        "",
+        "## Reason",
+        "",
+        "QA failed after 3 implementation rounds",
+        "",
+        "## Finding lifecycle",
+        "",
+        "### RESOLVED",
+        "",
+        "- Finding ID: `QA-RESOLVED`",
+        "  Summary: The old blocker",
+        "  Artifact references:",
+        "    - `reviews/qa-review-r1-a1.json`",
+        "",
+        "### OPEN",
+        "",
+        "- Finding ID: `QA-OPEN`",
+        "  Summary: The live blocker",
+        "  Artifact references:",
+        "    - `reviews/qa-review-r3-a1.json`",
+        "",
+        "## Scope escalations",
+        "",
+        "(none)",
+        "",
+        "## Round evidence",
+        "",
+        "- Round 1 attempt 1 (deterministic): FAIL / IMPLEMENTATION",
+        "  - Lifecycle record: `qa-review-r1-a1-record.json`",
+        "",
+        "## Commit evidence",
+        "",
+        "(none)",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const note = buildStuckDiagnosisNote(stuckPath);
+
+    // Open findings and the reason survive with their evidence.
+    expect(note).toContain("QA failed after 3 implementation rounds");
+    expect(note).toContain("QA-OPEN");
+    expect(note).toContain("The live blocker");
+    expect(note).toContain("reviews/qa-review-r3-a1.json");
+    // Resolved lifecycle content and the round-evidence trail do not
+    // re-enter a generator prompt (guardian round 2, PM 3).
+    expect(note).not.toContain("QA-RESOLVED");
+    expect(note).not.toContain("The old blocker");
+    expect(note).not.toContain("reviews/qa-review-r1-a1.json");
+    expect(note).not.toContain("qa-review-r1-a1-record.json");
+    expect(note).toContain("resolved findings never re-enter");
   });
 
   it("omits a missing stuck.md", () => {

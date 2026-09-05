@@ -12,12 +12,10 @@ import {
   advanceQAFindingLineage,
   decideQAFinalRepair,
   emptyQAConvergenceState,
-  formatQAGeneratorContext,
   hasPendingQAFinalRepair,
   loadQAConvergenceState,
   markQAFinalRepairUsed,
   parseQAConvergenceState,
-  qaGeneratorContext,
   resolveQAScopeAmendments,
   saveQAConvergenceState,
   validateQAReviewAgainstLineage,
@@ -161,7 +159,12 @@ describe("candidate-QA finding lineage", () => {
     });
   });
 
-  it("routes only active source-change findings to a fresh generator", () => {
+  it("keeps resolved lineage persisted without routing it to a fresh generator", () => {
+    // The generator repair projection is the compact failure set built from
+    // the QA attempt's unresolved findings (guardian round 2, PM 2). This
+    // state-level assertion pins the split: resolved lineage stays in the
+    // convergence state for convergence decisions and intervention evidence,
+    // while only OPEN entries remain eligible repair input.
     let state = advance(emptyQAConvergenceState(), [
       finding("QA-01", "OPEN", { behaviorIds: ["B-01"] }),
       finding("QA-02", "OPEN", { behaviorIds: ["B-02"] }),
@@ -172,19 +175,19 @@ describe("candidate-QA finding lineage", () => {
       finding("QA-03", "OPEN", { behaviorIds: ["B-01"] }),
     ]).update.state;
 
-    const context = qaGeneratorContext(state);
-    expect(context.open.map(({ currentId }) => currentId)).toEqual(["QA-03"]);
-    const rendered = formatQAGeneratorContext(state, ["gate.json", "test.log"]);
-    expect(rendered).toContain("Current deterministic gate failures");
-    expect(rendered).toContain("QA-03");
-    expect(rendered).toContain("State: OPEN");
-    expect(rendered).toContain("Unresolved: yes");
-    expect(rendered).toContain("Remedy: SOURCE_CHANGE");
-    expect(rendered).not.toContain("Relevant resolved QA findings");
-    expect(rendered).not.toContain("QA-01");
-    expect(rendered).not.toContain("State: RESOLVED");
-    expect(rendered).not.toContain("Unresolved: no");
-    expect(rendered).not.toContain("QA-02");
+    const open = Object.values(state.findings).filter(
+      (entry) => entry.finding.state === "OPEN",
+    );
+    expect(open.map(({ currentId }) => currentId)).toEqual(["QA-03"]);
+    // Persisted lineage keeps the resolved entries for evidence readers.
+    expect(state.findings["deterministic:QA-01"]).toMatchObject({
+      disposition: "RESOLVED",
+      finding: { state: "RESOLVED" },
+    });
+    expect(state.findings["deterministic:QA-02"]).toMatchObject({
+      disposition: "RESOLVED",
+      finding: { state: "RESOLVED" },
+    });
   });
 
   it("settles applied scope amendments so they never route to a resumed generator", () => {
@@ -201,7 +204,6 @@ describe("candidate-QA finding lineage", () => {
     expect(
       settled.findings["deterministic:QA-SCOPE"]?.finding.state,
     ).toBe("RESOLVED");
-    expect(formatQAGeneratorContext(settled)).toBe("(none)");
   });
 });
 

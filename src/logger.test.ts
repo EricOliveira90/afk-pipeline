@@ -288,10 +288,18 @@ PM review: N/A
       omittedArtifactClasses: ["prior-conversation"],
       contextManifestVersion: 1,
     };
+    const completion = {
+      type: "invocation-completed" as const,
+      sliceNumber: "01",
+      round: 1,
+      role: "generator" as const,
+    };
+    // Bytes ride on the pre-dispatch assembly record; tokens on the paired
+    // post-return completion record (guardian round 2, PM 4).
+    log.event({ ...evidence, ghIssue: "41", assembledByteSize: 101 });
     log.event({
-      ...evidence,
+      ...completion,
       ghIssue: "41",
-      assembledByteSize: 101,
       tokenCounts: { input_tokens: 11, output_tokens: 7 },
     });
     log.event({
@@ -299,6 +307,11 @@ PM review: N/A
       ghIssue: "41",
       round: 2,
       assembledByteSize: 29,
+    });
+    log.event({
+      ...completion,
+      ghIssue: "41",
+      round: 2,
       tokenCounts: { input_tokens: 3 },
     });
     log.event({
@@ -306,6 +319,11 @@ PM review: N/A
       ghIssue: "42",
       sliceNumber: "02",
       assembledByteSize: 70,
+    });
+    log.event({
+      ...completion,
+      ghIssue: "42",
+      sliceNumber: "02",
       tokenCounts: { cached_input_tokens: 5 },
     });
 

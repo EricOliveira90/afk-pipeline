@@ -127,9 +127,11 @@ export interface InvocationStats {
    *
    * Clock boundaries:
    * - The invocation clock starts when the provider process is
-   *   spawned by the shared invocation runtime and stops when its
-   *   `exit` event with code 0 is observed. Stats exist only for
-   *   successful invocations, so killed/failed runs record nothing.
+   *   spawned by the shared invocation runtime and stops the moment
+   *   its `exit` event with code 0 is observed — before any provider
+   *   `onSettled` cleanup runs, so cleanup time never counts as model
+   *   time. Stats exist only for successful invocations, so
+   *   killed/failed runs record nothing.
    * - Command time is the union (not the sum — overlapping intervals
    *   are merged) of provider-attributed command/tool execution
    *   intervals, timestamped as the begin/end records are parsed from
@@ -141,10 +143,10 @@ export interface InvocationStats {
    *
    * ABSENT — never 0 — when the provider cannot attribute command
    * time: the provider parses no structured stream (kiro), a tool
-   * record carries no correlatable id, or an execution's end record
-   * never arrived before exit. A present value of 0 can only mean a
-   * measured stream whose command intervals covered the whole
-   * invocation.
+   * record carries no correlatable id, an execution's end record
+   * never arrived before exit, or an end record arrived with no
+   * matching start. A present value of 0 can only mean a measured
+   * stream whose command intervals covered the whole invocation.
    */
   nonCommandTimeMs?: number;
 }

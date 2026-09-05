@@ -14,10 +14,29 @@ import {
 } from "./candidate-gate-phase.js";
 import { decideCandidateGatePhase } from "./candidate-gate-policy.js";
 import type { GeneratorFailureSet } from "./context-envelope.js";
-import type {
-  QAConvergenceState,
-} from "./qa-convergence.js";
-import type { QAReviewStage } from "./qa-review.js";
+
+/**
+ * Paths by which `toTree` differs from the QA-approved `fromTree` outside
+ * the slice's review-artifact directory. ADR 0012's amendment ties the QA
+ * verdict to one captured candidate tree; the only tree drift a later step
+ * may accept is the QA evaluator's own review artifacts inside the slice
+ * directory. Anything else — an evaluator source edit, stray build output —
+ * voids the verdict's authority over the new tree, and the caller must fail
+ * closed (guardian round 2, architect A1).
+ */
+export function reviewArtifactViolations(input: {
+  cwd: string;
+  fromTree: string;
+  toTree: string;
+  /** Repo-relative slice directory (forward slashes), e.g. `specs/x/slices/01-y`. */
+  reviewArtifactDir: string;
+}): string[] {
+  if (input.fromTree === input.toTree) return [];
+  const prefix = `${input.reviewArtifactDir.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
+  return git
+    .diffTreePaths(input.cwd, input.fromTree, input.toTree)
+    .filter((path) => !path.startsWith(prefix));
+}
 
 export type PostQAGateResult =
   | {
@@ -69,10 +88,15 @@ export async function runPostQAGates(args: {
   inactivityTimeoutMs: number;
   wallClockTimeoutMs: number;
   heartbeatIntervalMs: number;
-  convergence: QAConvergenceState;
-  repairStage: QAReviewStage | null;
   priorAttemptTreeIds: readonly string[];
   priorArtifacts: readonly GateEvidenceArtifact[];
+  /**
+   * The candidate tree the QA verdict is tied to. The post-QA checkpoint
+   * must equal it except under `reviewArtifactDir` (architect A1).
+   */
+  qaApprovedTreeId: string;
+  /** Repo-relative slice directory the QA evaluator legitimately writes. */
+  reviewArtifactDir: string;
   onGateOutcome: (outcome: CandidateGateOutcome) => void;
   onInfrastructureRetry: (message: string) => void;
   onCleanupWarning: (message: string) => void;
@@ -94,6 +118,29 @@ export async function runPostQAGates(args: {
   const cwd = checkpoint.worktreeDir ?? checkpointDir;
 
   try {
+    // The full suite must authorize the tree QA approved, not merely a tree
+    // that came later from the same worktree. Fail closed before paying the
+    // suite when the post-QA tree drifted outside the review-artifact
+    // allowlist (ADR 0012; guardian round 2, architect A1).
+    const violations = reviewArtifactViolations({
+      cwd: args.worktreeDir,
+      fromTree: args.qaApprovedTreeId,
+      toTree: checkpoint.treeId,
+      reviewArtifactDir: args.reviewArtifactDir,
+    });
+    if (violations.length > 0) {
+      return {
+        action: "ERROR",
+        error:
+          `Post-QA candidate tree ${checkpoint.treeId} differs from the ` +
+          `QA-approved tree ${args.qaApprovedTreeId} outside the ` +
+          `review-artifact allowlist (${args.reviewArtifactDir}/): ` +
+          `${violations.join(", ")}. The QA verdict does not authorize ` +
+          `this tree (ADR 0012).`,
+        candidateTreeId: checkpoint.treeId,
+        artifacts: [],
+      };
+    }
     const run = await runCandidateGatePhase({
       repoRoot: args.repoRoot,
       ghIssue: args.ghIssue,
@@ -127,8 +174,6 @@ export async function runPostQAGates(args: {
       declarations: args.declarations,
       evidenceDir: args.evidenceDir,
       nextRound: args.round + 1,
-      convergence: args.convergence,
-      ...(args.repairStage ? { repairStage: args.repairStage } : {}),
     });
     if (decision.action === "ERROR") {
       return {

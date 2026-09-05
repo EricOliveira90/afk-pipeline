@@ -400,17 +400,30 @@ export function assembleExplorerEnvelope(
       {
         artifactClass: "slice-request",
         artifactId: `issue:${input.ghIssue}`,
+        ...contentLocator(input.sliceBody),
       },
       ...repositoryContext.includedArtifactIds.map((artifactId) => ({
         artifactClass: artifactId.startsWith("docs/adr/")
           ? "repository-adr"
           : "repository-architecture",
         artifactId,
+        ...contentLocator(repositoryArtifactLocator(artifactId)),
       })),
     ],
     inlineSizeBudgetBytes: input.inlineSizeBudgetBytes,
     roleLabel: "Explorer",
   }) as ExplorerEnvelopeResult;
+}
+
+/**
+ * Anchor for a repository-context artifact inside the rendered prompt: the
+ * backticked ADR path from the ADR-index line, or the ARCHITECTURE.md block
+ * heading.
+ */
+function repositoryArtifactLocator(artifactId: string): string {
+  return artifactId.startsWith("docs/adr/")
+    ? `(\`${artifactId}\`)`
+    : "## ARCHITECTURE.md";
 }
 
 const ROLE_ENVELOPE_OMISSIONS = [
@@ -548,6 +561,18 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
  * manifest exists so the versioned schema carries the complete deferred role
  * contract; it is validated by the same completeness checks as every other
  * registered manifest.
+ *
+ * Include/exclude contract (guardian round 2, architect A3):
+ * - `docs/specs/afk-v2-agent-roles.md` M7 excludes `handoff.md` from every
+ *   reviewer input ("judge the tree, not the author's story"), so no
+ *   candidate or dependency-sibling handoff class is accepted; both are
+ *   deliberate omissions.
+ * - `docs/specs/afk-v2-plan.md` §3 item 5 leads the candidate evaluator's
+ *   envelope with the slice diff change summary plus the acceptance
+ *   manifest.
+ * - `docs/specs/afk-v2-agent-roles.md` §1 routes explorer evidence into the
+ *   candidate evaluator's include list as sections — evaluators get the
+ *   behavior and preservation evidence.
  */
 export const CANDIDATE_EVALUATOR_CONTEXT_MANIFEST = {
   version: 1,
@@ -573,22 +598,24 @@ export const CANDIDATE_EVALUATOR_CONTEXT_MANIFEST = {
     "A correct, necessary change is outside the declared file list; it is reported as a SCOPE_AMENDMENT finding for the orchestrator",
   ],
   acceptedInputArtifactClasses: [
+    "change-summary",
+    "acceptance-manifest",
     "qa-scope",
     "locked-contract",
-    "candidate-handoff",
+    "explorer-preservation-evidence",
     "cited-adr",
-    "dependency-sibling-handoffs",
     "unresolved-qa-findings",
     "sanity-command-set",
     "base-gate-authorization",
   ],
   outputArtifact: "qa-review-pair",
   inputOrder: [
+    "change-summary",
+    "acceptance-manifest",
     "qa-scope",
     "locked-contract",
-    "candidate-handoff",
+    "explorer-preservation-evidence",
     "cited-adr",
-    "dependency-sibling-handoffs",
     "unresolved-qa-findings",
     "sanity-command-set",
     "base-gate-authorization",
@@ -596,6 +623,8 @@ export const CANDIDATE_EVALUATOR_CONTEXT_MANIFEST = {
   inlineSizeBudgetBytes: 65_536,
   omittedArtifactClasses: [
     ...ROLE_ENVELOPE_OMISSIONS,
+    "candidate-handoff",
+    "dependency-sibling-handoffs",
     "planner-conversation",
     "generator-conversation",
     "other-qa-stage-findings",
@@ -633,6 +662,90 @@ export interface RoleEnvelopeResult {
 export interface ContextArtifactReference {
   artifactClass: string;
   artifactId: string;
+  /**
+   * Exact substring of the rendered prompt that anchors this artifact's
+   * block. Assembly verifies the anchors appear in the manifest's declared
+   * input order (guardian round 2, architect A3) and fails closed as
+   * CONFIGURATION on a mismatch before any evidence is emitted.
+   */
+  locator?: string;
+  /**
+   * Explicit reason this artifact's block cannot be located in the rendered
+   * prompt (e.g. it travels by reference only). Exemption is deliberate and
+   * recorded, never silent; mutually exclusive with `locator`.
+   */
+  locatorExemption?: string;
+}
+
+/**
+ * Builds the locator field for an artifact whose rendered block is the given
+ * interpolated content. Blank content is exempted explicitly (there is
+ * nothing to locate), never silently skipped.
+ */
+function contentLocator(
+  content: string,
+): { locator: string } | { locatorExemption: string } {
+  return content.trim() === ""
+    ? {
+        locatorExemption:
+          "interpolated content is blank; nothing to locate in the rendered prompt",
+      }
+    : { locator: content };
+}
+
+/**
+ * Verifies the rendered prompt presents each located artifact's block in the
+ * manifest's declared input order. The scan is sequential: each locator must
+ * appear at or after the previous located artifact's anchor position, so a
+ * prompt whose blocks are rendered out of manifest order fails closed as
+ * CONFIGURATION before the envelope's evidence is emitted (guardian round 2,
+ * architect A3).
+ */
+function validateRenderedBlockOrder(
+  role: string,
+  normalizedPrompt: string,
+  orderedArtifacts: readonly ContextArtifactReference[],
+): void {
+  let cursor = 0;
+  let previous: ContextArtifactReference | undefined;
+  for (const artifact of orderedArtifacts) {
+    if (
+      artifact.locator !== undefined &&
+      artifact.locatorExemption !== undefined
+    ) {
+      throw new ContextEnvelopeConfigurationError(
+        `${role} artifact "${artifact.artifactId}" (${artifact.artifactClass}) declares both a locator and a locator exemption`,
+      );
+    }
+    if (artifact.locatorExemption !== undefined) {
+      if (artifact.locatorExemption.trim() === "") {
+        throw new ContextEnvelopeConfigurationError(
+          `${role} artifact "${artifact.artifactId}" (${artifact.artifactClass}) declares a blank locator exemption; exemption must state a reason`,
+        );
+      }
+      continue;
+    }
+    if (artifact.locator === undefined) continue;
+    const locator = artifact.locator.replace(/\r\n?/g, "\n");
+    if (locator.trim() === "") {
+      throw new ContextEnvelopeConfigurationError(
+        `${role} artifact "${artifact.artifactId}" (${artifact.artifactClass}) declares a blank locator; use an explicit locator exemption instead`,
+      );
+    }
+    const index = normalizedPrompt.indexOf(locator, cursor);
+    if (index === -1) {
+      if (normalizedPrompt.includes(locator)) {
+        throw new ContextEnvelopeConfigurationError(
+          `${role} rendered prompt places artifact "${artifact.artifactId}" (${artifact.artifactClass}) before "${previous!.artifactId}" (${previous!.artifactClass}), violating the manifest's declared input order`,
+        );
+      }
+      throw new ContextEnvelopeConfigurationError(
+        `${role} artifact "${artifact.artifactId}" (${artifact.artifactClass}) locator was not found in the rendered prompt`,
+      );
+    }
+    cursor = index;
+    previous = artifact;
+  }
 }
 
 /**
@@ -945,6 +1058,11 @@ export function assembleContextEnvelope(input: {
     input.manifest.inlineSizeBudgetBytes,
   );
   const normalizedPrompt = input.prompt.replace(/\r\n?/g, "\n");
+  validateRenderedBlockOrder(
+    input.roleLabel ?? input.manifest.role,
+    normalizedPrompt,
+    orderedArtifacts,
+  );
   return {
     prompt: normalizedPrompt,
     evidence: {
@@ -1010,24 +1128,32 @@ export function assemblePlannerInitialEnvelope(
     "planner",
     "initial",
     [
-      { artifactClass: "slice-request", artifactId: "slice-request" },
+      {
+        artifactClass: "slice-request",
+        artifactId: "slice-request",
+        ...contentLocator(input.sliceBody),
+      },
       {
         artifactClass: "explorer-evidence-map",
         artifactId: `${input.sliceDir}/context.md`,
+        ...contentLocator(input.explorerContext),
       },
       {
         artifactClass: "base-gate-catalog",
         artifactId: "base-gate-catalog",
+        ...contentLocator(input.baseGateCatalog),
       },
       {
         artifactClass: "migration-reservation",
         artifactId: "migration-reservation",
+        ...contentLocator(input.migrationReservation),
       },
       ...repositoryContext.includedArtifactIds.map((artifactId) => ({
         artifactClass: artifactId.startsWith("docs/adr/")
           ? "repository-adr"
           : "repository-architecture",
         artifactId,
+        ...contentLocator(repositoryArtifactLocator(artifactId)),
       })),
     ],
     input.inlineSizeBudgetBytes,
@@ -1039,6 +1165,7 @@ export function assemblePlannerRevisionEnvelope(
   input: PlannerRevisionEnvelopeInput,
 ): RoleEnvelopeResult {
   const openFindings = openContractReviewFindings(input.findings);
+  const formattedOpenFindings = formatContractReviewFindings(openFindings);
   const prompt = renderPrompt("planner-revision", {
     GH_ISSUE: input.ghIssue,
     SPECS_DIR: input.specsDir,
@@ -1046,7 +1173,7 @@ export function assemblePlannerRevisionEnvelope(
     ROUND: input.round,
     CURRENT_CONTRACT: input.currentContract,
     CURRENT_ACCEPTANCE_MANIFEST: input.currentAcceptanceManifest,
-    OPEN_FINDINGS: formatContractReviewFindings(openFindings),
+    OPEN_FINDINGS: formattedOpenFindings,
     RESOLVED_HISTORY: "(none)",
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
     CONTRACT_RESPONSE_INSTRUCTIONS: input.contractResponseInstructions,
@@ -1061,30 +1188,36 @@ export function assemblePlannerRevisionEnvelope(
       {
         artifactClass: "current-contract-pair",
         artifactId: `${input.sliceDir}/contract.md`,
+        ...contentLocator(input.currentContract),
       },
       {
         artifactClass: "current-contract-pair",
         artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+        ...contentLocator(input.currentAcceptanceManifest),
       },
       ...(openFindings.length > 0
         ? [{
             artifactClass: "open-contract-findings",
             artifactId: "contract-review:open-findings",
+            ...contentLocator(formattedOpenFindings),
           }]
         : []),
       ...(input.controlSituation !== undefined
         ? [{
             artifactClass: "control-plane-situation",
             artifactId: "control-plane-situation",
+            ...contentLocator(input.controlSituation),
           }]
         : []),
       {
         artifactClass: "base-gate-catalog",
         artifactId: "base-gate-catalog",
+        ...contentLocator(input.baseGateCatalog),
       },
       {
         artifactClass: "migration-reservation",
         artifactId: "migration-reservation",
+        ...contentLocator(input.migrationReservation),
       },
     ],
     input.inlineSizeBudgetBytes,
@@ -1095,12 +1228,17 @@ export function assemblePlannerRevisionEnvelope(
 export function assembleContractEvaluatorInitialEnvelope(
   input: ContractEvaluatorInitialEnvelopeInput,
 ): RoleEnvelopeResult {
+  const renderedAcceptanceManifest = JSON.stringify(
+    input.acceptanceManifest,
+    null,
+    2,
+  );
   const prompt = renderPrompt("evaluator-contract", {
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
     CONTRACT_REVIEW_FILE: input.contractReviewFile,
     PROPOSED_CONTRACT: input.proposedContract,
-    ACCEPTANCE_MANIFEST: JSON.stringify(input.acceptanceManifest, null, 2),
+    ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
     BASE_GATE_CATALOG: input.baseGateCatalog,
     EXPLORER_CONTEXT: input.explorerContext,
   });
@@ -1112,18 +1250,22 @@ export function assembleContractEvaluatorInitialEnvelope(
       {
         artifactClass: "proposed-contract",
         artifactId: `${input.sliceDir}/contract.md`,
+        ...contentLocator(input.proposedContract),
       },
       {
         artifactClass: "acceptance-manifest",
         artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+        ...contentLocator(renderedAcceptanceManifest),
       },
       {
         artifactClass: "base-gate-catalog",
         artifactId: "base-gate-catalog",
+        ...contentLocator(input.baseGateCatalog),
       },
       {
         artifactClass: "explorer-evidence-map",
         artifactId: `${input.sliceDir}/context.md`,
+        ...contentLocator(input.explorerContext),
       },
     ],
     input.inlineSizeBudgetBytes,
@@ -1135,22 +1277,27 @@ export function assembleContractEvaluatorRevisionEnvelope(
   input: ContractEvaluatorRevisionEnvelopeInput,
 ): RoleEnvelopeResult {
   const openFindings = openContractReviewFindings(input.previousFindings);
+  const formattedPriorOpenFindings =
+    formatContractReviewFindings(openFindings);
+  const renderedAcceptanceManifest = JSON.stringify(
+    input.acceptanceManifest,
+    null,
+    2,
+  );
+  const renderedPlannerResponse =
+    input.plannerResponse === null
+      ? "(none)"
+      : JSON.stringify(input.plannerResponse, null, 2);
+  const renderedRevisionContext = JSON.stringify(input.revisions, null, 2);
   const prompt = renderPrompt("evaluator-contract-revision", {
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
     CONTRACT_REVIEW_FILE: input.contractReviewFile,
     REVISED_CONTRACT: input.proposedContract,
-    REVISED_ACCEPTANCE_MANIFEST: JSON.stringify(
-      input.acceptanceManifest,
-      null,
-      2,
-    ),
-    PRIOR_OPEN_FINDINGS: formatContractReviewFindings(openFindings),
-    PLANNER_RESPONSE:
-      input.plannerResponse === null
-        ? "(none)"
-        : JSON.stringify(input.plannerResponse, null, 2),
-    REVISION_CONTEXT: JSON.stringify(input.revisions, null, 2),
+    REVISED_ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
+    PRIOR_OPEN_FINDINGS: formattedPriorOpenFindings,
+    PLANNER_RESPONSE: renderedPlannerResponse,
+    REVISION_CONTEXT: renderedRevisionContext,
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
     BASE_GATE_CATALOG: input.baseGateCatalog,
     EXPLORER_CONTEXT: input.explorerContext,
@@ -1163,40 +1310,48 @@ export function assembleContractEvaluatorRevisionEnvelope(
       {
         artifactClass: "revised-contract",
         artifactId: `${input.sliceDir}/contract.md`,
+        ...contentLocator(input.proposedContract),
       },
       {
         artifactClass: "revised-acceptance-manifest",
         artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+        ...contentLocator(renderedAcceptanceManifest),
       },
       ...(openFindings.length > 0
         ? [{
             artifactClass: "prior-open-contract-findings",
             artifactId: "contract-review:prior-open-findings",
+            ...contentLocator(formattedPriorOpenFindings),
           }]
         : []),
       ...(input.plannerResponse !== null
         ? [{
             artifactClass: "planner-response",
             artifactId: `${input.sliceDir}/contract-response.json`,
+            ...contentLocator(renderedPlannerResponse),
           }]
         : []),
       {
         artifactClass: "contract-revision-evidence",
         artifactId: "contract-revision-evidence",
+        ...contentLocator(renderedRevisionContext),
       },
       ...(input.controlSituation !== undefined
         ? [{
             artifactClass: "control-plane-situation",
             artifactId: "control-plane-situation",
+            ...contentLocator(input.controlSituation),
           }]
         : []),
       {
         artifactClass: "base-gate-catalog",
         artifactId: "base-gate-catalog",
+        ...contentLocator(input.baseGateCatalog),
       },
       {
         artifactClass: "explorer-evidence-map",
         artifactId: `${input.sliceDir}/context.md`,
+        ...contentLocator(input.explorerContext),
       },
     ],
     input.inlineSizeBudgetBytes,
@@ -1265,12 +1420,17 @@ export function assembleGeneratorEnvelope(
           .join("\n")
       : "(no repository changes)";
   const failureSet = formatGeneratorFailureSet(input.failureSet);
+  const renderedAcceptanceManifest = JSON.stringify(
+    input.acceptanceManifest,
+    null,
+    2,
+  );
   const commonArgs = {
     SLICE_DIR: input.sliceDir,
     FILE_SCOPE: fileScope,
     MIGRATION_RESERVATION: input.migrationReservation,
     CONTRACT_VIEW: input.contractView,
-    ACCEPTANCE_MANIFEST: JSON.stringify(input.acceptanceManifest, null, 2),
+    ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
     TEST_COMMAND: input.testCommand,
     PATTERNS_AND_HARNESS: input.patternsAndHarness,
     FAILURE_SET: failureSet,
@@ -1286,32 +1446,40 @@ export function assembleGeneratorEnvelope(
     {
       artifactClass: "file-scope",
       artifactId: "acceptance-manifest:file-scope",
+      ...contentLocator(fileScope),
     },
     {
       artifactClass: "migration-reservation",
       artifactId: "migration-reservation",
+      ...contentLocator(input.migrationReservation),
     },
     ...(input.repairSituation === undefined
       ? []
       : [{
           artifactClass: "repair-situation",
           artifactId: "generator:repair-situation",
+          ...contentLocator(input.repairSituation),
         }]),
     ...(input.additionalArtifactIds ?? []).map((artifactId) => ({
       artifactClass: "repair-context",
       artifactId,
+      locatorExemption:
+        "repair-context artifacts travel by reference; only the repair situation inlines content",
     })),
     {
       artifactClass: "contract-view",
       artifactId: `${input.sliceDir}/contract.md`,
+      ...contentLocator(input.contractView),
     },
     {
       artifactClass: "acceptance-manifest",
       artifactId: `${input.sliceDir}/acceptance-manifest.json`,
+      ...contentLocator(renderedAcceptanceManifest),
     },
     {
       artifactClass: "verification-command",
       artifactId: "generator:test-command",
+      ...contentLocator(input.testCommand),
     },
     ...(input.patternsAndHarnessArtifactId === null
       ? []
@@ -1320,21 +1488,25 @@ export function assembleGeneratorEnvelope(
           artifactId:
             input.patternsAndHarnessArtifactId ??
             `${input.sliceDir}/context.md`,
+          ...contentLocator(input.patternsAndHarness),
         }]),
     {
       artifactClass: "failure-set",
       artifactId: "generator:failure-set",
+      ...contentLocator(failureSet),
     },
     ...input.failureSet.findings.flatMap((finding) =>
       finding.artifactReferences.map((artifactId) => ({
         artifactClass: "finding-evidence",
         artifactId,
+        ...contentLocator(`\`${artifactId}\``),
       })),
     ),
     ...input.failureSet.gates.flatMap((gate) =>
       gate.evidence.map((artifactId) => ({
         artifactClass: "gate-evidence",
         artifactId,
+        ...contentLocator(`\`${artifactId}\``),
       })),
     ),
   ];

@@ -64,8 +64,11 @@ export type PrepareInvocation = () => PreparedInvocation;
  *   provider's own id. Overlapping executions are merged into a union
  *   of busy time, not summed — the derived non-command time can never
  *   go negative from parallel tools.
- * - `end` for an unknown id is ignored; `begin` for an already-open id
- *   is ignored.
+ * - `end` for an unknown id poisons the tracker: a completion record
+ *   with no matching start means the stream's attribution cannot be
+ *   trusted, so it must yield "unavailable", never "zero command
+ *   time" (guardian round 2, architect A4). `begin` for an
+ *   already-open id is ignored.
  * - `markUnattributable()` poisons the tracker for records that cannot
  *   be correlated (e.g. a tool record with no id).
  * - `totalMs()` returns `undefined` when poisoned or when any interval
@@ -93,7 +96,13 @@ export function createCommandTimeTracker(
       open.add(id);
     },
     end(id) {
-      if (!open.delete(id)) return;
+      if (!open.delete(id)) {
+        // A completion with no matching start: attribution is incomplete
+        // in a way this tracker cannot repair, so the whole invocation's
+        // command time becomes unavailable rather than under-counted.
+        unattributable = true;
+        return;
+      }
       if (open.size === 0) totalMs += now() - busySince;
     },
     markUnattributable() {
@@ -369,6 +378,10 @@ export function runInvocation(
     });
 
     proc.on("exit", (code) => {
+      // Invocation clock end: taken the moment successful exit is
+      // observed, before `settle` runs provider `onSettled` cleanup —
+      // cleanup time is not model time (guardian round 2, architect A4).
+      const invocationEndedAt = Date.now();
       if (stdoutBuffer) {
         processLine(stdoutBuffer);
         stdoutBuffer = "";
@@ -396,7 +409,7 @@ export function runInvocation(
         const nonCommandTimeMs =
           commandTime === undefined
             ? undefined
-            : Math.max(0, Date.now() - invocationStartedAt - commandTime);
+            : Math.max(0, invocationEndedAt - invocationStartedAt - commandTime);
         resolve({
           exitCode,
           stdout,

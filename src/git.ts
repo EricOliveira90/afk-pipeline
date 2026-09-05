@@ -1277,6 +1277,37 @@ export function listChangedFiles(
   return { ok: true, paths: [...paths].sort() };
 }
 
+/**
+ * Repo-relative paths that differ between two git tree objects, sorted.
+ * Throws when either tree cannot be diffed — a caller comparing candidate
+ * trees must fail closed, not proceed on an unknown diff (ADR 0012;
+ * guardian round 2, architect A1).
+ */
+export function diffTreePaths(
+  cwd: string,
+  fromTree: string,
+  toTree: string,
+): string[] {
+  const output = git(
+    [
+      "-c",
+      "core.quotePath=false",
+      "diff-tree",
+      "-r",
+      "--name-only",
+      fromTree,
+      toTree,
+    ],
+    { cwd, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  return output
+    .split(/\r?\n/)
+    .map((path) => path.trim())
+    .filter(Boolean)
+    .map((path) => path.replace(/\\/g, "/"))
+    .sort();
+}
+
 /** Repo-relative files added between two refs, independent of project layout. */
 export function listAddedFiles(
   repoRoot: string,

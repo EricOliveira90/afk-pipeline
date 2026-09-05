@@ -749,9 +749,13 @@ describe("retried slice resume (spec #33)", () => {
       // Its own commit log across both rounds dispatched before intervention.
       expect(prompt).toContain("feat(#4001): round 1");
       expect(prompt).toContain("feat(#4001): round 2");
-      // The preserved diagnosis rode into the prompt.
+      // The preserved diagnosis rode into the prompt — projected: the
+      // round-evidence trail (which cites prior rounds' lifecycle records)
+      // stays on disk for the operator (guardian round 2, PM 3).
       expect(prompt).toMatch(/declared STUCK/i);
       expect(prompt).toContain("QA-01");
+      expect(prompt).not.toContain("qa-review-r1-a1-record.json");
+      expect(prompt).toContain("retained in the on-disk");
       expect(prompt).toContain(
         "The fixture evaluator observes the behavior passing",
       );

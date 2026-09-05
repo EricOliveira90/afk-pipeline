@@ -842,6 +842,12 @@ describe("explorer negotiation envelope", () => {
       }
       for (const marker of present) expect(prompt).toContain(marker);
       for (const marker of absent) expect(prompt).not.toContain(marker);
+      // PRD story 9 / slice #90: the dispatched explorer prompt carries the
+      // three-label citation rule (guardian round 2, architect A2 / PM 1).
+      expect(prompt).toContain("Label every statement");
+      expect(prompt).toContain("`FACT`");
+      expect(prompt).toContain("`INFERENCE`");
+      expect(prompt).toContain("`UNKNOWN`");
       expect(prompt).not.toContain("ADR-BODY-MUST-NOT-APPEAR");
       const writeBoundary = prompt.match(
         /^# Write boundary\r?\n([\s\S]*?)(?=^# )/m,
@@ -2466,8 +2472,22 @@ describe("focused generator scope revision", () => {
       evaluatorOmissions,
       generatorOmissions,
     ]);
-    expect(assemblies[0]).not.toHaveProperty("tokenCounts");
-    expect(assemblies.map((event) => event.tokenCounts)).toEqual([
+    // Assembly evidence carries no post-return facts: tokens and timing
+    // arrive in the paired invocation-completed event (guardian round 2,
+    // PM 4).
+    for (const event of assemblies) {
+      expect(event).not.toHaveProperty("tokenCounts");
+      expect(event).not.toHaveProperty("nonCommandTimeMs");
+    }
+    const completions = events.filter(
+      (event) => event.type === "invocation-completed",
+    );
+    expect(completions).toHaveLength(assemblies.length);
+    expect(completions.map((event) => event.role)).toEqual(
+      assemblies.map((event) => event.role),
+    );
+    expect(completions[0]).not.toHaveProperty("tokenCounts");
+    expect(completions.map((event) => event.tokenCounts)).toEqual([
       undefined,
       { input_tokens: 10 },
       {
@@ -2483,9 +2503,26 @@ describe("focused generator scope revision", () => {
       },
       { output_tokens: 5, cache_read_input_tokens: 2 },
     ]);
-    for (const event of assemblies.slice(1)) {
+    for (const event of completions.slice(1)) {
       expect(event).toHaveProperty("tokenCounts");
     }
+    // Dispatch-order contract (slice #83; guardian round 2, PM 4): at
+    // provider invocation entry the stub observed its matching
+    // prompt-assembly event as the journal's last entry.
+    const scopedRecords = records.filter(({ role }) =>
+      ["explorer", "planner", "evaluator-contract", "generator"].includes(
+        role,
+      ),
+    );
+    expect(scopedRecords).toHaveLength(assemblies.length);
+    scopedRecords.forEach((record, index) => {
+      expect(record.journalTailAtEntry, `${record.role} #${index}`)
+        .toMatchObject({
+          type: "prompt-assembly",
+          role: record.role,
+          ghIssue: "1081",
+        });
+    });
     for (const event of assemblies.filter(
       ({ role, round }) =>
         role !== "explorer" &&

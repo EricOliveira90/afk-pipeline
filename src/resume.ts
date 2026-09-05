@@ -277,19 +277,46 @@ export function isResumeStuckRequested(
  * An unknown last-commit time also omits (never mislead by default).
  */
 /**
+ * Projects the on-disk STUCK diagnosis to what a fresh generator may see:
+ * the reason, currently OPEN findings with their evidence, scope
+ * escalations, and commit evidence. The RESOLVED lifecycle section and the
+ * per-round evidence trail (which cites prior rounds' report artifacts)
+ * remain in `stuck.md` for the operator only — the PRD's fresh-context rule
+ * bars resolved findings and prior report references from every generator
+ * prompt, resumed ones included (guardian round 2, PM 3). A diagnosis
+ * without the pipeline-rendered section structure passes through unchanged.
+ */
+export function projectStuckDiagnosisForPrompt(content: string): string {
+  return content
+    .replace(
+      /### RESOLVED\r?\n[\s\S]*?(?=### OPEN)/,
+      "### RESOLVED\n\n(retained in the on-disk `stuck.md` for the " +
+        "operator — resolved findings never re-enter generator prompts)\n\n",
+    )
+    .replace(
+      /## Round evidence\r?\n[\s\S]*?(?=## Commit evidence)/,
+      "## Round evidence\n\n(retained in the on-disk `stuck.md` for the " +
+        "operator)\n\n",
+    );
+}
+
+/**
  * Prompt block for the preserved STUCK diagnosis, or `""` when absent (#49).
  *
- * Included verbatim and unconditionally — no staleness check, unlike
+ * Included unconditionally — no staleness check, unlike
  * `buildResumeHandoffNote`. A stuck.md is written by the pipeline at the
  * moment the slice was declared STUCK, after its last commit, so it
  * always describes the tip the resumed generator is standing on. It is
  * also the reason the operator opted in: dropping it would hand the
  * generator the same tree with none of the accumulated knowledge of why
- * it failed.
+ * it failed. It is projected, not verbatim: resolved lifecycle content
+ * stays on disk for the operator (guardian round 2, PM 3).
  */
 export function buildStuckDiagnosisNote(stuckPath: string): string {
   if (!existsSync(stuckPath)) return "";
-  const content = readFileSync(stuckPath, "utf-8").trim();
+  const content = projectStuckDiagnosisForPrompt(
+    readFileSync(stuckPath, "utf-8"),
+  ).trim();
   if (content === "") return "";
   return [
     "# Why you were declared STUCK",

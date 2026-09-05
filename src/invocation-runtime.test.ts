@@ -474,10 +474,23 @@ describe("command-time tracker (nonCommandTimeMs attribution)", () => {
     expect(tracker.totalMs()).toBeUndefined();
   });
 
-  it("ignores unknown ends and duplicate begins", () => {
+  it("poisons attribution on an end with no matching start", () => {
+    // Guardian round 2, architect A4: an unmatched completion means the
+    // stream's attribution cannot be trusted — the result must be
+    // "unavailable", never "zero command time".
     const clock = fakeClock();
     const tracker = createCommandTimeTracker(clock.now);
     tracker.end("unknown");
+    clock.set(100);
+    tracker.begin("a");
+    clock.set(300);
+    tracker.end("a");
+    expect(tracker.totalMs()).toBeUndefined();
+  });
+
+  it("ignores duplicate begins", () => {
+    const clock = fakeClock();
+    const tracker = createCommandTimeTracker(clock.now);
     clock.set(100);
     tracker.begin("a");
     clock.set(200);
@@ -533,5 +546,26 @@ describe("nonCommandTimeMs derivation at the runtime seam", () => {
     vi.setSystemTime(50_500);
     emitExit(proc, 0);
     expect((await promise).stats.nonCommandTimeMs).toBe(0);
+  });
+
+  it("excludes provider onSettled cleanup from the wall clock", async () => {
+    // Guardian round 2, architect A4: the invocation clock ends when
+    // successful exit is observed, before settle runs cleanup. Cleanup
+    // advancing the clock must not count as model time.
+    const proc = makeFakeProc();
+    const promise = start(
+      proc,
+      {},
+      {
+        commandTimeMs: () => 500,
+        onSettled: () => {
+          vi.setSystemTime(60_000); // slow cleanup: +8s after exit
+        },
+      },
+    );
+    vi.setSystemTime(52_000);
+    emitExit(proc, 0);
+    // wall 2000ms − command 500ms; the 8s cleanup is excluded
+    expect((await promise).stats.nonCommandTimeMs).toBe(1_500);
   });
 });

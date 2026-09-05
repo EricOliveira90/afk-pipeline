@@ -15,8 +15,10 @@ required section structure.
 
 # Citation rule
 
-Cite factual claims with a repository path and line, a symbol, or the command
-that established the claim. Put unresolved questions in `Unknowns`. Do not
+Label every statement in the evidence map as `FACT`, `INFERENCE`, or
+`UNKNOWN`. Cite each `FACT` with a repository path and line, a symbol, or the
+command that established the claim; an `INFERENCE` names the facts it is
+drawn from. Put unresolved questions in `Unknowns` as `UNKNOWN` items. Do not
 make design recommendations.
 
 # Four-section task

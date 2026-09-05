@@ -5,10 +5,6 @@ import type {
   GateEvidence,
   GateEvidenceArtifact,
 } from "./gate-runner.js";
-import {
-  formatQAGeneratorContext,
-  type QAConvergenceState,
-} from "./qa-convergence.js";
 
 export interface CandidateGatePhaseRun {
   evidence: GateEvidence;
@@ -40,14 +36,17 @@ export type CandidateGateDecision =
 /**
  * Turns one accepted-candidate gate phase into the next orchestration
  * decision. Required-gate classification and repair context stay together.
+ *
+ * The retry note is control-plane text only. All failure content — gate IDs,
+ * evidence paths, finding IDs, clear conditions — travels exclusively in the
+ * compact `failureSet`, which the generator envelope renders as the single
+ * final failure block (PRD user story 5; guardian round 2, PM 2).
  */
 export function decideCandidateGatePhase(input: {
   run: CandidateGatePhaseRun;
   declarations: readonly GateDeclaration[];
   evidenceDir: string;
   nextRound: number;
-  convergence: QAConvergenceState;
-  repairStage?: Parameters<typeof formatQAGeneratorContext>[2];
 }): CandidateGateDecision {
   const requiredIds = new Set(
     input.declarations
@@ -101,13 +100,9 @@ export function decideCandidateGatePhase(input: {
       })),
     },
     retryNote:
-      `This is implementation round ${input.nextRound}. Fix every unresolved ` +
-      `full-suite failure without regressing behavior the candidate already ` +
-      `delivers:\n` +
-      formatQAGeneratorContext(
-        input.convergence,
-        references,
-        input.repairStage,
-      ),
+      `This is implementation round ${input.nextRound}. The full slice ` +
+      `suite failed on the accepted candidate. Fix every failed gate in ` +
+      `the current failure set at the end of this prompt without ` +
+      `regressing behavior the candidate already delivers.`,
   };
 }

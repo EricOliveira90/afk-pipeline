@@ -108,7 +108,10 @@ import {
   assertGateEvidenceReleasesEvaluation,
   runCandidateGatePhase,
 } from "./candidate-gate-phase.js";
-import { runPostQAGates } from "./post-qa-gates.js";
+import {
+  reviewArtifactViolations,
+  runPostQAGates,
+} from "./post-qa-gates.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -226,7 +229,6 @@ import {
   type QAReviewStage,
 } from "./qa-review.js";
 import {
-  formatQAGeneratorContext,
   loadQAConvergenceState,
   type QAConvergenceState,
 } from "./qa-convergence.js";
@@ -888,6 +890,17 @@ export function makeSliceContext(
     : "(none — this slice declares no AFK dependencies)";
 
   const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
+    // Assembly evidence is journaled BEFORE dispatch so the record exists
+    // even when the invocation dies before returning, and so a provider
+    // observes its matching `prompt-assembly` event as the immediately
+    // preceding journal event at invocation entry (slice #83; guardian
+    // round 2, PM 4). Post-return facts arrive in `invocation-completed`.
+    if (opts.contextEnvelope !== undefined) {
+      logger.event({
+        type: "prompt-assembly",
+        ...opts.contextEnvelope,
+      });
+    }
     // Transient model outages (provider-classified) retry here with
     // backoff instead of failing the slice. See ADR 0022.
     const result = await withTransientRetry(
@@ -947,8 +960,11 @@ export function makeSliceContext(
       // otherwise. Nothing branches on it.
       const nonCommandTimeMs = result.stats.nonCommandTimeMs;
       logger.event({
-        type: "prompt-assembly",
-        ...opts.contextEnvelope,
+        type: "invocation-completed",
+        ghIssue: opts.contextEnvelope.ghIssue,
+        sliceNumber: opts.contextEnvelope.sliceNumber,
+        round: opts.contextEnvelope.round,
+        role: opts.contextEnvelope.role,
         ...(tokenCounts !== undefined &&
         Object.keys(tokenCounts).length > 0
           ? { tokenCounts }
@@ -4991,15 +5007,16 @@ export async function runSliceExecute(
             ],
           })),
         };
+        // The retry note is control-plane text only; failure content —
+        // failed gate IDs, evidence, and any still-open finding's ID,
+        // clear condition, and references — travels exclusively in the
+        // compact failure set the envelope renders as the single final
+        // failure block (guardian round 2, PM 2).
         retryNote =
-          `This is implementation round ${round + 1}. Fix every unresolved ` +
-          `base-gate failure without regressing behavior that already ` +
-          `passes:\n` +
-          formatQAGeneratorContext(
-            qaConvergence,
-            baseGateRepairReferences,
-            repairStage ?? undefined,
-          );
+          `This is implementation round ${round + 1}. Base gates failed on ` +
+          `the current candidate. Fix every entry in the current failure ` +
+          `set at the end of this prompt without regressing behavior that ` +
+          `already passes.`;
         if (implementationAttempt < implementationAttemptLimit) continue;
         logger.bumpEvalRound(slice.ghIssue, round);
         return finishIntervention(
@@ -5088,14 +5105,14 @@ export async function runSliceExecute(
             gates: [],
           };
           repairStage = "deterministic";
+          // Control-plane text only; the open findings' IDs, clear
+          // conditions, and references ride solely in the compact failure
+          // set above, rendered last in the prompt (guardian round 2, PM 2).
           retryNote =
-            `This is implementation round ${round + 1}. Repair the current ` +
-            `QA findings without regressing behavior that already passes:\n` +
-            formatQAGeneratorContext(
-              qaConvergence,
-              [],
-              "deterministic",
-            );
+            `This is implementation round ${round + 1}. Candidate QA left ` +
+            `open findings. Repair every finding in the current failure ` +
+            `set at the end of this prompt without regressing behavior ` +
+            `that already passes.`;
         }
         if (
           deterministic.outcome !== "IMPLEMENTATION" &&
@@ -5188,10 +5205,13 @@ export async function runSliceExecute(
             wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
             heartbeatIntervalMs:
               config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
-            convergence: qaConvergence,
-            repairStage,
             priorAttemptTreeIds: implementationCandidateTreeIds,
             priorArtifacts: gateArtifacts,
+            // The QA verdict is tied to this exact captured tree; the full
+            // suite may only run on a tree that differs from it inside the
+            // slice's review-artifact directory (architect A1, ADR 0012).
+            qaApprovedTreeId: checkpoint.treeId,
+            reviewArtifactDir: ctx.relSliceDir,
             onGateOutcome: (outcome) => {
               logger.event({
                 type: "gate-outcome",
@@ -5242,6 +5262,28 @@ export async function runSliceExecute(
           // Before the commit, so the diagnosis this slice ships is the
           // one the operator read, not whatever the generator left.
           restoreStuckDiagnosis();
+          // The accepted tree must be the one the suite just authorized,
+          // modulo the slice's own review artifacts (the restored
+          // diagnosis above is such a change). Fail closed on anything
+          // else (architect A1, ADR 0012).
+          const acceptedTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+          const acceptViolations = reviewArtifactViolations({
+            cwd: ctx.worktreeDir,
+            fromTree: postQaGates.candidateTreeId,
+            toTree: acceptedTreeId,
+            reviewArtifactDir: ctx.relSliceDir,
+          });
+          if (acceptViolations.length > 0) {
+            return {
+              phase: "ERROR",
+              error:
+                `Accepted candidate tree ${acceptedTreeId} differs from ` +
+                `the suite-authorized tree ${postQaGates.candidateTreeId} ` +
+                `outside the review-artifact allowlist ` +
+                `(${ctx.relSliceDir}/): ${acceptViolations.join(", ")}. ` +
+                `The gate evidence does not authorize this tree (ADR 0012).`,
+            };
+          }
           if (git.hasUncommittedChanges(ctx.worktreeDir)) {
             git.commitAll(
               ctx.worktreeDir,
@@ -5250,7 +5292,7 @@ export async function runSliceExecute(
           }
           return dispatchAcceptedCandidate(candidateLifecycle.accept({
             round,
-            candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
+            candidateTreeId: acceptedTreeId,
           }));
         }
         if (qaDispatch.action === "FINAL_REPAIR") {

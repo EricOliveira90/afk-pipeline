@@ -971,7 +971,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
   it("records checkpoint evidence and authorizes QA for the passing tree", async () => {
     const repo = makeRepo();
-    const sequencePath = join(repo, "gate-sequence.txt").replace(/\\/g, "/");
+    // Outside the repo: the evaluator stub and gate scripts append to it,
+    // and an in-repo marker would (correctly) trip the A1 tree-authority
+    // guard — evaluators must not mutate the candidate tree.
+    const sequencePath = `${repo}-gate-sequence.txt`.replace(/\\/g, "/");
     const cheapScript =
       `node -e "require('fs').appendFileSync('${sequencePath}','cheap\\n')"`;
     const fullSuiteScript =
@@ -1500,7 +1503,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
   it("routes compact lineage and grants one final repair for a fresh round-three blocker", async () => {
     const repo = makeRepo();
-    const sequencePath = join(repo, "qa-sequence.txt").replace(/\\/g, "/");
+    // Outside the repo — an in-repo evaluator marker would (correctly)
+    // trip the A1 tree-authority guard.
+    const sequencePath = `${repo}-qa-sequence.txt`.replace(/\\/g, "/");
     writeFileSync(
       join(repo, "package.json"),
       JSON.stringify({
@@ -1621,12 +1626,18 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(generatorPrompts).toHaveLength(4);
     expect(evaluatorPrompts).toHaveLength(4);
 
-    expect(generatorPrompts[1]).toContain("QA-01");
-    expect(generatorPrompts[1]).toContain("First blocker");
+    // Repair prompts carry QA-finding content in exactly one place: the
+    // compact failure set (finding ID + clear condition + report
+    // references), rendered as the prompt's final block. Summaries and any
+    // second finding block are absent (guardian round 2, PM 2).
+    expect(generatorPrompts[1]).toContain("# Current failure set");
+    expect(generatorPrompts[1]).toContain("Finding ID: `QA-01`");
     expect(generatorPrompts[1]).toContain("First condition");
-    expect(generatorPrompts[1]).toContain("QA-02");
-    expect(generatorPrompts[1]).toContain("Second blocker");
+    expect(generatorPrompts[1]).not.toContain("First blocker");
+    expect(generatorPrompts[1]).toContain("Finding ID: `QA-02`");
     expect(generatorPrompts[1]).toContain("Second condition");
+    expect(generatorPrompts[1]).not.toContain("Second blocker");
+    expect(generatorPrompts[1]).not.toContain("Current open QA findings");
     expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
 
@@ -1635,11 +1646,14 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[1]).toContain("qa-report-r1-a1.md");
 
-    expect(generatorPrompts[2]).toContain("Current open QA findings");
-    expect(generatorPrompts[2]).toContain("QA-02");
+    expect(generatorPrompts[2]).toContain("# Current failure set");
+    expect(generatorPrompts[2]).toContain("Finding ID: `QA-02`");
+    expect(generatorPrompts[2]).toContain("Second condition");
+    expect(generatorPrompts[2]).not.toContain("Current open QA findings");
     expect(generatorPrompts[2]).not.toContain("Relevant resolved QA findings");
     expect(generatorPrompts[2]).not.toContain("Finding ID: `QA-01`");
     expect(generatorPrompts[2]).not.toContain("First blocker");
+    expect(generatorPrompts[2]).not.toContain("Second blocker");
     expect(generatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
@@ -1651,9 +1665,11 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
 
-    expect(generatorPrompts[3]).toContain("Current open QA findings");
-    expect(generatorPrompts[3]).toContain("QA-03");
-    expect(generatorPrompts[3]).toContain("Fresh late blocker");
+    expect(generatorPrompts[3]).toContain("# Current failure set");
+    expect(generatorPrompts[3]).toContain("Finding ID: `QA-03`");
+    expect(generatorPrompts[3]).toContain("Fresh late condition");
+    expect(generatorPrompts[3]).not.toContain("Fresh late blocker");
+    expect(generatorPrompts[3]).not.toContain("Current open QA findings");
     expect(generatorPrompts[3]).not.toContain("Relevant resolved QA findings");
     expect(generatorPrompts[3]).not.toContain("Finding ID: `QA-01`");
     expect(generatorPrompts[3]).not.toContain("Finding ID: `QA-02`");
@@ -2274,7 +2290,10 @@ describe("base gate observability", () => {
 describe("shared-preview QA", () => {
   it("keeps deterministic and UAT findings isolated across a UAT retry", async () => {
     const repo = makeRepo();
-    const marker = join(repo, "migration-order.txt").replace(/\\/g, "/");
+    // Outside the repo — the shared-preview verify/apply commands run in
+    // the worktree after QA approval, and an in-repo marker would
+    // (correctly) trip the A1 tree-authority guard.
+    const marker = `${repo}-migration-order.txt`.replace(/\\/g, "/");
     const generatorPrompts: string[] = [];
     const deterministicPrompts: string[] = [];
     const uatPrompts: string[] = [];

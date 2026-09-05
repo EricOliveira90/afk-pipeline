@@ -86,6 +86,13 @@ export type RunEventPayload =
       verdict?: string;
     }
   | {
+      /**
+       * Assembled-envelope evidence, journaled immediately BEFORE the
+       * provider is dispatched so the record survives an invocation that
+       * dies mid-flight (slice #83; guardian round 2, PM 4). Post-return
+       * facts — token counts, non-command time — arrive in the paired
+       * `invocation-completed` event.
+       */
       type: "prompt-assembly";
       ghIssue: string;
       sliceNumber: string;
@@ -96,6 +103,20 @@ export type RunEventPayload =
       includedArtifactIds: string[];
       omittedArtifactClasses: string[];
       contextManifestVersion: number;
+    }
+  | {
+      /**
+       * Post-return completion evidence for a scoped invocation, paired
+       * with the `prompt-assembly` event journaled before its dispatch
+       * (same ghIssue/sliceNumber/round/role). Emitted only for
+       * invocations that returned successfully.
+       */
+      type: "invocation-completed";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      role: PromptAssemblyRole;
+      /** Provider-exposed token names and counts, never renamed. */
       tokenCounts?: Record<string, number>;
       /**
        * Evidence-only per-invocation non-command wall clock (PRD 3 §3
