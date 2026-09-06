@@ -158,7 +158,7 @@ describe("Codex command construction", () => {
     spawnMock.mockReset();
   });
 
-  it("uses the exact model, ephemeral JSON mode, full trust, and stdin", async () => {
+  it("P-05 keeps the exact prompt on stdin with existing Codex flags", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);
 
@@ -308,6 +308,34 @@ describe("Codex runtime hooks", () => {
       "Agent planner exited with code 2: unknown model",
     );
   });
+
+  it("B-05 preserves every exposed Codex token-count name", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "planner", prompt: "go", cwd: "/tmp" });
+    proc.stdout.push(
+      jsonLine({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 34,
+          cached_input_tokens: 13,
+          output_tokens: 9,
+        },
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    emitExit(proc, 0);
+
+    await expect(promise).resolves.toMatchObject({
+      stats: {
+        tokenCounts: {
+          input_tokens: 34,
+          cached_input_tokens: 13,
+          output_tokens: 9,
+        },
+      },
+    });
+  });
 });
 describe("Codex provider metadata", () => {
   it("uses the codex namespace and parser", () => {
@@ -412,5 +440,97 @@ describe("codex invoke AWS config isolation (regression: PRD 070 persist race)",
       else process.env.AWS_CONFIG_FILE = saved;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("nonCommandTimeMs evidence (A4)", () => {
+  // Fake only Date so line-arrival timestamps are deterministic while
+  // stream flushing keeps real setImmediate.
+  beforeEach(() => {
+    spawnMock.mockReset();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(200_000);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("computes wall clock minus command_execution started→completed intervals", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp" });
+
+    vi.setSystemTime(201_000);
+    proc.stdout.push(
+      jsonLine({
+        type: "item.started",
+        item: { id: "item-1", type: "command_execution", command: "pnpm test" },
+      }),
+    );
+    await flush();
+    vi.setSystemTime(204_000);
+    proc.stdout.push(
+      jsonLine({
+        type: "item.completed",
+        item: { id: "item-1", type: "command_execution", exit_code: 0 },
+      }),
+    );
+    await flush();
+    vi.setSystemTime(206_000);
+    emitExit(proc, 0);
+
+    const result = await promise;
+    // wall 6000ms − command 3000ms
+    expect(result.stats.nonCommandTimeMs).toBe(3_000);
+  });
+
+  it("omits the field when a command_execution never completes", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp" });
+
+    proc.stdout.push(commandLine("pnpm test"));
+    await flush();
+    vi.setSystemTime(205_000);
+    emitExit(proc, 0);
+
+    const result = await promise;
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
+  });
+
+  it("omits the field when a command record carries no correlatable id", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "generator", prompt: "go", cwd: "/tmp" });
+
+    proc.stdout.push(
+      jsonLine({
+        type: "item.started",
+        item: { type: "command_execution", command: "pnpm test" },
+      }),
+    );
+    await flush();
+    vi.setSystemTime(205_000);
+    emitExit(proc, 0);
+
+    const result = await promise;
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
+  });
+
+  it("records the full wall clock when the measured stream ran no commands", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({ role: "planner", prompt: "go", cwd: "/tmp" });
+
+    vi.setSystemTime(202_500);
+    emitExit(proc, 0);
+
+    const result = await promise;
+    // Zero command time is a measurement, not an invented value.
+    expect(result.stats.nonCommandTimeMs).toBe(2_500);
   });
 });

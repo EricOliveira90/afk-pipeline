@@ -274,93 +274,14 @@ export function advanceQAFindingLineage(
   };
 }
 
-function overlaps(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
-  if (left.length === 0 || right.length === 0) return true;
-  const rightIds = new Set(right);
-  return left.some((id) => rightIds.has(id));
-}
-
-/**
- * Generator memory stays compact: active source-change findings plus only
- * resolved source-change findings whose behavior scope overlaps active work.
- */
-export function qaGeneratorContext(
-  state: QAConvergenceState,
-  stage?: QAReviewStage,
-): {
-  open: QAFindingLineageEntry[];
-  relevantResolved: QAFindingLineageEntry[];
-} {
-  const entries = Object.values(state.findings).filter(
-    (entry) =>
-      entry.finding.remedy === "SOURCE_CHANGE" &&
-      (stage === undefined || entry.stage === stage),
-  );
-  const open = entries.filter((entry) => entry.finding.state === "OPEN");
-  const relevantResolved = entries.filter(
-    (entry) =>
-      entry.finding.state === "RESOLVED" &&
-      open.some((active) =>
-        overlaps(active.finding.behaviorIds, entry.finding.behaviorIds),
-      ),
-  );
-  return { open, relevantResolved };
-}
-
-function formatEntry(entry: QAFindingLineageEntry): string {
-  return [
-    `- Finding ID: \`${entry.currentId}\``,
-    `  QA stage: ${entry.stage}`,
-    `  Disposition: ${entry.disposition}`,
-    `  Severity: ${entry.finding.severity}`,
-    `  State: ${entry.finding.state}`,
-    `  Unresolved: ${entry.finding.state === "OPEN" ? "yes" : "no"}`,
-    `  Remedy: ${entry.finding.remedy}`,
-    `  Summary: ${entry.finding.summary}`,
-    `  Expected: ${entry.finding.expected}`,
-    `  Observed: ${entry.finding.observed}`,
-    `  Clear condition: ${entry.finding.clearCondition}`,
-    "  Artifact references:",
-    ...entry.artifactReferences.map((path) => `  - \`${path}\``),
-  ].join("\n");
-}
-
-export function formatQAGeneratorContext(
-  state: QAConvergenceState,
-  gateFailureReferences: readonly string[] = [],
-  stage?: QAReviewStage,
-): string {
-  const context = qaGeneratorContext(state, stage);
-  const sections: string[] = [];
-  if (gateFailureReferences.length > 0) {
-    sections.push(
-      [
-        "Current deterministic gate failures:",
-        ...gateFailureReferences.map((path) => `- \`${path}\``),
-      ].join("\n"),
-    );
-  }
-  if (context.open.length > 0) {
-    sections.push(
-      [
-        "Current open QA findings:",
-        ...context.open.map(formatEntry),
-      ].join("\n"),
-    );
-  }
-  if (context.relevantResolved.length > 0) {
-    sections.push(
-      [
-        "Relevant resolved QA findings — keep these behaviors satisfied:",
-        ...context.relevantResolved.map(formatEntry),
-      ].join("\n"),
-    );
-  }
-  return sections.length > 0 ? sections.join("\n\n") : "(none)";
-}
+// The QA-finding repair projection lives in the compact generator failure
+// set (`GeneratorFailureSet`, rendered by `formatGeneratorFailureSet` as the
+// single final failure block of the repair envelope). The former
+// `qaGeneratorContext`/`formatQAGeneratorContext` prose rendering was removed
+// because a second, broader finding block in the retry note duplicated and
+// exceeded that projection (guardian round 2, PM 2). Resolved lineage remains
+// persisted in this state for convergence decisions and intervention
+// evidence, and never returns to a fresh generator invocation.
 
 export function qaLifecycleHistory(
   state: QAConvergenceState,

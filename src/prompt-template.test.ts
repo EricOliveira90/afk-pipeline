@@ -7,37 +7,41 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 describe("renderPrompt", () => {
-  it("substitutes placeholders for the explorer template", () => {
+  it("P-03 substitutes placeholders for the explorer template", () => {
     const out = renderPrompt("explorer", {
       GH_ISSUE: "42",
       TITLE: "Contact list",
       SLICE_DIR: ".kiro/specs/contacts/slices/01-foo",
       SLICE_BODY: "Implement the contact list component",
       RELEVANT_FILES: "src/app.ts\nsrc/util.ts",
+      REPOSITORY_CONTEXT: "(none available)",
+      INLINE_SIZE_BUDGET_BYTES: 65536,
     });
     expect(out).toContain("#42");
     expect(out).toContain('"Contact list"');
     expect(out).toContain(".kiro/specs/contacts/slices/01-foo/context.md");
   });
 
-  it("supports numeric values and empty-string conditionals", () => {
+  it("supports numeric values in planner templates", () => {
     const out = renderPrompt("planner", {
       GH_ISSUE: "1",
       SPECS_DIR: "specs",
       SLICE_DIR: "specs/slices/01",
       ROUND: 2,
-      REVISION_NOTE: "",
-      RELEVANT_FILES: "",
       SLICE_BODY: "Local issue body",
+      EXPLORER_CONTEXT: "Explorer evidence",
       MIGRATION_RESERVATION: "No claim yet",
       BASE_GATE_CATALOG: "- tests: pnpm run test:run",
-      CONTRACT_RESPONSE_NOTE: "Write contract-response.json",
+      REPOSITORY_CONTEXT: "(none available)",
     });
     expect(out).toContain("**Negotiation round:** 2");
+    expect(out).toMatch(
+      /prohibition on implementation edits must still\s+allow the planner and evaluator to write their required contract/i,
+    );
     expect(out).not.toContain("{{");
   });
 
-  it("throws on missing placeholder values", () => {
+  it("P-03 throws on missing placeholder values", () => {
     expect(() =>
       renderPrompt("explorer", {
         GH_ISSUE: "1",
@@ -48,7 +52,7 @@ describe("renderPrompt", () => {
     ).toThrow(/SLICE_DIR/);
   });
 
-  it("throws on extra unused args", () => {
+  it("P-03 throws on extra unused args", () => {
     expect(() =>
       renderPrompt("evaluator-qa", {
         SLICE_DIR: "x",
@@ -143,33 +147,21 @@ describe("renderPrompt", () => {
     );
   });
 
-  /**
-   * #82 AC3: the shared resume template is what a STUCK repair round now
-   * reads, so the "don't touch the diagnosis" rule has to live in it. The
-   * orchestrator restores the bytes regardless, but a generator told to
-   * treat the file as read-only never makes it do the work.
-   */
-  it("tells the shared resume template to read stuck.md and leave it alone", () => {
-    const resumeTemplate = readFileSync(
-      new URL("../prompts/generator-resume.md", import.meta.url),
+  it("tells the repair template to leave stuck.md alone", () => {
+    const repairTemplate = readFileSync(
+      new URL("../prompts/generator-repair.md", import.meta.url),
       "utf-8",
     );
-    const requiredReading = resumeTemplate.match(
-      /^# Required reading\r?\n([\s\S]*?)(?=^# |\Z)/m,
-    )?.[1];
-    expect(requiredReading).toContain("{{SLICE_DIR}}/stuck.md");
-    const invariants = resumeTemplate.match(
-      /^# Invariants\r?\n([\s\S]*?)(?=^# |\Z)/m,
-    )?.[1];
-    expect(invariants).toContain("{{SLICE_DIR}}/stuck.md");
-    expect(invariants).toMatch(/never delete, move,\s+rewrite, or edit it/i);
+    expect(repairTemplate).toContain("preserved `stuck.md` evidence");
+    expect(repairTemplate).toMatch(
+      /read-only\. Never delete, move,\s+rewrite, or edit it/i,
+    );
   });
 
   it("gives every generator invocation the canonical scope-escalation contract", () => {
     const sources = [
-      new URL("../agents/generator.md", import.meta.url),
       new URL("../prompts/generator.md", import.meta.url),
-      new URL("../prompts/generator-resume.md", import.meta.url),
+      new URL("../prompts/generator-repair.md", import.meta.url),
     ];
     const escalationSections = sources.map((source) => {
       const content = readFileSync(source, "utf-8");
@@ -180,79 +172,143 @@ describe("renderPrompt", () => {
       return section![1]!.trim();
     });
 
-    expect(new Set(escalationSections)).toHaveLength(1);
-    expect(escalationSections[0]).toContain(
-      "the correct implementation requires a file path the locked contract",
-    );
-    expect(escalationSections[0]).toContain(
-      "Stop before making the undeclared edit",
-    );
-    expect(escalationSections[0]).toContain(
-      '{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}',
-    );
-    expect(escalationSections[0]).toMatch(
-      /contains no fields other than `version`, `findingIds`, `paths`,\s+and `reason`/,
-    );
-    // Both identities, and the rule that picks between them (ADR 0052).
-    // The pre-build case is the one the PRD's deadlock lives in, so it has
-    // to be authorized in the *same* canonical section every invocation
-    // gets — not only in the initial-generator template.
-    expect(escalationSections[0]).toContain(PRE_BUILD_SCOPE_FINDING_ID);
-    expect(escalationSections[0]).toContain("Nothing was cited to you");
-    expect(escalationSections[0]).toContain("Findings were cited to you");
-    expect(escalationSections[0]).toMatch(
-      /Never mix `PRE-BUILD-SCOPE` with a real finding ID/,
-    );
+    for (const section of escalationSections) {
+      expect(section).toMatch(/stop before/i);
+      expect(section).toContain(
+        '{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}',
+      );
+      expect(section).toContain(PRE_BUILD_SCOPE_FINDING_ID);
+      expect(section).toMatch(
+        /Never mix `PRE-BUILD-SCOPE` with a real finding\s+ID/i,
+      );
+    }
   });
 
-  it("loads all eight pipeline templates", () => {
-    expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "" })).toBeTruthy();
+  it("B-08 limits escalation to plan-level contradictions, silence, and risk", () => {
+    for (const name of ["generator.md", "generator-repair.md"]) {
+      const template = readFileSync(
+        new URL(`../prompts/${name}`, import.meta.url),
+        "utf-8",
+      );
+      const escalation = template.match(
+        /^# Scope escalation\r?\n([\s\S]*?)(?=^# |\Z)/m,
+      )?.[1];
+
+      expect(escalation).toMatch(/spec contradiction/i);
+      expect(escalation).toMatch(/including recorded ADRs/i);
+      expect(escalation).toMatch(/load-bearing\s+silence/i);
+      expect(escalation).toMatch(/declared risk class/i);
+      expect(escalation).toMatch(/decide and record otherwise/i);
+      expect(template).not.toMatch(/^#{1,6} ADR\b/m);
+      expect(template).not.toContain("grep for `docs/adr/`");
+    }
+  });
+
+  it("B-05 P-01 loads planner artifact contracts in both templates", () => {
+    expect(renderPrompt("explorer", { GH_ISSUE: "1", TITLE: "t", SLICE_DIR: "d", SLICE_BODY: "b", RELEVANT_FILES: "", REPOSITORY_CONTEXT: "(none available)", INLINE_SIZE_BUDGET_BYTES: 65536 })).toBeTruthy();
     expect(
       renderPrompt("planner", {
         GH_ISSUE: "1",
         SPECS_DIR: "s",
         SLICE_DIR: "d",
         ROUND: 1,
-        REVISION_NOTE: "",
-        RELEVANT_FILES: "",
         SLICE_BODY: "Fetch with gh",
+        EXPLORER_CONTEXT: "context",
         MIGRATION_RESERVATION: "No claim yet",
         BASE_GATE_CATALOG: "- tests: pnpm run test:run",
-        CONTRACT_RESPONSE_NOTE: "Do not write contract-response.json",
+        REPOSITORY_CONTEXT: "(none available)",
       }),
     ).toContain("- tests: pnpm run test:run");
     expect(
-      renderPrompt("evaluator-contract", {
+      renderPrompt("planner-revision", {
+        GH_ISSUE: "1",
         SPECS_DIR: "s",
         SLICE_DIR: "d",
+        ROUND: 2,
+        CURRENT_CONTRACT: "contract",
+        CURRENT_ACCEPTANCE_MANIFEST: '{"version":2}',
+        OPEN_FINDINGS: "(none)",
+        RESOLVED_HISTORY: "(none)",
+        CONTROL_SITUATION: "(none)",
+        CONTRACT_RESPONSE_INSTRUCTIONS: "Do not write a response.",
+        MIGRATION_RESERVATION: "No claim yet",
+        REPOSITORY_CONTEXT: "(none available)",
+        BASE_GATE_CATALOG: "- tests: pnpm run test:run",
+      }),
+    ).toContain("# Routed OPEN findings");
+    expect(
+      renderPrompt("evaluator-contract", {
+        SLICE_DIR: "d",
         ROUND: 1,
-        RELEVANT_FILES: "",
-        PREVIOUS_REVIEW_NOTE: "No previous round.",
+        PROPOSED_CONTRACT: "contract",
         ACCEPTANCE_MANIFEST: '{"version":2}',
         BASE_GATE_CATALOG: "- tests: pnpm run test",
         CONTRACT_REVIEW_FILE: "contract-review.json",
-        PLANNER_RESPONSE: "(first review round; no planner response)",
-        REVISION_CONTEXT: "(first review round; no prior revision)",
+        EXPLORER_CONTEXT: "context",
       }),
     ).toContain("- tests: pnpm run test");
-    expect(renderPrompt("generator", { SLICE_DIR: "d", RETRY_NOTE: "", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", TEST_COMMAND: "pnpm test", MIGRATION_RESERVATION: "none" })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
-    expect(renderPrompt("generator-resume", {
+    expect(
+      renderPrompt("evaluator-contract-revision", {
+        SLICE_DIR: "d",
+        ROUND: 2,
+        CONTRACT_REVIEW_FILE: "contract-review.json",
+        REVISED_CONTRACT: "contract",
+        REVISED_ACCEPTANCE_MANIFEST: '{"version":2}',
+        PRIOR_OPEN_FINDINGS: "(none)",
+        PLANNER_RESPONSE: "(none)",
+        REVISION_CONTEXT: '{"before":"old","after":"new"}',
+        CONTROL_SITUATION: "(none)",
+        BASE_GATE_CATALOG: "- tests: pnpm run test",
+        EXPLORER_CONTEXT: "context",
+      }),
+    ).toContain("# Prior OPEN findings");
+    expect(renderPrompt("generator", {
       SLICE_DIR: "d",
-      RELEVANT_FILES: "",
-      SIBLING_HANDOFFS: "(none)",
-      TEST_COMMAND: "pnpm test",
-      COMMITS_AHEAD: 1,
-      COMMIT_LOG: "abc123 feat: work",
-      WORKTREE_STATE: "preserved state",
-      BASE_REFRESH_NOTE: "base refreshed",
-      STUCK_NOTE: "",
-      UNRESOLVED_FINDINGS: "(none)",
-      HANDOFF_NOTE: "",
+      FILE_SCOPE: "- `src/example.ts`",
       MIGRATION_RESERVATION: "none",
+      CONTRACT_VIEW: "contract",
+      ACCEPTANCE_MANIFEST: '{"version":2}',
+      TEST_COMMAND: "pnpm test",
+      PATTERNS_AND_HARNESS: "patterns",
+      FAILURE_SET: "(none)",
+    })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
+    expect(renderPrompt("generator-repair", {
+      SLICE_DIR: "d",
+      FILE_SCOPE: "- `src/example.ts`",
+      MIGRATION_RESERVATION: "none",
+      CONTRACT_VIEW: "contract",
+      ACCEPTANCE_MANIFEST: '{"version":2}',
+      TEST_COMMAND: "pnpm test",
+      PATTERNS_AND_HARNESS: "patterns",
+      REPAIR_SITUATION: "resume facts",
+      FAILURE_SET: "(none)",
     })).toBeTruthy();
     expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
+  });
+
+  it("B-04 QA-02 documents the fresh revisionCitation object contract", () => {
+    const prompt = renderPrompt("evaluator-contract-revision", {
+      SLICE_DIR: "d",
+      ROUND: 2,
+      CONTRACT_REVIEW_FILE: "contract-review.json",
+      REVISED_CONTRACT: "contract",
+      REVISED_ACCEPTANCE_MANIFEST: '{"version":2}',
+      PRIOR_OPEN_FINDINGS: "(none)",
+      PLANNER_RESPONSE: "(none)",
+      REVISION_CONTEXT: '{"before":"old","after":"new"}',
+      CONTROL_SITUATION: "(none)",
+      BASE_GATE_CATALOG: "- tests: pnpm run test",
+      EXPLORER_CONTEXT: "context",
+    });
+
+    expect(prompt).toContain('"artifact": "contract.md"');
+    expect(prompt).toContain('"before": "exact text from the prior artifact"');
+    expect(prompt).toContain('"after": "exact text from the revised artifact"');
+    expect(prompt).toContain(
+      "`artifact` must be exactly `contract.md` or `acceptance-manifest.json`",
+    );
   });
 
   it("retires the STUCK prompts from active source while docs keep the history", () => {
@@ -264,6 +320,9 @@ describe("renderPrompt", () => {
         existsSync(new URL(`../prompts/${name}`, import.meta.url)),
       ).toBe(false);
     }
+    expect(
+      existsSync(new URL("../prompts/generator-resume.md", import.meta.url)),
+    ).toBe(false);
 
     expect(() =>
       execFileSync(

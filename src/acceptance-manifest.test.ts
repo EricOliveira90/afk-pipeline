@@ -3,7 +3,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseAcceptanceManifest,
+  restoreAcceptanceManifestRevisionScope,
   validateAcceptanceManifestCoverage,
+  validateAcceptanceManifestRevisionScope,
   validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
 
@@ -219,6 +221,75 @@ describe("acceptance-manifest.json", () => {
     expect(() =>
       validateAcceptanceManifestStability(previous, idChanged),
     ).toThrow(/B-01.*b-01/);
+  });
+
+  it("refuses planner revision drift outside routed behavior IDs", () => {
+    const previous = parseAcceptanceManifest(
+      version2Manifest([
+        validBehavior,
+        { ...validBehavior, id: "B-02", then: "the second behavior is kept" },
+      ]),
+    );
+    const allowedChange = parseAcceptanceManifest(
+      version2Manifest([
+        { ...validBehavior, then: "the routed behavior is revised" },
+        { ...validBehavior, id: "B-02", then: "the second behavior is kept" },
+      ]),
+    );
+    const unrelatedChange = parseAcceptanceManifest(
+      version2Manifest([
+        { ...validBehavior, then: "the routed behavior is revised" },
+        {
+          ...validBehavior,
+          id: "B-02",
+          then: "an unrelated behavior was weakened",
+        },
+      ]),
+    );
+
+    expect(() =>
+      validateAcceptanceManifestRevisionScope(previous, allowedChange, ["B-01"]),
+    ).not.toThrow();
+    expect(() =>
+      validateAcceptanceManifestRevisionScope(previous, unrelatedChange, [
+        "B-01",
+      ]),
+    ).toThrow(/outside the routed finding scope changed: B-02/);
+  });
+
+  it("restores unrelated planner drift while retaining routed changes", () => {
+    const previous = parseAcceptanceManifest(
+      version2Manifest([
+        validBehavior,
+        { ...validBehavior, id: "B-02", then: "the second behavior is kept" },
+      ]),
+    );
+    const current = parseAcceptanceManifest(
+      version2Manifest([
+        { ...validBehavior, then: "the routed behavior is revised" },
+        {
+          ...validBehavior,
+          id: "B-02",
+          then: "an unrelated behavior was weakened",
+        },
+      ]),
+    );
+
+    const restored = restoreAcceptanceManifestRevisionScope(
+      previous,
+      current,
+      ["B-01"],
+    );
+
+    expect(restored.restoredBehaviorIds).toEqual(["B-02"]);
+    expect(restored.manifest).toEqual(
+      parseAcceptanceManifest(
+        version2Manifest([
+          { ...validBehavior, then: "the routed behavior is revised" },
+          { ...validBehavior, id: "B-02", then: "the second behavior is kept" },
+        ]),
+      ),
+    );
   });
 
   it("requires the planner to write the machine declaration beside the contract", () => {

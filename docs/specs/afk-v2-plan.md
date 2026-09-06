@@ -348,6 +348,21 @@ What each stage banks for the runs after it:
   a MINOR archive gap does not outrank a run-killer fix, however fresh the
   review is.
 
+### Early PRD 4 delivery during PRD 3 (2026-09-02)
+
+Before PRD 3 slices #90, #95, and #99, the slice test sequence shipped the
+minimum useful part of M6 early: cheap typecheck/lint checks run before
+candidate QA; the full slice suite runs only after candidate QA accepts; a
+full-suite failure returns to the next bounded repair round; changed candidates
+repeat the cheap checks and QA; exact-tree QA authorization identifies a Git
+tree object rather than a `HEAD` commit. The aggregate pre-ship full suite is
+unchanged.
+
+PRD 4 still owns the complete policy-owned gate catalog, automatic
+`test:related` selection, the derived generator verification command,
+mechanical behavior-ID coverage, exact-tree result reuse/cache policy,
+structured prerequisites and advisory attributes, and project-level policy.
+
 ---
 
 ## 5. What runs through AFK, and what stays in normal agent sessions

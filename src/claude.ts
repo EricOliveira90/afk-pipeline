@@ -4,7 +4,10 @@ import type {
   InvokeResult,
   StreamEvent,
 } from "./agent-provider.js";
-import { runInvocation } from "./invocation-runtime.js";
+import {
+  createCommandTimeTracker,
+  runInvocation,
+} from "./invocation-runtime.js";
 
 const DEFAULT_MODEL = "claude-opus-5";
 const EXPLORER_MODEL = "claude-sonnet-5";
@@ -133,6 +136,45 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
           "--verbose",
         ];
     let costUsd: number | undefined;
+    let tokenCounts: Record<string, number> | undefined;
+    // Command-time attribution for `nonCommandTimeMs` (evidence only —
+    // see InvocationStats): every `tool_use` block opens an interval,
+    // matched to the `tool_result` block carrying its id. Blocks
+    // without an id poison the tracker so the field is omitted rather
+    // than guessed.
+    const commandTime = createCommandTimeTracker();
+
+    const trackCommandIntervals = (event: {
+      type?: unknown;
+      message?: { content?: unknown };
+    }) => {
+      if (
+        (event.type !== "assistant" && event.type !== "user") ||
+        !Array.isArray(event.message?.content)
+      ) {
+        return;
+      }
+      for (const block of event.message.content as {
+        type?: unknown;
+        id?: unknown;
+        tool_use_id?: unknown;
+      }[]) {
+        if (block.type === "tool_use") {
+          if (typeof block.id === "string") commandTime.begin(block.id);
+          else commandTime.markUnattributable();
+        } else if (block.type === "tool_result") {
+          // A result with no correlatable id is unattributable, the same
+          // as an id-less tool_use: the field must come out absent, never
+          // synthesized from a zero-command assumption (ADR 0046;
+          // guardian round 5, architect A1).
+          if (typeof block.tool_use_id === "string") {
+            commandTime.end(block.tool_use_id);
+          } else {
+            commandTime.markUnattributable();
+          }
+        }
+      }
+    };
 
     return {
       command: "claude",
@@ -143,11 +185,25 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (line.startsWith("{")) {
           try {
             const event = JSON.parse(line);
+            trackCommandIntervals(event);
             if (
               event.type === "result" &&
               typeof event.total_cost_usd === "number"
             ) {
               costUsd = event.total_cost_usd;
+            }
+            if (
+              event.type === "result" &&
+              typeof event.usage === "object" &&
+              event.usage !== null
+            ) {
+              const exposed = Object.fromEntries(
+                Object.entries(event.usage as Record<string, unknown>).filter(
+                  (entry): entry is [string, number] =>
+                    typeof entry[1] === "number",
+                ),
+              );
+              if (Object.keys(exposed).length > 0) tokenCounts = exposed;
             }
           } catch {
             // parseStreamLine handles malformed input below.
@@ -155,7 +211,11 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         }
         return parseStreamLine(line);
       },
-      stats: () => ({ costUsd }),
+      stats: () => ({
+        costUsd,
+        ...(tokenCounts === undefined ? {} : { tokenCounts }),
+      }),
+      commandTimeMs: () => commandTime.totalMs(),
     };
   });
 }

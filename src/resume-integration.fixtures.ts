@@ -21,6 +21,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
 import { writeContractReview, writeQAReview } from "./test-support.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
@@ -194,7 +195,11 @@ export function buildProvider(opts: {
             : "",
       });
       if (role === "explorer" && artifactDir) {
-        writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+        writeFileSync(
+          join(artifactDir, "context.md"),
+          validExplorerContext(`Resume context for ${sliceNumber}`),
+          "utf-8",
+        );
       } else if (role === "planner" && artifactDir) {
         writeFileSync(
           join(artifactDir, "contract.md"),

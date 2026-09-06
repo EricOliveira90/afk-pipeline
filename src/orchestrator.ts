@@ -29,6 +29,22 @@ import {
 } from "./contract-transaction.js";
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
 import { renderPrompt } from "./prompt-template.js";
+import {
+  assembleExplorerEnvelope,
+  assembleGeneratorEnvelope,
+  projectGeneratorContractView,
+  projectGeneratorPatternsAndHarness,
+  validateExplorerEvidenceMap,
+  type GeneratorFailureSet,
+} from "./context-envelope.js";
+import {
+  assembleAdjudicationPlannerPrompt,
+  assembleFocusedScopeEvaluatorPrompt,
+  assembleFocusedScopePlannerPrompt,
+  assembleNegotiationEvaluatorPrompt,
+  assembleNegotiationPlannerPrompt,
+  promptAssemblyContext,
+} from "./contract-prompt-orchestration.js";
 import { readRelevantFiles, formatRelevantFiles, readSliceFile } from "./prd-reader.js";
 import { runWave, type WaveOutcome } from "./wave.js";
 import {
@@ -40,11 +56,16 @@ import {
   isForceRestarted,
   isResumeStuckRequested,
 } from "./resume.js";
-import { resolveBaseGateDeclarations } from "./base-gates.js";
+import {
+  resolveBaseGateDeclarations,
+  resolveFullSuiteGateDeclarations,
+  resolvePreQAGateDeclarations,
+} from "./base-gates.js";
 import {
   lifecycle,
   type SliceIdentity,
 } from "./slice-lifecycle.js";
+import { cleanupEligibility } from "./cleanup-eligibility.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 import {
   computeSliceBounds,
@@ -77,13 +98,20 @@ import {
 import {
   createCandidateCheckpoint,
   resolveCandidateTreeId,
-  runGates,
   verifyGateEvidence,
   type GateDeclaration,
   type GateEvidence,
   type GateEvidenceArtifact,
   type GateResult,
 } from "./gate-runner.js";
+import {
+  assertGateEvidenceReleasesEvaluation,
+  runCandidateGatePhase,
+} from "./candidate-gate-phase.js";
+import {
+  reviewArtifactViolations,
+  runPostQAGates,
+} from "./post-qa-gates.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -107,8 +135,8 @@ import {
   type RunStatus,
 } from "./handoff.js";
 import {
+  resolveCandidateQACommands,
   resolveGeneratorTestCommand,
-  resolveSanityCommands,
   resolveSanityPlan,
 } from "./preship.js";
 import { buildReviewScopeBlock, runShipGate } from "./ship-gate.js";
@@ -146,10 +174,13 @@ import {
   acceptanceManifestPaths,
   loadAcceptanceManifest,
   normalizeAcceptanceManifestPath,
+  parseAcceptanceManifest,
+  restoreAcceptanceManifestRevisionScope,
   type AcceptanceManifest,
   type AcceptanceManifestV2,
   validateAcceptanceManifestBindings,
   validateAcceptanceManifestCoverage,
+  validateAcceptanceManifestRevisionScope,
   validateAcceptanceManifestStability,
 } from "./acceptance-manifest.js";
 import {
@@ -198,7 +229,6 @@ import {
   type QAReviewStage,
 } from "./qa-review.js";
 import {
-  formatQAGeneratorContext,
   loadQAConvergenceState,
   type QAConvergenceState,
 } from "./qa-convergence.js";
@@ -215,6 +245,7 @@ import {
   type ValidatedContractReview,
 } from "./convergence-coordinator.js";
 import { AcceptedCandidateLifecycle } from "./accepted-candidate.js";
+import { decideCandidateGatePhase } from "./candidate-gate-policy.js";
 import {
   applyScopeAmendment,
   buildScopeAmendmentRecord,
@@ -367,7 +398,10 @@ export interface PipelineConfig {
   selectedSliceNumbers?: string[];
   /** Parsed `<prd-dir>/afk.json`; absent preserves legacy behavior. */
   manifest?: AfkManifest | null;
-  /** Contract negotiation cap, bounded by the global two-round limit. */
+  /**
+   * Normal contract negotiation cap. The one-time convergence extension is
+   * awarded by artifact evidence, never requested through this setting.
+   */
   maxContractRounds?: number;
   /**
    * Agent provider. Drives branch namespacing (via `provider.name`) and
@@ -418,6 +452,14 @@ export interface PipelineConfig {
    * whole-suite guarantee moves per-checkpoint, not away. See ADR 0038.
    */
   testCommand?: string;
+  /** Effective inline byte limit for each assembled generator prompt. */
+  generatorInlineSizeBudgetBytes?: number;
+  /** Effective inline byte limit for each assembled explorer prompt. */
+  explorerInlineSizeBudgetBytes?: number;
+  /** Effective inline byte limit for each assembled planner prompt. */
+  plannerInlineSizeBudgetBytes?: number;
+  /** Effective inline byte limit for each assembled contract-evaluator prompt. */
+  contractEvaluatorInlineSizeBudgetBytes?: number;
   /** Execute independent lanes serially to avoid shared-service contention. */
   serialLanes?: boolean;
   /**
@@ -686,6 +728,7 @@ export function buildRunNamespace(args: {
   featBranch: string;
   intended: ReadonlyArray<{ path: string; branch: string }>;
   retained?: ReadonlyArray<{ path: string; branch: string }>;
+  cleanable?: ReadonlyArray<{ path: string; branch: string }>;
 }): RunNamespace {
   const slicePattern = sliceWorktreeNamePattern(args.prdSlug, args.provider);
   const scratchPattern = scratchMergeNamePattern(args.prdSlug, args.provider);
@@ -703,6 +746,7 @@ export function buildRunNamespace(args: {
     ],
     intended: args.intended,
     retained: args.retained ?? args.intended,
+    cleanable: args.cleanable ?? [],
   };
 }
 
@@ -753,22 +797,21 @@ export interface SliceContext {
   /**
    * Set by `runSliceNegotiate` when the slice resumed from its
    * surviving branch tip instead of restarting from base (spec #33).
-   * Drives the round-1 generator prompt: a resumed generator gets a
-   * resume template (own commit log, verify-then-continue) instead of
-   * the normal one. Absent for fresh and restarted slices.
+   * Drives the round-1 generator repair envelope with the surviving
+   * situation facts. Absent for fresh and restarted slices.
    */
   resume?: {
     /**
-     * Which resume this is, selecting the round-1 generator template.
+     * Which resume situation the repair envelope describes.
      *
      * - `killed` — the default path (#33): the previous invocation died
      *   mid-run, so the tree was reset to its last commit and refreshed
      *   from the feature branch before the generator was handed
-     *   `generator-resume`.
+     *   the repair envelope.
      * - `stuck` — the operator opted in with `--resume-stuck` (#49): the
      *   tree was left untouched and the stuck.md diagnosis survives.
-     *   Both modes use `generator-resume`; explicit situation blocks
-     *   carry their opposite worktree facts without template drift.
+     *   Both modes use `generator-repair`; explicit situation blocks
+     *   carry their opposite worktree facts.
      */
     mode: "killed" | "stuck";
     /** Commits on the slice branch beyond the feature-branch base. */
@@ -806,7 +849,20 @@ export interface SliceContext {
    */
   onContractLocked?: (contractPath: string) => string | null;
   invoke: (
-    opts: Parameters<AgentProvider["invoke"]>[0],
+    opts: Parameters<AgentProvider["invoke"]>[0] & {
+      /**
+       * Identity for the post-return `invocation-completed` event when the
+       * invocation carries no assembled envelope (candidate-QA and
+       * shared-preview evaluators). Stripped before the provider call.
+       */
+      completionEvidence?: {
+        ghIssue: string;
+        sliceNumber: string;
+        round: number;
+        attempt?: number;
+        role: "evaluator-qa" | "evaluator-uat";
+      };
+    },
   ) => ReturnType<AgentProvider["invoke"]>;
 }
 
@@ -831,11 +887,11 @@ export function makeSliceContext(
   const relSpecsDir = specsDir.replace(/\\/g, "/");
   const tag = `[afk] Slice #${slice.ghIssue} (${slice.title})`;
 
-  const sanityCommands = resolveSanityCommands(repoRoot);
+  const sanityCommands = resolveCandidateQACommands(repoRoot);
   const sanityCommandsBlock =
     sanityCommands.length > 0
       ? sanityCommands.map((c) => `- \`${c}\``).join("\n")
-      : "(no typecheck/lint/test scripts defined in this project — skip)";
+      : "(no pre-QA typecheck/lint scripts defined in this project — skip)";
   const siblingHandoffs = slice.blockedBy
     .map((issue) => config.dag.slices.get(issue))
     .filter((dependency): dependency is Slice => dependency !== undefined)
@@ -846,13 +902,46 @@ export function makeSliceContext(
     ? siblingHandoffs.map((path) => `- \`${path}\``).join("\n")
     : "(none — this slice declares no AFK dependencies)";
 
-  const invoke = async (opts: Parameters<AgentProvider["invoke"]>[0]) => {
+  const invoke = async (
+    opts: Parameters<AgentProvider["invoke"]>[0] & {
+      /**
+       * Identity for the post-return `invocation-completed` event when the
+       * invocation carries no assembled envelope (candidate-QA and
+       * shared-preview evaluators). Completion telemetry — token counts,
+       * `nonCommandTimeMs` — is decoupled from PRD 3 envelope assembly
+       * because evaluator reading time is the measurement the ROI rider
+       * scores (plan §3 item 13; guardian round 6). Stripped before the
+       * provider call: providers stay command/output adapters (ADR 0002).
+       */
+      completionEvidence?: {
+        ghIssue: string;
+        sliceNumber: string;
+        round: number;
+        attempt?: number;
+        role: "evaluator-qa" | "evaluator-uat";
+      };
+    },
+  ) => {
+    const { completionEvidence, ...providerOpts } = opts;
     // Transient model outages (provider-classified) retry here with
     // backoff instead of failing the slice. See ADR 0022.
     const result = await withTransientRetry(
-      () =>
-        provider.invoke({
-          ...opts,
+      () => {
+        // Assembly evidence is journaled immediately before EVERY provider
+        // dispatch — inside the retry callback, so a transient-retry
+        // re-dispatch also observes its matching `prompt-assembly` event
+        // as the immediately preceding journal entry, and the record
+        // exists even when the invocation dies before returning
+        // (slice #83; guardian round 2 PM 4, round 3 PM 2). Post-return
+        // facts arrive in `invocation-completed`.
+        if (opts.contextEnvelope !== undefined) {
+          logger.event({
+            type: "prompt-assembly",
+            ...opts.contextEnvelope,
+          });
+        }
+        return provider.invoke({
+          ...providerOpts,
           signal,
           onIdleWarning: (minutes) => {
             if (opts.logStream) {
@@ -874,7 +963,8 @@ export function makeSliceContext(
                 `deferring idle kill (wall-clock ceiling still applies)`,
             });
           },
-        }),
+        });
+      },
       {
         windowMs: config.transientRetryWindowMs,
         sleep: config.transientRetrySleep,
@@ -899,6 +989,35 @@ export function makeSliceContext(
       },
     );
     logger.addInvocationStats(slice.ghIssue, result.stats);
+    // Post-return completion telemetry: identity comes from the assembled
+    // envelope when there is one, or from `completionEvidence` for the
+    // evaluator invocations whose envelope path is deferred (guardian
+    // round 6 — evaluator reading time is the ROI rider's measurement).
+    const completionIdentity =
+      opts.contextEnvelope !== undefined
+        ? {
+            ghIssue: opts.contextEnvelope.ghIssue,
+            sliceNumber: opts.contextEnvelope.sliceNumber,
+            round: opts.contextEnvelope.round,
+            role: opts.contextEnvelope.role,
+          }
+        : completionEvidence;
+    if (completionIdentity !== undefined) {
+      const tokenCounts = result.stats.tokenCounts;
+      // nonCommandTimeMs rides along as evidence only (ADR 0046
+      // amendment) — recorded when the provider measured it, omitted
+      // otherwise. Nothing branches on it.
+      const nonCommandTimeMs = result.stats.nonCommandTimeMs;
+      logger.event({
+        type: "invocation-completed",
+        ...completionIdentity,
+        ...(tokenCounts !== undefined &&
+        Object.keys(tokenCounts).length > 0
+          ? { tokenCounts }
+          : {}),
+        ...(nonCommandTimeMs !== undefined ? { nonCommandTimeMs } : {}),
+      });
+    }
     return result;
   };
 
@@ -1158,31 +1277,30 @@ async function reviseAcceptedContract(
     "planner",
     revisionRound,
   );
+  const promptContext = promptAssemblyContext(
+    logger,
+    slice,
+    ctx.relSpecsDir,
+    ctx.relSliceDir,
+    revisionRound,
+  );
+  const plannerPrompt = assembleFocusedScopePlannerPrompt({
+    context: promptContext,
+    repoRoot: ctx.worktreeDir,
+    currentContract: readFileSync(contractPath, "utf-8"),
+    currentAcceptanceManifest: previousManifestText,
+    scopeEvidence: evidence,
+    contractResponseFilename: CONTRACT_RESPONSE_FILENAME,
+    migrationReservation: migrationReservationBlock(config, slice.ghIssue),
+    baseGateCatalog: formatBaseGateCatalog(
+      resolveBaseGateDeclarations(ctx.worktreeDir),
+    ),
+    inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
+  });
   await invoke({
     role: "planner",
-    prompt: renderPrompt("planner", {
-      GH_ISSUE: slice.ghIssue,
-      SPECS_DIR: ctx.relSpecsDir,
-      SLICE_DIR: ctx.relSliceDir,
-      ROUND: revisionRound,
-      RELEVANT_FILES: ctx.relevantFilesBlock,
-      SLICE_BODY:
-        `This is a focused revision of the already accepted contract. ` +
-        `The generator supplied this validated scope evidence:\n${evidence}`,
-      REVISION_NOTE:
-        `The generator stopped before an undeclared edit. Revise only the ` +
-        `contract and acceptance manifest needed to declare this request:\n` +
-        `${evidence}\n\nPreserve every other locked term.`,
-      CONTRACT_RESPONSE_NOTE:
-        `Do not write ${CONTRACT_RESPONSE_FILENAME} for this focused scope revision.`,
-      MIGRATION_RESERVATION: migrationReservationBlock(
-        config,
-        slice.ghIssue,
-      ),
-      BASE_GATE_CATALOG: formatBaseGateCatalog(
-        resolveBaseGateDeclarations(ctx.worktreeDir),
-      ),
-    }),
+    prompt: plannerPrompt.prompt,
+    contextEnvelope: plannerPrompt.contextEnvelope,
     cwd: ctx.worktreeDir,
     logStream: plannerLog,
     maxDurationMs: config.maxAgentDurationMs,
@@ -1293,26 +1411,22 @@ async function reviseAcceptedContract(
     "evaluator-contract",
     revisionRound,
   );
+  const evaluatorPrompt = assembleFocusedScopeEvaluatorPrompt({
+    context: promptContext,
+    contractReviewFile: CONTRACT_REVIEW_FILENAME,
+    proposedContract: readFileSync(contractPath, "utf-8"),
+    acceptanceManifest: revisedManifest,
+    baseGateCatalog: formatBaseGateCatalog(gateCatalog),
+    explorerContext: readFileSync(
+      join(ctx.absSliceDir, "context.md"),
+      "utf-8",
+    ),
+    inlineSizeBudgetBytes: config.contractEvaluatorInlineSizeBudgetBytes,
+  });
   await invoke({
     role: "evaluator-contract",
-    prompt: renderPrompt("evaluator-contract", {
-      SPECS_DIR: ctx.relSpecsDir,
-      SLICE_DIR: ctx.relSliceDir,
-      ROUND: revisionRound,
-      RELEVANT_FILES: ctx.relevantFilesBlock,
-      PREVIOUS_REVIEW_NOTE:
-        "This is a fresh evaluation of one focused generator scope revision.",
-      ACCEPTANCE_MANIFEST: JSON.stringify(revisedManifest, null, 2),
-      BASE_GATE_CATALOG: formatBaseGateCatalog(gateCatalog),
-      CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
-      PLANNER_RESPONSE:
-        "(fresh scope revision; no contract-review finding response)",
-      REVISION_CONTEXT: JSON.stringify(
-        { scopeEscalation: escalation, revisions },
-        null,
-        2,
-      ),
-    }),
+    prompt: evaluatorPrompt.prompt,
+    contextEnvelope: evaluatorPrompt.contextEnvelope,
     cwd: ctx.worktreeDir,
     logStream: evaluatorLog,
     maxDurationMs: config.maxAgentDurationMs,
@@ -2526,13 +2640,6 @@ async function runImpasseAdjudication(
       );
 
       if (plannerApplied.length > 0) {
-        const localSliceContent = readSliceFile(
-          config.prdDir,
-          ctx.slice.number,
-        );
-        const sliceBodyNote = localSliceContent
-          ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
-          : `No local issue manifest was found. Fetch the issue body with: gh issue view ${ctx.slice.ghIssue}`;
         const preApplyManifest = loadAcceptanceManifest(ctx.absSliceDir);
         // An unproven LOCKED contract reaching here is stale debris the
         // reconciliation above could not clear (its log validated, so the
@@ -2556,36 +2663,38 @@ async function runImpasseAdjudication(
         );
         const plannerLog = logger.agentLog(ctx.slice.number, "planner");
         try {
+          const plannerPrompt = assembleAdjudicationPlannerPrompt({
+            context: promptAssemblyContext(
+              logger,
+              ctx.slice,
+              ctx.relSpecsDir,
+              ctx.relSliceDir,
+              2,
+            ),
+            repoRoot: ctx.worktreeDir,
+            currentContract: readFileSync(contractPath, "utf-8"),
+            currentAcceptanceManifest: JSON.stringify(
+              preApplyManifest,
+              null,
+              2,
+            ),
+            impasseRecord: rawOutcome,
+            decisions: decisionLog.decisions.map((recorded) => recorded.raw),
+            contractResponseFilename: CONTRACT_RESPONSE_FILENAME,
+            migrationReservation: migrationReservationBlock(
+              config,
+              ctx.slice.ghIssue,
+            ),
+            baseGateCatalog: formatBaseGateCatalog(
+              resolveBaseGateDeclarations(ctx.worktreeDir),
+            ),
+            inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
+          });
           await ctx
             .invoke({
               role: "planner",
-              prompt: renderPrompt("planner", {
-                GH_ISSUE: ctx.slice.ghIssue,
-                SPECS_DIR: ctx.relSpecsDir,
-                SLICE_DIR: ctx.relSliceDir,
-                ROUND: 2,
-                RELEVANT_FILES: ctx.relevantFilesBlock,
-                SLICE_BODY: sliceBodyNote,
-                REVISION_NOTE: [
-                  "A human has adjudicated the current contract impasse.",
-                  "Apply every decision below exactly once, and only to the",
-                  "finding each one names. Do not re-adjudicate any of them.",
-                  "",
-                  "Current IMPASSE record (verbatim):",
-                  rawOutcome,
-                  "Human adjudications (verbatim, one per decided finding):",
-                  ...decisionLog.decisions.map((recorded) => recorded.raw),
-                ].join("\n"),
-                CONTRACT_RESPONSE_NOTE:
-                  `Do not write ${CONTRACT_RESPONSE_FILENAME}; the human adjudication replaces another evaluator round.`,
-                MIGRATION_RESERVATION: migrationReservationBlock(
-                  config,
-                  ctx.slice.ghIssue,
-                ),
-                BASE_GATE_CATALOG: formatBaseGateCatalog(
-                  resolveBaseGateDeclarations(ctx.worktreeDir),
-                ),
-              }),
+              prompt: plannerPrompt.prompt,
+              contextEnvelope: plannerPrompt.contextEnvelope,
               cwd: ctx.worktreeDir,
               maxDurationMs: config.maxAgentDurationMs,
               logStream: plannerLog,
@@ -2697,7 +2806,31 @@ async function negotiateAttempt(
       ? `The slice issue body is provided below (no need to fetch from GH):\n\n---\n${localSliceContent}\n---`
       : `No local issue manifest was found. Fetch the issue body with: gh issue view ${slice.ghIssue}`;
     const contextPath = join(ctx.absSliceDir, "context.md");
-    if (!existsSync(contextPath)) {
+    let hasValidContext = false;
+    if (existsSync(contextPath)) {
+      try {
+        validateExplorerEvidenceMap(readFileSync(contextPath, "utf-8"));
+        hasValidContext = true;
+      } catch {
+        // A malformed prior artifact is not accepted for planner dispatch.
+        // The explorer gets one chance to replace it with the current format.
+      }
+    }
+    if (!hasValidContext) {
+      const assembled = assembleExplorerEnvelope({
+        repoRoot: ctx.worktreeDir,
+        ghIssue: slice.ghIssue,
+        title: slice.title,
+        sliceDir: ctx.relSliceDir,
+        relevantFiles: relevantFilesBlock,
+        sliceBody: sliceBodyNote,
+        ...(config.explorerInlineSizeBudgetBytes !== undefined
+          ? {
+              inlineSizeBudgetBytes:
+                config.explorerInlineSizeBudgetBytes,
+            }
+          : {}),
+      });
       logger.phase(`${ctx.tag}: exploring...`, "error", {
         type: "phase-started",
         ghIssue: slice.ghIssue,
@@ -2707,13 +2840,13 @@ async function negotiateAttempt(
       await invokeAgent(
         {
           role: "explorer",
-          prompt: renderPrompt("explorer", {
-            GH_ISSUE: slice.ghIssue,
-            TITLE: slice.title,
-            SLICE_DIR: ctx.relSliceDir,
-            RELEVANT_FILES: relevantFilesBlock,
-            SLICE_BODY: sliceBodyNote,
-          }),
+          prompt: assembled.prompt,
+          contextEnvelope: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round: 1,
+            ...assembled.evidence,
+          },
           cwd: ctx.worktreeDir,
           maxDurationMs: config.maxAgentDurationMs,
         },
@@ -2726,6 +2859,13 @@ async function negotiateAttempt(
         agent: "explorer",
       });
     }
+    if (!existsSync(contextPath)) {
+      throw new Error(
+        `Explorer did not write required artifact ${ctx.relSliceDir}/context.md`,
+      );
+    }
+    const explorerContext = readFileSync(contextPath, "utf-8");
+    validateExplorerEvidenceMap(explorerContext);
 
     // --- Step 2: Planner (contract negotiation) ---
     const contractPath = join(ctx.absSliceDir, "contract.md");
@@ -2938,16 +3078,61 @@ async function negotiateAttempt(
           pendingObjection,
         );
         const routedFindings = plannerRound.routedFindings;
+        const relevantResolvedFindings =
+          plannerRound.relevantResolvedFindings;
         const requiresPlannerResponse = plannerRound.requiresResponse;
+        const currentContractText = existsSync(contractPath)
+          ? readFileSync(contractPath, "utf-8")
+          : "";
+        const currentManifestPath = join(
+          ctx.absSliceDir,
+          ACCEPTANCE_MANIFEST_FILENAME,
+        );
+        const currentManifestText = existsSync(currentManifestPath)
+          ? readFileSync(currentManifestPath, "utf-8")
+          : "(missing acceptance manifest)";
         const previousArtifactText = requiresPlannerResponse
           ? {
-              contract: readFileSync(contractPath, "utf-8"),
-              manifest: readFileSync(
-                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
-                "utf-8",
-              ),
+              contract: currentContractText,
+              manifest: currentManifestText,
             }
           : null;
+        const contractResponseInstructions = requiresPlannerResponse
+          ? [
+              `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
+              "Use exactly the required version-1 schema.",
+              `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
+              "CONDITION_MET and CONTESTED require non-blank evidence.",
+            ].join("\n")
+          : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`;
+        const baseGateCatalog = formatBaseGateCatalog(
+          resolveBaseGateDeclarations(ctx.worktreeDir),
+        );
+        const plannerPrompt = assembleNegotiationPlannerPrompt({
+          context: promptAssemblyContext(
+            logger,
+            slice,
+            ctx.relSpecsDir,
+            ctx.relSliceDir,
+            round,
+          ),
+          repoRoot: ctx.worktreeDir,
+          useInitialEnvelope: round === 1 && pendingObjection === null,
+          sliceBody: sliceBodyNote,
+          explorerContext,
+          currentContract: currentContractText,
+          currentAcceptanceManifest: currentManifestText,
+          findings: routedFindings,
+          resolvedFindings: relevantResolvedFindings,
+          pendingObjection,
+          contractResponseInstructions,
+          migrationReservation: migrationReservationBlock(
+            config,
+            slice.ghIssue,
+          ),
+          baseGateCatalog,
+          inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
+        });
 
         logger.phase(
           `${ctx.tag}: planning (round ${round}/${contractRoundLimit})...`,
@@ -2966,32 +3151,8 @@ async function negotiateAttempt(
         await invokeAgent(
           {
             role: "planner",
-            prompt: renderPrompt("planner", {
-              GH_ISSUE: slice.ghIssue,
-              SPECS_DIR: ctx.relSpecsDir,
-              SLICE_DIR: ctx.relSliceDir,
-              ROUND: round,
-              RELEVANT_FILES: relevantFilesBlock,
-              SLICE_BODY: sliceBodyNote,
-              REVISION_NOTE: plannerRound.revisionNote,
-              CONTRACT_RESPONSE_NOTE: requiresPlannerResponse
-                ? [
-                    `Write ${ctx.relSliceDir}/${CONTRACT_RESPONSE_FILENAME} after revising the contract.`,
-                    "Use exactly this schema:",
-                    `{"version":1,"round":${round},"responses":[{"findingId":"F-01","position":"UNRESOLVED","evidence":""}]}`,
-                    `Include one response for each routed ID and no others: ${routedFindings.map(({ id }) => id).join(", ")}.`,
-                    "CONDITION_MET and CONTESTED require non-blank evidence.",
-                  ].join("\n")
-                : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`,
-              MIGRATION_RESERVATION: migrationReservationBlock(config, slice.ghIssue),
-              // The planner must bind every behavior to a gate the
-              // lock gate can verify, so it is told the same derived
-              // catalog that check reads — otherwise it can only guess
-              // IDs and burn rounds on refusals.
-              BASE_GATE_CATALOG: formatBaseGateCatalog(
-                resolveBaseGateDeclarations(ctx.worktreeDir),
-              ),
-            }),
+            prompt: plannerPrompt.prompt,
+            contextEnvelope: plannerPrompt.contextEnvelope,
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
@@ -3013,15 +3174,11 @@ async function negotiateAttempt(
           round,
         });
 
-        let acceptanceManifestBlock = "";
         let baseGateCatalogBlock = "";
+        let evaluatedManifest: AcceptanceManifest | null = null;
         try {
           const lockArtifacts = loadBehaviorLockArtifacts();
-          acceptanceManifestBlock = JSON.stringify(
-            lockArtifacts.manifest,
-            null,
-            2,
-          );
+          evaluatedManifest = lockArtifacts.manifest;
           baseGateCatalogBlock = formatBaseGateCatalog(
             lockArtifacts.gateCatalog,
           );
@@ -3076,6 +3233,39 @@ async function negotiateAttempt(
                 ),
               },
             };
+            const allowedBehaviorIds = [
+              ...new Set(
+                routedFindings.flatMap(({ behaviorIds }) => behaviorIds),
+              ),
+            ];
+            const restoredRevision =
+              restoreAcceptanceManifestRevisionScope(
+                parseAcceptanceManifest(previousArtifactText!.manifest),
+                loadAcceptanceManifest(ctx.absSliceDir),
+                allowedBehaviorIds,
+              );
+            if (restoredRevision.restoredBehaviorIds.length > 0) {
+              writeFileSync(
+                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                `${JSON.stringify(restoredRevision.manifest, null, 2)}\n`,
+                "utf-8",
+              );
+              revisionArtifacts["acceptance-manifest.json"].after =
+                readFileSync(
+                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                  "utf-8",
+                );
+              logger.phase(
+                `${ctx.tag}: restored unrelated planner revision drift in ` +
+                  `${restoredRevision.restoredBehaviorIds.join(", ")}`,
+                "error",
+              );
+            }
+            validateAcceptanceManifestRevisionScope(
+              parseAcceptanceManifest(previousArtifactText!.manifest),
+              loadAcceptanceManifest(ctx.absSliceDir),
+              allowedBehaviorIds,
+            );
           } catch (error) {
             const defect =
               error instanceof Error ? error.message : String(error);
@@ -3117,28 +3307,32 @@ async function negotiateAttempt(
         let latestValidatedReview: ValidatedContractReview | null = null;
         let latestValidationError: unknown = null;
         let attemptLifecyclePrevious: ContractReview | null = null;
+        const currentContract = readFileSync(contractPath, "utf-8");
+        const evaluatorPrompt = assembleNegotiationEvaluatorPrompt({
+          context: promptAssemblyContext(
+            logger,
+            slice,
+            ctx.relSpecsDir,
+            ctx.relSliceDir,
+            evaluatorRound,
+          ),
+          useInitialEnvelope: evaluatorRound === 1,
+          contractReviewFile: CONTRACT_REVIEW_FILENAME,
+          proposedContract: currentContract,
+          acceptanceManifest: evaluatedManifest!,
+          baseGateCatalog: baseGateCatalogBlock,
+          explorerContext,
+          previousFindings: previousReview?.findings ?? [],
+          plannerResponse,
+          revisions: revisionArtifacts,
+          inlineSizeBudgetBytes:
+            config.contractEvaluatorInlineSizeBudgetBytes,
+        });
         await invokeAgent(
           {
             role: "evaluator-contract",
-            prompt: renderPrompt("evaluator-contract", {
-              SPECS_DIR: ctx.relSpecsDir,
-              SLICE_DIR: ctx.relSliceDir,
-              ROUND: evaluatorRound,
-              RELEVANT_FILES: relevantFilesBlock,
-              PREVIOUS_REVIEW_NOTE: contractLifecycle.evaluatorHistoryNote(
-                evaluatorRound,
-                ctx.relSliceDir,
-              ),
-              ACCEPTANCE_MANIFEST: acceptanceManifestBlock,
-              BASE_GATE_CATALOG: baseGateCatalogBlock,
-              CONTRACT_REVIEW_FILE: CONTRACT_REVIEW_FILENAME,
-              PLANNER_RESPONSE: plannerResponse
-                ? JSON.stringify(plannerResponse, null, 2)
-                : "(first review round; no planner response)",
-              REVISION_CONTEXT: revisionArtifacts
-                ? JSON.stringify(revisionArtifacts, null, 2)
-                : "(first review round; no prior revision)",
-            }),
+            prompt: evaluatorPrompt.prompt,
+            contextEnvelope: evaluatorPrompt.contextEnvelope,
             cwd: ctx.worktreeDir,
             maxDurationMs: config.maxAgentDurationMs,
           },
@@ -3506,6 +3700,16 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
       dispatch: { action: "CONTINUE" };
+      /**
+       * Exact bytes of the accepted pair as the orchestrator's scope
+       * amendment transaction left them, recorded as repo-relative path →
+       * git blob ID immediately after the write. Present only when this
+       * stage applied an amendment. The tree-authority guard admits those
+       * paths only at exactly these blobs, and the stage itself re-verifies
+       * them before returning, so a later evaluator edit to either
+       * artifact invalidates the verdict (guardian round 4, architect A1).
+       */
+      amendedPairBlobs?: Readonly<Record<string, string>>;
     }
   | {
       outcome: "IMPLEMENTATION";
@@ -3514,6 +3718,8 @@ export type QAStageResult =
       unresolved: QAReviewAttemptFinding[];
       convergence: QAConvergenceState;
       dispatch: QAAttemptDispatch;
+      /** See the PASS variant. */
+      amendedPairBlobs?: Readonly<Record<string, string>>;
     };
 
 /**
@@ -3556,6 +3762,40 @@ export interface QABaseGateEvidence {
   /** Repo-relative path of the verified evidence artifact. */
   evidenceArtifactId: string;
   declarations: readonly GateDeclaration[];
+  /**
+   * Git tree object ID captured for the candidate QA is about to review.
+   * This is not a commit ID and must not be compared with HEAD.
+   */
+  candidateTreeId?: string;
+}
+
+/**
+ * A PASS after a scope amendment is only valid over the exact pair bytes
+ * the orchestrator's transaction wrote. The evaluator re-grade runs in the
+ * mutable worktree, so re-hash both artifacts before honoring the verdict
+ * and fail closed on any drift (guardian round 4, architect A1; ADR 0048:
+ * agents never edit the locked file list).
+ */
+function assertAmendedPairIntact(
+  ctx: SliceContext,
+  amendedPairBlobs: Readonly<Record<string, string>> | undefined,
+  stage: QAReviewStage,
+  round: number,
+): void {
+  if (!amendedPairBlobs) return;
+  const drifted = Object.entries(amendedPairBlobs).filter(
+    ([path, blobId]) =>
+      git.hashFileAsBlob(ctx.worktreeDir, path) !== blobId,
+  );
+  if (drifted.length > 0) {
+    throw new Error(
+      `${stage} PASS in round ${round} is not honored: the accepted pair ` +
+        `changed after the orchestrator's scope amendment transaction ` +
+        `(${drifted.map(([path]) => path).join(", ")}). Agents never edit ` +
+        `the locked contract pair (ADR 0048); the verdict does not ` +
+        `authorize these bytes.`,
+    );
+  }
 }
 
 export async function runQAStage(
@@ -3617,6 +3857,13 @@ export async function runQAStage(
    * Pass 2 never ran.
    */
   let amendments = 0;
+  /**
+   * Exact accepted-pair bytes as the latest amendment transaction left
+   * them (repo-relative path → git blob ID), recorded inside the
+   * transaction so no other writer can interleave. `undefined` until an
+   * amendment applies (guardian round 4, architect A1).
+   */
+  let amendedPairBlobs: Record<string, string> | undefined;
   /** Attempts this stage-round may still spend, amendments included. */
   const attemptLimit = () => infrastructureRetries + 1 + amendments;
 
@@ -3633,7 +3880,7 @@ export async function runQAStage(
    * told to skip the sanity list outright and run remote scenarios, so there
    * is nothing to dedup.
    */
-  const authorizeSkip = (): BaseGateSkipAuthorization => {
+  const authorizeSkip = (attempt: number): BaseGateSkipAuthorization => {
     if (stage !== "deterministic") {
       // Refusing is what denies the citation; the prompt renders its own UAT
       // wording, because the generic refusal ends by ordering the sanity run
@@ -3650,17 +3897,20 @@ export async function runQAStage(
         reason: "no base-gate run was handed to this QA stage",
       };
     }
-    let reviewTreeId: string | null = null;
-    try {
-      reviewTreeId = resolveCandidateTreeId(ctx.worktreeDir);
-    } catch (error) {
-      // Hashing the candidate is the whole basis of the authorization, so a
-      // failure here is not an error to propagate — it is simply no
-      // authorization, and QA runs the gates as it always did.
-      logger.phase(
-        `${ctx.tag}: could not hash the tree under review; QA will re-run ` +
-          `the base gates (${error instanceof Error ? error.message : String(error)})`,
-      );
+    let reviewTreeId: string | null =
+      attempt === 1 ? (baseGate.candidateTreeId ?? null) : null;
+    if (reviewTreeId == null) {
+      try {
+        reviewTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+      } catch (error) {
+        // Hashing the candidate is the whole basis of the authorization, so a
+        // failure here is not an error to propagate — it is simply no
+        // authorization, and QA runs the gates as it always did.
+        logger.phase(
+          `${ctx.tag}: could not hash the tree under review; QA will re-run ` +
+            `the base gates (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
     }
     return authorizeBaseGateSkip({ ...baseGate, reviewTreeId });
   };
@@ -3670,7 +3920,7 @@ export async function runQAStage(
       ? `qa-report-r${round}-a${attempt}.md`
       : `uat-report-r${round}-a${attempt}.md`;
     const archivePath = join(ctx.absSliceDir, archiveName);
-    const skipAuthorization = authorizeSkip();
+    const skipAuthorization = authorizeSkip(attempt);
     type AttemptEvidence = {
       rawArchiveName: string | null;
       reportArchived: boolean;
@@ -3881,6 +4131,17 @@ export async function runQAStage(
       try {
         await invoke({
           role: "evaluator-qa",
+          // No assembled envelope: the candidate-evaluator prompt redesign
+          // is deferred, but completion telemetry still lands in
+          // events.jsonl with full identity (plan §3 item 13; guardian
+          // round 6).
+          completionEvidence: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            attempt,
+            role: stage === "deterministic" ? "evaluator-qa" : "evaluator-uat",
+          },
           prompt: renderPrompt("evaluator-qa", {
             SLICE_DIR: ctx.relSliceDir,
             RELEVANT_FILES: ctx.relevantFilesBlock,
@@ -4105,6 +4366,20 @@ export async function runQAStage(
                 plan,
               }),
             });
+            // Bind later authority boundaries to these exact bytes: the
+            // blob IDs are recorded inside the transaction, immediately
+            // after the orchestrator's own write, so an evaluator edit in
+            // any later re-grade cannot masquerade as the amendment
+            // (guardian round 4, architect A1).
+            amendedPairBlobs = Object.fromEntries(
+              ["contract.md", "acceptance-manifest.json"].map((name) => [
+                `${ctx.relSliceDir}/${name}`,
+                git.hashFileAsBlob(
+                  ctx.worktreeDir,
+                  `${ctx.relSliceDir}/${name}`,
+                ),
+              ]),
+            );
             tx.onAccepted();
           },
         );
@@ -4140,6 +4415,7 @@ export async function runQAStage(
     }
 
     if (review.verdict === "PASS") {
+      assertAmendedPairIntact(ctx, amendedPairBlobs, stage, round);
       return {
         outcome: "PASS",
         report: archiveDisplayPath,
@@ -4147,6 +4423,7 @@ export async function runQAStage(
         unresolved,
         convergence: convergenceState,
         dispatch: { action: "CONTINUE" },
+        ...(amendedPairBlobs ? { amendedPairBlobs } : {}),
       };
     }
     if (review.failureClass === "INFRASTRUCTURE") {
@@ -4191,35 +4468,11 @@ export async function runQAStage(
       unresolved,
       convergence: convergenceState,
       dispatch: coordinated.dispatch,
+      ...(amendedPairBlobs ? { amendedPairBlobs } : {}),
     };
   }
 
   throw new Error(`${stage} QA exhausted without a result`);
-}
-
-function assertGateEvidenceReleasesEvaluation(
-  evidence: GateEvidence,
-  declarations: readonly GateDeclaration[],
-  treeId: string,
-): void {
-  const complete =
-    evidence.treeId === treeId &&
-    evidence.results.length === declarations.length &&
-    evidence.results.every((result, index) => {
-      const declaration = declarations[index];
-      return (
-        declaration != null &&
-        result.gateId === declaration.id &&
-        result.stage === declaration.stage &&
-        result.treeId === treeId &&
-        (!declaration.required || result.status === "PASS")
-      );
-    });
-  if (!complete) {
-    throw new Error(
-      `Gate evidence does not release evaluation for checkpoint ${treeId}`,
-    );
-  }
 }
 
 export function collectRequiredGateFailures(
@@ -4258,6 +4511,10 @@ export async function runSliceExecute(
   let repairStage: QAReviewStage | null = null;
   let firstRound = 1;
   let retryNote = "";
+  let generatorFailureSet: GeneratorFailureSet = {
+    findings: [],
+    gates: [],
+  };
   const reviewArchiveDir = artifacts.contractReviewArchiveDir(
     config.repoRoot,
     pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
@@ -4401,6 +4658,14 @@ export async function runSliceExecute(
           : restored.retryStage === "shared-preview"
             ? sharedPreviewUnresolved
             : [];
+      generatorFailureSet = {
+        findings: resumedUnresolved.map((finding) => ({
+          id: finding.id,
+          clearCondition: finding.clearCondition,
+          artifactReferences: finding.artifactReferences,
+        })),
+        gates: [],
+      };
       repairStage = restored.retryStage;
       firstRound = restored.nextRound;
     }
@@ -4451,58 +4716,95 @@ export async function runSliceExecute(
           },
         );
         const genLog = logger.agentLog(slice.number, "generator", round);
-        const generatorPromptBase =
-          implementationAttempt === 1 && ctx.resume
-              ? renderPrompt("generator-resume", {
-                  SLICE_DIR: ctx.relSliceDir,
-                  RELEVANT_FILES: ctx.relevantFilesBlock,
-                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-                  TEST_COMMAND: ctx.testCommand,
-                  COMMITS_AHEAD: ctx.resume.commitsAhead,
-                  COMMIT_LOG: ctx.resume.commitLog,
-                  WORKTREE_STATE:
-                    ctx.resume.mode === "stuck"
-                      ? "**Your worktree was not touched.** Nothing was reset, cleaned, or dropped. Every committed change and uncommitted edit remains exactly where the previous attempt left it. Treat dirty-tree state as real work-in-progress."
-                      : "Your worktree was reset to your last commit. Uncommitted changes were discarded; anything after your last commit is gone and must be redone.",
-                  BASE_REFRESH_NOTE:
-                    ctx.resume.mode === "stuck"
-                      ? ctx.resume.baseRefreshed
-                        ? `The feature branch \`${featBranch}\` was merged into your branch just before this run, so your verification world is current.`
-                        : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`
-                      : `The feature branch \`${featBranch}\` was merged into your branch just before this run. Your verification world is current: work merged by sibling slices while you were away is now part of your tree.`,
-                  STUCK_NOTE:
-                    ctx.resume.mode === "stuck"
-                      ? ctx.resume.stuckNote ?? ""
-                      : "",
-                  UNRESOLVED_FINDINGS:
-                    qaConvergence.revision > 0
-                      ? formatQAGeneratorContext(
-                          qaConvergence,
-                          [],
-                          repairStage ?? undefined,
-                        )
-                      : formatUnresolvedQAFindings(resumedUnresolved),
-                  HANDOFF_NOTE: ctx.resume.handoffNote,
-                  MIGRATION_RESERVATION: migrationReservationBlock(
-                    config,
-                    slice.ghIssue,
-                  ),
-                })
-              : renderPrompt("generator", {
-                  SLICE_DIR: ctx.relSliceDir,
-                  RELEVANT_FILES: ctx.relevantFilesBlock,
-                  SIBLING_HANDOFFS: ctx.siblingHandoffsBlock,
-                  TEST_COMMAND: ctx.testCommand,
-                  RETRY_NOTE:
-                    implementationAttempt > 1 ? retryNote : "",
-                  MIGRATION_RESERVATION: migrationReservationBlock(
-                    config,
-                    slice.ghIssue,
-                  ),
-                });
-        const generatorPrompt = scopeRevisionNote
-          ? `${generatorPromptBase}\n\n${scopeRevisionNote}`
-          : generatorPromptBase;
+        const contract = readFileSync(
+          join(ctx.absSliceDir, "contract.md"),
+          "utf-8",
+        );
+        const acceptanceManifest = loadAcceptanceManifest(ctx.absSliceDir);
+        if (acceptanceManifest.version !== 2) {
+          throw new Error(
+            "Generator envelope requires an acceptance manifest with behavior bindings",
+          );
+        }
+        const contextPath = join(ctx.absSliceDir, "context.md");
+        const hasExplorerContext = existsSync(contextPath);
+        const context = hasExplorerContext
+          ? readFileSync(contextPath, "utf-8")
+          : "(no explorer context artifact is available for this legacy direct-execution path)";
+        const mode =
+          implementationAttempt === 1 &&
+          !ctx.resume &&
+          generatorAttempt === 1
+            ? "initial"
+            : "repair";
+        const worktreeState =
+          ctx.resume?.mode === "stuck"
+            ? "**Your worktree was not touched.** Nothing was reset, cleaned, or dropped. Every committed change and uncommitted edit remains exactly where the previous attempt left it. Treat dirty-tree state as real work-in-progress."
+            : "Your worktree was reset to your last commit. Uncommitted changes were discarded; anything after your last commit is gone and must be redone.";
+        const baseRefreshNote =
+          ctx.resume?.mode === "stuck"
+            ? ctx.resume.baseRefreshed
+              ? `The feature branch \`${featBranch}\` was merged into your branch just before this run, so your verification world is current.`
+              : `The feature branch \`${featBranch}\` could **not** be merged into your branch cleanly, and your tree was preserved rather than rebuilt. Your verification world may be behind the feature branch — do not assume sibling work is visible here.`
+            : `The feature branch \`${featBranch}\` was merged into your branch just before this run. Your verification world is current: work merged by sibling slices while you were away is now part of your tree.`;
+        const repairSituation =
+          mode === "repair"
+            ? [
+                `Implementation round: ${round} of ${finalRound}.`,
+                `Generator dispatch in this round: ${generatorAttempt}.`,
+                ...(ctx.resume
+                  ? [
+                      `Resume mode: ${ctx.resume.mode}.`,
+                      `Commits ahead of base: ${ctx.resume.commitsAhead}.`,
+                      "# Commit log",
+                      ctx.resume.commitLog || "(none)",
+                      "# Worktree state",
+                      worktreeState,
+                      "# Base refresh",
+                      baseRefreshNote,
+                      ...(ctx.resume.mode === "stuck" && ctx.resume.stuckNote
+                        ? ["# Preserved STUCK evidence", ctx.resume.stuckNote]
+                        : []),
+                      ...(ctx.resume.handoffNote
+                        ? ["# Prior handoff", ctx.resume.handoffNote]
+                        : []),
+                    ]
+                  : []),
+                ...(retryNote ? [retryNote] : []),
+                ...(scopeRevisionNote ? [scopeRevisionNote] : []),
+              ].join("\n\n")
+            : undefined;
+        const assembled = assembleGeneratorEnvelope({
+          mode,
+          sliceDir: ctx.relSliceDir,
+          contractView: projectGeneratorContractView(contract),
+          acceptanceManifest,
+          patternsAndHarness: projectGeneratorPatternsAndHarness(context),
+          ...(!hasExplorerContext
+            ? { patternsAndHarnessArtifactId: null }
+            : {}),
+          testCommand: ctx.testCommand,
+          migrationReservation: migrationReservationBlock(
+            config,
+            slice.ghIssue,
+          ),
+          failureSet: generatorFailureSet,
+          additionalArtifactIds: [
+            ...(ctx.resume?.mode === "stuck" && ctx.resume.stuckNote
+              ? [`${ctx.relSliceDir}/stuck.md`]
+              : []),
+            ...(ctx.resume?.handoffNote
+              ? [`${ctx.relSliceDir}/handoff.md`]
+              : []),
+          ],
+          ...(config.generatorInlineSizeBudgetBytes !== undefined
+            ? {
+                inlineSizeBudgetBytes:
+                  config.generatorInlineSizeBudgetBytes,
+              }
+            : {}),
+          ...(repairSituation !== undefined ? { repairSituation } : {}),
+        });
         rmSync(escalationPath, { force: true });
         // The accepted pair's bytes, captured before the generator can
         // touch them (architect A1, seventh gate round). Re-captured every
@@ -4513,7 +4815,13 @@ export async function runSliceExecute(
         const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
         await invoke({
           role: "generator",
-          prompt: generatorPrompt,
+          prompt: assembled.prompt,
+          contextEnvelope: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            ...assembled.evidence,
+          },
           cwd: ctx.worktreeDir,
           logStream: genLog,
           ...longCommandRoleBounds({
@@ -4714,8 +5022,16 @@ export async function runSliceExecute(
             args: [...basePlan.prepare.args],
           }
         : undefined;
-      const declarations = resolveBaseGateDeclarations(ctx.worktreeDir);
-      const checkpoint = declarations.some(
+      // Automatic related-suite selection is PRD 4 scope (#86). PRD 3 keeps
+      // the ADR 0012 amendment sequence: cheap typecheck/lint, then candidate
+      // QA, then the full slice suite (architect A1).
+      const preQaDeclarations = resolvePreQAGateDeclarations(ctx.worktreeDir);
+      const fullSuiteDeclarations =
+        resolveFullSuiteGateDeclarations(ctx.worktreeDir);
+      const preQaHasExecutable = preQaDeclarations.some(
+        (declaration) => declaration.command != null,
+      );
+      const checkpoint = [...preQaDeclarations, ...fullSuiteDeclarations].some(
         (declaration) => declaration.command != null,
       )
         ? createCandidateCheckpoint(ctx.worktreeDir, checkpointDir)
@@ -4725,130 +5041,74 @@ export async function runSliceExecute(
       implementationCandidateTreeIds.push(checkpoint.treeId);
       const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
-      const infrastructureRetries =
-        config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES;
-      if (
-        !Number.isSafeInteger(infrastructureRetries) ||
-        infrastructureRetries < 0
-      ) {
-        throw new Error("infrastructureRetries must be a non-negative integer");
-      }
-      const isRequired = (gateId: string) =>
-        declarations.some(
-          (declaration) =>
-            declaration.id === gateId && declaration.required,
-        );
-      let gateEvidence: GateEvidence | undefined;
-      let gateEvidencePath = "";
-      const gateAttempts: Array<{
-        evidence: GateEvidence;
-        evidencePath: string;
-      }> = [];
       try {
-        for (
-          let gateAttempt = 1;
-          gateAttempt <= infrastructureRetries + 1;
-          gateAttempt++
-        ) {
-          const gateRun = await runGates({
-            treeId: checkpoint.treeId,
-            cwd: gateCwd,
-            evidenceDir,
-            declarations,
-            ...(gatePrepare ? { prepare: gatePrepare } : {}),
-            signal,
-            inactivityTimeoutMs:
-              config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-            wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
-            heartbeatIntervalMs:
-              config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
-            onOutput: (_gateId, text) => process.stderr.write(text),
-          });
-          gateEvidencePath = gateRun.evidencePath;
-          gateArtifacts.push(gateRun.artifact);
-          gateEvidence = verifyGateEvidence(gateRun.artifact);
-          gateAttempts.push({
-            evidence: gateEvidence,
-            evidencePath: gateEvidencePath,
-          });
-          const evidenceArtifactId = relative(
-            config.repoRoot,
-            gateEvidencePath,
-          ).replace(/\\/g, "/");
-          for (const result of gateEvidence.results) {
+        const preQaGateRun = await runCandidateGatePhase({
+          repoRoot: config.repoRoot,
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          tag: ctx.tag,
+          round,
+          treeId: checkpoint.treeId,
+          cwd: gateCwd,
+          evidenceDir,
+          declarations: preQaDeclarations,
+          ...(gatePrepare && preQaHasExecutable
+              ? { prepare: gatePrepare }
+              : {}),
+          label: "pre-QA gates",
+          signal,
+          infrastructureRetries:
+            config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+          inactivityTimeoutMs:
+            config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+          wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+          heartbeatIntervalMs:
+            config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+          onGateOutcome: (outcome) => {
             logger.event({
               type: "gate-outcome",
               ghIssue: slice.ghIssue,
               sliceNumber: slice.number,
               round,
-              attemptId: gateEvidence.attemptId,
-              gateId: result.gateId,
-              stage: result.stage,
-              status: result.status,
-              failureKind: result.failureKind,
-              startedAt: result.startedAt,
-              endedAt: result.endedAt,
-              durationMs: result.durationMs,
-              exitCode: result.exitCode,
-              treeId: result.treeId,
-              evidenceArtifactId,
-              logArtifactId: result.logArtifactId,
+              ...outcome,
             });
-          }
-          const infrastructureFailure = gateEvidence.results.some(
-            (gate) =>
-              isRequired(gate.gateId) &&
-              gate.status === "INFRASTRUCTURE",
-          );
-          if (!infrastructureFailure || signal?.aborted) break;
-          if (gateAttempt <= infrastructureRetries) {
-            logger.phase(
-              `${ctx.tag}: base gates infrastructure retry ${gateAttempt}/${infrastructureRetries}`,
-              "error",
-              {
-                type: "warn",
-                reason: "infrastructure-retry",
-                ghIssue: slice.ghIssue,
-                message: `base gates infrastructure retry ${gateAttempt}/${infrastructureRetries}`,
-              },
-            );
-          }
+          },
+          onInfrastructureRetry: (message) => {
+            logger.phase(message, "error", {
+              type: "warn",
+              reason: "infrastructure-retry",
+              ghIssue: slice.ghIssue,
+              message,
+            });
+          },
+        });
+        gateArtifacts.push(...preQaGateRun.artifacts);
+        const gateEvidence = preQaGateRun.evidence;
+        const gateEvidencePath = preQaGateRun.evidencePath;
+        if (signal?.aborted) {
+          return { phase: "CANCELLED", error: CANCELLED_BY_USER };
         }
-      } finally {
-        if (checkpoint.worktreeDir) {
-          await git.removeWorktreeOrWarn(
-            ctx.worktreeDir,
-            checkpoint.worktreeDir,
-            {
-              label: "checkpoint worktree",
-              warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
-            },
-            { signal },
-          );
+        const evidenceDisplayPath = gateEvidencePath.replace(/\\/g, "/");
+        const requiredPreQaIds = new Set(
+          preQaDeclarations
+            .filter((declaration) => declaration.required)
+            .map((declaration) => declaration.id),
+        );
+        const requiredInfrastructure = gateEvidence.results.filter(
+          (gate) =>
+            requiredPreQaIds.has(gate.gateId) &&
+            gate.status === "INFRASTRUCTURE",
+        );
+        if (requiredInfrastructure.length > 0) {
+          return {
+            phase: "ERROR",
+            error: `Pre-QA gate infrastructure failed: ${requiredInfrastructure.map((gate) => gate.gateId).join(", ")} (${evidenceDisplayPath})`,
+          };
         }
-      }
-
-      if (!gateEvidence) {
-        throw new Error("Base gates produced no evidence");
-      }
-      if (signal?.aborted) {
-        return { phase: "CANCELLED", error: CANCELLED_BY_USER };
-      }
-      const evidenceDisplayPath = gateEvidencePath.replace(/\\/g, "/");
-      const requiredInfrastructure = gateEvidence.results.filter(
-        (gate) =>
-          isRequired(gate.gateId) && gate.status === "INFRASTRUCTURE",
-      );
-      if (requiredInfrastructure.length > 0) {
-        return {
-          phase: "ERROR",
-          error: `Base gate infrastructure failed: ${requiredInfrastructure.map((gate) => gate.gateId).join(", ")} (${evidenceDisplayPath})`,
-        };
-      }
-      const requiredFailures = collectRequiredGateFailures(
-        gateAttempts,
-        declarations,
-      );
+        const requiredFailures = collectRequiredGateFailures(
+          preQaGateRun.attempts,
+          preQaDeclarations,
+        );
       if (requiredFailures.length > 0) {
         const baseGateRepairReferences = [
           ...new Set(
@@ -4861,14 +5121,26 @@ export async function runSliceExecute(
           ),
         ];
         stuckReferences.push(...baseGateRepairReferences);
+        generatorFailureSet = {
+          findings: generatorFailureSet.findings,
+          gates: requiredFailures.map(({ evidencePath, result }) => ({
+            id: result.gateId,
+            evidence: [
+              evidencePath.replace(/\\/g, "/"),
+              join(evidenceDir, result.logArtifactId).replace(/\\/g, "/"),
+            ],
+          })),
+        };
+        // The retry note is control-plane text only; failure content —
+        // failed gate IDs, evidence, and any still-open finding's ID,
+        // clear condition, and references — travels exclusively in the
+        // compact failure set the envelope renders as the single final
+        // failure block (guardian round 2, PM 2).
         retryNote =
-          `This is implementation round ${round + 1}. Fix every unresolved ` +
-          `base-gate failure and preserve prior resolved QA behavior:\n` +
-          formatQAGeneratorContext(
-            qaConvergence,
-            baseGateRepairReferences,
-            repairStage ?? undefined,
-          );
+          `This is implementation round ${round + 1}. Base gates failed on ` +
+          `the current candidate. Fix every entry in the current failure ` +
+          `set at the end of this prompt without regressing behavior that ` +
+          `already passes.`;
         if (implementationAttempt < implementationAttemptLimit) continue;
         logger.bumpEvalRound(slice.ghIssue, round);
         return finishIntervention(
@@ -4883,21 +5155,22 @@ export async function runSliceExecute(
       } else {
         assertGateEvidenceReleasesEvaluation(
           gateEvidence,
-          declarations,
+          preQaDeclarations,
           checkpoint.treeId,
         );
         for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
         // The gates just passed on this tree; hand QA the evidence so it can
         // be authorized to cite them rather than run them again (ADR 0012,
-        // 2026-08-28). `runQAStage` re-hashes the tree and refuses on any
-        // mismatch, so passing the evidence never weakens the review.
+        // 2026-08-28). The first attempt uses the captured Git tree object ID
+        // directly; later attempts re-hash and fail closed after any mutation.
         const qaBaseGate: QABaseGateEvidence = {
           evidence: gateEvidence,
           evidenceArtifactId: relative(
             config.repoRoot,
             gateEvidencePath,
           ).replace(/\\/g, "/"),
-          declarations,
+          declarations: preQaDeclarations,
+          candidateTreeId: checkpoint.treeId,
         };
         logger.phase(
           `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
@@ -4941,21 +5214,34 @@ export async function runSliceExecute(
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
+        // An applied scope amendment is the one orchestrator-owned write
+        // that legitimately changes the accepted pair inside the QA
+        // window; carry its exact bytes to the tree-authority guard
+        // (architect A1, rounds 3–4).
+        let amendedPairBlobsThisAttempt = deterministic.amendedPairBlobs;
         if (deterministic.dispatch.action === "INTERVENE") {
           logger.bumpEvalRound(slice.ghIssue, round);
           return finishIntervention(deterministic.dispatch.request);
         }
         let qaDispatch = deterministic.dispatch;
         if (implementationFailed) {
+          generatorFailureSet = {
+            findings: deterministic.unresolved.map((finding) => ({
+              id: finding.id,
+              clearCondition: finding.clearCondition,
+              artifactReferences: finding.artifactReferences,
+            })),
+            gates: [],
+          };
           repairStage = "deterministic";
+          // Control-plane text only; the open findings' IDs, clear
+          // conditions, and references ride solely in the compact failure
+          // set above, rendered last in the prompt (guardian round 2, PM 2).
           retryNote =
-            `This is implementation round ${round + 1}. Repair the current ` +
-            `QA findings while preserving relevant resolved behavior:\n` +
-            formatQAGeneratorContext(
-              qaConvergence,
-              [],
-              "deterministic",
-            );
+            `This is implementation round ${round + 1}. Candidate QA left ` +
+            `open findings. Repair every finding in the current failure ` +
+            `set at the end of this prompt without regressing behavior ` +
+            `that already passes.`;
         }
         if (
           deterministic.outcome !== "IMPLEMENTATION" &&
@@ -5001,36 +5287,146 @@ export async function runSliceExecute(
             verdict: remote.outcome,
           });
           stuckReferences.push(remote.report);
+          amendedPairBlobsThisAttempt = remote.amendedPairBlobs
+            ? {
+                ...(amendedPairBlobsThisAttempt ?? {}),
+                ...remote.amendedPairBlobs,
+              }
+            : amendedPairBlobsThisAttempt;
           if (remote.dispatch.action === "INTERVENE") {
             logger.bumpEvalRound(slice.ghIssue, round);
             return finishIntervention(remote.dispatch.request);
           }
           if (remote.outcome === "IMPLEMENTATION") {
             implementationFailed = true;
+            generatorFailureSet = {
+              findings: remote.unresolved.map((finding) => ({
+                id: finding.id,
+                clearCondition: finding.clearCondition,
+                artifactReferences: finding.artifactReferences,
+              })),
+              gates: [],
+            };
             repairStage = "shared-preview";
             qaDispatch = remote.dispatch;
             retryNote =
               `This is implementation round ${round + 1}. Repair the current ` +
-              `QA findings while preserving relevant resolved behavior:\n` +
-              formatQAGeneratorContext(
-                qaConvergence,
-                [],
-                "shared-preview",
-              );
+              `shared-preview QA findings using the compact current failure ` +
+              `set below. Preserve deterministic behavior that already passed.`;
           }
         }
 
         logger.bumpEvalRound(slice.ghIssue, round);
         if (!implementationFailed) {
-          for (const artifact of gateArtifacts) verifyGateEvidence(artifact);
-          assertGateEvidenceReleasesEvaluation(
-            verifyGateEvidence(gateArtifacts.at(-1)!),
-            declarations,
-            checkpoint.treeId,
-          );
+          if (signal?.aborted) {
+            return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+          }
+          const postQaGates = await runPostQAGates({
+            repoRoot: config.repoRoot,
+            worktreeDir: ctx.worktreeDir,
+            prdSlug: config.prdSlug,
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            tag: ctx.tag,
+            round,
+            evidenceDir,
+            declarations: fullSuiteDeclarations,
+            ...(gatePrepare ? { prepare: gatePrepare } : {}),
+            signal,
+            infrastructureRetries:
+              config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+            inactivityTimeoutMs:
+              config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+            wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+            heartbeatIntervalMs:
+              config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+            priorAttemptTreeIds: implementationCandidateTreeIds,
+            priorArtifacts: gateArtifacts,
+            // The QA verdict is tied to this exact captured tree; the full
+            // suite may only run on a tree that differs from it by the
+            // exact expected QA-window artifacts, plus the accepted pair
+            // at exactly the bytes an audited scope amendment wrote
+            // (architect A1, ADR 0012).
+            qaApprovedTreeId: checkpoint.treeId,
+            reviewArtifactDir: ctx.relSliceDir,
+            ...(amendedPairBlobsThisAttempt
+              ? {
+                  orchestratorAuthorizedBlobs: amendedPairBlobsThisAttempt,
+                }
+              : {}),
+            onGateOutcome: (outcome) => {
+              logger.event({
+                type: "gate-outcome",
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                round,
+                ...outcome,
+              });
+            },
+            onInfrastructureRetry: (message) => {
+              logger.phase(message, "error", {
+                type: "warn",
+                reason: "infrastructure-retry",
+                ghIssue: slice.ghIssue,
+                message,
+              });
+            },
+            onCleanupWarning: (message) =>
+              logger.phase(`${ctx.tag}: ${message}`),
+          });
+          gateArtifacts.push(...postQaGates.artifacts);
+          if (postQaGates.action === "CANCELLED") {
+            return { phase: "CANCELLED", error: CANCELLED_BY_USER };
+          }
+          if (postQaGates.action === "ERROR") {
+            return { phase: "ERROR", error: postQaGates.error };
+          }
+          if (postQaGates.action === "REPAIR") {
+            stuckReferences.push(...postQaGates.references);
+            // QA passed this candidate before the full suite ran, so the
+            // finding set is resolved by construction. Replace the failure
+            // set with the gates-only projection instead of carrying the
+            // previous round's now-resolved findings into the next repair
+            // envelope (architect A2, PM P-02).
+            generatorFailureSet = postQaGates.failureSet;
+            retryNote = postQaGates.retryNote;
+            if (implementationAttempt < implementationAttemptLimit) continue;
+            return finishIntervention(
+              candidateLifecycle.exhaustDeterministicGates({
+                candidateTreeId: postQaGates.candidateTreeId,
+                revision: Math.max(qaConvergence.revision, round),
+                failedGateIds: postQaGates.failedGateIds,
+                attemptTreeIds: postQaGates.attemptTreeIds,
+                supportingEvidence: postQaGates.references,
+              }).request,
+            );
+          }
           // Before the commit, so the diagnosis this slice ships is the
           // one the operator read, not whatever the generator left.
           restoreStuckDiagnosis();
+          // The accepted tree must be the one the suite just authorized,
+          // modulo the exact expected QA-window artifacts (the restored
+          // diagnosis above is `stuck.md`, an allowed name). Fail closed
+          // on anything else — including the accepted pair, since no
+          // amendment can occur in this window (architect A1, ADR 0012).
+          const acceptedTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+          const acceptViolations = reviewArtifactViolations({
+            cwd: ctx.worktreeDir,
+            fromTree: postQaGates.candidateTreeId,
+            toTree: acceptedTreeId,
+            reviewArtifactDir: ctx.relSliceDir,
+          });
+          if (acceptViolations.length > 0) {
+            return {
+              phase: "ERROR",
+              error:
+                `Accepted candidate tree ${acceptedTreeId} differs from ` +
+                `the suite-authorized tree ${postQaGates.candidateTreeId} ` +
+                `beyond the expected QA-window artifacts ` +
+                `(${ctx.relSliceDir}/): ${acceptViolations.join(", ")}. ` +
+                `The gate evidence does not authorize this tree (ADR 0012).`,
+            };
+          }
           if (git.hasUncommittedChanges(ctx.worktreeDir)) {
             git.commitAll(
               ctx.worktreeDir,
@@ -5039,7 +5435,7 @@ export async function runSliceExecute(
           }
           return dispatchAcceptedCandidate(candidateLifecycle.accept({
             round,
-            candidateTreeId: resolveCandidateTreeId(ctx.worktreeDir),
+            candidateTreeId: acceptedTreeId,
           }));
         }
         if (qaDispatch.action === "FINAL_REPAIR") {
@@ -5082,6 +5478,19 @@ export async function runSliceExecute(
             supportingEvidence: stuckReferences,
           }).request,
         );
+      }
+      } finally {
+        if (checkpoint.worktreeDir) {
+          await git.removeWorktreeOrWarn(
+            ctx.worktreeDir,
+            checkpoint.worktreeDir,
+            {
+              label: "checkpoint worktree",
+              warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
+            },
+            { signal },
+          );
+        }
       }
     }
     return finishIntervention(
@@ -5473,6 +5882,20 @@ export async function runPipeline(
             ? [derived, { path: derived.path, branch: recorded }]
             : [derived];
         }),
+      cleanable: [...manifestDag.slices.values()].flatMap((slice) => {
+        const persisted = runState.slices[slice.ghIssue];
+        if (!persisted) return [];
+        const derived = worktreePathFor(slice);
+        const branch = persisted.branch ?? derived.branch;
+        const registeredDir = git.findWorktreeForBranch(repoRoot, branch);
+        const path = registeredDir ?? derived.path;
+        const worktreeIsClean =
+          !existsSync(path) || !git.hasUncommittedChanges(path);
+        return cleanupEligibility(persisted, worktreeIsClean) ===
+          "completed-clean"
+          ? [{ path, branch }]
+          : [];
+      }),
     }),
     minFreeBytes: gbToBytes(config.minFreeDiskGb ?? DEFAULT_MIN_FREE_DISK_GB),
     reportOnly: config.preflightReportOnly,

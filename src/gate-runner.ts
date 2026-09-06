@@ -26,6 +26,10 @@ export interface GateDeclaration {
   required: boolean;
   command?: string;
   args?: readonly string[];
+  /** Project policy's expected wall-clock cost, for budgeting/reporting. */
+  expectedCostMs?: number;
+  /** Per-gate wall-clock ceiling; falls back to the phase default. */
+  wallClockTimeoutMs?: number;
 }
 
 export interface GateResult {
@@ -530,7 +534,8 @@ export async function runGates(
         cwd: options.cwd,
         signal: options.signal,
         inactivityTimeoutMs: options.inactivityTimeoutMs,
-        wallClockTimeoutMs: options.wallClockTimeoutMs,
+        wallClockTimeoutMs:
+          declaration.wallClockTimeoutMs ?? options.wallClockTimeoutMs,
         heartbeatIntervalMs: options.heartbeatIntervalMs,
         onOutput: emit,
       },

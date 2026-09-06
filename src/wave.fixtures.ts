@@ -20,6 +20,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { validExplorerContext } from "./explorer-test-fixtures.js";
 import {
   rmDirWithRetry,
   writeContractResponse,
@@ -100,6 +101,8 @@ export interface SliceFixture {
   /** Exhaust contract negotiation in round two with a contested finding. */
   contractImpasse?: boolean;
 }
+
+export { validExplorerContext } from "./explorer-test-fixtures.js";
 
 /**
  * Write the version-2 acceptance manifest a planner stub declares for a
@@ -260,7 +263,7 @@ export function buildStubProvider(opts: {
       if (role === "explorer" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "context.md"),
-          `# Context for ${ghIssue}\n`,
+          validExplorerContext(`Context for ${ghIssue}`),
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {

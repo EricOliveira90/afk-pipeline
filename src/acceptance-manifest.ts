@@ -444,6 +444,91 @@ export function validateAcceptanceManifestStability(
       transitions.join(", "),
   );
 }
+
+export function validateAcceptanceManifestRevisionScope(
+  previous: AcceptanceManifest,
+  current: AcceptanceManifest,
+  allowedBehaviorIds: readonly string[],
+  source = ACCEPTANCE_MANIFEST_FILENAME,
+): void {
+  if (previous.version !== 2 || current.version !== 2) return;
+
+  const allowed = new Set(allowedBehaviorIds);
+  const previousById = new Map(
+    previous.behaviors.map((behavior) => [behavior.id, behavior]),
+  );
+  const currentById = new Map(
+    current.behaviors.map((behavior) => [behavior.id, behavior]),
+  );
+  const changed: string[] = [];
+
+  for (const [id, previousBehavior] of previousById) {
+    if (allowed.has(id)) continue;
+    const currentBehavior = currentById.get(id);
+    if (
+      currentBehavior === undefined ||
+      JSON.stringify(currentBehavior) !== JSON.stringify(previousBehavior)
+    ) {
+      changed.push(id);
+    }
+  }
+  for (const id of currentById.keys()) {
+    if (!previousById.has(id) && !allowed.has(id)) changed.push(id);
+  }
+
+  if (changed.length === 0) return;
+  throw new Error(
+    `${source} revision scope refused: behavior entries outside the routed ` +
+      `finding scope changed: ${[...new Set(changed)].sort().join(", ")}; ` +
+      `allowed behavior IDs: ${[...allowed].sort().join(", ") || "none"}`,
+  );
+}
+
+export function restoreAcceptanceManifestRevisionScope(
+  previous: AcceptanceManifest,
+  current: AcceptanceManifest,
+  allowedBehaviorIds: readonly string[],
+): { manifest: AcceptanceManifest; restoredBehaviorIds: string[] } {
+  if (previous.version !== 2 || current.version !== 2) {
+    return { manifest: current, restoredBehaviorIds: [] };
+  }
+
+  const allowed = new Set(allowedBehaviorIds);
+  const previousById = new Map(
+    previous.behaviors.map((behavior) => [behavior.id, behavior]),
+  );
+  const currentById = new Map(
+    current.behaviors.map((behavior) => [behavior.id, behavior]),
+  );
+  const restoredBehaviorIds: string[] = [];
+  const behaviors = previous.behaviors.map((previousBehavior) => {
+    if (allowed.has(previousBehavior.id)) {
+      return currentById.get(previousBehavior.id) ?? previousBehavior;
+    }
+    const candidate = currentById.get(previousBehavior.id);
+    if (
+      candidate === undefined ||
+      JSON.stringify(candidate) !== JSON.stringify(previousBehavior)
+    ) {
+      restoredBehaviorIds.push(previousBehavior.id);
+    }
+    return previousBehavior;
+  });
+
+  for (const behavior of current.behaviors) {
+    if (previousById.has(behavior.id)) continue;
+    if (allowed.has(behavior.id)) {
+      behaviors.push(behavior);
+    } else {
+      restoredBehaviorIds.push(behavior.id);
+    }
+  }
+
+  return {
+    manifest: { ...current, behaviors },
+    restoredBehaviorIds: [...new Set(restoredBehaviorIds)].sort(),
+  };
+}
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 

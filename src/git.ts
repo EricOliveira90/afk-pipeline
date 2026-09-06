@@ -1277,6 +1277,74 @@ export function listChangedFiles(
   return { ok: true, paths: [...paths].sort() };
 }
 
+/**
+ * Repo-relative paths that differ between two git tree objects, sorted.
+ * Throws when either tree cannot be diffed — a caller comparing candidate
+ * trees must fail closed, not proceed on an unknown diff (ADR 0012;
+ * guardian round 2, architect A1).
+ */
+export function diffTreePaths(
+  cwd: string,
+  fromTree: string,
+  toTree: string,
+): string[] {
+  const output = git(
+    [
+      "-c",
+      "core.quotePath=false",
+      "diff-tree",
+      "-r",
+      "--name-only",
+      fromTree,
+      toTree,
+    ],
+    { cwd, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  return output
+    .split(/\r?\n/)
+    .map((path) => path.trim())
+    .filter(Boolean)
+    .map((path) => path.replace(/\\/g, "/"))
+    .sort();
+}
+
+/**
+ * The git blob ID the file at `repoRelativePath` would hash to, with the
+ * repository's attribute filters applied for that path (`--path`), so the
+ * result is comparable to the blob a checkpoint's `git add -A` produces.
+ * Callers binding an authority decision to exact bytes (ADR 0012; guardian
+ * round 4, architect A1) record this immediately after writing the bytes.
+ */
+export function hashFileAsBlob(
+  cwd: string,
+  repoRelativePath: string,
+): string {
+  return git(
+    ["hash-object", "--path", repoRelativePath, "--", repoRelativePath],
+    { cwd, stdio: ["pipe", "pipe", "pipe"] },
+  ).trim();
+}
+
+/**
+ * The blob ID at `path` inside the given tree object, or `null` when the
+ * tree has no entry there. Fail-closed callers treat `null` as "the bytes
+ * are not the recorded bytes".
+ */
+export function treeEntryBlobId(
+  cwd: string,
+  tree: string,
+  path: string,
+): string | null {
+  try {
+    return git(["rev-parse", `${tree}:${path}`], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 /** Repo-relative files added between two refs, independent of project layout. */
 export function listAddedFiles(
   repoRoot: string,

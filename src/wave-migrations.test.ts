@@ -385,7 +385,22 @@ describe("runWave — contract-lock migration prefix gate", () => {
         await new Promise((r) => setTimeout(r, 5));
 
         if (role === "explorer" && dir) {
-          writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(
+            join(dir, "context.md"),
+            [
+              "## Files and current behavior",
+              "",
+              `- Migration context for ${ghIssue}`,
+              "",
+              "## Patterns and test harness",
+              "",
+              "- Migration fixture patterns",
+              "",
+              "## Unknowns",
+              "",
+            ].join("\n"),
+            "utf-8",
+          );
         } else if (role === "planner" && dir) {
           const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
           plannerRounds.set(ghIssue, round);
@@ -454,7 +469,22 @@ describe("runWave — contract-lock migration prefix gate", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
 
         if (role === "explorer" && dir) {
-          writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(
+            join(dir, "context.md"),
+            [
+              "## Files and current behavior",
+              "",
+              `- Reserved migration context for ${ghIssue}`,
+              "",
+              "## Patterns and test harness",
+              "",
+              "- Reserved-prefix fixture patterns",
+              "",
+              "## Unknowns",
+              "",
+            ].join("\n"),
+            "utf-8",
+          );
         } else if (role === "planner" && dir) {
           observedPrompts.push(prompt);
           const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
@@ -566,7 +596,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(existsSync(join(second.repo, "supabase", "migrations", "144_issue_2201.sql"))).toBe(false);
   }, 90_000);
 
-  it("sends a colliding contract back to the planner with the free prefix, then passes", async () => {
+  it("B-05 sends a migration refusal through a fresh planner revision envelope", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
       { number: "01", ghIssue: "2001", title: "Adds a migration", type: "AFK", blockedBy: [], userStories: "" },
@@ -618,6 +648,13 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(plannerPrompts[1]).toContain("003");
     expect(plannerPrompts[1]).toContain("004");
     expect(plannerPrompts[1]).toMatch(/pipeline REJECTED/i);
+    expect(plannerPrompts[1]).toContain("# Routed OPEN findings");
+    expect(plannerPrompts[1]).toContain("# Control-plane situation");
+    expect(plannerPrompts[1]).not.toContain("feedback-r1.md");
+    expect(plannerPrompts[1]).not.toContain("sibling handoffs");
+    expect(plannerPrompts[1]).not.toContain("grep for `docs/adr/`");
+    expect(plannerPrompts[1]).not.toContain("PRIOR-CONVERSATION-MARKER");
+    expect(plannerPrompts[1]).not.toContain(" RESOLVED");
 
     // Observable in the event stream, under one warn reason.
     const refusals = readEvents(logger.runDir).filter(
@@ -1024,7 +1061,22 @@ describe("runWave — contract-lock migration prefix gate", () => {
         async invoke(options: InvokeOptions): Promise<InvokeResult> {
           const dir = findSliceArtifactDir(options.cwd, "01");
           if (options.role === "explorer" && dir) {
-            writeFileSync(join(dir, "context.md"), "# Context\n", "utf-8");
+            writeFileSync(
+              join(dir, "context.md"),
+              [
+                "## Files and current behavior",
+                "",
+                "- Invalid prior migration lock context",
+                "",
+                "## Patterns and test harness",
+                "",
+                "- Prior-lock migration fixture patterns",
+                "",
+                "## Unknowns",
+                "",
+              ].join("\n"),
+              "utf-8",
+            );
           } else if (options.role === "planner") {
             plannerPrompts.push(options.prompt);
           } else if (options.role === "evaluator-contract") {

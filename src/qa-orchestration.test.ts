@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -46,6 +47,36 @@ import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
 const dirs: string[] = [];
 const fixtureChildren = new Set<ChildProcess>();
+const GENERATOR_FIXTURE_CONTRACT = [
+  "# Slice Contract",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "## Scope lock",
+  "Exercise QA orchestration.",
+  "",
+  "### In scope",
+  "- [behavior:B-01] Run the generator before QA.",
+  "",
+  "### Non-goals (explicit out-of-scope)",
+  "- Production behavior.",
+  "",
+  "### Existing behavior to preserve",
+  "- None.",
+  "",
+  "### Changes to existing behavior (only if the issue asks for it)",
+  "- None.",
+  "",
+  "## New patterns / deps / schema (if any)",
+  "- None.",
+  "",
+  "## Files expected to change",
+  "- README.md",
+  "",
+  "## Migration requirements",
+  "- New migration files: 0",
+  "",
+].join("\n");
 
 beforeEach(() => {
   vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -126,6 +157,32 @@ function makeContext(
   };
   const absSliceDir = join(repo, "specs", "slices", "01-prd-070-regression");
   mkdirSync(absSliceDir, { recursive: true });
+  writeFileSync(
+    join(absSliceDir, "contract.md"),
+    GENERATOR_FIXTURE_CONTRACT,
+    "utf-8",
+  );
+  writeFileSync(
+    join(absSliceDir, "acceptance-manifest.json"),
+    JSON.stringify({
+      version: 2,
+      fileScope: { kind: "paths", paths: ["README.md"] },
+      migrationCount: 0,
+      behaviors: [
+        {
+          id: "B-01",
+          source: "QA orchestration fixture",
+          given: "a locked fixture slice",
+          when: "the generator runs",
+          then: "QA evaluates its candidate",
+          observableResult: "the fixture reaches QA",
+          preservation: false,
+          gateIds: ["tests"],
+        },
+      ],
+    }),
+    "utf-8",
+  );
   const config: PipelineConfig = {
     repoRoot: repo,
     prdSlug: "prd-070",
@@ -527,7 +584,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(roles.filter((role) => role === "generator")).toHaveLength(2);
     expect(roles.filter((role) => role === "evaluator-qa")).toHaveLength(2);
     expect(roles.at(-1)).toBe("evaluator-qa");
-    expect(generatorPrompts[1]).toContain("This is implementation round 3");
+    expect(generatorPrompts[1]).toContain("Implementation round: 3 of 3.");
     expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r3-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r4-a1.md"))).toBe(false);
@@ -874,7 +931,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       JSON.stringify({
         name: "active-gate-fixture",
         scripts: {
-          test: "node -e \"let ticks=0; const timer=setInterval(()=>console.log(++ticks),50); setTimeout(()=>clearInterval(timer),2500)\"",
+          // Keep the command alive beyond the inactivity limit while emitting
+          // frequent output. Five seconds leaves enough scheduler margin for
+          // this heavy suite on loaded Windows runners.
+          test: "node -e \"let ticks=0; const timer=setInterval(()=>console.log(++ticks),50); setTimeout(()=>clearInterval(timer),6500)\"",
         },
       }),
       "utf-8",
@@ -900,7 +960,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       },
     };
     const ctx = makeContext(repo, provider, {
-      commandTimeoutMs: 2_000,
+      commandTimeoutMs: 5_000,
       heartbeatIntervalMs: 20,
     });
     artifactDir = ctx.absSliceDir;
@@ -909,15 +969,21 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
   });
 
-  it("blocks evaluation and emits typed evidence when required checkpoint gates exhaust", async () => {
+  it("records checkpoint evidence and authorizes QA for the passing tree", async () => {
     const repo = makeRepo();
-    const gateScript =
-      "node -e \"const fs=require('fs'); process.exit(fs.readFileSync('gate-state.txt','utf8').trim()==='pass'?0:23)\"";
+    // Outside the repo: the evaluator stub and gate scripts append to it,
+    // and an in-repo marker would (correctly) trip the A1 tree-authority
+    // guard — evaluators must not mutate the candidate tree.
+    const sequencePath = `${repo}-gate-sequence.txt`.replace(/\\/g, "/");
+    const cheapScript =
+      `node -e "require('fs').appendFileSync('${sequencePath}','cheap\\n')"`;
+    const fullSuiteScript =
+      `node -e "require('fs').appendFileSync('${sequencePath}','full\\n')"`;
     writeFileSync(
       join(repo, "package.json"),
       JSON.stringify({
         name: "gate-fixture",
-        scripts: { typecheck: gateScript, test: gateScript },
+        scripts: { typecheck: cheapScript, test: fullSuiteScript },
       }),
       "utf-8",
     );
@@ -927,23 +993,16 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     let generators = 0;
     let evaluators = 0;
     let artifactDir = "";
-    let exhaustGates = false;
-    const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
         if (options.role === "generator") {
           generators++;
-          generatorPrompts.push(options.prompt);
-          writeFileSync(
-            join(repo, "gate-state.txt"),
-            exhaustGates || generators === 1 ? "fail" : "pass",
-            "utf-8",
-          );
         } else if (options.role === "evaluator-qa") {
           evaluators++;
           evaluatorPrompts.push(options.prompt);
+          appendFileSync(sequencePath, "qa\n", "utf-8");
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -959,13 +1018,12 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       heartbeatIntervalMs: 20,
     });
     artifactDir = ctx.absSliceDir;
-
     await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
-    expect(generators).toBe(2);
+    expect(generators).toBe(1);
     expect(evaluators).toBe(1);
-    expect(generatorPrompts[1]).toMatch(/attempt-[\w]+\.json/);
-    expect(generatorPrompts[1]).toMatch(/typecheck\.log/);
-    expect(generatorPrompts[1]).toMatch(/tests\.log/);
+    expect(readFileSync(sequencePath, "utf-8")).toBe(
+      "cheap\nqa\nfull\n",
+    );
 
     const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
     const evidenceFiles = readdirSync(evidenceDir)
@@ -983,24 +1041,23 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const attempts = evidenceFiles.map((name) =>
       JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
     );
-    expect(attempts[0].results.map((gate: { gateId: string }) => gate.gateId))
-      .toEqual(["typecheck", "lint", "tests"]);
     expect(
-      attempts.some(
-        (attempt) =>
-          attempt.results.filter(
-            (gate: { status: string; failureKind: string }) =>
-              gate.status === "FAIL" &&
-              gate.failureKind === "COMMAND",
-          ).length === 2,
+      attempts.map((attempt) =>
+        attempt.results.map((gate: { gateId: string }) => gate.gateId),
       ),
-    ).toBe(true);
+    ).toEqual(
+      expect.arrayContaining([
+        ["typecheck", "lint"],
+        ["tests"],
+      ]),
+    );
     expect(
       attempts.some(
         (attempt) =>
-          attempt.results.filter(
-            (gate: { status: string }) => gate.status === "PASS",
-          ).length === 2,
+          attempt.results.some(
+            (gate: { gateId: string; status: string }) =>
+              gate.gateId === "tests" && gate.status === "PASS",
+          ),
       ),
     ).toBe(true);
 
@@ -1012,21 +1069,22 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     // spawned run can prove is that the tree sha the orchestrator hashes at
     // QA dispatch still equals the one the gates ran on, so the grant is
     // reachable at all and not permanently fail-closed.
-    const passingIndex = attempts.findIndex((attempt) =>
-      attempt.results.every(
-        (gate: { status: string }) => gate.status !== "FAIL",
-      ),
-    );
-    const passingAttempt = attempts[passingIndex];
     const qaPrompt = evaluatorPrompts[0] ?? "";
+    const passingIndex = attempts.findIndex((attempt) =>
+      qaPrompt.includes(attempt.attemptId),
+    );
+    expect(passingIndex).toBeGreaterThanOrEqual(0);
+    const passingAttempt = attempts[passingIndex];
     expect(qaPrompt).toContain("Skip authorization");
     expect(qaPrompt).toContain(`\`${passingAttempt.treeId}\``);
     expect(qaPrompt).toContain(`\`${passingAttempt.attemptId}\``);
-    // `lint` has no script in this fixture, so the gate never ran it and the
-    // authorization must not vouch for it.
+    // Candidate QA is authorized only for the cheap phase. The full suite has
+    // not run yet and must never appear in its citation.
     expect(qaPrompt).toContain("- typecheck — `pnpm run typecheck` — PASS at");
-    expect(qaPrompt).toContain("- tests — `pnpm run test` — PASS at");
+    expect(qaPrompt).not.toContain("- tests —");
     expect(qaPrompt).not.toContain("- lint —");
+    expect(qaPrompt).toContain("Git tree ID under review");
+    expect(qaPrompt).toContain("`git rev-parse HEAD`");
 
     const record = JSON.parse(
       readFileSync(
@@ -1037,24 +1095,109 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           "prd-070-stub",
           "slice-01",
           "reviews",
-          "qa-review-r2-a1-record.json",
+          "qa-review-r1-a1-record.json",
         ),
         "utf-8",
       ),
     );
+    const recordedPrompt = evaluatorPrompts[0] ?? "";
+    const recordedIndex = attempts.findIndex((attempt) =>
+      recordedPrompt.includes(attempt.attemptId),
+    );
+    expect(recordedIndex).toBeGreaterThanOrEqual(0);
+    const recordedAttempt = attempts[recordedIndex];
     expect(record.baseGateCitation).toEqual({
       evidenceArtifactId: relative(
         repo,
-        join(evidenceDir, evidenceFiles[passingIndex]!),
+        join(evidenceDir, evidenceFiles[recordedIndex]!),
       ).replace(/\\/g, "/"),
-      attemptId: passingAttempt.attemptId,
-      treeId: passingAttempt.treeId,
-      gateIds: ["typecheck", "tests"],
+      attemptId: recordedAttempt.attemptId,
+      treeId: recordedAttempt.treeId,
+      gateIds: ["typecheck"],
     });
 
-    // Reuse the same real-gate fixture to prove the terminal branch too.
-    // Seed durable prior QA evidence in that same fixture so gate exhaustion
-    // must merge semantic lineage instead of replacing it with gate-only data.
+  });
+
+  it("emits typed evidence when a resumed final-round checkpoint gate exhausts", async () => {
+    const repo = makeRepo();
+    const sequencePath = join(repo, "gate-sequence.txt").replace(/\\/g, "/");
+    const cheapScript =
+      `node -e "require('fs').appendFileSync('${sequencePath}','cheap\\n'); process.exit(23)"`;
+    const fullSuiteScript =
+      `node -e "require('fs').appendFileSync('${sequencePath}','full\\n')"`;
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "gate-fixture",
+        scripts: { typecheck: cheapScript, test: fullSuiteScript },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add failing gate scripts"]);
+
+    let generators = 0;
+    let evaluators = 0;
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          generators++;
+        } else if (options.role === "evaluator-qa") {
+          evaluators++;
+          appendFileSync(sequencePath, "qa\n", "utf-8");
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic", {
+            findings: [
+              {
+                id: "QA-PRIOR",
+                severity: "BLOCKING",
+                behaviorIds: ["B-PRIOR"],
+                summary: "Prior QA behavior regressed",
+                evidence: "The prior semantic assertion now passes",
+                expected: "The prior behavior remains fixed",
+                observed: "The prior behavior remains fixed",
+                clearCondition: "The prior semantic assertion passes",
+                state: "RESOLVED",
+              },
+            ],
+          });
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, {
+      commandTimeoutMs: 5_000,
+      heartbeatIntervalMs: 20,
+    });
+    artifactDir = ctx.absSliceDir;
+    const reviewDir = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "reviews",
+    );
+    seedStuckDiagnosisArchive(reviewDir, {
+      rounds: [1, 2],
+      includeEscalation: false,
+    });
+    ctx.resume = {
+      mode: "killed",
+      commitsAhead: 1,
+      commitLog: "abc1234 feat(#70): prior work",
+      handoffNote: "",
+    };
+
+    // Persist semantic lineage from the candidate's prior life. Starting at
+    // round three exercises the real terminal orchestration path with one
+    // remaining repair instead of replaying two already-completed rounds.
     const priorTreeId = resolveCandidateTreeId(repo);
     const priorArtifact =
       ".afk/artifacts/prd-070-stub/slice-01/reviews/qa-review-prior.json";
@@ -1134,15 +1277,15 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         ],
       },
     );
-    exhaustGates = true;
     await expect(runSliceExecute(ctx)).resolves.toMatchObject({
       phase: "STUCK",
       error: expect.stringContaining(
         "AFK exhausted deterministic base-gate repair capacity",
       ),
     });
-    expect(generators).toBe(5);
-    expect(evaluators).toBe(1);
+    expect(generators).toBe(1);
+    expect(evaluators).toBe(0);
+    expect(readFileSync(sequencePath, "utf-8")).toBe("cheap\n");
     const intervention = JSON.parse(
       readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
     );
@@ -1152,7 +1295,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         interventionClass: "IMPLEMENTATION_INTERVENTION",
       },
       reasonCodes: ["DETERMINISTIC_GATE_EXHAUSTED"],
-      blockerIds: expect.arrayContaining(["QA-PRIOR", "tests", "typecheck"]),
+      blockerIds: expect.arrayContaining(["QA-PRIOR", "typecheck"]),
       findingLineage: expect.arrayContaining([
         expect.objectContaining({
           currentId: "QA-PRIOR",
@@ -1167,13 +1310,12 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
         }),
         expect.objectContaining({
           phase: "deterministic-qa",
-          activeBlockingIds: ["tests", "typecheck"],
+          activeBlockingIds: ["typecheck"],
         }),
       ]),
       supportingEvidence: expect.arrayContaining([
         expect.stringMatching(/attempt-[\w]+\.json/),
         expect.stringMatching(/typecheck\.log/),
-        expect.stringMatching(/tests\.log/),
         priorArtifact,
         priorReport,
         "semantic-evidence:prior-qa",
@@ -1361,6 +1503,22 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
 
   it("routes compact lineage and grants one final repair for a fresh round-three blocker", async () => {
     const repo = makeRepo();
+    // Outside the repo — an in-repo evaluator marker would (correctly)
+    // trip the A1 tree-authority guard.
+    const sequencePath = `${repo}-qa-sequence.txt`.replace(/\\/g, "/");
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "qa-sequencing-fixture",
+        scripts: {
+          test:
+            `node -e "require('fs').appendFileSync('${sequencePath}','full\\n')"`,
+        },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add full-suite marker"]);
     const generatorPrompts: string[] = [];
     const evaluatorPrompts: string[] = [];
     let artifactDir = "";
@@ -1372,6 +1530,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
           writeFileSync(join(repo, "change.txt"), `${generatorPrompts.length}\n`, "utf-8");
         } else if (options.role === "evaluator-qa") {
           evaluatorPrompts.push(options.prompt);
+          appendFileSync(sequencePath, "qa\n", "utf-8");
           const round = evaluatorPrompts.length;
           writeFileSync(
             join(artifactDir, "qa-report.md"),
@@ -1467,12 +1626,18 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(generatorPrompts).toHaveLength(4);
     expect(evaluatorPrompts).toHaveLength(4);
 
-    expect(generatorPrompts[1]).toContain("QA-01");
-    expect(generatorPrompts[1]).toContain("First blocker");
+    // Repair prompts carry QA-finding content in exactly one place: the
+    // compact failure set (finding ID + clear condition + report
+    // references), rendered as the prompt's final block. Summaries and any
+    // second finding block are absent (guardian round 2, PM 2).
+    expect(generatorPrompts[1]).toContain("# Current failure set");
+    expect(generatorPrompts[1]).toContain("Finding ID: `QA-01`");
     expect(generatorPrompts[1]).toContain("First condition");
-    expect(generatorPrompts[1]).toContain("QA-02");
-    expect(generatorPrompts[1]).toContain("Second blocker");
+    expect(generatorPrompts[1]).not.toContain("First blocker");
+    expect(generatorPrompts[1]).toContain("Finding ID: `QA-02`");
     expect(generatorPrompts[1]).toContain("Second condition");
+    expect(generatorPrompts[1]).not.toContain("Second blocker");
+    expect(generatorPrompts[1]).not.toContain("Current open QA findings");
     expect(generatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("qa-report-r1-a1.md");
 
@@ -1481,10 +1646,15 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts[1]).toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[1]).toContain("qa-report-r1-a1.md");
 
-    expect(generatorPrompts[2]).toContain("Current open QA findings");
-    expect(generatorPrompts[2]).toContain("QA-02");
-    expect(generatorPrompts[2]).toContain("Relevant resolved QA findings");
-    expect(generatorPrompts[2]).toContain("QA-01");
+    expect(generatorPrompts[2]).toContain("# Current failure set");
+    expect(generatorPrompts[2]).toContain("Finding ID: `QA-02`");
+    expect(generatorPrompts[2]).toContain("Second condition");
+    expect(generatorPrompts[2]).not.toContain("Current open QA findings");
+    expect(generatorPrompts[2]).not.toContain("Relevant resolved QA findings");
+    expect(generatorPrompts[2]).not.toContain("Finding ID: `QA-01`");
+    expect(generatorPrompts[2]).not.toContain("First blocker");
+    expect(generatorPrompts[2]).not.toContain("Second blocker");
+    expect(generatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(generatorPrompts[2]).toContain("qa-review-r2-a1.json");
     expect(generatorPrompts[2]).toContain("qa-report-r2-a1.md");
 
@@ -1495,12 +1665,16 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluatorPrompts[2]).not.toContain("qa-review-r1-a1.json");
     expect(evaluatorPrompts[2]).not.toContain("qa-report-r1-a1.md");
 
-    expect(generatorPrompts[3]).toContain("Current open QA findings");
-    expect(generatorPrompts[3]).toContain("QA-03");
-    expect(generatorPrompts[3]).toContain("Fresh late blocker");
-    expect(generatorPrompts[3]).toContain("Relevant resolved QA findings");
-    expect(generatorPrompts[3]).toContain("QA-01");
-    expect(generatorPrompts[3]).toContain("QA-02");
+    expect(generatorPrompts[3]).toContain("# Current failure set");
+    expect(generatorPrompts[3]).toContain("Finding ID: `QA-03`");
+    expect(generatorPrompts[3]).toContain("Fresh late condition");
+    expect(generatorPrompts[3]).not.toContain("Fresh late blocker");
+    expect(generatorPrompts[3]).not.toContain("Current open QA findings");
+    expect(generatorPrompts[3]).not.toContain("Relevant resolved QA findings");
+    expect(generatorPrompts[3]).not.toContain("Finding ID: `QA-01`");
+    expect(generatorPrompts[3]).not.toContain("Finding ID: `QA-02`");
+    expect(generatorPrompts[3]).not.toContain("First blocker");
+    expect(generatorPrompts[3]).not.toContain("Second blocker");
     expect(generatorPrompts[3]).toContain("qa-review-r3-a1.json");
     expect(generatorPrompts[3]).not.toContain("qa-review-r1-a1.json");
 
@@ -1985,23 +2159,36 @@ describe("provider-independent policy-less base gates", () => {
       await expect(runSliceExecute(ctx)).resolves.toEqual({ phase: "PASS" });
       expect(evaluators).toBe(1);
       const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
-      const evidenceFile = readdirSync(evidenceDir).find((name) =>
-        name.endsWith(".json"),
-      )!;
-      const evidence = JSON.parse(
-        readFileSync(join(evidenceDir, evidenceFile), "utf-8"),
-      );
-      expect(evidence.results.map((gate: { gateId: string }) => gate.gateId))
-        .toEqual(["typecheck", "lint", "tests"]);
+      const evidence = readdirSync(evidenceDir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) =>
+          JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
+        );
       expect(
-        evidence.results.every(
-          (gate: { status: string }) => gate.status === "PASS",
+        evidence.map((attempt) =>
+          attempt.results.map((gate: { gateId: string }) => gate.gateId),
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          ["typecheck", "lint"],
+          ["tests"],
+        ]),
+      );
+      expect(
+        evidence.every((attempt) =>
+          attempt.results.every(
+            (gate: { status: string }) => gate.status === "PASS",
+          ),
         ),
       ).toBe(true);
+      // Cheap gates authorize QA on the pre-review tree. The full suite is
+      // then checkpointed from the exact post-QA tree whose pending stage can
+      // survive a restart, so the two phases deliberately have distinct IDs.
+      expect(new Set(evidence.map((attempt) => attempt.treeId)).size).toBe(2);
       expect(
         execFileSync(
           "git",
-          ["show", `${evidence.treeId}:provider-output.txt`],
+          ["show", `${evidence[0].treeId}:provider-output.txt`],
           { cwd: repo, encoding: "utf-8" },
         ),
       ).toBe(providerName);
@@ -2103,7 +2290,10 @@ describe("base gate observability", () => {
 describe("shared-preview QA", () => {
   it("keeps deterministic and UAT findings isolated across a UAT retry", async () => {
     const repo = makeRepo();
-    const marker = join(repo, "migration-order.txt").replace(/\\/g, "/");
+    // Outside the repo — the shared-preview verify/apply commands run in
+    // the worktree after QA approval, and an in-repo marker would
+    // (correctly) trip the A1 tree-authority guard.
+    const marker = `${repo}-migration-order.txt`.replace(/\\/g, "/");
     const generatorPrompts: string[] = [];
     const deterministicPrompts: string[] = [];
     const uatPrompts: string[] = [];
@@ -2176,7 +2366,7 @@ describe("shared-preview QA", () => {
     expect(uatPrompts).toHaveLength(2);
 
     expect(generatorPrompts[1]).toContain("UAT-OPEN");
-    expect(generatorPrompts[1]).toContain("UAT-OPEN summary");
+    expect(generatorPrompts[1]).not.toContain("UAT-OPEN summary");
     expect(generatorPrompts[1]).toContain("UAT-OPEN condition");
     expect(generatorPrompts[1]).toContain("uat-review-r1-a1.json");
     expect(generatorPrompts[1]).toContain("uat-report-r1-a1.md");

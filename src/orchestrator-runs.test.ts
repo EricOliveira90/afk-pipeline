@@ -1664,7 +1664,7 @@ describe("generator verification command (ADR 0038)", () => {
     };
   }
 
-  it("hands the override to the generator and the full sanity set to QA", async () => {
+  it("hands the override only to the generator and keeps the full suite out of QA", async () => {
     const slug = "generator-test-command";
     const { repo, prdDir, specsDir, slices, baseProvider } = makeSetup(
       slug,
@@ -1689,11 +1689,13 @@ describe("generator verification command (ADR 0038)", () => {
     expect(generatorPrompt).toBeDefined();
     expect(generatorPrompt!).toContain("pnpm test:fast");
 
-    // QA is told the gate's command set and is never shown the override.
+    // QA is told only the cheap candidate checks and is never shown either
+    // the generator override or the full suite, which runs after QA accepts.
     const qaPrompt = prompts.get("evaluator-qa")?.[0];
     expect(qaPrompt).toBeDefined();
-    expect(qaPrompt!).toContain("pnpm run test:run");
+    expect(qaPrompt!).not.toContain("pnpm run test:run");
     expect(qaPrompt!).not.toContain("test:fast");
+    expect(qaPrompt!).toContain("project's full test suite");
   }, 240_000);
 
   it("leaves the generator on the project's test script when no override is given", async () => {
@@ -1767,6 +1769,7 @@ describe("events.jsonl tee (spec #26)", () => {
     let warns: any[];
     let priorWarns: any[];
     let firstSummary: string;
+    let stubRecords: InvocationRecord[];
 
     beforeAll(async () => {
       repo = makeRepo({ lifetime: "describe" });
@@ -1796,7 +1799,11 @@ describe("events.jsonl tee (spec #26)", () => {
           outputContent: "retried",
         }],
       ]);
-      const stub = buildStubProvider({ fixtures, slices, records: [] });
+      const stub = buildStubProvider({
+        fixtures,
+        slices,
+        records: (stubRecords = []),
+      });
       // The retried slice's first generator invocation dies with a
       // provider-classified transient outage; the orchestrator retries
       // with backoff.
@@ -1974,6 +1981,51 @@ describe("events.jsonl tee (spec #26)", () => {
         (l) => l.type === "slice-outcome" && l.slice.ghIssue === RETRIED,
       );
       expect(outcome!.slice.phase).toBe("PASS");
+    });
+
+    it("re-journals assembly evidence for every transient-retry dispatch (round 3 PM 2)", () => {
+      // The retried slice's generator dispatches twice: the first attempt
+      // dies with the transient outage, the second succeeds. Each dispatch
+      // must journal its own prompt-assembly event immediately before the
+      // provider is invoked (slice #83), so the journal shows
+      // assembly → backoff warn → assembly, and exactly one completion
+      // (only the successful return produces post-return evidence).
+      const retriedGeneratorEvents = lines
+        .map((event, index) => ({ event, index }))
+        .filter(
+          ({ event }) =>
+            event.ghIssue === RETRIED &&
+            ((event.type === "prompt-assembly" &&
+              event.role === "generator") ||
+              (event.type === "warn" && event.reason === "backoff-retry") ||
+              (event.type === "invocation-completed" &&
+                event.role === "generator")),
+        );
+      expect(
+        retriedGeneratorEvents.map(({ event }) => event.type),
+      ).toEqual([
+        "prompt-assembly",
+        "warn",
+        "prompt-assembly",
+        "invocation-completed",
+      ]);
+      // Both dispatch records carry the same assembled evidence: one
+      // logical assembly, two dispatch attempts.
+      const [first, , second] = retriedGeneratorEvents;
+      expect(second!.event.assembledByteSize).toBe(
+        first!.event.assembledByteSize,
+      );
+      // And the successful attempt's provider observed its matching
+      // assembly event as the journal tail at invocation entry.
+      const retriedGeneratorRecord = stubRecords.find(
+        (record) =>
+          record.role === "generator" && record.ghIssue === RETRIED,
+      );
+      expect(retriedGeneratorRecord?.journalTailAtEntry).toMatchObject({
+        type: "prompt-assembly",
+        role: "generator",
+        ghIssue: RETRIED,
+      });
     });
 
     it("reports each slice's prior-run state on the next run (#29)", () => {

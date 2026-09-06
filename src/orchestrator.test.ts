@@ -36,7 +36,11 @@ import {
   runSliceNegotiate,
   assertSliceWorktreeOwnership,
 } from "./orchestrator.js";
-import { resolveBaseGateDeclarations } from "./base-gates.js";
+import {
+  resolveBaseGateDeclarations,
+  resolveFullSuiteGateDeclarations,
+  resolvePreQAGateDeclarations,
+} from "./base-gates.js";
 import type { NegotiateOutcome } from "./orchestrator.js";
 import { loadRunState } from "./run-state.js";
 import { createWorktree } from "./git.js";
@@ -45,6 +49,7 @@ import {
   buildReviewScopeBlock,
 } from "./ship-gate.js";
 import {
+  resolveCandidateQACommands,
   resolveGeneratorTestCommand,
   resolveSanityCommands,
   resolveTestCommand,
@@ -75,6 +80,7 @@ import {
   REVISION_PLANNER_FAILURE,
   REVISION_REJECTION_FINDING,
   sliceFromCwd,
+  validExplorerContext,
   writePrdFixture,
   type InvocationRecord,
   type SliceFixture,
@@ -479,16 +485,11 @@ describe("resolveGeneratorTestCommand", () => {
 });
 
 /**
- * Drift test: the command set the evaluator-qa is told to run MUST equal
- * the command set the post-merge sanity gate runs. If they diverge, a
- * slice can pass QA on code the gate then rejects (the failure mode that
- * motivated this fix: typecheck/lint violations passing through QA
- * because QA only ran tests). Walks several package.json shapes; for
- * each, the commands `runPreShipSanity` attempts must exactly match — same
- * commands, same order, dependency install included — what
- * `resolveSanityCommands` reports.
+ * Candidate sequencing projects one discovery result into cheap pre-QA gates
+ * and a post-acceptance full suite. The aggregate gate deliberately keeps the
+ * complete command set and order.
  */
-describe("evaluator-qa sanity command set matches the post-merge gate", () => {
+describe("candidate and aggregate sanity sequencing", () => {
   // Records the real invocation sequence through the subprocess seam, so the
   // comparison covers every command the gate runs — including the install
   // prep, which is not a `pnpm run` script and would otherwise be invisible
@@ -524,6 +525,26 @@ describe("evaluator-qa sanity command set matches the post-merge gate", () => {
       "pnpm run typecheck",
       "pnpm run test",
     ]);
+    expect(resolvePreQAGateDeclarations(dir)).toEqual([
+      {
+        id: "typecheck",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "typecheck"],
+      },
+      { id: "lint", stage: "base", required: false },
+    ]);
+    expect(resolveFullSuiteGateDeclarations(dir)).toEqual([
+      {
+        id: "tests",
+        stage: "base",
+        required: true,
+        command: "pnpm",
+        args: ["run", "test"],
+      },
+    ]);
+    expect(resolveCandidateQACommands(dir)).toEqual(["pnpm run typecheck"]);
   });
 
   it("matches when all three steps are defined", () => {
@@ -654,6 +675,235 @@ describe("assertSliceWorktreeOwnership", () => {
     );
     // Never deletes: ADR 0010 leaves a stale directory for the operator.
     expect(existsSync(ctx.worktreeDir)).toBe(true);
+  });
+});
+
+describe("explorer negotiation envelope", () => {
+  interface ExplorerRunOptions {
+    architecture?: boolean;
+    adrs?: boolean;
+    existingContext?: boolean;
+    inlineSizeBudgetBytes?: number;
+    explorerOutput?: string;
+  }
+
+  async function runExplorerNegotiation(
+    slug: string,
+    options: ExplorerRunOptions,
+  ) {
+    const repo = makeRepo();
+    if (options.architecture) {
+      writeFileSync(
+        join(repo, "ARCHITECTURE.md"),
+        "# Fixture architecture\n\nARCHITECTURE-BODY\n",
+        "utf-8",
+      );
+    }
+    if (options.adrs) {
+      mkdirSync(join(repo, "docs", "adr"), { recursive: true });
+      writeFileSync(
+        join(repo, "docs", "adr", "0001-fixture.md"),
+        "# Fixture ADR title\n\nADR-BODY-MUST-NOT-APPEAR\n",
+        "utf-8",
+      );
+    }
+    if (options.architecture || options.adrs) {
+      git(repo, ["add", "."]);
+      git(repo, ["commit", "-m", "add explorer repository context"]);
+    }
+
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9090",
+      title: "Explorer envelope",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    const invocations: InvokeOptions[] = [];
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(invokeOptions): Promise<InvokeResult> {
+        invocations.push(invokeOptions);
+        const artifactDir = findSliceArtifactDir(
+          invokeOptions.cwd,
+          slice.number,
+        );
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (invokeOptions.role === "explorer") {
+          writeFileSync(
+            join(artifactDir, "context.md"),
+            options.explorerOutput ?? validExplorerContext(),
+            "utf-8",
+          );
+          return { exitCode: 0, stdout: "", stats: {} };
+        }
+        throw new Error("stop fixture after explorer");
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        infrastructureRetries: 0,
+        ...(options.inlineSizeBudgetBytes !== undefined
+          ? {
+              explorerInlineSizeBudgetBytes:
+                options.inlineSizeBudgetBytes,
+            }
+          : {}),
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+    if (options.existingContext) {
+      createWorktree(repo, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+      mkdirSync(ctx.absSliceDir, { recursive: true });
+      writeFileSync(
+        join(ctx.absSliceDir, "context.md"),
+        validExplorerContext("existing"),
+        "utf-8",
+      );
+      git(ctx.worktreeDir, ["add", ctx.relSliceDir + "/context.md"]);
+      git(ctx.worktreeDir, ["commit", "-m", "persist explorer context"]);
+    }
+
+    const outcome = await runSliceNegotiate(ctx);
+    return { ctx, invocations, outcome };
+  }
+
+  // These repositories genuinely differ at explorer assembly time, so the
+  // independent omission cases cannot share one spawned worktree.
+  it.each([
+    {
+      label: "architecture and ADR index",
+      options: { architecture: true, adrs: true },
+      present: ["## ARCHITECTURE.md", "## ADR index"],
+      absent: [],
+    },
+    {
+      label: "architecture only",
+      options: { architecture: true },
+      present: ["## ARCHITECTURE.md"],
+      absent: ["## ADR index"],
+    },
+    {
+      label: "ADR index only",
+      options: { adrs: true },
+      present: ["## ADR index"],
+      absent: ["## ARCHITECTURE.md"],
+    },
+    {
+      label: "neither repository entry",
+      options: {},
+      present: ["(none available)"],
+      absent: ["## ARCHITECTURE.md", "## ADR index"],
+    },
+  ])(
+    "B-03 B-04 B-05 P-02 invokes explorer once through the provider seam with $label",
+    async ({ label, options, present, absent }) => {
+      const { ctx, invocations } = await runExplorerNegotiation(
+        `explorer-${label.replaceAll(" ", "-")}`,
+        options,
+      );
+      const explorerInvocations = invocations.filter(
+        (invocation) => invocation.role === "explorer",
+      );
+
+      expect(explorerInvocations).toHaveLength(1);
+      const prompt = explorerInvocations[0]!.prompt;
+      const requiredBlockOrder = [
+        "# Objective",
+        "# Write boundary",
+        "# Stop condition",
+        "# Citation rule",
+        "# Four-section task",
+        "# Slice inputs",
+        "# Repository context",
+        "# Budget",
+      ];
+      let previousBlockIndex = -1;
+      for (const block of requiredBlockOrder) {
+        const blockIndex = prompt.indexOf(block);
+        expect(blockIndex, block).toBeGreaterThan(previousBlockIndex);
+        previousBlockIndex = blockIndex;
+      }
+      for (const marker of present) expect(prompt).toContain(marker);
+      for (const marker of absent) expect(prompt).not.toContain(marker);
+      // PRD story 9 / slice #90: the dispatched explorer prompt carries the
+      // three-label citation rule (guardian round 2, architect A2 / PM 1)
+      // and the ADR-index pushed-selection rule (guardian round 3, PM 1).
+      expect(prompt).toContain("Label every statement");
+      expect(prompt).toContain("`FACT`");
+      expect(prompt).toContain("`INFERENCE`");
+      expect(prompt).toContain("`UNKNOWN`");
+      expect(prompt).toContain("pushed selection");
+      expect(prompt).toContain(
+        "open a full ADR only when its title plausibly governs",
+      );
+      expect(prompt).toContain("cite governing ADRs by number");
+      expect(prompt).not.toContain("ADR-BODY-MUST-NOT-APPEAR");
+      const writeBoundary = prompt.match(
+        /^# Write boundary\r?\n([\s\S]*?)(?=^# )/m,
+      )?.[1];
+      expect(writeBoundary).toContain(`${ctx.relSliceDir}/context.md`);
+      expect(writeBoundary).not.toContain("contract.md");
+      expect(writeBoundary).not.toContain("acceptance-manifest.json");
+    },
+  );
+
+  it("P-01 skips explorer when an existing context is a valid evidence map", async () => {
+    const { invocations } = await runExplorerNegotiation(
+      "explorer-existing-context",
+      { existingContext: true },
+    );
+    expect(
+      invocations.filter((invocation) => invocation.role === "explorer"),
+    ).toHaveLength(0);
+    expect(
+      invocations.filter((invocation) => invocation.role === "planner"),
+    ).toHaveLength(1);
+  });
+
+  it("B-01 rejects malformed explorer output before planner dispatch", async () => {
+    const { invocations, outcome } = await runExplorerNegotiation(
+      "explorer-malformed-output",
+      { explorerOutput: "# Legacy context\n" },
+    );
+    expect(
+      invocations.filter((invocation) => invocation.role === "explorer"),
+    ).toHaveLength(1);
+    expect(
+      invocations.filter((invocation) => invocation.role === "planner"),
+    ).toHaveLength(0);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /Explorer evidence map requires exactly these level-two sections/,
+    );
+  });
+
+  it("B-06 rejects an over-budget explorer prompt before provider invocation", async () => {
+    const { invocations, outcome } = await runExplorerNegotiation(
+      "explorer-over-budget",
+      { inlineSizeBudgetBytes: 1 },
+    );
+    expect(invocations).toHaveLength(0);
+    expect(outcome.phase).toBe("ERROR");
+    expect(outcome.phase === "ERROR" ? outcome.cause.summary : "").toMatch(
+      /Explorer prompt exceeds inline-size budget: actual \d+ bytes, allowed 1 bytes/,
+    );
   });
 });
 
@@ -1574,44 +1824,85 @@ describe("generator scope escalation", () => {
         escalation: escalation(slice),
       });
 
+      const fixtures = new Map<string, SliceFixture>([
+        [
+          slices[0]!.ghIssue,
+          { ...fixture(slices[0]!), revisionPlannerThrows: true },
+        ],
+        [slices[1]!.ghIssue, fixture(slices[1]!)],
+        [slices[2]!.ghIssue, fixture(slices[2]!)],
+        // The revision drops the accepted path instead of adding to it:
+        // it declares only the escalation's requested path, so the
+        // requested-path check passes but the additive guard must catch
+        // the lost `declared-04` (finding 3).
+        [
+          slices[3]!.ghIssue,
+          { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
+        ],
+        // Widens both orchestrator-owned files with a path its
+        // escalation never mentions, then escalates for `extra-05`.
+        [
+          slices[4]!.ghIssue,
+          {
+            ...fixture(slices[4]!),
+            ownedContractWidening: "src/smuggled-05.ts",
+          },
+        ],
+      ]);
+      const baseProvider = buildStubProvider({
+        slices,
+        records,
+        fixtures,
+      });
+
       await runPipeline({
         repoRoot: repo,
         prdSlug: slug,
         prdDir,
         specsDir,
         dag: buildDAG(slices),
-        provider: buildStubProvider({
-          slices,
-          records,
-          fixtures: new Map<string, SliceFixture>([
-            [
-              slices[0]!.ghIssue,
-              { ...fixture(slices[0]!), revisionPlannerThrows: true },
-            ],
-            [
-              slices[1]!.ghIssue,
-              { ...fixture(slices[1]!), revisionRejected: true },
-            ],
-            [slices[2]!.ghIssue, fixture(slices[2]!)],
-            // The revision drops the accepted path instead of adding to it:
-            // it declares only the escalation's requested path, so the
-            // requested-path check passes but the additive guard must catch
-            // the lost `declared-04` (finding 3).
-            [
-              slices[3]!.ghIssue,
-              { ...fixture(slices[3]!), revisedFiles: [`src/extra-04.ts`] },
-            ],
-            // Widens both orchestrator-owned files with a path its
-            // escalation never mentions, then escalates for `extra-05`.
-            [
-              slices[4]!.ghIssue,
-              {
-                ...fixture(slices[4]!),
-                ownedContractWidening: "src/smuggled-05.ts",
-              },
-            ],
-          ]),
-        }),
+        provider: {
+          ...baseProvider,
+          async invoke(options): Promise<InvokeResult> {
+            const result = await baseProvider.invoke(options);
+            const slice = sliceFromCwd(options.cwd, slices);
+            const evaluatorInvocations = records.filter(
+              (record) =>
+                record.role === "evaluator-contract" &&
+                record.ghIssue === slice?.ghIssue,
+            ).length;
+            if (
+              options.role === "evaluator-contract" &&
+              slice?.ghIssue === slices[1]!.ghIssue &&
+              evaluatorInvocations === 2
+            ) {
+              const artifactDir = findSliceArtifactDir(
+                options.cwd,
+                slice.number,
+              )!;
+              const feedbackRound =
+                /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "2";
+              writeFileSync(
+                join(artifactDir, `feedback-r${feedbackRound}.md`),
+                "## Evaluator feedback\n\nThe focused revision is rejected.\n",
+                "utf-8",
+              );
+              writeContractReview(artifactDir, "REVISE", [
+                {
+                  id: REVISION_REJECTION_FINDING,
+                  severity: "BLOCKING",
+                  behaviorIds: ["B-01"],
+                  evidence: '"the revised file scope"',
+                  expected: "a revision that keeps every locked term",
+                  observed: "the revision changes an accepted behavior",
+                  clearCondition: "the planner re-revises the contract",
+                  state: "OPEN",
+                },
+              ]);
+            }
+            return result;
+          },
+        },
         onContractLocked: (() => {
           const calls = new Map<string, number>();
           return (ghIssue) => {
@@ -1899,17 +2190,21 @@ describe("focused generator scope revision", () => {
     expect(records.filter(({ role }) => role === "planner")).toHaveLength(2);
   });
 
-  it("routes the exact escalation evidence through one focused planner", () => {
+  it("B-05 P-03 routes focused scope evidence through the planner revision envelope", () => {
     const planners = records.filter(({ role }) => role === "planner");
     expect(planners).toHaveLength(2);
+    expect(planners[1]!.prompt!).toContain("# Routed OPEN findings");
+    expect(planners[1]!.prompt!).toContain("# Control-plane situation");
     expect(planners[1]!.prompt!).toContain(
       JSON.stringify(escalation.findingIds),
     );
     expect(planners[1]!.prompt!).toContain(JSON.stringify(escalation.paths));
     expect(planners[1]!.prompt!).toContain(escalation.reason);
+    expect(planners[1]!.prompt!).not.toContain("grep for `docs/adr/`");
+    expect(planners[1]!.prompt!).not.toContain("sibling handoffs");
   });
 
-  it("evaluates the revised manifest after the focused planner", () => {
+  it("B-05 QA-01 evaluates the focused scope revision with an initial evaluator envelope", () => {
     const relevant = records.filter(({ role }) =>
       ["planner", "evaluator-contract", "generator"].includes(role),
     );
@@ -1922,14 +2217,21 @@ describe("focused generator scope revision", () => {
       "evaluator-contract",
       "generator",
     ]);
+    const evaluatorPrompts = relevant
+      .filter(({ role }) => role === "evaluator-contract")
+      .map(({ prompt }) => prompt!);
+    expect(evaluatorPrompts).toHaveLength(2);
+    expect(evaluatorPrompts[1]).toContain("# Proposed contract");
+    expect(evaluatorPrompts[1]).toContain("# Judgment boundary");
+    expect(evaluatorPrompts[1]).not.toContain("# Prior OPEN findings");
+    expect(evaluatorPrompts[1]).not.toContain("# Exact revision evidence");
     const freshGeneratorPrompt = relevant.at(-1)!.prompt!;
     expect(freshGeneratorPrompt).toContain('"fileScope"');
     expect(freshGeneratorPrompt).toContain("src/declared.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-a.ts");
     expect(freshGeneratorPrompt).toContain("src/extra-b.ts");
-    expect(freshGeneratorPrompt).toContain("This is implementation round 2");
+    expect(freshGeneratorPrompt).toContain("Implementation round: 2 of 3.");
     expect(freshGeneratorPrompt).toContain("QA-01");
-    expect(freshGeneratorPrompt).toContain("Fixture implementation finding");
     expect(freshGeneratorPrompt).toContain(
       "The fixture evaluator observes the behavior passing",
     );
@@ -1956,6 +2258,316 @@ describe("focused generator scope revision", () => {
 
     expect(generatorStarts.map(({ round }) => round)).toEqual([1, 2, 2]);
     expect(records.filter(({ role }) => role === "generator")).toHaveLength(3);
+  });
+
+  it("B-01 B-05 QA-04 journals exact complete envelope evidence for every scoped stub invocation", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const events = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assemblies = events.filter(
+      (event) => event.type === "prompt-assembly",
+    );
+    const scopedInvocations = records.filter(({ role }) =>
+      ["explorer", "planner", "evaluator-contract", "generator"].includes(
+        role,
+      ),
+    );
+
+    expect(assemblies).toHaveLength(scopedInvocations.length);
+    expect(assemblies.map((event) => event.role)).toEqual([
+      "explorer",
+      "planner",
+      "evaluator-contract",
+      "generator",
+      "generator",
+      "planner",
+      "evaluator-contract",
+      "generator",
+    ]);
+    const relSliceDir = join(
+      ".kiro",
+      "specs",
+      slug,
+      "slices",
+      "01-focused-scope-revision",
+    ).replace(/\\/g, "/");
+    const contractId = `${relSliceDir}/contract.md`;
+    const manifestId = `${relSliceDir}/acceptance-manifest.json`;
+    const contextId = `${relSliceDir}/context.md`;
+    const qaFindingIds = [
+      `.afk/artifacts/${slug}-stub/slice-01/reviews/qa-review-r1-a1.json`,
+      `${relSliceDir}/qa-report-r1-a1.md`,
+    ];
+    const initialEvaluatorClasses = [
+      "proposed-contract",
+      "acceptance-manifest",
+      "base-gate-catalog",
+      "explorer-behavior-preservation",
+    ];
+    const initialEvaluatorIds = [
+      contractId,
+      manifestId,
+      "base-gate-catalog",
+      contextId,
+    ];
+    const generatorBaseClasses = [
+      "file-scope",
+      "migration-reservation",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+    ];
+    const generatorBaseIds = [
+      "acceptance-manifest:file-scope",
+      "migration-reservation",
+      contractId,
+      manifestId,
+      "generator:test-command",
+      contextId,
+      "generator:failure-set",
+    ];
+    const repairGeneratorClasses = [
+      "file-scope",
+      "migration-reservation",
+      "repair-situation",
+      "contract-view",
+      "acceptance-manifest",
+      "verification-command",
+      "patterns-and-harness",
+      "failure-set",
+      "finding-evidence",
+      "finding-evidence",
+    ];
+    const repairGeneratorIds = [
+      "acceptance-manifest:file-scope",
+      "migration-reservation",
+      "generator:repair-situation",
+      contractId,
+      manifestId,
+      "generator:test-command",
+      contextId,
+      "generator:failure-set",
+      ...qaFindingIds,
+    ];
+    expect(
+      assemblies.map((event) => ({
+        classes: event.includedArtifactClasses,
+        ids: event.includedArtifactIds,
+      })),
+    ).toEqual([
+      {
+        classes: ["slice-request"],
+        ids: ["issue:1081"],
+      },
+      {
+        classes: [
+          "slice-request",
+          "explorer-evidence-map",
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+        ids: [
+          "slice-request",
+          contextId,
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+      },
+      {
+        classes: initialEvaluatorClasses,
+        ids: initialEvaluatorIds,
+      },
+      {
+        classes: generatorBaseClasses,
+        ids: generatorBaseIds,
+      },
+      {
+        classes: repairGeneratorClasses,
+        ids: repairGeneratorIds,
+      },
+      {
+        classes: [
+          "current-contract-pair",
+          "current-contract-pair",
+          "control-plane-situation",
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+        ids: [
+          contractId,
+          manifestId,
+          "control-plane-situation",
+          "base-gate-catalog",
+          "migration-reservation",
+        ],
+      },
+      {
+        classes: initialEvaluatorClasses,
+        ids: initialEvaluatorIds,
+      },
+      {
+        classes: repairGeneratorClasses,
+        ids: repairGeneratorIds,
+      },
+    ]);
+    expect(
+      assemblies.map((event) => ({
+        ghIssue: event.ghIssue,
+        sliceNumber: event.sliceNumber,
+        role: event.role,
+        contextManifestVersion: event.contextManifestVersion,
+      })),
+    ).toEqual([
+      "explorer",
+      "planner",
+      "evaluator-contract",
+      "generator",
+      "generator",
+      "planner",
+      "evaluator-contract",
+      "generator",
+    ].map((role) => ({
+      ghIssue: "1081",
+      sliceNumber: "01",
+      role,
+      contextManifestVersion: 1,
+    })));
+    expect(assemblies.map((event) => event.assembledByteSize)).toEqual(
+      scopedInvocations.map(({ prompt }) => Buffer.byteLength(prompt!)),
+    );
+    const explorerOmissions = [
+      "persona",
+      "full-adr-bodies",
+      "prior-conversation",
+      "other-role-conversation",
+    ];
+    const plannerOmissions = [
+      "prior-conversation",
+      "other-role-conversation",
+      "resolved-findings",
+      "sibling-handoffs",
+      "full-adr-bodies",
+    ];
+    const evaluatorOmissions = [
+      ...plannerOmissions,
+      "generator-output",
+      "cleanup-artifacts",
+      "explorer-patterns-and-harness",
+      "explorer-data-and-integration",
+    ];
+    const generatorOmissions = [
+      "resolved-findings",
+      "passing-logs",
+      "prior-conversation",
+      "other-role-conversation",
+      "sibling-handoffs",
+      "full-adr-bodies",
+    ];
+    expect(assemblies.map((event) => event.omittedArtifactClasses)).toEqual([
+      explorerOmissions,
+      plannerOmissions,
+      evaluatorOmissions,
+      generatorOmissions,
+      generatorOmissions,
+      plannerOmissions,
+      evaluatorOmissions,
+      generatorOmissions,
+    ]);
+    // Assembly evidence carries no post-return facts: tokens and timing
+    // arrive in the paired invocation-completed event (guardian round 2,
+    // PM 4).
+    for (const event of assemblies) {
+      expect(event).not.toHaveProperty("tokenCounts");
+      expect(event).not.toHaveProperty("nonCommandTimeMs");
+    }
+    const allCompletions = events.filter(
+      (event) => event.type === "invocation-completed",
+    );
+    const completions = allCompletions.filter(
+      (event) => event.role !== "evaluator-qa" && event.role !== "evaluator-uat",
+    );
+    expect(completions).toHaveLength(assemblies.length);
+    expect(completions.map((event) => event.role)).toEqual(
+      assemblies.map((event) => event.role),
+    );
+    // Completion telemetry is decoupled from envelope assembly: the
+    // candidate evaluator has no assembled envelope, yet each of its
+    // invocations lands a durable completion event with full identity.
+    // The stub reports a measured reading time only on its first
+    // attempt, so the second event proves an unmeasured provider omits
+    // the field rather than inventing 0 (plan §3 item 13; guardian
+    // round 6).
+    const evaluatorCompletions = allCompletions.filter(
+      (event) => event.role === "evaluator-qa",
+    );
+    expect(evaluatorCompletions.length).toBeGreaterThanOrEqual(2);
+    expect(evaluatorCompletions[0]).toMatchObject({
+      ghIssue: "1081",
+      sliceNumber: "01",
+      round: 1,
+      attempt: 1,
+      nonCommandTimeMs: 777,
+    });
+    for (const event of evaluatorCompletions.slice(1)) {
+      expect(event).not.toHaveProperty("nonCommandTimeMs");
+      expect(event).toMatchObject({ ghIssue: "1081", sliceNumber: "01" });
+    }
+    expect(completions[0]).not.toHaveProperty("tokenCounts");
+    expect(completions.map((event) => event.tokenCounts)).toEqual([
+      undefined,
+      { input_tokens: 10 },
+      {
+        input_tokens: 7,
+        output_tokens: 3,
+      },
+      { output_tokens: 5, cache_read_input_tokens: 2 },
+      { output_tokens: 5, cache_read_input_tokens: 2 },
+      { input_tokens: 10 },
+      {
+        input_tokens: 7,
+        output_tokens: 3,
+      },
+      { output_tokens: 5, cache_read_input_tokens: 2 },
+    ]);
+    for (const event of completions.slice(1)) {
+      expect(event).toHaveProperty("tokenCounts");
+    }
+    // Dispatch-order contract (slice #83; guardian round 2, PM 4): at
+    // provider invocation entry the stub observed its matching
+    // prompt-assembly event as the journal's last entry.
+    const scopedRecords = records.filter(({ role }) =>
+      ["explorer", "planner", "evaluator-contract", "generator"].includes(
+        role,
+      ),
+    );
+    expect(scopedRecords).toHaveLength(assemblies.length);
+    scopedRecords.forEach((record, index) => {
+      expect(record.journalTailAtEntry, `${record.role} #${index}`)
+        .toMatchObject({
+          type: "prompt-assembly",
+          role: record.role,
+          ghIssue: "1081",
+        });
+    });
+    for (const event of assemblies.filter(
+      ({ role, round }) =>
+        role !== "explorer" &&
+        (role !== "planner" || round !== 1),
+    )) {
+      expect(event.includedArtifactIds).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("contract.md"),
+          expect.stringContaining("acceptance-manifest.json"),
+        ]),
+      );
+    }
   });
 
   it("continues through QA after fresh generation", () => {
@@ -2529,7 +3141,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           const round = plannerPrompts.length;
@@ -2616,7 +3228,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           const round = plannerPrompts.length;
@@ -2723,7 +3335,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           writeFileSync(
@@ -2804,7 +3416,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerPrompts.push(opts.prompt);
           writeFileSync(
@@ -2940,7 +3552,7 @@ describe("round-scoped contract feedback", () => {
           const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
           if (!artifactDir) throw new Error("slice artifact directory missing");
           if (opts.role === "explorer") {
-            writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+            writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
           } else if (opts.role === "planner") {
             plannerRounds++;
             plannerPrompts.push(opts.prompt);
@@ -3014,7 +3626,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -3062,7 +3674,7 @@ describe("round-scoped contract feedback", () => {
     ).toBe(false);
   });
 
-  it("routes round 1 OPEN findings without prior feedback prose", async () => {
+  it("P-02 QA-02 grants one final contract round without resolved finding history", async () => {
     const repo = makeRepo();
     const slug = "feedback-rounds";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -3092,7 +3704,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           plannerPrompts.push(opts.prompt);
@@ -3107,21 +3719,28 @@ describe("round-scoped contract feedback", () => {
               "## Files expected to change",
               "- src/example.ts",
               "",
+              plannerRounds === 1
+                ? "The test asserts the baseline observable."
+                : "The test asserts the observable and scope plausibility.",
+              "",
             ].join("\n"),
             "utf-8",
           );
           writeAcceptanceManifest(artifactDir);
-          if (plannerRounds === 2) {
+          if (plannerRounds > 1) {
             writeFileSync(
               join(artifactDir, "contract-response.json"),
               JSON.stringify({
                 version: 1,
-                round: 2,
+                round: plannerRounds,
                 responses: [
                   {
-                    findingId: "F-01",
+                    findingId: plannerRounds === 2 ? "F-01" : "F-02",
                     position: "CONDITION_MET",
-                    evidence: "B-01 now names the failing command",
+                    evidence:
+                      plannerRounds === 2
+                        ? "B-01 now names the failing command"
+                        : "B-01 now asserts scope plausibility",
                   },
                 ],
               }),
@@ -3131,29 +3750,69 @@ describe("round-scoped contract feedback", () => {
         } else if (opts.role === "evaluator-contract") {
           evaluatorRounds++;
           evaluatorPrompts.push(opts.prompt);
-          const verdict = evaluatorRounds === 1 ? "REVISE" : "ACCEPT";
+          const verdict = evaluatorRounds < 3 ? "REVISE" : "ACCEPT";
           writeFileSync(
             join(artifactDir, `feedback-r${evaluatorRounds}.md`),
             `## Evaluator feedback — round ${evaluatorRounds}\n\nProse for ${verdict}.\n`,
             "utf-8",
           );
-          writeContractReview(
-            artifactDir,
-            verdict,
-            [
+          const findings =
+            evaluatorRounds === 1
+              ? [
               {
                 id: "F-01",
-                severity: "BLOCKING",
+                severity: "BLOCKING" as const,
                 behaviorIds: ["B-01"],
                 evidence: '"it reaches review"',
                 expected: "a falsifiable observable result",
                 observed: "an unfalsifiable one",
                 clearCondition:
                   "B-01 names a command that fails when the header is absent",
-                state: verdict === "REVISE" ? "OPEN" : "RESOLVED",
+                state: "OPEN" as const,
               },
-            ],
-          );
+                ]
+              : evaluatorRounds === 2
+                ? [
+                    {
+                      id: "F-01",
+                      severity: "BLOCKING" as const,
+                      behaviorIds: ["B-01"],
+                      evidence: "the original condition is now met",
+                      expected: "a falsifiable observable result",
+                      observed: "the command is now named",
+                      clearCondition: "the named command remains present",
+                      state: "RESOLVED" as const,
+                    },
+                    {
+                      id: "F-02",
+                      severity: "BLOCKING" as const,
+                      behaviorIds: ["B-01"],
+                      evidence: "the revision added an unproved scope claim",
+                      expected: "scope plausibility is asserted",
+                      observed: "only the observable is asserted",
+                      clearCondition: "B-01 asserts scope plausibility",
+                      state: "OPEN" as const,
+                      revisionCitation: {
+                        artifact: "contract.md" as const,
+                        before: "The test asserts the baseline observable.",
+                        after:
+                          "The test asserts the observable and scope plausibility.",
+                      },
+                    },
+                  ]
+                : [
+                    {
+                      id: "F-02",
+                      severity: "BLOCKING" as const,
+                      behaviorIds: ["B-01"],
+                      evidence: "the extension condition is now met",
+                      expected: "scope plausibility is asserted",
+                      observed: "scope plausibility is asserted",
+                      clearCondition: "B-01 asserts scope plausibility",
+                      state: "RESOLVED" as const,
+                    },
+                  ];
+          writeContractReview(artifactDir, verdict, findings);
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
@@ -3173,8 +3832,8 @@ describe("round-scoped contract feedback", () => {
 
     expect(await runSliceNegotiate(ctx)).toEqual({ phase: "LOCKED" });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(plannerRounds).toBe(2);
-    expect(evaluatorRounds).toBe(2);
+    expect(plannerRounds).toBe(3);
+    expect(evaluatorRounds).toBe(3);
     expect(plannerPrompts[0]).toContain("Local issue details");
     expect(plannerPrompts[0]).not.toContain("gh issue view 9001");
     expect(plannerPrompts[1]).not.toContain("feedback-r1.md");
@@ -3188,6 +3847,16 @@ describe("round-scoped contract feedback", () => {
     expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
     expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
+    expect(plannerPrompts[2]).toContain("[F-02] BLOCKING OPEN");
+    expect(plannerPrompts[2]).toContain("# Relevant resolved history");
+    expect(plannerPrompts[2]).not.toContain("[F-01] BLOCKING RESOLVED");
+    expect(plannerPrompts[2]).not.toContain(
+      "B-01 names a command that fails when the header is absent",
+    );
+    expect(plannerPrompts[2]).toContain(
+      "Include one response for each routed ID and no others: F-02.",
+    );
+    expect(evaluatorPrompts[2]).toContain('"round": 3');
 
     const contract = readFileSync(join(ctx.absSliceDir, "contract.md"), "utf-8");
     expect(contract).toMatch(/^\*\*Status:\*\*\s*LOCKED\s*$/m);
@@ -3217,7 +3886,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           plannerPrompts.push(opts.prompt);
@@ -3931,7 +4600,7 @@ describe("round-scoped contract feedback", () => {
   // revision citation, followed by a third planner response. Existing
   // negotiation fixtures either stop at two rounds or reuse an old blocker,
   // so none can reach this distinct continuation state.
-  it("grants the PRD 3 final response when round two first raises fresh cited blockers", async () => {
+  it("P-02 QA-02 grants the PRD 3 final response without resolved finding history", async () => {
     const repo = makeRepo();
     const slug = "converging-contract";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -3953,7 +4622,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           plannerPrompts.push(opts.prompt);
@@ -3970,16 +4639,28 @@ describe("round-scoped contract feedback", () => {
               "utf-8",
             );
           }
-          if (plannerRounds === 2) {
+          if (plannerRounds > 1) {
             writeFileSync(
               join(artifactDir, "contract.md"),
-              "# Contract\n\n**Status:** NEGOTIATING\n\nRound 2\n",
+              `# Contract\n\n**Status:** NEGOTIATING\n\nRound ${plannerRounds}\n`,
               "utf-8",
             );
-            writeContractResponse(
-              artifactDir,
-              ["F-r1-1", "F-r1-2", "F-r1-3", "F-r1-4"],
-              "CONDITION_MET",
+            const priorGaps = plannerRounds === 2 ? 4 : 2;
+            writeFileSync(
+              join(artifactDir, "contract-response.json"),
+              JSON.stringify({
+                version: 1,
+                round: plannerRounds,
+                responses: Array.from(
+                  { length: priorGaps },
+                  (_unused, index) => ({
+                    findingId: `F-r${plannerRounds - 1}-${index + 1}`,
+                    position: "CONDITION_MET",
+                    evidence: "the cited condition is now met",
+                  }),
+                ),
+              }),
+              "utf-8",
             );
           }
           if (plannerRounds === 3) {
@@ -4008,9 +4689,11 @@ describe("round-scoped contract feedback", () => {
           // round 2 fresh IDs, since a reused ID is a re-raised gap.
           const gaps = evaluatorRounds === 1 ? 4 : evaluatorRounds === 2 ? 2 : 0;
           const resolved =
-            evaluatorRounds === 2
-              ? Array.from({ length: 4 }, (_unused, index) => ({
-                  id: `F-r1-${index + 1}`,
+            evaluatorRounds > 1
+              ? Array.from(
+                  { length: evaluatorRounds === 2 ? 4 : 2 },
+                  (_unused, index) => ({
+                  id: `F-r${evaluatorRounds - 1}-${index + 1}`,
                   severity: "BLOCKING" as const,
                   behaviorIds: ["B-01"],
                   evidence: '"it reaches review"',
@@ -4090,10 +4773,10 @@ describe("round-scoped contract feedback", () => {
       expect(evaluatorRounds).toBe(3);
       expect(plannerPrompts[2]).toContain("F-r2-1");
       expect(plannerPrompts[2]).toContain("F-r2-2");
-      expect(plannerPrompts[2]).toContain(
+      expect(plannerPrompts[2]).not.toContain(
         "Keep this relevant resolved history satisfied",
       );
-      expect(plannerPrompts[2]).toContain("F-r1-1");
+      expect(plannerPrompts[2]).not.toContain("F-r1-1");
       expect(roundThreeResponse).toMatchObject({
         version: 1,
         round: 3,
@@ -4146,7 +4829,7 @@ describe("round-scoped contract feedback", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -4307,7 +4990,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           // Read before overwriting: what a later planner round starts from
@@ -4596,7 +5279,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           writeFileSync(
             join(artifactDir, "contract.md"),
@@ -4731,7 +5414,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -4916,7 +5599,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           writeFileSync(
             join(artifactDir, "contract.md"),
@@ -4986,7 +5669,7 @@ describe("contract review fails closed", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           writeFileSync(
             join(artifactDir, "contract.md"),
@@ -5058,7 +5741,7 @@ describe("contract review fails closed", () => {
  * `Status: NEGOTIATING` and bails. The orchestrator must own the flip.
  */
 describe("orchestrator-owned contract status", () => {
-  it("locks the contract on ACCEPT even when planner leaves Status NEGOTIATING", async () => {
+  it("P-02 locks the contract on ACCEPT even when planner leaves Status NEGOTIATING", async () => {
     const repo = makeRepo();
     const slug = "024-test";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -5208,7 +5891,7 @@ describe("orchestrator-owned contract status", () => {
         const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
-          writeFileSync(join(artifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -5667,13 +6350,14 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       expect(result.failureReason).toContain("PM: UNPARSEABLE");
     }, 240_000);
 
-    it("is unsuccessful when cancellation landed after the last merge but before the ship gates", async () => {
+    it("is unsuccessful when cancellation lands after candidate QA", async () => {
       const slug = "exit-cancelled-preship";
       const { repo, prdDir, specsDir, slices, baseProvider } =
         makePassingSliceSetup(slug, "7406");
 
-      // Cancel as soon as the slice's QA lands: the merge completes, so
-      // every slice is PASS, but the sanity gate and guardians never run.
+      // Cancel as soon as candidate QA lands. The post-QA full suite observes
+      // the signal and the slice never merges, so its outcome explains the
+      // failure.
       const controller = new AbortController();
       const provider: AgentProvider = {
         name: baseProvider.name,
@@ -5695,7 +6379,8 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.failureReason).toContain("cancelled");
+      expect(result.failureReason).toBeUndefined();
+      expect(result.summary).toContain("CANCELLED");
     }, 240_000);
 
     it("is unsuccessful when the pre-ship sanity gate failed, naming the failing step", async () => {

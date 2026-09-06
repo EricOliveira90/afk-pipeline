@@ -66,14 +66,15 @@ beforeEach(() => {
 });
 
 describe("kiro invoke spawn args", () => {
-  it("passes --agent, trusts all tools, and defaults to Fable", async () => {
+  it("P-05 keeps the exact prompt as Kiro's final argument with existing flags", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);
+    const exactPrompt = "EXACT-KIRO-ENVELOPE";
 
     const promise = invoke({
       role: "planner",
       agent: "planner",
-      prompt: "go",
+      prompt: exactPrompt,
       cwd: "/tmp/x",
     });
     proc.emit("exit", 0);
@@ -86,7 +87,7 @@ describe("kiro invoke spawn args", () => {
     expect(args).toContain("--trust-all-tools");
     expect(args[args.indexOf("--agent") + 1]).toBe("planner");
     expect(args[args.indexOf("--model") + 1]).toBe("claude-fable-5");
-    expect(args[args.length - 1]).toBe("go");
+    expect(args[args.length - 1]).toBe(exactPrompt);
     // Caller-supplied agent configs are the caller's responsibility —
     // the managed worker config is not written.
     expect(fsMock.writeFileSync).not.toHaveBeenCalled();
@@ -387,5 +388,27 @@ describe("transient exit classification", () => {
         (e as Error).name === "Error" &&
         (e as Error).message === "Agent planner exited with code 3",
     );
+  });
+});
+
+
+describe("nonCommandTimeMs evidence (A4)", () => {
+  it("never appears for kiro — no structured stream, no attribution", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({
+      role: "generator",
+      agent: "generator",
+      prompt: "go",
+      cwd: "/tmp/x",
+    });
+    proc.stdout.push("some unstructured output\n");
+    await new Promise((resolve) => setImmediate(resolve));
+    proc.emit("exit", 0);
+
+    const result = await promise;
+    // Kiro cannot attribute command time (ADR 0004: no parseStreamLine),
+    // so the field must be ABSENT — not an invented 0.
+    expect("nonCommandTimeMs" in result.stats).toBe(false);
   });
 });

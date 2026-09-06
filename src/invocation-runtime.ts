@@ -38,10 +38,82 @@ export interface PreparedInvocation {
   onOutput?: (stream: InvocationStream, text: string) => Error | undefined;
   classifyExit?: (exit: InvocationExit) => Error;
   stats?: () => InvocationStats;
+  /**
+   * Total provider-attributed command/tool execution time in ms, read
+   * once at successful exit. Return `undefined` when attribution is
+   * unavailable or incomplete — the runtime then OMITS
+   * `nonCommandTimeMs` from the stats rather than inventing a value.
+   * Providers typically implement this with `createCommandTimeTracker`.
+   * Evidence only; the runtime never branches on the value.
+   */
+  commandTimeMs?: () => number | undefined;
   onSettled?: () => void;
 }
 
 export type PrepareInvocation = () => PreparedInvocation;
+
+/**
+ * Accumulates provider-attributed command/tool execution intervals for
+ * one invocation. Feeds `PreparedInvocation.commandTimeMs`, which the
+ * runtime subtracts from the invocation wall clock to derive the
+ * evidence-only `InvocationStats.nonCommandTimeMs` (see its TSDoc in
+ * `agent-provider.ts` for the clock boundaries).
+ *
+ * Semantics:
+ * - `begin(id)`/`end(id)` bracket one execution, correlated by the
+ *   provider's own id. Overlapping executions are merged into a union
+ *   of busy time, not summed — the derived non-command time can never
+ *   go negative from parallel tools.
+ * - `end` for an unknown id poisons the tracker: a completion record
+ *   with no matching start means the stream's attribution cannot be
+ *   trusted, so it must yield "unavailable", never "zero command
+ *   time" (guardian round 2, architect A4). `begin` for an
+ *   already-open id is ignored.
+ * - `markUnattributable()` poisons the tracker for records that cannot
+ *   be correlated (e.g. a tool record with no id).
+ * - `totalMs()` returns `undefined` when poisoned or when any interval
+ *   is still open — incomplete attribution yields NO value, never a
+ *   guess.
+ */
+export interface CommandTimeTracker {
+  begin(id: string): void;
+  end(id: string): void;
+  markUnattributable(): void;
+  totalMs(): number | undefined;
+}
+
+export function createCommandTimeTracker(
+  now: () => number = Date.now,
+): CommandTimeTracker {
+  const open = new Set<string>();
+  let busySince = 0;
+  let totalMs = 0;
+  let unattributable = false;
+  return {
+    begin(id) {
+      if (open.has(id)) return;
+      if (open.size === 0) busySince = now();
+      open.add(id);
+    },
+    end(id) {
+      if (!open.delete(id)) {
+        // A completion with no matching start: attribution is incomplete
+        // in a way this tracker cannot repair, so the whole invocation's
+        // command time becomes unavailable rather than under-counted.
+        unattributable = true;
+        return;
+      }
+      if (open.size === 0) totalMs += now() - busySince;
+    },
+    markUnattributable() {
+      unattributable = true;
+    },
+    totalMs() {
+      if (unattributable || open.size > 0) return undefined;
+      return totalMs;
+    },
+  };
+}
 
 /**
  * Execute one agent invocation.
@@ -77,6 +149,10 @@ export function runInvocation(
 
     const invocation = prepare();
     let proc: ChildProcess;
+    // Invocation clock start: taken immediately before the provider
+    // process is spawned. Pairs with the `exit` observation below to
+    // form the wall clock behind `nonCommandTimeMs`.
+    const invocationStartedAt = Date.now();
     try {
       proc = spawn(invocation.command, invocation.args, {
         cwd,
@@ -302,6 +378,10 @@ export function runInvocation(
     });
 
     proc.on("exit", (code) => {
+      // Invocation clock end: taken the moment successful exit is
+      // observed, before `settle` runs provider `onSettled` cleanup —
+      // cleanup time is not model time (guardian round 2, architect A4).
+      const invocationEndedAt = Date.now();
       if (stdoutBuffer) {
         processLine(stdoutBuffer);
         stdoutBuffer = "";
@@ -322,12 +402,23 @@ export function runInvocation(
           return;
         }
         const stats = invocation.stats?.() ?? {};
+        // Evidence only (ADR 0046 amendment): derived and recorded,
+        // never branched on. Omitted — not zeroed — when the provider
+        // cannot attribute command time.
+        const commandTime = invocation.commandTimeMs?.();
+        const nonCommandTimeMs =
+          commandTime === undefined
+            ? undefined
+            : Math.max(0, invocationEndedAt - invocationStartedAt - commandTime);
         resolve({
           exitCode,
           stdout,
-          stats: invocation.parseStreamLine
-            ? { ...stats, toolCallCount }
-            : stats,
+          stats: {
+            ...(invocation.parseStreamLine
+              ? { ...stats, toolCallCount }
+              : stats),
+            ...(nonCommandTimeMs === undefined ? {} : { nonCommandTimeMs }),
+          },
         });
       });
     });

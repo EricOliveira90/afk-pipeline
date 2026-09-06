@@ -49,6 +49,7 @@ import {
   makeRepo,
   setupWave,
   sliceFromCwd,
+  validExplorerContext,
   type ProviderDeath,
   type SliceFixture,
 } from "./wave.fixtures.js";
@@ -589,7 +590,11 @@ describe("runWave", () => {
           : null;
 
         if (role === "explorer" && sliceArtifactDir) {
-          writeFileSync(join(sliceArtifactDir, "context.md"), "# Context\n", "utf-8");
+          writeFileSync(
+            join(sliceArtifactDir, "context.md"),
+            validExplorerContext(`Context for ${ghIssue}`),
+            "utf-8",
+          );
         } else if (role === "planner" && sliceArtifactDir) {
           if (ghIssue === "601") {
             writeFileSync(

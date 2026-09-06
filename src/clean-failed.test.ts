@@ -378,12 +378,15 @@ describe("runCleanFailed", () => {
     expect(report.removedWorktrees).toContain(mine);
   });
 
-  it("never touches a registered worktree whose slice is not in a failure phase", async () => {
+  it("removes a clean completed worktree but preserves a dirty completed worktree", async () => {
     const repo = makeRepo();
     setUp(repo, [
       { ghIssue: "104", number: "04", phase: "PASS", materialise: true },
+      { ghIssue: "105", number: "05", phase: "PASS", materialise: true },
     ]);
-    const dir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s04`);
+    const cleanDir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s04`);
+    const dirtyDir = join(repo, ".afk", "worktrees", `afk-${SLUG}-s05`);
+    writeFileSync(join(dirtyDir, "preserve.txt"), "uncommitted work\n");
 
     const report = await runCleanFailed({
       repoRoot: repo,
@@ -391,10 +394,12 @@ describe("runCleanFailed", () => {
       log: () => {},
     });
 
-    expect(existsSync(dir)).toBe(true);
-    expect(git.branchExists(repo, `afk/${SLUG}-slice-04-fixture`)).toBe(true);
-    expect(report.removedWorktrees).toEqual([]);
-    expect(report.skipped.some((s) => s.target === dir)).toBe(true);
+    expect(existsSync(cleanDir)).toBe(false);
+    expect(git.branchExists(repo, `afk/${SLUG}-slice-04-fixture`)).toBe(false);
+    expect(report.removedWorktrees).toEqual([cleanDir]);
+    expect(existsSync(dirtyDir)).toBe(true);
+    expect(git.branchExists(repo, `afk/${SLUG}-slice-05-fixture`)).toBe(true);
+    expect(report.skipped.some((s) => s.target === dirtyDir)).toBe(true);
   });
 
   it("removes leftover scratch merge dirs in this PRD's namespace", async () => {

@@ -27,6 +27,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
 import { resolveBaseGateDeclarations } from "./base-gates.js";
 import {
@@ -183,6 +184,57 @@ export interface InvocationRecord {
   finishedAt: number;
   /** ghIssue parsed from cwd (worktree directory contains the slice number) */
   ghIssue: string;
+  /**
+   * The last `events.jsonl` entry at provider invocation entry, captured
+   * only for scoped invocations (those dispatched with a context
+   * envelope). Slice #83 requires the matching `prompt-assembly` event to
+   * be journaled before dispatch (guardian round 2, PM 4) — this is the
+   * stub-side proof.
+   */
+  journalTailAtEntry?: Record<string, unknown> | null;
+}
+
+export { validExplorerContext } from "./explorer-test-fixtures.js";
+
+/**
+ * The last parsed `events.jsonl` entry of the run owning `cwd`, or `null`
+ * when no journal exists yet. Walks up from the invocation worktree to the
+ * repo root's `.afk/logs` and picks the newest run directory. Used by the
+ * stub provider to prove, at invocation entry, that assembly evidence was
+ * journaled before dispatch (slice #83; guardian round 2, PM 4).
+ */
+export function lastJournalEventAtEntry(
+  cwd: string,
+): Record<string, unknown> | null {
+  let dir = cwd;
+  for (;;) {
+    const logsRoot = join(dir, ".afk", "logs");
+    if (existsSync(logsRoot)) {
+      const runDirs = readdirSync(logsRoot)
+        .map((slugName) => join(logsRoot, slugName))
+        .filter((path) => statSync(path).isDirectory())
+        .flatMap((slugDir) =>
+          readdirSync(slugDir)
+            .map((name) => join(slugDir, name))
+            .filter((path) => statSync(path).isDirectory()),
+        )
+        .sort(
+          (left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs,
+        );
+      for (const runDir of runDirs) {
+        const eventsPath = join(runDir, "events.jsonl");
+        if (!existsSync(eventsPath)) continue;
+        const lines = readFileSync(eventsPath, "utf-8").trim().split(/\r?\n/);
+        const last = lines.at(-1);
+        if (!last) return null;
+        return JSON.parse(last) as Record<string, unknown>;
+      }
+      return null;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 export function git(cwd: string, args: string[]): string {
@@ -322,6 +374,13 @@ export function buildStubProvider(opts: {
     name: "stub",
     async invoke(options: InvokeOptions): Promise<InvokeResult> {
       const { role, cwd } = options;
+      // Captured at entry, before any stub work: the journal must already
+      // hold the matching prompt-assembly event for scoped invocations
+      // (slice #83; guardian round 2, PM 4).
+      const journalTailAtEntry =
+        options.contextEnvelope !== undefined
+          ? lastJournalEventAtEntry(cwd)
+          : undefined;
       const slice = sliceFromCwd(cwd, slices);
       const ghIssue = slice?.ghIssue ?? "";
       const fixture = fixtures.get(ghIssue);
@@ -341,7 +400,7 @@ export function buildStubProvider(opts: {
       if (role === "explorer" && sliceArtifactDir) {
         writeFileSync(
           join(sliceArtifactDir, "context.md"),
-          `# Context for ${ghIssue}\n`,
+          validExplorerContext(`Context for ${ghIssue}`),
           "utf-8",
         );
       } else if (role === "planner" && sliceArtifactDir && fixture) {
@@ -355,6 +414,9 @@ export function buildStubProvider(opts: {
             startedAt,
             finishedAt: Date.now(),
             ghIssue,
+            ...(journalTailAtEntry !== undefined
+              ? { journalTailAtEntry }
+              : {}),
           });
           throw new Error(REVISION_PLANNER_FAILURE);
         }
@@ -559,8 +621,32 @@ export function buildStubProvider(opts: {
         startedAt,
         finishedAt,
         ghIssue,
+        ...(journalTailAtEntry !== undefined ? { journalTailAtEntry } : {}),
       });
-      return { exitCode: 0, stdout: "", stats: {} };
+      const tokenCounts: Record<string, number> | undefined =
+        role === "planner"
+          ? { input_tokens: 10 }
+          : role === "evaluator-contract"
+            ? { input_tokens: 7, output_tokens: 3 }
+            : role === "generator"
+              ? { output_tokens: 5, cache_read_input_tokens: 2 }
+              : undefined;
+      // The first evaluator-qa invocation per slice reports a measured
+      // reading time; later attempts report nothing — so one shared
+      // spawned scenario covers both the durable evaluator completion
+      // event and the unmeasured-omission rule (guardian round 6).
+      const nonCommandTimeMs =
+        role === "evaluator-qa" && qaAttempts.get(ghIssue) === 1
+          ? 777
+          : undefined;
+      return {
+        exitCode: 0,
+        stdout: "",
+        stats: {
+          ...(tokenCounts === undefined ? {} : { tokenCounts }),
+          ...(nonCommandTimeMs === undefined ? {} : { nonCommandTimeMs }),
+        },
+      };
     },
   };
 }

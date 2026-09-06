@@ -13,7 +13,7 @@ import type {
   InvokeResult,
   StreamEvent,
 } from "./agent-provider.js";
-import { runInvocation } from "./invocation-runtime.js";
+import { runInvocation, createCommandTimeTracker } from "./invocation-runtime.js";
 
 const MODEL = "openai.gpt-5.6-sol";
 
@@ -242,6 +242,26 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       "-",
     ];
     const preparedEnv = prepareCodexSpawnEnv(process.env);
+    let tokenCounts: Record<string, number> | undefined;
+    // Command-time attribution for `nonCommandTimeMs` (evidence only —
+    // see InvocationStats): `command_execution` items open on
+    // `item.started` and close on `item.completed`, correlated by item
+    // id. An id-less command record poisons the tracker so the field
+    // is omitted rather than guessed.
+    const commandTime = createCommandTimeTracker();
+
+    const trackCommandIntervals = (event: JsonObject) => {
+      const item = asObject(event.item);
+      if (item?.type !== "command_execution") return;
+      if (typeof item.id !== "string") {
+        if (event.type === "item.started" || event.type === "item.completed") {
+          commandTime.markUnattributable();
+        }
+        return;
+      }
+      if (event.type === "item.started") commandTime.begin(item.id);
+      else if (event.type === "item.completed") commandTime.end(item.id);
+    };
 
     return {
       command: "codex",
@@ -249,7 +269,35 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       env: preparedEnv.env,
       shell: process.platform === "win32",
       stdin: prompt,
-      parseStreamLine,
+      parseStreamLine: (line) => {
+        if (line.trimStart().startsWith("{")) {
+          try {
+            const event = JSON.parse(line) as JsonObject;
+            trackCommandIntervals(event);
+            if (
+              event.type === "turn.completed" &&
+              typeof event.usage === "object" &&
+              event.usage !== null
+            ) {
+              const exposed = Object.fromEntries(
+                Object.entries(
+                  event.usage as Record<string, unknown>,
+                ).filter(
+                  (entry): entry is [string, number] =>
+                    typeof entry[1] === "number",
+                ),
+              );
+              if (Object.keys(exposed).length > 0) tokenCounts = exposed;
+            }
+          } catch {
+            // parseStreamLine handles malformed input below.
+          }
+        }
+        return parseStreamLine(line);
+      },
+      stats: () =>
+        tokenCounts === undefined ? {} : { tokenCounts },
+      commandTimeMs: () => commandTime.totalMs(),
       classifyExit: ({ exitCode, stderr }) => {
         const detail = stderr.trim();
         return new Error(

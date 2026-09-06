@@ -37,21 +37,40 @@ boundary.
 
 ## Decision
 
-Evaluator-qa runs the **same command set** the post-merge sanity gate
-runs, derived from the same `SANITY_STEPS` constant.
+The slice boundary runs the **same command set** as the post-merge sanity
+gate, derived from the same `SANITY_STEPS` constant. Candidate QA may cite
+or run the cheap subset; the orchestrator owns the full-suite step.
 
-`resolveSanityCommands(cwd)` returns the ordered list of `pnpm run
-<script>` invocations the gate would execute. The list is rendered
-into the evaluator-qa prompt as `{{SANITY_COMMANDS}}` and the prompt's
-Pass 1 instruction now reads "run **every** sanity command below — any
-non-zero exit = FAIL", replacing the single `pnpm test` line.
+### Amendment (2026-09-02) — candidate QA precedes the full slice suite
 
-`resolveSanityCommands` and `runPreShipSanity` walk the same constant
-in the same order with the same fallback rules, so they cannot drift.
-A drift test (`evaluator-qa sanity command set matches the post-merge
-gate`) records the commands `runPreShipSanity` actually executes for a
-given `package.json` and asserts the recorded sequence equals
-`resolveSanityCommands` output.
+The full test suite no longer runs before candidate QA. The per-slice sequence
+is now:
+
+1. dependency preparation plus available typecheck/lint checks;
+2. candidate QA, using exact-tree authorization for those checks;
+3. the full slice test suite, only after candidate QA accepts;
+4. a bounded generator repair round when that suite fails.
+
+All steps use the same captured candidate checkpoint. A QA failure therefore
+does not pay the full suite, while a suite failure still returns deterministic
+gate evidence to the generator. A changed repair candidate repeats the cheap
+checks and candidate QA before it can reach the suite again.
+
+The aggregate pre-ship gate is unchanged and still runs the complete sanity
+plan before guardian review and draft-PR creation.
+
+This is the minimum useful part of PRD 4's M6 test-cost policy delivered early.
+It does not add the policy-owned gate catalog, automatic `test:related`
+selection, exact-tree result caching, or mechanical behavior-ID coverage.
+
+`resolveCandidateQACommands(cwd)` returns dependency preparation plus the
+available typecheck/lint invocations. The list is rendered into the
+evaluator-qa prompt as `{{SANITY_COMMANDS}}`. Tests remain in the slice gate
+catalog but run under orchestrator control only after candidate QA accepts.
+
+`resolveCandidateQACommands`, the split slice declarations, and
+`runPreShipSanity` project the same sanity plan with the same fallback rules.
+Drift tests pin both the candidate subset and the unchanged aggregate plan.
 
 ### Amendment (2026-08-25, #101)
 
@@ -89,8 +108,8 @@ have. The `run-phase-ended` event carries the kind instead.
 
 ### Amendment (2026-08-28) — the same tree is not tested twice
 
-The decision above says *what* evaluator-qa runs. It said nothing about
-the fact that the orchestrator runs the same set, on the same tree,
+The original decision said *what* evaluator-qa ran. It said nothing about
+the fact that the orchestrator ran the same set, on the same tree,
 minutes earlier — and measurement showed that duplicate is the single
 largest avoidable cost in a QA round. On `run-20260827` a base gate
 took 739.3 s and the QA round that followed spent 772.5 s reproducing
@@ -125,7 +144,7 @@ it. ADR 0012's original concern — an agent asserting a command was clean
 when it never ran it — is untouched, because the agent is not the one
 asserting.
 
-#### Fail closed on the tree sha
+#### Fail closed on the tree ID
 
 The authorization is valid only when the tree the gates ran on is
 *byte-identical* to the tree under review. `resolveCandidateTreeId`
@@ -137,7 +156,7 @@ assert something about a tree nobody tested.
 
 `authorizeBaseGateSkip` (`qa-gate-authorization.ts`) refuses on any
 other state, each with a reason rendered into the prompt: the tree
-could not be hashed, the shas differ, a gate has no result, a gate
+could not be hashed, the tree IDs differ, a gate has no result, a gate
 result carries a different tree, a gate is not `PASS`, the project
 declares no executable gate, the evidence has no citable path. A
 refusal tells the evaluator to run the whole sanity list — which is
@@ -177,8 +196,8 @@ of the reliability wave.
 - The class of failures that motivated this ADR (typecheck + lint
   errors slipping through QA) is caught at slice time, where the
   generator can still react in-loop.
-- No duplicated logic: both functions read from `SANITY_STEPS`. Adding
-  a step (e.g. `format:check`) updates both call sites simultaneously.
+- No duplicated catalog logic: candidate and aggregate phases project the
+  same sanity plan. Adding a step updates both projections.
 - "Skip steps whose primary AND fallback are absent" is honoured in
   both directions — projects without a `lint` script aren't
   false-failed at QA, mirroring the gate.
@@ -188,10 +207,8 @@ of the reliability wave.
 - Slice runtime grows by one `tsc --noEmit` and one lint pass per QA
   round. On the consumer project these add ~30 s; small relative to
   the generator and test phases.
-- The agent must execute multiple commands rather than one. The
-  prompt now lists them as a bullet block; failure to run any of them
-  would be visible in `qa-report.md` and caught by Pass-1's
-  evidence-citation rule.
+- The agent may still execute multiple cheap commands. The prompt lists them
+  as a bullet block, and Pass 1 requires evidence for each uncovered command.
 - *(2026-08-28 amendment)* QA dispatch pays one `git add -A` plus
   `git write-tree` against the slice worktree, per QA attempt, to hash
   the tree under review. Bounded and small against the round it can
@@ -208,7 +225,7 @@ of the reliability wave.
   generator prompt also uses `{{TEST_COMMAND}}` for tracer-bullet
   iteration, where running typecheck after every red test would slow
   the inner loop without commensurate value. Generator gets the test
-  command, evaluator-qa gets the full sanity set.
+  command; the slice boundary sequences cheap checks, QA, then the suite.
 - **Move the post-merge gate earlier** so it runs per-slice on the
   feature branch. Rejected: the gate runs once on the merged
   aggregate; running it per-slice would multiply runtime and still
@@ -236,16 +253,16 @@ Considered for the 2026-08-28 amendment and rejected:
 
 ## References
 
-- `src/orchestrator.ts` — `SANITY_STEPS`, `resolveSanityCommands`,
-  `runPreShipSanity`.
+- `src/preship.ts` — the shared sanity plan and aggregate runner.
+- `src/orchestrator.ts` — candidate/full-suite projections and sequencing.
 - `prompts/evaluator-qa.md` — `{{SANITY_COMMANDS}}` and
   `{{BASE_GATE_AUTHORIZATION}}` rendering.
-- `src/orchestrator.test.ts` — drift test pinning the equivalence.
+- `src/orchestrator.test.ts` — projection tests pinning candidate and
+  aggregate behavior.
 - `src/qa-gate-authorization.ts` — the skip decision and its rendering;
   `src/qa-gate-authorization.test.ts` — the fail-closed decision table.
 - `src/gate-runner.ts` — `resolveCandidateTreeId`, shared with
   `createCandidateCheckpoint`.
 - `src/qa-review.ts` — `baseGateCitation` on `QAReviewAttemptRecord`.
-- `src/qa-orchestration.test.ts` — "blocks evaluation until every
-  required checkpoint gate passes" also pins that the grant is reachable
-  on a real candidate.
+- `src/qa-orchestration.test.ts` — candidate sequencing, bounded repair,
+  and exact-tree authorization on real candidates.

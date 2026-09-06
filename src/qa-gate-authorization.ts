@@ -18,8 +18,8 @@ import type { GateDeclaration, GateEvidence } from "./gate-runner.js";
  * one.
  *
  * Everything here fails closed. The authorization exists only when every
- * executable base gate PASSed on a tree sha that exactly equals the tree the
- * evaluator is about to review; any other state — a sha that moved, a missing
+ * executable base gate PASSed on a Git tree ID that exactly equals the tree the
+ * evaluator is about to review; any other state — a tree ID that moved, a missing
  * result, a gate that could not run, a tree that could not be hashed — refuses
  * with a reason and the evaluator runs the full sanity list, which is the
  * behaviour that shipped before this amendment. A refusal is never worse than
@@ -37,7 +37,7 @@ export interface CoveredBaseGate {
 }
 
 /**
- * The auditable half, recorded in the QA attempt record. Evidence ID plus sha
+ * The auditable half, recorded in the QA attempt record. Evidence ID plus tree ID
  * is enough for a reader to re-open the gate artifact and confirm what the
  * orchestrator asserted, on which tree, over which gates.
  */
@@ -46,7 +46,7 @@ export interface BaseGateSkipCitation {
   evidenceArtifactId: string;
   /** The gate run's attempt ID, as recorded in that artifact. */
   attemptId: string;
-  /** The tree sha the gates ran on, equal to the tree under review. */
+  /** The Git tree object ID the gates ran on, equal to the tree under review. */
   treeId: string;
   /** Gate IDs the authorization covers, in declaration order. */
   gateIds: string[];
@@ -68,7 +68,7 @@ export interface BaseGateSkipInput {
   /** The declarations the gate run was given. */
   declarations: readonly GateDeclaration[];
   /**
-   * Tree sha of the worktree the evaluator will review, hashed the same way
+   * Git tree object ID the evaluator will review, hashed the same way
    * the checkpoint was. `null` when it could not be resolved at all.
    */
   reviewTreeId: string | null;
@@ -87,7 +87,7 @@ export function authorizeBaseGateSkip(
     return {
       authorized: false,
       reason:
-        "the tree under review could not be hashed, so no sha comparison is possible",
+        "the tree under review could not be hashed, so no tree comparison is possible",
     };
   }
   if (evidence == null) {
@@ -207,10 +207,12 @@ export function formatBaseGateSkipAuthorization(
     "",
     `- Evidence artifact: \`${citation.evidenceArtifactId}\``,
     `- Gate attempt ID: \`${citation.attemptId}\``,
-    `- Tree sha under review: \`${citation.treeId}\``,
+    `- Git tree ID under review: \`${citation.treeId}\``,
     "",
     "In Pass 1 you may skip exactly those commands and cite the evidence",
-    "artifact and tree sha above as your evidence that they pass. Every other",
+    "artifact and Git tree ID above as your evidence that they pass. Do not",
+    "compare this value with `git rev-parse HEAD`: HEAD resolves to a commit",
+    "object, not this tree object. Every other",
     "sanity command — including the dependency install, which ran in a",
     "different checkout and did not populate yours — you must still run.",
     "",

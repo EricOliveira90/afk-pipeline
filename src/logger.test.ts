@@ -135,10 +135,10 @@ describe("Logger.writeSummary (run-summary.md byte stability)", () => {
 Started: 2026-08-29T12:00:00.000Z
 Finished: 2026-08-29T12:00:00.000Z
 
-| Slice | Status | Rounds | Branch | Cost | Tool calls |
-|-------|--------|--------|--------|------|------------|
-| 130 Pipeline finish | ✅ PASS | gen:0 eval:0 | merged | — | — |
-| **Run totals** | | | | **—** | **0** |
+| Slice | Status | Rounds | Branch | Cost | Tool calls | Prompt bytes | Provider tokens |
+|-------|--------|--------|--------|------|------------|--------------|-----------------|
+| 130 Pipeline finish | ✅ PASS | gen:0 eval:0 | merged | — | — | — | — |
+| **Run totals** | | | | **—** | **0** | **—** | **—** |
 
 
 
@@ -272,6 +272,138 @@ PM review: N/A
     expect(md).not.toContain("## Dependency Holds");
     expect(md).not.toContain("#82 Dependent");
   });
+
+  it("B-06 totals exact prompt bytes and only available token names per slice and run", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "envelope-totals");
+    log.restoreCompleted(id("41", "First", "afk/41"));
+    log.restoreCompleted(id("42", "Second", "afk/42"));
+    const evidence = {
+      type: "prompt-assembly" as const,
+      sliceNumber: "01",
+      round: 1,
+      role: "generator" as const,
+      includedArtifactClasses: ["contract-view"],
+      includedArtifactIds: ["slice/contract.md"],
+      omittedArtifactClasses: ["prior-conversation"],
+      contextManifestVersion: 1,
+    };
+    const completion = {
+      type: "invocation-completed" as const,
+      sliceNumber: "01",
+      round: 1,
+      role: "generator" as const,
+    };
+    // Bytes ride on the pre-dispatch assembly record; tokens on the paired
+    // post-return completion record (guardian round 2, PM 4).
+    log.event({ ...evidence, ghIssue: "41", assembledByteSize: 101 });
+    log.event({
+      ...completion,
+      ghIssue: "41",
+      tokenCounts: { input_tokens: 11, output_tokens: 7 },
+    });
+    log.event({
+      ...evidence,
+      ghIssue: "41",
+      round: 2,
+      assembledByteSize: 29,
+    });
+    log.event({
+      ...completion,
+      ghIssue: "41",
+      round: 2,
+      tokenCounts: { input_tokens: 3 },
+    });
+    log.event({
+      ...evidence,
+      ghIssue: "42",
+      sliceNumber: "02",
+      assembledByteSize: 70,
+    });
+    log.event({
+      ...completion,
+      ghIssue: "42",
+      sliceNumber: "02",
+      tokenCounts: { cached_input_tokens: 5 },
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain(
+      "| 41 First | ✅ PASS | gen:0 eval:0 | merged | — | — | 130 | input_tokens: 14, output_tokens: 7 |",
+    );
+    expect(md).toContain(
+      "| 42 Second | ✅ PASS | gen:0 eval:0 | merged | — | — | 70 | cached_input_tokens: 5 |",
+    );
+    expect(md).toContain(
+      "**200** | **input_tokens: 14, output_tokens: 7, cached_input_tokens: 5**",
+    );
+    const secondRow = md
+      .split("\n")
+      .find((line) => line.startsWith("| 42 Second |"))!;
+    expect(secondRow).not.toContain("output_tokens:");
+    expect(secondRow).not.toContain(", input_tokens:");
+  });
+
+  // Architect round-7 A1: runQAStage emits evaluator-qa/evaluator-uat
+  // completion events (kept in events.jsonl for ADR 0046), but those roles
+  // have no prompt-assembly record, so their token counts must not enter
+  // the B-06 envelope totals — both columns aggregate the same population.
+  it("excludes unassembled evaluator token counts from B-06 envelope totals", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "envelope-totals-evaluator");
+    log.restoreCompleted(id("41", "First", "afk/41"));
+    log.event({
+      type: "prompt-assembly",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "generator",
+      assembledByteSize: 101,
+      includedArtifactClasses: ["contract-view"],
+      includedArtifactIds: ["slice/contract.md"],
+      omittedArtifactClasses: ["prior-conversation"],
+      contextManifestVersion: 1,
+    });
+    log.event({
+      type: "invocation-completed",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "generator",
+      tokenCounts: { input_tokens: 11, output_tokens: 7 },
+    });
+    log.event({
+      type: "invocation-completed",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "evaluator-qa",
+      attempt: 1,
+      tokenCounts: { input_tokens: 999 },
+      nonCommandTimeMs: 1234,
+    });
+    log.event({
+      type: "invocation-completed",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "evaluator-uat",
+      tokenCounts: { input_tokens: 999, output_tokens: 999 },
+      nonCommandTimeMs: 5678,
+    });
+
+    const md = log.writeSummary();
+
+    // Per-slice and run totals are byte-for-byte what they would be
+    // without the evaluator events: 999 never enters either column.
+    expect(md).toContain(
+      "| 41 First | ✅ PASS | gen:0 eval:0 | merged | — | — | 101 | input_tokens: 11, output_tokens: 7 |",
+    );
+    expect(md).toContain(
+      "**101** | **input_tokens: 11, output_tokens: 7**",
+    );
+    expect(md).not.toContain("999");
+  });
 });
 
 
@@ -387,7 +519,7 @@ describe("Logger.phase (run.log, ADR 0017)", () => {
 });
 
 describe("Logger.writeSummary per-run copy", () => {
-  it("writes run-summary.md to both the stable path and the run directory", () => {
+  it("P-04 preserves both stable and per-run summary copies", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "summary-copy");
     recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });

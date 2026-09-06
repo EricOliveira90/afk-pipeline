@@ -19,6 +19,7 @@ import type {
   GateFailureKind,
   GateStatus,
 } from "./gate-runner.js";
+import type { PromptAssemblyRole } from "./context-envelope.js";
 
 export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
@@ -83,6 +84,59 @@ export type RunEventPayload =
        * ESCALATE/UNKNOWN; evaluator-qa/-uat → PASS/IMPLEMENTATION.
        */
       verdict?: string;
+    }
+  | {
+      /**
+       * Assembled-envelope evidence, journaled immediately BEFORE the
+       * provider is dispatched so the record survives an invocation that
+       * dies mid-flight (slice #83; guardian round 2, PM 4). Post-return
+       * facts — token counts, non-command time — arrive in the paired
+       * `invocation-completed` event.
+       */
+      type: "prompt-assembly";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      role: PromptAssemblyRole;
+      assembledByteSize: number;
+      includedArtifactClasses: string[];
+      includedArtifactIds: string[];
+      omittedArtifactClasses: string[];
+      contextManifestVersion: number;
+    }
+  | {
+      /**
+       * Post-return completion evidence for one provider invocation.
+       * For the four assembled roles it pairs with the `prompt-assembly`
+       * event journaled before its dispatch (same
+       * ghIssue/sliceNumber/round/role). Candidate-QA and shared-preview
+       * evaluator invocations emit it too — completion telemetry is
+       * decoupled from envelope assembly, because evaluator reading time
+       * is the measurement the PRD's ROI rider scores (plan §3 item 13;
+       * guardian round 6). Emitted only for invocations that returned
+       * successfully.
+       */
+      type: "invocation-completed";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      role: PromptAssemblyRole | "evaluator-qa" | "evaluator-uat";
+      /** Evaluator attempt within the round, when the role retries. */
+      attempt?: number;
+      /** Provider-exposed token names and counts, never renamed. */
+      tokenCounts?: Record<string, number>;
+      /**
+       * Evidence-only per-invocation non-command wall clock (PRD 3 §3
+       * item 13; ADR 0046 amendment 2026-09-05). Copied verbatim from
+       * `InvocationStats.nonCommandTimeMs` — see its TSDoc in
+       * `agent-provider.ts` for the exact clock boundaries. Absent
+       * whenever the provider could not attribute command time; a
+       * reader must treat absence as "unmeasured", never as 0. Like
+       * `stage-duration`, nothing thresholds, alerts on, or acts upon
+       * this field; its consumers are the context-envelope ROI
+       * analysis reading `events.jsonl`.
+       */
+      nonCommandTimeMs?: number;
     }
   | {
       type: "gate-outcome";

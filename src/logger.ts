@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import type { PromptAssemblyRole } from "./context-envelope.js";
 import type { SanityGateResult } from "./preship.js";
 import { readRunEvents } from "./run-events.js";
 import {
@@ -23,6 +24,23 @@ export interface SliceTotals {
   costUsd: number;
   toolCallCount: number;
 }
+
+interface EnvelopeTotals {
+  promptBytes: number;
+  tokenCounts: Map<string, number>;
+}
+
+/**
+ * The four assembled envelope roles (slice 04 B-06). The B-06 summary
+ * columns are envelope totals — assembled prompt bytes beside their exposed
+ * token counts — so both columns must aggregate the same invocation
+ * population. Evaluator completion events ("evaluator-qa"/"evaluator-uat")
+ * stay in events.jsonl for ADR 0046 but are excluded here because those
+ * roles have no matching prompt-assembly record (architect round-7 A1).
+ */
+const ASSEMBLED_ENVELOPE_ROLES: ReadonlySet<string> = new Set<
+  PromptAssemblyRole
+>(["explorer", "planner", "evaluator-contract", "generator"]);
 
 export interface DependencyBlocker {
   ghIssue: string;
@@ -225,13 +243,48 @@ export class Logger {
       prUrl,
       prOverrideNote,
     } = this.runLog;
-    const gateAttempts = (readRunEvents(this.runDir)?.events ?? []).filter(
+    const runEvents = readRunEvents(this.runDir)?.events ?? [];
+    const gateAttempts = runEvents.filter(
       (event) => event.type === "gate-outcome",
     );
+    const envelopeTotals = new Map<string, EnvelopeTotals>();
+    for (const event of runEvents) {
+      // Prompt bytes come from the pre-dispatch assembly record; token
+      // counts from the paired post-return completion record (guardian
+      // round 2, PM 4). Absent fields aggregate as absent, never as 0.
+      if (event.type === "prompt-assembly") {
+        const total = envelopeTotals.get(event.ghIssue) ?? {
+          promptBytes: 0,
+          tokenCounts: new Map<string, number>(),
+        };
+        total.promptBytes += event.assembledByteSize;
+        envelopeTotals.set(event.ghIssue, total);
+      } else if (
+        event.type === "invocation-completed" &&
+        // Only assembled envelope roles enter B-06 totals; unassembled
+        // evaluator roles would inflate the token column relative to the
+        // prompt-bytes column (architect round-7 A1).
+        ASSEMBLED_ENVELOPE_ROLES.has(event.role)
+      ) {
+        const total = envelopeTotals.get(event.ghIssue) ?? {
+          promptBytes: 0,
+          tokenCounts: new Map<string, number>(),
+        };
+        for (const [name, count] of Object.entries(event.tokenCounts ?? {})) {
+          total.tokenCounts.set(
+            name,
+            (total.tokenCounts.get(name) ?? 0) + count,
+          );
+        }
+        envelopeTotals.set(event.ghIssue, total);
+      }
+    }
 
     const totals = this.runLog.totals;
     let runCost = 0;
     let runToolCalls = 0;
+    let runPromptBytes = 0;
+    const runTokenCounts = new Map<string, number>();
     const rows = [...slices.values()]
       .map((s) => {
         const icon = statusIconFor(s.phase);
@@ -245,15 +298,29 @@ export class Logger {
         const t = totals.get(s.ghIssue);
         const cost = t && t.costUsd > 0 ? `$${t.costUsd.toFixed(4)}` : "—";
         const tools = t ? String(t.toolCallCount) : "—";
+        const envelope = envelopeTotals.get(s.ghIssue);
+        const promptBytes = envelope ? String(envelope.promptBytes) : "—";
+        const tokenCounts = envelope
+          ? formatTokenCounts(envelope.tokenCounts)
+          : "—";
         if (t) {
           runCost += t.costUsd;
           runToolCalls += t.toolCallCount;
         }
-        return `| ${s.ghIssue} ${s.title} | ${status} | ${rounds} | ${branchInfo} | ${cost} | ${tools} |`;
+        if (envelope) {
+          runPromptBytes += envelope.promptBytes;
+          for (const [name, count] of envelope.tokenCounts) {
+            runTokenCounts.set(
+              name,
+              (runTokenCounts.get(name) ?? 0) + count,
+            );
+          }
+        }
+        return `| ${s.ghIssue} ${s.title} | ${status} | ${rounds} | ${branchInfo} | ${cost} | ${tools} | ${promptBytes} | ${tokenCounts} |`;
       })
       .join("\n");
 
-    const totalsRow = `| **Run totals** | | | | **${runCost > 0 ? `$${runCost.toFixed(4)}` : "—"}** | **${runToolCalls}** |`;
+    const totalsRow = `| **Run totals** | | | | **${runCost > 0 ? `$${runCost.toFixed(4)}` : "—"}** | **${runToolCalls}** | **${runPromptBytes > 0 ? runPromptBytes : "—"}** | **${formatTokenCounts(runTokenCounts)}** |`;
     const gateRows = gateAttempts
       .map((event) => {
         const status =
@@ -321,8 +388,8 @@ ${adoptedEntries
 Started: ${startedAt.toISOString()}
 Finished: ${finishedAt!.toISOString()}
 
-| Slice | Status | Rounds | Branch | Cost | Tool calls |
-|-------|--------|--------|--------|------|------------|
+| Slice | Status | Rounds | Branch | Cost | Tool calls | Prompt bytes | Provider tokens |
+|-------|--------|--------|--------|------|------------|--------------|-----------------|
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
@@ -534,6 +601,13 @@ function sanitizeDetail(detail: string | undefined): string | undefined {
   const collapsed = detail.replace(/\s+/g, " ").trim();
   if (collapsed.length === 0) return undefined;
   return collapsed.length > 400 ? `${collapsed.slice(0, 397)}...` : collapsed;
+}
+
+function formatTokenCounts(tokenCounts: ReadonlyMap<string, number>): string {
+  if (tokenCounts.size === 0) return "—";
+  return [...tokenCounts]
+    .map(([name, count]) => `${name.replace(/\|/g, "\\|")}: ${count}`)
+    .join(", ");
 }
 
 function inlineMarkdown(value: string): string {

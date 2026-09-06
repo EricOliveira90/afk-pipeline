@@ -122,3 +122,25 @@ invocation's whole budget, including for a dispatch whose contract is
 already LOCKED and will spend none of it. That is accurate — unspent
 budget is remaining budget — but it is the one cell that does not shrink
 as a slice struggles.
+
+
+## Amendment (2026-09-05): per-invocation non-command time
+
+PRD 3 §3 item 13 adds one more duration to the same evidence-only
+regime: `nonCommandTimeMs`, the invocation wall clock minus the union
+of provider-attributed command/tool execution intervals. Providers that
+parse a structured stream (claude, codex) attribute command time from
+their begin/end records; the shared invocation runtime owns the wall
+clock (spawn → successful exit) and derives the difference onto
+`InvocationStats`. The orchestrator's invocation seam records it on the
+post-return `invocation-completed` event (a post-return fact cannot ride
+the pre-dispatch `prompt-assembly` record) for the four assembled roles
+and for candidate-QA/shared-preview evaluator invocations, whose
+envelope path is deferred but whose reading time is the measurement the
+ROI rider scores. A provider that cannot attribute command
+time — no structured stream (kiro), an uncorrelatable record, an
+execution whose end never arrived — records nothing: the field is
+omitted, never zeroed. Exact clock boundaries: `InvocationStats`
+TSDoc in `src/agent-provider.ts`. Like stage durations, it is recorded
+and nothing acts on it — no gate, verdict, retry, or bound reads it;
+its consumer is the context-envelope ROI analysis.

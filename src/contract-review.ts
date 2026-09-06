@@ -403,9 +403,9 @@ export function parseContractReview(
 }
 
 /**
- * Parse the planner's round-2 positions and verify that their IDs equal
- * the routed OPEN set. Response order is presentation; identity is the
- * control boundary.
+ * Parse the planner's revision-round positions and verify that their IDs
+ * equal the routed OPEN set. Response order is presentation; identity is
+ * the control boundary.
  */
 export function parseContractResponse(
   text: string,
@@ -584,6 +584,58 @@ export function contractReviewGapMetrics(
 }
 
 /**
+ * Decide whether a schema-valid round-two review earns the single final
+ * convergence round from PRD 3 plan item 23.
+ *
+ * The extension is intentionally narrower than "the review found something
+ * new": every blocker routed into round two must now be terminal, and every
+ * blocker that remains must be a fresh, revision-cited finding. The caller
+ * validates those citations against the exact changed artifact text before
+ * consulting this policy.
+ */
+export function qualifiesForContractConvergenceExtension(
+  previous: ContractReview,
+  current: ContractReview,
+  extensionUsed = false,
+): boolean {
+  if (extensionUsed) return false;
+  if (current.verdict !== "REVISE") return false;
+
+  const previousById = new Map(
+    previous.findings.map((finding) => [finding.id, finding]),
+  );
+  const currentById = new Map(
+    current.findings.map((finding) => [finding.id, finding]),
+  );
+  const activeBlocking = (finding: ContractReviewFinding): boolean =>
+    finding.severity === "BLOCKING" &&
+    (finding.state === "OPEN" || finding.state === "CONTESTED");
+  const previousBlockers = previous.findings.filter(activeBlocking);
+  const currentBlockers = current.findings.filter(activeBlocking);
+
+  if (currentBlockers.length === 0) return false;
+  if (
+    previousBlockers.some((finding) => {
+      const disposition = currentById.get(finding.id);
+      return (
+        disposition === undefined ||
+        (disposition.state !== "RESOLVED" &&
+          disposition.state !== "WITHDRAWN")
+      );
+    })
+  ) {
+    return false;
+  }
+
+  return currentBlockers.every(
+    (finding) =>
+      !previousById.has(finding.id) &&
+      finding.state === "OPEN" &&
+      finding.revisionCitation !== null,
+  );
+}
+
+/**
  * Render the review's findings for a planner prompt or a `stuck.md`
  * section. Every finding carries its clear-condition, which is the whole
  * point of routing the structured artifact rather than a prose summary:
@@ -730,7 +782,7 @@ export function validateRound2ContractReview(
     const disposition = currentById.get(plannerPosition.findingId);
     if (!disposition) {
       throw new Error(
-        `${CONTRACT_REVIEW_FILENAME} round 2 omitted routed finding ${plannerPosition.findingId}`,
+        `${CONTRACT_REVIEW_FILENAME} revision round omitted routed finding ${plannerPosition.findingId}`,
       );
     }
     const allowed = legalStates[plannerPosition.position];
