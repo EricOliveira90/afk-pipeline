@@ -976,6 +976,66 @@ describe("runShipGate", () => {
       },
     ]);
   });
+
+  it("B-01 QA-03 retries one failed round-state write and persists exactly one round", async () => {
+    const repo = makeRepo();
+    const slug = "round-write-retry";
+    const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const args = makeArgs(
+      repo,
+      slug,
+      fixture.journal,
+      invoke,
+      runCommand,
+    );
+    let writeAttempts = 0;
+    args.saveReviewPhase = (repoRoot, runSlug, reviewPhase) => {
+      writeAttempts++;
+      if (writeAttempts === 1) {
+        throw new Error("injected round-state write failure");
+      }
+      saveReviewPhase(repoRoot, runSlug, reviewPhase);
+    };
+
+    await expect(runShipGate(args)).rejects.toThrow(
+      "injected round-state write failure",
+    );
+
+    expect(writeAttempts).toBe(2);
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fixture.event).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "run-phase-started",
+        phase: "draft-pr",
+      }),
+    );
+    const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
+    expect(rounds).toHaveLength(1);
+    expect(rounds?.[0]).toEqual({
+      round: 1,
+      reviewedHeadSha,
+      headSha: git(repo, ["rev-parse", "HEAD"]),
+      architect: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+      pm: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+    });
+  });
 });
 
 describe("detectReviewWorktreeDrift", () => {

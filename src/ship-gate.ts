@@ -418,6 +418,8 @@ export interface RunShipGateArgs {
    * subprocesses, so no suite pays a real dependency install.
    */
   sanityRunCommand?: SanityCommandRunner;
+  /** Internal state-write seam used by direct persistence failure tests. */
+  saveReviewPhase?: typeof saveReviewPhase;
 }
 
 function blocked(
@@ -483,6 +485,7 @@ export async function runShipGate(
   } = args;
   const runCommand = args.runCommand ?? defaultRunCommand;
   const sanityRunCommand = args.sanityRunCommand;
+  const persistReviewPhase = args.saveReviewPhase ?? saveReviewPhase;
 
   if (signal?.aborted) {
     return blocked(
@@ -785,11 +788,11 @@ export async function runShipGate(
     reviewPhase: PersistedReviewPhase = {},
   ): void => {
     if (roundPersistenceAttempted) return;
-    roundPersistenceAttempted = true;
-    saveReviewPhase(repoRoot, runSlug, {
+    persistReviewPhase(repoRoot, runSlug, {
       ...reviewPhase,
       rounds: [completedRound(headSha)],
     });
+    roundPersistenceAttempted = true;
   };
 
   try {
