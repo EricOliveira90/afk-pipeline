@@ -603,6 +603,65 @@ describe("sanitizeReviewPhase", () => {
     });
   });
 
+  it("B-05 QA-01 keeps distinct findings that share a known stable identity", () => {
+    const findings = [
+      {
+        stableId: "A-01",
+        currentId: "A-05",
+        title: "Current-alias claimant",
+        class: "PRODUCT",
+        clearCondition: "Clear the current alias.",
+        disposition: "REPEATED",
+      },
+      {
+        stableId: "A-01",
+        currentId: "A-01",
+        title: "Stable-alias claimant",
+        class: "INTEGRITY",
+        clearCondition: "Clear the stable alias.",
+        disposition: "OPEN",
+      },
+    ];
+    const rounds = [
+      {
+        round: 1,
+        reviewedHeadSha: "base",
+        headSha: "review-commit",
+        architect: {
+          source: "INVOKED",
+          outcome: "ACCEPT-WITH-NOTES",
+          findings,
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+      {
+        round: 2,
+        reviewedHeadSha: "review-commit",
+        headSha: "review-commit",
+        architect: {
+          source: "CACHE",
+          outcome: "ACCEPT-WITH-NOTES",
+          findings,
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "CACHE",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+    ];
+
+    expect(sanitizeReviewPhase({ rounds })?.rounds).toEqual(rounds);
+  });
+
   it("B-06 keeps the cache favorable-only while the ledger accepts all six terminal outcomes", () => {
     const outcomes = [
       "SHIP",

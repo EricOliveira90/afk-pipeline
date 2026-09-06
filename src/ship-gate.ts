@@ -737,10 +737,8 @@ export async function runShipGate(
 
   const priorRounds = cachedReviewPhase?.rounds ?? [];
   const roundNumber = priorRounds.length + 1;
-  // Lineage resolves before the outcomes are published, because a findings
-  // block that has no durable representation makes that guardian's result
-  // UNPARSEABLE (B-04) — and the journal, the favorable cache and the draft-PR
-  // decision must all see the same downgraded outcome.
+  // Lineage resolves before outcomes are published so the durable round and
+  // the draft-PR decision observe the same parsed guardian evidence.
   const invokedLineage = new Map<GuardianKind, PersistedGuardianFinding[]>();
   const resolveLineage = (
     guardian: GuardianKind,
@@ -752,19 +750,6 @@ export async function runShipGate(
       guardian,
       result.findings,
     );
-    if (lineage === undefined) {
-      const message =
-        `${guardian} review reported two findings that name one prior finding ` +
-        "through its stable and current IDs — the findings block has no durable " +
-        "ledger representation, so the outcome is recorded as UNPARSEABLE.";
-      journal.phase(`  ⚠️  ${message}`, "warn");
-      journal.event({
-        type: "warn",
-        reason: "guardian-finding-alias-collision",
-        message,
-      });
-      return { ...result, outcome: "UNPARSEABLE", findings: [] };
-    }
     invokedLineage.set(guardian, lineage);
     return result;
   };

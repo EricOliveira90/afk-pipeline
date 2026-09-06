@@ -230,7 +230,7 @@ describe("advanceGuardianFindingLineage", () => {
     ]);
   });
 
-  it("B-03 QA-07 refuses a block whose two known aliases name one prior identity", () => {
+  it("B-03 QA-01 preserves both findings when two known aliases name one prior identity", () => {
     const prior = [
       roundWithArchitectFindings([
         {
@@ -244,10 +244,8 @@ describe("advanceGuardianFindingLineage", () => {
       ]),
     ];
     // Both IDs name the same prior entry, one through its stableId and one
-    // through its currentId. Minting a new identity for the loser breaks the
-    // ID-first rule, repeating the claimed one makes the ledger non-durable,
-    // and folding it away omits a parsed finding — so the block is refused and
-    // the caller records the guardian outcome as UNPARSEABLE.
+    // through its currentId. Both parsed findings remain durable records and
+    // both retain the known stable identity.
     expect(
       advanceGuardianFindingLineage(prior, "architect", [
         {
@@ -265,6 +263,23 @@ describe("advanceGuardianFindingLineage", () => {
           disposition: "OPEN",
         },
       ]),
-    ).toBeUndefined();
+    ).toEqual([
+      {
+        stableId: "A-01",
+        currentId: "A-05",
+        title: "Current-ID claimant",
+        class: "PRODUCT",
+        clearCondition: "Keep the current alias",
+        disposition: "REPEATED",
+      },
+      {
+        stableId: "A-01",
+        currentId: "A-01",
+        title: "Stable-ID claimant",
+        class: "INTEGRITY",
+        clearCondition: "Keep the stable alias",
+        disposition: "OPEN",
+      },
+    ]);
   });
 });

@@ -1076,7 +1076,7 @@ describe("runShipGate", () => {
     });
   });
 
-  it("B-04 QA-07 records UNPARSEABLE when two known aliases name one prior finding", async () => {
+  it("B-02 QA-01 persists both findings when two known aliases name one prior finding", async () => {
     const repo = makeRepo();
     const slug = "alias-collision";
     const headSha = git(repo, ["rev-parse", "HEAD"]);
@@ -1162,20 +1162,36 @@ describe("runShipGate", () => {
     });
 
     const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
-    // The round is still recorded — nothing is silently dropped — but the
-    // unrepresentable block downgrades the outcome instead of being folded,
-    // suffixed, or duplicated into a ledger the sanitizer would discard.
+    // Both parsed findings remain in the durable round and retain the prior
+    // stable identity through their known aliases.
     expect(rounds).toHaveLength(2);
     expect(rounds?.[1]?.architect).toEqual({
       source: "INVOKED",
-      outcome: "UNPARSEABLE",
-      findings: [],
+      outcome: "FIX-BEFORE-SHIP",
+      findings: [
+        {
+          stableId: "A-01",
+          currentId: "A-05",
+          title: "Current-alias claimant",
+          class: "PRODUCT",
+          clearCondition: "Clear the current alias.",
+          disposition: "REPEATED",
+        },
+        {
+          stableId: "A-01",
+          currentId: "A-01",
+          title: "Stable-alias claimant",
+          class: "INTEGRITY",
+          clearCondition: "Clear the stable alias.",
+          disposition: "OPEN",
+        },
+      ],
       findingsOriginRound: 2,
     });
-    expect(fixture.event).toHaveBeenCalledWith(
+    expect(fixture.event).not.toHaveBeenCalledWith(
       expect.objectContaining({ reason: "guardian-finding-alias-collision" }),
     );
-    // An UNPARSEABLE architect result is not favorable, so it is never cached.
+    // A blocking architect result is unfavorable, so it is never cached.
     expect(loadRunState(repo, slug).reviewPhase?.architect).toBeUndefined();
     expect(headSha).toBeTruthy();
   });

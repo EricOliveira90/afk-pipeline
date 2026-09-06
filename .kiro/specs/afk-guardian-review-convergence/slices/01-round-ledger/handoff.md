@@ -15,14 +15,14 @@
 ## Decisions made during implementation
 
 - Normalize guardian fingerprints by trimming, collapsing whitespace, and lowercasing class plus clear condition so formatting-only changes retain lineage.
-- When both known aliases of one prior identity appear in a later artifact, prefer the canonical stable-ID claimant and fold the duplicate current-alias entry so no new lineage is minted.
+- When both known aliases of one prior identity appear in a later artifact, preserve both parsed records with the prior stable ID because stable identity is not per-round row identity.
 - Persist a completed pair once across every post-review exit; artifact-commit error paths use the latest resolvable HEAD and do not populate favorable cache fields.
 - Mark round persistence complete only after the synchronous state writer returns so a failed first write remains eligible for the existing catch-path retry.
 
 ## Gotchas / learnings
 
 - Cache-backed findings are valid only when the latest earlier round with a matching post-review HEAD carries provenance to an invoked record.
-- A prior finding's stable and current aliases can both appear in one later artifact; lineage allocation must reserve stable identities one-to-one across both aliases.
+- Current IDs remain unique within a guardian record, but multiple records may share one stable ID when known aliases converge on the same prior identity.
 - Fatal review-worktree drift keeps its block and records the drifted HEAD, while artifact commit failures retain their existing exception path after recording the pair.
 - A successful catch-path retry records one round and still rethrows the original state-write error; draft-PR handling does not begin.
 - New migration files: 0

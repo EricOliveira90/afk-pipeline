@@ -260,11 +260,11 @@ function sanitizeGuardianRecord(
   const findings = record.findings.map(sanitizeGuardianFinding);
   if (findings.some((finding) => finding === undefined)) return undefined;
   const validFindings = findings as PersistedGuardianFinding[];
+  // Parsed current IDs remain unique, but multiple distinct records may share
+  // one stable identity when they name a prior finding through known aliases.
   if (
     new Set(validFindings.map((finding) => finding.currentId)).size !==
-      validFindings.length ||
-    new Set(validFindings.map((finding) => finding.stableId)).size !==
-      validFindings.length
+    validFindings.length
   ) {
     return undefined;
   }
