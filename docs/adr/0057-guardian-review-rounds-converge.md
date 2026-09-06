@@ -50,6 +50,28 @@ favorable-only; the *ledger* records everything. A malformed or missing
 ledger degrades to a full round-1 review, never blocks resumption — the same
 tolerance `sanitizeReviewPhase` already applies to the verdict cache.
 
+*Amendment, 2026-09-06 (issue #181).* Identity resolution is one-to-one
+within a round: one prior entry's stable identity goes to at most one of that
+round's findings. Two findings can reach one prior entry, because the entry is
+matched through both its `stableId` and its `currentId` and the guardian
+prompt numbers findings fresh each round. When they do, that entry's
+`stableId` goes to the claimant whose normalized class plus clear-condition
+fingerprint also matches. When neither fingerprint matches, it goes to the
+claimant whose ID equals the prior `stableId`. Every other claimant receives a
+new stable identity and keeps its guardian-provided ID as `currentId`.
+`stableId` stays unique within a guardian record, so it remains a single
+lineage and cross-round matching stays order-independent.
+
+This relaxes "stable ID first" for the collision case only, and it must: two
+claimants make "a known ID match always retains the prior stable identity"
+unsatisfiable. The three alternatives all cost more. Repeated stable IDs stop
+`stableId` naming one lineage and make the next round's match depend on row
+order. Folding one claimant away drops a reported finding. Refusing the block
+as `UNPARSEABLE` discards the whole round's findings for a review that parsed
+correctly, and under decision 4 a run can then reach the round cap with no
+persisted blockers to file. Decision 2 removes most of the cause: the round-2+
+prompt shows prior stable IDs and asks the guardian to reuse them.
+
 **2. Round 1 reviews the branch; later rounds verify the fix.** Round 1 reads
 `main...HEAD` exactly as today — it is the only round that should. From round
 2 on, the guardian receives the fix diff (`<last-reviewed-sha>..HEAD`), the
