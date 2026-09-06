@@ -124,7 +124,7 @@ describe("advanceGuardianFindingLineage", () => {
           clearCondition: "Changed",
           disposition: "REOPENED",
         },
-      ])[0]?.stableId,
+      ])?.[0]?.stableId,
     ).toBe("A-01");
   });
 
@@ -160,22 +160,24 @@ describe("advanceGuardianFindingLineage", () => {
       },
     ]);
 
-    expect(advanced.map((finding) => finding.stableId)).toEqual([
+    expect(advanced).toBeDefined();
+    const entries = advanced!;
+    expect(entries.map((finding) => finding.stableId)).toEqual([
       "A-01",
       "A-08",
     ]);
-    expect(new Set(advanced.map((finding) => finding.stableId)).size).toBe(2);
+    expect(new Set(entries.map((finding) => finding.stableId)).size).toBe(2);
 
     const phase = {
       rounds: [
         ...prior,
         {
-          ...roundWithArchitectFindings(advanced),
+          ...roundWithArchitectFindings(entries),
           round: 2,
           architect: {
             source: "INVOKED" as const,
             outcome: "FIX-BEFORE-SHIP" as const,
-            findings: advanced,
+            findings: entries,
             findingsOriginRound: 2,
           },
           pm: {
@@ -222,13 +224,13 @@ describe("advanceGuardianFindingLineage", () => {
       },
     ]);
 
-    expect(advanced.map((finding) => finding.stableId)).toEqual([
+    expect(advanced?.map((finding) => finding.stableId)).toEqual([
       "A-09",
       "A-01",
     ]);
   });
 
-  it("B-03 QA-07 folds two known aliases of one prior identity into one entry", () => {
+  it("B-03 QA-07 refuses a block whose two known aliases name one prior identity", () => {
     const prior = [
       roundWithArchitectFindings([
         {
@@ -241,58 +243,28 @@ describe("advanceGuardianFindingLineage", () => {
         },
       ]),
     ];
-    const advanced = advanceGuardianFindingLineage(prior, "architect", [
-      {
-        id: "A-05",
-        title: "Current-ID claimant",
-        class: "PRODUCT",
-        clearCondition: "Keep the current alias",
-        disposition: "REPEATED",
-      },
-      {
-        id: "A-01",
-        title: "Stable-ID claimant",
-        class: "INTEGRITY",
-        clearCondition: "Keep the stable alias",
-        disposition: "OPEN",
-      },
-    ]);
-
-    // The stable-ID claimant keeps the identity; the current-ID claimant is
-    // the same finding under its other alias, so it folds into that entry
-    // rather than minting a forbidden new stable identity.
-    expect(advanced).toEqual([
-      {
-        stableId: "A-01",
-        currentId: "A-01",
-        title: "Stable-ID claimant",
-        class: "INTEGRITY",
-        clearCondition: "Keep the stable alias",
-        disposition: "OPEN",
-      },
-    ]);
-
-    const phase = {
-      rounds: [
-        ...prior,
+    // Both IDs name the same prior entry, one through its stableId and one
+    // through its currentId. Minting a new identity for the loser breaks the
+    // ID-first rule, repeating the claimed one makes the ledger non-durable,
+    // and folding it away omits a parsed finding — so the block is refused and
+    // the caller records the guardian outcome as UNPARSEABLE.
+    expect(
+      advanceGuardianFindingLineage(prior, "architect", [
         {
-          ...roundWithArchitectFindings(advanced),
-          round: 2,
-          architect: {
-            source: "INVOKED" as const,
-            outcome: "FIX-BEFORE-SHIP" as const,
-            findings: advanced,
-            findingsOriginRound: 2,
-          },
-          pm: {
-            source: "INVOKED" as const,
-            outcome: "SHIP" as const,
-            findings: [],
-            findingsOriginRound: 2,
-          },
+          id: "A-05",
+          title: "Current-ID claimant",
+          class: "PRODUCT",
+          clearCondition: "Keep the current alias",
+          disposition: "REPEATED",
         },
-      ],
-    };
-    expect(sanitizeReviewPhase(phase)?.rounds).toHaveLength(2);
+        {
+          id: "A-01",
+          title: "Stable-ID claimant",
+          class: "INTEGRITY",
+          clearCondition: "Keep the stable alias",
+          disposition: "OPEN",
+        },
+      ]),
+    ).toBeUndefined();
   });
 });

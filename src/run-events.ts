@@ -284,7 +284,8 @@ export type RunEventPayload =
         | "preflight"
         | "review-artifact-restored"
         | "review-artifact-restore-failed"
-        | "review-worktree-drift";
+        | "review-worktree-drift"
+        | "guardian-finding-alias-collision";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

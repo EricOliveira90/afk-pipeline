@@ -1076,6 +1076,110 @@ describe("runShipGate", () => {
     });
   });
 
+  it("B-04 QA-07 records UNPARSEABLE when two known aliases name one prior finding", async () => {
+    const repo = makeRepo();
+    const slug = "alias-collision";
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      if (kind === "pm") {
+        writeReview(options, slug, "pm", "SHIP");
+        return invokeResult();
+      }
+      // Two findings naming the one prior entry through both of its aliases.
+      const dir = join(options.cwd, ".kiro", "specs", slug);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "review-architect.md"),
+        [
+          "# Guardian Review",
+          "",
+          "**Verdict:** FIX-BEFORE-SHIP",
+          "",
+          "## Structured findings (v1)",
+          JSON.stringify({
+            version: 1,
+            findings: [
+              {
+                id: "A-05",
+                title: "Current-alias claimant",
+                class: "PRODUCT",
+                clearCondition: "Clear the current alias.",
+                disposition: "REPEATED",
+              },
+              {
+                id: "A-01",
+                title: "Stable-alias claimant",
+                class: "INTEGRITY",
+                clearCondition: "Clear the stable alias.",
+                disposition: "OPEN",
+              },
+            ],
+          }),
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const cachedReviewPhase = {
+      rounds: [
+        {
+          round: 1,
+          reviewedHeadSha: "pre-review",
+          headSha: "prior-head",
+          architect: {
+            source: "INVOKED" as const,
+            outcome: "FIX-BEFORE-SHIP" as const,
+            findings: [
+              {
+                stableId: "A-01",
+                currentId: "A-05",
+                title: "The one prior finding",
+                class: "INTEGRITY",
+                clearCondition: "Commit the durable evidence.",
+                disposition: "OPEN" as const,
+              },
+            ],
+            findingsOriginRound: 1,
+          },
+          pm: {
+            source: "INVOKED" as const,
+            outcome: "SHIP" as const,
+            findings: [],
+            findingsOriginRound: 1,
+          },
+        },
+      ],
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      cachedReviewPhase,
+    });
+
+    const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
+    // The round is still recorded — nothing is silently dropped — but the
+    // unrepresentable block downgrades the outcome instead of being folded,
+    // suffixed, or duplicated into a ledger the sanitizer would discard.
+    expect(rounds).toHaveLength(2);
+    expect(rounds?.[1]?.architect).toEqual({
+      source: "INVOKED",
+      outcome: "UNPARSEABLE",
+      findings: [],
+      findingsOriginRound: 2,
+    });
+    expect(fixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "guardian-finding-alias-collision" }),
+    );
+    // An UNPARSEABLE architect result is not favorable, so it is never cached.
+    expect(loadRunState(repo, slug).reviewPhase?.architect).toBeUndefined();
+    expect(headSha).toBeTruthy();
+  });
+
   it("B-01 QA-06 keeps the reused caches when the artifact commit fails", async () => {
     const repo = makeRepo();
     const slug = "artifact-commit-failure-cache";
