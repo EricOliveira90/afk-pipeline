@@ -778,126 +778,139 @@ export async function runShipGate(
     architect: guardianRecord("architect", architectResult),
     pm: guardianRecord("pm", pmResult),
   });
-
-  const restore = restoreCapturedReviewArtifacts([
-    architectResult.captured,
-    pmResult.captured,
-  ]);
-  for (const { label, path } of restore.restored) {
-    const message =
-      `${label} review artifact was changed in the review worktree after the ` +
-      `agent finished — restored the agent's own output before committing: ${path} (#136).`;
-    journal.phase(`  ⚠️  ${message}`, "warn");
-    journal.event({
-      type: "warn",
-      reason: "review-artifact-restored",
-      message,
+  let roundPersistenceAttempted = false;
+  let roundHeadSha = headShaBefore;
+  const persistCompletedRound = (
+    headSha: string,
+    reviewPhase: PersistedReviewPhase = {},
+  ): void => {
+    if (roundPersistenceAttempted) return;
+    roundPersistenceAttempted = true;
+    saveReviewPhase(repoRoot, runSlug, {
+      ...reviewPhase,
+      rounds: [completedRound(headSha)],
     });
-  }
-  for (const { label, path, error } of restore.failed) {
-    const message =
-      `${label} review artifact could not be restored at ${path}: ${error}. ` +
-      "The committed review may not be the artifact this run's agent wrote — " +
-      "read it before trusting its verdict (#136).";
-    journal.phase(`  ⚠️  ${message}`, "warn");
-    journal.event({
-      type: "warn",
-      reason: "review-artifact-restore-failed",
-      message,
-    });
-  }
+  };
 
-  // Residual insurance: the restore above covers the two review files by
-  // content, but a guardian's shell reaches the whole worktree. Nothing else
-  // is allowed to have moved since the reviews started (#136 follow-up).
-  // One `git status --porcelain` serves both this check and the
-  // is-there-anything-to-commit question below: `hasUncommittedChanges` runs
-  // the identical command, so re-reading it would spawn a second git for an
-  // answer already in hand.
-  const statusBeforeCommit = git.statusPorcelain(reviewDir);
-  const drift = detectReviewWorktreeDrift({
-    headShaBefore,
-    headShaNow: git.resolveCommit(reviewDir, "HEAD"),
-    statusPorcelain: statusBeforeCommit,
-    specsDir,
-  });
-  if (drift) {
-    const detail = formatReviewWorktreeDrift(drift);
-    if (drift.headMoved || drift.changedPaths.length > 0) {
+  try {
+    const restore = restoreCapturedReviewArtifacts([
+      architectResult.captured,
+      pmResult.captured,
+    ]);
+    for (const { label, path } of restore.restored) {
       const message =
-        "review worktree moved between the guardian reviews and the artifact " +
-        `commit — ${detail}. Refusing to commit over it: the reviewed tree is ` +
-        "not the tree the wave produced (#136).";
-      journal.phase(`  ❌ ${message}`, "warn");
+        `${label} review artifact was changed in the review worktree after the ` +
+        `agent finished — restored the agent's own output before committing: ${path} (#136).`;
+      journal.phase(`  ⚠️  ${message}`, "warn");
+      journal.event({
+        type: "warn",
+        reason: "review-artifact-restored",
+        message,
+      });
+    }
+    for (const { label, path, error } of restore.failed) {
+      const message =
+        `${label} review artifact could not be restored at ${path}: ${error}. ` +
+        "The committed review may not be the artifact this run's agent wrote — " +
+        "read it before trusting its verdict (#136).";
+      journal.phase(`  ⚠️  ${message}`, "warn");
+      journal.event({
+        type: "warn",
+        reason: "review-artifact-restore-failed",
+        message,
+      });
+    }
+
+    // Residual insurance: the restore above covers the two review files by
+    // content, but a guardian's shell reaches the whole worktree. Nothing else
+    // is allowed to have moved since the reviews started (#136 follow-up).
+    // One `git status --porcelain` serves both this check and the
+    // is-there-anything-to-commit question below: `hasUncommittedChanges` runs
+    // the identical command, so re-reading it would spawn a second git for an
+    // answer already in hand.
+    roundHeadSha = git.resolveCommit(reviewDir, "HEAD") ?? roundHeadSha;
+    const statusBeforeCommit = git.statusPorcelain(reviewDir);
+    const drift = detectReviewWorktreeDrift({
+      headShaBefore,
+      headShaNow: roundHeadSha,
+      statusPorcelain: statusBeforeCommit,
+      specsDir,
+    });
+    if (drift) {
+      const detail = formatReviewWorktreeDrift(drift);
+      if (drift.headMoved || drift.changedPaths.length > 0) {
+        const message =
+          "review worktree moved between the guardian reviews and the artifact " +
+          `commit — ${detail}. Refusing to commit over it: the reviewed tree is ` +
+          "not the tree the wave produced (#136).";
+        journal.phase(`  ❌ ${message}`, "warn");
+        journal.event({
+          type: "warn",
+          reason: "review-worktree-drift",
+          message,
+        });
+        // The guardian pair completed, so preserve its evidence even though
+        // drift makes the artifact commit unsafe. The round records the actual
+        // HEAD at this exit and writes no favorable cache entry.
+        persistCompletedRound(roundHeadSha);
+        return blocked(message);
+      }
+      journal.phase(
+        `  ⚠️  Review worktree holds files outside this run's reviews — ${detail}. Committing them with the reviews.`,
+        "warn",
+      );
       journal.event({
         type: "warn",
         reason: "review-worktree-drift",
-        message,
+        message: `untracked files beside the review artifacts — ${detail}`,
       });
-      // The guardian pair completed, so preserve its evidence even though
-      // drift makes the artifact commit unsafe. No favorable cache entry is
-      // written, and the reviewed SHA is the only non-invented ledger key
-      // available when no post-artifact commit exists.
-      saveReviewPhase(repoRoot, runSlug, {
-        rounds: [completedRound(headShaBefore)],
-      });
-      return blocked(message);
     }
-    journal.phase(
-      `  ⚠️  Review worktree holds files outside this run's reviews — ${detail}. Committing them with the reviews.`,
-      "warn",
-    );
-    journal.event({
-      type: "warn",
-      reason: "review-worktree-drift",
-      message: `untracked files beside the review artifacts — ${detail}`,
-    });
-  }
 
-  if (statusBeforeCommit !== "") {
-    try {
-      git.commitAll(
-        reviewDir,
-        `docs(${prdSlug}): add post-impl guardian reviews`,
+    if (statusBeforeCommit !== "") {
+      try {
+        git.commitAll(
+          reviewDir,
+          `docs(${prdSlug}): add post-impl guardian reviews`,
+        );
+      } catch (error) {
+        if (git.hasUncommittedChanges(reviewDir)) throw error;
+      }
+    }
+
+    const headShaAfter = git.resolveCommit(reviewDir, "HEAD");
+    if (!headShaAfter) {
+      persistCompletedRound(roundHeadSha);
+      return blocked(
+        "could not resolve the post-artifact-commit HEAD for guardian evidence",
       );
-    } catch (error) {
-      if (git.hasUncommittedChanges(reviewDir)) throw error;
     }
-  }
+    roundHeadSha = headShaAfter;
+    const treeShaAfter = git.resolveTree(reviewDir);
+    const nextReviewPhase: PersistedReviewPhase = {};
+    // Only PASS is cached (ADR 0015). Sanity failure returns BLOCKED before
+    // reaching this point, but the guard keeps the invariant enforced at the
+    // write site rather than by control flow alone.
+    if (sanity.ok && treeShaAfter) {
+      nextReviewPhase.sanity = { treeSha: treeShaAfter, ok: true };
+    }
+    if (artifacts.isFavorableReviewOutcome(architectResult.outcome)) {
+      nextReviewPhase.architect = {
+        headSha: headShaAfter,
+        verdict: architectResult.outcome,
+      };
+    }
+    if (artifacts.isFavorableReviewOutcome(pmResult.outcome)) {
+      nextReviewPhase.pm = {
+        headSha: headShaAfter,
+        verdict: pmResult.outcome,
+      };
+    }
 
-  const headShaAfter = git.resolveCommit(reviewDir, "HEAD");
-  if (!headShaAfter) {
-    return blocked(
-      "could not resolve the post-artifact-commit HEAD for guardian evidence",
-    );
+    persistCompletedRound(headShaAfter, nextReviewPhase);
+  } catch (error) {
+    persistCompletedRound(roundHeadSha);
+    throw error;
   }
-  const treeShaAfter = git.resolveTree(reviewDir);
-  const nextReviewPhase: PersistedReviewPhase = {};
-  // Only PASS is cached (ADR 0015). Sanity failure returns BLOCKED before
-  // reaching this point, but the guard keeps the invariant enforced at the
-  // write site rather than by control flow alone.
-  if (sanity.ok && treeShaAfter) {
-    nextReviewPhase.sanity = { treeSha: treeShaAfter, ok: true };
-  }
-  if (artifacts.isFavorableReviewOutcome(architectResult.outcome)) {
-    nextReviewPhase.architect = {
-      headSha: headShaAfter,
-      verdict: architectResult.outcome,
-    };
-  }
-  if (artifacts.isFavorableReviewOutcome(pmResult.outcome)) {
-    nextReviewPhase.pm = {
-      headSha: headShaAfter,
-      verdict: pmResult.outcome,
-    };
-  }
-
-  nextReviewPhase.rounds = [completedRound(headShaAfter)];
-  saveReviewPhase(
-    repoRoot,
-    runSlug,
-    nextReviewPhase,
-  );
 
   const prPlan = buildPrCreationPlan({
     prdSlug,

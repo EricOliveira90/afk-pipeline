@@ -879,6 +879,7 @@ describe("runShipGate", () => {
     const repo = makeRepo();
     const slug = "drift-head";
     const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
+    let driftedHeadSha = "";
     const fixture = makeJournal();
     const invoke = vi.fn(async (options: InvokeOptions) => {
       const kind = options.role === "architect-review" ? "architect" : "pm";
@@ -888,6 +889,7 @@ describe("runShipGate", () => {
         // the guardians reviewed.
         writeFileSync(join(repo, "README.md"), "rogue\n", "utf-8");
         git(repo, ["commit", "-am", "rogue guardian commit"]);
+        driftedHeadSha = git(repo, ["rev-parse", "HEAD"]);
       }
       return invokeResult();
     });
@@ -905,6 +907,53 @@ describe("runShipGate", () => {
       expect.objectContaining({
         type: "warn",
         reason: "review-worktree-drift",
+      }),
+    );
+    expect(loadRunState(repo, slug).reviewPhase?.rounds).toEqual([
+      {
+        round: 1,
+        reviewedHeadSha,
+        headSha: driftedHeadSha,
+        architect: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+    ]);
+  });
+
+  it("B-01 QA-02 persists the completed guardian round when the artifact commit fails", async () => {
+    const repo = makeRepo();
+    const slug = "artifact-commit-failure";
+    const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      if (kind === "pm") {
+        writeFileSync(join(repo, ".git", "index.lock"), "locked\n", "utf-8");
+      }
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+
+    await expect(
+      runShipGate(makeArgs(repo, slug, fixture.journal, invoke, runCommand)),
+    ).rejects.toThrow();
+
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fixture.event).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "run-phase-started",
+        phase: "draft-pr",
       }),
     );
     expect(loadRunState(repo, slug).reviewPhase?.rounds).toEqual([

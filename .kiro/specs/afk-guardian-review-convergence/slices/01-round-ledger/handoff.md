@@ -1,7 +1,7 @@
 ## What shipped
 
-- B-01: `src/ship-gate.ts:completedRound`
-- B-02: `src/ship-gate.ts:completedRound`
+- B-01: `src/ship-gate.ts:persistCompletedRound`
+- B-02: `src/ship-gate.ts:persistCompletedRound`
 - B-03: `src/guardian-convergence.ts:advanceGuardianFindingLineage`
 - B-04: `src/artifacts.ts:parseGuardianReview`
 - B-05: `src/run-state.ts:sanitizeGuardianRounds`
@@ -15,10 +15,10 @@
 ## Decisions made during implementation
 
 - Normalize guardian fingerprints by trimming, collapsing whitespace, and lowercasing class plus clear condition so formatting-only changes retain lineage.
-- When worktree drift prevents the artifact commit, append a ledger-only round keyed to the reviewed SHA because no safe post-artifact cache key exists.
+- Persist a completed pair once across every post-review exit; failed artifact paths use the latest resolvable HEAD and do not populate favorable cache fields.
 
 ## Gotchas / learnings
 
 - Cache-backed findings are valid only when the latest earlier round with a matching post-review HEAD carries provenance to an invoked record.
-- Fatal review-worktree drift records completed guardian evidence but deliberately creates no favorable cache entry.
+- Fatal review-worktree drift keeps its block and records the drifted HEAD, while artifact commit failures retain their existing exception path after recording the pair.
 - New migration files: 0
