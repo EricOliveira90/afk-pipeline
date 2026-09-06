@@ -1,7 +1,7 @@
 # Guardian review rounds converge
 
-Status: proposed — design only; no slice starts until the operator approves
-this ADR's PR.
+Status: Accepted — approved by the operator on 2026-09-06; the design's
+implementation slices (#170–#174) are cleared to start.
 
 ## Context
 
