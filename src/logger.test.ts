@@ -343,6 +343,67 @@ PM review: N/A
     expect(secondRow).not.toContain("output_tokens:");
     expect(secondRow).not.toContain(", input_tokens:");
   });
+
+  // Architect round-7 A1: runQAStage emits evaluator-qa/evaluator-uat
+  // completion events (kept in events.jsonl for ADR 0046), but those roles
+  // have no prompt-assembly record, so their token counts must not enter
+  // the B-06 envelope totals — both columns aggregate the same population.
+  it("excludes unassembled evaluator token counts from B-06 envelope totals", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "envelope-totals-evaluator");
+    log.restoreCompleted(id("41", "First", "afk/41"));
+    log.event({
+      type: "prompt-assembly",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "generator",
+      assembledByteSize: 101,
+      includedArtifactClasses: ["contract-view"],
+      includedArtifactIds: ["slice/contract.md"],
+      omittedArtifactClasses: ["prior-conversation"],
+      contextManifestVersion: 1,
+    });
+    log.event({
+      type: "invocation-completed",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "generator",
+      tokenCounts: { input_tokens: 11, output_tokens: 7 },
+    });
+    log.event({
+      type: "invocation-completed",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "evaluator-qa",
+      attempt: 1,
+      tokenCounts: { input_tokens: 999 },
+      nonCommandTimeMs: 1234,
+    });
+    log.event({
+      type: "invocation-completed",
+      ghIssue: "41",
+      sliceNumber: "01",
+      round: 1,
+      role: "evaluator-uat",
+      tokenCounts: { input_tokens: 999, output_tokens: 999 },
+      nonCommandTimeMs: 5678,
+    });
+
+    const md = log.writeSummary();
+
+    // Per-slice and run totals are byte-for-byte what they would be
+    // without the evaluator events: 999 never enters either column.
+    expect(md).toContain(
+      "| 41 First | ✅ PASS | gen:0 eval:0 | merged | — | — | 101 | input_tokens: 11, output_tokens: 7 |",
+    );
+    expect(md).toContain(
+      "**101** | **input_tokens: 11, output_tokens: 7**",
+    );
+    expect(md).not.toContain("999");
+  });
 });
 
 

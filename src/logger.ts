@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
+import type { PromptAssemblyRole } from "./context-envelope.js";
 import type { SanityGateResult } from "./preship.js";
 import { readRunEvents } from "./run-events.js";
 import {
@@ -28,6 +29,18 @@ interface EnvelopeTotals {
   promptBytes: number;
   tokenCounts: Map<string, number>;
 }
+
+/**
+ * The four assembled envelope roles (slice 04 B-06). The B-06 summary
+ * columns are envelope totals — assembled prompt bytes beside their exposed
+ * token counts — so both columns must aggregate the same invocation
+ * population. Evaluator completion events ("evaluator-qa"/"evaluator-uat")
+ * stay in events.jsonl for ADR 0046 but are excluded here because those
+ * roles have no matching prompt-assembly record (architect round-7 A1).
+ */
+const ASSEMBLED_ENVELOPE_ROLES: ReadonlySet<string> = new Set<
+  PromptAssemblyRole
+>(["explorer", "planner", "evaluator-contract", "generator"]);
 
 export interface DependencyBlocker {
   ghIssue: string;
@@ -246,7 +259,13 @@ export class Logger {
         };
         total.promptBytes += event.assembledByteSize;
         envelopeTotals.set(event.ghIssue, total);
-      } else if (event.type === "invocation-completed") {
+      } else if (
+        event.type === "invocation-completed" &&
+        // Only assembled envelope roles enter B-06 totals; unassembled
+        // evaluator roles would inflate the token column relative to the
+        // prompt-bytes column (architect round-7 A1).
+        ASSEMBLED_ENVELOPE_ROLES.has(event.role)
+      ) {
         const total = envelopeTotals.get(event.ghIssue) ?? {
           promptBytes: 0,
           tokenCounts: new Map<string, number>(),
