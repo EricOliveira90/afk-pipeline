@@ -1,16 +1,48 @@
 # PRD: The guardian review converges
 
-**GH issue:** TBD (parent). Every slice issue is TBD — see `issues.md`.
+**GH issue:** no parent issue filed; slice issues are #170–#174 — see
+`issues.md`.
 **Parent design:** `docs/specs/afk-v2-plan.md` item 20. This PRD is the
 deferred guardian-convergence follow-up; it does not expand live PRD 3.
+**Approved design:** `docs/adr/0057-guardian-review-rounds-converge.md`
+(PR #169, merged 2026-09-06). Where this document and ADR 0057 differ,
+ADR 0057 controls.
 **Amends:** `docs/adr/0015-guardian-review-failure-classes-and-overrides.md`
 **Written:** 2026-08-31, after PRD `afk-v2-routing-adjudication` spent nine
 post-implementation guardian rounds without converging.
 
-## Status after the hand fixes
+## Status — deferral lifted 2026-09-06
 
-This PRD is **deferred until after PRD 3 produces one measured guardian run**.
-Do not create its issues or launch it through AFK before that review.
+The deferral condition below is satisfied and this PRD is active for AFK:
+
+- **PRD 3's measured guardian run happened.** `afk-v2-context-envelopes`
+  spent seven guardian rounds (fix commits `0060ac6`, `29f6946`, `1bbf2d5`,
+  `27a88a8`, `2098604`, `37c5fef`, `2e3726e`) before reaching double
+  ACCEPT-WITH-NOTES, and merged via PR #160 on 2026-09-05. Rounds 6 and 7
+  each blocked on a single new finding discovered by resampling, not by a
+  fix regressing — the second measurement of the same loop.
+- **PRD 2 is fully merged to `main`** via hand-opened PR #150 (2026-09-04):
+  round 9 ended with both guardians blocking, so the pipeline never opened
+  the PR itself; the operator collected the work by hand with the blocking
+  findings triaged and filed. The loop was exited by operator decision, not
+  by the gate clearing.
+- **The design review happened and is merged as ADR 0057.** Its five
+  decisions (round ledger; rounds 2+ verify the fix; narrowed blocking
+  authority with a reachability + attribution floor; a round cap with a
+  recorded, successful cap exit; the symmetric override as the attended
+  valve) supersede both this PRD's original proposal *and* the interim
+  "not approved" markers below.
+- **Implementation tickets #170–#174 are filed**, one per ADR 0057 decision;
+  the mapping and DAG are in `issues.md`.
+
+The history below — the hand fixes and the interim operator policy — is kept
+as the record of how the gate was run between PRD 2's round 9 and this
+approval.
+
+## Status after the hand fixes (historical, 2026-09-01)
+
+This PRD was **deferred until after PRD 3 produced one measured guardian
+run**; that review has now happened (see above).
 
 Landed by hand on `integration/pre-prd3`:
 
@@ -31,11 +63,12 @@ Approved for this deferred follow-up after PRD 3's measured run:
 These prompt-policy changes do not create automatic success and do not weaken
 the temporary three-blocked-invocation stop rule.
 
-Deferred: the round ledger, later-round review scoping, an automatic round cap,
-and note filing. The original delta-only rule and successful unattended cap
-below are not approved designs. Before PRD 3, use an operator policy instead:
-after three blocked guardian invocations, stop re-entry and request a human
-decision without changing the blocked result to success.
+Deferred at the time (now approved via ADR 0057): the round ledger,
+later-round review scoping, an automatic round cap, and note filing. The
+interim operator policy — after three blocked guardian invocations, stop
+re-entry and request a human decision without changing the blocked result to
+success — governed PRD 3's run and is replaced by ADR 0057's cap exit once
+#173 ships.
 
 ## Problem Statement
 
@@ -132,10 +165,12 @@ a pre-existing non-`ACCEPT` planner-lock bypass with a new gate-refusal
 regression from round 8's fix. The PM independently blocked on that authority
 bypass. Issue #149 and its regression test fix the non-`ACCEPT` path.
 
-## Original solution proposal — partially rejected and deferred
+## Original solution proposal — superseded by ADR 0057
 
-The status section above controls. This section records the original proposal
-for later redesign; it is not ready for AFK implementation.
+ADR 0057's five decisions are the approved design; tickets #170–#174
+implement them. This section records the original proposal and the interim
+partial-rejection for the archaeology; read the ADR, not this, for what to
+build.
 
 Four changes attack separate mechanisms. A fifth change makes non-blocking
 findings durable.
@@ -186,8 +221,8 @@ findings durable.
 
 ## Implementation Decisions
 
-- **Original cap proposal (not approved): the round cap is the primary escape
-  valve; the symmetric override is the
+- **Original cap proposal (now approved as ADR 0057 decision 4): the round
+  cap is the primary escape valve; the symmetric override is the
   secondary one.** A flag needs an operator at the console, and AFK's premise is
   unattended running — the nine rounds under discussion all ran unattended and
   no flag was there to be passed. A cap ends the loop without a human. The
@@ -196,19 +231,20 @@ findings durable.
   introduced; making it symmetric costs almost nothing next to leaving a
   documented one-sided veto in place. Both live in one slice because they share
   the same PR-body, override-note and exit-signal plumbing.
-- **Original cap default (not approved): 3**, matching ADR 0014's three-round implementation cap
+- **Original cap default (now approved as ADR 0057 decision 4): 3**, matching ADR 0014's three-round implementation cap
   and ADR 0015's "three-round implementation cap … unchanged". A gate that
   cannot converge in three architect rounds is not going to converge in eight;
   the evidence is that its finding rate does not fall. It is configurable, and
   the flag name is the implementer's call.
-- **Original success rule (not approved): a capped run is successful, like an
+- **Original success rule (now approved as ADR 0057 decision 4): a capped run
+  is successful, like an
   override.** ADR 0015's 2026-08-22
   amendment already carves out the override from the unsuccessful-exit rule on
   the grounds that the recorded note is the operator's acknowledgement. A
   cap-cleared PR carries the same recorded acknowledgement plus filed issues, so
   it takes the same treatment. This must be stated in the amendment, not left to
   inference.
-- **Original delta-only rule (not approved): scoping starts at round 2.** Round 1 reads `main...HEAD` exactly as
+- **Original delta-only rule (now approved as ADR 0057 decision 2): scoping starts at round 2.** Round 1 reads `main...HEAD` exactly as
   today. The ledger's absence *is* the signal that this is round 1, so no extra
   flag is needed.
 - **The ledger keys findings by a stable identity the reviewer supplies**, not by
@@ -231,16 +267,15 @@ findings durable.
   a vendored Rumo Fisio consumer persona that named `clinic_id`, RLS, and
   `safeAction`; nothing in `src/` read it. The file that drives this repo's
   self-run gate remains `prompts/architect-review.md`.
-- **This needs an ADR.** Any future convergence decision — review scope, impact
-  evidence, a bounded round count, and a durable findings ledger — is expensive
-  to reverse and needs an ADR. `0056` is the next free number across current
-  repository history as of 2026-08-31; re-check it when deferred work starts.
-  The symmetric override already amends ADR 0015 in place. Future work amends
-  ADR 0015 where it changes the never-cache-unfavorable rule or exit signal,
-  and cites ADR 0014 (round-cap precedent) and ADR 0048 (findings name their
-  remedy) as precedent without amending them. ADR 0033 (ship-gate extraction) is
-  the module boundary the change lands inside and is unaffected. Nothing is
-  superseded.
+- **This needed an ADR, and it exists: ADR 0057** (PR #169, merged
+  2026-09-06). The PRD's provisional `0056` was taken on `main` by the
+  run-state-lock ADR, and `0058` by the teardown sidecar sweep (issue #166).
+  ADR 0057 amends ADR 0015 (the ledger/cache split; the cap exit joins the
+  override in the exit-signal carve-out), cites ADR 0014 (round-cap
+  precedent) and ADR 0048 (findings name their remedy — here, their clear
+  condition and class) as precedent without amending them. ADR 0033
+  (ship-gate extraction) is the module boundary the change lands inside and
+  is unaffected. Nothing is superseded.
 
 ## Testing Decisions
 
@@ -284,8 +319,11 @@ findings durable.
 
 ## Further Notes
 
-Use PRD 3 as the next measurement. Record each guardian invocation's reviewed
-SHA, verdict, findings, fix commit, and elapsed time. After three blocked
-invocations, stop re-entry and request a human decision; do not convert the
-blocked result to success. Revisit this deferred PRD with that evidence before
-PRD 4 starts.
+PRD 3 was the next measurement, and it happened: seven guardian rounds on
+`afk-v2-context-envelopes` (merged via PR #160), with rounds 6 and 7 each
+blocking on a single fresh finding found by resampling. That evidence is
+folded into ADR 0057's Context and is what lifted this PRD's deferral.
+The interim stop rule (three blocked invocations → human decision, no
+automatic success) remains the operator policy for any run that ships
+before #173 lands — including this PRD's own AFK run, whose ship gate
+still runs the old unbounded loop.

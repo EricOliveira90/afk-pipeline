@@ -1,44 +1,87 @@
 # Guardian review convergence - Slice Index
 
-**Parent PRD:** TBD - see `prd.md` in this directory.
+**Parent PRD:** no parent issue filed — the approved design is
+`docs/adr/0057-guardian-review-rounds-converge.md` (PR #169, merged
+2026-09-06). Slice issues are #170–#174, one per ADR 0057 decision.
 
-| Slice | GH Issue | Title | Status | Blocked by | User stories covered |
-|-------|----------|-------|--------|------------|----------------------|
-| 01 | TBD | Every guardian round is recorded, blocked ones included | Deferred until after PRD 3 | - | US-1 |
-| 02 | TBD | Later architect reviews use prior-round evidence | Deferred; delta-only design not approved | 01 | US-2, US-3 |
-| 03 | - | A blocking finding states impact, recovery, and attribution | Landed by hand on `integration/pre-prd3` | - | US-4 |
-| 04 | TBD | A bounded gate and a symmetric override | Override landed; automatic cap deferred | 01 | US-5, US-6 |
-| 05 | TBD | A note that ships unfixed is filed once | Deferred until after PRD 3 | 04 | US-7 |
+| Slice | GH Issue | Title | Type | Blocked by | User stories covered |
+|-------|----------|-------|------|------------|----------------------|
+| 01 | #170 | Every review round is recorded, blocked ones included | AFK | — | US-1 |
+| 02 | #171 | Architect rounds 2+ verify the fix diff against prior findings' clear conditions | AFK | #170 | US-2, US-3 |
+| 03 | #172 | Blocking findings need a reachable trigger; new findings in later rounds report-but-don't-block | AFK | — | US-4 |
+| 04 | #173 | Hard round cap with recorded cap exit; verify symmetric override | AFK | #170 | US-5, US-6 |
+| 05 | #174 | A note that ships unfixed is filed exactly once | AFK | #173 | US-7 |
 
-## Current cut
+## Expected wave structure
 
-- Slice 03 landed by hand.
-- The override half of slice 04 landed by hand.
-- Slices 01, 02 and 05 remain deferred.
-- The automatic-cap half of slice 04 remains deferred.
-- PRD 3 supplies the next evidence before any deferred design returns.
+- **Wave 1:** #170 (round ledger) and #172 (rubric floor) — no code edges.
+- **Wave 2:** #171 (delta-scoped rounds 2+) and #173 (cap + override exit),
+  both blocked by #170. Both touch `src/ship-gate.ts`; the lane partitioner
+  will serialize them into one lane. Expected, not a problem.
+- **Wave 3:** #174 (notes filed once), blocked by #173 (reuses its
+  finding-to-issue filing path).
 
-## Before this runs
+## Why the cut falls here
 
-Do not launch this PRD before PRD 3 completes one measured guardian run. After
-that decision, the remaining work still needs:
+- **01 before 02 and 04.** Both consuming slices need the same thing that does
+  not exist today: a persisted record of an *unfavorable* round.
+  `PersistedReviewResult` is typed `"SHIP" | "ACCEPT-WITH-NOTES"` and
+  `sanitizeReviewResult` (`src/run-state.ts`) drops everything else, so
+  the storage change is not a field addition — it amends an explicit ADR 0015
+  rule (per ADR 0057 decision 1: the favorable-only *cache* stays; the
+  *ledger* records everything) and needs its own sanitizer, its own tolerance
+  for old state files, and its own tests. 01 also stands alone: it makes the
+  round-over-round history readable, which for PRD 2 took a `git log` over the
+  guardian artifact history to reconstruct by hand.
+- **02 is separate from 01** because it is a different seam. 01 is
+  `src/run-state.ts`; 02 is the prompt-render call in `src/ship-gate.ts`
+  plus new template variables in `prompts/architect-review.md`. Nothing in
+  02 changes storage, and 01 ships value without it.
+- **03 is independent and parallelizable.** It is a rubric change to
+  `prompts/architect-review.md` (ADR 0057 decision 3) with a mechanical
+  assertion on the finding disposition. It touches neither the state file nor
+  the PR decision, so it has no edge to 01, 02 or 04 and runs in wave 1.
+- **04 holds the cap and the recorded exit in one slice** because they are
+  conditions on the same expression — `open` in `buildPrCreationPlan`
+  (`src/ship-gate.ts`) — and share the PR-body note, the run-summary line and
+  the exit-signal carve-out. The symmetric override itself already landed by
+  hand (ADR 0015's 2026-08-31 amendment); #173 verifies it and wires the cap
+  exit through the same plumbing.
+- **05 after 04** because 04 introduces the finding-to-issue filing path (for
+  unresolved blockers at the cap) and 05 reuses it (for notes at ship). Building
+  the filer twice, or building it in 05 and having 04 wait, both cost more.
+- **The rubric floor is not merged into the delta-scoping slice** even
+  though both are prompt edits, because they fail differently. Delta scoping is
+  a mechanical win regardless of whether the findings were right; the floor is a
+  policy judgement about which findings should block. Keeping them separate means
+  a rollback of the policy does not roll back the efficiency fix.
+- **No slice adds a spawned pipeline scenario.** See the PRD's Testing Decisions
+  and AGENTS.md's "where a new assertion goes".
 
-- **Every deferred GH issue number is `TBD`, including the parent.** Creating
-  issues is an outward-facing action this spec session was not authorized to
-  take. File five issues (one parent, four deferred slices), then replace all
-  five `TBD`s. `pnpm lint:tickets <issue>...` (ADR 0049) runs on them first.
-- **The `Blocked by` column names slice numbers, not issue numbers.** The DAG
-  parser keys on issue numbers, so `01` and `04` must become `#<n>` once the
-  issues exist.
-- **The ADR number is provisional.** `0056` is the next free number across
-  current repository history as of 2026-08-31. Re-check it when the deferred
-  work starts.
+## Launch checklist — resolved 2026-09-06
 
-## Landed by hand
+The three blockers this file used to list are closed:
 
-- Slice 03 policy: `prompts/architect-review.md`.
-- Slice 04 override half: `src/ship-gate.ts`, its focused tests, and the
-  amendment to ADR 0015.
+- **Issue numbers:** #170–#174 filed, mapped 01–05 above. No parent issue was
+  filed; ADR 0057 is the anchoring design. `pnpm lint:tickets 170 171 172 173
+  174` (ADR 0049) runs before launch.
+- **`Blocked by` uses issue numbers** (the DAG parser's key), not slice
+  numbers.
+- **The ADR number resolved to 0057**, merged via PR #169. The PRD's
+  provisional `0056` was taken on `main` by the run-state-lock ADR; `0058` is
+  taken by the teardown sidecar sweep (issue #166).
+- The PRD-3 measured-run precondition is satisfied: `afk-v2-context-envelopes`
+  ran the gate for seven rounds (fix commits listed in ADR 0057's Context) and
+  merged via PR #160.
+- `afk.json` in this directory selects all five slices; no migrations, so no
+  prefix reservation.
+
+## Landed by hand (pre-ADR 0057)
+
+- Slice 03's precursor policy: findings state impact, recovery, and diff
+  attribution (`prompts/architect-review.md`).
+- Slice 04's override half: the symmetric one-favorable-guardian override in
+  `src/ship-gate.ts`, its focused tests, and the amendment to ADR 0015.
 - Related live defect #149: `src/orchestrator.ts` rejects a planner-authored
   lock when the evaluator returns `REVISE`.
 
@@ -60,3 +103,7 @@ narrative:
   the excision of PRD 2's slice 06 after round 6's A1, and the prior instance of
   this same loop being resolved by removing scope rather than by the gate
   clearing.
+- PRD 2 itself merged to `main` via hand-opened PR #150 (2026-09-04) after
+  round 9 ended with both guardians blocking — the loop was exited by operator
+  decision, not by the gate clearing. PRD 3's seven-round gate (PR #160,
+  merged 2026-09-05) is the second measurement, recorded in ADR 0057.
