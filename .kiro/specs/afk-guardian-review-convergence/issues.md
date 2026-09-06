@@ -8,7 +8,7 @@
 |-------|----------|-------|------|------------|----------------------|
 | 01 | #170 | Round ledger | AFK | — | US-1 |
 | 02 | #171 | Delta-scoped rounds 2+ | AFK | #170 | US-2, US-3 |
-| 03 | #172 | Blocking rubric floor | AFK | — | US-4 |
+| 03 | #172 | Blocking rubric floor | AFK | #170 | US-4 |
 | 04 | #173 | Round cap and override exit | AFK | #170 | US-5, US-6 |
 | 05 | #174 | Notes filed once | AFK | #173 | US-7 |
 
@@ -22,12 +22,18 @@ abbreviated.
 
 ## Expected wave structure
 
-- **Wave 1:** #170 (round ledger) and #172 (rubric floor) — no code edges.
-- **Wave 2:** #171 (delta-scoped rounds 2+) and #173 (cap + override exit),
-  both blocked by #170. Both touch `src/ship-gate.ts`; the lane partitioner
-  will serialize them into one lane. Expected, not a problem.
+- **Wave 1:** #170 (round ledger) alone.
+- **Wave 2:** #171 (delta-scoped rounds 2+), #172 (rubric floor) and #173
+  (cap + override exit), all blocked by #170. #171/#173 overlap on
+  `src/ship-gate.ts` and #171/#172 on `prompts/architect-review.md`; the
+  lane partitioner will serialize the overlaps. Expected, not a problem.
 - **Wave 3:** #174 (notes filed once), blocked by #173 (reuses its
   finding-to-issue filing path).
+
+The first launch declared #172 independent and its planner hit a
+load-bearing conflict: the rubric floor's mechanical test lands on the
+ledger's disposition seam, which #170 owns. The edge was added by operator
+decision (recorded in #172's body) after the 2026-09-06 run.
 
 ## Why the cut falls here
 
@@ -45,10 +51,12 @@ abbreviated.
   `src/run-state.ts`; 02 is the prompt-render call in `src/ship-gate.ts`
   plus new template variables in `prompts/architect-review.md`. Nothing in
   02 changes storage, and 01 ships value without it.
-- **03 is independent and parallelizable.** It is a rubric change to
-  `prompts/architect-review.md` (ADR 0057 decision 3) with a mechanical
-  assertion on the finding disposition. It touches neither the state file nor
-  the PR decision, so it has no edge to 01, 02 or 04 and runs in wave 1.
+- **03 follows 01.** It is a rubric change to `prompts/architect-review.md`
+  (ADR 0057 decision 3) plus a mechanical assertion on the finding
+  disposition — and that disposition rule lives in the ledger seam 01
+  introduces, so 03 consumes 01's schema (originally declared independent;
+  corrected by operator decision after the first run's contract impasse,
+  see #172).
 - **04 holds the cap and the recorded exit in one slice** because they are
   conditions on the same expression — `open` in `buildPrCreationPlan`
   (`src/ship-gate.ts`) — and share the PR-body note, the run-summary line and
