@@ -1188,9 +1188,6 @@ describe("runShipGate", () => {
       ],
       findingsOriginRound: 2,
     });
-    expect(fixture.event).not.toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "guardian-finding-alias-collision" }),
-    );
     // A blocking architect result is unfavorable, so it is never cached.
     expect(loadRunState(repo, slug).reviewPhase?.architect).toBeUndefined();
     expect(headSha).toBeTruthy();
