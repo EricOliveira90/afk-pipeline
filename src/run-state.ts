@@ -14,6 +14,10 @@ import {
 } from "./slice-lifecycle.js";
 import type { PersistedRunScope } from "./slice-scope.js";
 import { withFileLock } from "./file-lock.js";
+import type {
+  GuardianFindingDisposition,
+  ReviewOutcome,
+} from "./artifacts.js";
 
 /** Phases that get persisted. RUNNING / PENDING never touch disk. */
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
@@ -130,13 +134,53 @@ export interface PersistedReviewResult {
   verdict: "SHIP" | "ACCEPT-WITH-NOTES";
 }
 
+export interface PersistedGuardianFinding {
+  stableId: string;
+  currentId: string;
+  title: string;
+  class: string;
+  clearCondition: string;
+  disposition: GuardianFindingDisposition;
+}
+
+export interface PersistedGuardianReviewRecord {
+  source: "INVOKED" | "CACHE";
+  outcome: ReviewOutcome;
+  findings: PersistedGuardianFinding[];
+  findingsOriginRound: number | null;
+}
+
+export interface PersistedGuardianReviewRound {
+  round: number;
+  reviewedHeadSha: string;
+  headSha: string;
+  architect: PersistedGuardianReviewRecord;
+  pm: PersistedGuardianReviewRecord;
+}
+
 export interface PersistedReviewPhase {
   sanity?: PersistedSanityResult;
   architect?: PersistedReviewResult;
   pm?: PersistedReviewResult;
+  rounds?: PersistedGuardianReviewRound[];
 }
 
 const FAVORABLE_VERDICTS = new Set(["SHIP", "ACCEPT-WITH-NOTES"]);
+const REVIEW_OUTCOMES = new Set<ReviewOutcome>([
+  "SHIP",
+  "ACCEPT-WITH-NOTES",
+  "FIX-BEFORE-SHIP",
+  "UNPARSEABLE",
+  "NEVER_RAN",
+  "DIED_MID_RUN",
+]);
+const FINDING_DISPOSITIONS = new Set<GuardianFindingDisposition>([
+  "OPEN",
+  "RESOLVED",
+  "REPEATED",
+  "REOPENED",
+  "REGRESSED",
+]);
 
 function sanitizeReviewResult(value: unknown): PersistedReviewResult | undefined {
   const v = (value ?? {}) as { headSha?: unknown; verdict?: unknown };
@@ -151,14 +195,199 @@ function sanitizeReviewResult(value: unknown): PersistedReviewResult | undefined
   return undefined;
 }
 
+function nonBlank(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function sanitizeGuardianFinding(
+  value: unknown,
+): PersistedGuardianFinding | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const finding = value as Record<string, unknown>;
+  if (
+    !nonBlank(finding.stableId) ||
+    !nonBlank(finding.currentId) ||
+    !nonBlank(finding.title) ||
+    !nonBlank(finding.class) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(finding.class.trim()) ||
+    !nonBlank(finding.clearCondition) ||
+    typeof finding.disposition !== "string" ||
+    !FINDING_DISPOSITIONS.has(
+      finding.disposition as GuardianFindingDisposition,
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    stableId: finding.stableId.trim(),
+    currentId: finding.currentId.trim(),
+    title: finding.title.trim(),
+    class: finding.class.trim(),
+    clearCondition: finding.clearCondition.trim(),
+    disposition: finding.disposition as GuardianFindingDisposition,
+  };
+}
+
+function sanitizeGuardianRecord(
+  value: unknown,
+  round: number,
+): PersistedGuardianReviewRecord | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    (record.source !== "INVOKED" && record.source !== "CACHE") ||
+    typeof record.outcome !== "string" ||
+    !REVIEW_OUTCOMES.has(record.outcome as ReviewOutcome) ||
+    !Array.isArray(record.findings) ||
+    !(
+      record.findingsOriginRound === null ||
+      (Number.isSafeInteger(record.findingsOriginRound) &&
+        (record.findingsOriginRound as number) > 0)
+    )
+  ) {
+    return undefined;
+  }
+  if (
+    record.source === "CACHE" &&
+    !FAVORABLE_VERDICTS.has(record.outcome)
+  ) {
+    return undefined;
+  }
+  const findings = record.findings.map(sanitizeGuardianFinding);
+  if (findings.some((finding) => finding === undefined)) return undefined;
+  const validFindings = findings as PersistedGuardianFinding[];
+  if (
+    new Set(validFindings.map((finding) => finding.currentId)).size !==
+      validFindings.length ||
+    new Set(validFindings.map((finding) => finding.stableId)).size !==
+      validFindings.length
+  ) {
+    return undefined;
+  }
+  const findingsOriginRound = record.findingsOriginRound as number | null;
+  if (record.source === "INVOKED" && findingsOriginRound !== round) {
+    return undefined;
+  }
+  if (
+    record.source === "INVOKED" &&
+    (
+      (record.outcome === "SHIP" && validFindings.length !== 0) ||
+      (
+        (record.outcome === "ACCEPT-WITH-NOTES" ||
+          record.outcome === "FIX-BEFORE-SHIP") &&
+        validFindings.length === 0
+      ) ||
+      (
+        (record.outcome === "UNPARSEABLE" ||
+          record.outcome === "NEVER_RAN" ||
+          record.outcome === "DIED_MID_RUN") &&
+        validFindings.length !== 0
+      )
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    source: record.source,
+    outcome: record.outcome as ReviewOutcome,
+    findings: validFindings,
+    findingsOriginRound,
+  };
+}
+
+function sameFindings(
+  left: readonly PersistedGuardianFinding[],
+  right: readonly PersistedGuardianFinding[],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sanitizeGuardianRounds(
+  value: unknown,
+): PersistedGuardianReviewRound[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rounds: PersistedGuardianReviewRound[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const expectedRound = index + 1;
+    const input = value[index];
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+      return undefined;
+    }
+    const round = input as Record<string, unknown>;
+    const architect = sanitizeGuardianRecord(round.architect, expectedRound);
+    const pm = sanitizeGuardianRecord(round.pm, expectedRound);
+    if (
+      round.round !== expectedRound ||
+      !nonBlank(round.reviewedHeadSha) ||
+      !nonBlank(round.headSha) ||
+      architect === undefined ||
+      pm === undefined
+    ) {
+      return undefined;
+    }
+    rounds.push({
+      round: expectedRound,
+      reviewedHeadSha: round.reviewedHeadSha.trim(),
+      headSha: round.headSha.trim(),
+      architect,
+      pm,
+    });
+  }
+
+  for (let index = 0; index < rounds.length; index++) {
+    const round = rounds[index]!;
+    for (const guardian of ["architect", "pm"] as const) {
+      const record = round[guardian];
+      if (record.findingsOriginRound !== null) {
+        const origin = rounds[record.findingsOriginRound - 1]?.[guardian];
+        if (
+          origin?.source !== "INVOKED" ||
+          !sameFindings(record.findings, origin.findings)
+        ) {
+          return undefined;
+        }
+      }
+      if (record.source !== "CACHE") continue;
+      const sourceRound = rounds
+        .slice(0, index)
+        .reverse()
+        .find((prior) => prior.headSha === round.reviewedHeadSha);
+      const sourceRecord = sourceRound?.[guardian];
+      if (sourceRecord?.findingsOriginRound != null) {
+        if (
+          record.findingsOriginRound !==
+            sourceRecord.findingsOriginRound ||
+          !sameFindings(record.findings, sourceRecord.findings)
+        ) {
+          return undefined;
+        }
+      } else if (
+        record.findingsOriginRound !== null ||
+        record.findings.length !== 0
+      ) {
+        return undefined;
+      }
+    }
+  }
+  return rounds;
+}
+
 /**
  * Validate a loaded `reviewPhase`, dropping malformed or unfavorable
- * entries instead of throwing — a broken cache entry must degrade to a
- * re-run, never block resumption.
+ * cache entries independently from the all-or-nothing guardian ledger.
  */
 export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const v = value as { sanity?: unknown; architect?: unknown; pm?: unknown };
+  const v = value as {
+    sanity?: unknown;
+    architect?: unknown;
+    pm?: unknown;
+    rounds?: unknown;
+  };
   const out: PersistedReviewPhase = {};
   const sanity = (v.sanity ?? {}) as { treeSha?: unknown; ok?: unknown };
   if (typeof sanity.treeSha === "string" && sanity.treeSha.length > 0 && sanity.ok === true) {
@@ -168,6 +397,10 @@ export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | unde
   if (architect) out.architect = architect;
   const pm = sanitizeReviewResult(v.pm);
   if (pm) out.pm = pm;
+  if (v.rounds !== undefined) {
+    const rounds = sanitizeGuardianRounds(v.rounds);
+    if (rounds && rounds.length > 0) out.rounds = rounds;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -644,9 +877,9 @@ export function saveRunState(repoRoot: string, state: RunState) {
 }
 
 /**
- * Atomically replace the cached review-phase results. Re-reads the file
- * first (same pattern as `saveSliceState`) so parallel slice updates are
- * never clobbered. Pass `undefined` to clear the cache.
+ * Atomically replace cache fields and append completed guardian rounds.
+ * Re-reads the file first so parallel slice updates and earlier valid rounds
+ * are never clobbered. Pass `undefined` to clear the complete review phase.
  */
 export function saveReviewPhase(
   repoRoot: string,
@@ -657,7 +890,16 @@ export function saveReviewPhase(
     if (reviewPhase === undefined) {
       delete current.reviewPhase;
     } else {
-      current.reviewPhase = reviewPhase;
+      const earlierRounds = current.reviewPhase?.rounds ?? [];
+      const appendedRounds = reviewPhase.rounds ?? [];
+      current.reviewPhase = {
+        ...reviewPhase,
+        ...(
+          earlierRounds.length + appendedRounds.length > 0
+            ? { rounds: [...earlierRounds, ...appendedRounds] }
+            : {}
+        ),
+      };
     }
   });
 }
