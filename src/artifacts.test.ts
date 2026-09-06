@@ -1021,19 +1021,26 @@ describe("readReviewVerdict", () => {
     clearCondition: "The durable record is correct.",
     disposition: "OPEN",
   };
-  const artifact = (verdict: string, findings: unknown) =>
+  const artifact = (
+    verdict: string,
+    findings: unknown,
+    guardian: "architect" | "pm" = "pm",
+  ) =>
     [
       "# Guardian review",
       "",
       `**Verdict:** ${verdict}`,
       "",
-      "## Structured findings (v1)",
-      JSON.stringify({ version: 1, findings }),
+      `## Structured findings (v${guardian === "architect" ? 2 : 1})`,
+      JSON.stringify({
+        version: guardian === "architect" ? 2 : 1,
+        findings,
+      }),
       "",
       "Prose remains allowed.",
     ].join("\n");
 
-  it("B-04 parses every verdict with the required findings cardinality", () => {
+  it("P-02 parses PM v1 verdicts with null authority evidence", () => {
     expect(parseGuardianReview(artifact("SHIP", []))).toEqual({
       outcome: "SHIP",
       findings: [],
@@ -1041,9 +1048,38 @@ describe("readReviewVerdict", () => {
     for (const verdict of ["ACCEPT-WITH-NOTES", "FIX-BEFORE-SHIP"]) {
       expect(parseGuardianReview(artifact(verdict, [finding]))).toEqual({
         outcome: verdict,
-        findings: [finding],
+        findings: [
+          {
+            ...finding,
+            reachableTrigger: null,
+            introducedByReviewedDiff: null,
+          },
+        ],
       });
     }
+  });
+
+  it("B-04 parses architect v2 exact-key authority evidence", () => {
+    const architectFinding = {
+      ...finding,
+      reachableTrigger: " A retry consumes the incomplete durable record. ",
+      introducedByReviewedDiff: true,
+    };
+    expect(
+      parseGuardianReview(
+        artifact("FIX-BEFORE-SHIP", [architectFinding], "architect"),
+        "architect",
+      ),
+    ).toEqual({
+      outcome: "FIX-BEFORE-SHIP",
+      findings: [
+        {
+          ...architectFinding,
+          reachableTrigger:
+            "A retry consumes the incomplete durable record.",
+        },
+      ],
+    });
   });
 
   it("B-04 rejects missing, malformed, or verdict-inconsistent findings blocks", () => {
@@ -1069,6 +1105,34 @@ describe("readReviewVerdict", () => {
     ];
     for (const content of invalid) {
       expect(parseGuardianReview(content)).toEqual({
+        outcome: "UNPARSEABLE",
+        findings: [],
+      });
+    }
+    const architectFinding = {
+      ...finding,
+      reachableTrigger: "A retry reads invalid state.",
+      introducedByReviewedDiff: true,
+    };
+    for (const content of [
+      artifact("FIX-BEFORE-SHIP", [finding], "architect"),
+      artifact(
+        "FIX-BEFORE-SHIP",
+        [{ ...architectFinding, reachableTrigger: " " }],
+        "architect",
+      ),
+      artifact(
+        "FIX-BEFORE-SHIP",
+        [{ ...architectFinding, introducedByReviewedDiff: null }],
+        "architect",
+      ),
+      artifact(
+        "FIX-BEFORE-SHIP",
+        [{ ...architectFinding, extra: true }],
+        "architect",
+      ),
+    ]) {
+      expect(parseGuardianReview(content, "architect")).toEqual({
         outcome: "UNPARSEABLE",
         findings: [],
       });

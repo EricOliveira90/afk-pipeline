@@ -288,24 +288,25 @@ describe("renderPrompt", () => {
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
   });
 
-  it("B-04 requires the version-1 guardian findings block in both review prompts", () => {
-    for (const [name, args] of [
-      [
-        "architect-review",
-        { SPECS_DIR: "s", RELEVANT_FILES: "(files)" },
-      ],
-      [
-        "pm-review",
-        {
-          SPECS_DIR: "s",
-          RELEVANT_FILES: "(files)",
-          RUN_SCOPE: "(scope)",
-        },
-      ],
-    ] as const) {
-      const prompt = renderPrompt(name, args);
-      expect(prompt).toContain("## Structured findings (v1)");
-      expect(prompt).toContain('"version":1');
+  it("B-04 requires architect v2 authority evidence while PM remains v1", () => {
+    const architect = renderPrompt("architect-review", {
+      SPECS_DIR: "s",
+      RELEVANT_FILES: "(files)",
+    });
+    expect(architect).toContain("## Structured findings (v2)");
+    expect(architect).toContain('"version":2');
+    expect(architect).toContain('"reachableTrigger"');
+    expect(architect).toContain('"introducedByReviewedDiff"');
+
+    const pm = renderPrompt("pm-review", {
+      SPECS_DIR: "s",
+      RELEVANT_FILES: "(files)",
+      RUN_SCOPE: "(scope)",
+    });
+    expect(pm).toContain("## Structured findings (v1)");
+    expect(pm).toContain('"version":1');
+    expect(pm).not.toContain('"reachableTrigger"');
+    for (const prompt of [architect, pm]) {
       expect(prompt).toContain('"clearCondition"');
       expect(prompt).toContain('"disposition":"OPEN"');
       expect(prompt).toMatch(/empty `findings` array for SHIP/i);

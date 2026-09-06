@@ -21,6 +21,7 @@ import {
   advanceGuardianFindingLineage,
   type GuardianKind,
 } from "./guardian-convergence.js";
+import { guardianFindingMayBlock } from "./guardian-blocking-authority.js";
 import {
   saveReviewPhase,
   type PersistedGuardianFinding,
@@ -649,10 +650,11 @@ export async function runShipGate(
         path: reviewPath,
         content: defaultReviewArtifactIo.read(reviewPath),
       };
-      const parsed = artifacts.parseGuardianReview(captured.content);
+      const parsed = artifacts.parseGuardianReview(captured.content, kind);
       if (parsed.outcome === "UNPARSEABLE") {
+        const findingsVersion = kind === "architect" ? 2 : 1;
         journal.phase(
-          `  ⚠️  Could not parse ${label} review from ${reviewPath} — expected the exact verdict line and one valid "## Structured findings (v1)" block. Treating as UNPARSEABLE (no PR will be opened).`,
+          `  ⚠️  Could not parse ${label} review from ${reviewPath} — expected the exact verdict line and one valid "## Structured findings (v${findingsVersion})" block. Treating as UNPARSEABLE (no PR will be opened).`,
           "warn",
         );
       }
@@ -755,6 +757,36 @@ export async function runShipGate(
   };
   architectResult = resolveLineage("architect", architectResult);
   pmResult = resolveLineage("pm", pmResult);
+
+  if (
+    architectResult.source === "INVOKED" &&
+    architectResult.outcome === "FIX-BEFORE-SHIP"
+  ) {
+    const priorStableIds = new Set(
+      priorRounds.flatMap((round) =>
+        round.architect.findings.map((finding) => finding.stableId),
+      ),
+    );
+    const hasBlockingFinding = (
+      invokedLineage.get("architect") ?? []
+    ).some((finding) =>
+      guardianFindingMayBlock({
+        guardian: "architect",
+        round: roundNumber,
+        hasPriorLineage: priorStableIds.has(finding.stableId),
+        class: finding.class,
+        disposition: finding.disposition,
+        reachableTrigger: finding.reachableTrigger,
+        introducedByReviewedDiff: finding.introducedByReviewedDiff,
+      }),
+    );
+    if (!hasBlockingFinding) {
+      architectResult = {
+        ...architectResult,
+        outcome: "ACCEPT-WITH-NOTES",
+      };
+    }
+  }
 
   journal.setReviewOutcomes(architectResult, pmResult);
 

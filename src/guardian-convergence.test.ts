@@ -2,11 +2,23 @@ import { describe, expect, it } from "vitest";
 import { advanceGuardianFindingLineage } from "./guardian-convergence.js";
 import {
   sanitizeReviewPhase,
+  type PersistedGuardianFinding,
   type PersistedGuardianReviewRound,
 } from "./run-state.js";
 
 function roundWithArchitectFindings(
-  findings: PersistedGuardianReviewRound["architect"]["findings"],
+  findings: Array<
+    Omit<
+      PersistedGuardianFinding,
+      "reachableTrigger" | "introducedByReviewedDiff"
+    > &
+      Partial<
+        Pick<
+          PersistedGuardianFinding,
+          "reachableTrigger" | "introducedByReviewedDiff"
+        >
+      >
+  >,
 ): PersistedGuardianReviewRound {
   return {
     round: 1,
@@ -15,7 +27,14 @@ function roundWithArchitectFindings(
     architect: {
       source: "INVOKED",
       outcome: "FIX-BEFORE-SHIP",
-      findings,
+      findings: findings.map((finding) => ({
+        ...finding,
+        reachableTrigger:
+          finding.reachableTrigger ??
+          "A normal pipeline retry reaches the faulty state.",
+        introducedByReviewedDiff:
+          finding.introducedByReviewedDiff ?? true,
+      })),
       findingsOriginRound: 1,
     },
     pm: {
@@ -28,7 +47,7 @@ function roundWithArchitectFindings(
 }
 
 describe("advanceGuardianFindingLineage", () => {
-  it("B-03 gives ID matches precedence, then fingerprint matches, then new identities", () => {
+  it("P-03 preserves identity while authority evidence follows the current finding", () => {
     const prior = [
       roundWithArchitectFindings([
         {
@@ -58,6 +77,8 @@ describe("advanceGuardianFindingLineage", () => {
           class: "NEW_CLASS",
           clearCondition: "A different condition",
           disposition: "REPEATED",
+          reachableTrigger: "A retry reaches the renamed control flow.",
+          introducedByReviewedDiff: false,
         },
         {
           id: "A-12",
@@ -65,6 +86,8 @@ describe("advanceGuardianFindingLineage", () => {
           class: " integrity ",
           clearCondition: "  Commit   the durable evidence ",
           disposition: "RESOLVED",
+          reachableTrigger: null,
+          introducedByReviewedDiff: true,
         },
         {
           id: "A-20",
@@ -72,6 +95,8 @@ describe("advanceGuardianFindingLineage", () => {
           class: "PRODUCT",
           clearCondition: "Deliver the missing outcome",
           disposition: "OPEN",
+          reachableTrigger: "A fresh run omits the required outcome.",
+          introducedByReviewedDiff: true,
         },
       ]),
     ).toEqual([
@@ -82,6 +107,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "NEW_CLASS",
         clearCondition: "A different condition",
         disposition: "REPEATED",
+        reachableTrigger: "A retry reaches the renamed control flow.",
+        introducedByReviewedDiff: false,
       },
       {
         stableId: "A-10",
@@ -90,6 +117,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: " integrity ",
         clearCondition: "  Commit   the durable evidence ",
         disposition: "RESOLVED",
+        reachableTrigger: null,
+        introducedByReviewedDiff: true,
       },
       {
         stableId: "A-20",
@@ -98,6 +127,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "PRODUCT",
         clearCondition: "Deliver the missing outcome",
         disposition: "OPEN",
+        reachableTrigger: "A fresh run omits the required outcome.",
+        introducedByReviewedDiff: true,
       },
     ]);
   });
@@ -150,6 +181,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "INTEGRITY",
         clearCondition: "Commit the durable evidence",
         disposition: "REPEATED",
+        reachableTrigger: "A retry reaches the first fingerprint twin.",
+        introducedByReviewedDiff: false,
       },
       {
         id: "A-08",
@@ -157,6 +190,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: " integrity ",
         clearCondition: "  Commit   the durable evidence ",
         disposition: "OPEN",
+        reachableTrigger: "A retry reaches the second fingerprint twin.",
+        introducedByReviewedDiff: true,
       },
     ]);
 
@@ -255,6 +290,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "PRODUCT",
         clearCondition: "Keep the current alias",
         disposition: "REPEATED",
+        reachableTrigger: "A retry reaches the current alias.",
+        introducedByReviewedDiff: true,
       },
       {
         id: "A-01",
@@ -262,6 +299,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "INTEGRITY",
         clearCondition: "Keep the stable alias",
         disposition: "OPEN",
+        reachableTrigger: "A retry reaches the stable alias.",
+        introducedByReviewedDiff: false,
       },
     ]);
     expect(advanced).toEqual([
@@ -272,6 +311,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "PRODUCT",
         clearCondition: "Keep the current alias",
         disposition: "REPEATED",
+        reachableTrigger: "A retry reaches the current alias.",
+        introducedByReviewedDiff: true,
       },
       {
         stableId: "A-01",
@@ -280,6 +321,8 @@ describe("advanceGuardianFindingLineage", () => {
         class: "INTEGRITY",
         clearCondition: "Keep the stable alias",
         disposition: "OPEN",
+        reachableTrigger: "A retry reaches the stable alias.",
+        introducedByReviewedDiff: false,
       },
     ]);
 
