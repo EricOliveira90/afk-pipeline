@@ -260,11 +260,16 @@ function sanitizeGuardianRecord(
   const findings = record.findings.map(sanitizeGuardianFinding);
   if (findings.some((finding) => finding === undefined)) return undefined;
   const validFindings = findings as PersistedGuardianFinding[];
-  // Parsed current IDs remain unique, but multiple distinct records may share
-  // one stable identity when they name a prior finding through known aliases.
+  // Both IDs stay unique within a record: current IDs because the block
+  // parsed distinct rows, stable IDs because identity resolution is
+  // one-to-one within a round (ADR 0057 decision 1, amendment 2026-09-06) —
+  // `stableId` names one lineage, keeping cross-round matching
+  // order-independent.
   if (
     new Set(validFindings.map((finding) => finding.currentId)).size !==
-    validFindings.length
+      validFindings.length ||
+    new Set(validFindings.map((finding) => finding.stableId)).size !==
+      validFindings.length
   ) {
     return undefined;
   }

@@ -603,26 +603,8 @@ describe("sanitizeReviewPhase", () => {
     });
   });
 
-  it("B-05 QA-01 keeps distinct findings that share a known stable identity", () => {
-    const findings = [
-      {
-        stableId: "A-01",
-        currentId: "A-05",
-        title: "Current-alias claimant",
-        class: "PRODUCT",
-        clearCondition: "Clear the current alias.",
-        disposition: "REPEATED",
-      },
-      {
-        stableId: "A-01",
-        currentId: "A-01",
-        title: "Stable-alias claimant",
-        class: "INTEGRITY",
-        clearCondition: "Clear the stable alias.",
-        disposition: "OPEN",
-      },
-    ];
-    const rounds = [
+  it("B-05 QA-01 drops a ledger whose stable IDs repeat within a guardian record", () => {
+    const roundsWith = (findings: unknown[]) => [
       {
         round: 1,
         reviewedHeadSha: "base",
@@ -640,26 +622,42 @@ describe("sanitizeReviewPhase", () => {
           findingsOriginRound: 1,
         },
       },
-      {
-        round: 2,
-        reviewedHeadSha: "review-commit",
-        headSha: "review-commit",
-        architect: {
-          source: "CACHE",
-          outcome: "ACCEPT-WITH-NOTES",
-          findings,
-          findingsOriginRound: 1,
-        },
-        pm: {
-          source: "CACHE",
-          outcome: "SHIP",
-          findings: [],
-          findingsOriginRound: 1,
-        },
-      },
     ];
+    const currentAliasClaimant = {
+      stableId: "A-01",
+      currentId: "A-05",
+      title: "Current-alias claimant",
+      class: "PRODUCT",
+      clearCondition: "Clear the current alias.",
+      disposition: "REPEATED",
+    };
+    const stableAliasClaimant = {
+      currentId: "A-01",
+      title: "Stable-alias claimant",
+      class: "INTEGRITY",
+      clearCondition: "Clear the stable alias.",
+      disposition: "OPEN",
+    };
 
-    expect(sanitizeReviewPhase({ rounds })?.rounds).toEqual(rounds);
+    // Identity resolution is one-to-one within a round (ADR 0057 decision 1,
+    // amendment 2026-09-06): two findings sharing one stable identity are
+    // unrepresentable, so the ledger degrades to a full round-1 review.
+    expect(
+      sanitizeReviewPhase({
+        rounds: roundsWith([
+          currentAliasClaimant,
+          { ...stableAliasClaimant, stableId: "A-01" },
+        ]),
+      }),
+    ).toBeUndefined();
+
+    // The decided shape — the losing claimant carries a new stable identity
+    // and keeps its guardian-provided ID as currentId — stays durable.
+    const distinct = roundsWith([
+      currentAliasClaimant,
+      { ...stableAliasClaimant, stableId: "A-09" },
+    ]);
+    expect(sanitizeReviewPhase({ rounds: distinct })?.rounds).toEqual(distinct);
   });
 
   it("B-06 keeps the cache favorable-only while the ledger accepts all six terminal outcomes", () => {

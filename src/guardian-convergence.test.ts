@@ -230,7 +230,7 @@ describe("advanceGuardianFindingLineage", () => {
     ]);
   });
 
-  it("B-03 QA-01 preserves both findings when two known aliases name one prior identity", () => {
+  it("B-03 QA-01 gives a contested identity to the stableId claimant when no fingerprint matches", () => {
     const prior = [
       roundWithArchitectFindings([
         {
@@ -243,29 +243,30 @@ describe("advanceGuardianFindingLineage", () => {
         },
       ]),
     ];
-    // Both IDs name the same prior entry, one through its stableId and one
-    // through its currentId. Both parsed findings remain durable records and
-    // both retain the known stable identity.
-    expect(
-      advanceGuardianFindingLineage(prior, "architect", [
-        {
-          id: "A-05",
-          title: "Current-ID claimant",
-          class: "PRODUCT",
-          clearCondition: "Keep the current alias",
-          disposition: "REPEATED",
-        },
-        {
-          id: "A-01",
-          title: "Stable-ID claimant",
-          class: "INTEGRITY",
-          clearCondition: "Keep the stable alias",
-          disposition: "OPEN",
-        },
-      ]),
-    ).toEqual([
+    // Both IDs name the same prior identity, one through its stableId and one
+    // through its currentId, and neither fingerprint matches the prior entry.
+    // The identity goes to the claimant whose ID equals the prior stableId;
+    // the other claimant gets a new stable identity and keeps its
+    // guardian-provided ID as currentId (ADR 0057 decision 1 amendment).
+    const advanced = advanceGuardianFindingLineage(prior, "architect", [
       {
-        stableId: "A-01",
+        id: "A-05",
+        title: "Current-ID claimant",
+        class: "PRODUCT",
+        clearCondition: "Keep the current alias",
+        disposition: "REPEATED",
+      },
+      {
+        id: "A-01",
+        title: "Stable-ID claimant",
+        class: "INTEGRITY",
+        clearCondition: "Keep the stable alias",
+        disposition: "OPEN",
+      },
+    ]);
+    expect(advanced).toEqual([
+      {
+        stableId: "A-05",
         currentId: "A-05",
         title: "Current-ID claimant",
         class: "PRODUCT",
@@ -281,5 +282,73 @@ describe("advanceGuardianFindingLineage", () => {
         disposition: "OPEN",
       },
     ]);
+
+    const phase = {
+      rounds: [
+        ...prior,
+        {
+          round: 2,
+          reviewedHeadSha: "after",
+          headSha: "after-2",
+          architect: {
+            source: "INVOKED" as const,
+            outcome: "FIX-BEFORE-SHIP" as const,
+            findings: advanced,
+            findingsOriginRound: 2,
+          },
+          pm: {
+            source: "INVOKED" as const,
+            outcome: "SHIP" as const,
+            findings: [],
+            findingsOriginRound: 2,
+          },
+        },
+      ],
+    };
+    expect(sanitizeReviewPhase(phase)?.rounds).toHaveLength(2);
+  });
+
+  it("B-03 QA-01 gives a contested identity to the fingerprint-matching claimant", () => {
+    const prior = [
+      roundWithArchitectFindings([
+        {
+          stableId: "A-01",
+          currentId: "A-05",
+          title: "The one prior finding",
+          class: "INTEGRITY",
+          clearCondition: "Commit the durable evidence",
+          disposition: "OPEN",
+        },
+      ]),
+    ];
+    // The currentId claimant's normalized class + clear-condition fingerprint
+    // matches the prior entry, so it takes the stable identity even though the
+    // other claimant's ID equals the prior stableId. The losing stableId
+    // claimant cannot reuse its own ID as the new stable identity — that ID is
+    // the claimed one — so it gets a deterministic fresh identity while its
+    // guardian-provided ID stays visible as currentId.
+    const advanced = advanceGuardianFindingLineage(prior, "architect", [
+      {
+        id: "A-01",
+        title: "Stable-ID claimant, fingerprint changed",
+        class: "PRODUCT",
+        clearCondition: "Something else entirely",
+        disposition: "OPEN",
+      },
+      {
+        id: "A-05",
+        title: "Current-ID claimant, fingerprint intact",
+        class: " Integrity ",
+        clearCondition: "  Commit   the durable evidence ",
+        disposition: "REPEATED",
+      },
+    ]);
+    expect(
+      advanced.map((finding) => [finding.stableId, finding.currentId]),
+    ).toEqual([
+      ["A-01-2", "A-01"],
+      ["A-01", "A-05"],
+    ]);
+    expect(new Set(advanced.map((finding) => finding.stableId)).size).toBe(2);
   });
 });

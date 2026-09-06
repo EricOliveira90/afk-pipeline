@@ -1076,7 +1076,7 @@ describe("runShipGate", () => {
     });
   });
 
-  it("B-02 QA-01 persists both findings when two known aliases name one prior finding", async () => {
+  it("B-02 QA-01 persists both findings distinctly when two known aliases contest one prior identity", async () => {
     const repo = makeRepo();
     const slug = "alias-collision";
     const headSha = git(repo, ["rev-parse", "HEAD"]);
@@ -1162,15 +1162,16 @@ describe("runShipGate", () => {
     });
 
     const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
-    // Both parsed findings remain in the durable round and retain the prior
-    // stable identity through their known aliases.
+    // Both parsed findings persist distinctly: neither fingerprint matches the
+    // prior entry, so the stableId claimant keeps A-01 and the current-alias
+    // claimant mints a new identity (ADR 0057 decision 1 amendment).
     expect(rounds).toHaveLength(2);
     expect(rounds?.[1]?.architect).toEqual({
       source: "INVOKED",
       outcome: "FIX-BEFORE-SHIP",
       findings: [
         {
-          stableId: "A-01",
+          stableId: "A-05",
           currentId: "A-05",
           title: "Current-alias claimant",
           class: "PRODUCT",
