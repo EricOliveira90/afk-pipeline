@@ -99,6 +99,27 @@ cap exit. The PR is a draft; a human still merges. Notes that ship unfixed
 are filed exactly once across rounds, keyed by the ledger identity, so a
 note is neither lost nor re-raised as fresh.
 
+*Amendment, 2026-09-06 (operator decision; slice #173 escalated for want of
+it).* Two things decision 4 left unspecified.
+
+*What counts as an unfavorable round.* A ledger round counts as unfavorable
+when either guardian returns `FIX-BEFORE-SHIP`. The round counts once, even
+when both guardians return `FIX-BEFORE-SHIP`. The operational outcomes in the
+`ReviewOutcome` union (`src/run-state.ts`) — `UNPARSEABLE`, `NEVER_RAN` and
+`DIED_MID_RUN` — do not count toward the cap and cannot trigger a cap exit. A
+round whose only unfavorable signal is operational leaves the count where it
+was. This settles a narrower phrasing in the PRD
+(`.kiro/specs/afk-guardian-review-convergence/prd.md`, "unfavorable architect
+rounds") in favor of this ADR's bare "unfavorable rounds": either guardian's
+block counts. The PRD phrasing is superseded, not to be re-litigated.
+
+*Filing failure blocks the cap exit.* Filing the unresolved blocking findings
+as issues is mandatory for a cap exit, not best-effort. Filing is retryable.
+If filing still fails after retries, the run does not take the cap exit — the
+recorded-acknowledgement exit signal is only available once the findings are
+durably filed, so a cap exit can never report success on findings that exist
+nowhere but the ledger.
+
 **5. `--open-pr-on-override` stays the attended exit valve.** The 2026-08-31
 amendment to ADR 0015 already made it symmetric (either single blocking
 guardian can be overridden when the other is favorable); this ADR keeps that
