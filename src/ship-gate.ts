@@ -18,7 +18,13 @@ import {
 import { renderPrompt } from "./prompt-template.js";
 import type { RunJournal } from "./run-journal.js";
 import {
+  advanceGuardianFindingLineage,
+  type GuardianKind,
+} from "./guardian-convergence.js";
+import {
   saveReviewPhase,
+  type PersistedGuardianReviewRecord,
+  type PersistedGuardianReviewRound,
   type PersistedReviewPhase,
 } from "./run-state.js";
 import type { ResolvedRunScope } from "./slice-scope.js";
@@ -38,7 +44,9 @@ export interface CapturedReviewArtifact {
 
 /** Outcome of one guardian review run, with failure detail when it died. */
 export interface ReviewRunResult {
+  source: "INVOKED" | "CACHE";
   outcome: artifacts.ReviewOutcome;
+  findings: artifacts.GuardianReviewFinding[];
   detail?: string;
   /** Absent for a cached verdict and for an infrastructure failure. */
   captured?: CapturedReviewArtifact;
@@ -538,6 +546,11 @@ export async function runShipGate(
   journal.phase("  ✅ Pre-ship sanity gate passed.", "log");
 
   const headShaBefore = git.resolveCommit(reviewDir, "HEAD");
+  if (!headShaBefore) {
+    return blocked(
+      "could not resolve the pre-review HEAD for guardian evidence",
+    );
+  }
 
   const runGuardianReview = async (
     kind: "architect" | "pm",
@@ -557,7 +570,11 @@ export async function runShipGate(
             RELEVANT_FILES: relevantFilesBlock,
             RUN_SCOPE: reviewScope,
           });
-    let lastFailure: ReviewRunResult = { outcome: "NEVER_RAN" };
+    let lastFailure: ReviewRunResult = {
+      source: "INVOKED",
+      outcome: "NEVER_RAN",
+      findings: [],
+    };
     for (let attempt = 1; attempt <= options.reviewRetries + 1; attempt++) {
       journal.event({
         type: "run-phase-started",
@@ -593,7 +610,12 @@ export async function runShipGate(
         );
         const message =
           error instanceof Error ? error.message : String(error);
-        lastFailure = { outcome: failureClass, detail: message };
+        lastFailure = {
+          source: "INVOKED",
+          outcome: failureClass,
+          findings: [],
+          detail: message,
+        };
         journal.event({
           type: "run-phase-ended",
           phase: role,
@@ -623,10 +645,10 @@ export async function runShipGate(
         path: reviewPath,
         content: defaultReviewArtifactIo.read(reviewPath),
       };
-      const verdict = artifacts.parseReviewVerdict(captured.content);
-      if (verdict === "UNPARSEABLE") {
+      const parsed = artifacts.parseGuardianReview(captured.content);
+      if (parsed.outcome === "UNPARSEABLE") {
         journal.phase(
-          `  ⚠️  Could not parse ${label} review verdict from ${reviewPath} — expected a "**Verdict:** SHIP | ACCEPT-WITH-NOTES | FIX-BEFORE-SHIP" line. Treating as UNPARSEABLE (no PR will be opened).`,
+          `  ⚠️  Could not parse ${label} review from ${reviewPath} — expected the exact verdict line and one valid "## Structured findings (v1)" block. Treating as UNPARSEABLE (no PR will be opened).`,
           "warn",
         );
       }
@@ -634,9 +656,14 @@ export async function runShipGate(
         type: "run-phase-ended",
         phase: role,
         attempt,
-        verdict,
+        verdict: parsed.outcome,
       });
-      return { outcome: verdict, captured };
+      return {
+        source: "INVOKED",
+        outcome: parsed.outcome,
+        findings: parsed.findings,
+        captured,
+      };
     }
     return lastFailure;
   };
@@ -652,7 +679,11 @@ export async function runShipGate(
         `  ↩️  Reusing cached ${label} review verdict ${cached.verdict} for unchanged HEAD ${headShaBefore.slice(0, 12)}.`,
         "log",
       );
-      return { outcome: cached.verdict };
+      return {
+        source: "CACHE",
+        outcome: cached.verdict,
+        findings: [],
+      };
     }
     return undefined;
   };
@@ -782,6 +813,11 @@ export async function runShipGate(
   }
 
   const headShaAfter = git.resolveCommit(reviewDir, "HEAD");
+  if (!headShaAfter) {
+    return blocked(
+      "could not resolve the post-artifact-commit HEAD for guardian evidence",
+    );
+  }
   const treeShaAfter = git.resolveTree(reviewDir);
   const nextReviewPhase: PersistedReviewPhase = {};
   // Only PASS is cached (ADR 0015). Sanity failure returns BLOCKED before
@@ -790,26 +826,67 @@ export async function runShipGate(
   if (sanity.ok && treeShaAfter) {
     nextReviewPhase.sanity = { treeSha: treeShaAfter, ok: true };
   }
-  if (headShaAfter) {
-    if (artifacts.isFavorableReviewOutcome(architectResult.outcome)) {
-      nextReviewPhase.architect = {
-        headSha: headShaAfter,
-        verdict: architectResult.outcome,
-      };
-    }
-    if (artifacts.isFavorableReviewOutcome(pmResult.outcome)) {
-      nextReviewPhase.pm = {
-        headSha: headShaAfter,
-        verdict: pmResult.outcome,
-      };
-    }
+  if (artifacts.isFavorableReviewOutcome(architectResult.outcome)) {
+    nextReviewPhase.architect = {
+      headSha: headShaAfter,
+      verdict: architectResult.outcome,
+    };
   }
+  if (artifacts.isFavorableReviewOutcome(pmResult.outcome)) {
+    nextReviewPhase.pm = {
+      headSha: headShaAfter,
+      verdict: pmResult.outcome,
+    };
+  }
+
+  const priorRounds = cachedReviewPhase?.rounds ?? [];
+  const roundNumber = priorRounds.length + 1;
+  const guardianRecord = (
+    guardian: GuardianKind,
+    result: ReviewRunResult,
+  ): PersistedGuardianReviewRecord => {
+    if (result.source === "INVOKED") {
+      return {
+        source: "INVOKED",
+        outcome: result.outcome,
+        findings: advanceGuardianFindingLineage(
+          priorRounds,
+          guardian,
+          result.findings,
+        ),
+        findingsOriginRound: roundNumber,
+      };
+    }
+    const sourceRound = [...priorRounds]
+      .reverse()
+      .find((round) => round.headSha === headShaBefore);
+    const evidence = sourceRound?.[guardian];
+    return evidence?.findingsOriginRound != null
+      ? {
+          source: "CACHE",
+          outcome: result.outcome,
+          findings: evidence.findings.map((finding) => ({ ...finding })),
+          findingsOriginRound: evidence.findingsOriginRound,
+        }
+      : {
+          source: "CACHE",
+          outcome: result.outcome,
+          findings: [],
+          findingsOriginRound: null,
+        };
+  };
+  const completedRound: PersistedGuardianReviewRound = {
+    round: roundNumber,
+    reviewedHeadSha: headShaBefore,
+    headSha: headShaAfter,
+    architect: guardianRecord("architect", architectResult),
+    pm: guardianRecord("pm", pmResult),
+  };
+  nextReviewPhase.rounds = [completedRound];
   saveReviewPhase(
     repoRoot,
     runSlug,
-    Object.keys(nextReviewPhase).length > 0
-      ? nextReviewPhase
-      : undefined,
+    nextReviewPhase,
   );
 
   const prPlan = buildPrCreationPlan({

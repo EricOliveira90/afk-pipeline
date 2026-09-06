@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvokeOptions, InvokeResult } from "./agent-provider.js";
 import type { SanityCommandRunner } from "./preship.js";
 import type { RunEventPayload } from "./run-events.js";
+import { loadRunState, saveReviewPhase } from "./run-state.js";
 import {
   buildPrCreationPlan,
   detectReviewWorktreeDrift,
@@ -96,9 +97,29 @@ function writeReview(
 ): void {
   const dir = join(options.cwd, ".kiro", "specs", slug);
   mkdirSync(dir, { recursive: true });
+  const findings =
+    verdict === "SHIP"
+      ? []
+      : [
+          {
+            id: kind === "architect" ? "A-01" : "P-01",
+            title: `${kind} finding`,
+            class: kind === "architect" ? "INTEGRITY" : "PRODUCT",
+            clearCondition: `Clear the ${kind} finding.`,
+            disposition: "OPEN",
+          },
+        ];
   writeFileSync(
     join(dir, `review-${kind}.md`),
-    `# Guardian Review\n\n**Verdict:** ${verdict}\n`,
+    [
+      "# Guardian Review",
+      "",
+      `**Verdict:** ${verdict}`,
+      "",
+      "## Structured findings (v1)",
+      JSON.stringify({ version: 1, findings }),
+      "",
+    ].join("\n"),
     "utf-8",
   );
 }
@@ -169,7 +190,7 @@ describe("buildPrCreationPlan adoption provenance", () => {
 });
 
 describe("runShipGate", () => {
-  it("reuses sanity and favorable reviews cached against unchanged SHAs", async () => {
+  it("P-01 reuses favorable cache entries and records the no-ledger findings fallback", async () => {
     const repo = makeRepo();
     const slug = "cache-hit";
     const fixture = makeJournal();
@@ -214,9 +235,99 @@ describe("runShipGate", () => {
         String(message).includes("Reusing cached architect review verdict SHIP"),
       ),
     ).toBe(true);
+    const round = loadRunState(repo, slug).reviewPhase?.rounds?.[0];
+    expect(round?.architect).toEqual({
+      source: "CACHE",
+      outcome: "SHIP",
+      findings: [],
+      findingsOriginRound: null,
+    });
+    expect(round?.pm).toEqual({
+      source: "CACHE",
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [],
+      findingsOriginRound: null,
+    });
+    expect(loadRunState(repo, slug).reviewPhase?.architect).toEqual({
+      headSha: round?.headSha,
+      verdict: "SHIP",
+    });
   });
 
-  it("retries a guardian infrastructure failure without wave machinery", async () => {
+  it("P-01 copies cache-sourced findings only from matching ledger evidence", async () => {
+    const repo = makeRepo();
+    const slug = "cache-backed";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async () => {
+      throw new Error("cached reviews must not invoke guardians");
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) =>
+      command === "gh" && args[1] === "create"
+        ? "https://github.com/acme/repo/pull/42\n"
+        : "",
+    );
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    const treeSha = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const priorFinding = {
+      stableId: "A-01",
+      currentId: "A-02",
+      title: "Backed note",
+      class: "INTEGRITY",
+      clearCondition: "Retain the evidence.",
+      disposition: "OPEN" as const,
+    };
+    const cachedReviewPhase = {
+      sanity: { treeSha, ok: true as const },
+      architect: {
+        headSha,
+        verdict: "ACCEPT-WITH-NOTES" as const,
+      },
+      pm: { headSha, verdict: "SHIP" as const },
+      rounds: [
+        {
+          round: 1,
+          reviewedHeadSha: "pre-review",
+          headSha,
+          architect: {
+            source: "INVOKED" as const,
+            outcome: "ACCEPT-WITH-NOTES" as const,
+            findings: [priorFinding],
+            findingsOriginRound: 1,
+          },
+          pm: {
+            source: "INVOKED" as const,
+            outcome: "SHIP" as const,
+            findings: [],
+            findingsOriginRound: 1,
+          },
+        },
+      ],
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      cachedReviewPhase,
+    });
+
+    expect(invoke).not.toHaveBeenCalled();
+    const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
+    expect(rounds).toHaveLength(2);
+    expect(rounds?.[1]?.architect).toEqual({
+      source: "CACHE",
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [priorFinding],
+      findingsOriginRound: 1,
+    });
+    expect(rounds?.[1]?.pm).toEqual({
+      source: "CACHE",
+      outcome: "SHIP",
+      findings: [],
+      findingsOriginRound: 1,
+    });
+  });
+
+  it("B-02 P-02 persists only final outcomes after infrastructure retry semantics", async () => {
     const repo = makeRepo();
     const slug = "infra-retry";
     const fixture = makeJournal();
@@ -251,9 +362,25 @@ describe("runShipGate", () => {
         String(message).includes("Infrastructure retry 1/1"),
       ),
     ).toBe(true);
+    const round = loadRunState(repo, slug).reviewPhase?.rounds?.[0];
+    expect(round).toMatchObject({
+      round: 1,
+      architect: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+      pm: {
+        source: "INVOKED",
+        outcome: "FIX-BEFORE-SHIP",
+        findingsOriginRound: 1,
+      },
+    });
+    expect(round?.pm.findings).toHaveLength(1);
   });
 
-  it("opens an override PR and records the override outcome", async () => {
+  it("P-05 opens an override PR without changing the existing decision policy", async () => {
     const repo = makeRepo();
     const slug = "override";
     const fixture = makeJournal();
@@ -638,15 +765,33 @@ describe("runShipGate", () => {
   // `run-phase-ended` event, which fires *after* the capture read — that is
   // the boundary the fix claims, and the ordering has to be pinned rather
   // than raced or the test would be flaky about which invariant it proves.
-  it("commits the architect's own review after the PM agent reverts it in the shared worktree, reviews concurrent (#136)", async () => {
+  it("P-03 commits and parses each captured guardian artifact despite a concurrent sibling rewrite (#136)", async () => {
     const repo = makeRepo();
     const slug = "stale-review";
     const specsDir = join(repo, ".kiro", "specs", slug);
     const architectPath = join(specsDir, "review-architect.md");
-    const stale =
-      "# Architecture Guardian Review\n\n**Verdict:** FIX-BEFORE-SHIP\n\nlockAdjudicatedContract at lines 2065-2185.\n";
-    const fresh =
-      "# Architecture Guardian Review\n\n**Verdict:** SHIP\n\nrunImpasseAdjudication at line 2237.\n";
+    const stale = [
+      "# Architecture Guardian Review",
+      "",
+      "**Verdict:** FIX-BEFORE-SHIP",
+      "",
+      "## Structured findings (v1)",
+      '{"version":1,"findings":[{"id":"A-01","title":"Stale blocker","class":"INTEGRITY","clearCondition":"Fix stale flow","disposition":"OPEN"}]}',
+      "",
+      "lockAdjudicatedContract at lines 2065-2185.",
+      "",
+    ].join("\n");
+    const fresh = [
+      "# Architecture Guardian Review",
+      "",
+      "**Verdict:** SHIP",
+      "",
+      "## Structured findings (v1)",
+      '{"version":1,"findings":[]}',
+      "",
+      "runImpasseAdjudication at line 2237.",
+      "",
+    ].join("\n");
     // The previous gate round's review, already on the branch.
     mkdirSync(specsDir, { recursive: true });
     writeFileSync(architectPath, stale, "utf-8");
