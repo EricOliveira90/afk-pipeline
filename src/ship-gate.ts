@@ -733,6 +733,52 @@ export async function runShipGate(
 
   journal.setReviewOutcomes(architectResult, pmResult);
 
+  const priorRounds = cachedReviewPhase?.rounds ?? [];
+  const roundNumber = priorRounds.length + 1;
+  const guardianRecord = (
+    guardian: GuardianKind,
+    result: ReviewRunResult,
+  ): PersistedGuardianReviewRecord => {
+    if (result.source === "INVOKED") {
+      return {
+        source: "INVOKED",
+        outcome: result.outcome,
+        findings: advanceGuardianFindingLineage(
+          priorRounds,
+          guardian,
+          result.findings,
+        ),
+        findingsOriginRound: roundNumber,
+      };
+    }
+    const sourceRound = [...priorRounds]
+      .reverse()
+      .find((round) => round.headSha === headShaBefore);
+    const evidence = sourceRound?.[guardian];
+    return evidence?.findingsOriginRound != null
+      ? {
+          source: "CACHE",
+          outcome: result.outcome,
+          findings: evidence.findings.map((finding) => ({ ...finding })),
+          findingsOriginRound: evidence.findingsOriginRound,
+        }
+      : {
+          source: "CACHE",
+          outcome: result.outcome,
+          findings: [],
+          findingsOriginRound: null,
+        };
+  };
+  const completedRound = (
+    headSha: string,
+  ): PersistedGuardianReviewRound => ({
+    round: roundNumber,
+    reviewedHeadSha: headShaBefore,
+    headSha,
+    architect: guardianRecord("architect", architectResult),
+    pm: guardianRecord("pm", pmResult),
+  });
+
   const restore = restoreCapturedReviewArtifacts([
     architectResult.captured,
     pmResult.captured,
@@ -788,6 +834,13 @@ export async function runShipGate(
         reason: "review-worktree-drift",
         message,
       });
+      // The guardian pair completed, so preserve its evidence even though
+      // drift makes the artifact commit unsafe. No favorable cache entry is
+      // written, and the reviewed SHA is the only non-invented ledger key
+      // available when no post-artifact commit exists.
+      saveReviewPhase(repoRoot, runSlug, {
+        rounds: [completedRound(headShaBefore)],
+      });
       return blocked(message);
     }
     journal.phase(
@@ -839,50 +892,7 @@ export async function runShipGate(
     };
   }
 
-  const priorRounds = cachedReviewPhase?.rounds ?? [];
-  const roundNumber = priorRounds.length + 1;
-  const guardianRecord = (
-    guardian: GuardianKind,
-    result: ReviewRunResult,
-  ): PersistedGuardianReviewRecord => {
-    if (result.source === "INVOKED") {
-      return {
-        source: "INVOKED",
-        outcome: result.outcome,
-        findings: advanceGuardianFindingLineage(
-          priorRounds,
-          guardian,
-          result.findings,
-        ),
-        findingsOriginRound: roundNumber,
-      };
-    }
-    const sourceRound = [...priorRounds]
-      .reverse()
-      .find((round) => round.headSha === headShaBefore);
-    const evidence = sourceRound?.[guardian];
-    return evidence?.findingsOriginRound != null
-      ? {
-          source: "CACHE",
-          outcome: result.outcome,
-          findings: evidence.findings.map((finding) => ({ ...finding })),
-          findingsOriginRound: evidence.findingsOriginRound,
-        }
-      : {
-          source: "CACHE",
-          outcome: result.outcome,
-          findings: [],
-          findingsOriginRound: null,
-        };
-  };
-  const completedRound: PersistedGuardianReviewRound = {
-    round: roundNumber,
-    reviewedHeadSha: headShaBefore,
-    headSha: headShaAfter,
-    architect: guardianRecord("architect", architectResult),
-    pm: guardianRecord("pm", pmResult),
-  };
-  nextReviewPhase.rounds = [completedRound];
+  nextReviewPhase.rounds = [completedRound(headShaAfter)];
   saveReviewPhase(
     repoRoot,
     runSlug,

@@ -875,9 +875,10 @@ describe("runShipGate", () => {
   // Residual insurance (#136 review follow-up): the restore step covers the
   // two review files, so a guardian shell that moves anything else has to be
   // caught by the pre-commit HEAD/status check instead.
-  it("blocks the gate when a guardian moves HEAD in the review worktree", async () => {
+  it("B-01 QA-01 blocks worktree HEAD drift and persists the completed guardian round", async () => {
     const repo = makeRepo();
     const slug = "drift-head";
+    const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
     const fixture = makeJournal();
     const invoke = vi.fn(async (options: InvokeOptions) => {
       const kind = options.role === "architect-review" ? "architect" : "pm";
@@ -906,6 +907,25 @@ describe("runShipGate", () => {
         reason: "review-worktree-drift",
       }),
     );
+    expect(loadRunState(repo, slug).reviewPhase?.rounds).toEqual([
+      {
+        round: 1,
+        reviewedHeadSha,
+        headSha: reviewedHeadSha,
+        architect: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+    ]);
   });
 });
 
