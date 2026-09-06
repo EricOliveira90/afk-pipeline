@@ -783,11 +783,25 @@ export async function runShipGate(
   });
   let roundPersistenceAttempted = false;
   let roundHeadSha = headShaBefore;
-  // The cache payload of the attempt that threw. The catch-path retry reuses
-  // it: `persistReviewPhase` writes the whole phase, so retrying with an empty
-  // payload would replace valid sanity and favorable guardian entries with
-  // nothing and force the next run to redo work it had already cached (QA-04).
-  let attemptedReviewPhase: PersistedReviewPhase = {};
+  // `persistReviewPhase` replaces the cache fields wholesale, so every write
+  // that appends a round must carry forward the cache entries that are still
+  // valid. Writing an empty payload deleted them, forcing the next run to
+  // re-pay a sanity gate and guardian reviews it had already cached — on the
+  // catch-path retry (QA-04) and on every failure exit that lands before the
+  // fresh payload is assembled (QA-06). The floor is what this pass itself
+  // reused: entries whose `treeSha`/`headSha` matched the reviewed content.
+  const reusedReviewPhase: PersistedReviewPhase = {
+    ...(usesCachedSanity && cachedReviewPhase?.sanity
+      ? { sanity: cachedReviewPhase.sanity }
+      : {}),
+    ...(cachedArchitect && cachedReviewPhase?.architect
+      ? { architect: cachedReviewPhase.architect }
+      : {}),
+    ...(cachedPm && cachedReviewPhase?.pm
+      ? { pm: cachedReviewPhase.pm }
+      : {}),
+  };
+  let attemptedReviewPhase: PersistedReviewPhase = reusedReviewPhase;
   const persistCompletedRound = (
     headSha: string,
     reviewPhase: PersistedReviewPhase = attemptedReviewPhase,

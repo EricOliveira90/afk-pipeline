@@ -228,7 +228,7 @@ describe("advanceGuardianFindingLineage", () => {
     ]);
   });
 
-  it("B-03 QA-05 allocates a unique identity when two known IDs compete for one prior identity", () => {
+  it("B-03 QA-07 folds two known aliases of one prior identity into one entry", () => {
     const prior = [
       roundWithArchitectFindings([
         {
@@ -258,11 +258,19 @@ describe("advanceGuardianFindingLineage", () => {
       },
     ]);
 
-    expect(advanced.map((finding) => finding.stableId)).toEqual([
-      "A-01",
-      "A-01#2",
+    // The stable-ID claimant keeps the identity; the current-ID claimant is
+    // the same finding under its other alias, so it folds into that entry
+    // rather than minting a forbidden new stable identity.
+    expect(advanced).toEqual([
+      {
+        stableId: "A-01",
+        currentId: "A-01",
+        title: "Stable-ID claimant",
+        class: "INTEGRITY",
+        clearCondition: "Keep the stable alias",
+        disposition: "OPEN",
+      },
     ]);
-    expect(new Set(advanced.map((finding) => finding.stableId)).size).toBe(2);
 
     const phase = {
       rounds: [

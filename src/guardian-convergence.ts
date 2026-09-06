@@ -27,18 +27,6 @@ function priorFindings(
     .flatMap((round) => [...round[guardian].findings].reverse());
 }
 
-function allocateStableId(preferred: string, claimed: Set<string>): string {
-  if (!claimed.has(preferred)) {
-    claimed.add(preferred);
-    return preferred;
-  }
-  let suffix = 2;
-  while (claimed.has(`${preferred}#${suffix}`)) suffix++;
-  const allocated = `${preferred}#${suffix}`;
-  claimed.add(allocated);
-  return allocated;
-}
-
 /**
  * Assign stable identities to one guardian's newly parsed findings.
  *
@@ -59,16 +47,22 @@ export function advanceGuardianFindingLineage(
   const resolved = new Array<string | null>(findings.length).fill(null);
   // ID matches resolve first, across all findings, so the ID-first precedence
   // holds even when another finding's fingerprint points at the same entry.
-  findings.forEach((finding, index) => {
-    const idMatch = prior.find(
-      (entry) =>
-        entry.currentId === finding.id || entry.stableId === finding.id,
-    );
-    if (idMatch && !claimed.has(idMatch.stableId)) {
-      claimed.add(idMatch.stableId);
-      resolved[index] = idMatch.stableId;
-    }
-  });
+  // The canonical alias resolves before the current alias: when two findings
+  // name one prior entry through its two aliases, the `stableId` claimant is
+  // the one that keeps it, whatever order they arrived in.
+  for (const aliasOf of [
+    (entry: PersistedGuardianFinding) => entry.stableId,
+    (entry: PersistedGuardianFinding) => entry.currentId,
+  ]) {
+    findings.forEach((finding, index) => {
+      if (resolved[index] !== null) return;
+      const idMatch = prior.find((entry) => aliasOf(entry) === finding.id);
+      if (idMatch && !claimed.has(idMatch.stableId)) {
+        claimed.add(idMatch.stableId);
+        resolved[index] = idMatch.stableId;
+      }
+    });
+  }
   findings.forEach((finding, index) => {
     if (resolved[index] !== null) return;
     const fingerprintMatch = prior.find(
@@ -81,20 +75,33 @@ export function advanceGuardianFindingLineage(
       resolved[index] = fingerprintMatch.stableId;
     }
   });
-  return findings.map((finding, index) => {
-    // No match, or every candidate already claimed: allocate from the current
-    // ID. A suffix is needed when distinct current IDs both name one prior
-    // entry through its current and stable aliases; the losing alias must not
-    // make the completed round non-durable by duplicating the claimed ID.
-    const stableId =
-      resolved[index] ?? allocateStableId(finding.id, claimed);
-    return {
+  // A finding whose ID names a prior entry whose identity another finding
+  // already claimed is that same finding reported twice under its two aliases.
+  // It is folded into the entry that holds the identity: minting a new stable
+  // ID for a known alias would contradict the locked identity rule (QA-07),
+  // and repeating the claimed one drops the whole ledger at sanitization.
+  const aliasDuplicate = (finding: GuardianReviewFinding, index: number) => {
+    if (resolved[index] !== null) return false;
+    const idMatch = prior.find(
+      (entry) =>
+        entry.currentId === finding.id || entry.stableId === finding.id,
+    );
+    return idMatch !== undefined && claimed.has(idMatch.stableId);
+  };
+  return findings.flatMap((finding, index) => {
+    if (aliasDuplicate(finding, index)) return [];
+    // No match at all: the finding's own ID becomes its new stable identity.
+    // It cannot collide with a claimed one — a finding whose ID names a prior
+    // identity is either its claimant or folded away as an alias duplicate.
+    const stableId = resolved[index] ?? finding.id;
+    claimed.add(stableId);
+    return [{
       stableId,
       currentId: finding.id,
       title: finding.title,
       class: finding.class,
       clearCondition: finding.clearCondition,
       disposition: finding.disposition,
-    };
+    }];
   });
 }

@@ -1075,6 +1075,39 @@ describe("runShipGate", () => {
       ok: true,
     });
   });
+
+  it("B-01 QA-06 keeps the reused caches when the artifact commit fails", async () => {
+    const repo = makeRepo();
+    const slug = "artifact-commit-failure-cache";
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    const treeSha = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const fixture = makeJournal();
+    // Only PM is invoked: the architect verdict and the sanity gate are reused
+    // from cache, so both must survive the failing exit below.
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      writeReview(options, slug, "pm", "SHIP");
+      writeFileSync(join(repo, ".git", "index.lock"), "locked\n", "utf-8");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const cachedReviewPhase = {
+      sanity: { treeSha, ok: true as const },
+      architect: { headSha, verdict: "SHIP" as const },
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    await expect(
+      runShipGate({
+        ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+        cachedReviewPhase,
+      }),
+    ).rejects.toThrow();
+
+    const reviewPhase = loadRunState(repo, slug).reviewPhase;
+    expect(reviewPhase?.rounds).toHaveLength(1);
+    expect(reviewPhase?.architect).toEqual({ headSha, verdict: "SHIP" });
+    expect(reviewPhase?.sanity).toEqual({ treeSha, ok: true });
+  });
 });
 
 describe("detectReviewWorktreeDrift", () => {
