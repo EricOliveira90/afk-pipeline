@@ -2755,7 +2755,7 @@ describe("runPipeline merge-only recovery for MERGE-PENDING", () => {
               : "review-pm.md";
           writeFileSync(
             join(specs, fileName),
-            "# Guardian Review\n\n**Verdict:** SHIP\n",
+            "# Guardian Review\n\n**Verdict:** SHIP\n\n## Structured findings (v1)\n{\"version\":1,\"findings\":[]}\n",
             "utf-8",
           );
         }

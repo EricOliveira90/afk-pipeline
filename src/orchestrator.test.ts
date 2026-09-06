@@ -2706,7 +2706,7 @@ describe("runPipeline zero-dispatch outcome (issue #42)", () => {
               : "review-pm.md";
           writeFileSync(
             join(specs, fileName),
-            "# Guardian Review\n\n**Verdict:** SHIP\n",
+            "# Guardian Review\n\n**Verdict:** SHIP\n\n## Structured findings (v1)\n{\"version\":1,\"findings\":[]}\n",
             "utf-8",
           );
         }
@@ -5966,7 +5966,31 @@ describe("post-merge guardian review phase (ADR 0015)", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, fileName),
-      `# Guardian Review\n\n**Verdict:** ${verdict}\n\nFindings here.\n`,
+      [
+        "# Guardian Review",
+        "",
+        `**Verdict:** ${verdict}`,
+        "",
+        "## Structured findings (v1)",
+        // B-04 requires one structured block on every review: SHIP carries an
+        // empty findings array, any other verdict at least one entry.
+        JSON.stringify({
+          version: 1,
+          findings:
+            verdict === "SHIP"
+              ? []
+              : [
+                  {
+                    id: fileName.includes("architect") ? "A-01" : "P-01",
+                    title: "Fixture finding",
+                    class: "INTEGRITY",
+                    clearCondition: "Clear the fixture finding.",
+                    disposition: "OPEN",
+                  },
+                ],
+        }),
+        "",
+      ].join("\n"),
       "utf-8",
     );
   }
