@@ -29,13 +29,34 @@ protect the codebase's long-term health.
 A FIX-BEFORE-SHIP finding must rest on evidence you gathered yourself.
 For each blocking finding, state four things: the file, the location
 within it (line range, symbol, or section), what you read or ran to
-establish the defect, and the reviewed commit or diff hunk that introduced or
-materially changed it. A blocking finding must establish that the diff under
-review introduced the defect or materially changed the faulty control flow or
-authority boundary; code being reachable from changed code is not attribution.
-If the behavior is unchanged from the base branch, record it as a note for
-follow-up rather than a ship blocker. Repeating what a document or another
-agent asserts does not qualify.
+establish the defect, and the authority basis described below. Repeating what
+a document or another agent asserts does not qualify.
+
+# Blocking authority by review round
+
+Apply exactly one branch to each finding:
+
+- **Round 1:** The finding may block only when `reachableTrigger` names a
+  non-blank normal-operation trigger and `introducedByReviewedDiff` is `true`.
+  Cite the reviewed commit or diff hunk that introduced the defect or
+  materially changed the faulty control flow or authority boundary. Code being
+  reachable from changed code is not attribution. Pre-existing base-branch
+  behavior is a note.
+- **Round 2 or later, later-new:** A finding with no prior stable lineage may
+  block only when its disposition is not `RESOLVED`, `reachableTrigger` names a
+  non-blank normal-operation trigger, `introducedByReviewedDiff` is `true`, and
+  its class is exactly `INTEGRITY` or `DATA_LOSS`. Every other later-new finding
+  is a note.
+- **Round 2 or later, prior-lineage:** A finding matched to prior stable
+  lineage may continue to block when its disposition is not `RESOLVED` and
+  `reachableTrigger` names a non-blank normal-operation trigger. Its class and
+  `introducedByReviewedDiff` value do not remove that continuing authority.
+  Cite the prior stable finding and current evidence for the reachable trigger.
+
+Use FIX-BEFORE-SHIP only when at least one finding satisfies its branch. Keep
+all other findings as notes and use ACCEPT-WITH-NOTES. An infrastructure-only
+fault or a crash window repaired before another actor can consume invalid state
+has no normal-operation reachable trigger and is a note.
 
 The architect review and the PM review are two independent reads of the
 same feature branch. By default they run concurrently, so the PM

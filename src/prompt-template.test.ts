@@ -288,15 +288,43 @@ describe("renderPrompt", () => {
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
   });
 
-  it("B-04 requires architect v2 authority evidence while PM remains v1", () => {
+  it("B-01 B-02 B-03 B-04 QA-01 states the exact architect authority contract while PM remains v1", () => {
     const architect = renderPrompt("architect-review", {
       SPECS_DIR: "s",
       RELEVANT_FILES: "(files)",
     });
     expect(architect).toContain("## Structured findings (v2)");
-    expect(architect).toContain('"version":2');
-    expect(architect).toContain('"reachableTrigger"');
-    expect(architect).toContain('"introducedByReviewedDiff"');
+    const architectExample = architect.match(
+      /`(\{"version":2,"findings":\[\{[^\r\n]+\}\]\})`\./,
+    )?.[1];
+    expect(architectExample).toBeDefined();
+    const architectShape = JSON.parse(architectExample!);
+    expect(Object.keys(architectShape)).toEqual(["version", "findings"]);
+    expect(Object.keys(architectShape.findings[0])).toEqual([
+      "id",
+      "title",
+      "class",
+      "clearCondition",
+      "disposition",
+      "reachableTrigger",
+      "introducedByReviewedDiff",
+    ]);
+    expect(architectShape.findings[0].reachableTrigger).toEqual(
+      expect.any(String),
+    );
+    expect(architectShape.findings[0].introducedByReviewedDiff).toBe(true);
+    expect(architect).toMatch(
+      /Round 1:[\s\S]*?reachableTrigger[\s\S]*?non-blank[\s\S]*?introducedByReviewedDiff` is `true`/,
+    );
+    expect(architect).toMatch(
+      /Round 2 or later, later-new:[\s\S]*?no prior stable lineage[\s\S]*?introducedByReviewedDiff` is `true`[\s\S]*?exactly `INTEGRITY` or `DATA_LOSS`/,
+    );
+    expect(architect).toMatch(
+      /Round 2 or later, prior-lineage:[\s\S]*?not `RESOLVED`[\s\S]*?reachableTrigger[\s\S]*?non-blank[\s\S]*?class and[\s\S]*?introducedByReviewedDiff` value do not remove/,
+    );
+    expect(architect).toMatch(
+      /FIX-BEFORE-SHIP only when at least one finding satisfies its branch/,
+    );
 
     const pm = renderPrompt("pm-review", {
       SPECS_DIR: "s",
@@ -304,7 +332,19 @@ describe("renderPrompt", () => {
       RUN_SCOPE: "(scope)",
     });
     expect(pm).toContain("## Structured findings (v1)");
-    expect(pm).toContain('"version":1');
+    const pmExample = pm.match(
+      /`(\{"version":1,"findings":\[\{[^\r\n]+\}\]\})`\./,
+    )?.[1];
+    expect(pmExample).toBeDefined();
+    const pmShape = JSON.parse(pmExample!);
+    expect(Object.keys(pmShape)).toEqual(["version", "findings"]);
+    expect(Object.keys(pmShape.findings[0])).toEqual([
+      "id",
+      "title",
+      "class",
+      "clearCondition",
+      "disposition",
+    ]);
     expect(pm).not.toContain('"reachableTrigger"');
     for (const prompt of [architect, pm]) {
       expect(prompt).toContain('"clearCondition"');

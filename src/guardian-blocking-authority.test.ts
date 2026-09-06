@@ -12,73 +12,129 @@ const architectFinding = {
 };
 
 describe("guardianFindingMayBlock", () => {
-  it("B-01 requires a reachable trigger and reviewed-diff attribution in round 1", () => {
-    expect(guardianFindingMayBlock(architectFinding)).toBe(true);
+  it.each([
+    {
+      name: "reachable and attributed",
+      finding: {},
+      expected: true,
+    },
+    {
+      name: "null trigger",
+      finding: { reachableTrigger: null },
+      expected: false,
+    },
+    {
+      name: "blank trigger",
+      finding: { reachableTrigger: "   " },
+      expected: false,
+    },
+    {
+      name: "not attributed",
+      finding: { introducedByReviewedDiff: false },
+      expected: false,
+    },
+    {
+      name: "resolved",
+      finding: { disposition: "RESOLVED" as const },
+      expected: false,
+    },
+  ])("B-01 round-1 authority: $name", ({ finding, expected }) => {
     expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        reachableTrigger: null,
-      }),
-    ).toBe(false);
-    expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        reachableTrigger: "   ",
-      }),
-    ).toBe(false);
-    expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        introducedByReviewedDiff: false,
-      }),
-    ).toBe(false);
+      guardianFindingMayBlock({ ...architectFinding, ...finding }),
+    ).toBe(expected);
   });
 
-  it("B-02 allows only attributed later-new INTEGRITY and DATA_LOSS findings", () => {
-    for (const findingClass of ["INTEGRITY", "DATA_LOSS"]) {
-      expect(
-        guardianFindingMayBlock({
-          ...architectFinding,
-          round: 2,
-          class: findingClass,
-        }),
-      ).toBe(true);
-    }
-    expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        round: 2,
-        class: "SECURITY_GAP",
-      }),
-    ).toBe(false);
-    expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        round: 2,
+  it.each([
+    {
+      name: "attributed INTEGRITY",
+      finding: { class: "INTEGRITY" },
+      expected: true,
+    },
+    {
+      name: "attributed DATA_LOSS",
+      finding: { class: "DATA_LOSS" },
+      expected: true,
+    },
+    {
+      name: "other class",
+      finding: { class: "SECURITY_GAP" },
+      expected: false,
+    },
+    {
+      name: "null trigger",
+      finding: { class: "INTEGRITY", reachableTrigger: null },
+      expected: false,
+    },
+    {
+      name: "blank trigger",
+      finding: { class: "DATA_LOSS", reachableTrigger: " " },
+      expected: false,
+    },
+    {
+      name: "not attributed",
+      finding: {
         class: "INTEGRITY",
         introducedByReviewedDiff: false,
+      },
+      expected: false,
+    },
+    {
+      name: "resolved",
+      finding: {
+        class: "DATA_LOSS",
+        disposition: "RESOLVED" as const,
+      },
+      expected: false,
+    },
+  ])("B-02 later-new authority: $name", ({ finding, expected }) => {
+    expect(
+      guardianFindingMayBlock({
+        ...architectFinding,
+        round: 2,
+        hasPriorLineage: false,
+        ...finding,
       }),
-    ).toBe(false);
+    ).toBe(expected);
   });
 
-  it("B-03 lets reachable uncleared prior lineage continue blocking", () => {
-    expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        round: 3,
-        hasPriorLineage: true,
+  it.each([
+    {
+      name: "reachable uncleared finding",
+      finding: {},
+      expected: true,
+    },
+    {
+      name: "unattributed non-exception class",
+      finding: {
         class: "PRODUCT",
         introducedByReviewedDiff: false,
-      }),
-    ).toBe(true);
+      },
+      expected: true,
+    },
+    {
+      name: "null trigger",
+      finding: { reachableTrigger: null },
+      expected: false,
+    },
+    {
+      name: "blank trigger",
+      finding: { reachableTrigger: " " },
+      expected: false,
+    },
+    {
+      name: "resolved",
+      finding: { disposition: "RESOLVED" as const },
+      expected: false,
+    },
+  ])("B-03 prior-lineage authority: $name", ({ finding, expected }) => {
     expect(
       guardianFindingMayBlock({
         ...architectFinding,
         round: 3,
         hasPriorLineage: true,
-        disposition: "RESOLVED",
+        ...finding,
       }),
-    ).toBe(false);
+    ).toBe(expected);
   });
 
   it("P-01 keeps reachable structural classes eligible to block", () => {
