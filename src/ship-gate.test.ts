@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvokeOptions, InvokeResult } from "./agent-provider.js";
 import type { SanityCommandRunner } from "./preship.js";
 import type { RunEventPayload } from "./run-events.js";
+import { loadRunState, saveReviewPhase } from "./run-state.js";
 import {
   buildPrCreationPlan,
   detectReviewWorktreeDrift,
@@ -96,9 +97,29 @@ function writeReview(
 ): void {
   const dir = join(options.cwd, ".kiro", "specs", slug);
   mkdirSync(dir, { recursive: true });
+  const findings =
+    verdict === "SHIP"
+      ? []
+      : [
+          {
+            id: kind === "architect" ? "A-01" : "P-01",
+            title: `${kind} finding`,
+            class: kind === "architect" ? "INTEGRITY" : "PRODUCT",
+            clearCondition: `Clear the ${kind} finding.`,
+            disposition: "OPEN",
+          },
+        ];
   writeFileSync(
     join(dir, `review-${kind}.md`),
-    `# Guardian Review\n\n**Verdict:** ${verdict}\n`,
+    [
+      "# Guardian Review",
+      "",
+      `**Verdict:** ${verdict}`,
+      "",
+      "## Structured findings (v1)",
+      JSON.stringify({ version: 1, findings }),
+      "",
+    ].join("\n"),
     "utf-8",
   );
 }
@@ -169,7 +190,7 @@ describe("buildPrCreationPlan adoption provenance", () => {
 });
 
 describe("runShipGate", () => {
-  it("reuses sanity and favorable reviews cached against unchanged SHAs", async () => {
+  it("P-01 reuses favorable cache entries and records the no-ledger findings fallback", async () => {
     const repo = makeRepo();
     const slug = "cache-hit";
     const fixture = makeJournal();
@@ -214,9 +235,99 @@ describe("runShipGate", () => {
         String(message).includes("Reusing cached architect review verdict SHIP"),
       ),
     ).toBe(true);
+    const round = loadRunState(repo, slug).reviewPhase?.rounds?.[0];
+    expect(round?.architect).toEqual({
+      source: "CACHE",
+      outcome: "SHIP",
+      findings: [],
+      findingsOriginRound: null,
+    });
+    expect(round?.pm).toEqual({
+      source: "CACHE",
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [],
+      findingsOriginRound: null,
+    });
+    expect(loadRunState(repo, slug).reviewPhase?.architect).toEqual({
+      headSha: round?.headSha,
+      verdict: "SHIP",
+    });
   });
 
-  it("retries a guardian infrastructure failure without wave machinery", async () => {
+  it("P-01 copies cache-sourced findings only from matching ledger evidence", async () => {
+    const repo = makeRepo();
+    const slug = "cache-backed";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async () => {
+      throw new Error("cached reviews must not invoke guardians");
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) =>
+      command === "gh" && args[1] === "create"
+        ? "https://github.com/acme/repo/pull/42\n"
+        : "",
+    );
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    const treeSha = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const priorFinding = {
+      stableId: "A-01",
+      currentId: "A-02",
+      title: "Backed note",
+      class: "INTEGRITY",
+      clearCondition: "Retain the evidence.",
+      disposition: "OPEN" as const,
+    };
+    const cachedReviewPhase = {
+      sanity: { treeSha, ok: true as const },
+      architect: {
+        headSha,
+        verdict: "ACCEPT-WITH-NOTES" as const,
+      },
+      pm: { headSha, verdict: "SHIP" as const },
+      rounds: [
+        {
+          round: 1,
+          reviewedHeadSha: "pre-review",
+          headSha,
+          architect: {
+            source: "INVOKED" as const,
+            outcome: "ACCEPT-WITH-NOTES" as const,
+            findings: [priorFinding],
+            findingsOriginRound: 1,
+          },
+          pm: {
+            source: "INVOKED" as const,
+            outcome: "SHIP" as const,
+            findings: [],
+            findingsOriginRound: 1,
+          },
+        },
+      ],
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      cachedReviewPhase,
+    });
+
+    expect(invoke).not.toHaveBeenCalled();
+    const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
+    expect(rounds).toHaveLength(2);
+    expect(rounds?.[1]?.architect).toEqual({
+      source: "CACHE",
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [priorFinding],
+      findingsOriginRound: 1,
+    });
+    expect(rounds?.[1]?.pm).toEqual({
+      source: "CACHE",
+      outcome: "SHIP",
+      findings: [],
+      findingsOriginRound: 1,
+    });
+  });
+
+  it("B-02 P-02 persists only final outcomes after infrastructure retry semantics", async () => {
     const repo = makeRepo();
     const slug = "infra-retry";
     const fixture = makeJournal();
@@ -251,9 +362,25 @@ describe("runShipGate", () => {
         String(message).includes("Infrastructure retry 1/1"),
       ),
     ).toBe(true);
+    const round = loadRunState(repo, slug).reviewPhase?.rounds?.[0];
+    expect(round).toMatchObject({
+      round: 1,
+      architect: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+      pm: {
+        source: "INVOKED",
+        outcome: "FIX-BEFORE-SHIP",
+        findingsOriginRound: 1,
+      },
+    });
+    expect(round?.pm.findings).toHaveLength(1);
   });
 
-  it("opens an override PR and records the override outcome", async () => {
+  it("P-05 opens an override PR without changing the existing decision policy", async () => {
     const repo = makeRepo();
     const slug = "override";
     const fixture = makeJournal();
@@ -638,15 +765,33 @@ describe("runShipGate", () => {
   // `run-phase-ended` event, which fires *after* the capture read — that is
   // the boundary the fix claims, and the ordering has to be pinned rather
   // than raced or the test would be flaky about which invariant it proves.
-  it("commits the architect's own review after the PM agent reverts it in the shared worktree, reviews concurrent (#136)", async () => {
+  it("P-03 commits and parses each captured guardian artifact despite a concurrent sibling rewrite (#136)", async () => {
     const repo = makeRepo();
     const slug = "stale-review";
     const specsDir = join(repo, ".kiro", "specs", slug);
     const architectPath = join(specsDir, "review-architect.md");
-    const stale =
-      "# Architecture Guardian Review\n\n**Verdict:** FIX-BEFORE-SHIP\n\nlockAdjudicatedContract at lines 2065-2185.\n";
-    const fresh =
-      "# Architecture Guardian Review\n\n**Verdict:** SHIP\n\nrunImpasseAdjudication at line 2237.\n";
+    const stale = [
+      "# Architecture Guardian Review",
+      "",
+      "**Verdict:** FIX-BEFORE-SHIP",
+      "",
+      "## Structured findings (v1)",
+      '{"version":1,"findings":[{"id":"A-01","title":"Stale blocker","class":"INTEGRITY","clearCondition":"Fix stale flow","disposition":"OPEN"}]}',
+      "",
+      "lockAdjudicatedContract at lines 2065-2185.",
+      "",
+    ].join("\n");
+    const fresh = [
+      "# Architecture Guardian Review",
+      "",
+      "**Verdict:** SHIP",
+      "",
+      "## Structured findings (v1)",
+      '{"version":1,"findings":[]}',
+      "",
+      "runImpasseAdjudication at line 2237.",
+      "",
+    ].join("\n");
     // The previous gate round's review, already on the branch.
     mkdirSync(specsDir, { recursive: true });
     writeFileSync(architectPath, stale, "utf-8");
@@ -730,9 +875,11 @@ describe("runShipGate", () => {
   // Residual insurance (#136 review follow-up): the restore step covers the
   // two review files, so a guardian shell that moves anything else has to be
   // caught by the pre-commit HEAD/status check instead.
-  it("blocks the gate when a guardian moves HEAD in the review worktree", async () => {
+  it("B-01 QA-01 blocks worktree HEAD drift and persists the completed guardian round", async () => {
     const repo = makeRepo();
     const slug = "drift-head";
+    const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
+    let driftedHeadSha = "";
     const fixture = makeJournal();
     const invoke = vi.fn(async (options: InvokeOptions) => {
       const kind = options.role === "architect-review" ? "architect" : "pm";
@@ -742,6 +889,7 @@ describe("runShipGate", () => {
         // the guardians reviewed.
         writeFileSync(join(repo, "README.md"), "rogue\n", "utf-8");
         git(repo, ["commit", "-am", "rogue guardian commit"]);
+        driftedHeadSha = git(repo, ["rev-parse", "HEAD"]);
       }
       return invokeResult();
     });
@@ -761,6 +909,322 @@ describe("runShipGate", () => {
         reason: "review-worktree-drift",
       }),
     );
+    expect(loadRunState(repo, slug).reviewPhase?.rounds).toEqual([
+      {
+        round: 1,
+        reviewedHeadSha,
+        headSha: driftedHeadSha,
+        architect: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+    ]);
+  });
+
+  it("B-01 QA-02 persists the completed guardian round when the artifact commit fails", async () => {
+    const repo = makeRepo();
+    const slug = "artifact-commit-failure";
+    const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      if (kind === "pm") {
+        writeFileSync(join(repo, ".git", "index.lock"), "locked\n", "utf-8");
+      }
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+
+    await expect(
+      runShipGate(makeArgs(repo, slug, fixture.journal, invoke, runCommand)),
+    ).rejects.toThrow();
+
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fixture.event).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "run-phase-started",
+        phase: "draft-pr",
+      }),
+    );
+    expect(loadRunState(repo, slug).reviewPhase?.rounds).toEqual([
+      {
+        round: 1,
+        reviewedHeadSha,
+        headSha: reviewedHeadSha,
+        architect: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+    ]);
+  });
+
+  it("B-01 QA-03 retries one failed round-state write and persists exactly one round", async () => {
+    const repo = makeRepo();
+    const slug = "round-write-retry";
+    const reviewedHeadSha = git(repo, ["rev-parse", "HEAD"]);
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const args = makeArgs(
+      repo,
+      slug,
+      fixture.journal,
+      invoke,
+      runCommand,
+    );
+    let writeAttempts = 0;
+    args.saveReviewPhase = (repoRoot, runSlug, reviewPhase) => {
+      writeAttempts++;
+      if (writeAttempts === 1) {
+        throw new Error("injected round-state write failure");
+      }
+      saveReviewPhase(repoRoot, runSlug, reviewPhase);
+    };
+
+    await expect(runShipGate(args)).rejects.toThrow(
+      "injected round-state write failure",
+    );
+
+    expect(writeAttempts).toBe(2);
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fixture.event).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "run-phase-started",
+        phase: "draft-pr",
+      }),
+    );
+    const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
+    expect(rounds).toHaveLength(1);
+    expect(rounds?.[0]).toEqual({
+      round: 1,
+      reviewedHeadSha,
+      headSha: git(repo, ["rev-parse", "HEAD"]),
+      architect: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+      pm: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+    });
+  });
+
+  it("B-01 QA-04 keeps the reusable caches when the round write is retried", async () => {
+    const repo = makeRepo();
+    const slug = "round-write-retry-cache";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const args = makeArgs(repo, slug, fixture.journal, invoke, runCommand);
+    let writeAttempts = 0;
+    args.saveReviewPhase = (repoRoot, runSlug, reviewPhase) => {
+      writeAttempts++;
+      if (writeAttempts === 1) {
+        throw new Error("injected round-state write failure");
+      }
+      saveReviewPhase(repoRoot, runSlug, reviewPhase);
+    };
+
+    await expect(runShipGate(args)).rejects.toThrow(
+      "injected round-state write failure",
+    );
+
+    expect(writeAttempts).toBe(2);
+    const reviewPhase = loadRunState(repo, slug).reviewPhase;
+    expect(reviewPhase?.rounds).toHaveLength(1);
+    // The retry must carry the same cache payload the failed write carried:
+    // a transient failure that erased these entries would force the next run
+    // to re-run the sanity gate and both favorable guardians for nothing.
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    expect(reviewPhase?.architect).toEqual({ headSha, verdict: "SHIP" });
+    expect(reviewPhase?.pm).toEqual({ headSha, verdict: "SHIP" });
+    expect(reviewPhase?.sanity).toEqual({
+      treeSha: git(repo, ["rev-parse", "HEAD^{tree}"]),
+      ok: true,
+    });
+  });
+
+  it("B-02 QA-01 persists both findings distinctly when two known aliases contest one prior identity", async () => {
+    const repo = makeRepo();
+    const slug = "alias-collision";
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      if (kind === "pm") {
+        writeReview(options, slug, "pm", "SHIP");
+        return invokeResult();
+      }
+      // Two findings naming the one prior entry through both of its aliases.
+      const dir = join(options.cwd, ".kiro", "specs", slug);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "review-architect.md"),
+        [
+          "# Guardian Review",
+          "",
+          "**Verdict:** FIX-BEFORE-SHIP",
+          "",
+          "## Structured findings (v1)",
+          JSON.stringify({
+            version: 1,
+            findings: [
+              {
+                id: "A-05",
+                title: "Current-alias claimant",
+                class: "PRODUCT",
+                clearCondition: "Clear the current alias.",
+                disposition: "REPEATED",
+              },
+              {
+                id: "A-01",
+                title: "Stable-alias claimant",
+                class: "INTEGRITY",
+                clearCondition: "Clear the stable alias.",
+                disposition: "OPEN",
+              },
+            ],
+          }),
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const cachedReviewPhase = {
+      rounds: [
+        {
+          round: 1,
+          reviewedHeadSha: "pre-review",
+          headSha: "prior-head",
+          architect: {
+            source: "INVOKED" as const,
+            outcome: "FIX-BEFORE-SHIP" as const,
+            findings: [
+              {
+                stableId: "A-01",
+                currentId: "A-05",
+                title: "The one prior finding",
+                class: "INTEGRITY",
+                clearCondition: "Commit the durable evidence.",
+                disposition: "OPEN" as const,
+              },
+            ],
+            findingsOriginRound: 1,
+          },
+          pm: {
+            source: "INVOKED" as const,
+            outcome: "SHIP" as const,
+            findings: [],
+            findingsOriginRound: 1,
+          },
+        },
+      ],
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      cachedReviewPhase,
+    });
+
+    const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
+    // Both parsed findings persist distinctly: neither fingerprint matches the
+    // prior entry, so the stableId claimant keeps A-01 and the current-alias
+    // claimant mints a new identity (ADR 0057 decision 1 amendment).
+    expect(rounds).toHaveLength(2);
+    expect(rounds?.[1]?.architect).toEqual({
+      source: "INVOKED",
+      outcome: "FIX-BEFORE-SHIP",
+      findings: [
+        {
+          stableId: "A-05",
+          currentId: "A-05",
+          title: "Current-alias claimant",
+          class: "PRODUCT",
+          clearCondition: "Clear the current alias.",
+          disposition: "REPEATED",
+        },
+        {
+          stableId: "A-01",
+          currentId: "A-01",
+          title: "Stable-alias claimant",
+          class: "INTEGRITY",
+          clearCondition: "Clear the stable alias.",
+          disposition: "OPEN",
+        },
+      ],
+      findingsOriginRound: 2,
+    });
+    // A blocking architect result is unfavorable, so it is never cached.
+    expect(loadRunState(repo, slug).reviewPhase?.architect).toBeUndefined();
+    expect(headSha).toBeTruthy();
+  });
+
+  it("B-01 QA-06 keeps the reused caches when the artifact commit fails", async () => {
+    const repo = makeRepo();
+    const slug = "artifact-commit-failure-cache";
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    const treeSha = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const fixture = makeJournal();
+    // Only PM is invoked: the architect verdict and the sanity gate are reused
+    // from cache, so both must survive the failing exit below.
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      writeReview(options, slug, "pm", "SHIP");
+      writeFileSync(join(repo, ".git", "index.lock"), "locked\n", "utf-8");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const cachedReviewPhase = {
+      sanity: { treeSha, ok: true as const },
+      architect: { headSha, verdict: "SHIP" as const },
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    await expect(
+      runShipGate({
+        ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+        cachedReviewPhase,
+      }),
+    ).rejects.toThrow();
+
+    const reviewPhase = loadRunState(repo, slug).reviewPhase;
+    expect(reviewPhase?.rounds).toHaveLength(1);
+    expect(reviewPhase?.architect).toEqual({ headSha, verdict: "SHIP" });
+    expect(reviewPhase?.sanity).toEqual({ treeSha, ok: true });
   });
 });
 

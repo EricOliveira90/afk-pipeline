@@ -288,6 +288,33 @@ describe("renderPrompt", () => {
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
   });
 
+  it("B-04 requires the version-1 guardian findings block in both review prompts", () => {
+    for (const [name, args] of [
+      [
+        "architect-review",
+        { SPECS_DIR: "s", RELEVANT_FILES: "(files)" },
+      ],
+      [
+        "pm-review",
+        {
+          SPECS_DIR: "s",
+          RELEVANT_FILES: "(files)",
+          RUN_SCOPE: "(scope)",
+        },
+      ],
+    ] as const) {
+      const prompt = renderPrompt(name, args);
+      expect(prompt).toContain("## Structured findings (v1)");
+      expect(prompt).toContain('"version":1');
+      expect(prompt).toContain('"clearCondition"');
+      expect(prompt).toContain('"disposition":"OPEN"');
+      expect(prompt).toMatch(/empty `findings` array for SHIP/i);
+      expect(prompt).toMatch(
+        /ACCEPT-WITH-NOTES and\s+FIX-BEFORE-SHIP require at least one finding/i,
+      );
+    }
+  });
+
   it("B-04 QA-02 documents the fresh revisionCitation object contract", () => {
     const prompt = renderPrompt("evaluator-contract-revision", {
       SLICE_DIR: "d",

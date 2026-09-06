@@ -22,6 +22,7 @@ import {
   recordRetryDecision,
   clearSliceStateForDispatch,
   saveSliceStateIfUnchanged,
+  type PersistedGuardianReviewRound,
 } from "./run-state.js";
 
 const tempDirs: string[] = [];
@@ -323,7 +324,63 @@ describe("loadRunState + saveSliceState end-to-end", () => {
 
 /** ADR 0015: cheap re-entry cache for the post-merge review phase. */
 describe("review-phase persistence", () => {
-  it("round-trips reviewPhase through saveReviewPhase and loadRunState", () => {
+  const finding = {
+    stableId: "A-01",
+    currentId: "A-01",
+    title: "Durable evidence is missing",
+    class: "INTEGRITY",
+    clearCondition: "Persist the evidence.",
+    disposition: "OPEN" as const,
+  };
+  const invokedRound = (
+    round: number,
+    architectOutcome:
+      | "SHIP"
+      | "ACCEPT-WITH-NOTES"
+      | "FIX-BEFORE-SHIP"
+      | "UNPARSEABLE"
+      | "NEVER_RAN"
+      | "DIED_MID_RUN" = "SHIP",
+    pmOutcome:
+      | "SHIP"
+      | "ACCEPT-WITH-NOTES"
+      | "FIX-BEFORE-SHIP"
+      | "UNPARSEABLE"
+      | "NEVER_RAN"
+      | "DIED_MID_RUN" = "SHIP",
+  ): PersistedGuardianReviewRound => ({
+    round,
+    reviewedHeadSha: `reviewed-${round}`,
+    headSha: `head-${round}`,
+    architect: {
+      source: "INVOKED",
+      outcome: architectOutcome,
+      findings:
+        architectOutcome === "ACCEPT-WITH-NOTES" ||
+        architectOutcome === "FIX-BEFORE-SHIP"
+          ? [{ ...finding }]
+          : [],
+      findingsOriginRound: round,
+    },
+    pm: {
+      source: "INVOKED",
+      outcome: pmOutcome,
+      findings:
+        pmOutcome === "ACCEPT-WITH-NOTES" ||
+        pmOutcome === "FIX-BEFORE-SHIP"
+          ? [
+              {
+                ...finding,
+                stableId: "P-01",
+                currentId: "P-01",
+              },
+            ]
+          : [],
+      findingsOriginRound: round,
+    },
+  });
+
+  it("B-02 round-trips the canonical review round shape", () => {
     const repo = makeRepo();
     saveSliceState(repo, "demo", "70", {
       phase: "PASS",
@@ -333,6 +390,7 @@ describe("review-phase persistence", () => {
     saveReviewPhase(repo, "demo", {
       sanity: { treeSha: "t".repeat(40), ok: true },
       architect: { headSha: "h".repeat(40), verdict: "SHIP" },
+      rounds: [invokedRound(1, "FIX-BEFORE-SHIP", "DIED_MID_RUN")],
     });
 
     const loaded = loadRunState(repo, "demo");
@@ -341,6 +399,7 @@ describe("review-phase persistence", () => {
     expect(loaded.reviewPhase).toEqual({
       sanity: { treeSha: "t".repeat(40), ok: true },
       architect: { headSha: "h".repeat(40), verdict: "SHIP" },
+      rounds: [invokedRound(1, "FIX-BEFORE-SHIP", "DIED_MID_RUN")],
     });
 
     // Clearing removes the key entirely.
@@ -348,17 +407,46 @@ describe("review-phase persistence", () => {
     expect(loadRunState(repo, "demo").reviewPhase).toBeUndefined();
   });
 
-  it("saveSliceState preserves an existing reviewPhase", () => {
+  it("B-01 appends one completed round without replacing unfavorable history", () => {
+    const repo = makeRepo();
+    saveReviewPhase(repo, "demo", {
+      architect: { headSha: "head-1", verdict: "SHIP" },
+      rounds: [invokedRound(1)],
+    });
+    saveReviewPhase(repo, "demo", {
+      pm: { headSha: "head-2", verdict: "ACCEPT-WITH-NOTES" },
+      rounds: [invokedRound(2, "FIX-BEFORE-SHIP", "NEVER_RAN")],
+    });
+
+    expect(loadRunState(repo, "demo").reviewPhase).toEqual({
+      pm: { headSha: "head-2", verdict: "ACCEPT-WITH-NOTES" },
+      rounds: [
+        invokedRound(1),
+        invokedRound(2, "FIX-BEFORE-SHIP", "NEVER_RAN"),
+      ],
+    });
+  });
+
+  it("P-04 saveSliceState preserves the cache, ledger, and sibling optional fields", () => {
     const repo = makeRepo();
     saveReviewPhase(repo, "demo", {
       pm: { headSha: "abc123", verdict: "ACCEPT-WITH-NOTES" },
+      rounds: [invokedRound(1)],
     });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    state.qaConvergence = { retained: true };
+    writeFileSync(statePath, JSON.stringify(state), "utf-8");
     saveSliceState(repo, "demo", "71", {
       phase: "PASS",
       mergedToFeature: true,
     });
     expect(loadRunState(repo, "demo").reviewPhase).toEqual({
       pm: { headSha: "abc123", verdict: "ACCEPT-WITH-NOTES" },
+      rounds: [invokedRound(1)],
+    });
+    expect(loadRunState(repo, "demo").qaConvergence).toEqual({
+      retained: true,
     });
   });
 });
@@ -416,6 +504,214 @@ describe("sanitizeReviewPhase", () => {
     expect(state.reviewPhase).toEqual({
       architect: { headSha: "abc", verdict: "SHIP" },
     });
+  });
+
+  it("B-05 validates cache and ledger independently and drops an invalid ledger whole", () => {
+    const validFinding = {
+      stableId: "A-01",
+      currentId: "A-01",
+      title: "Finding",
+      class: "INTEGRITY",
+      clearCondition: "Clear it",
+      disposition: "OPEN",
+    };
+    const round1 = {
+      round: 1,
+      reviewedHeadSha: "base",
+      headSha: "review-commit",
+      architect: {
+        source: "INVOKED",
+        outcome: "ACCEPT-WITH-NOTES",
+        findings: [validFinding],
+        findingsOriginRound: 1,
+      },
+      pm: {
+        source: "INVOKED",
+        outcome: "SHIP",
+        findings: [],
+        findingsOriginRound: 1,
+      },
+    };
+    const valid = sanitizeReviewPhase({
+      architect: { headSha: "cache", verdict: "SHIP" },
+      rounds: [
+        round1,
+        {
+          round: 2,
+          reviewedHeadSha: "review-commit",
+          headSha: "review-commit",
+          architect: {
+            source: "CACHE",
+            outcome: "ACCEPT-WITH-NOTES",
+            findings: [validFinding],
+            findingsOriginRound: 1,
+          },
+          pm: {
+            source: "CACHE",
+            outcome: "SHIP",
+            findings: [],
+            findingsOriginRound: 1,
+          },
+        },
+        {
+          round: 3,
+          reviewedHeadSha: "unbacked-cache-head",
+          headSha: "unbacked-cache-head",
+          architect: {
+            source: "CACHE",
+            outcome: "SHIP",
+            findings: [],
+            findingsOriginRound: null,
+          },
+          pm: {
+            source: "CACHE",
+            outcome: "SHIP",
+            findings: [],
+            findingsOriginRound: null,
+          },
+        },
+      ],
+    });
+    expect(valid?.rounds).toHaveLength(3);
+    expect(valid?.rounds?.[2]?.architect).toMatchObject({
+      findings: [],
+      findingsOriginRound: null,
+    });
+
+    const malformed = structuredClone(valid!);
+    malformed.rounds![1]!.architect.findings[0]!.title = "not an exact copy";
+    expect(
+      sanitizeReviewPhase({
+        sanity: { treeSha: "tree", ok: true },
+        architect: { headSha: "cache", verdict: "SHIP" },
+        rounds: malformed.rounds,
+      }),
+    ).toEqual({
+      sanity: { treeSha: "tree", ok: true },
+      architect: { headSha: "cache", verdict: "SHIP" },
+    });
+
+    const invalidOrigin = structuredClone(valid!);
+    invalidOrigin.rounds![1]!.architect.findingsOriginRound = 2;
+    expect(
+      sanitizeReviewPhase({
+        architect: { headSha: "cache", verdict: "SHIP" },
+        rounds: invalidOrigin.rounds,
+      }),
+    ).toEqual({
+      architect: { headSha: "cache", verdict: "SHIP" },
+    });
+  });
+
+  it("B-05 QA-01 drops a ledger whose stable IDs repeat within a guardian record", () => {
+    const roundsWith = (findings: unknown[]) => [
+      {
+        round: 1,
+        reviewedHeadSha: "base",
+        headSha: "review-commit",
+        architect: {
+          source: "INVOKED",
+          outcome: "ACCEPT-WITH-NOTES",
+          findings,
+          findingsOriginRound: 1,
+        },
+        pm: {
+          source: "INVOKED",
+          outcome: "SHIP",
+          findings: [],
+          findingsOriginRound: 1,
+        },
+      },
+    ];
+    const currentAliasClaimant = {
+      stableId: "A-01",
+      currentId: "A-05",
+      title: "Current-alias claimant",
+      class: "PRODUCT",
+      clearCondition: "Clear the current alias.",
+      disposition: "REPEATED",
+    };
+    const stableAliasClaimant = {
+      currentId: "A-01",
+      title: "Stable-alias claimant",
+      class: "INTEGRITY",
+      clearCondition: "Clear the stable alias.",
+      disposition: "OPEN",
+    };
+
+    // Identity resolution is one-to-one within a round (ADR 0057 decision 1,
+    // amendment 2026-09-06): two findings sharing one stable identity are
+    // unrepresentable, so the ledger degrades to a full round-1 review.
+    expect(
+      sanitizeReviewPhase({
+        rounds: roundsWith([
+          currentAliasClaimant,
+          { ...stableAliasClaimant, stableId: "A-01" },
+        ]),
+      }),
+    ).toBeUndefined();
+
+    // The decided shape — the losing claimant carries a new stable identity
+    // and keeps its guardian-provided ID as currentId — stays durable.
+    const distinct = roundsWith([
+      currentAliasClaimant,
+      { ...stableAliasClaimant, stableId: "A-09" },
+    ]);
+    expect(sanitizeReviewPhase({ rounds: distinct })?.rounds).toEqual(distinct);
+  });
+
+  it("B-06 keeps the cache favorable-only while the ledger accepts all six terminal outcomes", () => {
+    const outcomes = [
+      "SHIP",
+      "ACCEPT-WITH-NOTES",
+      "FIX-BEFORE-SHIP",
+      "UNPARSEABLE",
+      "NEVER_RAN",
+      "DIED_MID_RUN",
+    ] as const;
+    const rounds = outcomes.map((outcome, index) => ({
+      round: index + 1,
+      reviewedHeadSha: `reviewed-${index + 1}`,
+      headSha: `head-${index + 1}`,
+      architect: {
+        source: "INVOKED" as const,
+        outcome,
+        findings:
+          outcome === "ACCEPT-WITH-NOTES" ||
+          outcome === "FIX-BEFORE-SHIP"
+            ? [
+                {
+                  stableId: `A-${index + 1}`,
+                  currentId: `A-${index + 1}`,
+                  title: "Finding",
+                  class: "INTEGRITY",
+                  clearCondition: "Clear it",
+                  disposition: "OPEN" as const,
+                },
+              ]
+            : [],
+        findingsOriginRound: index + 1,
+      },
+      pm: {
+        source: "INVOKED" as const,
+        outcome: "SHIP" as const,
+        findings: [],
+        findingsOriginRound: index + 1,
+      },
+    }));
+    const sanitized = sanitizeReviewPhase({
+      architect: { headSha: "bad", verdict: "FIX-BEFORE-SHIP" },
+      pm: { headSha: "good", verdict: "ACCEPT-WITH-NOTES" },
+      rounds,
+    });
+    expect(sanitized?.architect).toBeUndefined();
+    expect(sanitized?.pm).toEqual({
+      headSha: "good",
+      verdict: "ACCEPT-WITH-NOTES",
+    });
+    expect(sanitized?.rounds?.map((round) => round.architect.outcome)).toEqual(
+      outcomes,
+    );
   });
 });
 
