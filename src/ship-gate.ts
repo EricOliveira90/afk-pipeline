@@ -783,11 +783,17 @@ export async function runShipGate(
   });
   let roundPersistenceAttempted = false;
   let roundHeadSha = headShaBefore;
+  // The cache payload of the attempt that threw. The catch-path retry reuses
+  // it: `persistReviewPhase` writes the whole phase, so retrying with an empty
+  // payload would replace valid sanity and favorable guardian entries with
+  // nothing and force the next run to redo work it had already cached (QA-04).
+  let attemptedReviewPhase: PersistedReviewPhase = {};
   const persistCompletedRound = (
     headSha: string,
-    reviewPhase: PersistedReviewPhase = {},
+    reviewPhase: PersistedReviewPhase = attemptedReviewPhase,
   ): void => {
     if (roundPersistenceAttempted) return;
+    attemptedReviewPhase = reviewPhase;
     persistReviewPhase(repoRoot, runSlug, {
       ...reviewPhase,
       rounds: [completedRound(headSha)],

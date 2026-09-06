@@ -1036,6 +1036,45 @@ describe("runShipGate", () => {
       },
     });
   });
+
+  it("B-01 QA-04 keeps the reusable caches when the round write is retried", async () => {
+    const repo = makeRepo();
+    const slug = "round-write-retry-cache";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const args = makeArgs(repo, slug, fixture.journal, invoke, runCommand);
+    let writeAttempts = 0;
+    args.saveReviewPhase = (repoRoot, runSlug, reviewPhase) => {
+      writeAttempts++;
+      if (writeAttempts === 1) {
+        throw new Error("injected round-state write failure");
+      }
+      saveReviewPhase(repoRoot, runSlug, reviewPhase);
+    };
+
+    await expect(runShipGate(args)).rejects.toThrow(
+      "injected round-state write failure",
+    );
+
+    expect(writeAttempts).toBe(2);
+    const reviewPhase = loadRunState(repo, slug).reviewPhase;
+    expect(reviewPhase?.rounds).toHaveLength(1);
+    // The retry must carry the same cache payload the failed write carried:
+    // a transient failure that erased these entries would force the next run
+    // to re-run the sanity gate and both favorable guardians for nothing.
+    const headSha = git(repo, ["rev-parse", "HEAD"]);
+    expect(reviewPhase?.architect).toEqual({ headSha, verdict: "SHIP" });
+    expect(reviewPhase?.pm).toEqual({ headSha, verdict: "SHIP" });
+    expect(reviewPhase?.sanity).toEqual({
+      treeSha: git(repo, ["rev-parse", "HEAD^{tree}"]),
+      ok: true,
+    });
+  });
 });
 
 describe("detectReviewWorktreeDrift", () => {

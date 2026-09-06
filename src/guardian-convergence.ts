@@ -39,19 +39,44 @@ export function advanceGuardianFindingLineage(
   findings: readonly GuardianReviewFinding[],
 ): PersistedGuardianFinding[] {
   const prior = priorFindings(rounds, guardian);
-  return findings.map((finding) => {
+  // Matching is one-to-one within a round: a prior stable identity can be
+  // claimed by exactly one current finding. Two findings sharing a fingerprint
+  // used to claim the same prior stableId, and `sanitizeReviewPhase` drops a
+  // whole ledger whose stable IDs repeat — the round became non-durable (QA-05).
+  const claimed = new Set<string>();
+  const resolved = new Array<string | null>(findings.length).fill(null);
+  // ID matches resolve first, across all findings, so the ID-first precedence
+  // holds even when another finding's fingerprint points at the same entry.
+  findings.forEach((finding, index) => {
     const idMatch = prior.find(
       (entry) =>
         entry.currentId === finding.id || entry.stableId === finding.id,
     );
-    const fingerprintMatch =
-      idMatch ??
-      prior.find(
-        (entry) =>
-          normalizedFingerprint(entry) === normalizedFingerprint(finding),
-      );
+    if (idMatch && !claimed.has(idMatch.stableId)) {
+      claimed.add(idMatch.stableId);
+      resolved[index] = idMatch.stableId;
+    }
+  });
+  findings.forEach((finding, index) => {
+    if (resolved[index] !== null) return;
+    const fingerprintMatch = prior.find(
+      (entry) =>
+        !claimed.has(entry.stableId) &&
+        normalizedFingerprint(entry) === normalizedFingerprint(finding),
+    );
+    if (fingerprintMatch) {
+      claimed.add(fingerprintMatch.stableId);
+      resolved[index] = fingerprintMatch.stableId;
+    }
+  });
+  return findings.map((finding, index) => {
+    // No match, or every candidate already claimed: the finding keeps its own
+    // ID as a new stable identity. It cannot collide with a claimed one — a
+    // finding whose ID equals a prior stable identity resolves in the ID pass.
+    const stableId = resolved[index] ?? finding.id;
+    claimed.add(stableId);
     return {
-      stableId: fingerprintMatch?.stableId ?? finding.id,
+      stableId,
       currentId: finding.id,
       title: finding.title,
       class: finding.class,
