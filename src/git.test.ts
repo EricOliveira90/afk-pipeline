@@ -13,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,6 +47,7 @@ import {
   preserveRecoveryTree,
   resolveTree,
   removeWorktree,
+  formatWorktreeSurvivorWarning,
   type WorktreeBusyError,
 } from "./git.js";
 import {
@@ -349,6 +351,89 @@ describe("git.removeWorktree — regression for Windows pnpm leftovers", () => {
     git(repoDir, ["worktree", "add", wt, "feature/result"]);
     const result = await removeWorktree(repoDir, wt);
     expect(result.removed).toBe(true);
+  });
+
+  // Issue #166 / ADR 0058: a stalled removal triggers exactly one sweep
+  // of known detached sidecars, and the sweep outcome rides the result.
+  // Plain unregistered directories: `git worktree remove` falls through,
+  // so the rm retry loop (the seam under test) does the actual delete.
+  it("sweeps known sidecars once when an rm attempt stalls, then retries", async () => {
+    const wt = join(repoDir, "wt-sidecar");
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, "held.txt"), "x");
+
+    let rmCalls = 0;
+    let sweeps = 0;
+    const result = await removeWorktree(repoDir, wt, {
+      rm: (path, opts) => {
+        rmCalls++;
+        if (rmCalls === 1) {
+          const err = new Error("EBUSY: resource busy") as NodeJS.ErrnoException;
+          err.code = "EBUSY";
+          throw err;
+        }
+        rmSync(path, opts);
+      },
+      sweepSidecars: async () => {
+        sweeps++;
+        return {
+          scanned: true,
+          matched: [{ pid: 4196, name: "codex.exe" }],
+          terminated: [4196],
+          survivors: [],
+        };
+      },
+    });
+
+    expect(result.removed).toBe(true);
+    expect(sweeps).toBe(1);
+    expect(result.sidecars).toMatchObject({ terminated: [4196] });
+  });
+
+  it("never sweeps when the first rm attempt succeeds", async () => {
+    const wt = join(repoDir, "wt-nosweep");
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, "f.txt"), "x");
+
+    let sweeps = 0;
+    const result = await removeWorktree(repoDir, wt, {
+      sweepSidecars: async () => {
+        sweeps++;
+        return { scanned: true, matched: [], terminated: [], survivors: [] };
+      },
+    });
+    expect(result.removed).toBe(true);
+    expect(sweeps).toBe(0);
+    expect(result.sidecars).toBeUndefined();
+  });
+
+  it("carries the sweep evidence into the survivor warning on final failure", async () => {
+    const wt = join(repoDir, "wt-stillheld");
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, "held.txt"), "x");
+
+    const result = await removeWorktree(repoDir, wt, {
+      timeoutMs: 200,
+      rm: () => {
+        const err = new Error("EBUSY: resource busy") as NodeJS.ErrnoException;
+        err.code = "EBUSY";
+        throw err;
+      },
+      sweepSidecars: async () => ({
+        scanned: true,
+        matched: [{ pid: 4196, name: "codex.exe" }],
+        terminated: [],
+        survivors: [4196],
+      }),
+    });
+
+    expect(result.removed).toBe(false);
+    const warning = formatWorktreeSurvivorWarning("review worktree", wt, result);
+    expect(warning).toContain("codex.exe (PID 4196)");
+    expect(warning).toContain("survived termination");
+
+    // Leave the shared repo clean for the other cases.
+    await removeWorktree(repoDir, wt);
   });
 });
 

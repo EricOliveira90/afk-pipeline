@@ -6,6 +6,11 @@ import {
   quiesceWorktree,
   type WorktreeQuiesceReport,
 } from "./worktree-processes.js";
+import {
+  formatSidecarDetail,
+  sweepDetachedSidecars,
+  type SidecarSweepReport,
+} from "./worktree-sidecars.js";
 
 const git = (args: string[], opts?: ExecFileSyncOptions): string =>
   (execFileSync("git", args, { encoding: "utf-8", ...opts }) as string).trim();
@@ -215,6 +220,12 @@ export interface RemoveWorktreeResult {
    * only when quiescing was skipped entirely.
    */
   processes?: WorktreeQuiesceReport;
+  /**
+   * Outcome of the known-sidecar sweep (issue #166, ADR 0058). Present
+   * only when an rm attempt failed with a handle-shaped error, which is
+   * what triggers the sweep.
+   */
+  sidecars?: SidecarSweepReport;
 }
 
 export interface RemoveWorktreeOptions {
@@ -242,6 +253,10 @@ export interface RemoveWorktreeOptions {
   gitAdminMutex?: <T>(fn: () => Promise<T>) => Promise<T>;
   /** Injectable for tests. */
   quiesce?: typeof quiesceWorktree;
+  /** Injectable for tests. */
+  sweepSidecars?: typeof sweepDetachedSidecars;
+  /** Injectable for tests. */
+  rm?: typeof rmSync;
   /** Injectable for tests. */
   now?: () => number;
 }
@@ -305,18 +320,32 @@ export async function removeWorktree(
   // rmSync (a pending Windows delete, a junction, a process recreating
   // entries under us) is retried on the same budget as a thrown EBUSY
   // rather than spun on forever.
+  //
+  // The first surviving attempt additionally triggers a one-time sweep
+  // of known detached sidecars (issue #166, ADR 0058): the codex OTel
+  // supervisor pair holds worktrees via its cwd, which no listing can
+  // attribute to a directory, so it is identified by name and killed.
+  // Running the sweep only once a removal has actually stalled, not
+  // preemptively, keeps the common case free — and leaves nearly the
+  // whole removal budget for the retries that follow a successful sweep.
+  const rm = options.rm ?? rmSync;
+  const sweep = options.sweepSidecars ?? sweepDetachedSidecars;
   const deadline = now() + timeoutMs;
   let attempts = 0;
   let lastError: string | undefined;
   let fatal = false;
+  let sidecars: SidecarSweepReport | undefined;
   while (existsSync(worktreeDir)) {
     if (attempts > 0) {
       if (fatal || signal?.aborted || now() >= deadline) break;
+      if (sidecars === undefined) {
+        sidecars = await sweep();
+      }
       await sleep(Math.min(50 * attempts, 400), signal);
     }
     attempts++;
     try {
-      rmSync(worktreeDir, { recursive: true, force: true });
+      rm(worktreeDir, { recursive: true, force: true });
       lastError = undefined;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
@@ -340,12 +369,26 @@ export async function removeWorktree(
     removed,
     attempts,
     processes,
+    sidecars,
     lastError: removed
       ? undefined
       : (lastError ??
         "rmSync reported success but the directory is still present " +
           "(pending delete, junction, or a live process recreating entries)"),
   };
+}
+
+/**
+ * The shared evidence clause both prose sites below compose: what became
+ * of AFK's own processes (quiesce) and of the known detached sidecars
+ * (sweep). Empty string when there is nothing to say.
+ */
+function formatRemovalEvidence(result: RemoveWorktreeResult): string {
+  const parts = [
+    result.processes ? formatQuiesceDetail(result.processes) : undefined,
+    result.sidecars ? formatSidecarDetail(result.sidecars) : undefined,
+  ].filter((part): part is string => part !== undefined);
+  return parts.length > 0 ? `; ${parts.join("; ")}` : "";
 }
 
 /**
@@ -358,13 +401,10 @@ export function formatWorktreeSurvivorWarning(
   worktreeDir: string,
   result: RemoveWorktreeResult,
 ): string {
-  const detail = result.processes
-    ? formatQuiesceDetail(result.processes)
-    : undefined;
   return (
     `${label} cleanup incomplete: ${worktreeDir} still on disk after ` +
     `${result.attempts} removal attempt(s)` +
-    (detail ? `; ${detail}` : "") +
+    formatRemovalEvidence(result) +
     (result.lastError ? ` (${result.lastError})` : "") +
     ` — something is still holding handles inside it; the next run will ` +
     `refuse the stale directory (ADR 0010) until it is removed`
@@ -387,13 +427,10 @@ export class WorktreeBusyError extends Error {
     readonly worktreeDir: string,
     readonly removal: RemoveWorktreeResult,
   ) {
-    const detail = removal.processes
-      ? formatQuiesceDetail(removal.processes)
-      : undefined;
     super(
       `Cannot refresh worktree for ${branch}: ${worktreeDir} is still ` +
         `present after ${removal.attempts} removal attempt(s)` +
-        (detail ? `; ${detail}` : "") +
+        formatRemovalEvidence(removal) +
         (removal.lastError ? ` (${removal.lastError})` : "") +
         `. A live process is holding handles inside it — the branch and ` +
         `its commits were left intact; close the process (or let it exit) ` +
