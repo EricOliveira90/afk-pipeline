@@ -2,78 +2,77 @@
 
 **Verdict:** FIX-BEFORE-SHIP
 
-Reviewed `main...HEAD` at `20986047890ac39f1717112888e01f64c91197e6`
-against base `817d663b480145ef16a02d581a67a15d4ef2ec6f`, the PRD, all slice
+Reviewed `main...HEAD` at
+`37c5fef05e9bbef6b239677a8e889ab1a2ca15fc` against base
+`817d663b480145ef16a02d581a67a15d4ef2ec6f`, the PRD, all available slice
 contracts and handoffs, `ARCHITECTURE.md`, and the governing ADRs. I accepted
 the recorded pre-ship result and did not rerun the full suite.
 
 ## FIX-BEFORE-SHIP
 
-### A1 — Candidate-evaluator reading-time evidence is dropped at the invocation seam
+### A1 — Run-summary token totals include unassembled evaluator invocations
 
-- **Convention:** ADR 0046, “Amendment (2026-09-05): per-invocation
-  non-command time,” requires `nonCommandTimeMs` as per-invocation durable
-  evidence for the context-envelope ROI analysis. It also says the
-  orchestrator invocation seam records the measurement. ADR 0030 assigns the
-  shared invocation runtime the invocation lifecycle and provider-returned
-  statistics.
-- **File and location:** `src/orchestrator.ts`, `makeSliceContext`'s `invoke`
-  wrapper (lines 892–978), especially the `opts.contextEnvelope !== undefined`
-  guard at lines 959–976; `runQAStage`'s `invokeEvaluator` path (lines
-  4086–4125); and `src/logger.ts`, `addInvocationStats` (lines 124–135).
-- **Evidence gathered:** I read the provider/runtime/statistics path and ran
-  `rg -n "contextEnvelope|invocation-completed|nonCommandTimeMs|invokeAgent"`
-  across the provider, runtime, orchestrator, event, and logger modules. I
-  inspected `git blame` and `git show 0060ac6` for the introducing hunk, plus
-  `git show 29f6946` for the later event split. Claude and Codex can return
-  `nonCommandTimeMs`; `addInvocationStats` retains only cost and tool calls;
-  the durable `invocation-completed` event is emitted only when
-  `contextEnvelope` exists. Candidate QA invokes the same wrapper without
-  that metadata because its envelope path is deferred.
-- **Concrete failure path:** a Claude- or Codex-backed candidate evaluator
-  completes successfully and returns measured `nonCommandTimeMs`. The wrapper
-  drops it from in-memory totals, skips `invocation-completed`, and no other
-  reader persists it. The candidate evaluator is the role whose reading-time
-  change the roadmap's ROI rider is meant to compare, so the resulting
-  `events.jsonl` cannot answer the required question. No retry or later phase
-  reconstructs the lost measurement.
-- **Attribution:** commit `0060ac61d3363c0af430d84070cf8a9cf190b125`
-  introduced the metric and conditioned its durable write on
-  `contextEnvelope`; commit `29f6946c` moved the post-return facts to
-  `invocation-completed` while retaining that guard. This behavior is absent
-  from `main`.
-- **Required correction:** decouple per-invocation completion telemetry from
-  PRD-3 envelope evidence. Persist measured `nonCommandTimeMs` for candidate
-  QA as well as the four assembled roles, with enough role/slice/round/attempt
-  identity to correlate it, and add a focused regression for a successful
-  evaluator-QA invocation.
+- **Convention and contract:** ADR 0017 makes `run-summary.md` a stable
+  consumer contract. ADR 0046 defines candidate-QA/shared-preview
+  `invocation-completed` records as per-invocation ROI evidence. Slice 04
+  contract B-06 defines the summary columns as totals for the scoped context
+  envelopes: assembled prompt bytes and their exposed provider token counts.
+- **File and location:** `src/logger.ts`, `Logger.writeSummary`, lines
+  237-260; `src/orchestrator.ts`, `makeSliceContext` lines 996-1019 and
+  `runQAStage` lines 4132-4144; `src/run-events.ts`, the
+  `invocation-completed` payload at lines 107-139.
+- **Evidence gathered:** I read the event producer and summary consumer,
+  inspected `git show 37c5fef` and `git blame` for the affected hunks, and
+  read the B-06 logger test. `runQAStage` now emits successful
+  `evaluator-qa`/`evaluator-uat` completion events carrying provider token
+  counts, while `Logger.writeSummary` adds token counts from every
+  `invocation-completed` event but adds prompt bytes only from
+  `prompt-assembly`. The existing logger test creates only generator
+  completions, so the passed suite does not exercise the widened event
+  population. `git diff --check main...HEAD` passed.
+- **Concrete failure path:** a Claude or Codex candidate evaluator returns
+  token usage. The wrapper journals that usage without a matching envelope
+  assembly, and the summary adds it to the slice and run “Provider tokens”
+  totals. The adjacent “Prompt bytes” total still covers only explorer,
+  planner, contract evaluator, and generator envelopes. The durable summary
+  therefore reports two totals over different invocation populations and
+  overstates B-06 envelope token usage. No later phase corrects the file.
+- **Attribution:** commit `37c5fef` widened `invocation-completed` to
+  evaluator roles and began emitting those events from `runQAStage`.
+  `Logger.writeSummary` already consumed every completion event, so this hunk
+  materially changed the population it aggregates. The behavior is absent
+  from the base branch.
+- **Required correction:** keep evaluator completion events in
+  `events.jsonl` for ADR 0046, but exclude unassembled evaluator roles from
+  B-06 envelope-summary totals (or require a matching scoped
+  `prompt-assembly` identity). Add a focused logger test with evaluator token
+  counts proving they do not enter envelope totals.
 
-## Standards notes
+## Standards
 
-- `validateExplorerEvidenceMap` is still an inline deterministic check in
-  `src/orchestrator.ts:2766–2825`, rather than a declared gate with evidence.
-  This conflicts with `ARCHITECTURE.md`, “Seams — GateDeclaration” and
-  “Placement rules.” It fails safely before planner dispatch, so I record it
-  as debt rather than a second blocker.
-- `src/orchestrator.ts` grows from 6,193 to 6,563 lines and retains generator
-  repair-situation construction and envelope routing. The extractions into
-  `context-envelope.ts`, `contract-prompt-orchestration.ts`, and gate modules
-  help, but the net growth still conflicts with `ARCHITECTURE.md`, “Hubs — do
-  not grow these; extract instead.”
-- `InvokeOptions.contextEnvelope` is orchestration-owned evidence explicitly
-  ignored by providers. This leaks PRD-specific metadata through the
-  provider seam defined by ADR 0002 and ADR 0030, and is the coupling that
-  causes A1.
-- ADR 0046 says `nonCommandTimeMs` is copied onto `prompt-assembly`; the code
-  correctly learns it only after return and writes `invocation-completed`.
-  Amend the ADR to match the causal event model.
+- `src/orchestrator.ts` grows from 6,193 to 6,617 lines and still owns
+  envelope telemetry, gate classification, QA authority checks, and repair
+  projection. It also imports `candidate-gate-policy.ts`, which
+  `ARCHITECTURE.md` lists as a Gates internal. This conflicts with
+  `ARCHITECTURE.md`, “Hubs — do not grow these; extract instead” and the
+  Modules public/internal boundary. The new checks fail closed before invalid
+  state ships, so this is structural debt rather than another blocker.
+- `InvokeOptions.contextEnvelope` in `src/agent-provider.ts` is
+  orchestration-owned evidence that every provider ignores. ADR 0002 and ADR
+  0030 define providers as command/output adapters. Move this metadata to the
+  orchestrator invocation wrapper when that seam is next revised.
+- `promptAssemblyContext` retains an unused `_journal: unknown` parameter,
+  and `recordPromptAssembly` now packages evidence rather than recording it.
+  These names preserve an obsolete ownership model and should be cleaned up.
 
-## Spec notes
+## Spec
 
-- `CANDIDATE_EVALUATOR_CONTEXT_MANIFEST` is manifest-only while the live
-  evaluator-QA prompt remains outside envelope assembly. Its declared omitted
-  handoff classes therefore do not govern the current prompt, which still
-  reads handoffs. The live handoff behavior predates this feature and the PRD
-  defers the candidate-evaluator prompt redesign, so this is not attributed as
-  a ship blocker; the manifest should not be treated as authoritative until
-  the deferred assembly path consumes it.
+- The branch includes the early PRD 4 gate-sequencing change
+  (pre-QA checks → candidate QA → full suite) alongside PRD 3. ADR 0012 and
+  the parent plan now document that decision, so it is not an undocumented
+  authority change, but it substantially enlarges this feature branch and is
+  the main source of the orchestrator-hub growth noted above.
+- Apart from A1, the four scoped roles use versioned, fail-closed,
+  provider-independent envelope assembly, preserve the declared evidence
+  identities, and keep candidate-evaluator prompt assembly deferred as the
+  PRD requires.
