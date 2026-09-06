@@ -6,11 +6,19 @@
 
 | Slice | GH Issue | Title | Type | Blocked by | User stories covered |
 |-------|----------|-------|------|------------|----------------------|
-| 01 | #170 | Every review round is recorded, blocked ones included | AFK | — | US-1 |
-| 02 | #171 | Architect rounds 2+ verify the fix diff against prior findings' clear conditions | AFK | #170 | US-2, US-3 |
-| 03 | #172 | Blocking findings need a reachable trigger; new findings in later rounds report-but-don't-block | AFK | — | US-4 |
-| 04 | #173 | Hard round cap with recorded cap exit; verify symmetric override | AFK | #170 | US-5, US-6 |
-| 05 | #174 | A note that ships unfixed is filed exactly once | AFK | #173 | US-7 |
+| 01 | #170 | Round ledger | AFK | — | US-1 |
+| 02 | #171 | Delta-scoped rounds 2+ | AFK | #170 | US-2, US-3 |
+| 03 | #172 | Blocking rubric floor | AFK | — | US-4 |
+| 04 | #173 | Round cap and override exit | AFK | #170 | US-5, US-6 |
+| 05 | #174 | Notes filed once | AFK | #173 | US-7 |
+
+Titles are deliberately short: the slice artifact directory and branch names
+derive from `slugify(title)`, and the first launch (2026-09-06, run
+`run-20260906-014739`) died on Windows' 260-char path limit — `git add`
+failed with "Filename too long" on slice 03's `acceptance-manifest.json`
+under the slice worktree. The full behavior statements live in the GH issue
+titles and bodies, which the pipeline reads; only the slug source is
+abbreviated.
 
 ## Expected wave structure
 
