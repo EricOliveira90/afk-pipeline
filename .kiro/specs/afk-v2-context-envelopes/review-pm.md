@@ -4,58 +4,58 @@
 
 ## Scope
 
-Reviewed HEAD `37c5fef` against the PRD, parent role decisions and plan,
-the four selected issue bodies, and the slice artifacts for 01 (#83), 02
-(#90), 03 (#95), and 04 (#99). No manifest slice was skipped. I accepted
-the already-passed pre-ship sanity gate and did not rerun the full suite.
+Reviewed HEAD `2e3726e` against the PRD, issue bodies, available slice
+contracts and manifests, and implementations for slices 01 (#83), 02 (#90),
+03 (#95), and 04 (#99). No manifest slice was skipped. I accepted the
+already-passed pre-ship sanity gate and did not rerun the full suite.
 
 ## Requirement verification
 
 | Requirement area | Result | Product outcome |
 |---|---|---|
-| Slice 01 — Generator focused envelope | Delivered | Initial and repair dispatches use the versioned, fail-closed envelope path. The generator receives the projected locked contract, manifest behaviors, inline file scope, selected patterns/harness, verbatim verification command, and only the current open findings and failed gates at the end. Resume and STUCK situations use the repair template as data blocks; retired resume templates and prompt rituals are absent. |
-| Slice 02 — Explorer evidence map | Delivered | The explorer prompt carries the FACT/INFERENCE/UNKNOWN rule, exact ordered four-section task, optional ADR-title index and `ARCHITECTURE.md`, and a fail-closed budget. The orchestrator rejects malformed section structure before planning. Generator and evaluator consumers receive the promised section projections rather than per-item role tags. |
-| Slice 03 — Planner and contract evaluator | Delivered | Planner and contract evaluator each have focused initial and revision templates. Planner initial receives all explorer evidence plus repository context; revisions receive current contract state, open findings, control context, gates, migration reservation, and repository context without resolved history. Evaluators receive the manifest, gate catalog, selected behavior/preservation evidence and unknowns, and revision-scoped judgment rules. |
-| Slice 04 — Parity and evidence completeness | Delivered | Explorer, planner, contract evaluator, and generator dispatch through provider-independent versioned manifests. Assembly validates complete manifest contracts, declared artifact classes, logical and rendered order, deterministic output, stable IDs, and fail-closed budgets. Events record exact prompt bytes, ordered classes/IDs, omissions, manifest version, and exposed token names; summaries aggregate prompt and token totals. |
-| PRD-carried plan item 13 — reading-time evidence | Delivered | Claude and Codex derive `nonCommandTimeMs` only when command time is attributable. Successful assembled-role, candidate-QA, and shared-preview evaluator invocations now persist it in `invocation-completed` events with issue, slice, round, role, and evaluator attempt identity; unmeasured invocations omit the field rather than inventing zero. |
-| Candidate-evaluator manifest entry | Delivered within scope | A complete versioned candidate-evaluator role manifest declares the change-summary-first order, accepted inputs, reviewer handoff exclusions, output, stop/escalation conditions, and budget. Its prompt assembly remains correctly deferred to PRD 4. |
+| Slice 01 — Generator focused envelope | Delivered | Initial and repair dispatches use a versioned, fail-closed envelope. The generator receives the projected locked contract, acceptance manifest, inline file scope, selected patterns/harness, verbatim verification command, and the current computed failure set. Resumes are repair-situation data, resolved findings and passing logs are excluded, retired resume templates are absent, and assembly evidence is journaled immediately before every dispatch. |
+| Slice 02 — Explorer evidence map | Delivered | The explorer receives the FACT/INFERENCE/UNKNOWN rule, exact ordered four-section task, ADR-title index and optional `ARCHITECTURE.md`, with no persona or per-item role tags. Malformed output is rejected before planning. The generator receives only `Patterns and test harness`; contract evaluators receive behavior/preservation evidence and unknowns. Missing repository-context inputs degrade cleanly. |
+| Slice 03 — Planner and contract evaluator | Delivered | Planner and contract evaluator each have focused initial and revision envelopes. Planner initial receives the complete explorer map, gates, migration reservation, ADR index, and architecture context; revisions receive only the current contract pair, open findings, control situation, gates, migration reservation, and repository context. Evaluators receive the contract/manifest, gate catalog, selected explorer evidence, and revision-scoped judgment inputs. |
+| Slice 04 — Parity and evidence completeness | Delivered | Explorer, planner, contract evaluator, and generator all dispatch through provider-independent versioned manifests. Assembly rejects incomplete manifests, undeclared or unordered context classes, rendered-order mismatches, and over-budget prompts before dispatch. Repeated assembly is deterministic; stub-provider parity preserves behavior, gate, finding, and checkpoint IDs. |
+| Invocation and run evidence | Delivered | Every scoped dispatch records prompt bytes, ordered artifact classes and IDs, omitted classes, and manifest version; successful completions add only provider-exposed token names. Slice/run summaries aggregate the same four assembled-role population. HEAD's round-7 fix correctly excludes unassembled evaluator token counts while retaining their separate completion evidence. |
+| Fresh context and prompt reduction | Delivered | Prior conversations, other-role conversations, resolved findings, passing raw logs, sibling handoffs, and full ADR bodies are excluded where promised. Generator handoff is reduced to what shipped, decisions, and gotchas, with verification status left to gates. |
+| PRD-carried reading-time evidence | Delivered | Measured `nonCommandTimeMs` is durable for assembled roles, candidate QA, and shared-preview evaluation, and remains absent when a provider cannot measure it. It does not affect control flow. |
+| Candidate-evaluator manifest entry | Delivered within scope | A complete versioned candidate-evaluator manifest records its objective, boundaries, accepted inputs, output, order, omissions, and budget. Live candidate-evaluator envelope assembly remains deferred as planned. |
 
 ## Notes
 
-1. Project-specific stricter envelope budgets are implemented as internal
-   `PipelineConfig` fields, but the shipped CLI runtime options and
-   `<prd-dir>/afk.json` do not expose them. The selected slices still deliver
-   fixed versioned budgets and fail closed, so the safety outcome ships; a
-   future configuration surface would make the PRD's “project policy may set
-   stricter budgets” decision available to normal CLI users without a custom
-   caller.
+1. Stricter role budgets are configurable through internal `PipelineConfig`
+   fields, but the shipped CLI and `<prd-dir>/afk.json` do not expose them.
+   Fixed versioned budgets still fail closed, so the safety outcome ships;
+   exposing the stricter project-policy setting would complete the normal
+   operator-facing configuration story.
 
 ## Evidence reviewed
 
-- Read the PRD, `issues.md`, all current slice artifacts, the retained slice
-  02 contract/manifest, all four GitHub issue bodies, parent context-envelope
-  decisions, and the carried plan items.
-- Read all scoped prompt templates, role manifests, generic and role-specific
-  assemblers, section projections, negotiation routes, generator initial and
-  repair routes, provider invocation/completion evidence, event schema, and
-  summary aggregation.
-- Verified the previous reading-time blocker is closed in
-  `src/orchestrator.ts:makeSliceContext` and `runQAStage`: evaluator calls now
-  supply `completionEvidence`, successful results emit
-  `invocation-completed`, and the field remains absent when not measured.
-- Verified focused tests cover exact prompt/evidence order, section
-  selection, exclusions, deterministic assembly, one-byte-over budget
-  failures, provider-stub parity, stable IDs, summary totals, provider prompt
-  delivery, and measured/unmeasured reading-time evidence.
-- `git diff --check main...HEAD` passed. This review worktree has no installed
-  `node_modules`, so the narrow Vitest commands were unavailable; I did not
-  install dependencies or rerun the already-passed full gate.
+- Read the PRD, slice index, all current slice artifacts, the retained slice
+  02 and slice 04 contracts/manifests, all four GitHub issue bodies, and the
+  governing role/context decisions.
+- Read all seven scoped prompt templates, the role manifests, generic and
+  role-specific assemblers, section validators/projections, orchestration
+  dispatch paths, failure-set construction, run-event schema, provider token
+  handling, and summary aggregation.
+- Verified from `src/orchestrator.ts:makeSliceContext` that prompt-assembly
+  evidence is emitted inside the retry callback immediately before provider
+  dispatch, and completion evidence is emitted after successful return.
+- Verified the generator failure set is built from unresolved finding IDs,
+  clear conditions and artifact references plus failed required gates, and
+  that post-QA gate repair replaces resolved findings with gates-only evidence.
+- Ran the focused envelope, prompt, logger, and provider adapter suites:
+  7 files and 134 tests passed. `git diff --check integration/pre-prd3...HEAD`
+  also passed.
 
 ## Out-of-scope PRD gaps
 
-- The live Kiro/Claude Code/Codex parity matrix remains explicitly deferred;
-  slice 04 delivers provider-independent assembly and named-stub parity.
-- Candidate/final evaluator prompt switching, cleaner, hardener, remediator,
-  and guardian envelopes remain assigned to later PRDs.
+- The live Kiro/Claude Code/Codex parity matrix remains deferred; slice 04
+  delivers provider-independent assembly and named-stub parity.
+- Candidate/final evaluator prompt switching and reviewer-handoff exclusion
+  remain deferred. Candidate QA still uses its direct prompt path.
+- Cleaner, hardener, remediator, and guardian envelopes remain assigned to
+  later PRDs.
 - Acceptance/scope-gate execution and provider model, authentication, or
   streaming redesign remain out of scope.

@@ -1,78 +1,72 @@
 # Architecture Guardian Review
 
-**Verdict:** FIX-BEFORE-SHIP
+**Verdict:** ACCEPT-WITH-NOTES
 
 Reviewed `main...HEAD` at
-`37c5fef05e9bbef6b239677a8e889ab1a2ca15fc` against base
-`817d663b480145ef16a02d581a67a15d4ef2ec6f`, the PRD, all available slice
-contracts and handoffs, `ARCHITECTURE.md`, and the governing ADRs. I accepted
-the recorded pre-ship result and did not rerun the full suite.
+`2e3726e7446315593780103e9793d83b9e0e123a` against base
+`817d663b480145ef16a02d581a67a15d4ef2ec6f`, the PRD, every available
+slice artifact, `ARCHITECTURE.md`, and the governing ADRs. The recorded
+pre-ship gate already passed this exact tree, so I did not rerun the full
+suite.
 
-## FIX-BEFORE-SHIP
+No changed control flow establishes a FIX-BEFORE-SHIP failure path. The
+round-7 correction in `src/logger.ts` restores one population for the B-06
+summary columns: prompt bytes and provider tokens now cover only explorer,
+planner, contract-evaluator, and generator invocations. I inspected commit
+`2e3726e`, traced every production invocation of those roles, and ran
+`pnpm vitest run src/logger.test.ts` (23 tests passed). `git diff --check
+main...HEAD` also passed.
 
-### A1 — Run-summary token totals include unassembled evaluator invocations
+## Notes
 
-- **Convention and contract:** ADR 0017 makes `run-summary.md` a stable
-  consumer contract. ADR 0046 defines candidate-QA/shared-preview
-  `invocation-completed` records as per-invocation ROI evidence. Slice 04
-  contract B-06 defines the summary columns as totals for the scoped context
-  envelopes: assembled prompt bytes and their exposed provider token counts.
-- **File and location:** `src/logger.ts`, `Logger.writeSummary`, lines
-  237-260; `src/orchestrator.ts`, `makeSliceContext` lines 996-1019 and
-  `runQAStage` lines 4132-4144; `src/run-events.ts`, the
-  `invocation-completed` payload at lines 107-139.
-- **Evidence gathered:** I read the event producer and summary consumer,
-  inspected `git show 37c5fef` and `git blame` for the affected hunks, and
-  read the B-06 logger test. `runQAStage` now emits successful
-  `evaluator-qa`/`evaluator-uat` completion events carrying provider token
-  counts, while `Logger.writeSummary` adds token counts from every
-  `invocation-completed` event but adds prompt bytes only from
-  `prompt-assembly`. The existing logger test creates only generator
-  completions, so the passed suite does not exercise the widened event
-  population. `git diff --check main...HEAD` passed.
-- **Concrete failure path:** a Claude or Codex candidate evaluator returns
-  token usage. The wrapper journals that usage without a matching envelope
-  assembly, and the summary adds it to the slice and run “Provider tokens”
-  totals. The adjacent “Prompt bytes” total still covers only explorer,
-  planner, contract evaluator, and generator envelopes. The durable summary
-  therefore reports two totals over different invocation populations and
-  overstates B-06 envelope token usage. No later phase corrects the file.
-- **Attribution:** commit `37c5fef` widened `invocation-completed` to
-  evaluator roles and began emitting those events from `runQAStage`.
-  `Logger.writeSummary` already consumed every completion event, so this hunk
-  materially changed the population it aggregates. The behavior is absent
-  from the base branch.
-- **Required correction:** keep evaluator completion events in
-  `events.jsonl` for ADR 0046, but exclude unassembled evaluator roles from
-  B-06 envelope-summary totals (or require a matching scoped
-  `prompt-assembly` identity). Add a focused logger test with evaluator token
-  counts proving they do not enter envelope totals.
+### 1. Envelope telemetry crosses two declared module boundaries
 
-## Standards
+- **Convention:** `ARCHITECTURE.md`, “Hubs — do not grow these; extract
+  instead,” and “Modules → Gates” (`candidate-gate-policy.ts` is an internal);
+  ADR 0002 and ADR 0030 define `AgentProvider` as the backend command/output
+  adapter seam.
+- **Evidence:** `src/orchestrator.ts` has a net `+821/-398` diff and still owns
+  prompt-assembly journaling in `makeSliceContext`, completion telemetry,
+  candidate-gate sequencing, and tree-authority checks. It also retains an
+  unused direct import of internal `candidate-gate-policy.ts` at line 248.
+  `src/agent-provider.ts:14-33` puts orchestration-owned `contextEnvelope`
+  metadata on `InvokeOptions`; providers ignore it, but `makeSliceContext`
+  still passes it through `provider.invoke`. `src/contract-prompt-orchestration.ts`
+  consequently imports its evidence type from the provider layer.
+- **Attribution:** commits `2fb0c11` and `eb012b9` introduced the provider
+  metadata path; `ee68e16` introduced the internal gate-policy import, which
+  remained after extraction commit `62458b4`.
+- **Impact:** future envelope or provider additions require coordinated edits
+  across orchestration, prompt assembly, provider types, events, and summary
+  consumers. Current dispatches remain correct and fail closed, so this is
+  structural debt rather than a ship blocker. Move invocation evidence onto
+  an orchestrator-owned wrapper and finish removing internal gate policy from
+  the hub when this seam is next changed.
 
-- `src/orchestrator.ts` grows from 6,193 to 6,617 lines and still owns
-  envelope telemetry, gate classification, QA authority checks, and repair
-  projection. It also imports `candidate-gate-policy.ts`, which
-  `ARCHITECTURE.md` lists as a Gates internal. This conflicts with
-  `ARCHITECTURE.md`, “Hubs — do not grow these; extract instead” and the
-  Modules public/internal boundary. The new checks fail closed before invalid
-  state ships, so this is structural debt rather than another blocker.
-- `InvokeOptions.contextEnvelope` in `src/agent-provider.ts` is
-  orchestration-owned evidence that every provider ignores. ADR 0002 and ADR
-  0030 define providers as command/output adapters. Move this metadata to the
-  orchestrator invocation wrapper when that seam is next revised.
-- `promptAssemblyContext` retains an unused `_journal: unknown` parameter,
-  and `recordPromptAssembly` now packages evidence rather than recording it.
-  These names preserve an obsolete ownership model and should be cleaned up.
+### 2. `clean-failed` now exceeds its documented command scope
 
-## Spec
+- **Convention:** ADR 0023 defines `afk clean-failed` as cleanup for
+  failure-phase debris and says registered non-failure worktrees are skipped.
+- **Evidence:** `src/cleanup-eligibility.ts:13-27` returns
+  `completed-clean` for a merged, clean `PASS` slice, and
+  `src/clean-failed.ts:217-329` removes that worktree and deletes its branch.
+  The focused test at `src/clean-failed.test.ts:381-402` asserts this behavior;
+  I ran that single test and it passed.
+- **Attribution:** commit `183ddac` replaced the previous failure-phase guard
+  with the shared cleanup eligibility rule and changed the prior skip test
+  into a deletion test.
+- **Impact:** the behavior is safe from data loss as implemented: the
+  worktree must be clean, the merge must be recorded, and branch deletion is
+  refused if commits remain ahead of the feature branch. The problem is
+  command/ADR semantic drift, not unsafe recovery. Either rename/generalize
+  the command and amend ADR 0023, or keep completed-slice cleanup in a
+  separately documented path.
 
-- The branch includes the early PRD 4 gate-sequencing change
-  (pre-QA checks → candidate QA → full suite) alongside PRD 3. ADR 0012 and
-  the parent plan now document that decision, so it is not an undocumented
-  authority change, but it substantially enlarges this feature branch and is
-  the main source of the orchestrator-hub growth noted above.
-- Apart from A1, the four scoped roles use versioned, fail-closed,
-  provider-independent envelope assembly, preserve the declared evidence
-  identities, and keep candidate-evaluator prompt assembly deferred as the
-  PRD requires.
+## Attribution check
+
+I also verified the reported stale-explorer concern independently.
+`runSliceNegotiate` already skipped exploration whenever `context.md` existed
+on the base branch; commit `6067288` narrowed that behavior by accepting only
+a structurally valid evidence map. Because the freshness defect was not
+introduced or materially widened by this diff, it is not a ship finding for
+this review.
