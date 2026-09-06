@@ -26,6 +26,7 @@ import {
   readContractLockProvenance,
   readContractStatus,
   preserveNegotiationFailure,
+  parseGuardianReview,
   readReviewVerdict,
   renderStuckDiagnosis,
 } from "./artifacts.js";
@@ -1013,101 +1014,74 @@ describe("readReviewVerdict", () => {
     cleanup = [];
   });
 
-  describe("real-world formats observed in AFK runs", () => {
-    it("parses bold format: **Verdict:** SHIP (bug-fixes-round-2 architect)", () => {
-      withTempFile(
-        `# Architect Review\n\n**Date:** 2026-05-05\n**Verdict:** SHIP\n\nAll good.\n`,
-        (p) => expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
-    });
+  const finding = {
+    id: "A-01",
+    title: "Concrete gap",
+    class: "INTEGRITY",
+    clearCondition: "The durable record is correct.",
+    disposition: "OPEN",
+  };
+  const artifact = (verdict: string, findings: unknown) =>
+    [
+      "# Guardian review",
+      "",
+      `**Verdict:** ${verdict}`,
+      "",
+      "## Structured findings (v1)",
+      JSON.stringify({ version: 1, findings }),
+      "",
+      "Prose remains allowed.",
+    ].join("\n");
 
-    it("parses markdown header: ## Verdict: SHIP (architecture-deepening both, bug-fixes-round-2 PM)", () => {
-      withTempFile(
-        `# PM Review\n\nSome prose.\n\n## Verdict: SHIP\n\nBoth slices are minimal bug fixes.\n`,
-        (p) => expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
+  it("B-04 parses every verdict with the required findings cardinality", () => {
+    expect(parseGuardianReview(artifact("SHIP", []))).toEqual({
+      outcome: "SHIP",
+      findings: [],
     });
-
-    it("returns UNPARSEABLE when no Verdict line is present (bug-fixes-tiers-1-3 both)", () => {
-      withTempFile(
-        `# Architect Review\n\nCritical finding: slice 01 has 5 of 8 requirements completely unimplemented.\n\nThe two blockers must be fixed before the client demo.\n`,
-        (p) => expect(readReviewVerdict(p)).toBe("UNPARSEABLE"),
-      );
-    });
+    for (const verdict of ["ACCEPT-WITH-NOTES", "FIX-BEFORE-SHIP"]) {
+      expect(parseGuardianReview(artifact(verdict, [finding]))).toEqual({
+        outcome: verdict,
+        findings: [finding],
+      });
+    }
   });
 
-  describe("accepted format variations", () => {
-    it("parses ACCEPT-WITH-NOTES under bold format", () => {
-      withTempFile(`**Verdict:** ACCEPT-WITH-NOTES\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("ACCEPT-WITH-NOTES"),
-      );
-    });
-
-    it("parses ACCEPT WITH NOTES (spaces) under header format", () => {
-      withTempFile(`## Verdict: ACCEPT WITH NOTES\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("ACCEPT-WITH-NOTES"),
-      );
-    });
-
-    it("parses FIX-BEFORE-SHIP under header format", () => {
-      withTempFile(`### Verdict: FIX-BEFORE-SHIP\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("FIX-BEFORE-SHIP"),
-      );
-    });
-
-    it("parses FIX BEFORE SHIP (spaces) under bold format", () => {
-      withTempFile(`**Verdict:** FIX BEFORE SHIP\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("FIX-BEFORE-SHIP"),
-      );
-    });
-
-    it("parses plain format: Verdict: SHIP", () => {
-      withTempFile(`Verdict: SHIP\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
-    });
-
-    it("parses single-asterisk italic: *Verdict:* SHIP", () => {
-      withTempFile(`*Verdict:* SHIP\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
-    });
-
-    it("is case-insensitive on the 'Verdict' key", () => {
-      withTempFile(`**verdict:** ship\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
-    });
-
-    it("tolerates trailing whitespace after the value", () => {
-      withTempFile(`**Verdict:** SHIP   \n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
-    });
-
-    it("strips trailing bold markers on the value itself", () => {
-      withTempFile(`**Verdict: SHIP**\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("SHIP"),
-      );
-    });
+  it("B-04 rejects missing, malformed, or verdict-inconsistent findings blocks", () => {
+    const invalid = [
+      "**Verdict:** SHIP\n",
+      artifact("SHIP", [finding]),
+      artifact("ACCEPT-WITH-NOTES", []),
+      artifact("FIX-BEFORE-SHIP", []),
+      artifact("SHIP", "not-an-array"),
+      artifact("FIX-BEFORE-SHIP", [finding, finding]),
+      artifact("FIX-BEFORE-SHIP", [{ ...finding, title: " " }]),
+      artifact("FIX-BEFORE-SHIP", [{ ...finding, class: "not a token" }]),
+      artifact("FIX-BEFORE-SHIP", [{ ...finding, disposition: "UNKNOWN" }]),
+      artifact("SHIP", []).replace(
+        '{"version":1,"findings":[]}',
+        '{"version":1,"findings":[],"extra":true}',
+      ),
+      artifact("SHIP", []).replace(
+        "## Structured findings (v1)\n",
+        "## Structured findings (v1)\n\n",
+      ),
+      artifact("SHIP", []).replace("**Verdict:** SHIP", "## Verdict: SHIP"),
+    ];
+    for (const content of invalid) {
+      expect(parseGuardianReview(content)).toEqual({
+        outcome: "UNPARSEABLE",
+        findings: [],
+      });
+    }
   });
 
-  describe("negative cases", () => {
-    it("returns UNPARSEABLE when the file does not exist", () => {
-      expect(readReviewVerdict("/nonexistent/path/review.md")).toBe("UNPARSEABLE");
+  it("reads the canonical artifact from disk and rejects absence", () => {
+    withTempFile(artifact("SHIP", []), (path) => {
+      expect(readReviewVerdict(path)).toBe("SHIP");
     });
-
-    it("returns UNPARSEABLE when the verdict value is unrecognized", () => {
-      withTempFile(`**Verdict:** MAYBE\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("UNPARSEABLE"),
-      );
-    });
-
-    it("returns UNPARSEABLE for a file with only prose", () => {
-      withTempFile(`# Review\n\nLooks fine to me.\n`, (p) =>
-        expect(readReviewVerdict(p)).toBe("UNPARSEABLE"),
-      );
-    });
+    expect(readReviewVerdict("/nonexistent/path/review.md")).toBe(
+      "UNPARSEABLE",
+    );
   });
 });
 

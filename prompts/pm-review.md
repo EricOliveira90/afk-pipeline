@@ -41,6 +41,15 @@ when one is quoting the other.
   `**Verdict:** ACCEPT-WITH-NOTES` or `**Verdict:** FIX-BEFORE-SHIP`
   (bold, with colon). This is parsed by the orchestrator. Do not use a
   markdown heading for it.
+- The file MUST contain exactly one `## Structured findings (v1)` heading.
+  Put exactly one single-line JSON object immediately below it:
+  `{"version":1,"findings":[{"id":"P-01","title":"...","class":"PRODUCT","clearCondition":"...","disposition":"OPEN"}]}`.
+  Use an empty `findings` array for SHIP. ACCEPT-WITH-NOTES and
+  FIX-BEFORE-SHIP require at least one finding. IDs must be unique and
+  non-blank; `title`, `class`, and `clearCondition` must be non-blank;
+  `class` must be a machine token; and `disposition` must be one of `OPEN`,
+  `RESOLVED`, `REPEATED`, `REOPENED`, or `REGRESSED`. Do not add other
+  top-level JSON keys.
 - The pre-ship sanity gate (typecheck, lint, and the full test suite)
   already PASSED against this exact tree immediately before this review.
   Do NOT re-run the full test suite — it is slow and its result is

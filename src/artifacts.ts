@@ -59,6 +59,26 @@ export type ReviewVerdict =
  */
 export type ReviewOutcome = ReviewVerdict | "NEVER_RAN" | "DIED_MID_RUN";
 
+export type GuardianFindingDisposition =
+  | "OPEN"
+  | "RESOLVED"
+  | "REPEATED"
+  | "REOPENED"
+  | "REGRESSED";
+
+export interface GuardianReviewFinding {
+  id: string;
+  title: string;
+  class: string;
+  clearCondition: string;
+  disposition: GuardianFindingDisposition;
+}
+
+export interface ParsedGuardianReview {
+  outcome: ReviewVerdict;
+  findings: GuardianReviewFinding[];
+}
+
 export type ReviewFailureClass = "NEVER_RAN" | "DIED_MID_RUN";
 
 /** Outcomes that allow the draft PR to open. */
@@ -142,6 +162,147 @@ export function readReviewVerdict(reviewPath: string): ReviewVerdict {
   return parseReviewVerdict(readIfExists(reviewPath));
 }
 
+const GUARDIAN_FINDING_DISPOSITIONS =
+  new Set<GuardianFindingDisposition>([
+    "OPEN",
+    "RESOLVED",
+    "REPEATED",
+    "REOPENED",
+    "REGRESSED",
+  ]);
+const GUARDIAN_FINDING_KEYS = [
+  "class",
+  "clearCondition",
+  "disposition",
+  "id",
+  "title",
+];
+const STRUCTURED_FINDINGS_HEADING = "## Structured findings (v1)";
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
+}
+
+function parseGuardianFindings(value: unknown): GuardianReviewFinding[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = new Set<string>();
+  const findings: GuardianReviewFinding[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      return null;
+    }
+    const finding = item as Record<string, unknown>;
+    if (!hasExactKeys(finding, GUARDIAN_FINDING_KEYS)) return null;
+    const id = typeof finding.id === "string" ? finding.id.trim() : "";
+    const title =
+      typeof finding.title === "string" ? finding.title.trim() : "";
+    const findingClass =
+      typeof finding.class === "string" ? finding.class.trim() : "";
+    const clearCondition =
+      typeof finding.clearCondition === "string"
+        ? finding.clearCondition.trim()
+        : "";
+    const disposition = finding.disposition;
+    if (
+      id === "" ||
+      ids.has(id) ||
+      title === "" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(findingClass) ||
+      clearCondition === "" ||
+      typeof disposition !== "string" ||
+      !GUARDIAN_FINDING_DISPOSITIONS.has(
+        disposition as GuardianFindingDisposition,
+      )
+    ) {
+      return null;
+    }
+    ids.add(id);
+    findings.push({
+      id,
+      title,
+      class: findingClass,
+      clearCondition,
+      disposition: disposition as GuardianFindingDisposition,
+    });
+  }
+  return findings;
+}
+
+/**
+ * Parse the canonical guardian artifact contract introduced by GH #170.
+ *
+ * The exact verdict line remains human-readable, while the single JSON object
+ * immediately below `## Structured findings (v1)` is the only findings input.
+ * Any malformed or verdict-inconsistent structure makes the whole invoked
+ * result UNPARSEABLE.
+ */
+export function parseGuardianReview(
+  content: string | null,
+): ParsedGuardianReview {
+  if (!content) return { outcome: "UNPARSEABLE", findings: [] };
+  const lines = content.split(/\r?\n/);
+  const verdicts = lines.flatMap((line) => {
+    if (line === "**Verdict:** SHIP") return ["SHIP" as const];
+    if (line === "**Verdict:** ACCEPT-WITH-NOTES") {
+      return ["ACCEPT-WITH-NOTES" as const];
+    }
+    if (line === "**Verdict:** FIX-BEFORE-SHIP") {
+      return ["FIX-BEFORE-SHIP" as const];
+    }
+    return [];
+  });
+  const headingIndexes = lines.flatMap((line, index) =>
+    line === STRUCTURED_FINDINGS_HEADING ? [index] : [],
+  );
+  if (verdicts.length !== 1 || headingIndexes.length !== 1) {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  const jsonLine = lines[headingIndexes[0]! + 1];
+  if (jsonLine === undefined || jsonLine.trim() === "") {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  let structured: unknown;
+  try {
+    structured = JSON.parse(jsonLine);
+  } catch {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  if (
+    typeof structured !== "object" ||
+    structured === null ||
+    Array.isArray(structured)
+  ) {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  const block = structured as Record<string, unknown>;
+  if (
+    !hasExactKeys(block, ["version", "findings"]) ||
+    block.version !== 1
+  ) {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  const findings = parseGuardianFindings(block.findings);
+  if (findings === null) {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  const outcome = verdicts[0]!;
+  if (
+    (outcome === "SHIP" && findings.length !== 0) ||
+    (outcome !== "SHIP" && findings.length === 0)
+  ) {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  return { outcome, findings };
+}
+
 /**
  * Classify a guardian verdict from review content already in hand. The ship
  * gate captures each guardian's artifact the moment its invocation returns and
@@ -151,33 +312,7 @@ export function readReviewVerdict(reviewPath: string): ReviewVerdict {
 export function parseReviewVerdict(
   content: string | null,
 ): ReviewVerdict {
-  if (!content) return "UNPARSEABLE";
-  // Accept several formats seen in the wild from guardian agents:
-  //   **Verdict:** SHIP
-  //   *Verdict:* SHIP
-  //   ## Verdict: SHIP     (markdown header)
-  //   ### Verdict SHIP     (header, no colon)
-  //   Verdict: SHIP        (plain)
-  // The pinned format in the prompt is `**Verdict:** <value>`; the loose
-  // match is defence-in-depth against agents formatting it differently.
-  const pattern = /^\s*#{0,6}\s*\*{0,3}\s*Verdict\s*:?\s*\*{0,3}\s*([^\n]+)/im;
-  const m = content.match(pattern);
-  const captured = m?.[1]?.trim() ?? null;
-  if (!captured) return "UNPARSEABLE";
-  // Strip any leftover markdown emphasis (e.g. "**SHIP**") and normalize.
-  const upper = captured.replace(/\*+/g, "").trim().toUpperCase();
-  if (upper === "SHIP") return "SHIP";
-  if (
-    upper.startsWith("ACCEPT-WITH-NOTES") ||
-    upper.startsWith("ACCEPT WITH NOTES")
-  )
-    return "ACCEPT-WITH-NOTES";
-  if (
-    upper.startsWith("FIX-BEFORE-SHIP") ||
-    upper.startsWith("FIX BEFORE SHIP")
-  )
-    return "FIX-BEFORE-SHIP";
-  return "UNPARSEABLE";
+  return parseGuardianReview(content).outcome;
 }
 
 /**
