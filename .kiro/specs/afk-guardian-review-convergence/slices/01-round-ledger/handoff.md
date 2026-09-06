@@ -15,12 +15,14 @@
 ## Decisions made during implementation
 
 - Normalize guardian fingerprints by trimming, collapsing whitespace, and lowercasing class plus clear condition so formatting-only changes retain lineage.
+- When distinct current IDs compete for one prior identity, let the first ID claimant retain it and allocate a deterministic `#N` suffix to later claimants so the round stays durable.
 - Persist a completed pair once across every post-review exit; failed artifact paths use the latest resolvable HEAD and do not populate favorable cache fields.
 - Mark round persistence complete only after the synchronous state writer returns so a failed first write remains eligible for the existing catch-path retry.
 
 ## Gotchas / learnings
 
 - Cache-backed findings are valid only when the latest earlier round with a matching post-review HEAD carries provenance to an invoked record.
+- A prior finding's stable and current aliases can both appear in one later artifact; lineage allocation must reserve stable identities one-to-one across both aliases.
 - Fatal review-worktree drift keeps its block and records the drifted HEAD, while artifact commit failures retain their existing exception path after recording the pair.
 - A successful catch-path retry records one round and still rethrows the original state-write error; draft-PR handling does not begin.
 - New migration files: 0

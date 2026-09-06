@@ -27,6 +27,18 @@ function priorFindings(
     .flatMap((round) => [...round[guardian].findings].reverse());
 }
 
+function allocateStableId(preferred: string, claimed: Set<string>): string {
+  if (!claimed.has(preferred)) {
+    claimed.add(preferred);
+    return preferred;
+  }
+  let suffix = 2;
+  while (claimed.has(`${preferred}#${suffix}`)) suffix++;
+  const allocated = `${preferred}#${suffix}`;
+  claimed.add(allocated);
+  return allocated;
+}
+
 /**
  * Assign stable identities to one guardian's newly parsed findings.
  *
@@ -70,11 +82,12 @@ export function advanceGuardianFindingLineage(
     }
   });
   return findings.map((finding, index) => {
-    // No match, or every candidate already claimed: the finding keeps its own
-    // ID as a new stable identity. It cannot collide with a claimed one — a
-    // finding whose ID equals a prior stable identity resolves in the ID pass.
-    const stableId = resolved[index] ?? finding.id;
-    claimed.add(stableId);
+    // No match, or every candidate already claimed: allocate from the current
+    // ID. A suffix is needed when distinct current IDs both name one prior
+    // entry through its current and stable aliases; the losing alias must not
+    // make the completed round non-durable by duplicating the claimed ID.
+    const stableId =
+      resolved[index] ?? allocateStableId(finding.id, claimed);
     return {
       stableId,
       currentId: finding.id,

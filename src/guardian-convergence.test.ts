@@ -227,4 +227,64 @@ describe("advanceGuardianFindingLineage", () => {
       "A-01",
     ]);
   });
+
+  it("B-03 QA-05 allocates a unique identity when two known IDs compete for one prior identity", () => {
+    const prior = [
+      roundWithArchitectFindings([
+        {
+          stableId: "A-01",
+          currentId: "A-05",
+          title: "The one prior finding",
+          class: "INTEGRITY",
+          clearCondition: "Commit the durable evidence",
+          disposition: "OPEN",
+        },
+      ]),
+    ];
+    const advanced = advanceGuardianFindingLineage(prior, "architect", [
+      {
+        id: "A-05",
+        title: "Current-ID claimant",
+        class: "PRODUCT",
+        clearCondition: "Keep the current alias",
+        disposition: "REPEATED",
+      },
+      {
+        id: "A-01",
+        title: "Stable-ID claimant",
+        class: "INTEGRITY",
+        clearCondition: "Keep the stable alias",
+        disposition: "OPEN",
+      },
+    ]);
+
+    expect(advanced.map((finding) => finding.stableId)).toEqual([
+      "A-01",
+      "A-01#2",
+    ]);
+    expect(new Set(advanced.map((finding) => finding.stableId)).size).toBe(2);
+
+    const phase = {
+      rounds: [
+        ...prior,
+        {
+          ...roundWithArchitectFindings(advanced),
+          round: 2,
+          architect: {
+            source: "INVOKED" as const,
+            outcome: "FIX-BEFORE-SHIP" as const,
+            findings: advanced,
+            findingsOriginRound: 2,
+          },
+          pm: {
+            source: "INVOKED" as const,
+            outcome: "SHIP" as const,
+            findings: [],
+            findingsOriginRound: 2,
+          },
+        },
+      ],
+    };
+    expect(sanitizeReviewPhase(phase)?.rounds).toHaveLength(2);
+  });
 });
