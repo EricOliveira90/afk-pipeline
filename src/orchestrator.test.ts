@@ -77,6 +77,7 @@ import {
   findSliceArtifactDir,
   git,
   makeRepo,
+  REVISION_PLANNER_ESCALATION,
   REVISION_PLANNER_FAILURE,
   REVISION_REJECTION_FINDING,
   sliceFromCwd,
@@ -86,6 +87,7 @@ import {
   type SliceFixture,
 } from "./orchestrator.fixtures.js";
 import { writeAcceptanceManifest } from "./orchestrator.fixtures.js";
+import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import {
   writeContractResponse,
   writeContractReview,
@@ -1791,6 +1793,20 @@ describe("generator scope escalation", () => {
         blockedBy: [],
         userStories: "",
       },
+      // A slice in a wave that already runs, rather than a sixth spawn
+      // (AGENTS.md level 3): the revision planner stops to request a design
+      // decision instead of revising. Same claim as this describe's — the
+      // accepted pair survives — plus the one thing only this path can show:
+      // the request reaches the operator instead of the missing manifest the
+      // stop implies.
+      {
+        number: "06",
+        ghIssue: "1145",
+        title: "Revision planner requests a decision",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const escalation = (slice: Slice): string =>
       JSON.stringify({
@@ -1847,6 +1863,10 @@ describe("generator scope escalation", () => {
             ...fixture(slices[4]!),
             ownedContractWidening: "src/smuggled-05.ts",
           },
+        ],
+        [
+          slices[5]!.ghIssue,
+          { ...fixture(slices[5]!), revisionPlannerEscalates: true },
         ],
       ]);
       const baseProvider = buildStubProvider({
@@ -2027,12 +2047,24 @@ describe("generator scope escalation", () => {
       ).toHaveLength(1);
     });
 
+    it("ends the slice ERROR naming the requested design decision", () => {
+      const error = state.slices[slices[5]!.ghIssue]!.error!;
+      expect(state.slices[slices[5]!.ghIssue]!.phase).toBe("ERROR");
+      expect(error).toContain("design decision");
+      expect(error).toContain(REVISION_PLANNER_ESCALATION.criterion);
+      expect(error).toContain(REVISION_PLANNER_ESCALATION.citation);
+      // The whole point: the stop is not reported as the artifact it chose
+      // not to write.
+      expect(error).not.toContain("acceptance-manifest.json is missing");
+    });
+
     it.each([
       ["a planner throw", 0],
       ["an evaluator rejection", 1],
       ["a lock-gate refusal", 2],
       ["a dropped locked path", 3],
       ["a generator rewriting its own lock", 4],
+      ["a planner requesting a design decision", 5],
     ])(
       "leaves the accepted contract byte-identical after %s",
       (_label, index) => {
@@ -2052,6 +2084,7 @@ describe("generator scope escalation", () => {
       ["a lock-gate refusal", 2],
       ["a dropped locked path", 3],
       ["a generator rewriting its own lock", 4],
+      ["a planner requesting a design decision", 5],
     ])(
       "restores the accepted acceptance manifest after %s, unwidened",
       (_label, index) => {
@@ -3606,7 +3639,7 @@ describe("round-scoped contract feedback", () => {
     },
   );
 
-  it("does not reuse a valid manifest from an earlier planner round", async () => {
+  it("does not reuse a valid manifest or a stale escalation from an earlier round", async () => {
     const repo = makeRepo();
     const slug = "stale-acceptance-manifest";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -3627,6 +3660,22 @@ describe("round-scoped contract feedback", () => {
         if (!artifactDir) throw new Error("slice artifact directory missing");
         if (opts.role === "explorer") {
           writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
+          // A sentinel left behind by an earlier life of this slice — the
+          // ESCALATE archive copies rather than moves, so one can survive
+          // into the next run. Neither planner round writes one, so both
+          // rounds must behave exactly as they did before the sentinel
+          // existed: the loop deletes it before every invocation.
+          writeFileSync(
+            join(artifactDir, PLANNER_ESCALATION_FILENAME),
+            JSON.stringify({
+              version: 1,
+              criterion: "SPEC_CONTRADICTION",
+              decision: "STALE — decided in a prior life",
+              options: ["stale one", "stale two"],
+              citation: "prd.md:1",
+            }),
+            "utf-8",
+          );
         } else if (opts.role === "planner") {
           plannerRounds++;
           writeFileSync(
@@ -3666,12 +3715,219 @@ describe("round-scoped contract feedback", () => {
       "pnpm test",
     );
 
-    expect((await runSliceNegotiate(ctx)).phase).toBe("ESCALATE");
+    const outcome = await runSliceNegotiate(ctx);
+    expect(outcome.phase).toBe("ESCALATE");
     expect(plannerRounds).toBe(2);
     expect(evaluatorRounds).toBe(1);
     expect(
       existsSync(join(ctx.absSliceDir, "acceptance-manifest.json")),
     ).toBe(false);
+    // The stale sentinel neither escalated round 1 nor recaptioned round 2's
+    // genuine missing-manifest refusal as a design decision request.
+    expect(
+      existsSync(join(ctx.absSliceDir, PLANNER_ESCALATION_FILENAME)),
+    ).toBe(false);
+    const cause = outcome.phase === "ESCALATE" ? outcome.cause : undefined;
+    expect(cause?.kind).not.toBe("design-decision");
+    expect(cause?.summary).not.toContain("design decision");
+  });
+
+  it("reports a deliberate planner stop as a design decision request", async () => {
+    // A new spawned scenario, deliberately (AGENTS.md level 4): every other
+    // planner stub in the suite either writes a valid manifest or writes
+    // nothing by accident, so none of them reaches "the planner stopped on
+    // purpose" — the state this whole patch exists to distinguish from a
+    // failed round. One spawn carries all four claims.
+    const repo = makeRepo();
+    const slug = "planner-design-decision";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9006",
+      title: "Deliberate stop",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          // An agent-authored lock, which only an ACCEPT may leave behind
+          // (ADR 0008). The sentinel branch bypasses refuseInvalidManifest,
+          // so it has to reproduce that normalisation itself — otherwise the
+          // generator would read this line as permission and the next run
+          // would skip negotiation on it.
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** LOCKED\n",
+            "utf-8",
+          );
+          // The sentinel instead of the contract pair, exactly as both
+          // planner templates instruct. No acceptance manifest is written.
+          writeFileSync(
+            join(artifactDir, PLANNER_ESCALATION_FILENAME),
+            JSON.stringify({
+              version: 1,
+              criterion: "LOAD_BEARING_SILENCE",
+              decision: "Which wire format the status endpoint emits",
+              options: ["newline-delimited JSON", "one JSON array"],
+              citation: "prd.md:212",
+            }),
+            "utf-8",
+          );
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+
+    expect(outcome.phase).toBe("ESCALATE");
+    // Two rounds were allowed and only one was spent: the second would have
+    // re-run the same planner against the same unsettled specification.
+    expect(plannerRounds).toBe(1);
+    expect(evaluatorRounds).toBe(0);
+
+    const cause = outcome.phase === "ESCALATE" ? outcome.cause : undefined;
+    // Asserted so a later refactor cannot quietly reclassify a design
+    // decision request as infrastructure and start retrying it.
+    expect(cause?.kind).toBe("design-decision");
+    expect(cause?.summary).toContain("design decision");
+    expect(cause?.summary).toContain("LOAD_BEARING_SILENCE");
+    expect(cause?.summary).toContain("prd.md:212");
+    expect(cause?.summary).not.toContain("acceptance-manifest");
+
+    // The operator's read. This is what catches an implementation that calls
+    // refuseInvalidManifest first and only then notices the sentinel.
+    const stuck = readFileSync(join(ctx.absSliceDir, "stuck.md"), "utf-8");
+    expect(stuck).toContain("prd.md:212");
+    expect(stuck).toContain("design decision");
+    expect(stuck).not.toContain("acceptance-manifest.json is missing");
+
+    // The agent-authored lock did not survive the escalation.
+    expect(readContractStatus(join(ctx.absSliceDir, "contract.md"))).toBe(
+      "NEGOTIATING",
+    );
+  });
+
+  it("prefers a deliberate stop to the contract pair written beside it", async () => {
+    // A second spawn, deliberately: the scenario above has no manifest, so it
+    // passes just as well with the sentinel read out of the manifest loader's
+    // catch. Here the planner writes a *valid* pair alongside the sentinel,
+    // so nothing throws — `evaluatorRounds` staying at 1 is what proves the
+    // sentinel is read before the pair is loaded rather than after it fails,
+    // and that a planner cannot disown a contract and have it evaluated
+    // anyway. It also covers a stop raised on a later round, not just round 1.
+    const repo = makeRepo();
+    const slug = "planner-stop-beats-pair";
+    const { prdDir, specsDir } = writePrdFixture(repo, slug);
+    const slice: Slice = {
+      number: "01",
+      ghIssue: "9007",
+      title: "Stop beats pair",
+      type: "AFK",
+      blockedBy: [],
+      userStories: "",
+    };
+    let plannerRounds = 0;
+    let evaluatorRounds = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+        const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+        if (!artifactDir) throw new Error("slice artifact directory missing");
+        if (opts.role === "explorer") {
+          writeFileSync(join(artifactDir, "context.md"), validExplorerContext(), "utf-8");
+        } else if (opts.role === "planner") {
+          plannerRounds++;
+          writeFileSync(
+            join(artifactDir, "contract.md"),
+            "# Contract\n\n**Status:** NEGOTIATING\n",
+            "utf-8",
+          );
+          writeAcceptanceManifest(artifactDir);
+          if (plannerRounds === 2) {
+            writeFileSync(
+              join(artifactDir, PLANNER_ESCALATION_FILENAME),
+              JSON.stringify({
+                version: 1,
+                criterion: "DECLARED_RISK_CLASS",
+                decision: "Whether this slice may drop the legacy column",
+                options: ["drop it", "keep it and dual-write"],
+                citation: "risk class: schema history",
+              }),
+              "utf-8",
+            );
+          }
+        } else if (opts.role === "evaluator-contract") {
+          evaluatorRounds++;
+          writeContractReview(artifactDir, "REVISE");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const dag = buildDAG([slice]);
+    const featBranch = `feat-stub/${slug}`;
+    git(repo, ["branch", featBranch]);
+    const logger = new Logger(repo, `${slug}-stub`);
+    const ctx = makeSliceContext(
+      {
+        repoRoot: repo,
+        prdSlug: slug,
+        prdDir,
+        specsDir,
+        dag,
+        provider,
+        maxContractRounds: 2,
+      },
+      slice,
+      logger,
+      featBranch,
+      "- README.md",
+      "pnpm test",
+    );
+
+    const outcome = await runSliceNegotiate(ctx);
+
+    expect(outcome.phase).toBe("ESCALATE");
+    expect(plannerRounds).toBe(2);
+    // Round 2's valid pair was never evaluated: the sentinel won.
+    expect(evaluatorRounds).toBe(1);
+    const cause = outcome.phase === "ESCALATE" ? outcome.cause : undefined;
+    expect(cause?.kind).toBe("design-decision");
+    expect(cause?.summary).toContain("DECLARED_RISK_CLASS");
+    expect(cause?.summary).toContain("schema history");
+    expect(cause?.summary).not.toContain("acceptance-manifest");
   });
 
   it("P-02 QA-02 grants one final contract round without resolved finding history", async () => {

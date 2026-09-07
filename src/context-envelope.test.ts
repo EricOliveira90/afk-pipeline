@@ -24,6 +24,7 @@ import {
   type ContextEnvelopeManifest,
 } from "./context-envelope.js";
 import type { ContractReviewFinding } from "./contract-review.js";
+import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1485,6 +1486,24 @@ describe("role contract manifests", () => {
       );
       expect(body, template).toContain("{{SLICE_DIR}}/handoff.md");
       expect(body, template).toContain("{{SLICE_DIR}}/escalation.md");
+    }
+  });
+
+  it("declares the planner's complete write contract, matching both templates", () => {
+    // The twin of the generator assertion above. Both shipped planner
+    // templates instruct writing `planner-escalation.md` instead of the
+    // contract pair when a §3c escalation test fires, so the manifest — where
+    // a reader looks for the role's boundary — must declare it beside the
+    // pair rather than describing a write scope the prompts contradict.
+    const writeScope = [...PLANNER_CONTEXT_MANIFEST.allowedWriteScope];
+    expect(
+      writeScope.some((entry) => entry.includes(PLANNER_ESCALATION_FILENAME)),
+    ).toBe(true);
+    for (const template of ["planner", "planner-revision"]) {
+      const body = readFileSync(join(PROMPTS_DIR, `${template}.md`), "utf-8");
+      expect(body, template).toContain(
+        `{{SLICE_DIR}}/${PLANNER_ESCALATION_FILENAME}`,
+      );
     }
   });
 

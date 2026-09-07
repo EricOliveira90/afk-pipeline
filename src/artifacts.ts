@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
+import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import {
   CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
   CONTRACT_REVIEW_FILENAME,
@@ -1052,6 +1053,11 @@ export function sliceArtifactNames(sliceDir: string): string[] {
   return [
     "contract.md",
     "context.md",
+    // The planner's deliberate-stop record. Archived because a negotiation
+    // ESCALATE has no commits, so the next run restarts the slice from base
+    // and deletes the slice directory — without this entry the one file that
+    // says which decision the run is waiting on would not survive it.
+    PLANNER_ESCALATION_FILENAME,
     ...rounds,
     "handoff.md",
     CONTRACT_NEGOTIATION_OUTCOME_FILENAME,
@@ -1098,8 +1104,9 @@ function moveDirectory(from: string, to: string): void {
  *
  * Two kinds of artifact, for two reasons:
  *
- * - The untracked spec artifacts (contract.md, context.md, feedback-r*,
- *   qa-report*, handoff.md, stuck.md) are **copied** out of the worktree,
+ * - The untracked spec artifacts (contract.md, context.md,
+ *   planner-escalation.md, feedback-r*, qa-report*, handoff.md, stuck.md) are
+ *   **copied** out of the worktree,
  *   because a from-base restart recreates the worktree and they are the
  *   only copy (#113).
  * - The `reviews/` archive dir is **moved**, because the next life's

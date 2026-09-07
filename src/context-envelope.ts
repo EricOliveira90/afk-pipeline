@@ -452,6 +452,7 @@ export const PLANNER_CONTEXT_MANIFEST = {
     "slice/contract.md",
     "slice/acceptance-manifest.json",
     "slice/contract-response.json on routed review revisions",
+    "slice/planner-escalation.md instead of the pair when an escalation condition fires",
   ],
   stopConditions: [
     "The required planner artifacts are rewritten in place",

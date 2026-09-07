@@ -67,6 +67,23 @@ because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
 
+## Ticket authoring — do not leave a load-bearing decision unmade
+
+The planner decides mechanical, reversible, in-contract details itself and
+records them in the contract (`docs/specs/afk-v2-plan.md` §3c policy 1). It
+stops and asks only when one of three tests fires: a **spec contradiction** (a
+recorded ADR counts as spec), **load-bearing silence** about a public
+interface, a data format or a security posture, or a **declared risk class**
+(schema history, auth, deletion of tests or gates, destructive git). It stops
+by writing `planner-escalation.md` naming the test, the citation, and the
+candidate answers, and the run reports a design-decision request and spends no
+further contract round on it.
+
+That is a correct outcome, not a failure — the alternative is a contract built
+on a guess. But it costs a slice dispatch and a human round trip, so the
+author's job is to settle those decisions in the ticket body, or cite the ADR
+that already settled them, rather than leave them for the planner to find.
+
 ## Where a new assertion goes (read this before adding a test)
 
 A test that spawns a pipeline or a wave costs seconds of wall clock on

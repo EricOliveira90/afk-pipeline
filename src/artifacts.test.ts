@@ -35,6 +35,7 @@ import type {
   ContractReviewAttemptRecord,
 } from "./contract-review.js";
 import type { QAReviewAttemptRecord } from "./qa-review.js";
+import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
   seedStuckDiagnosisArchive,
@@ -528,10 +529,15 @@ describe("archiveArtifactsBeforeRestart (#113)", () => {
     return { repoRoot, sliceDir };
   }
 
-  it("copies out the contract, context, feedback rounds and qa reports", () => {
+  it("copies out the contract, context, escalation, feedback rounds and qa reports", () => {
     const names = [
       "contract.md",
       "context.md",
+      // A negotiation ESCALATE has no commits, so the next run restarts this
+      // slice from base and deletes the slice dir. Without the sentinel in
+      // the copied set, the one file naming the decision the run is waiting
+      // on would not survive the restart.
+      PLANNER_ESCALATION_FILENAME,
       "feedback-r1.md",
       "feedback-r2.md",
       "qa-report.md",
