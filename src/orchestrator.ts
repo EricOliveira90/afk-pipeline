@@ -950,9 +950,9 @@ export function makeSliceContext(
         return provider.invoke({
           ...providerOpts,
           signal,
-          onIdleWarning: (minutes) => {
+          onIdleWarning: (silentSeconds) => {
             if (opts.logStream) {
-              logger.writeIdleWarning(opts.logStream, opts.role, minutes);
+              logger.writeIdleWarning(opts.logStream, opts.role, silentSeconds);
             }
           },
           // Busy-probe deferrals (ADR 0021) become typed warn events so
@@ -5891,9 +5891,9 @@ export async function runPipeline(
         provider.invoke({
           ...opts,
           signal,
-          onIdleWarning: (minutes) => {
+          onIdleWarning: (silentSeconds) => {
             if (opts.logStream) {
-              logger.writeIdleWarning(opts.logStream, opts.role, minutes);
+              logger.writeIdleWarning(opts.logStream, opts.role, silentSeconds);
             }
           },
         }),

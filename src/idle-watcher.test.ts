@@ -38,20 +38,39 @@ describe("createIdleWatcher", () => {
   });
 
   it("reset() restarts both timers and resets the warning counter", () => {
-    const warningCounts: number[] = [];
+    // onWarning reports elapsed silent SECONDS, not tick count
+    // (issue #182): at a 1 s interval those coincide numerically.
+    const silentSeconds: number[] = [];
     const watcher = createIdleWatcher({
       idleTimeoutMs: 10_000,
       idleWarningIntervalMs: 1_000,
       onTimeout: () => {},
-      onWarning: (n) => warningCounts.push(n),
+      onWarning: (s) => silentSeconds.push(s),
     });
 
     vi.advanceTimersByTime(2_500);
-    expect(warningCounts).toEqual([1, 2]);
+    expect(silentSeconds).toEqual([1, 2]);
 
     watcher.reset();
     vi.advanceTimersByTime(1_000);
-    expect(warningCounts).toEqual([1, 2, 1]);
+    expect(silentSeconds).toEqual([1, 2, 1]);
+
+    watcher.stop();
+  });
+
+  it("reports elapsed silent seconds, not the tick count", () => {
+    // The real interval is 30 s, so a tick count read as minutes turned
+    // an 80-minute gap into "idle for 161 minutes" (issue #182).
+    const silentSeconds: number[] = [];
+    const watcher = createIdleWatcher({
+      idleTimeoutMs: 600_000,
+      idleWarningIntervalMs: 30_000,
+      onTimeout: () => {},
+      onWarning: (s) => silentSeconds.push(s),
+    });
+
+    vi.advanceTimersByTime(90_000);
+    expect(silentSeconds).toEqual([30, 60, 90]);
 
     watcher.stop();
   });
@@ -108,21 +127,21 @@ describe("createIdleWatcher — deferral probe", () => {
   });
 
   it("keeps counting warnings across a deferral (the agent really is silent)", async () => {
-    const warningCounts: number[] = [];
+    const silentSeconds: number[] = [];
     const watcher = createIdleWatcher({
       idleTimeoutMs: 1_000,
       idleWarningIntervalMs: 400,
       onTimeout: () => {},
-      onWarning: (n) => warningCounts.push(n),
+      onWarning: (s) => silentSeconds.push(s),
       shouldDefer: () => Promise.resolve(true),
     });
 
-    // 400, 800 → warnings 1, 2; timeout at 1_000 defers and restarts.
+    // 400, 800 → 0.4 s, 0.8 s silent; timeout at 1_000 defers and restarts.
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(warningCounts).toEqual([1, 2]);
-    // Next cycle continues the count: 3, 4 — not back to 1.
+    expect(silentSeconds).toEqual([0.4, 0.8]);
+    // Next cycle continues the accumulation — it does not restart at 0.4.
     await vi.advanceTimersByTimeAsync(800);
-    expect(warningCounts).toEqual([1, 2, 3, 4]);
+    expect(silentSeconds).toEqual([0.4, 0.8, 1.2, 1.6]);
 
     watcher.stop();
   });

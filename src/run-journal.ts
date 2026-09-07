@@ -430,8 +430,8 @@ export class RunJournal {
     this.logger.addInvocationStats(ghIssue, stats);
   }
 
-  writeIdleWarning(stream: WriteStream, agent: string, minutes: number) {
-    this.logger.writeIdleWarning(stream, agent, minutes);
+  writeIdleWarning(stream: WriteStream, agent: string, silentSeconds: number) {
+    this.logger.writeIdleWarning(stream, agent, silentSeconds);
   }
 
   /**

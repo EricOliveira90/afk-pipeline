@@ -266,7 +266,14 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     return {
       command: "codex",
       args,
-      env: preparedEnv.env,
+      // Codex logs its own stream retries ("Reconnecting… 1/5") at WARN
+      // and defaults to ERROR, so its record of a stall was discarded
+      // as it happened (issue #182). Observability only; an operator
+      // `RUST_LOG` still wins.
+      env: {
+        RUST_LOG: "codex_core=warn",
+        ...preparedEnv.env,
+      },
       shell: process.platform === "win32",
       stdin: prompt,
       parseStreamLine: (line) => {
@@ -298,6 +305,9 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       stats: () =>
         tokenCounts === undefined ? {} : { tokenCounts },
       commandTimeMs: () => commandTime.totalMs(),
+      // Gates busy-probe idle-kill deferral (ADR 0059): the same
+      // `command_execution` brackets above, read live instead of summed.
+      isCommandOpen: () => commandTime.hasOpenCommand(),
       classifyExit: ({ exitCode, stderr }) => {
         const detail = stderr.trim();
         return new Error(

@@ -152,11 +152,19 @@ export class Logger {
     this.runLog.totals.set(ghIssue, t);
   }
 
-  /** Append an idle-warning line to a slice's agent log. */
-  writeIdleWarning(stream: WriteStream, agent: string, minutes: number) {
-    stream.write(
-      `\n[afk] ${agent} idle for ${minutes} minute${minutes === 1 ? "" : "s"}…\n`,
-    );
+  /**
+   * Append an idle-warning line to a slice's agent log. Takes elapsed
+   * silent SECONDS: the warning interval is 30 s, so the old
+   * tick-count parameter printed an 80-minute gap as "161 minutes"
+   * (issue #182).
+   */
+  writeIdleWarning(stream: WriteStream, agent: string, silentSeconds: number) {
+    const minutes = Math.floor(silentSeconds / 60);
+    const elapsed =
+      minutes >= 1
+        ? `${minutes} minute${minutes === 1 ? "" : "s"}`
+        : `${Math.round(silentSeconds)}s`;
+    stream.write(`\n[afk] ${agent} idle for ${elapsed}…\n`);
   }
 
   /**

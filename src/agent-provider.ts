@@ -79,8 +79,13 @@ export interface InvokeOptions {
    * ignore it.
    */
   bare?: boolean;
-  /** Called periodically while the agent produces no stdout. `minutes` = elapsed idle minutes. */
-  onIdleWarning?: (minutes: number) => void;
+  /**
+   * Called on every `idleWarningIntervalMs` tick while the agent
+   * produces no stdout. `silentSeconds` = elapsed idle seconds, not a
+   * tick count (issue #182: the tick count was being printed as
+   * minutes against a 30 s interval).
+   */
+  onIdleWarning?: (silentSeconds: number) => void;
   /**
    * Allow the busy probe (ADR 0021) to defer idle kills while live
    * spawned processes are found in the agent's tree. Opt-in per role:
