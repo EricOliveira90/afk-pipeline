@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
+import { buildGuardianRoundScope } from "./guardian-round-scope.js";
 import { parseQAReview } from "./qa-review.js";
 import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 import {
@@ -352,7 +353,13 @@ describe("renderPrompt", () => {
       REPAIR_SITUATION: "resume facts",
       FAILURE_SET: "(none)",
     })).toBeTruthy();
-    expect(renderPrompt("architect-review", { SPECS_DIR: "s", RELEVANT_FILES: "" })).toBeTruthy();
+    expect(renderPrompt("architect-review", {
+      SPECS_DIR: "s",
+      RELEVANT_FILES: "",
+      ROUND_SCOPE: "round 1",
+      OPEN_FINDINGS: "(none)",
+      RESOLVED_HISTORY: "(none)",
+    })).toBeTruthy();
     expect(renderPrompt("pm-review", { SPECS_DIR: "s", RELEVANT_FILES: "", RUN_SCOPE: "(scope)" })).toBeTruthy();
   });
 
@@ -360,6 +367,9 @@ describe("renderPrompt", () => {
     const architect = renderPrompt("architect-review", {
       SPECS_DIR: "s",
       RELEVANT_FILES: "(files)",
+      ROUND_SCOPE: "round 1",
+      OPEN_FINDINGS: "(none)",
+      RESOLVED_HISTORY: "(none)",
     });
     expect(architect).toContain("## Structured findings (v2)");
     const architectExample = architect.match(
@@ -422,6 +432,93 @@ describe("renderPrompt", () => {
         /ACCEPT-WITH-NOTES and\s+FIX-BEFORE-SHIP require at least one finding/i,
       );
     }
+  });
+
+  it("renders the architect review round scope from the ledger, round 1 and round N", () => {
+    const roundOne = buildGuardianRoundScope({
+      rounds: [],
+      guardian: "architect",
+      defaultBranch: "main",
+    });
+    const roundOnePrompt = renderPrompt("architect-review", {
+      SPECS_DIR: "s",
+      RELEVANT_FILES: "(files)",
+      ROUND_SCOPE: roundOne.roundScope,
+      OPEN_FINDINGS: roundOne.openFindings,
+      RESOLVED_HISTORY: roundOne.resolvedHistory,
+    });
+    expect(roundOnePrompt).toContain("# What this round reviews");
+    expect(roundOnePrompt).toContain("git diff main...HEAD");
+    expect(roundOnePrompt).not.toContain("verification round");
+    expect(roundOnePrompt).not.toContain("{{");
+
+    const roundTwo = buildGuardianRoundScope({
+      rounds: [
+        {
+          round: 1,
+          reviewedHeadSha: "reviewed-1",
+          headSha: "deadbeefcafe0001",
+          architect: {
+            source: "INVOKED",
+            outcome: "FIX-BEFORE-SHIP",
+            findingsOriginRound: 1,
+            findings: [
+              {
+                stableId: "A-01",
+                currentId: "A-01",
+                title: "Round persistence skips the early return",
+                class: "INTEGRITY",
+                clearCondition: "The round persists on every exit path.",
+                disposition: "OPEN",
+                reachableTrigger: "A normal retry reads the partial record.",
+                introducedByReviewedDiff: true,
+              },
+              {
+                stableId: "A-02",
+                currentId: "A-02",
+                title: "Naming drift in the lane partitioner",
+                class: "CONVENTION",
+                clearCondition: "The helper follows the module's naming.",
+                disposition: "RESOLVED",
+                reachableTrigger: null,
+                introducedByReviewedDiff: false,
+              },
+            ],
+          },
+          pm: {
+            source: "INVOKED",
+            outcome: "SHIP",
+            findingsOriginRound: 1,
+            findings: [],
+          },
+        },
+      ],
+      guardian: "architect",
+      defaultBranch: "main",
+    });
+    const roundTwoPrompt = renderPrompt("architect-review", {
+      SPECS_DIR: "s",
+      RELEVANT_FILES: "(files)",
+      ROUND_SCOPE: roundTwo.roundScope,
+      OPEN_FINDINGS: roundTwo.openFindings,
+      RESOLVED_HISTORY: roundTwo.resolvedHistory,
+    });
+    expect(roundTwoPrompt).toContain("review round 2, a verification round");
+    expect(roundTwoPrompt).toContain("git diff deadbeefcafe0001..HEAD");
+    expect(roundTwoPrompt).not.toContain("git diff main...HEAD");
+    expect(roundTwoPrompt).toContain("Reuse the stable IDs");
+    expect(roundTwoPrompt).toMatch(
+      /## Open findings[\s\S]*?\[A-01\][\s\S]*?The round persists on every exit path\./,
+    );
+    expect(roundTwoPrompt).toMatch(
+      /## Already resolved — do not re-raise[\s\S]*?\[A-02\]/,
+    );
+    // The resolved finding must not reappear in the verify-these list.
+    const openBlock = roundTwoPrompt
+      .split("## Open findings")[1]!
+      .split("## Already resolved")[0]!;
+    expect(openBlock).not.toContain("[A-02]");
+    expect(roundTwoPrompt).not.toContain("{{");
   });
 
   it("B-04 QA-02 documents the fresh revisionCitation object contract", () => {

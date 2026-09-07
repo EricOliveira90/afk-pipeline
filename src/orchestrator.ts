@@ -487,6 +487,12 @@ export interface PipelineConfig {
    * architect verdict is favorable. See ADR 0015.
    */
   openPrOnOverride?: boolean;
+  /**
+   * Unfavorable guardian review rounds before the gate stops fixing and takes
+   * the recorded cap exit. Defaults to `DEFAULT_GUARDIAN_ROUND_CAP` (3); 0
+   * disables the cap. See ADR 0057 decision 4.
+   */
+  guardianRoundCap?: number;
   /** Enables remote UAT after deterministic QA. */
   sharedPreview?: SharedPreviewConfig;
 
@@ -6793,6 +6799,7 @@ export async function runPipeline(
           maxAgentDurationMs: config.maxAgentDurationMs,
           serialReviews: config.serialLanes === true,
           openPrOnOverride: config.openPrOnOverride === true,
+          guardianRoundCap: config.guardianRoundCap,
         },
         signal,
       });

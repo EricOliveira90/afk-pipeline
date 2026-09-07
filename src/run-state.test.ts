@@ -14,6 +14,7 @@ import {
   loadRunState,
   saveSliceState,
   saveRunState,
+  saveFiledFindings,
   saveReviewPhase,
   sanitizeReviewPhase,
   isSliceComplete,
@@ -453,6 +454,51 @@ describe("review-phase persistence", () => {
       retained: true,
     });
   });
+
+  it("appends filed findings, ignores a re-filed identity, and survives the next round write", () => {
+    const repo = makeRepo();
+    const blocker = {
+      guardian: "architect" as const,
+      stableId: "A-01",
+      fingerprint: "fp-a1",
+      kind: "BLOCKER" as const,
+      round: 3,
+      issue: "https://github.com/acme/repo/issues/1",
+    };
+    saveReviewPhase(repo, "demo", { rounds: [invokedRound(1)] });
+    saveFiledFindings(repo, "demo", [blocker]);
+    // Same identity, different issue: the record already exists, so the second
+    // write is a no-op rather than a duplicate.
+    saveFiledFindings(repo, "demo", [
+      { ...blocker, round: 4, issue: "https://github.com/acme/repo/issues/9" },
+      {
+        guardian: "pm",
+        stableId: "P-01",
+        fingerprint: "fp-p1",
+        kind: "NOTE",
+        round: 4,
+        issue: "https://github.com/acme/repo/issues/2",
+      },
+    ]);
+    saveFiledFindings(repo, "demo", []);
+
+    expect(loadRunState(repo, "demo").reviewPhase?.filedFindings).toEqual([
+      blocker,
+      expect.objectContaining({ stableId: "P-01" }),
+    ]);
+
+    // The next round's cache write replaces the cache fields wholesale; the
+    // filed-issue memory must not go with them, or every note would be filed
+    // again next round.
+    saveReviewPhase(repo, "demo", {
+      pm: { headSha: "head-2", verdict: "SHIP" },
+      rounds: [invokedRound(2, "FIX-BEFORE-SHIP", "SHIP")],
+    });
+
+    const reloaded = loadRunState(repo, "demo").reviewPhase;
+    expect(reloaded?.filedFindings).toHaveLength(2);
+    expect(reloaded?.rounds).toHaveLength(2);
+  });
 });
 
 describe("sanitizeReviewPhase", () => {
@@ -490,6 +536,86 @@ describe("sanitizeReviewPhase", () => {
         pm: { headSha: "", verdict: "SHIP" },
       }),
     ).toEqual({ sanity: { treeSha: "abc", ok: true } });
+  });
+
+  /**
+   * The filed-issue record is validated entry by entry, not all-or-nothing like
+   * the ledger: every record dropped is one finding the next round may file a
+   * second issue for, so keeping the valid majority minimizes duplicates
+   * (ADR 0057 decision 4, last sentence).
+   */
+  it("keeps each well-formed filed finding and drops only the malformed rows", () => {
+    expect(
+      sanitizeReviewPhase({
+        filedFindings: [
+          {
+            guardian: "architect",
+            stableId: " A-01 ",
+            fingerprint: "fp-a1",
+            kind: "BLOCKER",
+            round: 3,
+            issue: " https://github.com/acme/repo/issues/1 ",
+          },
+          // Every one of these is dropped, and none of them takes the row
+          // above with it.
+          { guardian: "designer", stableId: "X", fingerprint: "f", kind: "NOTE", round: 1, issue: "u" },
+          { guardian: "pm", stableId: "  ", fingerprint: "f", kind: "NOTE", round: 1, issue: "u" },
+          { guardian: "pm", stableId: "P-01", fingerprint: "", kind: "NOTE", round: 1, issue: "u" },
+          { guardian: "pm", stableId: "P-01", fingerprint: "f", kind: "MAYBE", round: 1, issue: "u" },
+          { guardian: "pm", stableId: "P-01", fingerprint: "f", kind: "NOTE", round: 0, issue: "u" },
+          { guardian: "pm", stableId: "P-01", fingerprint: "f", kind: "NOTE", round: 1.5, issue: "u" },
+          { guardian: "pm", stableId: "P-01", fingerprint: "f", kind: "NOTE", round: 1, issue: "" },
+          "not an object",
+          null,
+          {
+            guardian: "pm",
+            stableId: "P-02",
+            fingerprint: "fp-p2",
+            kind: "NOTE",
+            round: 2,
+            issue: "https://github.com/acme/repo/issues/2",
+          },
+          // A duplicate identity collapses to the first record.
+          {
+            guardian: "pm",
+            stableId: "P-02",
+            fingerprint: "fp-p2",
+            kind: "NOTE",
+            round: 3,
+            issue: "https://github.com/acme/repo/issues/3",
+          },
+        ],
+      }),
+    ).toEqual({
+      filedFindings: [
+        {
+          guardian: "architect",
+          stableId: "A-01",
+          fingerprint: "fp-a1",
+          kind: "BLOCKER",
+          round: 3,
+          issue: "https://github.com/acme/repo/issues/1",
+        },
+        {
+          guardian: "pm",
+          stableId: "P-02",
+          fingerprint: "fp-p2",
+          kind: "NOTE",
+          round: 2,
+          issue: "https://github.com/acme/repo/issues/2",
+        },
+      ],
+    });
+  });
+
+  it("reads an unusable filed-finding record as nothing filed rather than refusing the phase", () => {
+    expect(
+      sanitizeReviewPhase({
+        sanity: { treeSha: "abc", ok: true },
+        filedFindings: "not an array",
+      }),
+    ).toEqual({ sanity: { treeSha: "abc", ok: true } });
+    expect(sanitizeReviewPhase({ filedFindings: [] })).toBeUndefined();
   });
 
   it("B-04 drops an impossible architect blocking ledger but keeps favorable cache data", () => {

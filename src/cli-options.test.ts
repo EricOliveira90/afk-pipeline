@@ -136,6 +136,26 @@ describe("parsePipelineRuntimeOptions", () => {
     expect(parsePipelineRuntimeOptions([]).openPrOnOverride).toBe(false);
   });
 
+  it("reads the guardian round cap, allowing 0 to disable it and leaving it absent by default", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--guardian-round-cap", "5"])
+        .guardianRoundCap,
+    ).toBe(5);
+    // 0 is a real choice — the unbounded pre-ADR-0057 loop — not a typo.
+    expect(
+      parsePipelineRuntimeOptions(["--guardian-round-cap", "0"])
+        .guardianRoundCap,
+    ).toBe(0);
+    // Absent means the ship gate applies DEFAULT_GUARDIAN_ROUND_CAP.
+    expect(parsePipelineRuntimeOptions([]).guardianRoundCap).toBeUndefined();
+    expect(() =>
+      parsePipelineRuntimeOptions(["--guardian-round-cap", "-1"]),
+    ).toThrow(/--guardian-round-cap must be a non-negative integer/);
+    expect(() =>
+      parsePipelineRuntimeOptions(["--guardian-round-cap", "three"]),
+    ).toThrow(/--guardian-round-cap must be a non-negative integer/);
+  });
+
   it("requires preview verify and apply commands together", () => {
     expect(() =>
       parsePipelineRuntimeOptions(["--preview-verify-command", "pnpm db:verify"]),

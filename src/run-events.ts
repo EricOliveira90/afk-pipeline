@@ -259,8 +259,11 @@ export type RunEventPayload =
        * committing — or could not restore — and a review worktree that moved
        * under the gate between the reviews and the artifact commit (#136),
        * which is immediately followed by the `cancellation-requested`
-       * line it triggers, and the previous attempt's persisted slice
-       * record dropped when this run dispatched the slice (#111).
+       * line it triggers, the previous attempt's persisted slice
+       * record dropped when this run dispatched the slice (#111), and each
+       * guardian finding the ship gate filed as an issue — or could not file:
+       * a blocking finding that cannot be filed refuses the round-cap exit,
+       * while an unfilable note only warns (ADR 0057 decision 4).
        */
       reason:
         | "cancellation-requested"
@@ -284,7 +287,10 @@ export type RunEventPayload =
         | "preflight"
         | "review-artifact-restored"
         | "review-artifact-restore-failed"
-        | "review-worktree-drift";
+        | "review-worktree-drift"
+        | "guardian-finding-filed"
+        | "guardian-cap-filing-failed"
+        | "guardian-note-filing-failed";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

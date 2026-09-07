@@ -22,8 +22,26 @@ import {
   type GuardianKind,
 } from "./guardian-convergence.js";
 import { guardianFindingMayBlock } from "./guardian-blocking-authority.js";
+import { buildGuardianRoundScope } from "./guardian-round-scope.js";
 import {
+  foldGuardianLedger,
+  unresolvedBlockingFindings,
+  unresolvedNoteFindings,
+} from "./guardian-finding-ledger.js";
+import {
+  decideGuardianRoundCapExit,
+  DEFAULT_GUARDIAN_ROUND_CAP,
+} from "./guardian-round-cap.js";
+import {
+  buildFindingIssueDrafts,
+  fileFindingIssues,
+  type FindingFilingOutcome,
+  type FindingIssueDraft,
+} from "./finding-filing.js";
+import {
+  saveFiledFindings,
   saveReviewPhase,
+  type PersistedFiledFinding,
   type PersistedGuardianFinding,
   type PersistedGuardianReviewRecord,
   type PersistedGuardianReviewRound,
@@ -268,9 +286,28 @@ export function buildReviewScopeBlock(scope: ResolvedRunScope): string {
 export interface PrCreationPlan {
   open: boolean;
   overridden: boolean;
+  /** Set when the guardian round cap opened this PR. See ADR 0057 decision 4. */
+  cappedExit: boolean;
   title: string;
   body: string;
   overrideNote?: string;
+  /**
+   * The cap exit's acknowledgement, the counterpart of `overrideNote`. Both
+   * reach the run summary through `journal.setPrOverrideNote`: cap exit and
+   * override exit are the same carve-out with different provenance.
+   */
+  cappedExitNote?: string;
+}
+
+/**
+ * The recorded cap exit: the disagreement the gate stopped fixing, and the
+ * issues it filed instead. Present only once filing has succeeded — a run that
+ * could not file does not reach this type.
+ */
+export interface GuardianCapExit {
+  cap: number;
+  unfavorableRounds: number;
+  filed: readonly PersistedFiledFinding[];
 }
 
 export interface AdoptedSlice extends SliceAdoption {
@@ -281,6 +318,12 @@ export interface AdoptedSlice extends SliceAdoption {
  * Decide whether the draft PR opens and build its content. An override records
  * disagreement with one real guardian judgment; it never replaces a missing
  * verdict or clears two blocking judgments.
+ *
+ * `capExit` is the second, unattended exit (ADR 0057 decision 4): supplied only
+ * once the unresolved blocking findings are durably filed, it opens the same
+ * draft PR with the disagreement recorded in the body. Override and cap exit
+ * are mutually exclusive by construction — an override already opens the PR, so
+ * the caller never asks for a cap exit on a plan that opens.
  */
 export function buildPrCreationPlan(args: {
   prdSlug: string;
@@ -290,6 +333,7 @@ export function buildPrCreationPlan(args: {
   openPrOnOverride: boolean;
   closesIssues: readonly string[];
   adoptions?: readonly AdoptedSlice[];
+  capExit?: GuardianCapExit;
 }): PrCreationPlan {
   const architectOk = artifacts.isFavorableReviewOutcome(args.architect);
   const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
@@ -298,7 +342,8 @@ export function buildPrCreationPlan(args: {
   const overridden =
     args.openPrOnOverride &&
     ((architectBlocked && pmOk) || (pmBlocked && architectOk));
-  const open = (architectOk && pmOk) || overridden;
+  const cappedExit = !overridden && args.capExit !== undefined;
+  const open = (architectOk && pmOk) || overridden || cappedExit;
   const overriddenGuardian = architectBlocked ? "architect" : "PM";
   const specsPath = args.specsDir.replace(/\\/g, "/");
 
@@ -317,6 +362,33 @@ export function buildPrCreationPlan(args: {
         `- PM review: **${args.pm}**${pmBlocked ? " (overridden)" : ""}`,
         "",
         `Read ${specsPath}/review-${overriddenGuardian.toLowerCase()}.md for the blocking findings before merging.`,
+      ].join("\n"),
+    );
+  }
+  if (cappedExit && args.capExit) {
+    const { cap, unfavorableRounds, filed } = args.capExit;
+    const blockers = filed.filter((record) => record.kind === "BLOCKER");
+    sections.push(
+      [
+        "## Guardian round cap reached (ADR 0057 decision 4)",
+        "",
+        `The guardian review gate spent ${unfavorableRounds} unfavorable round(s), reaching its cap of ${cap}, so this run stopped fixing and opened the draft PR with the disagreement recorded.`,
+        "",
+        `- Architect review: **${args.architect}**`,
+        `- PM review: **${args.pm}**`,
+        "",
+        blockers.length > 0
+          ? [
+              "The unresolved blocking findings were filed as issues — read them before merging:",
+              "",
+              ...blockers.map(
+                (record) =>
+                  `- ${record.issue} — ${record.guardian === "pm" ? "PM" : "architect"} \`${record.stableId}\`, last reported in round ${record.round}`,
+              ),
+            ].join("\n")
+          : "No blocking finding survived the ledger at the cap; the reviews below carry the detail.",
+        "",
+        `Read ${specsPath}/review-architect.md and ${specsPath}/review-pm.md for the guardians' own words. This is a draft PR: a human still merges it.`,
       ].join("\n"),
     );
   }
@@ -342,14 +414,25 @@ export function buildPrCreationPlan(args: {
     args.closesIssues.map((issue) => `Closes #${issue}`).join("\n"),
   );
 
+  const filedBlockers =
+    args.capExit?.filed.filter((record) => record.kind === "BLOCKER") ?? [];
   return {
     open,
     overridden,
+    cappedExit,
     title: `feat: ${args.prdSlug}`,
     body: sections.join("\n\n"),
     overrideNote: overridden
       ? `PR opened via --open-pr-on-override despite ${overriddenGuardian} verdict FIX-BEFORE-SHIP (architect: ${args.architect}, PM: ${args.pm}).`
       : undefined,
+    cappedExitNote:
+      cappedExit && args.capExit
+        ? `PR opened at the guardian round cap after ${args.capExit.unfavorableRounds} unfavorable round(s) of ${args.capExit.cap} ` +
+          `(architect: ${args.architect}, PM: ${args.pm}); ` +
+          (filedBlockers.length > 0
+            ? `${filedBlockers.length} unresolved blocking finding(s) filed as ${filedBlockers.map((record) => record.issue).join(", ")}.`
+            : "no unresolved blocking finding remained in the ledger.")
+        : undefined,
   };
 }
 
@@ -371,11 +454,18 @@ export interface ShipGateOptions {
   maxAgentDurationMs?: number;
   serialReviews: boolean;
   openPrOnOverride: boolean;
+  /**
+   * Unfavorable guardian rounds before the recorded cap exit (ADR 0057
+   * decision 4). Absent means `DEFAULT_GUARDIAN_ROUND_CAP`; 0 disables the cap.
+   */
+  guardianRoundCap?: number;
 }
 
 export interface ShipGatePrOutcome {
   requested: boolean;
   overridden: boolean;
+  /** Whether the guardian round cap opened this PR. */
+  cappedExit: boolean;
   url: string | null;
   number: number | null;
 }
@@ -422,6 +512,8 @@ export interface RunShipGateArgs {
   sanityRunCommand?: SanityCommandRunner;
   /** Internal state-write seam used by direct persistence failure tests. */
   saveReviewPhase?: typeof saveReviewPhase;
+  /** Internal state-write seam for the filed-issue record. */
+  saveFiledFindings?: typeof saveFiledFindings;
 }
 
 function blocked(
@@ -434,6 +526,7 @@ function blocked(
     pr: {
       requested: pr.requested ?? false,
       overridden: pr.overridden ?? false,
+      cappedExit: pr.cappedExit ?? false,
       url: pr.url ?? null,
       number: pr.number ?? null,
     },
@@ -557,6 +650,16 @@ export async function runShipGate(
     );
   }
 
+  // Read before the reviews run: round 1 reads the branch, later rounds verify
+  // the fix against what the ledger already recorded (ADR 0057 decision 2).
+  const priorRounds = cachedReviewPhase?.rounds ?? [];
+  const roundNumber = priorRounds.length + 1;
+  const architectScope = buildGuardianRoundScope({
+    rounds: priorRounds,
+    guardian: "architect",
+    defaultBranch,
+  });
+
   const runGuardianReview = async (
     kind: "architect" | "pm",
   ): Promise<ReviewRunResult> => {
@@ -564,11 +667,22 @@ export async function runShipGate(
     const label = kind === "architect" ? "Architect" : "PM";
     const reviewFileName =
       kind === "architect" ? "review-architect.md" : "review-pm.md";
+    if (kind === "architect") {
+      journal.phase(
+        architectScope.deltaBaseSha === null
+          ? `  🔎 Architect review round ${architectScope.round}: reviewing the whole branch against ${defaultBranch}.`
+          : `  🔎 Architect review round ${architectScope.round}: verifying the fix diff ${architectScope.deltaBaseSha.slice(0, 12)}..HEAD against the recorded open findings.`,
+        "log",
+      );
+    }
     const prompt =
       kind === "architect"
         ? renderPrompt("architect-review", {
             SPECS_DIR: relativeSpecsDir,
             RELEVANT_FILES: relevantFilesBlock,
+            ROUND_SCOPE: architectScope.roundScope,
+            OPEN_FINDINGS: architectScope.openFindings,
+            RESOLVED_HISTORY: architectScope.resolvedHistory,
           })
         : renderPrompt("pm-review", {
             SPECS_DIR: relativeSpecsDir,
@@ -737,8 +851,6 @@ export async function runShipGate(
     pmResult = pmSettled.value;
   }
 
-  const priorRounds = cachedReviewPhase?.rounds ?? [];
-  const roundNumber = priorRounds.length + 1;
   // Lineage resolves before outcomes are published so the durable round and
   // the draft-PR decision observe the same parsed guardian evidence.
   const invokedLineage = new Map<GuardianKind, PersistedGuardianFinding[]>();
@@ -830,6 +942,7 @@ export async function runShipGate(
     pm: guardianRecord("pm", pmResult),
   });
   let roundPersistenceAttempted = false;
+  let persistedRound: PersistedGuardianReviewRound | undefined;
   let roundHeadSha = headShaBefore;
   // `persistReviewPhase` replaces the cache fields wholesale, so every write
   // that appends a round must carry forward the cache entries that are still
@@ -856,11 +969,13 @@ export async function runShipGate(
   ): void => {
     if (roundPersistenceAttempted) return;
     attemptedReviewPhase = reviewPhase;
+    const round = completedRound(headSha);
     persistReviewPhase(repoRoot, runSlug, {
       ...reviewPhase,
-      rounds: [completedRound(headSha)],
+      rounds: [round],
     });
     roundPersistenceAttempted = true;
+    persistedRound = round;
   };
 
   try {
@@ -983,7 +1098,94 @@ export async function runShipGate(
     throw error;
   }
 
-  const prPlan = buildPrCreationPlan({
+  // The full ledger this decision reads: every recorded round plus the one this
+  // pass just wrote. A round that failed to persist is absent, which can only
+  // undercount — the cap never fires on evidence that is not durable.
+  const ledgerRounds: PersistedGuardianReviewRound[] = [
+    ...priorRounds,
+    ...(persistedRound ? [persistedRound] : []),
+  ];
+  const foldedLedger = foldGuardianLedger(ledgerRounds);
+  const alreadyFiled = cachedReviewPhase?.filedFindings ?? [];
+  const persistFiledFindings = args.saveFiledFindings ?? saveFiledFindings;
+
+  /**
+   * File one batch of drafts and record what was opened.
+   *
+   * The durable record is written before the caller acts on the result, so a
+   * crash between filing and the PR cannot make the next round file the same
+   * finding twice (ADR 0057 decision 4, last sentence). A record that will not
+   * persist is reported as a filing failure rather than thrown: "durably filed"
+   * is the cap exit's precondition, and a state write is half of durable — but
+   * bookkeeping must not lose a completed gate either, so the caller decides.
+   */
+  const fileIssues = (
+    drafts: readonly FindingIssueDraft[],
+  ): FindingFilingOutcome => {
+    const outcome = fileFindingIssues({
+      drafts,
+      alreadyFiled,
+      retries: options.reviewRetries,
+      onRetry: (draft, attempt, error) => {
+        journal.phase(
+          `  ⚠️  Could not file ${draft.guardian} finding ${draft.stableId} as an issue: ${error}. Retry ${attempt}/${options.reviewRetries}.`,
+          "warn",
+        );
+      },
+      create: (draft) =>
+        runCommand(
+          "gh",
+          ["issue", "create", "--title", draft.title, "--body", draft.body],
+          { cwd: repoRoot, encoding: "utf-8" },
+        ),
+    });
+    if (outcome.filed.length === 0) return outcome;
+    try {
+      persistFiledFindings(repoRoot, runSlug, outcome.filed);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const byStableId = new Map(
+        outcome.filed.map((record) => [record.stableId, record]),
+      );
+      const message =
+        `Filed ${outcome.filed.length} guardian finding issue(s) but could not record them in run state: ${detail}. ` +
+        `Issues already opened: ${outcome.filed.map((record) => record.issue).join(", ")} — ` +
+        "a later round may file them again.";
+      journal.phase(`  ⚠️  ${message}`, "warn");
+      journal.event({
+        type: "warn",
+        reason: "guardian-finding-filed",
+        message,
+      });
+      return {
+        filed: [],
+        skipped: outcome.skipped,
+        failed: [
+          ...outcome.failed,
+          ...drafts
+            .filter((draft) => byStableId.has(draft.stableId))
+            .map((draft) => ({
+              draft,
+              error: `the issue was created but its record could not be persisted: ${detail}`,
+            })),
+        ],
+      };
+    }
+    for (const record of outcome.filed) {
+      const message =
+        `Filed ${record.guardian === "pm" ? "PM" : "architect"} finding ` +
+        `${record.stableId} (${record.kind.toLowerCase()}) as ${record.issue}.`;
+      journal.phase(`  📝 ${message}`, "log");
+      journal.event({
+        type: "warn",
+        reason: "guardian-finding-filed",
+        message,
+      });
+    }
+    return outcome;
+  };
+
+  let prPlan = buildPrCreationPlan({
     prdSlug,
     specsDir,
     architect: architectResult.outcome,
@@ -992,6 +1194,80 @@ export async function runShipGate(
     closesIssues,
     adoptions,
   });
+
+  // The gate has a clock (ADR 0057 decision 4). A blocked round that has spent
+  // the cap stops fixing: it files the unresolved blocking findings and opens
+  // the draft PR with them recorded, rather than handing the next run another
+  // full re-review of a disagreement that is not depleting.
+  const capDecision = decideGuardianRoundCapExit({
+    rounds: ledgerRounds,
+    architect: architectResult.outcome,
+    pm: pmResult.outcome,
+    prWouldOpen: prPlan.open,
+    cap: options.guardianRoundCap ?? DEFAULT_GUARDIAN_ROUND_CAP,
+  });
+  if (capDecision.capReached) {
+    const blockers = unresolvedBlockingFindings(foldedLedger);
+    journal.phase(
+      `  ⏱️  Guardian round cap reached: ${capDecision.unfavorableRounds} unfavorable round(s) of ${capDecision.cap}. ` +
+        `Filing ${blockers.length} unresolved blocking finding(s) as issues instead of running another round.`,
+      "warn",
+    );
+    const filing = fileIssues(
+      buildFindingIssueDrafts({
+        prdSlug,
+        specsDir,
+        featureBranch,
+        kind: "BLOCKER",
+        findings: blockers,
+      }),
+    );
+    if (filing.failed.length > 0) {
+      // Filing is mandatory for a cap exit, not best-effort: the exit signal is
+      // only available once the findings are durably filed, so a run can never
+      // report success on findings that exist nowhere but the ledger (ADR 0057
+      // decision 4, amendment 2026-09-06).
+      const detail = filing.failed
+        .map(({ draft, error }) => `${draft.stableId}: ${error}`)
+        .join("; ");
+      const message =
+        `guardian round cap reached (${capDecision.unfavorableRounds} unfavorable round(s) of ${capDecision.cap}) ` +
+        `but ${filing.failed.length} unresolved blocking finding(s) could not be filed as issues — ${detail}. ` +
+        "Refusing the cap exit: a capped run may not report success on findings recorded nowhere but the ledger.";
+      journal.phase(`  ❌ ${message}`, "warn");
+      journal.event({
+        type: "warn",
+        reason: "guardian-cap-filing-failed",
+        message,
+      });
+      journal.event({
+        type: "run-phase-ended",
+        phase: "draft-pr",
+        verdict: "SKIPPED",
+      });
+      return blocked(message);
+    }
+    prPlan = buildPrCreationPlan({
+      prdSlug,
+      specsDir,
+      architect: architectResult.outcome,
+      pm: pmResult.outcome,
+      openPrOnOverride: options.openPrOnOverride,
+      closesIssues,
+      adoptions,
+      capExit: {
+        cap: capDecision.cap,
+        unfavorableRounds: capDecision.unfavorableRounds,
+        filed: [...filing.filed, ...filing.skipped],
+      },
+    });
+  } else if (!prPlan.open && capDecision.reason) {
+    journal.phase(
+      `  ⏱️  Guardian round cap not reached — ${capDecision.reason}.`,
+      "log",
+    );
+  }
+
   journal.event({ type: "run-phase-started", phase: "draft-pr" });
   let prUrl: string | null = null;
   let prNumber: number | null = null;
@@ -1006,9 +1282,38 @@ export async function runShipGate(
     );
   }
 
-  if (prPlan.overridden) {
-    journal.phase(`  ⚠️  ${prPlan.overrideNote}`, "warn");
-    journal.setPrOverrideNote(prPlan.overrideNote!);
+  // Every note that ships unfixed is filed exactly once across rounds, keyed by
+  // its ledger identity (ADR 0057 decision 4, last sentence; slice #174). This
+  // runs on every PR-opening exit — clean, override, and cap — because "ships
+  // unfixed" is a property of the PR opening, not of which exit opened it.
+  const noteFiling = fileIssues(
+    buildFindingIssueDrafts({
+      prdSlug,
+      specsDir,
+      featureBranch,
+      kind: "NOTE",
+      findings: unresolvedNoteFindings(foldedLedger),
+    }),
+  );
+  for (const { draft, error } of noteFiling.failed) {
+    // A note that could not be filed must not sink a ship the guardians cleared.
+    // Nothing is recorded for it, so the next round retries; when there is no
+    // next round the warning is the record.
+    const message =
+      `${draft.guardian === "pm" ? "PM" : "architect"} note ${draft.stableId} ships unfixed but could not be ` +
+      `filed as an issue: ${error}. Read it in the review artifact — it is recorded nowhere else.`;
+    journal.phase(`  ⚠️  ${message}`, "warn");
+    journal.event({
+      type: "warn",
+      reason: "guardian-note-filing-failed",
+      message,
+    });
+  }
+
+  const acknowledgement = prPlan.overrideNote ?? prPlan.cappedExitNote;
+  if (acknowledgement) {
+    journal.phase(`  ⚠️  ${acknowledgement}`, "warn");
+    journal.setPrOverrideNote(acknowledgement);
   }
   try {
     runCommand("git", ["push", "-u", "origin", featureBranch], {
@@ -1064,6 +1369,7 @@ export async function runShipGate(
     pr: {
       requested: true,
       overridden: prPlan.overridden,
+      cappedExit: prPlan.cappedExit,
       url: prUrl,
       number: prNumber,
     },

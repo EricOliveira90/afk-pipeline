@@ -16,6 +16,7 @@ import type { PersistedRunScope } from "./slice-scope.js";
 import { withFileLock } from "./file-lock.js";
 import type {
   GuardianFindingDisposition,
+  GuardianKind,
   ReviewOutcome,
 } from "./artifacts.js";
 import { guardianFindingMayBlock } from "./guardian-blocking-authority.js";
@@ -161,11 +162,31 @@ export interface PersistedGuardianReviewRound {
   pm: PersistedGuardianReviewRecord;
 }
 
+/**
+ * One guardian finding this run has opened an issue for.
+ *
+ * The durable half of "filed exactly once" (ADR 0057 decision 4, last
+ * sentence): a note that rides two consecutive rounds is filed on the first and
+ * skipped on the second because its ledger identity is already in here.
+ */
+export interface PersistedFiledFinding {
+  guardian: GuardianKind;
+  stableId: string;
+  /** Normalized class + clear condition — the content half of the identity. */
+  fingerprint: string;
+  kind: "BLOCKER" | "NOTE";
+  /** The round whose entry was filed. */
+  round: number;
+  /** Whatever the tracker returned to name the issue, usually a URL. */
+  issue: string;
+}
+
 export interface PersistedReviewPhase {
   sanity?: PersistedSanityResult;
   architect?: PersistedReviewResult;
   pm?: PersistedReviewResult;
   rounds?: PersistedGuardianReviewRound[];
+  filedFindings?: PersistedFiledFinding[];
 }
 
 const FAVORABLE_VERDICTS = new Set(["SHIP", "ACCEPT-WITH-NOTES"]);
@@ -434,6 +455,52 @@ function sanitizeGuardianRounds(
 }
 
 /**
+ * Validate the filed-issue record, entry by entry.
+ *
+ * Unlike the ledger this is *not* all-or-nothing. Every record dropped is one
+ * finding the next round may file a second issue for, so keeping the valid
+ * majority minimizes duplicates instead of discarding the whole memory over one
+ * bad row. A missing or unreadable record degrades to "nothing filed yet",
+ * never blocks resumption — the same tolerance the verdict cache gets.
+ */
+function sanitizeFiledFindings(
+  value: unknown,
+): PersistedFiledFinding[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const records: PersistedFiledFinding[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      (record.guardian !== "architect" && record.guardian !== "pm") ||
+      !nonBlank(record.stableId) ||
+      !nonBlank(record.fingerprint) ||
+      (record.kind !== "BLOCKER" && record.kind !== "NOTE") ||
+      !Number.isSafeInteger(record.round) ||
+      (record.round as number) < 1 ||
+      !nonBlank(record.issue)
+    ) {
+      continue;
+    }
+    const key = `${record.guardian} ${record.stableId.trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    records.push({
+      guardian: record.guardian as GuardianKind,
+      stableId: record.stableId.trim(),
+      fingerprint: record.fingerprint,
+      kind: record.kind,
+      round: record.round as number,
+      issue: record.issue.trim(),
+    });
+  }
+  return records.length > 0 ? records : undefined;
+}
+
+/**
  * Validate a loaded `reviewPhase`, dropping malformed or unfavorable
  * cache entries independently from the all-or-nothing guardian ledger.
  */
@@ -444,6 +511,7 @@ export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | unde
     architect?: unknown;
     pm?: unknown;
     rounds?: unknown;
+    filedFindings?: unknown;
   };
   const out: PersistedReviewPhase = {};
   const sanity = (v.sanity ?? {}) as { treeSha?: unknown; ok?: unknown };
@@ -457,6 +525,10 @@ export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | unde
   if (v.rounds !== undefined) {
     const rounds = sanitizeGuardianRounds(v.rounds);
     if (rounds && rounds.length > 0) out.rounds = rounds;
+  }
+  if (v.filedFindings !== undefined) {
+    const filed = sanitizeFiledFindings(v.filedFindings);
+    if (filed) out.filedFindings = filed;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -937,6 +1009,12 @@ export function saveRunState(repoRoot: string, state: RunState) {
  * Atomically replace cache fields and append completed guardian rounds.
  * Re-reads the file first so parallel slice updates and earlier valid rounds
  * are never clobbered. Pass `undefined` to clear the complete review phase.
+ *
+ * `filedFindings` is carried forward like `rounds` rather than replaced like the
+ * caches. It is an append-only memory of issues that exist in the tracker, so
+ * dropping it would make the next round file every note a second time — and the
+ * round write that would drop it happens on every pass, before the filing
+ * decision has even run.
  */
 export function saveReviewPhase(
   repoRoot: string,
@@ -949,6 +1027,8 @@ export function saveReviewPhase(
     } else {
       const earlierRounds = current.reviewPhase?.rounds ?? [];
       const appendedRounds = reviewPhase.rounds ?? [];
+      const filedFindings =
+        reviewPhase.filedFindings ?? current.reviewPhase?.filedFindings;
       current.reviewPhase = {
         ...reviewPhase,
         ...(
@@ -956,8 +1036,40 @@ export function saveReviewPhase(
             ? { rounds: [...earlierRounds, ...appendedRounds] }
             : {}
         ),
+        ...(filedFindings ? { filedFindings } : {}),
       };
     }
+  });
+}
+
+/**
+ * Append filed-issue records, ignoring identities already recorded.
+ *
+ * A dedicated writer rather than a `saveReviewPhase` field, because filing
+ * happens *after* the round has been persisted and the caches recomputed:
+ * routing it through `saveReviewPhase` would re-enter the round-append path for
+ * a write that has no round to add. Re-reads the file first, so a record
+ * survives whatever else the ship gate wrote in between.
+ */
+export function saveFiledFindings(
+  repoRoot: string,
+  prdSlug: string,
+  filed: readonly PersistedFiledFinding[],
+) {
+  if (filed.length === 0) return;
+  updateRunState(repoRoot, prdSlug, (current) => {
+    const reviewPhase = current.reviewPhase ?? {};
+    const records = [...(reviewPhase.filedFindings ?? [])];
+    for (const record of filed) {
+      const duplicate = records.some(
+        (existing) =>
+          existing.guardian === record.guardian &&
+          existing.stableId === record.stableId,
+      );
+      if (duplicate) continue;
+      records.push(record);
+    }
+    current.reviewPhase = { ...reviewPhase, filedFindings: records };
   });
 }
 

@@ -390,10 +390,10 @@ _Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
 The post-wave module that decides whether the merged **feature branch** may
 ship. It runs or reuses the **pre-ship sanity gate**, invokes or reuses the
 **architect reviewer** and **PM reviewer**, commits guardian artifacts,
-persists the review phase in **run state**, and applies the normal or
-`--open-pr-on-override` draft-PR decision. It returns a ship verdict and PR
-outcome to the AFK pipeline; push and GitHub CLI failures remain best-effort
-after the gate opens. See ADR 0033.
+persists the review phase in **run state**, and applies the normal,
+`--open-pr-on-override`, or **cap exit** draft-PR decision. It returns a ship
+verdict and PR outcome to the AFK pipeline; push and GitHub CLI failures
+remain best-effort after the gate opens. See ADR 0033 and ADR 0057.
 _Avoid_: "pre-ship sanity gate" (that is one check inside the ship gate),
 "review phase" (omits sanity, caching, and the PR decision), "PR creator"
 (opening the gate and creating the remote PR are distinct), "release gate"
@@ -438,11 +438,26 @@ Reported as an unsuccessful `PipelineResult` with a
 `failureReason`, so `afk`, `afk-claude`, and `afk-codex` all exit
 non-zero. A draft PR opened by `--open-pr-on-override` is not a blocked
 ship: the recorded override note is the operator's acknowledgement, and
-the run stays successful. Distinct from **escalation** (a single slice's
-agent gave up) and **cancellation** (user-initiated). See ADR 0015.
+the run stays successful. Neither is a **cap exit**. Distinct from
+**escalation** (a single slice's agent gave up) and **cancellation**
+(user-initiated). See ADR 0015.
 _Avoid_: "failed run" (slices can all pass), "not ready" (that is the
 run-summary's rendering, not the outcome), "exit code 2" (there is no
 per-class exit taxonomy)
+
+**Cap exit**:
+The **ship gate**'s unattended exit once it has spent `--guardian-round-cap`
+unfavorable **guardian rounds** (default 3). It files the ledger's unresolved
+blocking findings as issues, opens the draft PR with them recorded in its
+body, and reports success with the note — extending ADR 0015's exit-signal
+carve-out from the operator's override to the clock. A round counts as
+unfavorable only when a guardian returned `FIX-BEFORE-SHIP`; the operational
+outcomes (`UNPARSEABLE`, `NEVER_RAN`, `DIED_MID_RUN`) neither count nor can
+trigger the exit. Filing is mandatory: a run that cannot file is a **blocked
+ship** instead. See ADR 0057 decision 4.
+_Avoid_: "timeout" (this counts rounds, not time), "give up" (the findings
+are filed and the branch ships as a draft), "auto-merge" (a human merges),
+"override" (that one is operator-requested; this one is the clock)
 
 **Cancellation**:
 External termination via `AbortSignal` (typically SIGINT / Ctrl-C).

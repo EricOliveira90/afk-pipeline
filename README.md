@@ -146,7 +146,8 @@ regardless of verdict — they are evidence either way.
      ↓
 Both SHIP or ACCEPT-WITH-NOTES → opens draft PR via `gh pr create`
 Either FIX-BEFORE-SHIP        → stops; no PR opened (unless
-                                --open-pr-on-override, see below)
+                                --open-pr-on-override, or the round cap
+                                was reached — see below)
 Agent dies before any output  → outcome NEVER_RAN (infrastructure;
                                 retried within the run)
 Agent killed after real work  → outcome DIED_MID_RUN (infrastructure;
@@ -205,6 +206,20 @@ favorable). The override and both verdicts are recorded in the PR body.
 Use it when a PRD's remaining gaps belong to HITL slices outside the
 run's scope. Infrastructure failures and unparseable verdicts are never
 overridden.
+
+`--guardian-round-cap <n>` bounds the review loop (default 3, matching the
+implementation cap; `0` disables it). Rounds 2 and later hand the architect
+the fix diff since the last reviewed commit plus the ledger's open findings
+to verify, rather than a fresh read of the whole branch. Once the run has
+spent the capped number of unfavorable rounds — a round in which either
+guardian returned `FIX-BEFORE-SHIP`; infrastructure and unparseable outcomes
+do not count — it stops fixing: the unresolved blocking findings are filed
+as GitHub issues, the draft PR opens with them listed in its body, and the
+run exits 0 with the acknowledgement in `run-summary.md`. Filing is
+mandatory for that exit, so a run that cannot reach the issue tracker stays
+blocked rather than reporting success on findings recorded nowhere but its
+own state. Notes that ship unfixed are filed the same way, once each across
+rounds. The PR is a draft either way; a human still merges (ADR 0057).
 
 ### Cleaning up after failed runs
 
@@ -319,7 +334,10 @@ pre-ship sanity gate, or a guardian verdict that is unfavorable or absent
 exits non-zero with a one-line reason so wrapper scripts and CI notice.
 `--open-pr-on-override` is the exception: when it cleared the gate despite
 an unfavorable PM verdict, the run exits 0 and the override note is
-recorded in the PR body and `run-summary.md` (ADR 0015).
+recorded in the PR body and `run-summary.md` (ADR 0015). The guardian round
+cap is the second exception, on the same terms: a capped run exits 0 with
+its own note, and the findings it stopped fixing are filed as issues
+(ADR 0057).
 
 The gate is the decision to open the draft PR, not the `git push` /
 `gh pr create` calls that follow it — those stay best-effort, so a run
@@ -336,7 +354,8 @@ per-failure-class exit code; a second stop signal still exits 130.
 | Agent idle timeout (10 min) | Agent killed, slice → STUCK — deferred while a spawned process (e.g. a long test suite) is still running (ADR 0021) |
 | Model temporarily unavailable | Invocation retried with exponential backoff for up to 15 min (`--transient-retry-window-ms`, ADR 0022) |
 | Pre-ship sanity gate fails | Skip guardians + PR; recorded in run-summary.md; run exits non-zero |
-| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`); review files committed to the feature branch; run exits non-zero unless the PR was opened by override |
+| Guardian says FIX-BEFORE-SHIP | No PR (unless `--open-pr-on-override`, or the round cap was reached); review files committed to the feature branch; run exits non-zero unless the PR was opened by override or cap exit |
+| Guardian round cap reached (default 3 unfavorable rounds) | Unresolved blocking findings filed as issues, draft PR opened listing them, run exits 0 with the acknowledgement in run-summary.md — unless filing fails, which keeps the run blocked (ADR 0057) |
 | Guardian dies before producing output | Outcome → NEVER_RAN; infrastructure retry within the run (`--infrastructure-retries`); stderr surfaced in run-summary.md |
 | Guardian killed mid-run (idle watcher / tool cap) | Outcome → DIED_MID_RUN; infrastructure retry within the run |
 | Guardian finishes but verdict unparseable | Outcome → UNPARSEABLE (terminal); no PR; other review still completes; run exits non-zero |
