@@ -47,8 +47,8 @@ export function buildFindingIssueDrafts(args: {
     const reviewFile = `${specsPath}/review-${guardian === "pm" ? "pm" : "architect"}.md`;
     const heading =
       args.kind === "BLOCKER"
-        ? `unresolved at the guardian round cap`
-        : `note shipped unfixed`;
+        ? "unresolved at the guardian round cap"
+        : "note shipped unfixed";
     return {
       guardian,
       stableId: finding.stableId,

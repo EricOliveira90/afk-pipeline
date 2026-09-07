@@ -1645,6 +1645,48 @@ describe("runShipGate", () => {
     expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toHaveLength(2);
   });
 
+  it("refuses the cap exit when the filed-issue record cannot be persisted", async () => {
+    const repo = makeRepo();
+    const slug = "cap-record-write-failure";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(
+        options,
+        slug,
+        kind,
+        kind === "architect" ? "FIX-BEFORE-SHIP" : "SHIP",
+      );
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) =>
+      command === "gh" && args[0] === "issue" && args[1] === "create"
+        ? "https://github.com/acme/repo/issues/300\n"
+        : "",
+    );
+    const base = makeArgs(repo, slug, fixture.journal, invoke, runCommand);
+
+    const result = await runShipGate({
+      ...base,
+      options: { ...base.options, guardianRoundCap: 1 },
+      saveFiledFindings: () => {
+        throw new Error("EPERM: state file is locked");
+      },
+    });
+
+    // The issue exists in the tracker but not in run state, so the run is not
+    // durably filed — and "durably filed" is the exit's precondition.
+    expect(result.verdict).toBe("BLOCKED");
+    expect(result.failureReason).toContain("could not be filed as issues");
+    expect(result.failureReason).toContain("could not be persisted");
+    expect(result.pr.requested).toBe(false);
+    // The already-opened issue is named, so a human can find it.
+    expect(fixture.phase).toHaveBeenCalledWith(
+      expect.stringContaining("https://github.com/acme/repo/issues/300"),
+      "warn",
+    );
+  });
+
   it("keeps a clean ship when a note cannot be filed", async () => {
     const repo = makeRepo();
     const slug = "note-filing-failure";

@@ -35,6 +35,7 @@ import {
 import {
   buildFindingIssueDrafts,
   fileFindingIssues,
+  type FindingFilingOutcome,
   type FindingIssueDraft,
 } from "./finding-filing.js";
 import {
@@ -1113,9 +1114,14 @@ export async function runShipGate(
    *
    * The durable record is written before the caller acts on the result, so a
    * crash between filing and the PR cannot make the next round file the same
-   * finding twice (ADR 0057 decision 4, last sentence).
+   * finding twice (ADR 0057 decision 4, last sentence). A record that will not
+   * persist is reported as a filing failure rather than thrown: "durably filed"
+   * is the cap exit's precondition, and a state write is half of durable — but
+   * bookkeeping must not lose a completed gate either, so the caller decides.
    */
-  const fileIssues = (drafts: readonly FindingIssueDraft[]) => {
+  const fileIssues = (
+    drafts: readonly FindingIssueDraft[],
+  ): FindingFilingOutcome => {
     const outcome = fileFindingIssues({
       drafts,
       alreadyFiled,
@@ -1133,19 +1139,48 @@ export async function runShipGate(
           { cwd: repoRoot, encoding: "utf-8" },
         ),
     });
-    if (outcome.filed.length > 0) {
+    if (outcome.filed.length === 0) return outcome;
+    try {
       persistFiledFindings(repoRoot, runSlug, outcome.filed);
-      for (const record of outcome.filed) {
-        const message =
-          `Filed ${record.guardian === "pm" ? "PM" : "architect"} finding ` +
-          `${record.stableId} (${record.kind.toLowerCase()}) as ${record.issue}.`;
-        journal.phase(`  📝 ${message}`, "log");
-        journal.event({
-          type: "warn",
-          reason: "guardian-finding-filed",
-          message,
-        });
-      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const byStableId = new Map(
+        outcome.filed.map((record) => [record.stableId, record]),
+      );
+      const message =
+        `Filed ${outcome.filed.length} guardian finding issue(s) but could not record them in run state: ${detail}. ` +
+        `Issues already opened: ${outcome.filed.map((record) => record.issue).join(", ")} — ` +
+        "a later round may file them again.";
+      journal.phase(`  ⚠️  ${message}`, "warn");
+      journal.event({
+        type: "warn",
+        reason: "guardian-finding-filed",
+        message,
+      });
+      return {
+        filed: [],
+        skipped: outcome.skipped,
+        failed: [
+          ...outcome.failed,
+          ...drafts
+            .filter((draft) => byStableId.has(draft.stableId))
+            .map((draft) => ({
+              draft,
+              error: `the issue was created but its record could not be persisted: ${detail}`,
+            })),
+        ],
+      };
+    }
+    for (const record of outcome.filed) {
+      const message =
+        `Filed ${record.guardian === "pm" ? "PM" : "architect"} finding ` +
+        `${record.stableId} (${record.kind.toLowerCase()}) as ${record.issue}.`;
+      journal.phase(`  📝 ${message}`, "log");
+      journal.event({
+        type: "warn",
+        reason: "guardian-finding-filed",
+        message,
+      });
     }
     return outcome;
   };
