@@ -1573,6 +1573,78 @@ describe("runShipGate", () => {
     expect(loadRunState(repo, slug).reviewPhase?.rounds).toHaveLength(1);
   });
 
+  // Slice #174, at the seam the unit tests cannot reach: notes ride the clean
+  // ship path, both guardians', and the durable record survives the round write
+  // that happens in between. Two gate entries on one repo, so the
+  // once-across-rounds rule is proven rather than inferred.
+  it("files both guardians' unfixed notes exactly once across rounds on a clean ship", async () => {
+    const repo = makeRepo();
+    const slug = "notes-filed-once";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "ACCEPT-WITH-NOTES");
+      return invokeResult();
+    });
+    let nextIssue = 200;
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) => {
+      if (command === "gh" && args[0] === "issue" && args[1] === "create") {
+        return `https://github.com/acme/repo/issues/${nextIssue++}\n`;
+      }
+      if (command === "gh" && args[0] === "pr" && args[1] === "create") {
+        return "https://github.com/acme/repo/pull/88\n";
+      }
+      return "";
+    });
+    const issueCalls = () =>
+      runCommand.mock.calls.filter(
+        ([command, args]) =>
+          command === "gh" && args[0] === "issue" && args[1] === "create",
+      );
+
+    const first = await runShipGate(
+      makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+    );
+
+    expect(first.verdict).toBe("SHIP");
+    // A clean ship needs no exit note: nothing was overridden or capped.
+    expect(first.pr).toMatchObject({ overridden: false, cappedExit: false });
+    expect(fixture.setPrOverrideNote).not.toHaveBeenCalled();
+    expect(issueCalls()).toHaveLength(2);
+    expect(issueCalls().map(([, args]) => args[3])).toEqual([
+      "[afk][notes-filed-once] architect finding",
+      "[afk][notes-filed-once] pm finding",
+    ]);
+    for (const [, args] of issueCalls()) {
+      expect(args[5]).toContain("note shipped unfixed");
+    }
+    expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toEqual([
+      expect.objectContaining({
+        guardian: "architect",
+        stableId: "A-01",
+        kind: "NOTE",
+        issue: "https://github.com/acme/repo/issues/200",
+      }),
+      expect.objectContaining({
+        guardian: "pm",
+        stableId: "P-01",
+        kind: "NOTE",
+        issue: "https://github.com/acme/repo/issues/201",
+      }),
+    ]);
+
+    // Round 2: both notes ride again — the regression this guards is filing
+    // them a second time.
+    const second = await runShipGate({
+      ...makeArgs(repo, slug, makeJournal().journal, invoke, runCommand),
+      cachedReviewPhase: loadRunState(repo, slug).reviewPhase,
+    });
+
+    expect(second.verdict).toBe("SHIP");
+    expect(issueCalls()).toHaveLength(2);
+    expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toHaveLength(2);
+  });
+
   it("keeps a clean ship when a note cannot be filed", async () => {
     const repo = makeRepo();
     const slug = "note-filing-failure";
