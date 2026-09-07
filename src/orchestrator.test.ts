@@ -6931,6 +6931,114 @@ describe("buildPrCreationPlan", () => {
       expect(plan.overrideNote).toBeDefined();
     }
   });
+
+  /**
+   * The cap exit is the second, unattended way a blocked gate opens a draft PR
+   * (ADR 0057 decision 4). Filing has already happened by the time the plan is
+   * built, so the plan's job is to record it: a body section naming the filed
+   * issues and an acknowledgement note that reaches the run summary through the
+   * same `setPrOverrideNote` plumbing the override uses.
+   */
+  describe("guardian round cap exit", () => {
+    const filedBlocker = {
+      guardian: "architect" as const,
+      stableId: "A-01",
+      fingerprint: "fp-a1",
+      kind: "BLOCKER" as const,
+      round: 3,
+      issue: "https://github.com/acme/repo/issues/501",
+    };
+    const filedNote = {
+      guardian: "pm" as const,
+      stableId: "P-02",
+      fingerprint: "fp-p2",
+      kind: "NOTE" as const,
+      round: 3,
+      issue: "https://github.com/acme/repo/issues/502",
+    };
+
+    it("opens a blocked plan and records the cap, the verdicts, and the filed blockers", () => {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect: "FIX-BEFORE-SHIP",
+        pm: "FIX-BEFORE-SHIP",
+        openPrOnOverride: false,
+        capExit: {
+          cap: 3,
+          unfavorableRounds: 3,
+          filed: [filedBlocker, filedNote],
+        },
+      });
+
+      expect(plan.open).toBe(true);
+      expect(plan.cappedExit).toBe(true);
+      expect(plan.overridden).toBe(false);
+      expect(plan.overrideNote).toBeUndefined();
+      expect(plan.body).toContain(
+        "## Guardian round cap reached (ADR 0057 decision 4)",
+      );
+      expect(plan.body).toContain("3 unfavorable round(s), reaching its cap of 3");
+      expect(plan.body).toContain("- Architect review: **FIX-BEFORE-SHIP**");
+      expect(plan.body).toContain("- PM review: **FIX-BEFORE-SHIP**");
+      expect(plan.body).toContain("issues/501");
+      // Notes are filed but are not the blockers a human must read first.
+      expect(plan.body).not.toContain("issues/502");
+      expect(plan.body).toContain("a human still merges it");
+      expect(plan.body).not.toContain("Human override");
+      expect(plan.cappedExitNote).toContain(
+        "PR opened at the guardian round cap after 3 unfavorable round(s) of 3",
+      );
+      expect(plan.cappedExitNote).toContain("issues/501");
+    });
+
+    it("still records the exit when the ledger held no unresolved blocker", () => {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect: "FIX-BEFORE-SHIP",
+        pm: "SHIP",
+        openPrOnOverride: false,
+        capExit: { cap: 3, unfavorableRounds: 3, filed: [] },
+      });
+
+      expect(plan.open).toBe(true);
+      expect(plan.cappedExit).toBe(true);
+      expect(plan.body).toContain("No blocking finding survived the ledger");
+      expect(plan.cappedExitNote).toContain(
+        "no unresolved blocking finding remained in the ledger",
+      );
+    });
+
+    it("yields to the override rather than stacking two exits on one PR", () => {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect: "SHIP",
+        pm: "FIX-BEFORE-SHIP",
+        openPrOnOverride: true,
+        capExit: { cap: 3, unfavorableRounds: 3, filed: [filedBlocker] },
+      });
+
+      expect(plan.open).toBe(true);
+      expect(plan.overridden).toBe(true);
+      expect(plan.cappedExit).toBe(false);
+      expect(plan.cappedExitNote).toBeUndefined();
+      expect(plan.body).toContain("## Human override");
+      expect(plan.body).not.toContain("## Guardian round cap reached");
+    });
+
+    it("leaves a plan without a cap exit exactly as it was", () => {
+      const plan = buildPrCreationPlan({
+        ...base,
+        architect: "FIX-BEFORE-SHIP",
+        pm: "FIX-BEFORE-SHIP",
+        openPrOnOverride: false,
+      });
+
+      expect(plan.open).toBe(false);
+      expect(plan.cappedExit).toBe(false);
+      expect(plan.cappedExitNote).toBeUndefined();
+      expect(plan.body).not.toContain("Guardian round cap");
+    });
+  });
 });
 
 

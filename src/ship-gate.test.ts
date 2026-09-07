@@ -590,8 +590,20 @@ describe("runShipGate", () => {
       const result = await runShipGate(args);
 
       expect(result.verdict).toBe("BLOCKED");
+      // Slice #173: one unfavorable round is not the cap, so nothing is filed
+      // and no exit is taken — `runCommand` never ran means no `gh` at all.
       expect(runCommand).not.toHaveBeenCalled();
       expect(fixture.setPrOverrideNote).not.toHaveBeenCalled();
+      expect(result.pr.cappedExit).toBe(false);
+      expect(
+        loadRunState(repo, slug).reviewPhase?.filedFindings,
+      ).toBeUndefined();
+      expect(fixture.phase).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Guardian round cap not reached — 1 unfavorable round(s) of 3",
+        ),
+        "log",
+      );
     }
   });
 
@@ -1309,6 +1321,290 @@ describe("runShipGate", () => {
       ),
       "log",
     );
+  });
+
+  // One spawned scenario, deliberately: the cap exit's wiring is what the unit
+  // tests cannot reach — the ordering of file-then-decide, the durable
+  // filed-issue record, the PR body, and the note dedupe *across* ship-gate
+  // entries. It runs the gate twice against one repo so the second entry pays
+  // no second setup and proves the once-across-rounds rule end to end
+  // (slices #173 and #174).
+  it("takes the recorded cap exit, files each finding once across rounds, and ships", async () => {
+    const repo = makeRepo();
+    const slug = "guardian-round-cap";
+    const fixture = makeJournal();
+    const writeCappedArchitectReview = (options: InvokeOptions) => {
+      const dir = join(options.cwd, ".kiro", "specs", slug);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "review-architect.md"),
+        [
+          "# Guardian Review",
+          "",
+          "**Verdict:** FIX-BEFORE-SHIP",
+          "",
+          "## Structured findings (v2)",
+          JSON.stringify({
+            version: 2,
+            findings: [
+              {
+                id: "A-01",
+                title: "Durable record is written incomplete",
+                class: "INTEGRITY",
+                clearCondition: "The round persists before the early return.",
+                disposition: "REPEATED",
+                reachableTrigger: "A retry consumes the incomplete record.",
+                introducedByReviewedDiff: true,
+              },
+              {
+                id: "A-02",
+                title: "Helper name drifts from the module's convention",
+                class: "CONVENTION",
+                clearCondition: "The helper follows the module's naming.",
+                disposition: "REPEATED",
+                reachableTrigger: null,
+                introducedByReviewedDiff: false,
+              },
+            ],
+          }),
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+    };
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      if (options.role === "architect-review") {
+        writeCappedArchitectReview(options);
+      } else {
+        writeReview(options, slug, "pm", "SHIP");
+      }
+      return invokeResult();
+    });
+    let nextIssue = 100;
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) => {
+      if (command === "gh" && args[0] === "issue" && args[1] === "create") {
+        return `https://github.com/acme/repo/issues/${nextIssue++}\n`;
+      }
+      if (command === "gh" && args[1] === "create") {
+        return "https://github.com/acme/repo/pull/77\n";
+      }
+      return "";
+    });
+
+    const priorFindings = [
+      {
+        stableId: "A-01",
+        currentId: "A-01",
+        title: "Durable record is written incomplete",
+        class: "INTEGRITY",
+        clearCondition: "The round persists before the early return.",
+        disposition: "OPEN" as const,
+        reachableTrigger: "A retry consumes the incomplete record.",
+        introducedByReviewedDiff: true,
+      },
+      {
+        stableId: "A-02",
+        currentId: "A-02",
+        title: "Helper name drifts from the module's convention",
+        class: "CONVENTION",
+        clearCondition: "The helper follows the module's naming.",
+        disposition: "OPEN" as const,
+        reachableTrigger: null,
+        introducedByReviewedDiff: false,
+      },
+    ];
+    // Two unfavorable rounds already spent; this pass is the third.
+    const cachedReviewPhase = {
+      rounds: [1, 2].map((round) => ({
+        round,
+        reviewedHeadSha: round === 1 ? "pre-review" : `head-${round - 1}`,
+        headSha: `head-${round}`,
+        architect: {
+          source: "INVOKED" as const,
+          outcome: "FIX-BEFORE-SHIP" as const,
+          findings: priorFindings.map((finding) => ({ ...finding })),
+          findingsOriginRound: round,
+        },
+        pm: {
+          source: "INVOKED" as const,
+          outcome: "SHIP" as const,
+          findings: [],
+          findingsOriginRound: round,
+        },
+      })),
+    };
+    saveReviewPhase(repo, slug, cachedReviewPhase);
+
+    const capped = await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      cachedReviewPhase,
+    });
+
+    // The gate stops fixing and ships: a capped run is successful, like an
+    // override (ADR 0057 decision 4, extending ADR 0015's carve-out).
+    expect(capped.verdict).toBe("SHIP");
+    expect(capped.pr).toMatchObject({
+      requested: true,
+      overridden: false,
+      cappedExit: true,
+      url: "https://github.com/acme/repo/pull/77",
+    });
+
+    // The blocker and the note are each filed exactly once, blocker first.
+    const issueCalls = runCommand.mock.calls.filter(
+      ([command, args]) =>
+        command === "gh" && args[0] === "issue" && args[1] === "create",
+    );
+    expect(issueCalls).toHaveLength(2);
+    const issueBodies = issueCalls.map(([, args]) => args[5]!);
+    expect(issueBodies[0]).toContain("unresolved at the guardian round cap");
+    expect(issueBodies[0]).toContain("`A-01`");
+    expect(issueBodies[1]).toContain("note shipped unfixed");
+    expect(issueBodies[1]).toContain("`A-02`");
+
+    // The filed issues are durable, so a later round cannot file them again.
+    expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toEqual([
+      expect.objectContaining({
+        guardian: "architect",
+        stableId: "A-01",
+        kind: "BLOCKER",
+        round: 3,
+        issue: "https://github.com/acme/repo/issues/100",
+      }),
+      expect.objectContaining({
+        guardian: "architect",
+        stableId: "A-02",
+        kind: "NOTE",
+        round: 3,
+        issue: "https://github.com/acme/repo/issues/101",
+      }),
+    ]);
+
+    // The PR body and the run summary both record the exit, through the same
+    // plumbing the override uses.
+    const prCreateBodies = () =>
+      runCommand.mock.calls
+        .filter(
+          ([command, args]) =>
+            command === "gh" && args[0] === "pr" && args[1] === "create",
+        )
+        .map(([, args]) => args[args.indexOf("--body") + 1]!);
+    const prBody = prCreateBodies()[0]!;
+    expect(prBody).toContain("## Guardian round cap reached");
+    expect(prBody).toContain("3 unfavorable round(s), reaching its cap of 3");
+    expect(prBody).toContain("https://github.com/acme/repo/issues/100");
+    expect(prBody).not.toContain("https://github.com/acme/repo/issues/101");
+    expect(fixture.setPrOverrideNote).toHaveBeenCalledWith(
+      expect.stringContaining("PR opened at the guardian round cap after 3"),
+    );
+
+    // Round 4, same disagreement: nothing is filed a second time.
+    const secondFixture = makeJournal();
+    const carried = loadRunState(repo, slug).reviewPhase!;
+    const again = await runShipGate({
+      ...makeArgs(repo, slug, secondFixture.journal, invoke, runCommand),
+      cachedReviewPhase: carried,
+    });
+
+    expect(again.verdict).toBe("SHIP");
+    expect(again.pr.cappedExit).toBe(true);
+    expect(
+      runCommand.mock.calls.filter(
+        ([command, args]) =>
+          command === "gh" && args[0] === "issue" && args[1] === "create",
+      ),
+    ).toHaveLength(2);
+    expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toHaveLength(2);
+    // The round-4 PR body still names the issues the earlier round filed.
+    expect(prCreateBodies().at(-1)!).toContain(
+      "https://github.com/acme/repo/issues/100",
+    );
+  });
+
+  it("refuses the cap exit when an unresolved blocker cannot be filed", async () => {
+    const repo = makeRepo();
+    const slug = "guardian-cap-filing-failure";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(
+        options,
+        slug,
+        kind,
+        kind === "architect" ? "FIX-BEFORE-SHIP" : "SHIP",
+      );
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) => {
+      if (command === "gh" && args[0] === "issue" && args[1] === "create") {
+        throw new Error("gh: could not create issue (403)");
+      }
+      return "";
+    });
+
+    const result = await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+      options: {
+        ...makeArgs(repo, slug, fixture.journal, invoke, runCommand).options,
+        // Cap 1, so this single blocking round reaches it.
+        guardianRoundCap: 1,
+        reviewRetries: 1,
+      },
+    });
+
+    // Filing is mandatory for a cap exit, not best-effort: no PR, no success.
+    expect(result.verdict).toBe("BLOCKED");
+    expect(result.failureReason).toContain("guardian round cap reached");
+    expect(result.failureReason).toContain("could not be filed as issues");
+    expect(result.pr.requested).toBe(false);
+    expect(fixture.setPrOverrideNote).not.toHaveBeenCalled();
+    expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toBeUndefined();
+    // Two attempts per draft with one retry, and the retry is announced.
+    expect(
+      runCommand.mock.calls.filter(
+        ([command, args]) =>
+          command === "gh" && args[0] === "issue" && args[1] === "create",
+      ),
+    ).toHaveLength(2);
+    expect(fixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "guardian-cap-filing-failed" }),
+    );
+    // The round itself still persists: the ledger records every round.
+    expect(loadRunState(repo, slug).reviewPhase?.rounds).toHaveLength(1);
+  });
+
+  it("keeps a clean ship when a note cannot be filed", async () => {
+    const repo = makeRepo();
+    const slug = "note-filing-failure";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "ACCEPT-WITH-NOTES");
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) => {
+      if (command === "gh" && args[0] === "issue" && args[1] === "create") {
+        throw new Error("gh: could not create issue (403)");
+      }
+      if (command === "gh" && args[1] === "create") {
+        return "https://github.com/acme/repo/pull/78\n";
+      }
+      return "";
+    });
+
+    const result = await runShipGate({
+      ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+    });
+
+    // A note nobody could file must not sink a ship both guardians cleared.
+    expect(result.verdict).toBe("SHIP");
+    expect(result.pr.cappedExit).toBe(false);
+    expect(result.pr.overridden).toBe(false);
+    expect(fixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "guardian-note-filing-failed" }),
+    );
+    // Nothing was recorded as filed, so a later round retries it.
+    expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toBeUndefined();
   });
 
   it("B-01 QA-06 keeps the reused caches when the artifact commit fails", async () => {

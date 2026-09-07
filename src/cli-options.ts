@@ -63,6 +63,14 @@ export interface PipelineRuntimeOptions {
    */
   openPrOnOverride?: boolean;
   /**
+   * Unfavorable guardian review rounds the ship gate spends before it stops
+   * fixing: it files the unresolved blocking findings as issues, opens the
+   * draft PR with them recorded, and reports success (ADR 0057 decision 4).
+   * Absent leaves the default of 3, matching ADR 0014's implementation cap.
+   * 0 disables the cap and restores the unbounded pre-ADR-0057 loop.
+   */
+  guardianRoundCap?: number;
+  /**
    * Slices the operator forces to restart from base regardless of
    * resume eligibility (#37) — for worktrees a human has judged bad.
    * Values are slice numbers or GH issue ids; repeatable and
@@ -219,6 +227,11 @@ export function parsePipelineRuntimeOptions(
     "--max-agent-duration-ms",
     false,
   );
+  const guardianRoundCap = parseIntegerOption(
+    optionValue(args, "--guardian-round-cap"),
+    "--guardian-round-cap",
+    true,
+  );
   const testCommand = parseCommandOption(args, "--test-command");
   const minFreeDiskGb = parseMinFreeDiskGb(
     optionValue(args, "--min-free-disk-gb"),
@@ -259,6 +272,7 @@ export function parsePipelineRuntimeOptions(
     preflightReportOnly,
     serialLanes,
     openPrOnOverride,
+    guardianRoundCap,
     forceRestart,
     resumeStuck,
     sharedPreview: verifyMigrationCommand && applyMigrationCommand
