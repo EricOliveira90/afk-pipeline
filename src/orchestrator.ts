@@ -56,6 +56,7 @@ import {
   formatRestartRefusal,
   isForceRestarted,
   isResumeStuckRequested,
+  MAX_RESUME_ATTEMPTS,
 } from "./resume.js";
 import {
   resolveBaseGateDeclarations,
@@ -124,6 +125,7 @@ import {
   isSliceComplete,
   getResumeAttempts,
   recordRetryDecision,
+  chargeResumeAttempt,
   type RunState,
 } from "./run-state.js";
 import {
@@ -845,6 +847,26 @@ export interface SliceContext {
      */
     baseRefreshed?: boolean;
   };
+  /**
+   * Spend one resume attempt against the poison-tree cap — set alongside
+   * `resume`, and called exactly once, immediately before the first generator
+   * dispatch of this invocation (#188 defect 4).
+   *
+   * The counter answers "how many times has a generator already been let loose
+   * on this tree", which is the only question `MAX_RESUME_ATTEMPTS` is a good
+   * answer to. `prepareSliceWorktree` decides the resume long before that:
+   * everything from the ADR 0010 ownership assert through the explorer,
+   * contract negotiation, the contract-lock gate, adjudication routing,
+   * exact-stage resume and prompt assembly runs first, and any of it can fail.
+   * Charging at the decision made every one of those failures cost an attempt,
+   * so two configuration faults exhausted the cap and pointed the operator at
+   * `--force-restart` on a tree holding five good commits — the poisoned-tree
+   * heuristic inverted, with the tree fine and the pipeline the thing failing.
+   *
+   * Idempotent by its own latch: the implementation loop runs several rounds
+   * inside one invocation, and one *invocation* costs one attempt.
+   */
+  chargeResume?: () => void;
   /**
    * Gate consulted the moment the contract reaches LOCKED, before
    * negotiation returns — the caller's chance to inspect the locked
@@ -1985,6 +2007,38 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
   );
   const plan = decideResume(facts);
 
+  // Every outcome below except the two resume arms starts from no pending
+  // charge and no resume situation. Cleared here rather than in each arm so a
+  // lane successor that resumed in Phase A and was then recreated from base
+  // cannot carry either into its second pass.
+  delete ctx.resume;
+  delete ctx.chargeResume;
+
+  /**
+   * Arm the resume charge. The attempt is spent when a generator is
+   * dispatched onto this tree, not when the decision to re-attach is made
+   * (#188 defect 4) — see `SliceContext.chargeResume`. The latch is captured
+   * per decision, so the several generator rounds of one invocation cost one
+   * attempt between them.
+   */
+  const armResumeCharge = (describe: (attempts: number) => string): void => {
+    let spent = false;
+    ctx.chargeResume = () => {
+      if (spent) return;
+      spent = true;
+      const attempts = chargeResumeAttempt(
+        repoRoot,
+        runSlug,
+        ghIssue,
+        describe,
+      );
+      ctx.logger.phase(
+        `${ctx.tag}: resume attempt ${attempts}/${MAX_RESUME_ATTEMPTS} ` +
+          `charged at generator dispatch`,
+      );
+    };
+  };
+
   /**
    * Put the previous life's artifacts out of this one's way, for the two
    * paths that start a slice at round 1 with no resume state.
@@ -2101,10 +2155,22 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
         commitLog,
         handoffNote,
       };
+      // Recorded, not charged. The attempt is spent at the generator dispatch
+      // (#188 defect 4): everything between here and there — negotiation, the
+      // contract-lock gate, prompt assembly, the spawn itself — can fail
+      // without a generator ever seeing this tree, and none of those failures
+      // is evidence the tree is poisoned.
       recordRetryDecision(repoRoot, runSlug, ghIssue, {
-        attempts: priorAttempts + 1,
-        lastDecision: `resumed from ${plan.commitsAhead} commit(s)`,
+        attempts: priorAttempts,
+        lastDecision:
+          `resume planned from ${plan.commitsAhead} commit(s); no attempt ` +
+          `charged — the generator was not dispatched`,
       });
+      armResumeCharge(
+        (attempts) =>
+          `resumed from ${plan.commitsAhead} commit(s) — attempt ` +
+          `${attempts}/${MAX_RESUME_ATTEMPTS} charged at generator dispatch`,
+      );
       ctx.logger.phase(
         `${ctx.tag}: resuming from ${plan.commitsAhead} commit(s) on ${ctx.branch}`,
       );
@@ -2135,12 +2201,26 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
       stuckNote,
       baseRefreshed,
     };
+    // Recorded, not charged — same rule as the `killed` arm above. The stuck
+    // path is exempt from the cap by construction (`--resume-stuck` must be
+    // re-supplied every run, so the operator is the cap), but the counter has
+    // to mean one thing on both paths or its audit trail lies.
+    const stuckRefreshNote = baseRefreshed
+      ? ""
+      : " (base refresh declined to preserve the tree)";
     recordRetryDecision(repoRoot, runSlug, ghIssue, {
-      attempts: priorAttempts + 1,
+      attempts: priorAttempts,
       lastDecision:
-        `resumed STUCK tree from ${plan.commitsAhead} commit(s) via --resume-stuck` +
-        (baseRefreshed ? "" : " (base refresh declined to preserve the tree)"),
+        `resume of STUCK tree planned from ${plan.commitsAhead} commit(s) via ` +
+        `--resume-stuck${stuckRefreshNote}; no attempt charged — the generator ` +
+        `was not dispatched`,
     });
+    armResumeCharge(
+      (attempts) =>
+        `resumed STUCK tree from ${plan.commitsAhead} commit(s) via ` +
+        `--resume-stuck${stuckRefreshNote} — attempt ${attempts} charged at ` +
+        `generator dispatch (not capped)`,
+    );
     const message =
       `resuming STUCK slice from ${plan.commitsAhead} commit(s) on ${ctx.branch} ` +
       `(--resume-stuck: tree not reset, diagnosis preserved)` +
@@ -2195,6 +2275,20 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
       );
     }
     git.createWorktree(repoRoot, ctx.branch, ctx.worktreeDir, ctx.featBranch);
+    // A fresh tree earns a fresh resume budget, for the same reason
+    // `restartFromBase` resets it: the count means "resumed generator
+    // dispatches this tree has absorbed", and this is not that tree. Without
+    // this, a slice whose branch and worktree `clean-failed` removed carries
+    // its predecessor's spent count and can be capped on the new tree's first
+    // real resume.
+    if (priorAttempts > 0) {
+      recordRetryDecision(repoRoot, runSlug, ghIssue, {
+        attempts: 0,
+        lastDecision:
+          "fresh worktree created (no branch or worktree survived) — " +
+          "resume budget reset",
+      });
+    }
   }
 
   git.assertWorktreeRegistered(repoRoot, ctx.branch, ctx.worktreeDir);
@@ -2243,6 +2337,14 @@ export function assertSliceWorktreeOwnership(ctx: SliceContext): void {
  * resume mode are the ones this dispatch actually runs under rather than
  * the ones it inherited.
  *
+ * The attempt count projects the pending charge. Since #188 defect 4 the
+ * increment lands at the generator dispatch, which is after this line, so the
+ * persisted value here is one short of what this dispatch will have spent if
+ * it reaches the generator — and what it will have spent is the number the
+ * operator needs. A dispatch that ends before the generator leaves a bounds
+ * line that over-reported by one; its own failure line and the state file both
+ * say the attempt was not charged.
+ *
  * Reporting only. Every budget is still enforced where it was.
  */
 export function reportSliceBounds(ctx: SliceContext): void {
@@ -2250,10 +2352,11 @@ export function reportSliceBounds(ctx: SliceContext): void {
   const provider = config.provider ?? kiroProvider;
   const runSlug = pipelineRunSlug(config.prdSlug, provider);
   const bounds = computeSliceBounds({
-    resumeAttemptsSpent: getResumeAttempts(
-      loadRunState(config.repoRoot, runSlug),
-      slice.ghIssue,
-    ),
+    resumeAttemptsSpent:
+      getResumeAttempts(
+        loadRunState(config.repoRoot, runSlug),
+        slice.ghIssue,
+      ) + (ctx.chargeResume ? 1 : 0),
     // A fresh or restarted slice starts at round 1 whatever is on disk;
     // only a resume inherits the rounds its prior lives spent.
     implementationRoundsSpent: ctx.resume
@@ -5181,6 +5284,15 @@ export async function runSliceExecute(
         // measured against the *new* accepted bytes, not the round's first
         // ones.
         const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
+        // The resume attempt is spent here and nowhere earlier (#188 defect 4).
+        // Written *before* the call, not after it returns: a poisoned tree's
+        // whole symptom is that the generator never returns, so charging on
+        // the way out would leave the cap unable to see the case it exists
+        // for. The residual window — a kill between this write and the process
+        // actually starting — over-charges by one, which is both far narrower
+        // than the old window (all of negotiation) and the safe direction to
+        // err in. Latched, so the rounds of this loop cost one attempt.
+        ctx.chargeResume?.();
         await invoke({
           role: "generator",
           prompt: assembled.prompt,

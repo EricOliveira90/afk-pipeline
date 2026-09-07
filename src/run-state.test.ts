@@ -21,6 +21,7 @@ import {
   adaptLoadedState,
   getResumeAttempts,
   recordRetryDecision,
+  chargeResumeAttempt,
   clearSliceStateForDispatch,
   saveSliceStateIfUnchanged,
   type PersistedGuardianReviewRound,
@@ -1010,6 +1011,40 @@ describe("resume-attempt tracking", () => {
     const state = loadRunState(repo, "demo");
     expect(getResumeAttempts(state, "100")).toBe(0);
     expect(getResumeAttempts(state, "200")).toBe(1);
+  });
+
+  it("charges one attempt at a time, reading the persisted count (#188 defect 4)", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "100", { phase: "ERROR", error: "died" });
+    recordRetryDecision(repo, "demo", "200", {
+      attempts: 1,
+      lastDecision: "resume planned; no attempt charged",
+    });
+
+    // From absent, and from an existing record. The new count is returned so
+    // the caller can name it without a second read.
+    expect(
+      chargeResumeAttempt(repo, "demo", "100", (n) => `charged ${n}`),
+    ).toBe(1);
+    expect(
+      chargeResumeAttempt(repo, "demo", "200", (n) => `charged ${n}`),
+    ).toBe(2);
+
+    const state = loadRunState(repo, "demo");
+    expect(getResumeAttempts(state, "100")).toBe(1);
+    expect(getResumeAttempts(state, "200")).toBe(2);
+    expect(state.resume?.["100"]?.lastDecision).toBe("charged 1");
+    expect(state.resume?.["200"]?.lastDecision).toBe("charged 2");
+    // The slice's own record, and the other slice's resume entry, survive.
+    expect(state.slices["100"]!.phase).toBe("ERROR");
+
+    // The increment reads the file, not a value the caller captured earlier:
+    // an interleaved slice-outcome write cannot roll it back.
+    saveSliceState(repo, "demo", "100", { phase: "STUCK", error: "gave up" });
+    expect(
+      chargeResumeAttempt(repo, "demo", "100", (n) => `charged ${n}`),
+    ).toBe(2);
+    expect(getResumeAttempts(loadRunState(repo, "demo"), "100")).toBe(2);
   });
 });
 

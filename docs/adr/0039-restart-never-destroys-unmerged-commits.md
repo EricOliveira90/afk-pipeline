@@ -151,3 +151,59 @@ reads exactly the evidence this moves, and the global three-round cap
 (ADR 0014) is computed from it. A restart already grants a fresh round
 budget, so relocating a restarted slice's prior evidence changes no
 round arithmetic.
+
+## Amendment (2026-09-07) — the cap counts resumed *generator dispatches* (#188 defect 4)
+
+"What this does not change" said `MAX_RESUME_ATTEMPTS` is still 2 and
+`--resume-stuck` is still exempt. Both hold. What changes is *when* an
+attempt is spent, and therefore what the number counts.
+
+The counter was incremented inside `prepareSliceWorktree`, at the moment
+the resume was decided — which is the first thing a slice dispatch does.
+Everything after it and before the generator runs on the decision's
+credit: the ADR 0010 ownership assert, the explorer, contract
+negotiation and its repair passes, the contract-lock gate, adjudication
+routing, exact-stage resume, prompt assembly, and the provider spawn.
+Each of those can fail without a generator ever seeing the tree, and each
+of them used to cost an attempt.
+
+The PRD 072 field run (#188) shows what that does. Two invocations died in
+negotiation — a schema-refused artifact and an envelope over the
+64 KiB inline budget — and the third refused with `resume attempt cap (2)
+reached`, pointing the operator at `--force-restart` on a branch holding
+five good commits. The cap's own comment says it protects against a
+poisoned tree; here the tree was fine and the pipeline was the thing
+failing, so the heuristic fired backwards. The operator recovered by
+hand-editing `resume[ghIssue].attempts` in the state file.
+
+**Decision: the attempt is charged immediately before the first generator
+dispatch of an invocation, not at the resume decision.**
+`chargeResumeAttempt` (`src/run-state.ts`) is the only writer that raises
+it, and `SliceContext.chargeResume` — a latch armed by the resume decision
+— is its only caller. So:
+
+- A resume that never reaches the generator charges nothing. The state
+  file says so in `lastDecision` ("resume planned … no attempt charged").
+- One invocation charges one attempt, however many implementation rounds
+  it runs. The latch, not the round loop, owns the count.
+- The charge is written *before* the provider call, never after it
+  returns: a poisoned tree's whole symptom is that the generator never
+  returns, so charging on the way out would blind the cap to the case it
+  exists for. The residual window — a kill between the state write and the
+  process starting — over-charges by one, which is the safe direction.
+- `--resume-stuck` charges from the same latch. It stays exempt from the
+  cap, but the counter has to mean one thing on both paths or its audit
+  trail lies.
+- Restart still resets to 0, and the `fresh` decision now does too. Both
+  are new trees, and the count is about a tree.
+- The `slice-bounds` line projects the pending charge, so it keeps
+  reporting what this dispatch will have spent if it reaches the
+  generator. A dispatch that ends earlier leaves a line that
+  over-reported by one; its failure line and the state file both say the
+  attempt was not charged.
+
+What this does not fix: nothing now bounds a slice that fails
+pre-generator forever. That is deliberate — the stop belongs to the
+failure's own mechanism (ADR 0061's repair pass for a refused artifact,
+non-progress observations for a semantic loop, the operator for a
+configuration fault), and the alternative is the inverted heuristic above.

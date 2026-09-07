@@ -300,6 +300,37 @@ describe("retried slice resume (spec #33)", () => {
     });
 
     /**
+     * #188 defect 4, on the same fixture: the attempt is charged once per
+     * *invocation* that dispatches a generator, and not at all for a dispatch
+     * that never reaches one. This fixture already produces all four cases —
+     * a resume that reaches the generator, a resume that runs several
+     * implementation rounds inside one invocation, a from-base restart, and a
+     * refusal before any agent ran — so it needs the assertion, not a spawn.
+     */
+    it("charges one resume attempt per generator-reaching invocation, and none otherwise", () => {
+      const resume = JSON.parse(readFileSync(statePath, "utf-8")).resume ?? {};
+      const spent = (ghIssue: string) => resume[ghIssue]?.attempts ?? 0;
+
+      // Resumed and reached the generator: exactly one, however many
+      // implementation rounds the invocation ran. Slice 05 completed a QA
+      // round in run 1 and so runs more than one round on the resume.
+      expect(spent("4001")).toBe(1);
+      expect(spent("4005")).toBe(1);
+      expect(resume["4001"]?.lastDecision).toMatch(
+        /attempt 1\/2 charged at generator dispatch/,
+      );
+
+      // Restarted from base: a new tree, a fresh budget.
+      expect(spent("4003")).toBe(0);
+      expect(spent("4004")).toBe(0);
+
+      // Refused before any agent ran: nothing was dispatched onto the tree,
+      // so nothing is charged, and the record says which of the two it was.
+      expect(spent("4002")).toBe(0);
+      expect(resume["4002"]?.lastDecision).toMatch(/refused to restart/);
+    });
+
+    /**
      * Bounds visibility (wave item 14). Riding this fixture rather than
      * spawning: it is the only scenario that already dispatches the same
      * slices twice with a resume, a restart and a refusal between the
