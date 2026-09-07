@@ -13,6 +13,7 @@
 ## Decisions made during implementation
 
 - Favorable legacy architect v1 artifacts remain readable with null authority evidence, while a v1 `FIX-BEFORE-SHIP` artifact is unparseable because it cannot prove v2 blocking authority.
+- The authority-policy fixture generates the full 96-case cross-product so every round, lineage, trigger, attribution, class, and disposition interaction stays bound.
 
 ## Gotchas / learnings
 

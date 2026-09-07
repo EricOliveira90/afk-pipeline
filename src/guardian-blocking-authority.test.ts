@@ -11,130 +11,71 @@ const architectFinding = {
   introducedByReviewedDiff: true,
 };
 
+const authorityMatrix = ([1, 2] as const).flatMap((round) =>
+  [false, true].flatMap((hasPriorLineage) =>
+    ([null, "A retry reads the partially written ledger."] as const).flatMap(
+      (reachableTrigger) =>
+        [false, true].flatMap((introducedByReviewedDiff) =>
+          (["INTEGRITY", "DATA_LOSS", "SECURITY_GAP"] as const).flatMap(
+            (findingClass) =>
+              (["OPEN", "RESOLVED"] as const).map((disposition) => {
+                const behavior =
+                  round === 1
+                    ? "B-01"
+                    : hasPriorLineage
+                      ? "B-03"
+                      : "B-02";
+                const hasReachableUnclearedFinding =
+                  reachableTrigger !== null && disposition !== "RESOLVED";
+                const expected =
+                  hasReachableUnclearedFinding &&
+                  (round === 1
+                    ? introducedByReviewedDiff
+                    : hasPriorLineage ||
+                      (introducedByReviewedDiff &&
+                        (findingClass === "INTEGRITY" ||
+                          findingClass === "DATA_LOSS")));
+
+                return {
+                  name: [
+                    behavior,
+                    `round=${round}`,
+                    `prior=${hasPriorLineage}`,
+                    `reachable=${reachableTrigger !== null}`,
+                    `attributed=${introducedByReviewedDiff}`,
+                    `class=${findingClass}`,
+                    `disposition=${disposition}`,
+                  ].join(" "),
+                  input: {
+                    ...architectFinding,
+                    round,
+                    hasPriorLineage,
+                    class: findingClass,
+                    disposition,
+                    reachableTrigger,
+                    introducedByReviewedDiff,
+                  },
+                  expected,
+                };
+              }),
+          ),
+        ),
+    ),
+  ),
+);
+
 describe("guardianFindingMayBlock", () => {
-  it.each([
-    {
-      name: "reachable and attributed",
-      finding: {},
-      expected: true,
-    },
-    {
-      name: "null trigger",
-      finding: { reachableTrigger: null },
-      expected: false,
-    },
-    {
-      name: "blank trigger",
-      finding: { reachableTrigger: "   " },
-      expected: false,
-    },
-    {
-      name: "not attributed",
-      finding: { introducedByReviewedDiff: false },
-      expected: false,
-    },
-    {
-      name: "resolved",
-      finding: { disposition: "RESOLVED" as const },
-      expected: false,
-    },
-  ])("B-01 round-1 authority: $name", ({ finding, expected }) => {
-    expect(
-      guardianFindingMayBlock({ ...architectFinding, ...finding }),
-    ).toBe(expected);
+  it.each(authorityMatrix)("$name", ({ input, expected }) => {
+    expect(guardianFindingMayBlock(input)).toBe(expected);
   });
 
-  it.each([
-    {
-      name: "attributed INTEGRITY",
-      finding: { class: "INTEGRITY" },
-      expected: true,
-    },
-    {
-      name: "attributed DATA_LOSS",
-      finding: { class: "DATA_LOSS" },
-      expected: true,
-    },
-    {
-      name: "other class",
-      finding: { class: "SECURITY_GAP" },
-      expected: false,
-    },
-    {
-      name: "null trigger",
-      finding: { class: "INTEGRITY", reachableTrigger: null },
-      expected: false,
-    },
-    {
-      name: "blank trigger",
-      finding: { class: "DATA_LOSS", reachableTrigger: " " },
-      expected: false,
-    },
-    {
-      name: "not attributed",
-      finding: {
-        class: "INTEGRITY",
-        introducedByReviewedDiff: false,
-      },
-      expected: false,
-    },
-    {
-      name: "resolved",
-      finding: {
-        class: "DATA_LOSS",
-        disposition: "RESOLVED" as const,
-      },
-      expected: false,
-    },
-  ])("B-02 later-new authority: $name", ({ finding, expected }) => {
+  it("B-01 rejects a blank reachable trigger", () => {
     expect(
       guardianFindingMayBlock({
         ...architectFinding,
-        round: 2,
-        hasPriorLineage: false,
-        ...finding,
+        reachableTrigger: "   ",
       }),
-    ).toBe(expected);
-  });
-
-  it.each([
-    {
-      name: "reachable uncleared finding",
-      finding: {},
-      expected: true,
-    },
-    {
-      name: "unattributed non-exception class",
-      finding: {
-        class: "PRODUCT",
-        introducedByReviewedDiff: false,
-      },
-      expected: true,
-    },
-    {
-      name: "null trigger",
-      finding: { reachableTrigger: null },
-      expected: false,
-    },
-    {
-      name: "blank trigger",
-      finding: { reachableTrigger: " " },
-      expected: false,
-    },
-    {
-      name: "resolved",
-      finding: { disposition: "RESOLVED" as const },
-      expected: false,
-    },
-  ])("B-03 prior-lineage authority: $name", ({ finding, expected }) => {
-    expect(
-      guardianFindingMayBlock({
-        ...architectFinding,
-        round: 3,
-        hasPriorLineage: true,
-        ...finding,
-      }),
-    ).toBe(expected);
+    ).toBe(false);
   });
 
   it("P-01 keeps reachable structural classes eligible to block", () => {
