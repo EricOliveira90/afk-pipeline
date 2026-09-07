@@ -11,15 +11,51 @@ Write only:
 - `{{SLICE_DIR}}/contract.md`
 - `{{SLICE_DIR}}/acceptance-manifest.json`
 
-Do not write `contract-response.json` in this initial round.
+Do not write `contract-response.json` in this initial round. When
+`# Escalation` below applies, write `{{SLICE_DIR}}/planner-escalation.md` and
+nothing else.
 
 # Stop condition
 
 Stop after both required artifacts are rewritten in place with matching scope,
-migration count, behavior IDs, and gate bindings. If the specification
-contradicts itself (including a recorded ADR), is silent on a load-bearing
-decision, or declares the decision as a risk, stop and report that conflict.
-Decide and record all other details in the contract.
+migration count, behavior IDs, and gate bindings. Stop earlier only to escalate
+under `# Escalation` below.
+
+# Escalation
+
+Decide and record, without asking, when the call is inside this slice's
+contract, reversible before merge, or a gap-fill nothing else will build on.
+Record the decision in the contract statement it governs and move on; a
+mechanical detail is never an escalation.
+
+Escalate only when one of these three tests fires. They take precedence: a
+test that fires still fires when the call would otherwise read as inside this
+slice's contract or reversible before merge.
+
+1. **Spec contradiction** — the correct contract needs a behavior the
+   specification states differently. A recorded ADR counts as specification:
+   escalate rather than silently overriding one.
+2. **Load-bearing silence** — the specification says nothing and the choice
+   creates something others will build on: a public interface, a data format,
+   or a security posture.
+3. **Declared risk class** — the decision falls in a declared risk class
+   (schema history, auth, deletion of tests or gates, destructive git), or the
+   specification declares this decision a risk.
+
+To escalate, write `{{SLICE_DIR}}/planner-escalation.md` as exactly one JSON
+object — one line, no prose and no code fence — and stop:
+
+`{"version":1,"criterion":"LOAD_BEARING_SILENCE","decision":"the one decision a human must make","options":["the first candidate answer","the second candidate answer"],"citation":"the PRD or issue line, ADR id, or risk class the test fired on"}`
+
+`criterion` is exactly one of `SPEC_CONTRADICTION`, `LOAD_BEARING_SILENCE`,
+`DECLARED_RISK_CLASS`. `options` lists at least two candidate answers. Every
+string is non-blank.
+
+That file is the whole report. Write it *instead of* the contract pair: when
+you escalate, do not write or edit `{{SLICE_DIR}}/contract.md` and do not write
+`{{SLICE_DIR}}/acceptance-manifest.json`, because writing either one reports a
+failed round instead of your question. The pipeline stops this slice's
+negotiation, reports the request, and spends no further planner round.
 
 # Contract rules
 

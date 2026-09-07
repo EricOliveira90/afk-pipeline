@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
 import { resolveBaseGateDeclarations } from "./base-gates.js";
+import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import {
   writeContractResponse,
   writeContractReview,
@@ -42,6 +43,15 @@ import type {
 } from "./agent-provider.js";
 
 const integrationTempDirs: string[] = [];
+
+/** The request the `revisionPlannerEscalates` fixture writes. Asserted, so it lives here. */
+export const REVISION_PLANNER_ESCALATION = {
+  version: 1,
+  criterion: "SPEC_CONTRADICTION",
+  decision: "Whether the widened scope may change the public return type",
+  options: ["keep the type and adapt", "change the type"],
+  citation: "ADR 0051",
+} as const;
 
 /** Message the `revisionPlannerThrows` fixture fails with. */
 export const REVISION_PLANNER_FAILURE =
@@ -165,6 +175,14 @@ export interface SliceFixture {
    * is fixed here rather than per test.
    */
   revisionPlannerThrows?: boolean;
+  /**
+   * Write `planner-escalation.md` instead of the revised pair from the
+   * focused-revision planner — the deliberate-stop half of the rollback.
+   * `planner-revision.md` is this path's template too, so a planner can hit
+   * a §3c escalation test here and stop, and the run must report the design
+   * decision rather than the missing manifest the stop implies.
+   */
+  revisionPlannerEscalates?: boolean;
   /**
    * Make the *revision* contract evaluator return REVISE, so the focused
    * revision is planned and then rejected — the other half of ADR 0051's
@@ -419,6 +437,28 @@ export function buildStubProvider(opts: {
               : {}),
           });
           throw new Error(REVISION_PLANNER_FAILURE);
+        }
+        if (
+          fixture.revisionPlannerEscalates &&
+          isFocusedRevision(options.prompt)
+        ) {
+          writeFileSync(
+            join(sliceArtifactDir, PLANNER_ESCALATION_FILENAME),
+            JSON.stringify(REVISION_PLANNER_ESCALATION),
+            "utf-8",
+          );
+          records.push({
+            role,
+            prompt: options.prompt,
+            cwd,
+            startedAt,
+            finishedAt: Date.now(),
+            ghIssue,
+            ...(journalTailAtEntry !== undefined
+              ? { journalTailAtEntry }
+              : {}),
+          });
+          return { exitCode: 0, stdout: "", stats: {} };
         }
         const files =
           plannerRound > 1

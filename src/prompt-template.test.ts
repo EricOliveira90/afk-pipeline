@@ -2,6 +2,10 @@ import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
 import { parseQAReview } from "./qa-review.js";
 import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
+import {
+  PLANNER_ESCALATION_FILENAME,
+  parsePlannerEscalation,
+} from "./planner-escalation.js";
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -201,6 +205,70 @@ describe("renderPrompt", () => {
       expect(escalation).toMatch(/decide and record otherwise/i);
       expect(template).not.toMatch(/^#{1,6} ADR\b/m);
       expect(template).not.toContain("grep for `docs/adr/`");
+    }
+  });
+
+  it("gives both planner templates the same critical-judgment rule", () => {
+    // §3c policy 1 as prompt text. Both templates carry it because the
+    // negotiation loop renders `planner.md` in round 1 and
+    // `planner-revision.md` from round 2 on, and a judgment rule that holds
+    // in only one of them is a rule the planner can escape by being revised.
+    for (const name of ["planner.md", "planner-revision.md"]) {
+      const template = readFileSync(
+        new URL(`../prompts/${name}`, import.meta.url),
+        "utf-8",
+      );
+      const escalation = template.match(
+        /^# Escalation\r?\n([\s\S]*?)(?=^# |\Z)/m,
+      )?.[1];
+      expect(escalation, name).toBeDefined();
+
+      // Decide-and-record first: without it the section reads as "escalate
+      // when unsure", which is the behavior the rule exists to prevent.
+      expect(escalation, name).toMatch(/decide and record/i);
+      expect(escalation, name).toMatch(/reversible before merge/i);
+
+      expect(escalation, name).toMatch(/spec contradiction/i);
+      expect(escalation, name).toMatch(/a recorded ADR counts as specification/i);
+      expect(escalation, name).toMatch(/load-bearing silence/i);
+      expect(escalation, name).toMatch(/public interface/i);
+      expect(escalation, name).toMatch(/security posture/i);
+      expect(escalation, name).toMatch(/declared risk class/i);
+      expect(escalation, name).toMatch(/schema history/i);
+      expect(escalation, name).toMatch(/deletion of tests or gates/i);
+      expect(escalation, name).toMatch(/destructive git/i);
+
+      // The sentinel by constant, not by literal, so renaming the artifact
+      // cannot leave the prompts pointing at the old name.
+      expect(escalation, name).toContain(PLANNER_ESCALATION_FILENAME);
+      for (const criterion of [
+        "SPEC_CONTRADICTION",
+        "LOAD_BEARING_SILENCE",
+        "DECLARED_RISK_CLASS",
+      ]) {
+        expect(escalation, name).toContain(criterion);
+      }
+
+      // The exemplar is round-tripped through the parser rather than compared
+      // to a literal pasted in here. What decides whether a real planner's
+      // sentinel is read as a request or as `malformed` is the parser, so the
+      // prompt has to be checked against the parser — not against a second
+      // copy of itself.
+      const exemplar = escalation!.match(/^`(\{.*\})`$/m)?.[1];
+      expect(exemplar, name).toBeDefined();
+      expect(() => parsePlannerEscalation(exemplar!), name).not.toThrow();
+
+      // Instead of, not as well as: a sentinel written beside a contract pair
+      // reports a failed round rather than a question.
+      expect(escalation, name).toMatch(/instead of/i);
+      expect(escalation, name).toContain("acceptance-manifest.json");
+
+      // The write boundary is the sentence the model treats as exhaustive, so
+      // the third artifact has to be named there too.
+      const boundary = template.match(
+        /^# Write boundary\r?\n([\s\S]*?)(?=^# |\Z)/m,
+      )?.[1];
+      expect(boundary, name).toContain(PLANNER_ESCALATION_FILENAME);
     }
   });
 

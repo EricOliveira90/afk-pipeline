@@ -81,6 +81,16 @@ import {
   type InvocationRecord,
   type SliceFixture,
 } from "./orchestrator.fixtures.js";
+import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
+
+/** The request #8194's apply planner writes instead of applying the decision. */
+const APPLY_ESCALATION = {
+  version: 1,
+  criterion: "SPEC_CONTRADICTION",
+  decision: "Whether the decided behavior may override the recorded ADR",
+  options: ["follow the ADR", "amend the ADR first"],
+  citation: "ADR 0054",
+} as const;
 
 afterEach(() => {
   cleanupIntegrationTempDirs();
@@ -189,6 +199,21 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         title: "Unrelated dependent",
         type: "AFK",
         blockedBy: ["8182"],
+        userStories: "",
+      },
+      // The apply planner stops to request a design decision instead of
+      // applying the human's. Another lane of this wave for the same reason
+      // as #8189/#8190: a parked slice with a valid recorded decision is
+      // exactly the state this fixture already builds, and the apply round is
+      // the one place where ignoring the stop is worse than misreporting it —
+      // the pre-apply pair is still valid, so the lock would succeed and mark
+      // the decision consumed by a contract containing none of it.
+      {
+        number: "12",
+        ghIssue: "8194",
+        title: "Apply planner requests a decision",
+        type: "AFK",
+        blockedBy: [],
         userStories: "",
       },
     ];
@@ -310,6 +335,16 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           outputContent: "unrelated dependent",
         },
       ],
+      [
+        "8194",
+        {
+          files: ["src/apply-escalation.txt"],
+          contractImpasse: true,
+          qaPasses: true,
+          outputFile: "src/apply-escalation.txt",
+          outputContent: "must not generate",
+        },
+      ],
     ]);
     const records: InvocationRecord[] = [];
     /** Decision bytes the fixture wrote, per slice, for verbatim checks. */
@@ -368,6 +403,11 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
               thirdInstruction:
                 "Neither position stands: split the disputed behavior in two.",
             },
+            {
+              ghIssue: "8194",
+              number: "12",
+              winningPosition: "EVALUATOR",
+            },
           ]) {
             const parkedCwd = records.find(
               (record) => record.ghIssue === decision.ghIssue,
@@ -418,6 +458,32 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
           // decisions are what identify an apply round here.
           if (existsSync(join(artifactDir, "adjudication-decisions.json"))) {
             renumberAppliedManifestBehavior(artifactDir);
+          }
+        }
+        if (
+          options.role === "planner" &&
+          invokedSlice?.ghIssue === "8194"
+        ) {
+          const artifactDir = findSliceArtifactDir(
+            options.cwd,
+            invokedSlice.number,
+          );
+          if (!artifactDir) {
+            throw new Error(
+              `apply-escalation artifact directory #${invokedSlice.ghIssue} missing`,
+            );
+          }
+          // Recorded decisions identify the apply round, as for #8188. The
+          // planner leaves the pre-apply pair exactly as it found it and
+          // writes the sentinel instead — the compliant shape for a §3c stop
+          // under `planner-revision.md`, and the shape that would otherwise
+          // sail through `lockAdjudicatedContract`.
+          if (existsSync(join(artifactDir, "adjudication-decisions.json"))) {
+            writeFileSync(
+              join(artifactDir, PLANNER_ESCALATION_FILENAME),
+              JSON.stringify(APPLY_ESCALATION),
+              "utf-8",
+            );
           }
         }
         return result;
@@ -507,6 +573,16 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         text: "behavior ID stability refused: unchanged behavior renumbered B-01 -> B-02",
         plannerInvocations: 3,
       },
+      // The apply planner stopped instead of applying. This lane belongs in
+      // the refusal list because it must end exactly where the gate refusals
+      // do — parked estate preserved, no generator, contract not LOCKED — and
+      // the shared body already asserts all three.
+      {
+        ghIssue: "8194",
+        number: "12",
+        text: "the planner stopped instead of applying the human decision(s)",
+        plannerInvocations: 3,
+      },
     ];
     const runParent = join(repo, ".afk", "logs", `${slug}-stub`);
     const latestRunDir = readdirSync(runParent)
@@ -575,6 +651,26 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
       });
       expect(runLog).toContain(refusal.text);
     }
+
+    // #8194 additionally: the decisions stay unapplied, so the next run
+    // retries them once the design question is settled, and the request is
+    // reported as one rather than as the manifest the planner did not write.
+    const applyStopWorktree = records.find(
+      (record) => record.ghIssue === "8194",
+    )!.cwd;
+    const applyStopDir = findSliceArtifactDir(applyStopWorktree, "12")!;
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(applyStopDir, "adjudication-decisions.json"),
+          "utf-8",
+        ),
+      ),
+    ).toMatchObject({ applied: false });
+    const applyStopError = state.slices["8194"]!.error!;
+    expect(applyStopError).toContain("design decision");
+    expect(applyStopError).toContain(APPLY_ESCALATION.citation);
+    expect(applyStopError).not.toContain("acceptance-manifest.json is missing");
 
     // The two successful apply routes. The refusal lanes above prove the
     // gates can stop generation; these prove the same code path reaches

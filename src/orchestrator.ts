@@ -256,6 +256,13 @@ import {
   outOfScopeChangedPaths,
   parseScopeEscalation,
 } from "./escalation.js";
+import {
+  clearPlannerEscalation,
+  PLANNER_ESCALATION_FILENAME,
+  plannerEscalationRequest,
+  readPlannerEscalation,
+  type PlannerEscalationRecord,
+} from "./planner-escalation.js";
 
 const MAX_GENERATOR_ROUNDS = 3;
 const DEFAULT_ADJUDICATION_WAIT_MS = 60_000;
@@ -1272,6 +1279,7 @@ async function reviseAcceptedContract(
     },
   );
   rmSync(manifestPath, { force: true });
+  clearPlannerEscalation(ctx.absSliceDir);
   const plannerLog = logger.agentLog(
     slice.number,
     "planner",
@@ -1313,6 +1321,19 @@ async function reviseAcceptedContract(
     round: revisionRound,
   });
 
+  // `planner-revision.md` is this path's template too, so this planner can
+  // also stop to request a design decision. Read the sentinel before the
+  // manifest, for the same reason the negotiation loop does: the missing
+  // manifest is the stop's consequence, and reporting it as the defect would
+  // hide the request behind "acceptance-manifest.json is missing". The
+  // transaction rolls the accepted pair back either way.
+  const revisionEscalation = readPlannerEscalation(ctx.absSliceDir);
+  if (revisionEscalation !== null) {
+    return {
+      phase: "ERROR",
+      error: `focused scope revision stopped — ${plannerEscalationRequest(revisionEscalation)}`,
+    };
+  }
   const revisedManifest = loadAcceptanceManifest(ctx.absSliceDir);
   validateAcceptanceManifestStability(previousManifest, revisedManifest);
   validateAcceptanceManifestCoverage(
@@ -1518,6 +1539,15 @@ type NegotiateFailureKind =
    * discard, `--resume-stuck` to keep a STUCK tree, or manual recovery.
    */
   | "restart-refused"
+  /**
+   * The planner stopped on purpose and asked for a design decision it is not
+   * allowed to make (`docs/specs/afk-v2-plan.md` §3c policy 1). Not a
+   * `verdict`: no evaluator ran and nothing judged the contract — the planner
+   * declined to write one. Terminal and deliberately not
+   * infrastructure-class: the same planner against the same specification
+   * stops again, so the fix is a recorded decision, not a retry.
+   */
+  | "design-decision"
   | "internal-error";
 
 interface NegotiateFailureCause {
@@ -1718,6 +1748,31 @@ function negotiateVerdictCause(args: {
           `evaluator verdict ${verdict} (a verdict, not an infrastructure death)`
         : `negotiate: contract not locked after negotiation — last evaluator ` +
           `verdict ${verdict} at round ${round} (a verdict, not an infrastructure death)`,
+  };
+}
+
+/**
+ * The planner's deliberate stop, reported as the request it is.
+ *
+ * The summary is what the wave records as the slice's outcome reason, so it is
+ * what `afk status` and the next run's retry line show. It must never be the
+ * missing-artifact sentence: a planner that obeyed its stop condition and a
+ * planner that failed to write a manifest used to be indistinguishable in
+ * this report, which sent the reader looking for a broken agent instead of an
+ * unsettled decision.
+ */
+function plannerEscalationCause(
+  record: PlannerEscalationRecord,
+  round: number,
+): NegotiateFailureCause {
+  return {
+    kind: "design-decision",
+    role: "planner",
+    summary:
+      `negotiate: the planner stopped at round ${round} to request a design ` +
+      `decision instead of writing a contract — ` +
+      `${plannerEscalationRequest(record)}; record the decision, then rerun ` +
+      `the slice`,
   };
 }
 
@@ -2661,6 +2716,11 @@ async function runImpasseAdjudication(
             agent: "planner",
           },
         );
+        // Deleted here too, so "a sentinel on disk was written by the planner
+        // invocation that just ran" holds for the whole file rather than only
+        // for the negotiation loop. Without it, a survivor from an earlier
+        // phase would be read below as this planner's stop.
+        clearPlannerEscalation(ctx.absSliceDir);
         const plannerLog = logger.agentLog(ctx.slice.number, "planner");
         try {
           const plannerPrompt = assembleAdjudicationPlannerPrompt({
@@ -2710,6 +2770,36 @@ async function runImpasseAdjudication(
           sliceNumber: ctx.slice.number,
           agent: "planner",
         });
+        // This planner reads `planner-revision.md` too, so it can stop to
+        // request a design decision — a human decision that overrides a
+        // recorded ADR fires escalation test 1 directly. Read before the
+        // lock, because this path is the one where an ignored stop is
+        // *worse* than a misreport: the pre-apply pair is still on disk and
+        // still valid, so `lockAdjudicatedContract` would accept it and
+        // `markAdjudicationDecisionsApplied` would mark the human's
+        // decisions consumed by a contract that contains none of them.
+        // Returning here instead leaves the decision log unapplied and lets
+        // the transaction restore the pair, so the same decisions are
+        // retried once the design question is settled.
+        const applyEscalation = readPlannerEscalation(ctx.absSliceDir);
+        if (applyEscalation !== null) {
+          const request = plannerEscalationRequest(applyEscalation);
+          // A plain phase line, no structured event: this round already
+          // emitted its planner `phase-ended` above, and the run-event
+          // `reason` vocabulary is not this patch's to extend.
+          logger.phase(`${ctx.tag}: adjudication apply refused — ${request}`);
+          return {
+            phase: "ADJUDICATION-LOCK-REFUSED",
+            cause: {
+              kind: "design-decision",
+              role: "planner",
+              summary:
+                `adjudication: the planner stopped instead of applying the ` +
+                `human decision(s) — ${request}; the decisions stay ` +
+                `unapplied, so record this one and rerun the slice`,
+            },
+          };
+        }
         const locked = lockAdjudicatedContract(preApplyManifest);
         if (locked.phase === "LOCKED") {
           markAdjudicationDecisionsApplied(ctx.absSliceDir, decisionLog);
@@ -3157,14 +3247,23 @@ async function negotiateAttempt(
             maxDurationMs: config.maxAgentDurationMs,
           },
           () => logger.agentLog(slice.number, "planner", round),
-          requiresPlannerResponse
-            ? () => {
-                rmSync(
-                  join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
-                  { force: true },
-                );
-              }
-            : undefined,
+          // Per *attempt*, not per round. An infrastructure retry re-runs the
+          // planner, so a sentinel written by an attempt that was retried
+          // away would otherwise survive into the successful attempt's output
+          // and escalate a round that produced a perfectly good contract.
+          // Nothing is lost by clearing it: when retries are exhausted
+          // `invokeAgent` throws and negotiate returns ERROR without ever
+          // reading the sentinel, so the only reachable reader is the attempt
+          // that succeeded.
+          () => {
+            clearPlannerEscalation(ctx.absSliceDir);
+            if (requiresPlannerResponse) {
+              rmSync(
+                join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
+                { force: true },
+              );
+            }
+          },
         );
         logger.event({
           type: "phase-ended",
@@ -3173,6 +3272,59 @@ async function negotiateAttempt(
           agent: "planner",
           round,
         });
+
+        // A deliberate stop, read on its own terms rather than out of the
+        // manifest loader's throw. The planner writes this sentinel *instead
+        // of* the contract pair, so the missing `acceptance-manifest.json` is
+        // that stop's consequence and not an independent defect — reporting
+        // it as the defect is what made an obeyed stop condition look
+        // identical to a failed planner, and then cost a second, unchanged
+        // round to reach the same place.
+        //
+        // Read before `loadBehaviorLockArtifacts`, not inside its catch: a
+        // planner that wrote the sentinel *and* a valid pair does not throw,
+        // so a check in the catch would evaluate a contract whose own author
+        // declared the specification unsettled and discard the request
+        // silently. The sentinel was deleted at the top of every attempt of
+        // this invocation, so its presence proves the attempt whose output is
+        // being read wrote it, and it wins over any pair sitting beside it.
+        const plannerEscalation = readPlannerEscalation(ctx.absSliceDir);
+        if (plannerEscalation !== null) {
+          // Only an ACCEPT may leave a lock (ADR 0008). Nothing here wrote
+          // one, but the planner may have written it into the `contract.md`
+          // this round started from — and the generator reads that line as
+          // permission while the next run's status fork skips negotiation on
+          // it. This is the one thing `refuseInvalidManifest` does that
+          // bypassing it must not drop.
+          if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+            artifacts.reopenContract(contractPath);
+          }
+          const request = plannerEscalationRequest(plannerEscalation);
+          lastRound = round;
+          lastVerdict = "NONE";
+          capDecisions.push(
+            `The planner stopped at round ${round} to request a design ` +
+              `decision instead of writing a contract: ${request}. Record the ` +
+              `decision in the source issue or an ADR, then rerun the slice. ` +
+              `Report: ${ctx.relSliceDir}/${PLANNER_ESCALATION_FILENAME}.`,
+          );
+          logger.phase(`${ctx.tag}: contract negotiation stopped: ${request}`);
+          logger.phase(
+            `${ctx.tag}: ESCALATE — the planner requested a design decision`,
+          );
+          preserveContractNegotiationFailure(
+            ctx,
+            "ESCALATE",
+            round,
+            "NONE",
+            lastFeedbackPath,
+            capDecisions.join(" "),
+          );
+          return {
+            phase: "ESCALATE",
+            cause: plannerEscalationCause(plannerEscalation, round),
+          };
+        }
 
         let baseGateCatalogBlock = "";
         let evaluatedManifest: AcceptanceManifest | null = null;
