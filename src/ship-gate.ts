@@ -22,6 +22,7 @@ import {
   type GuardianKind,
 } from "./guardian-convergence.js";
 import { guardianFindingMayBlock } from "./guardian-blocking-authority.js";
+import { buildGuardianRoundScope } from "./guardian-round-scope.js";
 import {
   saveReviewPhase,
   type PersistedGuardianFinding,
@@ -557,6 +558,16 @@ export async function runShipGate(
     );
   }
 
+  // Read before the reviews run: round 1 reads the branch, later rounds verify
+  // the fix against what the ledger already recorded (ADR 0057 decision 2).
+  const priorRounds = cachedReviewPhase?.rounds ?? [];
+  const roundNumber = priorRounds.length + 1;
+  const architectScope = buildGuardianRoundScope({
+    rounds: priorRounds,
+    guardian: "architect",
+    defaultBranch,
+  });
+
   const runGuardianReview = async (
     kind: "architect" | "pm",
   ): Promise<ReviewRunResult> => {
@@ -564,11 +575,22 @@ export async function runShipGate(
     const label = kind === "architect" ? "Architect" : "PM";
     const reviewFileName =
       kind === "architect" ? "review-architect.md" : "review-pm.md";
+    if (kind === "architect") {
+      journal.phase(
+        architectScope.deltaBaseSha === null
+          ? `  🔎 Architect review round ${architectScope.round}: reviewing the whole branch against ${defaultBranch}.`
+          : `  🔎 Architect review round ${architectScope.round}: verifying the fix diff ${architectScope.deltaBaseSha.slice(0, 12)}..HEAD against the recorded open findings.`,
+        "log",
+      );
+    }
     const prompt =
       kind === "architect"
         ? renderPrompt("architect-review", {
             SPECS_DIR: relativeSpecsDir,
             RELEVANT_FILES: relevantFilesBlock,
+            ROUND_SCOPE: architectScope.roundScope,
+            OPEN_FINDINGS: architectScope.openFindings,
+            RESOLVED_HISTORY: architectScope.resolvedHistory,
           })
         : renderPrompt("pm-review", {
             SPECS_DIR: relativeSpecsDir,
@@ -737,8 +759,6 @@ export async function runShipGate(
     pmResult = pmSettled.value;
   }
 
-  const priorRounds = cachedReviewPhase?.rounds ?? [];
-  const roundNumber = priorRounds.length + 1;
   // Lineage resolves before outcomes are published so the durable round and
   // the draft-PR decision observe the same parsed guardian evidence.
   const invokedLineage = new Map<GuardianKind, PersistedGuardianFinding[]>();

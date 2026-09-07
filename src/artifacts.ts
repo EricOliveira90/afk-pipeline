@@ -93,6 +93,24 @@ export function isFavorableReviewOutcome(
   return outcome === "SHIP" || outcome === "ACCEPT-WITH-NOTES";
 }
 
+/**
+ * Outcomes that report how the review ran rather than what it judged.
+ *
+ * ADR 0057 decision 4 (amendment 2026-09-06) names these three the operational
+ * outcomes: they carry no guardian judgment, so they neither count toward the
+ * guardian round cap nor stand as a round that read the reviewed tree. This is
+ * broader than `isReviewInfrastructureFailure`, which asks the narrower
+ * question of what retries within the run — `UNPARSEABLE` is terminal for the
+ * round yet still says nothing about the code.
+ */
+export function isOperationalReviewOutcome(outcome: ReviewOutcome): boolean {
+  return (
+    outcome === "UNPARSEABLE" ||
+    outcome === "NEVER_RAN" ||
+    outcome === "DIED_MID_RUN"
+  );
+}
+
 /** Infrastructure-class review outcomes retry within the run (ADR 0015). */
 export function isReviewInfrastructureFailure(
   outcome: ReviewOutcome,

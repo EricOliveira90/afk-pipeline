@@ -78,7 +78,9 @@ when one is quoting the other.
   `{"version":2,"findings":[{"id":"A-01","title":"...","class":"INTEGRITY","clearCondition":"...","disposition":"OPEN","reachableTrigger":"A normal retry reads the invalid durable state.","introducedByReviewedDiff":true}]}`.
   Use an empty `findings` array for SHIP. ACCEPT-WITH-NOTES and
   FIX-BEFORE-SHIP require at least one finding. IDs must be unique and
-  non-blank; `title`, `class`, and `clearCondition` must be non-blank;
+  non-blank, and an `id` that names one of the stable IDs listed under "Open
+  findings" above must be that finding's stable ID — reuse it rather than
+  renumbering; `title`, `class`, and `clearCondition` must be non-blank;
   `class` must be a machine token; and `disposition` must be one of `OPEN`,
   `RESOLVED`, `REPEATED`, `REOPENED`, or `REGRESSED`. `reachableTrigger`
   must be either `null` or a non-blank concrete normal-operation trigger;
@@ -91,17 +93,29 @@ when one is quoting the other.
   already known. Run only narrowly-scoped commands (single test files,
   greps, typecheck of a specific concern) when you need fresh evidence.
 
+# What this round reviews
+
+{{ROUND_SCOPE}}
+
+## Open findings
+
+{{OPEN_FINDINGS}}
+
+## Already resolved — do not re-raise
+
+{{RESOLVED_HISTORY}}
+
 # Required reading
 
 {{RELEVANT_FILES}}
 
 Also read:
 - All slice contracts and implementations under `{{SPECS_DIR}}/slices/`
-- The diff of the feature branch against the base branch
+- The diff named under "What this round reviews" above
 
 # Task
 
-Review the merged code from all slices then write your review to
+Review the code this round is scoped to, then write your review to
 `{{SPECS_DIR}}/review-architect.md`. Focus on patterns, not style.
 
 **How to write the file:** Use the Bash tool with a heredoc:

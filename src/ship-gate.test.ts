@@ -264,6 +264,14 @@ describe("runShipGate", () => {
         },
       ],
     });
+    // Slice #171: with no ledger this is round 1, so the architect still reads
+    // the whole branch against the base.
+    const architectPrompt = invoke.mock.calls
+      .map(([options]) => options)
+      .find((options) => options.role === "architect-review")!.prompt;
+    expect(architectPrompt).toContain("review round 1");
+    expect(architectPrompt).toContain("git diff main...HEAD");
+    expect(architectPrompt).not.toContain("verification round");
   });
 
   it("P-01 reuses favorable cache entries and records the no-ledger findings fallback", async () => {
@@ -1281,6 +1289,26 @@ describe("runShipGate", () => {
     // A blocking architect result is unfavorable, so it is never cached.
     expect(loadRunState(repo, slug).reviewPhase?.architect).toBeUndefined();
     expect(headSha).toBeTruthy();
+
+    // Slice #171: this same second round read the ledger the first wrote — its
+    // prompt is scoped to the fix diff from round 1's headSha and lists the
+    // prior finding by the stable ID the guardian must reuse (ADR 0057
+    // decision 2). Asserted here rather than in a new spawned scenario.
+    const architectPrompt = invoke.mock.calls
+      .map(([options]) => options)
+      .find((options) => options.role === "architect-review")!.prompt;
+    expect(architectPrompt).toContain("review round 2, a verification round");
+    expect(architectPrompt).toContain("git diff prior-head..HEAD");
+    expect(architectPrompt).not.toContain("git diff main...HEAD");
+    expect(architectPrompt).toContain("[A-01]");
+    expect(architectPrompt).toContain("Commit the durable evidence.");
+    expect(architectPrompt).toContain("Reuse the stable IDs");
+    expect(fixture.phase).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Architect review round 2: verifying the fix diff prior-head..HEAD",
+      ),
+      "log",
+    );
   });
 
   it("B-01 QA-06 keeps the reused caches when the artifact commit fails", async () => {
