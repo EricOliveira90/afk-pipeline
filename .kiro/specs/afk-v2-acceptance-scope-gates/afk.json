@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "selectedSlices": ["01", "02", "03", "04", "05", "06"],
+  "migrationPrefixes": [],
+  "protectedIssues": [],
+  "protectedChangeWaivers": [
+    {
+      "riskClass": "gate-policy",
+      "path": "afk.config.json",
+      "author": "EricOliveira90",
+      "reason": "Slices 02 (#85) and 05 (#86) add the acceptance and cost keys to the gatePolicy object slice 01 (#84) creates there; the edit is the contract, not a weakened feedback loop. Inert while the launched orchestrator has not adopted slice 01's gate (prd.md, self-hosting note); load-bearing only if the run is relaunched on a rebuilt binary mid-PRD. riskClass must match the class #84 declares for gate-policy paths."
+    }
+  ]
+}
