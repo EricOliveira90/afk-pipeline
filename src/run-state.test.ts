@@ -331,6 +331,8 @@ describe("review-phase persistence", () => {
     class: "INTEGRITY",
     clearCondition: "Persist the evidence.",
     disposition: "OPEN" as const,
+    reachableTrigger: "A retry consumes an incomplete durable record.",
+    introducedByReviewedDiff: true,
   };
   const invokedRound = (
     round: number,
@@ -373,6 +375,8 @@ describe("review-phase persistence", () => {
                 ...finding,
                 stableId: "P-01",
                 currentId: "P-01",
+                reachableTrigger: null,
+                introducedByReviewedDiff: null,
               },
             ]
           : [],
@@ -488,6 +492,91 @@ describe("sanitizeReviewPhase", () => {
     ).toEqual({ sanity: { treeSha: "abc", ok: true } });
   });
 
+  it("B-04 drops an impossible architect blocking ledger but keeps favorable cache data", () => {
+    expect(
+      sanitizeReviewPhase({
+        architect: { headSha: "cached-head", verdict: "SHIP" },
+        rounds: [
+          {
+            round: 1,
+            reviewedHeadSha: "reviewed-head",
+            headSha: "review-commit",
+            architect: {
+              source: "INVOKED",
+              outcome: "FIX-BEFORE-SHIP",
+              findings: [
+                {
+                  stableId: "A-01",
+                  currentId: "A-01",
+                  title: "Pre-existing behavior",
+                  class: "INTEGRITY",
+                  clearCondition: "Change main's existing behavior.",
+                  disposition: "OPEN",
+                  reachableTrigger: "A normal run reaches the behavior.",
+                  introducedByReviewedDiff: false,
+                },
+              ],
+              findingsOriginRound: 1,
+            },
+            pm: {
+              source: "INVOKED",
+              outcome: "SHIP",
+              findings: [],
+              findingsOriginRound: 1,
+            },
+          },
+        ],
+      }),
+    ).toEqual({
+      architect: { headSha: "cached-head", verdict: "SHIP" },
+    });
+  });
+
+  it("P-02 loads legacy PM v1 findings with null authority evidence", () => {
+    const sanitized = sanitizeReviewPhase({
+      rounds: [
+        {
+          round: 1,
+          reviewedHeadSha: "reviewed-head",
+          headSha: "review-commit",
+          architect: {
+            source: "INVOKED",
+            outcome: "SHIP",
+            findings: [],
+            findingsOriginRound: 1,
+          },
+          pm: {
+            source: "INVOKED",
+            outcome: "ACCEPT-WITH-NOTES",
+            findings: [
+              {
+                stableId: "P-01",
+                currentId: "P-01",
+                title: "Product note",
+                class: "PRODUCT",
+                clearCondition: "Clarify the product behavior.",
+                disposition: "OPEN",
+              },
+            ],
+            findingsOriginRound: 1,
+          },
+        },
+      ],
+    });
+    expect(sanitized?.rounds?.[0]?.pm.findings).toEqual([
+      {
+        stableId: "P-01",
+        currentId: "P-01",
+        title: "Product note",
+        class: "PRODUCT",
+        clearCondition: "Clarify the product behavior.",
+        disposition: "OPEN",
+        reachableTrigger: null,
+        introducedByReviewedDiff: null,
+      },
+    ]);
+  });
+
   it("is applied when loading a v1 state file", () => {
     const state = adaptLoadedState(
       {
@@ -514,6 +603,8 @@ describe("sanitizeReviewPhase", () => {
       class: "INTEGRITY",
       clearCondition: "Clear it",
       disposition: "OPEN",
+      reachableTrigger: null,
+      introducedByReviewedDiff: null,
     };
     const round1 = {
       round: 1,
@@ -630,6 +721,8 @@ describe("sanitizeReviewPhase", () => {
       class: "PRODUCT",
       clearCondition: "Clear the current alias.",
       disposition: "REPEATED",
+      reachableTrigger: null,
+      introducedByReviewedDiff: null,
     };
     const stableAliasClaimant = {
       currentId: "A-01",
@@ -637,6 +730,8 @@ describe("sanitizeReviewPhase", () => {
       class: "INTEGRITY",
       clearCondition: "Clear the stable alias.",
       disposition: "OPEN",
+      reachableTrigger: null,
+      introducedByReviewedDiff: null,
     };
 
     // Identity resolution is one-to-one within a round (ADR 0057 decision 1,
@@ -687,6 +782,8 @@ describe("sanitizeReviewPhase", () => {
                   class: "INTEGRITY",
                   clearCondition: "Clear it",
                   disposition: "OPEN" as const,
+                  reachableTrigger: "A retry consumes invalid state.",
+                  introducedByReviewedDiff: true,
                 },
               ]
             : [],

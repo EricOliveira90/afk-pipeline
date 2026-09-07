@@ -94,6 +94,14 @@ function writeReview(
   slug: string,
   kind: "architect" | "pm",
   verdict: string,
+  architectAuthority: {
+    reachableTrigger: string | null;
+    introducedByReviewedDiff: boolean;
+  } = {
+    reachableTrigger:
+      "A normal pipeline retry consumes the invalid state.",
+    introducedByReviewedDiff: true,
+  },
 ): void {
   const dir = join(options.cwd, ".kiro", "specs", slug);
   mkdirSync(dir, { recursive: true });
@@ -107,6 +115,9 @@ function writeReview(
             class: kind === "architect" ? "INTEGRITY" : "PRODUCT",
             clearCondition: `Clear the ${kind} finding.`,
             disposition: "OPEN",
+            ...(kind === "architect"
+              ? architectAuthority
+              : {}),
           },
         ];
   writeFileSync(
@@ -116,8 +127,11 @@ function writeReview(
       "",
       `**Verdict:** ${verdict}`,
       "",
-      "## Structured findings (v1)",
-      JSON.stringify({ version: 1, findings }),
+      `## Structured findings (v${kind === "architect" ? 2 : 1})`,
+      JSON.stringify({
+        version: kind === "architect" ? 2 : 1,
+        findings,
+      }),
       "",
     ].join("\n"),
     "utf-8",
@@ -190,6 +204,68 @@ describe("buildPrCreationPlan adoption provenance", () => {
 });
 
 describe("runShipGate", () => {
+  it("B-04 downgrades an unauthorized architect blocker and retains its finding", async () => {
+    const repo = makeRepo();
+    const slug = "architect-authority-floor";
+    const fixture = makeJournal();
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(
+        options,
+        slug,
+        kind,
+        kind === "architect" ? "FIX-BEFORE-SHIP" : "SHIP",
+        {
+          reachableTrigger: null,
+          introducedByReviewedDiff: false,
+        },
+      );
+      return invokeResult();
+    });
+    const runCommand = vi.fn<ShipCommandRunner>((command, args) =>
+      command === "gh" && args[1] === "create"
+        ? "https://github.com/acme/repo/pull/42\n"
+        : "",
+    );
+
+    const result = await runShipGate(
+      makeArgs(repo, slug, fixture.journal, invoke, runCommand),
+    );
+
+    expect(result.verdict).toBe("SHIP");
+    expect(fixture.setReviewOutcomes).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "ACCEPT-WITH-NOTES",
+        findings: [
+          expect.objectContaining({
+            id: "A-01",
+            reachableTrigger: null,
+            introducedByReviewedDiff: false,
+          }),
+        ],
+      }),
+      expect.objectContaining({ outcome: "SHIP" }),
+    );
+    expect(
+      loadRunState(repo, slug).reviewPhase?.rounds?.[0]?.architect,
+    ).toMatchObject({
+      source: "INVOKED",
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [
+        {
+          stableId: "A-01",
+          currentId: "A-01",
+          title: "architect finding",
+          class: "INTEGRITY",
+          clearCondition: "Clear the architect finding.",
+          disposition: "OPEN",
+          reachableTrigger: null,
+          introducedByReviewedDiff: false,
+        },
+      ],
+    });
+  });
+
   it("P-01 reuses favorable cache entries and records the no-ledger findings fallback", async () => {
     const repo = makeRepo();
     const slug = "cache-hit";
@@ -275,6 +351,8 @@ describe("runShipGate", () => {
       class: "INTEGRITY",
       clearCondition: "Retain the evidence.",
       disposition: "OPEN" as const,
+      reachableTrigger: null,
+      introducedByReviewedDiff: null,
     };
     const cachedReviewPhase = {
       sanity: { treeSha, ok: true as const },
@@ -775,8 +853,8 @@ describe("runShipGate", () => {
       "",
       "**Verdict:** FIX-BEFORE-SHIP",
       "",
-      "## Structured findings (v1)",
-      '{"version":1,"findings":[{"id":"A-01","title":"Stale blocker","class":"INTEGRITY","clearCondition":"Fix stale flow","disposition":"OPEN"}]}',
+      "## Structured findings (v2)",
+      '{"version":2,"findings":[{"id":"A-01","title":"Stale blocker","class":"INTEGRITY","clearCondition":"Fix stale flow","disposition":"OPEN","reachableTrigger":"A retry consumes stale state.","introducedByReviewedDiff":true}]}',
       "",
       "lockAdjudicatedContract at lines 2065-2185.",
       "",
@@ -786,8 +864,8 @@ describe("runShipGate", () => {
       "",
       "**Verdict:** SHIP",
       "",
-      "## Structured findings (v1)",
-      '{"version":1,"findings":[]}',
+      "## Structured findings (v2)",
+      '{"version":2,"findings":[]}',
       "",
       "runImpasseAdjudication at line 2237.",
       "",
@@ -1097,9 +1175,9 @@ describe("runShipGate", () => {
           "",
           "**Verdict:** FIX-BEFORE-SHIP",
           "",
-          "## Structured findings (v1)",
+          "## Structured findings (v2)",
           JSON.stringify({
-            version: 1,
+            version: 2,
             findings: [
               {
                 id: "A-05",
@@ -1107,6 +1185,8 @@ describe("runShipGate", () => {
                 class: "PRODUCT",
                 clearCondition: "Clear the current alias.",
                 disposition: "REPEATED",
+                reachableTrigger: "A retry reaches the current alias.",
+                introducedByReviewedDiff: false,
               },
               {
                 id: "A-01",
@@ -1114,6 +1194,8 @@ describe("runShipGate", () => {
                 class: "INTEGRITY",
                 clearCondition: "Clear the stable alias.",
                 disposition: "OPEN",
+                reachableTrigger: "A retry reaches the stable alias.",
+                introducedByReviewedDiff: false,
               },
             ],
           }),
@@ -1141,6 +1223,9 @@ describe("runShipGate", () => {
                 class: "INTEGRITY",
                 clearCondition: "Commit the durable evidence.",
                 disposition: "OPEN" as const,
+                reachableTrigger:
+                  "A retry consumes the incomplete durable record.",
+                introducedByReviewedDiff: true,
               },
             ],
             findingsOriginRound: 1,
@@ -1177,6 +1262,8 @@ describe("runShipGate", () => {
           class: "PRODUCT",
           clearCondition: "Clear the current alias.",
           disposition: "REPEATED",
+          reachableTrigger: "A retry reaches the current alias.",
+          introducedByReviewedDiff: false,
         },
         {
           stableId: "A-01",
@@ -1185,6 +1272,8 @@ describe("runShipGate", () => {
           class: "INTEGRITY",
           clearCondition: "Clear the stable alias.",
           disposition: "OPEN",
+          reachableTrigger: "A retry reaches the stable alias.",
+          introducedByReviewedDiff: false,
         },
       ],
       findingsOriginRound: 2,

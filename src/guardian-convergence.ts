@@ -1,10 +1,24 @@
-import type { GuardianReviewFinding } from "./artifacts.js";
+import type {
+  GuardianKind,
+  GuardianReviewFinding,
+} from "./artifacts.js";
 import type {
   PersistedGuardianFinding,
   PersistedGuardianReviewRound,
 } from "./run-state.js";
 
-export type GuardianKind = "architect" | "pm";
+export type { GuardianKind } from "./artifacts.js";
+
+type GuardianFindingLineageInput = Omit<
+  GuardianReviewFinding,
+  "reachableTrigger" | "introducedByReviewedDiff"
+> &
+  Partial<
+    Pick<
+      GuardianReviewFinding,
+      "reachableTrigger" | "introducedByReviewedDiff"
+    >
+  >;
 
 function normalizedFingerprint(finding: {
   class: string;
@@ -47,7 +61,7 @@ function priorFindings(
 export function advanceGuardianFindingLineage(
   rounds: readonly PersistedGuardianReviewRound[],
   guardian: GuardianKind,
-  findings: readonly GuardianReviewFinding[],
+  findings: readonly GuardianFindingLineageInput[],
 ): PersistedGuardianFinding[] {
   const prior = priorFindings(rounds, guardian);
   const claimed = new Set<string>();
@@ -136,6 +150,9 @@ export function advanceGuardianFindingLineage(
       class: finding.class,
       clearCondition: finding.clearCondition,
       disposition: finding.disposition,
+      reachableTrigger: finding.reachableTrigger ?? null,
+      introducedByReviewedDiff:
+        finding.introducedByReviewedDiff ?? null,
     };
   });
 }

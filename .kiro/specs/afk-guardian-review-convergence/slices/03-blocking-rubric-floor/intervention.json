@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "cause": {
+    "kind": "QA_CONVERGENCE",
+    "interventionClass": "IMPLEMENTATION_INTERVENTION"
+  },
+  "interventionClass": "IMPLEMENTATION_INTERVENTION",
+  "phase": "deterministic-qa",
+  "reasonCodes": [
+    "SEMANTIC_CAP_EXHAUSTED"
+  ],
+  "blockerIds": [
+    "QA-01"
+  ],
+  "summary": "AFK exhausted 0 implementation attempt(s) without an accepted candidate.",
+  "findingLineage": [
+    {
+      "stableId": "QA-01",
+      "currentId": "QA-01",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "Architect prompt omits and contradicts the later-round blocking rules",
+      "evidence": "prompts/architect-review.md:33-37 universally requires every blocker to be introduced by the reviewed diff and demotes unchanged behavior, while it never states the later-new INTEGRITY/DATA_LOSS exception or the prior-lineage exception. src/prompt-template.test.ts:291-315 checks the v2 heading and field names but not those required rules.",
+      "clearCondition": "The architect prompt explicitly distinguishes round-1, later-new, and prior-lineage blocking authority without contradicting B-03, and the focused prompt test asserts the exact authority-field shapes plus the round-aware floor and exceptions.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r1-a1.json",
+        ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r1-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-02",
+      "currentId": "QA-02",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "Authority policy tests do not bind the declared cross-product",
+      "evidence": "src/guardian-blocking-authority.test.ts:15-81 tests trigger absence only in round 1 and RESOLVED only for prior lineage; it does not cover combinations such as a triggerless prior-lineage finding or triggerless later-new INTEGRITY finding.",
+      "clearCondition": "A table-driven policy test covers the declared dimensions, including triggerless and resolved cases for both later-new and prior-lineage findings.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r1-a1.json",
+        ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r1-a1.md"
+      ]
+    }
+  ],
+  "attemptedRepairs": [
+    {
+      "phase": "deterministic-qa",
+      "revision": 1,
+      "candidateTreeId": "ccaf6f1883fb7f24039a5cc6715ee4aa4c824857",
+      "activeBlockingIds": [
+        "QA-01"
+      ],
+      "findingLineage": [
+        {
+          "stableId": "QA-01",
+          "currentId": "QA-01",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "Architect prompt omits and contradicts the later-round blocking rules",
+          "evidence": "prompts/architect-review.md:33-37 universally requires every blocker to be introduced by the reviewed diff and demotes unchanged behavior, while it never states the later-new INTEGRITY/DATA_LOSS exception or the prior-lineage exception. src/prompt-template.test.ts:291-315 checks the v2 heading and field names but not those required rules.",
+          "clearCondition": "The architect prompt explicitly distinguishes round-1, later-new, and prior-lineage blocking authority without contradicting B-03, and the focused prompt test asserts the exact authority-field shapes plus the round-aware floor and exceptions.",
+          "artifactReferences": [
+            ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r1-a1.json",
+            ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r1-a1.md"
+          ]
+        },
+        {
+          "stableId": "QA-02",
+          "currentId": "QA-02",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "Authority policy tests do not bind the declared cross-product",
+          "evidence": "src/guardian-blocking-authority.test.ts:15-81 tests trigger absence only in round 1 and RESOLVED only for prior lineage; it does not cover combinations such as a triggerless prior-lineage finding or triggerless later-new INTEGRITY finding.",
+          "clearCondition": "A table-driven policy test covers the declared dimensions, including triggerless and resolved cases for both later-new and prior-lineage findings.",
+          "artifactReferences": [
+            ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r1-a1.json",
+            ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r1-a1.md"
+          ]
+        }
+      ],
+      "supportingEvidence": [
+        ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r1-a1.json",
+        ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r1-a1.md"
+      ]
+    }
+  ],
+  "preservedCandidate": {
+    "branch": "afk-codex/afk-guardian-review-convergence-slice-03-blocking-rubric-floor",
+    "treeId": "ccaf6f1883fb7f24039a5cc6715ee4aa4c824857",
+    "phase": "deterministic-qa",
+    "revision": 1,
+    "recoveryRef": "refs/afk/recovery/afk-guardian-review-convergence-codex/172/deterministic-qa-r1-ccaf6f1883fb7f24039a5cc6715ee4aa4c824857",
+    "recoveryCommit": "25ec45032585db78e7d5577a4d1e939a761ea9c0"
+  },
+  "supportingEvidence": [
+    ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r1-a1.json",
+    ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r2-a1.json",
+    ".afk/artifacts/afk-guardian-review-convergence-codex/slice-03/reviews/qa-review-r3-a1.json",
+    ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r1-a1.md",
+    ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r2-a1.md",
+    ".kiro/specs/afk-guardian-review-convergence/slices/03-blocking-rubric-floor/qa-report-r3-a1.md"
+  ],
+  "requiredOperatorAction": "Inspect QA-01 on preserved candidate tree ccaf6f1883fb7f24039a5cc6715ee4aa4c824857, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice."
+}

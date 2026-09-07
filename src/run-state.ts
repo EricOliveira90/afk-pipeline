@@ -18,6 +18,7 @@ import type {
   GuardianFindingDisposition,
   ReviewOutcome,
 } from "./artifacts.js";
+import { guardianFindingMayBlock } from "./guardian-blocking-authority.js";
 
 /** Phases that get persisted. RUNNING / PENDING never touch disk. */
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
@@ -141,6 +142,8 @@ export interface PersistedGuardianFinding {
   class: string;
   clearCondition: string;
   disposition: GuardianFindingDisposition;
+  reachableTrigger: string | null;
+  introducedByReviewedDiff: boolean | null;
 }
 
 export interface PersistedGuardianReviewRecord {
@@ -220,6 +223,26 @@ function sanitizeGuardianFinding(
   ) {
     return undefined;
   }
+  const reachableTrigger =
+    finding.reachableTrigger === undefined ||
+    finding.reachableTrigger === null
+      ? null
+      : nonBlank(finding.reachableTrigger)
+        ? finding.reachableTrigger.trim()
+        : undefined;
+  const introducedByReviewedDiff =
+    finding.introducedByReviewedDiff === undefined ||
+    finding.introducedByReviewedDiff === null
+      ? null
+      : typeof finding.introducedByReviewedDiff === "boolean"
+        ? finding.introducedByReviewedDiff
+        : undefined;
+  if (
+    reachableTrigger === undefined ||
+    introducedByReviewedDiff === undefined
+  ) {
+    return undefined;
+  }
   return {
     stableId: finding.stableId.trim(),
     currentId: finding.currentId.trim(),
@@ -227,6 +250,8 @@ function sanitizeGuardianFinding(
     class: finding.class.trim(),
     clearCondition: finding.clearCondition.trim(),
     disposition: finding.disposition as GuardianFindingDisposition,
+    reachableTrigger,
+    introducedByReviewedDiff,
   };
 }
 
@@ -373,6 +398,33 @@ function sanitizeGuardianRounds(
       } else if (
         record.findingsOriginRound !== null ||
         record.findings.length !== 0
+      ) {
+        return undefined;
+      }
+    }
+    if (
+      round.architect.source === "INVOKED" &&
+      round.architect.outcome === "FIX-BEFORE-SHIP"
+    ) {
+      const priorStableIds = new Set(
+        rounds
+          .slice(0, index)
+          .flatMap((prior) =>
+            prior.architect.findings.map((finding) => finding.stableId),
+          ),
+      );
+      if (
+        !round.architect.findings.some((finding) =>
+          guardianFindingMayBlock({
+            guardian: "architect",
+            round: round.round,
+            hasPriorLineage: priorStableIds.has(finding.stableId),
+            class: finding.class,
+            disposition: finding.disposition,
+            reachableTrigger: finding.reachableTrigger,
+            introducedByReviewedDiff: finding.introducedByReviewedDiff,
+          }),
+        )
       ) {
         return undefined;
       }

@@ -1,0 +1,7 @@
+The contract is testable because the pure authority-policy matrix directly covers the round, lineage, trigger, attribution, class, and disposition rules, while focused parser, lineage, run-state, prompt, and existing ship-gate fixtures observe the integration boundaries. The declared typecheck and test gates can produce relevant evidence for every behavior.
+
+The scope follows the explorer evidence from artifact parsing through lineage, persisted-ledger sanitization, and ship-gate planning. Its additive architect-v2 fields leave PM v1 and the existing identity, cache, infrastructure-failure, override, and favorable-outcome behavior under explicit preservation obligations.
+
+The contract makes reliable choices for the unresolved field shape and ledger invariant: authority evidence is represented explicitly, blocking remains a record-level outcome, and impossible persisted blockers invalidate the tolerant rounds ledger. The unavailable round-2 context owned by #171 is clearly excluded while this slice consumes the round and stable-lineage seam.
+
+The work is feasible in one generator session: it introduces no migration or dependency, centers the logic in one pure policy module, and reuses direct or existing fixtures instead of adding a spawned pipeline scenario. Related convergence, cap, override, PR-recording, PM-policy, agent-rubric, sanity-gate, QA, and live-review work is named as out of scope.

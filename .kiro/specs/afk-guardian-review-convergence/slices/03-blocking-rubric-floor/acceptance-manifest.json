@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "prompts/architect-review.md",
+      "src/artifacts.ts",
+      "src/artifacts.test.ts",
+      "src/guardian-blocking-authority.ts",
+      "src/guardian-blocking-authority.test.ts",
+      "src/guardian-convergence.ts",
+      "src/guardian-convergence.test.ts",
+      "src/prompt-template.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/ship-gate.ts",
+      "src/ship-gate.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #172 task 1; ADR 0057 decision 3",
+      "given": "an architect round-1 FIX-BEFORE-SHIP finding",
+      "when": "its effective ledger outcome is derived",
+      "then": "the finding may keep blocking authority only with a non-blank reachableTrigger and introducedByReviewedDiff true",
+      "observableResult": "authority-policy and ship-gate fixtures downgrade triggerless, recovery-only, or pre-existing findings to ACCEPT-WITH-NOTES while retaining them",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #172 task 2; ADR 0057 decisions 2-3",
+      "given": "architect round 2 or later reports a finding with no prior stable lineage",
+      "when": "its effective ledger outcome is derived",
+      "then": "the finding may block only with a non-blank reachable trigger, reviewed-fix attribution, and class INTEGRITY or DATA_LOSS",
+      "observableResult": "the policy matrix retains every new finding but only the two attributed exception classes can keep FIX-BEFORE-SHIP",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #172 task 2; ADR 0057 decisions 1-3",
+      "given": "architect round 2 or later reports a finding matched to a prior stable lineage",
+      "when": "the current disposition is evaluated",
+      "then": "a non-RESOLVED finding with a non-blank reachable trigger may continue blocking while a RESOLVED finding cannot",
+      "observableResult": "lineage and policy fixtures distinguish prior uncleared and resolved findings without changing stable identity",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #172 Tests and Dependency decision; ADR 0057 decisions 1 and 3",
+      "given": "an invoked architect record claims FIX-BEFORE-SHIP",
+      "when": "the ship gate constructs it or persisted review state is sanitized",
+      "then": "at least one finding must satisfy the round-aware authority rule or the record cannot carry blocking authority",
+      "observableResult": "ship-gate fixtures record ACCEPT-WITH-NOTES for unauthorized findings and run-state fixtures drop an impossible persisted blocking rounds ledger",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #172 retained classes; existing architect principle 2; ADR 0057 decision 3",
+      "given": "a coupling, broken-abstraction, security-gap, or missing-error-handling finding satisfies the applicable authority rule",
+      "when": "architect blocking authority is derived",
+      "then": "the class remains eligible to block and trigger category or low frequency alone does not demote it",
+      "observableResult": "policy fixtures keep representative eligible structural classes blocking",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "ADR 0015; ADR 0057 decision 1",
+      "given": "PM structured findings v1 or existing SHIP, ACCEPT-WITH-NOTES, infrastructure-failure, and favorable-cache records",
+      "when": "they are parsed, folded, persisted, or loaded",
+      "then": "their schema, cardinality, retry, cache-provenance, and ledger-tolerance behavior remains unchanged",
+      "observableResult": "existing PM parser, run-state, and ship-gate fixtures remain green with null authority evidence",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "ADR 0057 decision 1 and 2026-09-06 amendment",
+      "given": "architect findings reuse IDs, aliases, or normalized class-plus-clear-condition fingerprints",
+      "when": "lineage advances with additive authority evidence",
+      "then": "one-to-one stable identity, current identity, collision ordering, and lifecycle dispositions remain unchanged",
+      "observableResult": "existing lineage fixtures retain their stable IDs and dispositions while the new fields follow the current finding",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "ADR 0015; ADR 0057 decisions 3 and 5",
+      "given": "at least one architect finding retains blocking authority",
+      "when": "draft-PR planning evaluates architect and PM outcomes",
+      "then": "existing favorable, blocked, single-guardian override, two-blocker refusal, artifact commit, and cache behavior remains unchanged",
+      "observableResult": "existing ship-gate decision fixtures retain their outcomes when an authorized blocker is present",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}
