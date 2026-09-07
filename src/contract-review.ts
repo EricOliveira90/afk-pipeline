@@ -668,6 +668,31 @@ export function openContractReviewFindings(
   return findings.filter((finding) => finding.state === "OPEN");
 }
 
+/**
+ * The states durable lineage still holds a slice to: a CONTESTED finding is
+ * unresolved, not retired, so the review that omits it is refused exactly as
+ * one omitting an OPEN finding is.
+ *
+ * Declared here, at the bottom of the dependency chain, so the enforcing side
+ * (`validateContractReviewAgainstLineage`) and the informing side (the
+ * carried-findings block a round-1 prompt renders) cannot drift apart — a
+ * validator enforcing a set the prompt was never shown is the wedge #178 was
+ * filed for.
+ */
+export const ACTIVE_CONTRACT_FINDING_STATES: ReadonlySet<string> = new Set([
+  "OPEN",
+  "CONTESTED",
+]);
+
+/** Findings durable lineage still enforces, in evaluator order (#178). */
+export function activeContractReviewFindings(
+  findings: readonly ContractReviewFinding[],
+): ContractReviewFinding[] {
+  return findings.filter((finding) =>
+    ACTIVE_CONTRACT_FINDING_STATES.has(finding.state),
+  );
+}
+
 /** Build the code-derived audit record for one valid evaluator attempt. */
 export function buildContractReviewAttemptRecord(
   round: number,

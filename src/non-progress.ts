@@ -473,10 +473,17 @@ function requiredAction(
 ): string {
   const blockers = blockerIds.join(", ");
   if (kind === "PRODUCT_DECISION") {
+    // Deliberately not "resume from candidate tree <id>". Nothing consumes a
+    // preserved contract-phase tree: a rerun renegotiates from base at round 1
+    // and carries the open findings forward through durable lineage, which is
+    // how the recorded decision reaches the new contract (#178). The tree is
+    // named as evidence to read, not as a resume target that does not exist.
     return (
-      `Clarify or decide the contract requirement behind ${blockers}, record ` +
-      `that decision in the source issue, then resume from candidate tree ` +
-      `${candidate.treeId}.`
+      `Clarify or decide the contract requirement behind ${blockers} and ` +
+      `record that decision in the source issue or an ADR, then rerun the ` +
+      `slice: negotiation restarts at round 1 and carries ${blockers} into it ` +
+      `as durable lineage. Preserved candidate tree ${candidate.treeId} holds ` +
+      `the artifacts the exhausted negotiation produced.`
     );
   }
   if (kind === "RECOVERY_ACTION") {

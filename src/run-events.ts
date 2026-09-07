@@ -263,7 +263,12 @@ export type RunEventPayload =
        * record dropped when this run dispatched the slice (#111), and each
        * guardian finding the ship gate filed as an issue — or could not file:
        * a blocking finding that cannot be filed refuses the round-cap exit,
-       * while an unfilable note only warns (ADR 0057 decision 4).
+       * while an unfilable note only warns (ADR 0057 decision 4), and a
+       * negotiation artifact refused by deterministic validation and handed
+       * back to its author with the exact error for one repair pass — or
+       * denied one — plus durable contract lineage found only under the bare
+       * PRD slug, which this run reads as empty and adopts nothing from
+       * (both ADR 0061).
        */
       reason:
         | "cancellation-requested"
@@ -280,6 +285,8 @@ export type RunEventPayload =
         | "resume-stuck"
         | "contract-lock-refused"
         | "scope-amended"
+        | "negotiation-artifact-repair"
+        | "orphaned-contract-lineage"
         | "contract-review-archive-failed"
         | "qa-review-archive-failed"
         | "feature-branch-fast-forward"

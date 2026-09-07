@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -12,7 +12,10 @@ import {
   contractPlannerContext,
   decideContractContinuation,
   emptyContractFindingLineage,
+  findOrphanedContractLineage,
+  loadContractFindingLineage,
   parseContractFindingLineage,
+  saveContractFindingLineage,
 } from "./contract-convergence.js";
 
 const finding = (
@@ -173,6 +176,145 @@ describe("contract round routing", () => {
       ]);
       expect(next.revisionNote).toContain("[F-01]");
       expect(next.revisionNote).toContain("[F-02]");
+      expect(next.carriedFindings).toEqual([]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("informs a fresh round 1 of the lineage its review is enforced against", () => {
+    // #178: a restart renegotiates from base while lineage survives, and the
+    // anti-amnesia validator refuses a review that omits an open blocker. Both
+    // prompts for that round have to carry the findings, or the slice wedges:
+    // planner round 1 through `carriedFindings`, evaluator round 1 through the
+    // history note that had no caller at all.
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-contract-restart-"));
+    try {
+      const location = {
+        repoRoot,
+        prdSlug: "contract-restart",
+        ghIssue: "9082",
+        sliceDir: repoRoot,
+        runSlug: "contract-restart-codex",
+      };
+      saveContractFindingLineage(
+        location,
+        advanceContractFindingLineage(
+          emptyContractFindingLineage(),
+          review([finding("F-01"), finding("F-02")]),
+        ).lineage,
+      );
+
+      const restarted = new ContractRoundLifecycle(location);
+      expect(restarted.hasDurableLineage).toBe(true);
+
+      const firstRound = restarted.preparePlannerRound(1, null);
+      expect(firstRound.carriedFindings.map(({ id }) => id)).toEqual([
+        "F-01",
+        "F-02",
+      ]);
+      expect(firstRound.routedFindings).toEqual([]);
+      expect(firstRound.requiresResponse).toBe(false);
+
+      const note = restarted.evaluatorHistoryNote(1, "specs/slices/01-x");
+      expect(note).toContain("fresh attempt with durable finding lineage");
+      expect(note).toContain("[F-01]");
+      expect(note).toContain("[F-02]");
+      expect(note).toContain("F-01 clears");
+      // Resolved history stays out of both role envelopes, which declare
+      // `resolved-findings` omitted.
+      expect(note).not.toContain("Relevant resolved history");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps durable lineage in the provider-qualified run-state file", () => {
+    // #178 comment: lineage keyed on the bare PRD slug landed in
+    // `.afk/state/<slug>.json` while every other read and write of this run's
+    // state used `<slug>-<provider>.json`. The tamper guard then survived a
+    // state reset it should have been cleared by, and an operator editing "the"
+    // state file could not reach it.
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-contract-slug-"));
+    try {
+      const lineage = advanceContractFindingLineage(
+        emptyContractFindingLineage(),
+        review([finding("F-01")]),
+      ).lineage;
+      saveContractFindingLineage(
+        { repoRoot, ghIssue: "9083", runSlug: "split-brain-codex" },
+        lineage,
+      );
+
+      const qualified = join(
+        repoRoot,
+        ".afk",
+        "state",
+        "split-brain-codex.json",
+      );
+      expect(existsSync(qualified)).toBe(true);
+      expect(existsSync(join(repoRoot, ".afk", "state", "split-brain.json")))
+        .toBe(false);
+      expect(
+        JSON.parse(readFileSync(qualified, "utf-8")).contractConvergence,
+      ).toMatchObject({ "9083": { revision: 1 } });
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("names lineage stranded under the bare PRD slug, and adopts nothing", () => {
+    // The one silent case in ADR 0061's relocation: the schema did not change,
+    // so a build on either side of the move reads an *empty* lineage from the
+    // other's file instead of failing. Nothing is adopted — on a non-kiro run
+    // the bare-slug file may be a live kiro run's state for the same PRD, and
+    // importing another run's tamper-guard memory is worse than not seeing
+    // this one's.
+    const repoRoot = mkdtempSync(join(tmpdir(), "afk-contract-orphan-"));
+    try {
+      const lineage = advanceContractFindingLineage(
+        emptyContractFindingLineage(),
+        review([finding("F-01")]),
+      ).lineage;
+      saveContractFindingLineage(
+        { repoRoot, ghIssue: "9083", runSlug: "orphan" },
+        lineage,
+      );
+      const location = {
+        repoRoot,
+        prdSlug: "orphan",
+        runSlug: "orphan-codex",
+        ghIssue: "9083",
+      };
+
+      const message = findOrphanedContractLineage(location);
+      expect(message).toContain(".afk/state/orphan.json");
+      expect(message).toContain(".afk/state/orphan-codex.json");
+      expect(message).toContain("#9083");
+      // Reading it does not move it.
+      expect(
+        loadContractFindingLineage({
+          repoRoot,
+          runSlug: "orphan-codex",
+          ghIssue: "9083",
+        }),
+      ).toEqual(emptyContractFindingLineage());
+      expect(findOrphanedContractLineage(location)).toBe(message);
+
+      // Silent in the three cases that are not a split: a kiro run (the two
+      // slugs are the same file), another slice, and a run whose qualified
+      // file already holds its own lineage.
+      expect(
+        findOrphanedContractLineage({ ...location, runSlug: "orphan" }),
+      ).toBeNull();
+      expect(
+        findOrphanedContractLineage({ ...location, ghIssue: "9999" }),
+      ).toBeNull();
+      saveContractFindingLineage(
+        { repoRoot, ghIssue: "9083", runSlug: "orphan-codex" },
+        lineage,
+      );
+      expect(findOrphanedContractLineage(location)).toBeNull();
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }

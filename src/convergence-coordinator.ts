@@ -115,12 +115,26 @@ export class ContractRoundLifecycle {
     return contractPlannerContext(this.lineage).open;
   }
 
+  /** True once a durable lineage revision exists, in this run or an earlier one. */
+  get hasDurableLineage(): boolean {
+    return this.lineage.revision > 0;
+  }
+
   preparePlannerRound(
     round: number,
     gateObjection: string | null,
   ): {
     requiresResponse: boolean;
     routedFindings: ContractReviewFinding[];
+    /**
+     * Durable open findings a *fresh* round 1 must already address. A restart
+     * renegotiates from base while lineage survives in run state, and
+     * `validateContractReviewAgainstLineage` refuses a review that omits these
+     * — so the round-1 planner has to see them or the slice cannot converge
+     * (#178). Empty on round 1 of a first attempt and on every later round,
+     * where `routedFindings` carries the same obligation.
+     */
+    carriedFindings: ContractReviewFinding[];
     relevantResolvedFindings: ContractReviewFinding[];
     revisionNote: string;
   } {
@@ -155,23 +169,27 @@ export class ContractRoundLifecycle {
     return {
       requiresResponse: round > 1 && this.previousReview !== null,
       routedFindings: round > 1 ? currentRoundFindings : [],
+      carriedFindings:
+        round === 1 && this.lineage.revision > 0 ? context.open : [],
       relevantResolvedFindings: context.relevantResolved,
       revisionNote,
     };
   }
 
+  /**
+   * The durable-lineage block for an evaluator envelope, initial round
+   * included. Resolved history stays out of it: the planner manifest and the
+   * evaluator manifest both declare `resolved-findings` omitted, and the
+   * anti-amnesia validator only requires the *open* blockers back.
+   */
   evaluatorHistoryNote(evaluatorRound: number, relSliceDir: string): string {
     const context = contractPlannerContext(this.lineage);
     const durableHistory =
-      context.open.length > 0 || context.relevantResolved.length > 0
+      context.open.length > 0
         ? [
-            "Durable finding lineage for this slice:",
+            "Durable open findings for this slice:",
             "",
-            "Current open findings:",
             formatContractReviewFindings(context.open),
-            "",
-            "Relevant resolved history:",
-            formatContractReviewFindings(context.relevantResolved),
           ].join("\n")
         : "No durable finding lineage exists for this slice.";
     if (evaluatorRound > 1) {
@@ -185,8 +203,9 @@ export class ContractRoundLifecycle {
     }
     return this.lineage.revision > 0
       ? `This is a fresh attempt with durable finding lineage. ` +
-          `Reuse stable IDs and disposition every still-open finding. ` +
-          `Resolved history relevant to this revision is already in the planner context.\n\n` +
+          `Reuse stable IDs and disposition every still-open finding: a review ` +
+          `that omits one is refused, and this round's planner was given the ` +
+          `same findings to address in the contract it just wrote.\n\n` +
           durableHistory
       : "This is the first review round; every finding ID is new.";
   }

@@ -34,6 +34,14 @@ Stop after both review artifacts are written. An unreviewable revision is a
 
 {{PRIOR_OPEN_FINDINGS}}
 
+# Durable finding lineage
+
+Every finding below is still open in this slice's durable lineage, including any
+inherited from an earlier attempt. Reuse each ID exactly and give it a current
+state; a review that omits one is refused.
+
+{{DURABLE_FINDING_LINEAGE}}
+
 # Planner response
 
 ```json
@@ -121,6 +129,9 @@ shape:
 - Exactly one verdict: `ACCEPT` or `REVISE`.
 - `ACCEPT` requires zero active BLOCKING findings.
 - `REVISE` requires at least one active BLOCKING finding.
+- `severity` is exactly `BLOCKING` or `ADVISORY`. There is no third severity;
+  anything else makes the artifact malformed.
+- `state` is exactly one of `OPEN`, `RESOLVED`, `CONTESTED`, `WITHDRAWN`.
 - Include every routed prior finding exactly once with its current state.
 - Never reactivate a terminal finding.
 - Never report gap counts.

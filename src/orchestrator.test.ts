@@ -102,6 +102,11 @@ import {
   type AdjudicationDecisionLog,
 } from "./adjudication.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
+import {
+  advanceContractFindingLineage,
+  emptyContractFindingLineage,
+  saveContractFindingLineage,
+} from "./contract-convergence.js";
 import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 
 /**
@@ -5044,10 +5049,13 @@ describe("round-scoped contract feedback", () => {
       expect(errorSpy.mock.calls.flat().join(" ")).toContain(
         "granting final contract response",
       );
+      // The provider-qualified run-state file: durable lineage lives beside
+      // this run's scope, slice records and resume counters, not in a second
+      // file keyed on the bare PRD slug (#178).
       expect(
         JSON.parse(
           readFileSync(
-            join(repo, ".afk", "state", `${slug}.json`),
+            join(repo, ".afk", "state", `${slug}-stub.json`),
             "utf-8",
           ),
         ),
@@ -5446,7 +5454,12 @@ describe("contract review fails closed", () => {
         "NEGOTIATING",
       );
       expect(plannerRounds()).toBe(1);
-      expect(evaluatorRounds()).toBe(1);
+      // The exit is unchanged; what precedes it is not. A written-but-refused
+      // artifact earns exactly one repair pass carrying the validation error
+      // (ADR 0061), and the stub repeats the same defect, so the slice still
+      // fails closed on it. An artifact that was never written earns none:
+      // there is no validation error to hand back.
+      expect(evaluatorRounds()).toBe(artifact === null ? 1 : 2);
     },
     60_000,
   );
@@ -5645,6 +5658,231 @@ describe("contract review fails closed", () => {
       ],
     });
   });
+
+  // New spawned scenario, deliberately: no existing fixture starts a
+  // negotiation with durable lineage already in run state, which is the state
+  // both defects need. It carries all four assertions of the
+  // negotiation-reliability track so the wave cost is paid once — the
+  // informing side of durable lineage in the round-1 planner and evaluator
+  // prompts (#178), a repair pass for each refused artifact (#188 defect 1),
+  // and the state file the lineage is written back to (#178 comment).
+  it(
+    "informs a restarted round 1 of durable lineage and repairs refused negotiation artifacts",
+    async () => {
+      const repo = makeRepo();
+      const slug = "negotiation-reliability";
+      const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      const slice: Slice = {
+        number: "01",
+        ghIssue: "9178",
+        title: "Negotiation reliability",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      };
+      // What the operator's restart leaves behind: a blocker the previous
+      // attempt never closed, persisted under the provider-qualified run slug.
+      const carried = {
+        id: "F-01",
+        severity: "BLOCKING" as const,
+        behaviorIds: ["B-01"],
+        evidence: '"the contract as written"',
+        expected: "an unambiguous identity-precedence rule",
+        observed: "two rules that contradict each other",
+        clearCondition: "the contract states one precedence rule",
+        state: "OPEN" as const,
+        revisionCitation: null,
+      };
+      saveContractFindingLineage(
+        {
+          repoRoot: repo,
+          runSlug: `${slug}-stub`,
+          ghIssue: slice.ghIssue,
+        },
+        advanceContractFindingLineage(emptyContractFindingLineage(), {
+          version: 2,
+          verdict: "REVISE",
+          findings: [carried],
+        }).lineage,
+      );
+
+      const plannerPrompts: string[] = [];
+      const evaluatorPrompts: string[] = [];
+      let plannerInvocations = 0;
+      let evaluatorInvocations = 0;
+      const provider: AgentProvider = {
+        name: "stub",
+        async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+          const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+          if (!artifactDir) throw new Error("slice artifact directory missing");
+          if (opts.role === "explorer") {
+            writeFileSync(
+              join(artifactDir, "context.md"),
+              validExplorerContext(),
+              "utf-8",
+            );
+          } else if (opts.role === "planner") {
+            plannerInvocations++;
+            plannerPrompts.push(opts.prompt!);
+            // Round 2 is invocation 2 — an evaluator repair pass costs no
+            // planner dispatch. It commits the exact PRD 072 planner refusal, a
+            // response declaring the wrong round; invocation 3 is its repair.
+            //
+            // Invocation 3 obeys the repair instruction literally: it rewrites
+            // the refused artifact and *nothing else*. That is the whole point
+            // of the pass, and it is what proves the pass costs no round —
+            // the contract and manifest this round already wrote have to still
+            // be on disk for it, or the missing manifest is routed as an
+            // acceptance-manifest gate objection and the round is spent.
+            if (plannerInvocations === 3) {
+              writeContractResponse(artifactDir, ["F-01"], "CONDITION_MET", 2);
+            } else {
+              writeFileSync(
+                join(artifactDir, "contract.md"),
+                `# Contract\n\n**Status:** NEGOTIATING\n\nInvocation ${plannerInvocations}\n`,
+                "utf-8",
+              );
+              writeAcceptanceManifest(artifactDir);
+              if (plannerInvocations === 2) {
+                writeContractResponse(artifactDir, ["F-01"], "CONDITION_MET", 7);
+              }
+            }
+          } else if (opts.role === "evaluator-contract") {
+            evaluatorInvocations++;
+            evaluatorPrompts.push(opts.prompt!);
+            if (evaluatorInvocations === 1) {
+              // The exact PRD 072 evaluator refusal: a severity outside the
+              // schema. Terminal before ADR 0061.
+              writeFileSync(
+                join(artifactDir, "contract-review.json"),
+                JSON.stringify({
+                  version: 2,
+                  verdict: "REVISE",
+                  findings: [{ ...carried, severity: "MINOR" }],
+                }),
+                "utf-8",
+              );
+            } else if (evaluatorInvocations === 2) {
+              writeContractReview(artifactDir, "REVISE", [carried]);
+            } else {
+              writeContractReview(artifactDir, "ACCEPT", [
+                { ...carried, state: "RESOLVED" },
+              ]);
+            }
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+      const dag = buildDAG([slice]);
+      const featBranch = `feat-stub/${slug}`;
+      git(repo, ["branch", featBranch]);
+      const logger = new Logger(repo, `${slug}-stub`);
+      const ctx = makeSliceContext(
+        {
+          repoRoot: repo,
+          prdSlug: slug,
+          prdDir,
+          specsDir,
+          dag,
+          provider,
+          maxContractRounds: 2,
+        },
+        slice,
+        logger,
+        featBranch,
+        "- README.md",
+        "pnpm test",
+      );
+
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      let outcome: NegotiateOutcome;
+      try {
+        outcome = await runSliceNegotiate(ctx);
+      } finally {
+        errorSpy.mockRestore();
+      }
+
+      // #178: the round-1 planner is told what the round-1 review will be
+      // enforced against, so the contract can address it before the evaluator
+      // dispositions it.
+      expect(plannerPrompts[0]).toContain("# Carried open findings");
+      expect(plannerPrompts[0]).toContain("[F-01]");
+      expect(plannerPrompts[0]).toContain("the contract states one precedence rule");
+      // #178: so is the round-1 evaluator, whose history note had no caller.
+      expect(evaluatorPrompts[0]).toContain("# Durable finding lineage");
+      expect(evaluatorPrompts[0]).toContain("[F-01]");
+      expect(evaluatorPrompts[0]).toContain(
+        "fresh attempt with durable finding lineage",
+      );
+
+      // #188 defect 1: each refused artifact bought one repair pass carrying
+      // the verbatim validation error, not an ERROR for the slice.
+      expect(evaluatorPrompts[1]).toContain("repair pass, not a new round");
+      expect(evaluatorPrompts[1]).toContain(
+        "severity must be BLOCKING or ADVISORY",
+      );
+      expect(plannerPrompts[2]).toContain("repair pass, not a new round");
+      expect(plannerPrompts[2]).toContain(
+        "contract-response.json must declare round 2",
+      );
+      // A repair pass is not a round: the two rounds still ran one planner and
+      // one evaluator dispatch each, plus exactly one repair pass apiece.
+      expect(plannerInvocations).toBe(3);
+      expect(evaluatorInvocations).toBe(3);
+      expect(outcome.phase).toBe("LOCKED");
+      // ...and the planner repair pass left the round's artifacts alone, as it
+      // was told to. Nothing deleted the manifest under it, so no
+      // acceptance-manifest gate objection was fabricated against a round that
+      // had already produced a valid one. (LOCKED above is the primary guard:
+      // a deleted manifest refuses round 2, which is the last allowed round,
+      // and the slice would ESCALATE instead.)
+      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
+        "contract lock refused before evaluation",
+      );
+      expect(
+        existsSync(join(ctx.absSliceDir, "acceptance-manifest.json")),
+      ).toBe(true);
+
+      // Every attempt of the round is archived, repair passes included, under
+      // a numbering that continues rather than colliding.
+      const reviews = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-01",
+        "reviews",
+      );
+      expect(
+        readdirSync(reviews).filter((name) => name.endsWith(".json")).sort(),
+      ).toEqual([
+        "contract-review-r1-a1.json",
+        "contract-review-r1-a2-record.json",
+        "contract-review-r1-a2.json",
+        "contract-review-r2-a1-record.json",
+        "contract-review-r2-a1.json",
+      ]);
+
+      // #178 comment: lineage is written back beside the rest of this run's
+      // state — scope, slice records, resume counters — not into a second file
+      // keyed on the bare PRD slug, where `afk clean-failed` and an operator
+      // editing "the" state file could not reach it.
+      expect(
+        loadRunState(repo, `${slug}-stub`).contractConvergence,
+      ).toMatchObject({
+        "9178": {
+          revision: 3,
+          findings: { "F-01": { finding: { state: "RESOLVED" } } },
+        },
+      });
+      expect(
+        loadRunState(repo, slug).contractConvergence,
+      ).toBeUndefined();
+    },
+    60_000,
+  );
 
   // New spawned scenario, deliberately: this state combines provider death
   // after a partial evaluator artifact, successful retry archival, and a

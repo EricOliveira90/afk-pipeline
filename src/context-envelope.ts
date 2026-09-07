@@ -3,6 +3,7 @@ import type {
   AcceptanceManifestV2,
 } from "./acceptance-manifest.js";
 import {
+  activeContractReviewFindings,
   formatContractReviewFindings,
   openContractReviewFindings,
   type ContractResponse,
@@ -476,8 +477,12 @@ export const PLANNER_CONTEXT_MANIFEST = {
   ],
   outputArtifact: "negotiating-contract-pair",
   inputOrder: {
+    // `open-contract-findings` appears in the initial order too: a restart
+    // renegotiates from base while durable lineage survives, so round 1 can
+    // carry open findings the review will be refused for omitting (#178).
     initial: [
       "slice-request",
+      "open-contract-findings",
       "explorer-evidence-map",
       "base-gate-catalog",
       "migration-reservation",
@@ -535,9 +540,16 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
   ],
   outputArtifact: "contract-review-pair",
   inputOrder: {
+    // The initial order carries two classes the first round can still need:
+    // durable open findings from an earlier attempt's lineage, which this
+    // review must disposition or be refused (#178), and a control-plane
+    // situation, which is how a refused artifact's exact validation error
+    // reaches the repair pass (ADR 0061).
     initial: [
       "proposed-contract",
       "acceptance-manifest",
+      "prior-open-contract-findings",
+      "control-plane-situation",
       "base-gate-catalog",
       "explorer-behavior-preservation",
     ],
@@ -947,6 +959,12 @@ export interface PlannerInitialEnvelopeInput
   repoRoot: string;
   sliceBody: string;
   explorerContext: string;
+  /**
+   * Durable open findings this fresh contract must already address (#178).
+   * Absent on a genuine first attempt; present when an earlier attempt's
+   * lineage survived a restart.
+   */
+  carriedFindings?: readonly ContractReviewFinding[];
 }
 
 export interface PlannerRevisionEnvelopeInput
@@ -973,6 +991,18 @@ interface ContractEvaluatorEnvelopeCommonInput {
   acceptanceManifest: AcceptanceManifest;
   baseGateCatalog: string;
   explorerContext: string;
+  /**
+   * The durable-lineage block. The enforcement side of durable lineage —
+   * `validateContractReviewAgainstLineage` — refuses a review that drops an
+   * open blocker, so the informing side has to reach every round including the
+   * first (#178).
+   */
+  durableLineage?: string;
+  /**
+   * Out-of-band situation the round must answer: today, the exact validation
+   * error behind an artifact repair pass (ADR 0061).
+   */
+  controlSituation?: string;
   inlineSizeBudgetBytes?: number;
 }
 
@@ -984,7 +1014,6 @@ export interface ContractEvaluatorRevisionEnvelopeInput
   previousFindings: readonly ContractReviewFinding[];
   plannerResponse: ContractResponse | null;
   revisions: ContractRevisionArtifacts;
-  controlSituation?: string;
 }
 
 export function assertEnvelopeBudget(
@@ -1129,12 +1158,30 @@ export function assemblePlannerInitialEnvelope(
   input: PlannerInitialEnvelopeInput,
 ): RoleEnvelopeResult {
   const repositoryContext = buildExplorerRepositoryContext(input.repoRoot);
+  /**
+   * Filtered to the *active* set — the one
+   * `validateContractReviewAgainstLineage` enforces, `OPEN` and `CONTESTED`
+   * both — and not to `OPEN` alone. Narrowing it further would drop a
+   * CONTESTED blocker the review is still refused for omitting, and when that
+   * blocker is the only carried finding the block would print "no durable
+   * finding lineage" as a fact about a slice that has one (#178). The filter
+   * stays because the role manifest declares resolved findings omitted and
+   * this is where that promise is kept.
+   */
+  const carriedFindings = activeContractReviewFindings(
+    input.carriedFindings ?? [],
+  );
+  const formattedCarriedFindings =
+    carriedFindings.length > 0
+      ? formatContractReviewFindings(carriedFindings)
+      : "(none — this slice has no durable finding lineage)";
   const prompt = renderPrompt("planner", {
     GH_ISSUE: input.ghIssue,
     SPECS_DIR: input.specsDir,
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
     SLICE_BODY: input.sliceBody,
+    CARRIED_OPEN_FINDINGS: formattedCarriedFindings,
     EXPLORER_CONTEXT: input.explorerContext,
     BASE_GATE_CATALOG: input.baseGateCatalog,
     MIGRATION_RESERVATION: input.migrationReservation,
@@ -1150,6 +1197,13 @@ export function assemblePlannerInitialEnvelope(
         artifactId: "slice-request",
         ...contentLocator(input.sliceBody),
       },
+      ...(carriedFindings.length > 0
+        ? [{
+            artifactClass: "open-contract-findings",
+            artifactId: "contract-review:durable-open-findings",
+            ...contentLocator(formattedCarriedFindings),
+          }]
+        : []),
       {
         artifactClass: "explorer-evidence-map",
         artifactId: `${input.sliceDir}/context.md`,
@@ -1268,6 +1322,8 @@ export function assembleContractEvaluatorInitialEnvelope(
     CONTRACT_REVIEW_FILE: input.contractReviewFile,
     PROPOSED_CONTRACT: input.proposedContract,
     ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
+    DURABLE_FINDING_LINEAGE: input.durableLineage ?? "(none)",
+    CONTROL_SITUATION: input.controlSituation ?? "(none)",
     BASE_GATE_CATALOG: input.baseGateCatalog,
     EXPLORER_CONTEXT: evaluatorEvidence,
   });
@@ -1286,6 +1342,14 @@ export function assembleContractEvaluatorInitialEnvelope(
         artifactId: `${input.sliceDir}/acceptance-manifest.json`,
         ...contentLocator(renderedAcceptanceManifest),
       },
+      ...durableLineageArtifact(input.durableLineage),
+      ...(input.controlSituation !== undefined
+        ? [{
+            artifactClass: "control-plane-situation",
+            artifactId: "control-plane-situation",
+            ...contentLocator(input.controlSituation),
+          }]
+        : []),
       {
         artifactClass: "base-gate-catalog",
         artifactId: "base-gate-catalog",
@@ -1300,6 +1364,24 @@ export function assembleContractEvaluatorInitialEnvelope(
     input.inlineSizeBudgetBytes,
     "Contract evaluator",
   );
+}
+
+/**
+ * The durable-lineage block's artifact reference, when one was supplied.
+ * It shares the `prior-open-contract-findings` class: durable open findings
+ * *are* prior open findings, and reusing the declared class keeps the manifest
+ * version honest instead of inventing a class for the same evidence.
+ */
+function durableLineageArtifact(
+  durableLineage: string | undefined,
+): ContextArtifactReference[] {
+  return durableLineage === undefined
+    ? []
+    : [{
+        artifactClass: "prior-open-contract-findings",
+        artifactId: "contract-review:durable-open-findings",
+        ...contentLocator(durableLineage),
+      }];
 }
 
 export function assembleContractEvaluatorRevisionEnvelope(
@@ -1328,6 +1410,7 @@ export function assembleContractEvaluatorRevisionEnvelope(
     REVISED_CONTRACT: input.proposedContract,
     REVISED_ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
     PRIOR_OPEN_FINDINGS: formattedPriorOpenFindings,
+    DURABLE_FINDING_LINEAGE: input.durableLineage ?? "(none)",
     PLANNER_RESPONSE: renderedPlannerResponse,
     REVISION_CONTEXT: renderedRevisionContext,
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
@@ -1356,6 +1439,7 @@ export function assembleContractEvaluatorRevisionEnvelope(
             ...contentLocator(formattedPriorOpenFindings),
           }]
         : []),
+      ...durableLineageArtifact(input.durableLineage),
       ...(input.plannerResponse !== null
         ? [{
             artifactClass: "planner-response",

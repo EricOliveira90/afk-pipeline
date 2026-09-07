@@ -20,6 +20,7 @@ import type { AgentProvider, InvokeOptions } from "./agent-provider.js";
 import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
+import { decideNegotiationArtifactRepair } from "./artifact-repair.js";
 import {
   captureAcceptedContractPair,
   mutatedAcceptedContractFiles,
@@ -244,6 +245,7 @@ import {
   type RecordedQAAttempt,
   type ValidatedContractReview,
 } from "./convergence-coordinator.js";
+import { findOrphanedContractLineage } from "./contract-convergence.js";
 import { AcceptedCandidateLifecycle } from "./accepted-candidate.js";
 import { decideCandidateGatePhase } from "./candidate-gate-policy.js";
 import {
@@ -3000,6 +3002,20 @@ async function negotiateAttempt(
         config.provider ?? kiroProvider,
       ),
     };
+    // The one silent case in ADR 0061's lineage relocation: a pre-#178 build
+    // wrote this slice's lineage under the bare PRD slug, so this run reads an
+    // empty one and the tamper guard has nothing to enforce. Nothing is
+    // adopted (see `findOrphanedContractLineage`) — it is named instead, once,
+    // before the first round.
+    const orphanedLineage = findOrphanedContractLineage(convergenceTarget);
+    if (orphanedLineage !== null) {
+      logger.phase(`${ctx.tag}: ${orphanedLineage}`, "error", {
+        type: "warn",
+        reason: "orphaned-contract-lineage",
+        ghIssue: slice.ghIssue,
+        message: orphanedLineage,
+      });
+    }
     const contractLifecycle = new ContractRoundLifecycle(convergenceTarget);
     let lastFindings: readonly ContractReviewFinding[] =
       contractLifecycle.openFindings;
@@ -3204,146 +3220,346 @@ async function negotiateAttempt(
         const baseGateCatalog = formatBaseGateCatalog(
           resolveBaseGateDeclarations(ctx.worktreeDir),
         );
-        const plannerPrompt = assembleNegotiationPlannerPrompt({
-          context: promptAssemblyContext(
-            logger,
-            slice,
-            ctx.relSpecsDir,
-            ctx.relSliceDir,
-            round,
-          ),
-          repoRoot: ctx.worktreeDir,
-          useInitialEnvelope: round === 1 && pendingObjection === null,
-          sliceBody: sliceBodyNote,
-          explorerContext,
-          currentContract: currentContractText,
-          currentAcceptanceManifest: currentManifestText,
-          findings: routedFindings,
-          resolvedFindings: relevantResolvedFindings,
-          pendingObjection,
-          contractResponseInstructions,
-          migrationReservation: migrationReservationBlock(
-            config,
-            slice.ghIssue,
-          ),
-          baseGateCatalog,
-          inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
-        });
+        /**
+         * Planner dispatch for this round. The loop runs more than once only
+         * for an artifact repair pass: a refused `contract-response.json` is
+         * handed back with its exact validation error instead of ending the
+         * slice on a one-field schema slip (ADR 0061, #188 defect 1). The
+         * round number, the routed findings and the pre-round artifact text
+         * are all captured above, so a repair pass cannot buy a revision.
+         */
+        let plannerRepairsUsed = 0;
+        let plannerRepairInstruction: string | null = null;
+        /**
+         * The behavior-ID stability baseline as the round began. A repair pass
+         * re-runs `loadBehaviorLockArtifacts`, whose side effect is to advance
+         * `previousSchemaValidManifest` — so without this restore the pass's
+         * manifest would be checked against the *refused* pass's manifest
+         * instead of the previous round's, and a renumbering introduced by an
+         * attempt ADR 0061 declares "recorded no result" would become the
+         * accepted baseline.
+         */
+        const roundStabilityBaseline: AcceptanceManifestV2 | null =
+          previousSchemaValidManifest;
+        /** Set when the round's manifest is refused; spends the round below. */
+        let manifestObjection: string | null = null;
+        /** Set when a refused response artifact is terminal for the slice. */
+        let responseArtifactCause: NegotiateFailureCause | null = null;
+        let baseGateCatalogBlock = "";
+        let evaluatedManifest: AcceptanceManifest | null = null;
+        for (;;) {
+          const plannerPrompt = assembleNegotiationPlannerPrompt({
+            context: promptAssemblyContext(
+              logger,
+              slice,
+              ctx.relSpecsDir,
+              ctx.relSliceDir,
+              round,
+            ),
+            repoRoot: ctx.worktreeDir,
+            // A repair pass answers a refused artifact, which only exists once
+            // the planner has already written the pair, so it always takes the
+            // revision envelope — the one with a control-plane slot to carry
+            // the validation error.
+            useInitialEnvelope:
+              round === 1 &&
+              pendingObjection === null &&
+              plannerRepairInstruction === null,
+            sliceBody: sliceBodyNote,
+            explorerContext,
+            currentContract: currentContractText,
+            currentAcceptanceManifest: currentManifestText,
+            findings: routedFindings,
+            carriedFindings: plannerRound.carriedFindings,
+            resolvedFindings: relevantResolvedFindings,
+            pendingObjection,
+            repairInstruction: plannerRepairInstruction,
+            contractResponseInstructions,
+            migrationReservation: migrationReservationBlock(
+              config,
+              slice.ghIssue,
+            ),
+            baseGateCatalog,
+            inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
+          });
 
-        logger.phase(
-          `${ctx.tag}: planning (round ${round}/${contractRoundLimit})...`,
-          "error",
-          {
-            type: "phase-started",
+          logger.phase(
+            `${ctx.tag}: planning (round ${round}/${contractRoundLimit})...`,
+            "error",
+            {
+              type: "phase-started",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              agent: "planner",
+              round,
+            },
+          );
+          // Only on a first pass. A repair pass asks for one corrected
+          // artifact and says to change nothing else, so deleting the
+          // manifest the round already wrote and validated would leave a
+          // planner that obeys with no manifest at all — and the missing-file
+          // throw is routed as an acceptance-manifest gate objection, which
+          // spends the round a repair pass is defined not to spend
+          // (ADR 0061 decision 1).
+          if (plannerRepairInstruction === null) {
+            rmSync(join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME), {
+              force: true,
+            });
+          }
+          await invokeAgent(
+            {
+              role: "planner",
+              prompt: plannerPrompt.prompt,
+              contextEnvelope: plannerPrompt.contextEnvelope,
+              cwd: ctx.worktreeDir,
+              maxDurationMs: config.maxAgentDurationMs,
+            },
+            () => logger.agentLog(slice.number, "planner", round),
+            // Per *attempt*, not per round. An infrastructure retry re-runs the
+            // planner, so a sentinel written by an attempt that was retried
+            // away would otherwise survive into the successful attempt's output
+            // and escalate a round that produced a perfectly good contract.
+            // Nothing is lost by clearing it: when retries are exhausted
+            // `invokeAgent` throws and negotiate returns ERROR without ever
+            // reading the sentinel, so the only reachable reader is the attempt
+            // that succeeded.
+            () => {
+              clearPlannerEscalation(ctx.absSliceDir);
+              if (requiresPlannerResponse) {
+                rmSync(
+                  join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
+                  { force: true },
+                );
+              }
+            },
+          );
+          logger.event({
+            type: "phase-ended",
             ghIssue: slice.ghIssue,
             sliceNumber: slice.number,
             agent: "planner",
             round,
-          },
-        );
-        rmSync(join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME), {
-          force: true,
-        });
-        await invokeAgent(
-          {
-            role: "planner",
-            prompt: plannerPrompt.prompt,
-            contextEnvelope: plannerPrompt.contextEnvelope,
-            cwd: ctx.worktreeDir,
-            maxDurationMs: config.maxAgentDurationMs,
-          },
-          () => logger.agentLog(slice.number, "planner", round),
-          // Per *attempt*, not per round. An infrastructure retry re-runs the
-          // planner, so a sentinel written by an attempt that was retried
-          // away would otherwise survive into the successful attempt's output
-          // and escalate a round that produced a perfectly good contract.
-          // Nothing is lost by clearing it: when retries are exhausted
-          // `invokeAgent` throws and negotiate returns ERROR without ever
-          // reading the sentinel, so the only reachable reader is the attempt
-          // that succeeded.
-          () => {
-            clearPlannerEscalation(ctx.absSliceDir);
-            if (requiresPlannerResponse) {
-              rmSync(
-                join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
-                { force: true },
-              );
-            }
-          },
-        );
-        logger.event({
-          type: "phase-ended",
-          ghIssue: slice.ghIssue,
-          sliceNumber: slice.number,
-          agent: "planner",
-          round,
-        });
+          });
 
-        // A deliberate stop, read on its own terms rather than out of the
-        // manifest loader's throw. The planner writes this sentinel *instead
-        // of* the contract pair, so the missing `acceptance-manifest.json` is
-        // that stop's consequence and not an independent defect — reporting
-        // it as the defect is what made an obeyed stop condition look
-        // identical to a failed planner, and then cost a second, unchanged
-        // round to reach the same place.
-        //
-        // Read before `loadBehaviorLockArtifacts`, not inside its catch: a
-        // planner that wrote the sentinel *and* a valid pair does not throw,
-        // so a check in the catch would evaluate a contract whose own author
-        // declared the specification unsettled and discard the request
-        // silently. The sentinel was deleted at the top of every attempt of
-        // this invocation, so its presence proves the attempt whose output is
-        // being read wrote it, and it wins over any pair sitting beside it.
-        const plannerEscalation = readPlannerEscalation(ctx.absSliceDir);
-        if (plannerEscalation !== null) {
-          // Only an ACCEPT may leave a lock (ADR 0008). Nothing here wrote
-          // one, but the planner may have written it into the `contract.md`
-          // this round started from — and the generator reads that line as
-          // permission while the next run's status fork skips negotiation on
-          // it. This is the one thing `refuseInvalidManifest` does that
-          // bypassing it must not drop.
-          if (artifacts.readContractStatus(contractPath) === "LOCKED") {
-            artifacts.reopenContract(contractPath);
+          // A deliberate stop, read on its own terms rather than out of the
+          // manifest loader's throw. The planner writes this sentinel *instead
+          // of* the contract pair, so the missing `acceptance-manifest.json` is
+          // that stop's consequence and not an independent defect — reporting
+          // it as the defect is what made an obeyed stop condition look
+          // identical to a failed planner, and then cost a second, unchanged
+          // round to reach the same place.
+          //
+          // Read before `loadBehaviorLockArtifacts`, not inside its catch: a
+          // planner that wrote the sentinel *and* a valid pair does not throw,
+          // so a check in the catch would evaluate a contract whose own author
+          // declared the specification unsettled and discard the request
+          // silently. The sentinel was deleted at the top of every attempt of
+          // this invocation, so its presence proves the attempt whose output is
+          // being read wrote it, and it wins over any pair sitting beside it.
+          const plannerEscalation = readPlannerEscalation(ctx.absSliceDir);
+          if (plannerEscalation !== null) {
+            // Only an ACCEPT may leave a lock (ADR 0008). Nothing here wrote
+            // one, but the planner may have written it into the `contract.md`
+            // this round started from — and the generator reads that line as
+            // permission while the next run's status fork skips negotiation on
+            // it. This is the one thing `refuseInvalidManifest` does that
+            // bypassing it must not drop.
+            if (artifacts.readContractStatus(contractPath) === "LOCKED") {
+              artifacts.reopenContract(contractPath);
+            }
+            const request = plannerEscalationRequest(plannerEscalation);
+            lastRound = round;
+            lastVerdict = "NONE";
+            capDecisions.push(
+              `The planner stopped at round ${round} to request a design ` +
+                `decision instead of writing a contract: ${request}. Record the ` +
+                `decision in the source issue or an ADR, then rerun the slice. ` +
+                `Report: ${ctx.relSliceDir}/${PLANNER_ESCALATION_FILENAME}.`,
+            );
+            logger.phase(
+              `${ctx.tag}: contract negotiation stopped: ${request}`,
+            );
+            logger.phase(
+              `${ctx.tag}: ESCALATE — the planner requested a design decision`,
+            );
+            preserveContractNegotiationFailure(
+              ctx,
+              "ESCALATE",
+              round,
+              "NONE",
+              lastFeedbackPath,
+              capDecisions.join(" "),
+            );
+            return {
+              phase: "ESCALATE",
+              cause: plannerEscalationCause(plannerEscalation, round),
+            };
           }
-          const request = plannerEscalationRequest(plannerEscalation);
-          lastRound = round;
-          lastVerdict = "NONE";
-          capDecisions.push(
-            `The planner stopped at round ${round} to request a design ` +
-              `decision instead of writing a contract: ${request}. Record the ` +
-              `decision in the source issue or an ADR, then rerun the slice. ` +
-              `Report: ${ctx.relSliceDir}/${PLANNER_ESCALATION_FILENAME}.`,
-          );
-          logger.phase(`${ctx.tag}: contract negotiation stopped: ${request}`);
-          logger.phase(
-            `${ctx.tag}: ESCALATE — the planner requested a design decision`,
-          );
-          preserveContractNegotiationFailure(
-            ctx,
-            "ESCALATE",
-            round,
-            "NONE",
-            lastFeedbackPath,
-            capDecisions.join(" "),
-          );
-          return {
-            phase: "ESCALATE",
-            cause: plannerEscalationCause(plannerEscalation, round),
-          };
+
+          try {
+            const lockArtifacts = loadBehaviorLockArtifacts();
+            evaluatedManifest = lockArtifacts.manifest;
+            baseGateCatalogBlock = formatBaseGateCatalog(
+              lockArtifacts.gateCatalog,
+            );
+          } catch (error) {
+            // Not a repair pass: a refused manifest is scope evidence the
+            // *next* planner round owes an answer to (ADR 0050), and it is
+            // routed as a gate objection below rather than re-prompted here.
+            manifestObjection =
+              error instanceof Error ? error.message : String(error);
+            break;
+          }
+
+          plannerResponse = null;
+          revisionArtifacts = null;
+          if (requiresPlannerResponse) {
+            /**
+             * Only `contract-response.json`'s own validation earns a repair
+             * pass, and it is read alone for exactly that reason. All three
+             * planner-side defects #188 reports throw from here, and nothing
+             * else does: the manifest read/write/parse and the revision-scope
+             * validator below are not the agent's response artifact. Handing
+             * a manifest refusal back as "your contract-response.json was
+             * refused" would tell the planner to rewrite a file that was
+             * never wrong — and a refused *manifest* is scope evidence the
+             * next round owes an answer to (ADR 0050), deliberately outside
+             * the repair pass's scope (ADR 0061 decision 1). Those throws
+             * keep their pre-ADR-0061 terminal exit, below.
+             */
+            let responseDefect: string | null = null;
+            try {
+              plannerResponse = loadContractResponse(
+                ctx.absSliceDir,
+                routedFindings.map(({ id }) => id),
+                round,
+              );
+            } catch (error) {
+              responseDefect =
+                error instanceof Error ? error.message : String(error);
+            }
+            if (responseDefect !== null) {
+              const repair = decideNegotiationArtifactRepair({
+                artifact: CONTRACT_RESPONSE_FILENAME,
+                defect: responseDefect,
+                artifactWritten: existsSync(
+                  join(ctx.absSliceDir, CONTRACT_RESPONSE_FILENAME),
+                ),
+                repairsUsed: plannerRepairsUsed,
+              });
+              if (repair.action === "repair") {
+                plannerRepairsUsed++;
+                plannerRepairInstruction = repair.instruction;
+                // The refused pass advanced the stability baseline; a pass
+                // that recorded no result must not move it.
+                previousSchemaValidManifest = roundStabilityBaseline;
+                const message =
+                  `negotiate: ${CONTRACT_RESPONSE_FILENAME} was refused; ` +
+                  `repair pass ${plannerRepairsUsed} in round ${round} — ${responseDefect}`;
+                logger.phase(`${ctx.tag}: ${message}`, "error", {
+                  type: "warn",
+                  reason: "negotiation-artifact-repair",
+                  ghIssue: slice.ghIssue,
+                  message,
+                });
+                continue;
+              }
+              // Journal the denial too. A grant logged and a denial silent
+              // reads as "the other artifact was never considered".
+              const denial =
+                `negotiate: ${CONTRACT_RESPONSE_FILENAME} was refused and no ` +
+                `repair pass was granted — ${repair.reason}`;
+              logger.phase(`${ctx.tag}: ${denial}`, "error", {
+                type: "warn",
+                reason: "negotiation-artifact-repair",
+                ghIssue: slice.ghIssue,
+                message: denial,
+              });
+              responseArtifactCause = negotiationArtifactCause(
+                "planner",
+                "contract response",
+                responseDefect,
+              );
+              break;
+            }
+            try {
+              revisionArtifacts = {
+                "contract.md": {
+                  before: previousArtifactText!.contract,
+                  after: readFileSync(contractPath, "utf-8"),
+                },
+                "acceptance-manifest.json": {
+                  before: previousArtifactText!.manifest,
+                  after: readFileSync(
+                    join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                    "utf-8",
+                  ),
+                },
+              };
+              const allowedBehaviorIds = [
+                ...new Set(
+                  routedFindings.flatMap(({ behaviorIds }) => behaviorIds),
+                ),
+              ];
+              const restoredRevision =
+                restoreAcceptanceManifestRevisionScope(
+                  parseAcceptanceManifest(previousArtifactText!.manifest),
+                  loadAcceptanceManifest(ctx.absSliceDir),
+                  allowedBehaviorIds,
+                );
+              if (restoredRevision.restoredBehaviorIds.length > 0) {
+                writeFileSync(
+                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                  `${JSON.stringify(restoredRevision.manifest, null, 2)}\n`,
+                  "utf-8",
+                );
+                revisionArtifacts["acceptance-manifest.json"].after =
+                  readFileSync(
+                    join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+                    "utf-8",
+                  );
+                logger.phase(
+                  `${ctx.tag}: restored unrelated planner revision drift in ` +
+                    `${restoredRevision.restoredBehaviorIds.join(", ")}`,
+                  "error",
+                );
+              }
+              validateAcceptanceManifestRevisionScope(
+                parseAcceptanceManifest(previousArtifactText!.manifest),
+                loadAcceptanceManifest(ctx.absSliceDir),
+                allowedBehaviorIds,
+              );
+            } catch (error) {
+              // Not repair-eligible: see the comment above the response read.
+              responseArtifactCause = negotiationArtifactCause(
+                "planner",
+                "contract revision",
+                error instanceof Error ? error.message : String(error),
+              );
+              break;
+            }
+          }
+          break;
         }
 
-        let baseGateCatalogBlock = "";
-        let evaluatedManifest: AcceptanceManifest | null = null;
-        try {
-          const lockArtifacts = loadBehaviorLockArtifacts();
-          evaluatedManifest = lockArtifacts.manifest;
-          baseGateCatalogBlock = formatBaseGateCatalog(
-            lockArtifacts.gateCatalog,
+        if (responseArtifactCause !== null) {
+          logger.phase(
+            `${ctx.tag}: ${responseArtifactCause.summary}`,
+            "error",
+            {
+              type: "phase-ended",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              agent: "planner",
+              round,
+              verdict: "NONE",
+            },
           );
-        } catch (error) {
-          const objection =
-            error instanceof Error ? error.message : String(error);
-          refuseInvalidManifest(objection, `planner round ${round}`);
+          return { phase: "ERROR", cause: responseArtifactCause };
+        }
+
+        if (manifestObjection !== null) {
+          refuseInvalidManifest(manifestObjection, `planner round ${round}`);
           lastRound = round;
           lastVerdict = "NONE";
           if (round < allowedContractRounds) continue;
@@ -3369,81 +3585,6 @@ async function negotiateAttempt(
           return { phase: "ESCALATE", cause };
         }
 
-        plannerResponse = null;
-        revisionArtifacts = null;
-        if (requiresPlannerResponse) {
-          try {
-            plannerResponse = loadContractResponse(
-              ctx.absSliceDir,
-              routedFindings.map(({ id }) => id),
-              round,
-            );
-            revisionArtifacts = {
-              "contract.md": {
-                before: previousArtifactText!.contract,
-                after: readFileSync(contractPath, "utf-8"),
-              },
-              "acceptance-manifest.json": {
-                before: previousArtifactText!.manifest,
-                after: readFileSync(
-                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
-                  "utf-8",
-                ),
-              },
-            };
-            const allowedBehaviorIds = [
-              ...new Set(
-                routedFindings.flatMap(({ behaviorIds }) => behaviorIds),
-              ),
-            ];
-            const restoredRevision =
-              restoreAcceptanceManifestRevisionScope(
-                parseAcceptanceManifest(previousArtifactText!.manifest),
-                loadAcceptanceManifest(ctx.absSliceDir),
-                allowedBehaviorIds,
-              );
-            if (restoredRevision.restoredBehaviorIds.length > 0) {
-              writeFileSync(
-                join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
-                `${JSON.stringify(restoredRevision.manifest, null, 2)}\n`,
-                "utf-8",
-              );
-              revisionArtifacts["acceptance-manifest.json"].after =
-                readFileSync(
-                  join(ctx.absSliceDir, ACCEPTANCE_MANIFEST_FILENAME),
-                  "utf-8",
-                );
-              logger.phase(
-                `${ctx.tag}: restored unrelated planner revision drift in ` +
-                  `${restoredRevision.restoredBehaviorIds.join(", ")}`,
-                "error",
-              );
-            }
-            validateAcceptanceManifestRevisionScope(
-              parseAcceptanceManifest(previousArtifactText!.manifest),
-              loadAcceptanceManifest(ctx.absSliceDir),
-              allowedBehaviorIds,
-            );
-          } catch (error) {
-            const defect =
-              error instanceof Error ? error.message : String(error);
-            const cause = negotiationArtifactCause(
-              "planner",
-              "contract response",
-              defect,
-            );
-            logger.phase(`${ctx.tag}: ${cause.summary}`, "error", {
-              type: "phase-ended",
-              ghIssue: slice.ghIssue,
-              sliceNumber: slice.number,
-              agent: "planner",
-              round,
-              verdict: "NONE",
-            });
-            return { phase: "ERROR", cause };
-          }
-        }
-
         evaluatorRound++;
         logger.phase(
           `${ctx.tag}: evaluating contract (round ${round}/${contractRoundLimit})...`,
@@ -3466,79 +3607,147 @@ async function negotiateAttempt(
         let latestValidationError: unknown = null;
         let attemptLifecyclePrevious: ContractReview | null = null;
         const currentContract = readFileSync(contractPath, "utf-8");
-        const evaluatorPrompt = assembleNegotiationEvaluatorPrompt({
-          context: promptAssemblyContext(
-            logger,
-            slice,
-            ctx.relSpecsDir,
-            ctx.relSliceDir,
-            evaluatorRound,
-          ),
-          useInitialEnvelope: evaluatorRound === 1,
-          contractReviewFile: CONTRACT_REVIEW_FILENAME,
-          proposedContract: currentContract,
-          acceptanceManifest: evaluatedManifest!,
-          baseGateCatalog: baseGateCatalogBlock,
-          explorerContext,
-          previousFindings: previousReview?.findings ?? [],
-          plannerResponse,
-          revisions: revisionArtifacts,
-          inlineSizeBudgetBytes:
-            config.contractEvaluatorInlineSizeBudgetBytes,
-        });
-        await invokeAgent(
-          {
-            role: "evaluator-contract",
-            prompt: evaluatorPrompt.prompt,
-            contextEnvelope: evaluatorPrompt.contextEnvelope,
-            cwd: ctx.worktreeDir,
-            maxDurationMs: config.maxAgentDurationMs,
-          },
-          () =>
-            logger.agentLog(
-              slice.number,
-              "evaluator-contract",
+        /**
+         * The informing half of durable lineage. `validateContractReviewAgainstLineage`
+         * refuses a review that drops an open blocker, so every round that is
+         * enforced against lineage has to be told what lineage holds — the
+         * initial envelope included, which is the round a restart lands on
+         * (#178).
+         */
+        const durableLineageNote = contractLifecycle.hasDurableLineage
+          ? contractLifecycle.evaluatorHistoryNote(
+              evaluatorRound,
+              ctx.relSliceDir,
+            )
+          : null;
+        /**
+         * Attempts already archived for this round, across repair passes.
+         * `invokeAgent` counts attempts per invocation and the archive refuses
+         * to overwrite, so a repair pass has to continue the round's numbering
+         * rather than restart it at 1.
+         */
+        let archivedAttempts = 0;
+        let reviewRepairsUsed = 0;
+        let reviewRepairInstruction: string | null = null;
+        for (;;) {
+          const evaluatorPrompt = assembleNegotiationEvaluatorPrompt({
+            context: promptAssemblyContext(
+              logger,
+              slice,
+              ctx.relSpecsDir,
+              ctx.relSliceDir,
               evaluatorRound,
             ),
-          // Both artifacts are deleted before every attempt, so a stale
-          // review from an earlier attempt or round can never be read as
-          // this attempt's verdict.
-          () => {
-            attemptLifecyclePrevious = latestValidAttemptReview;
-            rmSync(feedbackPath, { force: true });
-            rmSync(reviewPath, { force: true });
-          },
-          (attempt) => {
-            let validated: ValidatedContractReview | null = null;
-            try {
-              validated = contractLifecycle.validateAttempt({
-                review: loadContractReview(ctx.absSliceDir),
+            useInitialEnvelope: evaluatorRound === 1,
+            contractReviewFile: CONTRACT_REVIEW_FILENAME,
+            proposedContract: currentContract,
+            acceptanceManifest: evaluatedManifest!,
+            baseGateCatalog: baseGateCatalogBlock,
+            explorerContext,
+            previousFindings: previousReview?.findings ?? [],
+            durableLineage: durableLineageNote,
+            repairInstruction: reviewRepairInstruction,
+            plannerResponse,
+            revisions: revisionArtifacts,
+            inlineSizeBudgetBytes:
+              config.contractEvaluatorInlineSizeBudgetBytes,
+          });
+          let attemptsThisPass = 0;
+          await invokeAgent(
+            {
+              role: "evaluator-contract",
+              prompt: evaluatorPrompt.prompt,
+              contextEnvelope: evaluatorPrompt.contextEnvelope,
+              cwd: ctx.worktreeDir,
+              maxDurationMs: config.maxAgentDurationMs,
+            },
+            () =>
+              logger.agentLog(
+                slice.number,
+                "evaluator-contract",
                 evaluatorRound,
+              ),
+            // Both artifacts are deleted before every attempt, so a stale
+            // review from an earlier attempt or round can never be read as
+            // this attempt's verdict.
+            () => {
+              attemptLifecyclePrevious = latestValidAttemptReview;
+              rmSync(feedbackPath, { force: true });
+              rmSync(reviewPath, { force: true });
+            },
+            (attempt) => {
+              attemptsThisPass = attempt;
+              let validated: ValidatedContractReview | null = null;
+              try {
+                validated = contractLifecycle.validateAttempt({
+                  review: loadContractReview(ctx.absSliceDir),
+                  evaluatorRound,
+                  plannerResponse,
+                  revisionArtifacts,
+                  attemptLifecyclePrevious:
+                    attemptLifecyclePrevious ?? previousReview,
+                });
+              } catch (error) {
+                latestValidationError = error;
+                // The invocation retry policy decides whether another attempt
+                // may replace this malformed artifact; the repair policy below
+                // decides whether the agent gets told why it was refused.
+              }
+              const archived = archiveContractReviewAttempt(
+                ctx,
+                reviewArchiveDir,
+                evaluatorRound,
+                archivedAttempts + attempt,
+                validated,
                 plannerResponse,
-                revisionArtifacts,
-                attemptLifecyclePrevious:
-                  attemptLifecyclePrevious ?? previousReview,
-              });
-            } catch (error) {
-              latestValidationError = error;
-              // The invocation retry policy decides whether another attempt
-              // may replace this malformed artifact.
-            }
-            const archived = archiveContractReviewAttempt(
-              ctx,
-              reviewArchiveDir,
-              evaluatorRound,
-              attempt,
-              validated,
-              plannerResponse,
-            );
-            if (archived) {
-              latestValidatedReview = validated;
-              latestValidAttemptReview = archived.review;
-              lastReviewAttemptRecord = archived.record;
-            }
-          },
-        );
+              );
+              if (archived) {
+                latestValidatedReview = validated;
+                latestValidAttemptReview = archived.review;
+                lastReviewAttemptRecord = archived.record;
+              }
+            },
+          );
+          archivedAttempts += attemptsThisPass;
+          if (latestValidatedReview !== null) break;
+          const defect =
+            latestValidationError instanceof Error
+              ? latestValidationError.message
+              : latestValidationError === null
+                ? ""
+                : String(latestValidationError);
+          const repair = decideNegotiationArtifactRepair({
+            artifact: CONTRACT_REVIEW_FILENAME,
+            defect,
+            artifactWritten: existsSync(reviewPath),
+            repairsUsed: reviewRepairsUsed,
+          });
+          if (repair.action !== "repair") {
+            // Journal the denial too, so the operator can tell a repair the
+            // policy refused from one that was never considered.
+            const denial =
+              `negotiate: ${CONTRACT_REVIEW_FILENAME} was refused and no ` +
+              `repair pass was granted — ${repair.reason}`;
+            logger.phase(`${ctx.tag}: ${denial}`, "error", {
+              type: "warn",
+              reason: "negotiation-artifact-repair",
+              ghIssue: slice.ghIssue,
+              message: denial,
+            });
+            break;
+          }
+          reviewRepairsUsed++;
+          reviewRepairInstruction = repair.instruction;
+          const message =
+            `negotiate: ${CONTRACT_REVIEW_FILENAME} was refused; repair pass ` +
+            `${reviewRepairsUsed} in round ${round} — ${defect}`;
+          logger.phase(`${ctx.tag}: ${message}`, "error", {
+            type: "warn",
+            reason: "negotiation-artifact-repair",
+            ghIssue: slice.ghIssue,
+            message,
+          });
+        }
 
         lastRound = round;
         lastFeedbackPath = feedbackPath;
@@ -3556,10 +3765,11 @@ async function negotiateAttempt(
           validatedReview = latestValidatedReview;
         } catch (error) {
           // The evaluator finished but said nothing the orchestrator can
-          // act on. There is no default verdict and no extra round: a
-          // malformed, missing, or self-contradictory review artifact is
-          // terminal, and the operator gets the artifact named. See
-          // ADR 0017 for the earlier, weaker version of this rule.
+          // act on, and its repair pass is spent. There is no default verdict
+          // and no extra round: a malformed, missing, or self-contradictory
+          // review artifact is terminal, and the operator gets the artifact
+          // named. See ADR 0017 for the earlier, weaker version of this rule
+          // and ADR 0061 for the repair pass that now precedes this exit.
           const defect = error instanceof Error ? error.message : String(error);
           const cause = reviewArtifactCause(defect);
           logger.phase(`${ctx.tag}: ${cause.summary}`, "error", {

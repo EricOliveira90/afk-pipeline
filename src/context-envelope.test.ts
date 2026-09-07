@@ -75,6 +75,14 @@ const resolvedFinding: ContractReviewFinding = {
   state: "RESOLVED",
 };
 
+/** Unresolved, not retired: durable lineage still enforces it (#178). */
+const contestedFinding: ContractReviewFinding = {
+  ...openFinding,
+  id: "F-CONTESTED",
+  clearCondition: "CONTESTED-CLEAR-CONDITION",
+  state: "CONTESTED",
+};
+
 /** The repository root: carries docs/adr/*.md and ARCHITECTURE.md. */
 const repoRootWithDocs = fileURLToPath(new URL("..", import.meta.url));
 /** src/ exists but has neither docs/adr nor ARCHITECTURE.md. */
@@ -403,6 +411,164 @@ describe("planner and contract-evaluator context envelopes", () => {
       "base-gate-catalog",
       "migration-reservation",
       ...repositoryContext.includedArtifactIds,
+    ]);
+  });
+
+  it("#178 carries durable open findings into the initial planner envelope", () => {
+    const result = assemblePlannerInitialEnvelope({
+      repoRoot: repoRootWithoutDocs,
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      sliceBody: "SLICE-REQUEST",
+      explorerContext,
+      carriedFindings: [openFinding, contestedFinding, resolvedFinding],
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "No migration reservation is active.",
+    });
+
+    const markers = [
+      "# Slice request",
+      "SLICE-REQUEST",
+      "# Carried open findings",
+      "F-OPEN",
+      "# Explorer evidence map",
+    ];
+    let previous = -1;
+    for (const marker of markers) {
+      const index = result.prompt.indexOf(marker);
+      expect(index, marker).toBeGreaterThan(previous);
+      previous = index;
+    }
+    // Exactly the set `validateContractReviewAgainstLineage` enforces travels:
+    // CONTESTED is unresolved, so dropping it would enforce against a prompt
+    // that was never shown it. Resolved findings stay out — the manifest
+    // declares them omitted for this role and that holds on the initial path.
+    expect(result.prompt).toContain("F-CONTESTED");
+    expect(result.prompt).toContain("CONTESTED-CLEAR-CONDITION");
+    expect(result.prompt).not.toContain("F-RESOLVED");
+    expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
+    expect(result.evidence.includedArtifactClasses.slice(0, 3)).toEqual([
+      "slice-request",
+      "open-contract-findings",
+      "explorer-evidence-map",
+    ]);
+    expect(result.evidence.includedArtifactIds[1]).toBe(
+      "contract-review:durable-open-findings",
+    );
+
+    // A first attempt has no lineage, so the block says so and claims no
+    // artifact — the evidence stays an honest record of what was supplied.
+    const firstAttempt = assemblePlannerInitialEnvelope({
+      repoRoot: repoRootWithoutDocs,
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      sliceBody: "SLICE-REQUEST",
+      explorerContext,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "No migration reservation is active.",
+    });
+    expect(firstAttempt.prompt).toContain(
+      "(none — this slice has no durable finding lineage)",
+    );
+    expect(firstAttempt.evidence.includedArtifactClasses).not.toContain(
+      "open-contract-findings",
+    );
+  });
+
+  it("#178 ADR 0061 carries durable lineage and a repair situation into both evaluator envelopes", () => {
+    const durableLineage =
+      "This is a fresh attempt with durable finding lineage.\n\nDURABLE-F-01";
+    const repair =
+      "Your contract-review.json was refused. Exact validation error:\n" +
+      "contract-review.json findings[2] finding severity must be BLOCKING or ADVISORY";
+    const initial = assembleContractEvaluatorInitialEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "PROPOSED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext,
+      durableLineage,
+      controlSituation: repair,
+    });
+
+    const markers = [
+      "# Acceptance manifest",
+      "# Durable finding lineage",
+      "DURABLE-F-01",
+      "# Control-plane situation",
+      "severity must be BLOCKING or ADVISORY",
+      "# Executable gate catalog",
+    ];
+    let previous = -1;
+    for (const marker of markers) {
+      const index = initial.prompt.indexOf(marker);
+      expect(index, marker).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(initial.evidence.includedArtifactClasses).toEqual([
+      "proposed-contract",
+      "acceptance-manifest",
+      "prior-open-contract-findings",
+      "control-plane-situation",
+      "base-gate-catalog",
+      "explorer-behavior-preservation",
+    ]);
+    expect(initial.evidence.includedArtifactIds[2]).toBe(
+      "contract-review:durable-open-findings",
+    );
+    // Round 1 of a first attempt carries neither block.
+    const bare = assembleContractEvaluatorInitialEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "PROPOSED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext,
+    });
+    expect(bare.evidence.includedArtifactClasses).toEqual([
+      "proposed-contract",
+      "acceptance-manifest",
+      "base-gate-catalog",
+      "explorer-behavior-preservation",
+    ]);
+
+    const revision = assembleContractEvaluatorRevisionEnvelope({
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      round: 2,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "REVISED-CONTRACT",
+      acceptanceManifest,
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext,
+      previousFindings: [openFinding],
+      plannerResponse: null,
+      revisions: {
+        "contract.md": { before: "old contract", after: "REVISED-CONTRACT" },
+        "acceptance-manifest.json": {
+          before: '{"version":2,"old":true}',
+          after: JSON.stringify(acceptanceManifest),
+        },
+      },
+      durableLineage,
+    });
+    expect(revision.prompt.indexOf("# Durable finding lineage")).toBeGreaterThan(
+      revision.prompt.indexOf("# Prior OPEN findings"),
+    );
+    expect(revision.evidence.includedArtifactIds).toEqual([
+      ".kiro/specs/demo/slices/03-envelope/contract.md",
+      ".kiro/specs/demo/slices/03-envelope/acceptance-manifest.json",
+      "contract-review:prior-open-findings",
+      "contract-review:durable-open-findings",
+      "contract-revision-evidence",
+      "base-gate-catalog",
+      ".kiro/specs/demo/slices/03-envelope/context.md",
     ]);
   });
 
@@ -1699,15 +1865,15 @@ describe("role contract manifests", () => {
         manifest: PLANNER_CONTEXT_MANIFEST,
         includedArtifacts: [
           {
-            artifactClass: "open-contract-findings",
-            artifactId: "contract-review:open-findings",
+            artifactClass: "current-contract-pair",
+            artifactId: "slice/contract.md",
           },
         ],
         inputOrderKey: "initial",
         roleLabel: "Planner",
       }),
     ).toThrow(
-      'CONFIGURATION: planner context class "open-contract-findings" has no slot in the declared input order variant "initial"',
+      'CONFIGURATION: planner context class "current-contract-pair" has no slot in the declared input order variant "initial"',
     );
     expect(() =>
       assembleContextEnvelope({

@@ -309,6 +309,18 @@ describe("non-progress policy", () => {
       action: "intervene",
       request: { interventionClass: "PRODUCT_DECISION" },
     });
+    // #178's secondary finding: the operator action no longer promises a
+    // "resume from candidate tree" no code consumes. A rerun renegotiates from
+    // base at round 1 and carries the blockers in as durable lineage; the
+    // preserved tree is named as evidence to read, not as a resume target.
+    const productAction =
+      product.action === "intervene"
+        ? product.request.requiredOperatorAction
+        : "";
+    expect(productAction).toContain("rerun the slice");
+    expect(productAction).toContain("durable lineage");
+    expect(productAction).toContain(TREE_A);
+    expect(productAction).not.toContain("resume from candidate tree");
 
     const recovery = buildRecoveryIntervention({
       phase: "deterministic-qa",
