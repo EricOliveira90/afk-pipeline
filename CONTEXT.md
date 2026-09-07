@@ -311,6 +311,12 @@ _Avoid_: "pre-flight check" (it is not before the pipeline, it is inside
 negotiation), "validation" (too generic), "merge check" (the merge-mutex
 collision check is a different, and still authoritative, thing)
 
+**Gate-evidenced scope discovery**:
+A deterministic gate's proof that already-decided behavior requires an
+undeclared path. It may support a focused scope revision only before that path
+is edited; it never authorizes existing out-of-scope work (ADR 0060).
+_Avoid_: "gate-failure amendment", "post-hoc scope amendment"
+
 **Lane leader**:
 The first slice in a lane (by ascending slice number). Negotiates its
 contract during the wave's parallel Phase A like any other slice;
