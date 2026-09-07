@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": [
+        "B-01",
+        "B-02",
+        "B-03"
+      ],
+      "summary": "Authority policy tests bind the declared cross-product",
+      "evidence": "src/guardian-blocking-authority.test.ts now generates the 96-case Cartesian matrix across round, prior-lineage membership, trigger presence, reviewed-diff attribution, exception versus non-exception class, and disposition. `pnpm vitest run src/guardian-blocking-authority.test.ts` passed all 99 tests, including the matrix and separate blank-trigger and preservation assertions.",
+      "expected": "The policy test must bind the contract's declared cross-product so interactions among round, lineage, trigger, attribution, class, and disposition cannot regress independently.",
+      "observed": "The table covers rounds 1 and 2, both lineage states, null and reachable triggers, both attribution values, INTEGRITY, DATA_LOSS, and SECURITY_GAP classes, and OPEN and RESOLVED dispositions.",
+      "clearCondition": "A table-driven policy test covers the declared dimensions, including triggerless and resolved cases for both later-new and prior-lineage findings.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
