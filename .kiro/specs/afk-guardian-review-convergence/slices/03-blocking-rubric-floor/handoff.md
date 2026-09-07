@@ -3,19 +3,17 @@
 - B-01: `src/guardian-blocking-authority.ts:guardianFindingMayBlock`
 - B-02: `src/guardian-blocking-authority.ts:guardianFindingMayBlock`
 - B-03: `src/guardian-blocking-authority.ts:guardianFindingMayBlock`
-- B-04: `src/ship-gate.ts:runShipGate` and `src/run-state.ts:sanitizeGuardianRounds`
+- B-04: `src/artifacts.ts:parseGuardianReview`, `src/ship-gate.ts:runShipGate`, and `src/run-state.ts:sanitizeGuardianRounds`
 - P-01: `src/guardian-blocking-authority.ts:guardianFindingMayBlock`
 - P-02: `src/artifacts.ts:parseGuardianReview` and `src/run-state.ts:sanitizeGuardianFinding`
 - P-03: `src/guardian-convergence.ts:advanceGuardianFindingLineage`
-- P-04: `src/ship-gate.ts:buildPrCreationPlan`
+- P-04: `src/ship-gate.ts:runShipGate`
+- New migration files: 0
 
 ## Decisions made during implementation
 
-- Prior-lineage membership means the resolved stable ID appears in an earlier architect round, preserving the existing one-to-one collision rules.
-- Missing legacy authority evidence normalizes to `null`; only an architect ledger that still claims impossible blocking authority is rejected.
-- A `RESOLVED` architect finding never contributes blocking authority, including malformed round-1 or later-new combinations.
+- Favorable legacy architect v1 artifacts remain readable with null authority evidence, while a v1 `FIX-BEFORE-SHIP` artifact is unparseable because it cannot prove v2 blocking authority.
 
 ## Gotchas / learnings
 
-- Architect artifacts now require structured findings v2, while PM artifacts remain v1 and persist null authority evidence.
-- New migration files: 0
+- New architect artifacts must use structured findings v2; the v1 compatibility path exists only for favorable historical records.

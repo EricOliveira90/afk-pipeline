@@ -186,6 +186,7 @@ const ARCHITECT_GUARDIAN_FINDING_KEYS = [
   "introducedByReviewedDiff",
   "reachableTrigger",
 ];
+type GuardianStructuredFindingsVersion = 1 | 2;
 
 function hasExactKeys(
   value: Record<string, unknown>,
@@ -201,7 +202,7 @@ function hasExactKeys(
 
 function parseGuardianFindings(
   value: unknown,
-  guardian: GuardianKind,
+  version: GuardianStructuredFindingsVersion,
 ): GuardianReviewFinding[] | null {
   if (!Array.isArray(value)) return null;
   const ids = new Set<string>();
@@ -214,7 +215,7 @@ function parseGuardianFindings(
     if (
       !hasExactKeys(
         finding,
-        guardian === "architect"
+        version === 2
           ? ARCHITECT_GUARDIAN_FINDING_KEYS
           : PM_GUARDIAN_FINDING_KEYS,
       )
@@ -232,7 +233,7 @@ function parseGuardianFindings(
         : "";
     const disposition = finding.disposition;
     const reachableTrigger =
-      guardian === "architect"
+      version === 2
         ? finding.reachableTrigger === null
           ? null
           : typeof finding.reachableTrigger === "string"
@@ -240,7 +241,7 @@ function parseGuardianFindings(
             : undefined
         : null;
     const introducedByReviewedDiff =
-      guardian === "architect"
+      version === 2
         ? finding.introducedByReviewedDiff
         : null;
     if (
@@ -255,7 +256,7 @@ function parseGuardianFindings(
       ) ||
       reachableTrigger === undefined ||
       reachableTrigger === "" ||
-      (guardian === "architect" &&
+      (version === 2 &&
         typeof introducedByReviewedDiff !== "boolean")
     ) {
       return null;
@@ -281,6 +282,8 @@ function parseGuardianFindings(
  * The exact verdict line remains human-readable, while the single JSON object
  * immediately below the guardian-specific structured-findings heading is the
  * only findings input. Architect uses v2 authority evidence; PM remains v1.
+ * Favorable architect v1 artifacts remain readable for compatibility, but a
+ * v1 architect blocker cannot claim authority without the v2 evidence.
  * Any malformed or verdict-inconsistent structure makes the whole invoked
  * result UNPARSEABLE.
  */
@@ -290,10 +293,16 @@ export function parseGuardianReview(
 ): ParsedGuardianReview {
   if (!content) return { outcome: "UNPARSEABLE", findings: [] };
   const lines = content.split(/\r?\n/);
-  const structuredFindingsHeading =
+  const recognizedHeadings: Array<{
+    heading: string;
+    version: GuardianStructuredFindingsVersion;
+  }> =
     guardian === "architect"
-      ? "## Structured findings (v2)"
-      : "## Structured findings (v1)";
+      ? [
+          { heading: "## Structured findings (v2)", version: 2 },
+          { heading: "## Structured findings (v1)", version: 1 },
+        ]
+      : [{ heading: "## Structured findings (v1)", version: 1 }];
   const verdicts = lines.flatMap((line) => {
     if (line === "**Verdict:** SHIP") return ["SHIP" as const];
     if (line === "**Verdict:** ACCEPT-WITH-NOTES") {
@@ -304,13 +313,24 @@ export function parseGuardianReview(
     }
     return [];
   });
-  const headingIndexes = lines.flatMap((line, index) =>
-    line === structuredFindingsHeading ? [index] : [],
+  const headingMatches = lines.flatMap((line, index) =>
+    recognizedHeadings.flatMap(({ heading, version }) =>
+      line === heading ? [{ index, version }] : [],
+    ),
   );
-  if (verdicts.length !== 1 || headingIndexes.length !== 1) {
+  if (verdicts.length !== 1 || headingMatches.length !== 1) {
     return { outcome: "UNPARSEABLE", findings: [] };
   }
-  const jsonLine = lines[headingIndexes[0]! + 1];
+  const outcome = verdicts[0]!;
+  const headingMatch = headingMatches[0]!;
+  if (
+    guardian === "architect" &&
+    headingMatch.version === 1 &&
+    outcome === "FIX-BEFORE-SHIP"
+  ) {
+    return { outcome: "UNPARSEABLE", findings: [] };
+  }
+  const jsonLine = lines[headingMatch.index + 1];
   if (jsonLine === undefined || jsonLine.trim() === "") {
     return { outcome: "UNPARSEABLE", findings: [] };
   }
@@ -330,15 +350,17 @@ export function parseGuardianReview(
   const block = structured as Record<string, unknown>;
   if (
     !hasExactKeys(block, ["version", "findings"]) ||
-    block.version !== (guardian === "architect" ? 2 : 1)
+    block.version !== headingMatch.version
   ) {
     return { outcome: "UNPARSEABLE", findings: [] };
   }
-  const findings = parseGuardianFindings(block.findings, guardian);
+  const findings = parseGuardianFindings(
+    block.findings,
+    headingMatch.version,
+  );
   if (findings === null) {
     return { outcome: "UNPARSEABLE", findings: [] };
   }
-  const outcome = verdicts[0]!;
   if (
     (outcome === "SHIP" && findings.length !== 0) ||
     (outcome !== "SHIP" && findings.length === 0)

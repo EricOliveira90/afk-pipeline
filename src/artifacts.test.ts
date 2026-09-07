@@ -1059,6 +1059,40 @@ describe("readReviewVerdict", () => {
     }
   });
 
+  it("P-02 preserves favorable legacy architect v1 records with null authority evidence", () => {
+    const legacyArchitectArtifact = (verdict: string, findings: unknown) =>
+      [
+        "# Guardian review",
+        "",
+        `**Verdict:** ${verdict}`,
+        "",
+        "## Structured findings (v1)",
+        JSON.stringify({ version: 1, findings }),
+      ].join("\n");
+
+    expect(
+      parseGuardianReview(legacyArchitectArtifact("SHIP", []), "architect"),
+    ).toEqual({
+      outcome: "SHIP",
+      findings: [],
+    });
+    expect(
+      parseGuardianReview(
+        legacyArchitectArtifact("ACCEPT-WITH-NOTES", [finding]),
+        "architect",
+      ),
+    ).toEqual({
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [
+        {
+          ...finding,
+          reachableTrigger: null,
+          introducedByReviewedDiff: null,
+        },
+      ],
+    });
+  });
+
   it("B-04 parses architect v2 exact-key authority evidence", () => {
     const architectFinding = {
       ...finding,
@@ -1116,6 +1150,9 @@ describe("readReviewVerdict", () => {
     };
     for (const content of [
       artifact("FIX-BEFORE-SHIP", [finding], "architect"),
+      artifact("FIX-BEFORE-SHIP", [finding], "architect")
+        .replace("## Structured findings (v2)", "## Structured findings (v1)")
+        .replace('"version":2', '"version":1'),
       artifact(
         "FIX-BEFORE-SHIP",
         [{ ...architectFinding, reachableTrigger: " " }],
