@@ -156,6 +156,10 @@ describe("invocation runtime lifecycle", () => {
     });
   });
 
+  // A provider that reports no command lifecycle (`isCommandOpen`
+  // omitted — kiro has no structured stream, ADR 0004) keeps the
+  // ADR 0021 descendant-only rule. ADR 0059 narrows only the providers
+  // that can answer the question.
   it("defers an idle kill while the busy probe sees spawned work", async () => {
     const proc = makeFakeProc();
     const onIdleDeferral = vi.fn();
@@ -175,11 +179,74 @@ describe("invocation runtime lifecycle", () => {
       busyProcesses: 2,
     });
     expect(logged.join("")).toContain("deferring idle kill");
+    // The gate was never consulted — there was nothing to consult.
+    expect(logged.join("")).not.toContain("no command running");
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(terminateMock).toHaveBeenCalledTimes(1);
     emitExit(proc, null);
     await rejection;
+  });
+
+  it("defers while a command is open, then kills once it completes", async () => {
+    // ADR 0059, case 1: open command + surviving descendant → defer.
+    const proc = makeFakeProc();
+    const onIdleDeferral = vi.fn();
+    let commandOpen = true;
+    busyCheckMock.mockResolvedValue(2);
+    const promise = start(
+      proc,
+      { deferIdleKillWhenBusy: true, onIdleDeferral },
+      { isCommandOpen: () => commandOpen },
+    );
+    const rejection = promise.catch((error: unknown) => error as Error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(terminateMock).not.toHaveBeenCalled();
+    expect(onIdleDeferral).toHaveBeenCalledWith({
+      silentSeconds: 1,
+      busyProcesses: 2,
+    });
+
+    // The suite finishes but its workers outlive it — the exact shape
+    // that cost two runs ~80 min each (issue #182). One more idle
+    // window and the kill lands.
+    commandOpen = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(terminateMock).toHaveBeenCalledTimes(1);
+    expect(onIdleDeferral).toHaveBeenCalledTimes(1);
+    emitExit(proc, null);
+    await rejection;
+  });
+
+  it("kills a descendant that survived a completed command", async () => {
+    // ADR 0059, case 2: completed command + surviving descendant →
+    // kill at the idle timeout, not at the wall-clock ceiling.
+    const proc = makeFakeProc();
+    const onIdleDeferral = vi.fn();
+    const logged: string[] = [];
+    busyCheckMock.mockResolvedValue(3);
+    const promise = start(
+      proc,
+      {
+        deferIdleKillWhenBusy: true,
+        onIdleDeferral,
+        logStream: { write: (text: string) => logged.push(text) },
+      },
+      { isCommandOpen: () => false },
+    );
+    const rejection = promise.catch((error: unknown) => error as Error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(terminateMock).toHaveBeenCalledTimes(1);
+    expect(onIdleDeferral).not.toHaveBeenCalled();
+    expect(logged.join("")).toContain(
+      "3 leftover process(es) but no command running",
+    );
+    emitExit(proc, null);
+    await expect(rejection).resolves.toMatchObject({
+      message: "Agent generator idle for 1s — killed",
+    });
   });
 
   it("kills at the idle timeout without deferral when the role has not opted in", async () => {
@@ -486,6 +553,21 @@ describe("command-time tracker (nonCommandTimeMs attribution)", () => {
     clock.set(300);
     tracker.end("a");
     expect(tracker.totalMs()).toBeUndefined();
+  });
+
+  it("reports an open command while a bracket is unclosed, even when poisoned", () => {
+    // ADR 0059: `hasOpenCommand()` is a liveness signal, not an
+    // attribution verdict. `markUnattributable()` makes totals
+    // unavailable but must not blind the busy-probe gate.
+    const clock = fakeClock();
+    const tracker = createCommandTimeTracker(clock.now);
+    expect(tracker.hasOpenCommand()).toBe(false);
+    tracker.begin("a");
+    expect(tracker.hasOpenCommand()).toBe(true);
+    tracker.markUnattributable();
+    expect(tracker.hasOpenCommand()).toBe(true);
+    tracker.end("a");
+    expect(tracker.hasOpenCommand()).toBe(false);
   });
 
   it("ignores duplicate begins", () => {

@@ -48,6 +48,33 @@ function recordTerminal(
   log.recordTerminal(sliceId, outcome);
 }
 
+describe("Logger.writeIdleWarning", () => {
+  // Issue #182: the warning interval is 30 s, so passing the tick count
+  // printed an 80-minute gap as "idle for 161 minutes". The parameter is
+  // elapsed silent SECONDS.
+  function capture(silentSeconds: number): string {
+    const lines: string[] = [];
+    const stream = {
+      write: (text: string) => lines.push(text),
+    } as unknown as Parameters<Logger["writeIdleWarning"]>[0];
+    new Logger(makeRepo(), "idle").writeIdleWarning(
+      stream,
+      "generator",
+      silentSeconds,
+    );
+    return lines.join("");
+  }
+
+  it("renders elapsed silence in minutes once past a minute", () => {
+    expect(capture(4_800)).toContain("generator idle for 80 minutes…");
+    expect(capture(60)).toContain("generator idle for 1 minute…");
+  });
+
+  it("renders sub-minute silence in seconds rather than rounding to 0", () => {
+    expect(capture(30)).toContain("generator idle for 30s…");
+  });
+});
+
 describe("Logger.formatConsoleSummary", () => {
   it("groups every phase into its bucket exhaustively", () => {
     const repo = makeRepo();

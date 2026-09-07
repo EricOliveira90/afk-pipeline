@@ -13,10 +13,17 @@ import { emitExit, makeFakeProc, type FakeProc } from "./test/fake-proc.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const terminateMock = vi.hoisted(() => vi.fn());
+const busyCheckMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
   spawnSync: vi.fn(),
+}));
+
+// Only invocations that opt into `deferIdleKillWhenBusy` build a probe,
+// so this stub is inert for every other test in this file.
+vi.mock("./busy-probe.js", () => ({
+  createBusyProbe: () => ({ check: busyCheckMock }),
 }));
 
 // Kill paths delegate to the tree terminator (ADR 0020); unit tests
@@ -34,6 +41,8 @@ const CLEAN_KILL: TerminationReport = {
 
 beforeEach(() => {
   terminateMock.mockReset();
+  busyCheckMock.mockReset();
+  busyCheckMock.mockResolvedValue(0);
   // Mirror a successful real kill: the tree dies, `exit` follows.
   terminateMock.mockImplementation(async (proc: FakeProc) => {
     setImmediate(() => proc.emit("exit", null));
@@ -443,6 +452,90 @@ describe("codex invoke AWS config isolation (regression: PRD 070 persist race)",
   });
 });
 
+
+/**
+ * ADR 0059 / issue #182: the busy probe's live-descendant check cannot
+ * tell a running command from an orphan that outlived one. Codex feeds
+ * the gate its own `command_execution` brackets, so deferral ends when
+ * the command does — not when the 120-minute ceiling does.
+ */
+describe("busy-probe deferral requires an open command_execution", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const emit = (proc: FakeProc, line: string) =>
+    proc.stdout.emit("data", Buffer.from(line));
+
+  const completedLine = (id = "item-1") =>
+    jsonLine({
+      type: "item.completed",
+      item: { id, type: "command_execution", exit_code: 0 },
+    });
+
+  const startInvocation = (
+    proc: FakeProc,
+    onIdleDeferral: (info: { busyProcesses: number }) => void,
+  ) => {
+    spawnMock.mockReturnValue(proc);
+    return invoke({
+      role: "generator",
+      prompt: "go",
+      cwd: "/tmp",
+      idleTimeoutMs: 1_000,
+      idleWarningIntervalMs: 400,
+      maxDurationMs: 60_000,
+      deferIdleKillWhenBusy: true,
+      onIdleDeferral,
+    });
+  };
+
+  it("defers while a command_execution is open", async () => {
+    const proc = makeFakeProc();
+    const onIdleDeferral = vi.fn();
+    busyCheckMock.mockResolvedValue(2);
+    const rejection = startInvocation(proc, onIdleDeferral).catch(
+      (e: unknown) => e as Error,
+    );
+
+    emit(proc, commandLine("pnpm test:fast"));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(terminateMock).not.toHaveBeenCalled();
+    // Two idle windows deferred, so the rule ran and said "still working".
+    expect(onIdleDeferral).toHaveBeenCalledTimes(2);
+
+    emitExit(proc, null);
+    await rejection;
+  });
+
+  it("kills once the command completes, even with descendants still alive", async () => {
+    const proc = makeFakeProc();
+    const onIdleDeferral = vi.fn();
+    // Leftover vitest workers / a codex credential sidecar chain.
+    busyCheckMock.mockResolvedValue(3);
+    const rejection = startInvocation(proc, onIdleDeferral).catch(
+      (e: unknown) => e as Error,
+    );
+
+    emit(proc, commandLine("pnpm test:fast"));
+    emit(proc, completedLine());
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(terminateMock).toHaveBeenCalledTimes(1);
+    expect(onIdleDeferral).not.toHaveBeenCalled();
+    // Stand in for the killed tree's `exit` (fake timers hold the
+    // stubbed terminator's queued emit).
+    emitExit(proc, null);
+    await expect(rejection).resolves.toMatchObject({
+      message: expect.stringContaining("idle for 1s — killed"),
+    });
+  });
+});
 
 describe("nonCommandTimeMs evidence (A4)", () => {
   // Fake only Date so line-arrival timestamps are deterministic while

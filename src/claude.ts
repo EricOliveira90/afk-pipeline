@@ -216,6 +216,14 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
         ...(tokenCounts === undefined ? {} : { tokenCounts }),
       }),
       commandTimeMs: () => commandTime.totalMs(),
+      // Gates busy-probe idle-kill deferral (ADR 0059). Claude Code's
+      // lifecycle is `tool_use` → `tool_result` rather than codex's
+      // `item.started` → `item.completed`, and it brackets every tool,
+      // not just Bash. That is a strictly wider "open" window than
+      // codex's, which is the safe direction: deferral still also
+      // requires a live spawned descendant, and non-shell tools
+      // complete in milliseconds.
+      isCommandOpen: () => commandTime.hasOpenCommand(),
     };
   });
 }

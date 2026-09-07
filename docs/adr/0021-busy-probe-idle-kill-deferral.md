@@ -4,6 +4,14 @@
 > into every invocation: `deferIdleKillWhenBusy` is opt-in, set by the
 > orchestrator only for generator and evaluator-qa. Other roles hit the
 > plain idle timeout. The probe's mechanics below are unchanged.
+>
+> **Narrowed again by ADR 0059 (2026-09-07).** A live descendant is
+> necessary but no longer sufficient: providers that observe a command
+> lifecycle (codex, claude-code) must also report a command currently
+> open. A descendant that outlived its command — an orphaned vitest
+> worker, a codex credential sidecar — no longer defers the kill
+> (issue #182). Providers with no lifecycle signal (kiro, ADR 0004) keep
+> the descendant-only rule below. The probe itself is unchanged.
 
 ## Failure mode
 

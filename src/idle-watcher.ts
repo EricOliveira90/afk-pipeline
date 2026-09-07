@@ -21,7 +21,14 @@ export interface IdleWatcherOptions {
   idleTimeoutMs: number;
   idleWarningIntervalMs: number;
   onTimeout: () => void;
-  onWarning?: (minutes: number) => void;
+  /**
+   * Fired on each warning interval with the ELAPSED SILENT SECONDS, not
+   * a tick count. The counter behind it ticks every
+   * `idleWarningIntervalMs`, which is 30 s in practice — reporting the
+   * raw count made an 80-minute gap print as "idle for 161 minutes"
+   * (issue #182).
+   */
+  onWarning?: (silentSeconds: number) => void;
   /**
    * Consulted when the idle timeout fires. Resolving true defers the
    * kill: both timers restart (the warning counter keeps counting —
@@ -76,7 +83,7 @@ export function createIdleWatcher(opts: IdleWatcherOptions): IdleWatcher {
     if (opts.onWarning) {
       warningHandle = setInterval(() => {
         warningCount++;
-        opts.onWarning!(warningCount);
+        opts.onWarning!((warningCount * opts.idleWarningIntervalMs) / 1_000);
       }, opts.idleWarningIntervalMs);
     }
   };

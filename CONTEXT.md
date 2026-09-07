@@ -131,18 +131,22 @@ warnings**. For the Kiro provider, "producing stdout" means meaningful
 output — decorative terminal animation (spinner frames) is filtered out
 of the liveness signal. See ADR 0016. For generator and evaluator-qa
 only, the kill is deferred while the **busy probe** reports a live
-spawned process; every other role is killed at the timeout regardless.
-See ADR 0021 and ADR 0037.
+spawned process *and* a command is open; every other role is killed at
+the timeout regardless. See ADR 0021, ADR 0037 and ADR 0059.
 
 **Busy probe**:
 A process-level check consulted when the idle timeout fires: it
 compares the agent's live process tree against a baseline snapshot
-taken shortly after spawn. Fresh descendants mean the agent is silently
-running a command (typically a test suite), and the idle kill is
-deferred — the **wall-clock ceiling** still bounds the invocation.
-Opt-in per invocation (`deferIdleKillWhenBusy`); the orchestrator
-enables it only for generator and evaluator-qa, the roles expected to
-run long commands. See ADR 0021 and ADR 0037.
+taken shortly after spawn. A fresh descendant means the agent spawned
+something after startup — but only defers the idle kill when the
+provider also reports a command/tool execution currently open, so a
+worker that outlived its command cannot hold a stalled invocation alive
+(ADR 0059). Providers with no command lifecycle (kiro, ADR 0004) defer
+on the descendant alone. Either way the **wall-clock ceiling** still
+bounds the invocation. Opt-in per invocation
+(`deferIdleKillWhenBusy`); the orchestrator enables it only for
+generator and evaluator-qa, the roles expected to run long commands.
+See ADR 0021, ADR 0037 and ADR 0059.
 _Avoid_: "liveness probe" (liveness is the output-based signal)
 
 **Wall-clock ceiling**:

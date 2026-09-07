@@ -47,6 +47,20 @@ export interface PreparedInvocation {
    * Evidence only; the runtime never branches on the value.
    */
   commandTimeMs?: () => number | undefined;
+  /**
+   * Whether a provider-observed command/tool execution is open RIGHT NOW
+   * — i.e. its start record has been seen and its completion record has
+   * not. Gates busy-probe idle-kill deferral (ADR 0059): a live spawned
+   * descendant only counts as work when a command is actually running,
+   * so leftover orphans from an already-finished command can no longer
+   * hold a stalled invocation past its idle timeout (issue #182).
+   *
+   * Providers that track command lifecycle implement this with
+   * `createCommandTimeTracker().hasOpenCommand`. Providers with no
+   * structured stream (kiro, ADR 0004) OMIT it, which preserves the
+   * ADR 0021 descendant-only rule for them rather than guessing.
+   */
+  isCommandOpen?: () => boolean;
   onSettled?: () => void;
 }
 
@@ -74,12 +88,18 @@ export type PrepareInvocation = () => PreparedInvocation;
  * - `totalMs()` returns `undefined` when poisoned or when any interval
  *   is still open — incomplete attribution yields NO value, never a
  *   guess.
+ * - `hasOpenCommand()` exposes that same open-interval state as a live
+ *   signal rather than an attribution verdict, for the busy-probe
+ *   deferral gate (ADR 0059). Unlike `totalMs()` it is NOT affected by
+ *   `markUnattributable()`: a stream whose durations cannot be summed
+ *   can still say truthfully whether a bracket is currently open.
  */
 export interface CommandTimeTracker {
   begin(id: string): void;
   end(id: string): void;
   markUnattributable(): void;
   totalMs(): number | undefined;
+  hasOpenCommand(): boolean;
 }
 
 export function createCommandTimeTracker(
@@ -111,6 +131,9 @@ export function createCommandTimeTracker(
     totalMs() {
       if (unattributable || open.size > 0) return undefined;
       return totalMs;
+    },
+    hasOpenCommand() {
+      return open.size > 0;
     },
   };
 }
@@ -273,9 +296,28 @@ export function runInvocation(
       onWarning: onIdleWarning,
       ...(busyProbe
         ? {
+            // ADR 0059: a live descendant is necessary but no longer
+            // sufficient. A descendant that outlives the command that
+            // spawned it — an orphaned vitest worker, a codex
+            // credential sidecar — used to hold a stalled invocation
+            // alive indefinitely (issue #182, twice at ~80 min each).
+            // Requiring an open command as well is decisive: it needs
+            // no process-name allowlist and no CPU sampling, which
+            // would kill the I/O-bound suites ADR 0021 exists to
+            // protect.
             shouldDefer: async () => {
               busyDescendants = await busyProbe.check();
-              return busyDescendants > 0;
+              if (busyDescendants === 0) return false;
+              // No lifecycle signal from this provider → keep the
+              // ADR 0021 descendant-only rule rather than guessing.
+              if (invocation.isCommandOpen === undefined) return true;
+              if (invocation.isCommandOpen()) return true;
+              logStream?.write(
+                `\n[afk] ${role} silent for ${idleTimeoutMs / 1000}s with ` +
+                  `${busyDescendants} leftover process(es) but no command ` +
+                  `running — killing as idle (ADR 0059)\n`,
+              );
+              return false;
             },
             onDefer: () => {
               logStream?.write(
