@@ -22,7 +22,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestrator.js";
 import { MAX_RESUME_ATTEMPTS } from "./resume.js";
-import { loadRunState, recordRetryDecision } from "./run-state.js";
+import {
+  getResumeAttempts,
+  loadRunState,
+  recordRetryDecision,
+} from "./run-state.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
@@ -109,6 +113,38 @@ describe("prepareSliceWorktree", () => {
     expect(ctx.resume).toBeDefined();
     expect(ctx.resume!.commitsAhead).toBe(1);
     expect(git(ctx.worktreeDir, ["rev-parse", "HEAD"])).toBe(tipBefore);
+
+    // #188 defect 4: the decision alone charges nothing. Everything between
+    // here and the generator dispatch — negotiation, the lock gate, prompt
+    // assembly, the spawn — can fail without a generator seeing this tree, and
+    // none of that is evidence the tree is poisoned.
+    //
+    // This is also where the field scenario is proved, deliberately without a
+    // spawn (AGENTS.md rung 1/2): "a resumed tree whose negotiation fails
+    // before the generator leaves the counter alone" is this assertion plus a
+    // one-call-site invariant — `chargeResumeAttempt` is called only by the
+    // latch below, and the latch only from the line above the generator
+    // `invoke`. `resume-integration.test.ts` covers the other side (a resume
+    // that does reach the generator charges exactly one, restart and refusal
+    // charge none) on a fixture that already spawns.
+    const spent = () =>
+      getResumeAttempts(loadRunState(repo, "noop-refresh-stub"), "4001");
+    expect(spent()).toBe(0);
+    expect(
+      loadRunState(repo, "noop-refresh-stub").resume?.["4001"]?.lastDecision,
+    ).toMatch(/no attempt charged/);
+
+    // The charge is armed on the context and spends exactly once, however
+    // many generator rounds one invocation runs.
+    expect(ctx.chargeResume).toBeDefined();
+    ctx.chargeResume!();
+    expect(spent()).toBe(1);
+    ctx.chargeResume!();
+    ctx.chargeResume!();
+    expect(spent()).toBe(1);
+    expect(
+      loadRunState(repo, "noop-refresh-stub").resume?.["4001"]?.lastDecision,
+    ).toMatch(/attempt 1\/2 charged at generator dispatch/);
   }, 240_000);
 
   it("multiple slices forced in one invocation restart; unnamed slices resume normally (#37)", async () => {
@@ -385,10 +421,18 @@ describe("prepareSliceWorktree", () => {
     // and left `.afk/artifacts` alone, so this launch is "fresh" in git
     // while the prior life's QA archives are still on disk.
     const reviews = writeStaleReviewArchives(repo, slug, "05");
+    // ...and the prior life spent its resume budget on the tree that is gone.
+    spendResumeBudget(repo, slug, "75");
 
     await prepareSliceWorktree(ctx);
 
     expect(ctx.resume).toBeUndefined();
+    expect(ctx.chargeResume).toBeUndefined();
+    // #188 defect 4: a fresh tree earns a fresh budget, for the same reason a
+    // restart does — the count means "resumed generator dispatches this tree
+    // absorbed", and this is not that tree. Carrying the stale count would cap
+    // the new tree on its first real resume.
+    expect(getResumeAttempts(loadRunState(repo, `${slug}-stub`), "75")).toBe(0);
     expect(existsSync(join(reviews, "qa-review-r1-a1.json"))).toBe(false);
     expect(
       readFileSync(

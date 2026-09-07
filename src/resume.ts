@@ -37,7 +37,12 @@ export interface ResumeFacts {
   commitsAheadOfBase: number;
   /** A stuck.md sits in the slice's artifact dir — terminal by design (#36). */
   stuckFilePresent: boolean;
-  /** Resumes already spent on this tree, from the run-state file (#36). */
+  /**
+   * Resumed generator dispatches already spent on this tree, from the
+   * run-state file (#36). A resume that never reached the generator is not one
+   * of them (#188 defect 4): the count is raised at the dispatch, so a
+   * negotiation or configuration failure leaves it alone.
+   */
   resumeAttempts: number;
   /** The operator named this slice in --force-restart (#37). */
   forceRestart: boolean;
@@ -52,9 +57,17 @@ export interface ResumeFacts {
 }
 
 /**
- * Resumes allowed per slice tree before the next retry stops resuming it
- * — repeated death on the same tree is itself evidence of poison. The
- * counter resets on restart, so a fresh tree earns a fresh budget.
+ * Resumed **generator dispatches** allowed per slice tree before the next
+ * retry stops resuming it — repeated death under a generator on the same tree
+ * is itself evidence of poison. The counter resets on a restart or a fresh
+ * worktree, so a new tree earns a fresh budget.
+ *
+ * "Generator dispatches" is the load-bearing half (#188 defect 4). A resume
+ * that died in negotiation, or on a prompt too large to spawn, is not evidence
+ * about the tree — it is evidence about the pipeline, and charging it inverted
+ * the heuristic this cap exists for: two configuration faults exhausted the
+ * budget and pointed the operator at `--force-restart` on a tree holding five
+ * good commits.
  *
  * Reaching the cap does **not** license destroying the tree: with commits
  * on the branch the slice refuses and reports (#113). Only a branch

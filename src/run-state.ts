@@ -972,12 +972,16 @@ function canonicalSliceRecord(record: PersistedSliceState): unknown {
  * `--only-failed` reads "not complete" rather than "recorded failed", so
  * a cleared slice stays eligible for the next run exactly as before.
  *
- * Deliberately NOT cleared: `resume` bookkeeping (its `attempts` is the
- * poison-tree cap, and the dispatch this clearing accompanies is about
- * to increment it), exact-stage checkpoints (the resumed dispatch must
- * inspect one before any agent runs), contract and QA convergence lineage
- * (fresh attempts must retain prior findings), `scope`, `migrations`, and
- * `reviewPhase`. None of those is a per-attempt terminal outcome claim.
+ * Deliberately NOT cleared: `resume` bookkeeping — its `attempts` is the
+ * count of resumed generator dispatches this tree has already absorbed, and
+ * it survives a dispatch precisely because a dispatch that never reaches the
+ * generator must not change it (#188 defect 4). Only a from-base restart
+ * resets it, because that is a new tree; only `chargeResumeAttempt`, called
+ * immediately before the generator, raises it. Also not cleared: exact-stage
+ * checkpoints (the resumed dispatch must inspect one before any agent runs),
+ * contract and QA convergence lineage (fresh attempts must retain prior
+ * findings), `scope`, `migrations`, and `reviewPhase`. None of those is a
+ * per-attempt terminal outcome claim.
  */
 export function clearSliceStateForDispatch(
   repoRoot: string,
@@ -1106,4 +1110,36 @@ export function recordRetryDecision(
   updateRunState(repoRoot, prdSlug, (current) => {
     current.resume = { ...current.resume, [ghIssue]: decision };
   });
+}
+
+/**
+ * Spend one resume attempt, read-modify-write inside the state lock, and
+ * return the new count (#188 defect 4).
+ *
+ * Separate from `recordRetryDecision` because the two happen at different
+ * moments and mean different things: the decision is recorded when
+ * `prepareSliceWorktree` re-attaches to a surviving tree, the charge when a
+ * generator is actually dispatched onto it. The increment reads the persisted
+ * value rather than taking one from the caller, so a decision written earlier
+ * in the same invocation — or by a parallel writer — cannot be clobbered by a
+ * stale `priorAttempts` captured before negotiation ran.
+ *
+ * `describe` receives the new count so the audit trail can name it
+ * ("attempt 2/2 charged at generator dispatch") without a second read.
+ */
+export function chargeResumeAttempt(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  describe: (attempts: number) => string,
+): number {
+  let charged = 0;
+  updateRunState(repoRoot, prdSlug, (current) => {
+    charged = (current.resume?.[ghIssue]?.attempts ?? 0) + 1;
+    current.resume = {
+      ...current.resume,
+      [ghIssue]: { attempts: charged, lastDecision: describe(charged) },
+    };
+  });
+  return charged;
 }
