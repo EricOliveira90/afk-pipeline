@@ -1,4 +1,4 @@
-# Code anchors — slice 01 (#84), File-scope gate
+# Code anchors — slice 08 (#195), File-scope gate
 
 Verified against `integration/pre-prd4` on 2026-09-08. Read this before writing
 the contract. It is kept out of the issue body deliberately: the planner prompt

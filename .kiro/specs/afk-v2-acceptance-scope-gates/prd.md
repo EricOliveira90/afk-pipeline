@@ -524,8 +524,34 @@ scope discovery, not an omission the planner may assume (ADR 0052 / ADR 0060).
 | `ARCHITECTURE.md` | own rows | own rows | own rows | own rows | own rows | own rows |
 | `AGENTS.md`, `CLAUDE.md` | — | — | — | — | launch command | — |
 
-**Slice 07 (#193) was split out of slice 01 on 2026-09-08 and the map's `01`
-column splits with it.** Slice 01's first successful negotiation produced a
+**Slice 01 was split twice on 2026-09-08; the map's `01` column splits three
+ways.** Slice 07 (#193) took feedback integrity and the `GATE-SCOPE` channel, then
+slice 08 (#195) took the file-scope gate and D22's plumbing, leaving #84 as the
+policy reader alone. Both moves were forced by the same 65,536-byte inline-size
+budget in `src/context-envelope.ts`, which the combined slice overflowed three
+times: on the contract pair (75,419 bytes), on the revision-round planner prompt
+(70,398), and on the evaluator prompt (68,241). Each time the pair was dense
+rather than padded, so the slice was too large rather than the planner verbose.
+
+The budget was **not** raised. It is the same kind of ratchet as
+`suite-budgets.json`, an override can only lower it (`Math.min` at
+`context-envelope.ts:1103`), and raising a context-discipline limit to fit an
+oversized slice is the defect rather than the fix.
+
+**Where the map's `01` column now lands.** #84: D1's policy reader and D6's glob
+matcher — `src/gate-policy.ts`, `afk.config.json`. #195: D2/D3/D4's comparison and
+D22's plumbing — `src/scope-gate.ts`, `src/gate-runner.ts`, the
+`src/orchestrator.ts` call site, gate id `scope`. #193: D5, D6's deletion rule,
+D12 and D13 — `src/escalation.ts`, `src/afk-manifest.ts`, `src/run-state.ts`,
+`src/post-qa-gates.ts`, gate id `feedback-integrity`, the generator prompt trio and
+the two evaluator-contract rubrics. `src/run-events.ts`, `src/logger.ts` and
+`ARCHITECTURE.md` are shared, as they already are by five slices apiece.
+
+Edges: #195 and #193 are both behind #84; #193 is also behind #195 for the D22
+plumbing; #132 gains #195 because D3's re-resolved base is a `scope-gate` rule.
+#85, #86, #91 and #96 are unchanged — they need only the policy reader.
+
+Superseded note (kept for the record): Slice 01's first successful negotiation produced a
 32,008-byte `contract.md` plus a 24,179-byte `acceptance-manifest.json`
 (31 behaviors), assembling a 75,419-byte contract-evaluator prompt against the
 65,536-byte inline-size budget in `src/context-envelope.ts`. The pair was dense,
