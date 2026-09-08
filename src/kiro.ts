@@ -156,6 +156,13 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     const model =
       options.model ?? (role === "explorer" ? EXPLORER_MODEL : DEFAULT_MODEL);
     const agentName = agent ?? ensureWorkerAgentConfig();
+    // Pass the prompt via stdin instead of argv, the way claude.ts and
+    // codex.ts already do. `kiro-cli chat`'s `[INPUT]` positional is
+    // optional and the CLI reads the first question from stdin when it
+    // is omitted, so omitting it costs nothing and removes the win32
+    // command-line ceiling that killed large slices with ENAMETOOLONG
+    // (issue #206, from #188 defect 3). Argv keeps every flag kiro
+    // needs.
     const args = [
       "chat",
       "--no-interactive",
@@ -164,7 +171,6 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
       model,
       "--agent",
       agentName,
-      prompt,
     ];
     const stdoutProgress = createProgressFilter();
     const stderrProgress = createProgressFilter();
@@ -175,6 +181,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
     return {
       command: "kiro-cli",
       args,
+      stdin: prompt,
       activityFilter: (stream, text) =>
         stream === "stdout"
           ? stdoutProgress.update(text)
