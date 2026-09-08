@@ -4105,7 +4105,11 @@ describe("round-scoped contract feedback", () => {
     expect(plannerPrompts[1]).toContain(
       "Clear when: B-01 names a command that fails when the header is absent",
     );
-    expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
+    // ADR 0062: the revision round names the pair at its worktree path
+    // instead of inlining it, so the manifest body is no longer in the prompt.
+    expect(evaluatorPrompts[1]).toContain(
+      `- \`${ctx.relSliceDir}/acceptance-manifest.json\``,
+    );
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
     expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
     expect(plannerPrompts[2]).toContain("[F-02] BLOCKING OPEN");

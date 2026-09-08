@@ -18,17 +18,15 @@ Stop after both review artifacts are written. An unreviewable revision is a
 
 # Revised contract pair
 
-## contract.md
+The pair under review is in your working tree. Read both files in full before
+you judge anything:
 
-```markdown
-{{REVISED_CONTRACT}}
-```
+- `{{SLICE_DIR}}/contract.md`
+- `{{SLICE_DIR}}/{{ACCEPTANCE_MANIFEST_FILE}}`
 
-## acceptance-manifest.json
-
-```json
-{{REVISED_ACCEPTANCE_MANIFEST}}
-```
+They are not inlined below. Everything this revision *changed* is reproduced
+verbatim under "Exact revision evidence", which is the only text a fresh
+finding may cite.
 
 # Prior OPEN findings
 
@@ -50,9 +48,11 @@ state; a review that omits one is refused.
 
 # Exact revision evidence
 
-```json
+Every region this revision changed, per artifact, with the prior and revised
+text quoted exactly. Unchanged text is not reproduced: a fresh finding about
+unchanged text is invalid, so this block is the citable surface of the round.
+
 {{REVISION_CONTEXT}}
-```
 
 # Control-plane situation
 
@@ -96,7 +96,11 @@ fresh finding must be `OPEN` and must use this exact citation object:
 
 `artifact` must be exactly `contract.md` or `acceptance-manifest.json`.
 `before` and `after` must be exact, unequal text from that artifact changed by
-this revision. A fresh finding about unchanged text is invalid.
+this revision. A fresh finding about unchanged text is invalid. Copy both
+strings from the "Exact revision evidence" block — `before` from a prior-text
+quote and `after` from the revised-text quote of the same changed region. A
+citation assembled from the files themselves is refused unless it happens to
+land on changed text.
 
 Limit any fresh judgment to gate aptness, scenario honesty, evidence-backed
 scope, blocking UNKNOWNs, single-session feasibility, and explicit non-goals.
