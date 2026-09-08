@@ -3,7 +3,10 @@
 **GH issue:** #72 — the parent contract. Its Problem Statement, Solution,
 24 user stories, Implementation Decisions, Testing Decisions and Out of
 Scope are authoritative and are **not restated here**.
-**Slice issues:** #84, #85, #91, #96, #86, #132 — see `issues.md`.
+**Slice issues:** #84, #85, #91, #96, #86, #132, #193, #195 — see `issues.md`.
+**Note on ownership:** slice 01 was split twice on 2026-09-08. Where a decision
+below says "slice 01", read the split note after the file-scope map — it is
+authoritative for which of #84, #195 and #193 owns each part.
 **Parent design:** `docs/specs/afk-v2-plan.md` §2 (PRD 4 row), §3 items 2,
 5, 12, 13, §3b item 15, §3c policies 1, 2, 4, §3d item 17;
 `docs/specs/afk-v2-agent-roles.md` mechanisms M2, M6, M7 and roles 5, 8.
