@@ -11,6 +11,7 @@ decisions D1-D21 and the file-scope map.
 | 04 | #96 | Final evaluation and reuse | AFK | #91 | US-13, US-14, US-18 |
 | 05 | #86 | Test cost split and caching | AFK | #84 | US-16, US-17, US-21, US-22, US-24 |
 | 06 | #132 | Merge resolution round | AFK | #85 | US-23 |
+| 07 | #193 | Feedback integrity and gate-scope revisions | AFK | #84 | US-5, US-6, US-22, US-24 |
 
 Stories 9 (probe-as-evidence transport) and 15 (final-evaluator code
 attribution) are deferred by the plan; D14 in `prd.md` records how far
@@ -24,7 +25,7 @@ the GH issue titles and bodies, which the pipeline reads.
 ## Expected wave structure — and why it is serial
 
 - **Wave 1:** #84 alone.
-- **Wave 2:** #85 and #86, both blocked by #84.
+- **Wave 2:** #85, #86 and #193, all blocked by #84.
 - **Wave 3:** #91 (blocked by #84 and #85) and #132 (blocked by #85).
 - **Wave 4:** #96, blocked by #91.
 
@@ -103,15 +104,15 @@ fails against anything touching the orchestrator or the gate modules.
 
 ## Launch checklist
 
-- `pnpm lint:tickets 84 85 86 91 96 132` — exits 0, re-run 2026-09-07 on
-  `integration/pre-prd4`. It prints three "waiver matched nothing" notes for
+- `pnpm lint:tickets 84 85 86 91 96 132 193` — exits 0 with zero warnings,
+  re-run 2026-09-08 on `integration/pre-prd4`. It prints three "waiver matched nothing" notes for
   #92, #93 and #95 — stale waivers from earlier PRDs. They are not these
   tickets' and they do not gate.
 - `Blocked by` uses issue numbers, the DAG parser's key
   (`src/issues-parser.ts`), not slice numbers. The four waves above were
   re-derived from that parser against this table.
 - ADR 0060 is merged and is cited by #84; #183 is closed against it.
-- `afk.json` here selects all six slices. No slice adds a migration, so
+- `afk.json` here selects all seven slices. No slice adds a migration, so
   no prefix is reserved and `migrationPrefixes` stays empty.
 - `afk.json` also carries one pre-recorded D5 waiver, for
   `afk.config.json`. Slices 02 and 05 add keys to the `gatePolicy` object
@@ -123,9 +124,9 @@ fails against anything touching the orchestrator or the gate modules.
   rebuilt binary, which is why it is recorded now rather than discovered at a
   park. Its `riskClass` is the literal `gate-policy`, the string D5 pins for
   #84 to declare.
-- **Precondition 3 is currently unmet:** #135 (provider environment
-  filtering) is OPEN with no code shipped. Land it or waive it in writing
-  before launching; see `prd.md`'s Launch preconditions.
+- **Precondition 3 was waived in writing on 2026-09-07** and its evidence
+  re-earned for the Claude backend on 2026-09-08; see `prd.md`'s Launch
+  preconditions. #135 stays OPEN.
 - Preconditions 4 and 6 are the operator's to confirm at launch: no
   concurrent run, and the explicit verification command. Preconditions 1, 2
   and 5 were verified on `integration/pre-prd4`.

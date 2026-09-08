@@ -1,6 +1,14 @@
 {
   "version": 1,
-  "selectedSlices": ["01", "02", "03", "04", "05", "06"],
+  "selectedSlices": [
+    "01",
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07"
+  ],
   "migrationPrefixes": [],
   "protectedIssues": [],
   "protectedChangeWaivers": [

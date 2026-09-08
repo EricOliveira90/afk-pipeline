@@ -488,6 +488,30 @@ scope discovery, not an omission the planner may assume (ADR 0052 / ADR 0060).
 | `ARCHITECTURE.md` | own rows | own rows | own rows | own rows | own rows | own rows |
 | `AGENTS.md`, `CLAUDE.md` | — | — | — | — | launch command | — |
 
+**Slice 07 (#193) was split out of slice 01 on 2026-09-08 and the map's `01`
+column splits with it.** Slice 01's first successful negotiation produced a
+32,008-byte `contract.md` plus a 24,179-byte `acceptance-manifest.json`
+(31 behaviors), assembling a 75,419-byte contract-evaluator prompt against the
+65,536-byte inline-size budget in `src/context-envelope.ts`. The pair was dense,
+not padded — about 673 bytes per behavior of real given/when/then — so the slice
+was too large rather than the planner verbose. The budget was **not** raised: it
+is the same kind of ratchet as `suite-budgets.json`, and raising a context
+discipline limit to fit an oversized slice is the defect, not the fix.
+
+The seam follows the decisions. **Slice 01 keeps** D1's policy reader, D2/D3/D4's
+file-scope comparison, D22's gate plumbing (`GateDeclaration.run`,
+`GateResult.findings`, `GATE_EVIDENCE_VERSION` 1 → 2), the gate id `scope`, and
+the D6 glob matcher — so `src/gate-policy.ts`, `src/scope-gate.ts`,
+`src/gate-runner.ts`, `afk.config.json`. **Slice 07 takes** D5, D6's deletion
+rule, D12 and D13 — so `src/escalation.ts`, `src/afk-manifest.ts`,
+`src/run-state.ts`, `src/post-qa-gates.ts`, the gate id `feedback-integrity`,
+`prompts/generator.md`, `prompts/generator-repair.md`, `agents/generator.md`,
+`prompts/evaluator-contract.md` and `prompts/evaluator-contract-revision.md`.
+`src/orchestrator.ts`, `src/run-events.ts`, `src/logger.ts` and
+`ARCHITECTURE.md` are shared by both, as they already are by five slices apiece.
+Slice 07 is blocked by slice 01 and joins wave 2 beside #85 and #86; no other
+slice's dependency edges change, because #85 and #86 need only the policy reader.
+
 `prompts/evaluator-contract*.md` is written out as two literal paths
 deliberately — `src/acceptance-manifest.ts` refuses a `fileScope` path
 containing `*`, `?` or `[`, so a planner copying a glob row into its manifest is
