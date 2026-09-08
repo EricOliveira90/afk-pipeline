@@ -1,96 +1,131 @@
-# PRD 4 launch blockers — slice 01 needs an authoring pass
+# PRD 4 run status — 2026-09-08 morning
 
-**Written 2026-09-08 after three consecutive launch attempts.** Read this
-before relaunching `.kiro/specs/afk-v2-acceptance-scope-gates`.
+Supersedes the 2026-09-07 version of this file, which covered the three Codex
+attempts only. Read this before relaunching.
 
-## Outcome of the three attempts
+## Where the run stands
 
-Every attempt died the same way: slice 01 (#84) reached `planning (round 1/2)`,
-the planner wrote `planner-escalation.md` with criterion `LOAD_BEARING_SILENCE`
-instead of a contract, the slice landed `ESCALATE`, and all five siblings went
-`NOT-RUN` behind it. **No contract locked, no code written, nothing merged.** The
-slice branch `afk-codex/afk-v2-acceptance-scope-gates-slice-01-file-scope-gate`
-is empty; AFK restarted it from base each time and archived the prior attempt to
-`.afk/artifacts/afk-v2-acceptance-scope-gates-codex/slice-01/pre-restart-N`.
+**Slice 01 (#84, Gate policy reader) shipped.** Contract ACCEPT on round 1, one
+generator round, clean deterministic QA, merged into
+`feat-claude-code/afk-v2-acceptance-scope-gates`:
 
-| Run | Base | Escalated on | Explorer | Planner | Total | Planner tool calls | input_tokens |
-|---|---|---|---|---|---|---|---|
-| `run-20260907-223720` | `c58e9e2` | D1's `gatePolicy` JSON shapes | 154s | 56s | 209s | 35 | 1,020,172 |
-| `run-20260907-225023` | `fe2628a` | D5's waiver `path` matching | 206s | 57s | 263s | 34 | 1,372,267 |
-| `run-20260907-231823` | `3cbf09c` | D6's `testGlobs` matcher dialect | 268s | 53s | 321s | 24 | 690,094 |
+```
+1028254 feat(#84): add the gate policy reader, validator and glob matcher
+7fba600 feat(#84): declare this repository's own gatePolicy in afk.config.json
+d7cb19b docs(#84): record the slice 01 gate policy reader handoff
+        src/gate-policy.ts       335 ++++
+        src/gate-policy.test.ts  353 ++++
+```
 
-Cost of the three: ~13 minutes of pipeline wall-clock, ~3.1M input tokens, and
-three operator decision round-trips. No lane partitioning, no generator dispatch,
-no merges, so there is no throughput or test-cost evidence to report — the run
-never reached a writing round.
+**Everything else is blocked behind #195**, which is the critical path for six of
+the eight slices. #195 wrote an accepted-quality contract, drew a `REVISE` with
+three findings, and then died on the revision round at
+`CONFIGURATION: Contract evaluator prompt exceeds inline-size budget: actual
+151315 bytes, allowed 65536`.
 
-Note the explorer cost climbing (154s → 206s → 268s) as `prd.md` grew.
+No draft PR. Nothing merged to `main`. Nothing stranded: every non-passing slice
+branch is empty, and `#84`'s work is on the feature branch.
 
-## Why this is an authoring problem, not a run problem
+## The blocker is an AFK defect, not a PRD problem — #196
 
-`prd.md`'s opening claim is that it "exists for one reason: **to leave the planner
-no load-bearing decision to discover.**" For slice 01 that is not yet true. Three
-escalations were raised by the planner. Two more were found by an operator read
-pass — and both came from reading the code slice 01 must extend, not from reading
-the PRD:
+A contract **revision round** can be structurally unreachable. Measured on #195,
+`run-20260908-073124`, from `prompt-assembly` events:
 
-- `src/gate-runner.ts:417` treats a `GateDeclaration` with no `command` as
-  `SKIPPED` ("Optional gate has no command"), so the in-process scope gate D2
-  specifies **cannot exist** as a declared gate today.
-- `GateResult` carries only `detail?: string`. There is nowhere to put the
-  violation path list #84 requires as "structured evidence", nor the four waiver
-  fields D5 requires in gate evidence.
-- `GateEvidenceArtifact` has `evidencePath` and `evidenceSha256` and **no id
-  field**, so D12's `gateEvidence.evidenceArtifactId` had no referent.
-- `RunState` is `version: 3`, a persisted schema, so the "waiver record" the
-  file-scope map assigns slice 01 is a schema bump the PRD never mentions.
-- `package.json` has **no `dependencies` key at all**. Neither glob option the
-  planner offered acknowledged that "minimatch-compatible" means AFK's first
-  runtime dependency.
-
-The pattern: `prd.md` was written against the *plan* and the *ADRs*, and
-validated against the integration branch for **file paths** (the file-scope map
-says so), but not against the **type signatures and persisted schema versions**
-of the modules slice 01 extends. That is where every remaining silence lives.
-
-## Decisions already recorded (do not re-ask these)
-
-Seven decisions were settled by the operator across the three cycles and are
-committed to `prd.md`:
-
-| # | Where | Decision |
+| Role | Round | Assembled bytes |
 |---|---|---|
-| 1 | D1 | `protectedPaths` is an object of `gatePolicyPaths` + `testGlobs` string arrays; `riskClasses` is a flat string array. Risk-class→path association is code, not config. |
-| 2 | D1 | An unknown `gatePolicy` member is malformed and refuses the launch, naming the key. Slices 02/05 widen the known set. |
-| 3 | D5 | A waiver `path` is one exact repo-relative path after normalization, never a glob. Duplicate `riskClass`+`path` refuses the launch. |
-| 4 | D6 | The glob dialect is a narrow hand-rolled subset — literal segments, `*`, `**` — case-sensitive on every platform. No runtime dependency. |
-| 5 | D22 | `GateDeclaration` gains an optional in-process `run`; `GateResult` gains a typed `findings` payload; `GATE_EVIDENCE_VERSION` 1 → 2. |
-| 6 | D22 | Two gate IDs at stage `deterministic`: `scope` (D2/D3/D4) and `feedback-integrity` (D5/D6). |
-| 7 | D22 | `RunState` 3 → 4 with per-slice `appliedWaivers`; `evidenceArtifactId` **is** the existing `evidenceSha256`. |
+| planner | 1 | 34,990 |
+| evaluator-contract | 1 | 45,862 |
+| planner | 2 | 58,646 |
+| evaluator-contract | 2 | **151,315** |
 
-## What the authoring pass should do before relaunching
+Same slice, same contract. Round 1 fit comfortably; round 2 was 2.3× the whole
+budget. A slice can therefore be blocked not by its contract's quality but by
+having drawn *any* revision round.
 
-1. Open every source file in slice 01's row of the file-scope map and check each
-   PRD statement against the actual type signature and schema version. The five
-   findings above all came out of that exercise; assume more remain in
-   `src/post-qa-gates.ts` and `src/escalation.ts`.
-2. Do the same for slices 02–06. Nothing suggests slice 01 is unusual — it is
-   just the only one that has run.
-3. Confirm the park path: D5 says an unwaived protected change "parks the slice
-   through PRD 2's park-and-continue machinery with its risk class and exact
-   path." The shape of that park record was not checked.
+Worse, **the overflow throws before the `prompt-assembly` event is emitted**, so
+the per-artifact breakdown that would name the offending revision artifact is
+never recorded. The total and the ratio are knowable; the cause is not.
 
-## Environment notes for whoever relaunches
+Until #196 lands, the only lever is "get an ACCEPT on round 1". That worked for
+#84 and is not something a babysitter can guarantee.
 
-- **`scripts/min-env.sh` cannot be invoked from a bare `cmd.exe`.** It resolves
-  its clean intermediate shell with `type -P bash`, and on a Windows PATH that
-  finds `C:\Windows\System32\bash.exe` (WSL), which deadlocks with
-  `get_proc_lock: Couldn't acquire sync_proc_subproc`. The launcher must put
-  Git's `usr\bin` ahead on PATH first — `.afk/launch-prd4.cmd` does. Worth
-  hardening in the script itself: prefer `/usr/bin/bash` when it exists.
-- **The globally linked `afk-codex` is not this worktree.** It resolves to a
-  git-installed copy of afk-pipeline under `PNPM_HOME`. A self-run must launch
-  `node C:/Code/afk/dist/afk-codex.js` after `pnpm build`.
-- Launch preconditions 1–6 in `prd.md` all verified on 2026-09-07;
-  `AWS_PROFILE`, `AWS_DEFAULT_PROFILE` and `AWS_CONFIG_FILE` were all absent, so
-  the #135 waiver's stated condition held.
+## Two more product defects this run exposed
+
+- **#192** — the planner escalates `LOAD_BEARING_SILENCE` for details the
+  repository already decides. Eight escalations across the night; at least two
+  offered two candidates where a constraint already in the repo eliminated one
+  (AFK has no runtime dependencies, so "minimatch-compatible" was never free).
+- **#194** — the contract evaluator raised a **blocking** finding on a false
+  premise, twice: that a `fileScope` casing mismatch could cause a false
+  out-of-scope report. `normalizePath` (`src/acceptance-manifest.ts:64-71`)
+  lowercases and the parser stores the normalized form (`:269`), so manifest path
+  comparison is case-insensitive by construction and the predicted failure cannot
+  happen.
+
+All three are the same shape: a role reasoning from an assumption where the
+codebase holds the answer.
+
+## Decisions settled overnight — do not re-ask these
+
+Recorded in `prd.md` (D1, D5, D6, D22, the split notes) and in
+`anchors/<NN>-<slug>.md`. Fifteen in total. The load-bearing ones:
+
+| Where | Decision |
+|---|---|
+| D1 | `protectedPaths` is an object of `gatePolicyPaths` + `testGlobs` arrays; `riskClasses` a flat string array; unknown members refuse the launch |
+| D5 | a waiver `path` is one exact repo-relative path, never a glob |
+| D6 | the glob dialect is a narrow hand-rolled subset, case-sensitive on every platform; AFK adds no runtime dependency |
+| D22 | `GateDeclaration.run` for in-process gates; a **required** declaration with neither `command` nor `run` is a configuration failure, an **optional** one keeps `SKIPPED`; `GATE_EVIDENCE_VERSION` 1 → 2 |
+| D22 | `evidenceArtifactId` is the repo-relative evidence path, per `candidate-gate-phase.ts:111-116` — not a sha256 |
+| anchors/02 | `gatePolicy.acceptance` is `{command, args, matcher}` with a literal `{behaviorId}` placeholder required in `args` |
+| anchors/05 | `gatePolicy.cost` is a hybrid: records only for `skipDetectors` and `relatedTests`; `expectedCostMs` and prerequisites stay code |
+| anchors/08 | the `scope` gate runs on the final candidate before merge, **not** pre-QA, because binding ADR 0048's amendment warrant is an independent evaluator finding and a red pre-QA gate never dispatches one |
+| prd.md | **every content-derived gate declares through D22's `run` seam and so depends on #195** |
+
+## Slice 01 was split twice, and why
+
+| Overflow | Bytes | Response |
+|---|---|---|
+| contract pair | 75,419 | split off #193 (feedback integrity, `GATE-SCOPE`) |
+| revision-round planner | 70,398 | moved the code anchors out of the issue bodies into `anchors/*.md` |
+| evaluator prompt | 68,241 | split off #195 (file-scope gate, D22 plumbing) |
+
+The 65,536 budget was never raised. It is the same kind of ratchet as
+`suite-budgets.json`, an override can only lower it (`Math.min` at
+`context-envelope.ts:1103`), and raising a context-discipline limit to fit an
+oversized slice is the defect rather than the fix.
+
+Waves are now 1:#84 ✅, 2:#195, 3:#85/#86/#193, 4:#91/#132, 5:#96.
+
+## Recommendation
+
+**Do not relaunch before #196 is fixed.** Every remaining slice is one `REVISE`
+away from the same death, and six of eight sit behind #195. The cheapest useful
+fix is #196's revised point 1 — emit `prompt-assembly` before the budget check, or
+attach the byte breakdown to the error — because it is a few lines and it converts
+this from a guessing game into a diagnosis. Then apply the existing by-reference
+pattern (`context-envelope.ts:1612`) to whichever revision artifact turns out to
+carry the mass.
+
+That work is AFK product code, outside PRD 4's file scope, and belongs to a
+separate branch and PR.
+
+## Launch mechanics worth keeping
+
+- **The globally linked `afk-claude`/`afk-codex` is not this worktree** — it
+  resolves through `PNPM_HOME` to a git-installed copy. A self-run must invoke
+  `node <repo>/dist/afk-claude.js` after `pnpm build`.
+- **`scripts/min-env.sh` cannot be invoked from a bare `cmd.exe`.** It resolves its
+  clean shell with `type -P bash`, which on an unmodified Windows PATH finds
+  `C:\Windows\System32\bash.exe` (WSL) and deadlocks with
+  `get_proc_lock: Couldn't acquire sync_proc_subproc`. `.afk/launch-prd4.cmd` puts
+  Git's `usr\bin` first. Worth hardening in the script — prefer `/usr/bin/bash`.
+- **Widening `selectedSlices` mid-run is refused**, correctly. Archive the state
+  file (`.afk/state-archive/` holds two) when a split adds a slice.
+- **Retitling an issue changes its branch slug**, so preflight refuses until the
+  old worktree is removed. Expected; it caught it cleanly.
+- **After any spec commit, the feature branch must be reconciled** or the
+  divergence guard refuses. Merge host HEAD into it from a temporary worktree so
+  the primary checkout never moves.
+- `claude` authenticates fine under `min-env.sh` — auth lives under
+  `USERPROFILE`/`HOME`, both forwarded.
