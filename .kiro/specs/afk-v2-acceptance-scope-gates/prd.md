@@ -708,7 +708,18 @@ consequences of splitting slice 01 rather than of the original design.
   slices' file scopes, the exact ADR 0060 conflict this PRD exists to prevent) and
   reordering the DAG.
 
-Waves are now 1:#84, 2:#86/#195, 3:#85/#193, 4:#91/#132, 5:#96.
+**The general rule, so no further slice escalates on it: every slice shipping a
+gate whose verdict is content-derived declares that gate through D22's in-process
+`GateDeclaration.run` seam, and therefore depends on #195.** `GateResult.status`
+is classified from the exit code alone, so a gate whose verdict comes from output
+content — zero behavior matches (D8), a newly introduced skip (D7), an
+out-of-scope path (D2), a deleted test (D6) — has no other honest way to reach the
+persisted status. #85, #86 and #193 all qualify; #91 and #96 ship no gate and are
+unaffected. Deciding the verdict after `runGates` returns is rejected in every
+case: it leaves the persisted `GateResult` asserting a status the gate never had,
+which defeats gate evidence as the source of truth.
+
+Waves are now 1:#84, 2:#195, 3:#85/#86/#193, 4:#91/#132, 5:#96.
 
 ## Launch preconditions
 

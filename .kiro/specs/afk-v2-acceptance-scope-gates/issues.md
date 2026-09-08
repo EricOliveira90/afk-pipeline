@@ -9,7 +9,7 @@ decisions D1-D21 and the file-scope map.
 | 02 | #85 | Behavior coverage gate | AFK | #84, #195 | US-1, US-2, US-3 |
 | 03 | #91 | Candidate evaluator isolation | AFK | #84, #85 | US-4, US-7, US-8, US-10, US-11, US-12, US-18, US-19, US-20 |
 | 04 | #96 | Final evaluation and reuse | AFK | #91 | US-13, US-14, US-18 |
-| 05 | #86 | Test cost split and caching | AFK | #84 | US-16, US-17, US-21, US-22, US-24 |
+| 05 | #86 | Test cost split and caching | AFK | #84, #195 | US-16, US-17, US-21, US-22, US-24 |
 | 06 | #132 | Merge resolution round | AFK | #85, #195 | US-23 |
 | 07 | #193 | Feedback integrity and gate-scope revisions | AFK | #84, #195 | US-5, US-6, US-22, US-24 |
 | 08 | #195 | File-scope gate | AFK | #84 | US-1, US-3, US-24 |
@@ -26,8 +26,8 @@ the GH issue titles and bodies, which the pipeline reads.
 ## Expected wave structure — and why it is serial
 
 - **Wave 1:** #84 alone.
-- **Wave 2:** #86 and #195, both blocked by #84.
-- **Wave 3:** #85 (blocked by #84 and #195) and #193 (blocked by #84 and #195).
+- **Wave 2:** #195, blocked by #84.
+- **Wave 3:** #85, #86 and #193, all blocked by #84 and #195.
 - **Wave 4:** #91 (blocked by #84 and #85) and #132 (blocked by #85 and #195).
 - **Wave 5:** #96, blocked by #91.
 
