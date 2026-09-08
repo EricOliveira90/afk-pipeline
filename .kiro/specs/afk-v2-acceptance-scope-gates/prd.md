@@ -47,6 +47,38 @@ split so that one slice creates the module and two extend it:
 **slices 02 and 05 are blocked by slice 01**, correcting both tickets'
 former "none within this PRD".
 
+**The version-1 member shapes are named arrays, not rule records.**
+Recorded 2026-09-07 after slice 01's planner escalated
+`LOAD_BEARING_SILENCE` on this exact point: the table above named the
+concepts and no line fixed their JSON. `protectedPaths` is an object of
+two string arrays; `riskClasses` is a flat array of the risk-class
+strings D5 declares. The association between a risk class and the paths
+it covers is **code in `src/gate-policy.ts`, not config** —
+`gatePolicyPaths` members raise `gate-policy`, and `testGlobs` members
+raise `deleted-test` or `skipped-test` per D6 and D7.
+
+```json
+{
+  "gatePolicy": {
+    "version": 1,
+    "protectedPaths": {
+      "gatePolicyPaths": ["afk.config.json", "suite-budgets.json"],
+      "testGlobs": ["**/*.test.ts"]
+    },
+    "riskClasses": ["gate-policy", "deleted-test", "skipped-test"]
+  }
+}
+```
+
+Both members are optional; each defaults to the values shown, which are
+the derived baseline D6 and D5 already specify. The rejected alternative
+was records associating a `riskClass` with paths or globs plus per-class
+validation metadata: it is more expressive, but D6 already cites the
+dotted path `gatePolicy.protectedPaths.testGlobs`, so a record array
+would have made that citation unresolvable, and no consumer in this PRD
+reads a per-class option. A malformed member fails closed at launch
+naming the offending key, as the paragraph above already requires.
+
 ### D2 — the file-scope gate reuses the two helpers that already exist
 
 `outOfScopeChangedPaths` (`src/escalation.ts`) is already the normalized
