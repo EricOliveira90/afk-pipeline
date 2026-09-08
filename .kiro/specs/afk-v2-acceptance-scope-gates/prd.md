@@ -455,10 +455,24 @@ Each is stated so it can be checked rather than asserted. Verified against
    follow-ups; its state is not the check, because the dependency PRD 4 has is
    the shipped manifest entry (D9, D11), not the umbrella.
 3. Plan item 21 (#135, provider environment filtering) is settled, since the
-   plan sequences it between PRDs 3 and 4. **NOT MET as of 2026-09-07:** #135 is
-   OPEN and no environment-projection code has shipped. This is the operator's
-   call at launch — either land #135 first, or waive it here in writing naming
-   the accepted exposure. Do not launch on an unread checklist line.
+   plan sequences it between PRDs 3 and 4. **WAIVED for this launch on
+   2026-09-07:** launch only through `scripts/min-env.sh`, which forwards the
+   named platform keys in that script through a clean intermediate environment
+   before it execs AFK. The shell may add its own bookkeeping keys; no other
+   inherited key is forwarded. The wrapper covers provider processes and
+   gate-command descendants for this launch; #135 stays OPEN because an
+   unwrapped later launch would still inherit the operator's full environment.
+
+   Accepted residual exposure: this is not an OS or network sandbox, so
+   credential files under the operator's profile remain readable; applying the
+   wrapper is an operator launch obligation rather than an AFK-enforced
+   invariant; and the wrapper does not retain `AWS_PROFILE`,
+   `AWS_DEFAULT_PROFILE`, or `AWS_CONFIG_FILE`. Those selectors were absent on
+   the launch machine and the Codex end-to-end smoke authenticated in the
+   minimized environment. If an operator deliberately sets one later, this
+   wrapper drops it and Codex may select its managed profile instead. Rebuild
+   or invoke the wrapper from the committed copy, never from an unrecorded
+   temporary file.
 4. No other AFK run is live: see the one-lane note above. Operator-confirmed.
 5. `afk.json` in this directory selects all six slices. No slice adds a
    migration, so no prefix is reserved. **Verified** against
