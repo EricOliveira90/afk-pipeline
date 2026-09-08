@@ -1,7 +1,9 @@
-import type {
-  AcceptanceManifest,
-  AcceptanceManifestV2,
+import {
+  ACCEPTANCE_MANIFEST_FILENAME,
+  type AcceptanceManifest,
+  type AcceptanceManifestV2,
 } from "./acceptance-manifest.js";
+import { renderContractRevisionEvidence } from "./contract-revision-evidence.js";
 import {
   activeContractReviewFindings,
   formatContractReviewFindings,
@@ -1016,15 +1018,65 @@ export interface ContractEvaluatorRevisionEnvelopeInput
   revisions: ContractRevisionArtifacts;
 }
 
+/**
+ * Per-artifact-class inlined byte weight of an assembled prompt, heaviest
+ * first, plus whatever the template and unlocated text account for.
+ *
+ * #196: the overflow throw used to report only the total, and it throws before
+ * the `prompt-assembly` event is emitted, so the run's exhaustive artifact log
+ * held nothing about the round that failed. Establishing that
+ * `contract-revision-evidence` carried 70,899 of slice #195's 151,315 bytes
+ * took a hand-built harness against preserved worktree files. The breakdown
+ * belongs in the error that reports the overflow.
+ */
+export function envelopeArtifactByteBreakdown(
+  prompt: string,
+  artifacts: readonly ContextArtifactReference[],
+): string {
+  const inlined = new Map<string, number>();
+  const byReference = new Set<string>();
+  for (const artifact of artifacts) {
+    if (artifact.locator === undefined) {
+      byReference.add(artifact.artifactClass);
+      continue;
+    }
+    inlined.set(
+      artifact.artifactClass,
+      (inlined.get(artifact.artifactClass) ?? 0) +
+        Buffer.byteLength(artifact.locator, "utf-8"),
+    );
+  }
+  const ranked = [...inlined.entries()].sort(
+    ([leftClass, left], [rightClass, right]) =>
+      right - left || leftClass.localeCompare(rightClass),
+  );
+  const accounted = ranked.reduce((total, [, size]) => total + size, 0);
+  const remainder = Buffer.byteLength(prompt, "utf-8") - accounted;
+  const parts = [
+    ranked.length === 0
+      ? "no inlined artifact classes"
+      : `inlined bytes by artifact class: ${ranked
+          .map(([artifactClass, size]) => `${artifactClass} ${size}`)
+          .join(", ")}`,
+    `template and unlocated text ${remainder}`,
+  ];
+  if (byReference.size > 0) {
+    parts.push(`by reference: ${[...byReference].sort().join(", ")}`);
+  }
+  return parts.join("; ");
+}
+
 export function assertEnvelopeBudget(
   roleLabel: string,
   prompt: string,
   allowedByteSize: number,
+  artifacts: readonly ContextArtifactReference[] = [],
 ): number {
   const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
   if (assembledByteSize > allowedByteSize) {
     throw new ContextEnvelopeConfigurationError(
-      `${roleLabel} prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes`,
+      `${roleLabel} prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes ` +
+        `(${envelopeArtifactByteBreakdown(prompt, artifacts)})`,
     );
   }
   return assembledByteSize;
@@ -1117,6 +1169,7 @@ export function assembleContextEnvelope(input: {
         input.roleLabel ?? input.manifest.role,
         normalizedPrompt,
         effectiveBudget,
+        orderedArtifacts,
       ),
       includedArtifactClasses: orderedArtifacts.map(
         ({ artifactClass }) => artifactClass,
@@ -1308,11 +1361,6 @@ export function assemblePlannerRevisionEnvelope(
 export function assembleContractEvaluatorInitialEnvelope(
   input: ContractEvaluatorInitialEnvelopeInput,
 ): RoleEnvelopeResult {
-  const renderedAcceptanceManifest = JSON.stringify(
-    input.acceptanceManifest,
-    null,
-    2,
-  );
   const evaluatorEvidence = projectContractEvaluatorEvidence(
     input.explorerContext,
   );
@@ -1320,8 +1368,7 @@ export function assembleContractEvaluatorInitialEnvelope(
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
     CONTRACT_REVIEW_FILE: input.contractReviewFile,
-    PROPOSED_CONTRACT: input.proposedContract,
-    ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
+    ACCEPTANCE_MANIFEST_FILE: ACCEPTANCE_MANIFEST_FILENAME,
     DURABLE_FINDING_LINEAGE: input.durableLineage ?? "(none)",
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
     BASE_GATE_CATALOG: input.baseGateCatalog,
@@ -1335,12 +1382,12 @@ export function assembleContractEvaluatorInitialEnvelope(
       {
         artifactClass: "proposed-contract",
         artifactId: `${input.sliceDir}/contract.md`,
-        ...contentLocator(input.proposedContract),
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       {
         artifactClass: "acceptance-manifest",
         artifactId: `${input.sliceDir}/acceptance-manifest.json`,
-        ...contentLocator(renderedAcceptanceManifest),
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       ...durableLineageArtifact(input.durableLineage),
       ...(input.controlSituation !== undefined
@@ -1384,39 +1431,76 @@ function durableLineageArtifact(
       }];
 }
 
+/**
+ * Why evaluator rounds name the pair instead of inlining it (#196).
+ *
+ * The revised pair is the round's largest term — 39,529 bytes on slice #195 —
+ * and inlining it alongside the round's required delta evidence, prior
+ * findings, planner response and explorer projection put the floor at ~69,000
+ * bytes against a 65,536-byte budget, before a single byte of revision
+ * evidence. A revision round therefore could not fit, whatever the evidence
+ * block did.
+ *
+ * The first live #195 retry after that fix produced a larger round-1 pair and
+ * failed before evaluator dispatch at 66,818 bytes: the pair was again the
+ * dominant 43,179-byte term. Pair size is not bounded by the envelope, so
+ * "round 1 fits" is not a safe distinction.
+ *
+ * Reference rather than omission: the evaluator runs in the slice's worktree,
+ * so both files are at the named paths, and the changed regions — the only
+ * text a fresh revision finding may cite — are reproduced verbatim in the
+ * revision evidence block. No evidence leaves either round; the bulk stops
+ * being copied into the prompt.
+ */
+const CONTRACT_PAIR_BY_REFERENCE =
+  "the contract pair travels by reference to its worktree path; evaluator " +
+  "rounds must open both files before review (#196)";
+
 export function assembleContractEvaluatorRevisionEnvelope(
   input: ContractEvaluatorRevisionEnvelopeInput,
 ): RoleEnvelopeResult {
   const openFindings = openContractReviewFindings(input.previousFindings);
   const formattedPriorOpenFindings =
     formatContractReviewFindings(openFindings);
-  const renderedAcceptanceManifest = JSON.stringify(
-    input.acceptanceManifest,
-    null,
-    2,
-  );
   const renderedPlannerResponse =
     input.plannerResponse === null
       ? "(none)"
       : JSON.stringify(input.plannerResponse, null, 2);
-  const renderedRevisionContext = JSON.stringify(input.revisions, null, 2);
   const evaluatorEvidence = projectContractEvaluatorEvidence(
     input.explorerContext,
   );
-  const prompt = renderPrompt("evaluator-contract-revision", {
-    SLICE_DIR: input.sliceDir,
-    ROUND: input.round,
-    CONTRACT_REVIEW_FILE: input.contractReviewFile,
-    REVISED_CONTRACT: input.proposedContract,
-    REVISED_ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
-    PRIOR_OPEN_FINDINGS: formattedPriorOpenFindings,
-    DURABLE_FINDING_LINEAGE: input.durableLineage ?? "(none)",
-    PLANNER_RESPONSE: renderedPlannerResponse,
-    REVISION_CONTEXT: renderedRevisionContext,
-    CONTROL_SITUATION: input.controlSituation ?? "(none)",
-    BASE_GATE_CATALOG: input.baseGateCatalog,
-    EXPLORER_CONTEXT: evaluatorEvidence,
-  });
+  const render = (revisionEvidence: string): string =>
+    renderPrompt("evaluator-contract-revision", {
+      SLICE_DIR: input.sliceDir,
+      ROUND: input.round,
+      CONTRACT_REVIEW_FILE: input.contractReviewFile,
+      ACCEPTANCE_MANIFEST_FILE: ACCEPTANCE_MANIFEST_FILENAME,
+      PRIOR_OPEN_FINDINGS: formattedPriorOpenFindings,
+      DURABLE_FINDING_LINEAGE: input.durableLineage ?? "(none)",
+      PLANNER_RESPONSE: renderedPlannerResponse,
+      REVISION_CONTEXT: revisionEvidence,
+      CONTROL_SITUATION: input.controlSituation ?? "(none)",
+      BASE_GATE_CATALOG: input.baseGateCatalog,
+      EXPLORER_CONTEXT: evaluatorEvidence,
+    });
+  /**
+   * The revision evidence is sized to the room the round's other blocks leave
+   * (#196), so a revision can never be refused for carrying too much of its
+   * own delta: the block that overflowed is the one that yields. Every other
+   * block is required evidence, so measuring the prompt without any evidence
+   * is the same as measuring what is left for it.
+   */
+  const budget = Math.min(
+    input.inlineSizeBudgetBytes ??
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+  );
+  const withoutEvidence = render("");
+  const renderedRevisionContext = renderContractRevisionEvidence(
+    input.revisions,
+    budget - Buffer.byteLength(withoutEvidence.replace(/\r\n?/g, "\n"), "utf-8"),
+  );
+  const prompt = render(renderedRevisionContext);
   return roleEnvelopeResult(
     prompt,
     "evaluator-contract",
@@ -1425,12 +1509,12 @@ export function assembleContractEvaluatorRevisionEnvelope(
       {
         artifactClass: "revised-contract",
         artifactId: `${input.sliceDir}/contract.md`,
-        ...contentLocator(input.proposedContract),
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       {
         artifactClass: "revised-acceptance-manifest",
-        artifactId: `${input.sliceDir}/acceptance-manifest.json`,
-        ...contentLocator(renderedAcceptanceManifest),
+        artifactId: `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`,
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       ...(openFindings.length > 0
         ? [{

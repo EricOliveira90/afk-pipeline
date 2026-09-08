@@ -664,9 +664,9 @@ describe("planner and contract-evaluator context envelopes", () => {
     ).not.toContain("proposed-contract-pair");
     const markers = [
       "# Proposed contract",
-      "PROPOSED-CONTRACT",
+      "`.kiro/specs/demo/slices/03-envelope/contract.md`",
       "# Acceptance manifest",
-      '"id": "B-01"',
+      "`.kiro/specs/demo/slices/03-envelope/acceptance-manifest.json`",
       "# Executable gate catalog",
       "- tests: pnpm test:fast",
       "# Explorer behavior and preservation evidence",
@@ -688,6 +688,8 @@ describe("planner and contract-evaluator context envelopes", () => {
     }
     expect(result.prompt).not.toContain("generator output");
     expect(result.prompt).not.toContain("feedback-r0.md");
+    expect(result.prompt).not.toContain("PROPOSED-CONTRACT");
+    expect(result.prompt).not.toContain('"id": "B-01"');
     expect(result.evidence.includedArtifactClasses).toEqual([
       "proposed-contract",
       "acceptance-manifest",
@@ -754,7 +756,14 @@ describe("planner and contract-evaluator context envelopes", () => {
     expect(result.prompt).toContain(
       "`artifact` must be exactly `contract.md` or `acceptance-manifest.json`",
     );
-    expect(result.prompt).toContain('"before": "old contract"');
+    // #196: the revision block carries the changed regions verbatim, not a
+    // JSON copy of both whole artifacts, and the pair itself is named rather
+    // than inlined.
+    expect(result.prompt).toContain("old contract");
+    expect(result.prompt).toContain(
+      "- `.kiro/specs/demo/slices/03-envelope/contract.md`",
+    );
+    expect(result.prompt).not.toContain('"before": "old contract"');
     expect(result.prompt).not.toContain("RESOLVED-CLEAR-CONDITION");
     expect(result.evidence.includedArtifactClasses).toEqual([
       "revised-contract",
@@ -1159,6 +1168,219 @@ describe("planner and contract-evaluator context envelopes", () => {
       }),
     ).toThrow(
       `actual ${Buffer.byteLength(prompt)} bytes, allowed ${Buffer.byteLength(prompt) - 1} bytes`,
+    );
+  });
+
+  /**
+   * #196. Slice #195 drew a REVISE at round 1 with a 45,862-byte evaluator
+   * prompt and then died at CONFIGURATION on the revision with 151,315 bytes.
+   * The figures below are the artifact sizes measured on that slice's
+   * preserved worktree, so the fixture is the failure's shape, not a guess:
+   * contract.md 22,495, acceptance-manifest.json 17,035 (21 behaviors),
+   * context.md 14,147, contract-review.json 9,253, contract-response.json
+   * 5,198, prior pair 29,734.
+   */
+  describe("#196 a #195-sized contract revision round", () => {
+    const padTo = (seed: string, bytes: number): string => {
+      const lines: string[] = [];
+      let used = 0;
+      for (let index = 0; used < bytes; index += 1) {
+        const line = `${seed} clause ${index}: the gate records its own evidence path.`;
+        lines.push(line);
+        used += Buffer.byteLength(line, "utf-8") + 1;
+      }
+      return lines.join("\n");
+    };
+    const priorContract = padTo("prior", 15_461);
+    const revisedContract = [
+      padTo("prior", 12_000),
+      padTo("revised", 10_400),
+    ].join("\n");
+    const behaviors = Array.from({ length: 21 }, (_, index) => ({
+      id: `B-${String(index + 1).padStart(2, "0")}`,
+      source: `GH #195 D${index + 1}; prd.md D${index + 1}`,
+      given: padTo(`given-${index}`, 120),
+      when: padTo(`when-${index}`, 200),
+      then: padTo(`then-${index}`, 200),
+      observableResult: padTo(`observable-${index}`, 160),
+      preservation: false,
+      gateIds: ["typecheck", "tests"],
+    }));
+    const revisedManifest: AcceptanceManifestV2 = {
+      version: 2,
+      fileScope: { kind: "paths", paths: ["src/gate-runner.ts"] },
+      migrationCount: 0,
+      behaviors,
+    };
+    const priorManifestText = JSON.stringify(
+      { ...revisedManifest, behaviors: behaviors.slice(0, 15) },
+      null,
+      2,
+    );
+    const findings: ContractReviewFinding[] = [1, 2, 3].map((index) => ({
+      id: `F-0${index}`,
+      severity: "BLOCKING",
+      behaviorIds: [`B-0${index}`],
+      evidence: padTo(`evidence-${index}`, 700),
+      expected: padTo(`expected-${index}`, 700),
+      observed: padTo(`observed-${index}`, 700),
+      clearCondition: padTo(`clear-${index}`, 700),
+      state: "OPEN",
+      revisionCitation: null,
+    }));
+    const bigExplorerContext = [
+      "## Files and current behavior",
+      "",
+      padTo("files", 6_000),
+      "",
+      "## Patterns and test harness",
+      "",
+      padTo("patterns", 3_500),
+      "",
+      "## Data and integration",
+      "",
+      padTo("data", 1_000),
+      "",
+      "## Unknowns",
+      "",
+      padTo("unknowns", 3_500),
+    ].join("\n");
+    const revisions = {
+      "contract.md": { before: priorContract, after: revisedContract },
+      "acceptance-manifest.json": {
+        before: priorManifestText,
+        after: JSON.stringify(revisedManifest, null, 2),
+      },
+    };
+    const assemble = () =>
+      assembleContractEvaluatorRevisionEnvelope({
+        sliceDir: ".kiro/specs/demo/slices/08-file-scope-gate",
+        round: 2,
+        contractReviewFile: "contract-review.json",
+        proposedContract: revisedContract,
+        acceptanceManifest: revisedManifest,
+        baseGateCatalog: padTo("gate", 1_520),
+        explorerContext: bigExplorerContext,
+        previousFindings: findings,
+        plannerResponse: {
+          version: 1,
+          round: 2,
+          responses: findings.map((finding) => ({
+            findingId: finding.id,
+            position: "CONDITION_MET" as const,
+            evidence: padTo(`response-${finding.id}`, 1_600),
+          })),
+        },
+        revisions,
+        durableLineage: padTo("lineage", 10_700),
+      });
+
+    it("names the dominant revision artifact: whole-file evidence alone overran the whole budget", () => {
+      // The pre-fix block was exactly this value. It is 1.4x the entire
+      // 65,536-byte evaluator budget on its own, which is why no amount of
+      // slicing could make a revision round fit.
+      const wholeFileEvidence = Buffer.byteLength(
+        JSON.stringify(revisions, null, 2),
+        "utf-8",
+      );
+      expect(wholeFileEvidence).toBeGreaterThan(
+        CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+      );
+    });
+
+    it("fits under the 65,536-byte budget and still carries citable revision evidence", () => {
+      const result = assemble();
+      expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+        CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+      );
+      const evidenceBlock = result.prompt
+        .split("# Exact revision evidence")[1]!
+        .split("# Control-plane situation")[0]!;
+      expect(evidenceBlock).toContain("revised clause 0");
+      expect(evidenceBlock).toContain("`revisionCitation.before`");
+      // It fits with the whole delta carried, not by truncating it.
+      expect(evidenceBlock).not.toMatch(/changed regions? omitted/);
+      // Both sides of the change are quoted: the prior text a fresh finding
+      // needs for `before`, and the revised text it needs for `after`.
+      expect(evidenceBlock).toContain(priorContract.split("\n").at(-1)!);
+      expect(evidenceBlock).toContain(revisedContract.split("\n").at(-1)!);
+      // The pair is named, not copied.
+      expect(result.prompt).toContain(
+        "- `.kiro/specs/demo/slices/08-file-scope-gate/contract.md`",
+      );
+      expect(
+        result.evidence.includedArtifactClasses.slice(0, 2),
+      ).toEqual(["revised-contract", "revised-acceptance-manifest"]);
+    });
+
+    it("keeps the round's required evidence whole while the delta yields", () => {
+      const prompt = assemble().prompt;
+      for (const finding of findings) {
+        expect(prompt).toContain(finding.clearCondition);
+      }
+      expect(prompt).toContain("lineage clause 0");
+      expect(prompt).toContain("unknowns clause 0");
+      expect(prompt).toContain("response-F-01 clause 0");
+    });
+  });
+
+  it("#196 a regenerated #195 round-1 pair travels by reference and fits", () => {
+    const result = assembleContractEvaluatorInitialEnvelope({
+      sliceDir:
+        ".kiro/specs/afk-v2-acceptance-scope-gates/slices/08-file-scope-gate",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "C".repeat(25_043),
+      acceptanceManifest: {
+        ...acceptanceManifest,
+        behaviors: Array.from({ length: 22 }, (_, index) => ({
+          id: `B-${String(index + 1).padStart(2, "0")}`,
+          source: "GH #195 D22",
+          given: "G".repeat(180),
+          when: "W".repeat(180),
+          then: "T".repeat(300),
+          observableResult: "O".repeat(220),
+          preservation: false,
+          gateIds: ["tests"],
+        })),
+      },
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext: [
+        "## Files and current behavior",
+        "F".repeat(6_000),
+        "## Unknowns",
+        "U".repeat(4_500),
+      ].join("\n"),
+      durableLineage: "L".repeat(8_612),
+    });
+
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+    expect(result.prompt).not.toContain("C".repeat(1_000));
+    expect(
+      result.evidence.includedArtifactClasses.slice(0, 2),
+    ).toEqual(["proposed-contract", "acceptance-manifest"]);
+  });
+
+  it("#196 an overflow error names the byte weight of each inlined artifact class", () => {
+    expect(() =>
+      assembleContractEvaluatorInitialEnvelope({
+        sliceDir: ".kiro/specs/demo/slices/03-envelope",
+        round: 1,
+        contractReviewFile: "contract-review.json",
+        proposedContract: "contract travels by reference",
+        acceptanceManifest,
+        baseGateCatalog: "- tests: pnpm test:fast",
+        explorerContext: [
+          "## Files and current behavior",
+          "F".repeat(70_000),
+          "## Unknowns",
+          "none",
+        ].join("\n"),
+      }),
+    ).toThrow(
+      /inlined bytes by artifact class: explorer-behavior-preservation 70047/,
     );
   });
 });

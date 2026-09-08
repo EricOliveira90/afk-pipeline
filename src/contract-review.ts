@@ -209,6 +209,17 @@ export function requireNonBlankString(
   return value;
 }
 
+function requireString(
+  value: unknown,
+  field: string,
+  source: string,
+): string {
+  if (typeof value !== "string") {
+    throw new Error(`${source} ${field} must be a string`);
+  }
+  return value;
+}
+
 function parseFindings(
   value: unknown,
   source: string,
@@ -301,17 +312,25 @@ function parseFindings(
       }
       revisionCitation = {
         artifact: citation.artifact as ContractRevisionCitation["artifact"],
-        before: requireNonBlankString(
+        before: requireString(
           citation.before,
           `${field} revisionCitation before`,
           source,
         ),
-        after: requireNonBlankString(
+        after: requireString(
           citation.after,
           `${field} revisionCitation after`,
           source,
         ),
       };
+      if (
+        revisionCitation.before === "" &&
+        revisionCitation.after === ""
+      ) {
+        throw new Error(
+          `${source} ${field} revisionCitation requires at least one non-empty side`,
+        );
+      }
     }
 
     return {
@@ -846,30 +865,40 @@ export function validateRound2ContractReview(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} requires a revisionCitation`,
       );
     }
-    if (citation.before === citation.after) {
-      throw new Error(
-        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before and after must differ`,
-      );
-    }
     const artifact = revisions?.[citation.artifact];
     if (!artifact) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} cannot validate revisionCitation without revision artifacts`,
       );
     }
-    if (!artifact.before.includes(citation.before)) {
+    const normalizeCitationText = (text: string): string =>
+      text.replace(/\r\n?/g, "\n");
+    const priorArtifact = normalizeCitationText(artifact.before);
+    const currentArtifact = normalizeCitationText(artifact.after);
+    const priorCitation = normalizeCitationText(citation.before);
+    const currentCitation = normalizeCitationText(citation.after);
+    if (
+      priorCitation !== "" &&
+      currentCitation !== "" &&
+      priorCitation === currentCitation
+    ) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before and after must differ`,
+      );
+    }
+    if (priorCitation !== "" && !priorArtifact.includes(priorCitation)) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before does not match prior ${citation.artifact}`,
       );
     }
-    if (!artifact.after.includes(citation.after)) {
+    if (currentCitation !== "" && !currentArtifact.includes(currentCitation)) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation after does not match current ${citation.artifact}`,
       );
     }
     if (
-      artifact.after.includes(citation.before) ||
-      artifact.before.includes(citation.after)
+      (priorCitation !== "" && currentArtifact.includes(priorCitation)) ||
+      (currentCitation !== "" && priorArtifact.includes(currentCitation))
     ) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation does not identify changed ${citation.artifact} text`,
