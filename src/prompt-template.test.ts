@@ -311,8 +311,7 @@ describe("renderPrompt", () => {
       renderPrompt("evaluator-contract", {
         SLICE_DIR: "d",
         ROUND: 1,
-        PROPOSED_CONTRACT: "contract",
-        ACCEPTANCE_MANIFEST: '{"version":2}',
+        ACCEPTANCE_MANIFEST_FILE: "acceptance-manifest.json",
         DURABLE_FINDING_LINEAGE: "(none)",
         CONTROL_SITUATION: "(none)",
         BASE_GATE_CATALOG: "- tests: pnpm run test",

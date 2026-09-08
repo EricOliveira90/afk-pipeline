@@ -43,31 +43,40 @@ the prompt.
 
 ## Decision
 
-**1. The revision evidence block is the changed regions, quoted verbatim, and
-nothing else.** `src/contract-revision-evidence.ts` renders a line-level diff of
-each artifact as regions with their prior text and their revised text quoted
-exactly. Unchanged text is not reproduced.
+**1. The revision evidence block is the changed regions, quoted exactly after
+line-ending normalization, and nothing else.**
+`src/contract-revision-evidence.ts` renders a line-level diff of each artifact
+as citation-ready regions. Replacement quotes are expanded with adjacent
+context when repeated text would otherwise also occur in the opposite artifact.
+An insertion carries `before: ""`; a deletion carries `after: ""`. Unchanged
+text is not otherwise reproduced.
 
 This is not a lossy summary of the old block; it is the part of the old block a
-review could act on. The prompt already requires every fresh finding to carry a
-`revisionCitation` whose `before` appears only in the prior artifact and whose
-`after` appears only in the revised one — `validateRound2ContractReview`
-enforces exactly that. Changed text is therefore the only citable text in the
-round, and the unchanged bulk was carried so that it could never be used. On the
-#195-shaped fixture the block goes from 70,899 bytes to about 21,000 with the
-whole delta intact; a three-edit revision of the same contract renders in under
-3,000.
+review could act on. The prompt requires every fresh finding to carry a
+`revisionCitation` whose non-empty `before` appears only in the prior artifact
+and whose non-empty `after` appears only in the revised one —
+`validateRound2ContractReview` enforces exactly that after normalizing CRLF to
+LF. Changed text is therefore the only citable text in the round, and the
+unchanged bulk was carried where it could never be used. On the #195-shaped
+fixture the block goes from 70,899 bytes to about 21,000 with the whole delta
+intact; a three-edit revision of the same contract renders in under 3,000.
 
-**2. The revised pair travels by reference on the revision round.** The
+**2. The contract pair travels by reference on every evaluator round.** The
 evaluator runs in the slice's worktree, so `contract.md` and
-`acceptance-manifest.json` are at the paths the prompt names, and the prompt
-tells the round to read both in full. The classes stay declared; each carries a
-`locatorExemption` recording why, so the omission is in the run evidence rather
-than silent.
+`acceptance-manifest.json` are at the paths each prompt names, and both prompts
+require the round to read the files in full before review. The classes stay
+declared; each carries a `locatorExemption` recording why, so the omission is in
+the run evidence rather than silent.
 
-Reference, not omission: no evidence leaves the round, and the text a fresh
-finding may cite is inlined by decision 1. The round-1 envelope still inlines
-the pair — it fits, and a first review has no delta to anchor on.
+The original change kept the round-1 pair inline on the premise that it fit.
+The first isolated #195 retry falsified that premise: its newly generated
+round-1 evaluator prompt was 66,818 bytes, including 25,043 bytes of proposed
+contract and 18,136 bytes of manifest. It failed before evaluator dispatch.
+Pair size is not bounded by the envelope, so treating round 1 differently only
+moves the same failure to whichever contract first crosses the line.
+
+Reference, not omission: no evidence leaves either round. On a revision, the
+text a fresh finding may cite remains inlined by decision 1.
 
 The alternative was to keep the pair inline and drop the explorer projection or
 the durable-lineage block. Both are worse. The projection is withheld
@@ -100,15 +109,16 @@ copies, not the discipline.
 
 ## Consequences
 
-- A revision round's prompt no longer scales with the size of the contract pair,
-  only with the size of the revision. The #195-shaped regression fixture
-  assembles at 61,503 bytes with its full delta carried and no truncation.
-- The revision review is no longer self-contained: an evaluator that does not
-  read the two named files reviews a delta without its context. Every provider
-  AFK dispatches has file tools and already must write two files, so the
-  capability is not in question; the discipline is, and it is a prompt
-  instruction rather than a mechanical guarantee. This is the cost of the
-  decision, recorded rather than discovered.
+- An evaluator prompt no longer scales with the size of the contract pair; a
+  revision prompt scales only with the size of the revision. The #195-shaped
+  revision fixture assembles at 61,503 bytes with its full delta carried and no
+  truncation, and the regenerated round-1 shape that failed at 66,818 now fits.
+- Contract review is no longer self-contained: an evaluator that does not read
+  the two named files reviews without its primary evidence. Every provider AFK
+  dispatches has file tools and already must write two files, so the capability
+  is not in question; the discipline is, and it is a prompt instruction rather
+  than a mechanical guarantee. This is the cost of the decision, recorded
+  rather than discovered.
 - A fresh `revisionCitation` is now *more* likely to validate, not less. #188
   defect 1 reports a review refused for a citation whose `after` did not match
   the current manifest — the failure mode of quoting unchanged text out of a
@@ -116,22 +126,23 @@ copies, not the discipline.
   the prompt says to copy them.
 - **Relationship to #188, stated as evidence rather than as a claim.** #188
   defect 2 (`actual 72688 bytes, allowed 65536`) is the same assertion on the
-  same role, and ADR 0061 already attributes it to the revision envelope, so the
-  code path is shared and this change reduces the same dominant term. It is not
-  established as the *same* root cause: #188's report predates any per-artifact
-  breakdown, so nothing in it distinguishes a 70 KB evidence block from a large
-  PRD inlined elsewhere. Decision 4 is what would settle it on the next
-  occurrence. #188's other three defects — artifact-schema strictness (closed by
-  ADR 0061), win32 `spawn ENAMETOOLONG`, and infrastructure faults spending the
-  resume cap — are untouched here.
+  same role, and ADR 0061 attributes it to the revision envelope, so the code
+  path is shared. This change removes the term that dominates #195. It is not
+  established that the same term dominated #188, or that the two reports have
+  the same root cause: #188 predates any per-artifact breakdown, so nothing in
+  it distinguishes a large revision-evidence block from another large inlined
+  input. Decision 4 is what would settle it on the next occurrence. #188's
+  other three defects — artifact-schema strictness (closed by ADR 0061), win32
+  `spawn ENAMETOOLONG`, and infrastructure faults spending the resume cap — are
+  untouched here.
 - **Early contract-lock refusal was not implemented.** #196's point 4 proposes
   projecting the revision-round size at contract lock and refusing the round-1
   verdict. It is now the wrong shape: the projection's dominant input was the
-  revised pair, which no longer enters the prompt, and the revised delta does
-  not exist at lock time. Decision 3 makes the round fit rather than predicting
-  that it will not, and decision 4 makes the residual case legible. If a lock-
-  time gate is still wanted it should measure the fixed blocks alone, which is a
-  different check from the one #196 describes.
+  contract pair, which no longer enters either evaluator prompt, and the revised
+  delta does not exist at lock time. Decision 3 makes the revision round fit
+  rather than predicting that it will not, and decision 4 makes any residual
+  case legible. If a lock-time gate is still wanted it should measure the fixed
+  blocks alone, which is a different check from the one #196 describes.
 - Cites ADR 0061 (the durable-lineage block this decision preserves, and the
   #188 attribution it records) and the by-reference precedent in the generator
   envelope's `repair-context` artifacts.

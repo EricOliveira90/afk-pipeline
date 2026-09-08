@@ -11,10 +11,12 @@
  * What the round actually judges is the *delta*: whether each prior finding's
  * clear-condition is now met, and whether the revision introduced a fresh gap.
  * The prompt already requires a fresh finding to carry a `revisionCitation`
- * whose `before` text exists only in the prior artifact and whose `after` text
- * exists only in the revised one — that is, exact text from a changed region.
- * So the changed regions, reproduced verbatim, are the complete inline
- * evidence; the unchanged bulk is what a review can never cite.
+ * whose non-empty `before` text exists only in the prior artifact and whose
+ * non-empty `after` text exists only in the revised one — that is, exact text
+ * from a changed region. Insertions use an empty `before`; deletions use an
+ * empty `after`. So the changed regions, reproduced verbatim after line-ending
+ * normalization, are the complete inline evidence; the unchanged bulk is what
+ * a review can never cite.
  */
 
 /** One contiguous changed region of a single artifact. */
@@ -38,6 +40,9 @@ const LCS_CELL_CEILING = 4_000_000;
 
 const splitLines = (text: string): string[] =>
   text.replace(/\r\n?/g, "\n").split("\n");
+
+const normalizedText = (text: string): string =>
+  text.replace(/\r\n?/g, "\n");
 
 /**
  * Line-level changed regions between two texts. Common leading and trailing
@@ -161,6 +166,61 @@ export function contractRevisionRegions(
   return regions;
 }
 
+/**
+ * A replacement region may quote text that also occurs elsewhere in the
+ * opposite artifact. Expand it with adjacent context until both quotes identify
+ * this revision rather than merely a repeated line. Insertions and deletions
+ * stay one-sided: their empty side is meaningful citation data.
+ */
+function citationReadyRegion(
+  before: string,
+  after: string,
+  changed: ContractRevisionRegion,
+): ContractRevisionRegion {
+  if (changed.beforeLines.length === 0 || changed.afterLines.length === 0) {
+    return changed;
+  }
+  const beforeLines = splitLines(before);
+  const afterLines = splitLines(after);
+  const beforeText = normalizedText(before);
+  const afterText = normalizedText(after);
+  let beforeStart = changed.beforeStart - 1;
+  let afterStart = changed.afterStart - 1;
+  let beforeEnd = beforeStart + changed.beforeLines.length;
+  let afterEnd = afterStart + changed.afterLines.length;
+  const identifiesChange = (): boolean => {
+    const prior = beforeLines.slice(beforeStart, beforeEnd).join("\n");
+    const revised = afterLines.slice(afterStart, afterEnd).join("\n");
+    return (
+      prior !== revised &&
+      !afterText.includes(prior) &&
+      !beforeText.includes(revised)
+    );
+  };
+
+  while (!identifiesChange()) {
+    const canExpandLeft = beforeStart > 0 || afterStart > 0;
+    const canExpandRight =
+      beforeEnd < beforeLines.length || afterEnd < afterLines.length;
+    if (!canExpandLeft && !canExpandRight) break;
+    if (canExpandLeft) {
+      beforeStart = Math.max(0, beforeStart - 1);
+      afterStart = Math.max(0, afterStart - 1);
+    }
+    if (canExpandRight) {
+      beforeEnd = Math.min(beforeLines.length, beforeEnd + 1);
+      afterEnd = Math.min(afterLines.length, afterEnd + 1);
+    }
+  }
+
+  return {
+    beforeStart: beforeStart + 1,
+    beforeLines: beforeLines.slice(beforeStart, beforeEnd),
+    afterStart: afterStart + 1,
+    afterLines: afterLines.slice(afterStart, afterEnd),
+  };
+}
+
 /** A fence long enough to hold `body` verbatim without terminating early. */
 function fenceFor(body: string): string {
   const longest = [...body.matchAll(/`+/g)].reduce(
@@ -196,6 +256,10 @@ function renderRegion(
         region.beforeLines,
       ),
     );
+  } else {
+    parts.push(
+      'Prior text: `""` (empty because this region is an insertion).\n',
+    );
   }
   if (region.afterLines.length > 0) {
     parts.push(
@@ -203,6 +267,10 @@ function renderRegion(
         "Revised text (exact; usable as `revisionCitation.after`):",
         region.afterLines,
       ),
+    );
+  } else {
+    parts.push(
+      'Revised text: `""` (empty because this region is a deletion).\n',
     );
   }
   return parts.join("\n");
@@ -213,11 +281,11 @@ export interface ContractRevisionEvidenceInput {
 }
 
 /**
- * Render the revision's changed regions, newest artifact first, within
- * `maxBytes`. Whole regions are kept or dropped — never half a region, which
- * would put text in the prompt that exists in neither artifact and so cannot
- * be cited. A drop is always named, with the count and the budget that caused
- * it, so a thin round is diagnosable rather than silently thin.
+ * Render the revision's changed regions within `maxBytes`. Whole regions are
+ * kept or dropped — never half a region, which would put text in the prompt
+ * that exists in neither artifact and so cannot be cited. A drop is named when
+ * the budget can hold the omission note; below that minimum the block is empty
+ * rather than overflowing the prompt it is meant to protect.
  */
 export function renderContractRevisionEvidence(
   revisions: ContractRevisionEvidenceInput | null | undefined,
@@ -238,7 +306,9 @@ export function renderContractRevisionEvidence(
   let used = 0;
   let omitted = 0;
   for (const [artifact, { before, after }] of Object.entries(revisions)) {
-    const regions = contractRevisionRegions(before, after);
+    const regions = contractRevisionRegions(before, after).map((region) =>
+      citationReadyRegion(before, after, region),
+    );
     const header =
       regions.length === 0
         ? `## ${artifact}\n\nThis revision left \`${artifact}\` unchanged, so no fresh ` +
@@ -263,13 +333,17 @@ export function renderContractRevisionEvidence(
     });
   }
   if (omitted > 0) {
-    blocks.push(
+    const omission = (
       `## ${omitted} changed region${omitted === 1 ? "" : "s"} omitted\n\n` +
         `The revision evidence this round had room for is ${cap} bytes, ` +
         `which the regions above consume. A fresh finding must cite text ` +
         `reproduced above; read the artifacts named at the top of this prompt ` +
-        `for anything else.\n`,
+        `for anything else.\n`
     );
+    const withOmission = [...blocks, omission].join("\n").trimEnd();
+    if (bytes(withOmission) <= maxBytes) return withOmission;
+    const withoutOmission = blocks.join("\n").trimEnd();
+    return bytes(withoutOmission) <= maxBytes ? withoutOmission : "";
   }
   return blocks.join("\n").trimEnd();
 }

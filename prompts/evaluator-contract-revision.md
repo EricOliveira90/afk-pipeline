@@ -49,8 +49,10 @@ state; a review that omits one is refused.
 # Exact revision evidence
 
 Every region this revision changed, per artifact, with the prior and revised
-text quoted exactly. Unchanged text is not reproduced: a fresh finding about
-unchanged text is invalid, so this block is the citable surface of the round.
+text quoted exactly after CRLF/LF normalization. An insertion shows prior text
+as `""`; a deletion shows revised text as `""`. Unchanged text is not
+reproduced: a fresh finding about unchanged text is invalid, so this block is
+the citable surface of the round.
 
 {{REVISION_CONTEXT}}
 
@@ -95,12 +97,12 @@ fresh finding must be `OPEN` and must use this exact citation object:
 ```
 
 `artifact` must be exactly `contract.md` or `acceptance-manifest.json`.
-`before` and `after` must be exact, unequal text from that artifact changed by
-this revision. A fresh finding about unchanged text is invalid. Copy both
-strings from the "Exact revision evidence" block — `before` from a prior-text
-quote and `after` from the revised-text quote of the same changed region. A
-citation assembled from the files themselves is refused unless it happens to
-land on changed text.
+At least one of `before` and `after` must be non-empty. For an insertion, copy
+`before: ""`; for a deletion, copy `after: ""`. Every non-empty side must be
+exact normalized text from that artifact changed by this revision, and the two
+sides must differ. A fresh finding about unchanged text is invalid. Copy both
+strings from the same region in "Exact revision evidence". A citation assembled
+from the files themselves is refused unless it happens to land on changed text.
 
 Limit any fresh judgment to gate aptness, scenario honesty, evidence-backed
 scope, blocking UNKNOWNs, single-session feasibility, and explicit non-goals.

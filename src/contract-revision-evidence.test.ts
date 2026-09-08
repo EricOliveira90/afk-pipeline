@@ -4,6 +4,7 @@ import {
   renderContractRevisionEvidence,
 } from "./contract-revision-evidence.js";
 import {
+  parseContractReview,
   validateRound2ContractReview,
   type ContractResponse,
   type ContractReview,
@@ -135,6 +136,11 @@ describe("renderContractRevisionEvidence", () => {
     expect(renderContractRevisionEvidence(revisions, 0)).toBe("");
   });
 
+  it("never exceeds a positive byte budget too small for an omission note", () => {
+    const evidence = renderContractRevisionEvidence(revisions, 10);
+    expect(Buffer.byteLength(evidence, "utf-8")).toBeLessThanOrEqual(10);
+  });
+
   it("records the absence of revision artifacts instead of inventing them", () => {
     expect(renderContractRevisionEvidence(null, 65_536)).toBe(
       "(no revision evidence was recorded for this round)",
@@ -212,5 +218,235 @@ describe("evidence sufficiency for a fresh revisionCitation", () => {
     expect(() =>
       validateRound2ContractReview(previous, response, current, revisions),
     ).not.toThrow();
+  });
+
+  it("an append-only insertion uses an empty prior side and validates", () => {
+    const revisions = {
+      "contract.md": {
+        before: "intro",
+        after: "intro\nnew blocking claim",
+      },
+      "acceptance-manifest.json": {
+        before: '{"version":2}',
+        after: '{"version":2}',
+      },
+    };
+    const evidence = renderContractRevisionEvidence(revisions, 65_536);
+    expect(evidence).toContain(
+      'Prior text: `""` (empty because this region is an insertion).',
+    );
+    expect(evidence).toContain("new blocking claim");
+
+    const current: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-02",
+          severity: "BLOCKING",
+          behaviorIds: [],
+          evidence: '"new blocking claim"',
+          expected: "no unsupported claim",
+          observed: "the revision added one",
+          clearCondition: "remove or support the claim",
+          state: "OPEN",
+          revisionCitation: {
+            artifact: "contract.md",
+            before: "",
+            after: "new blocking claim",
+          },
+        },
+      ],
+    };
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "ACCEPT", findings: [] },
+        { version: 1, round: 2, responses: [] },
+        current,
+        revisions,
+      ),
+    ).not.toThrow();
+  });
+
+  it("a deletion uses an empty revised side and validates", () => {
+    const revisions = {
+      "contract.md": {
+        before: "intro\nrequired gate",
+        after: "intro",
+      },
+      "acceptance-manifest.json": {
+        before: '{"version":2}',
+        after: '{"version":2}',
+      },
+    };
+    const evidence = renderContractRevisionEvidence(revisions, 65_536);
+    expect(evidence).toContain("required gate");
+    expect(evidence).toContain(
+      'Revised text: `""` (empty because this region is a deletion).',
+    );
+
+    const current: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-02",
+          severity: "BLOCKING",
+          behaviorIds: [],
+          evidence: '"required gate"',
+          expected: "the gate remains required",
+          observed: "the revision deleted it",
+          clearCondition: "restore the requirement",
+          state: "OPEN",
+          revisionCitation: {
+            artifact: "contract.md",
+            before: "required gate",
+            after: "",
+          },
+        },
+      ],
+    };
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "ACCEPT", findings: [] },
+        { version: 1, round: 2, responses: [] },
+        current,
+        revisions,
+      ),
+    ).not.toThrow();
+  });
+
+  it("repeated text expands to a citation that is unique across revisions", () => {
+    const revisions = {
+      "contract.md": {
+        before: "A\nX\nB\nX",
+        after: "A\nY\nB\nX",
+      },
+      "acceptance-manifest.json": {
+        before: '{"version":2}',
+        after: '{"version":2}',
+      },
+    };
+    const evidence = renderContractRevisionEvidence(revisions, 65_536);
+    expect(evidence).toContain("A\nX\nB");
+    expect(evidence).toContain("A\nY\nB");
+
+    const current: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-02",
+          severity: "BLOCKING",
+          behaviorIds: [],
+          evidence: '"Y"',
+          expected: "X remains at the first position",
+          observed: "the revision changed it to Y",
+          clearCondition: "restore X",
+          state: "OPEN",
+          revisionCitation: {
+            artifact: "contract.md",
+            before: "A\nX\nB",
+            after: "A\nY\nB",
+          },
+        },
+      ],
+    };
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "ACCEPT", findings: [] },
+        { version: 1, round: 2, responses: [] },
+        current,
+        revisions,
+      ),
+    ).not.toThrow();
+  });
+
+  it("normalizes CRLF consistently between rendered evidence and validation", () => {
+    const revisions = {
+      "contract.md": {
+        before: "head\r\nold one\r\nold two\r\ntail",
+        after: "head\r\nnew one\r\nnew two\r\ntail",
+      },
+      "acceptance-manifest.json": {
+        before: '{"version":2}',
+        after: '{"version":2}',
+      },
+    };
+    const evidence = renderContractRevisionEvidence(revisions, 65_536);
+    expect(evidence).toContain("old one\nold two");
+    expect(evidence).toContain("new one\nnew two");
+
+    const current: ContractReview = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-02",
+          severity: "BLOCKING",
+          behaviorIds: [],
+          evidence: '"new one"',
+          expected: "the old pair",
+          observed: "the new pair",
+          clearCondition: "restore the old pair",
+          state: "OPEN",
+          revisionCitation: {
+            artifact: "contract.md",
+            before: "old one\nold two",
+            after: "new one\nnew two",
+          },
+        },
+      ],
+    };
+    expect(() =>
+      validateRound2ContractReview(
+        { version: 2, verdict: "ACCEPT", findings: [] },
+        { version: 1, round: 2, responses: [] },
+        current,
+        revisions,
+      ),
+    ).not.toThrow();
+  });
+
+  it("the canonical parser accepts exactly one empty insertion or deletion side", () => {
+    const base = {
+      version: 2,
+      verdict: "REVISE",
+      findings: [
+        {
+          id: "F-02",
+          severity: "BLOCKING",
+          behaviorIds: [],
+          evidence: "changed text",
+          expected: "expected",
+          observed: "observed",
+          clearCondition: "clear",
+          state: "OPEN",
+          revisionCitation: {
+            artifact: "contract.md",
+            before: "",
+            after: "inserted text",
+          },
+        },
+      ],
+    };
+    expect(parseContractReview(JSON.stringify(base))).toMatchObject(base);
+    expect(() =>
+      parseContractReview(
+        JSON.stringify({
+          ...base,
+          findings: [
+            {
+              ...base.findings[0],
+              revisionCitation: {
+                artifact: "contract.md",
+                before: "",
+                after: "",
+              },
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/at least one non-empty side/);
   });
 });

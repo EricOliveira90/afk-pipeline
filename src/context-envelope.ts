@@ -1361,11 +1361,6 @@ export function assemblePlannerRevisionEnvelope(
 export function assembleContractEvaluatorInitialEnvelope(
   input: ContractEvaluatorInitialEnvelopeInput,
 ): RoleEnvelopeResult {
-  const renderedAcceptanceManifest = JSON.stringify(
-    input.acceptanceManifest,
-    null,
-    2,
-  );
   const evaluatorEvidence = projectContractEvaluatorEvidence(
     input.explorerContext,
   );
@@ -1373,8 +1368,7 @@ export function assembleContractEvaluatorInitialEnvelope(
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
     CONTRACT_REVIEW_FILE: input.contractReviewFile,
-    PROPOSED_CONTRACT: input.proposedContract,
-    ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
+    ACCEPTANCE_MANIFEST_FILE: ACCEPTANCE_MANIFEST_FILENAME,
     DURABLE_FINDING_LINEAGE: input.durableLineage ?? "(none)",
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
     BASE_GATE_CATALOG: input.baseGateCatalog,
@@ -1388,12 +1382,12 @@ export function assembleContractEvaluatorInitialEnvelope(
       {
         artifactClass: "proposed-contract",
         artifactId: `${input.sliceDir}/contract.md`,
-        ...contentLocator(input.proposedContract),
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       {
         artifactClass: "acceptance-manifest",
         artifactId: `${input.sliceDir}/acceptance-manifest.json`,
-        ...contentLocator(renderedAcceptanceManifest),
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       ...durableLineageArtifact(input.durableLineage),
       ...(input.controlSituation !== undefined
@@ -1438,7 +1432,7 @@ function durableLineageArtifact(
 }
 
 /**
- * Why the revision round names the pair instead of inlining it (#196).
+ * Why evaluator rounds name the pair instead of inlining it (#196).
  *
  * The revised pair is the round's largest term — 39,529 bytes on slice #195 —
  * and inlining it alongside the round's required delta evidence, prior
@@ -1447,16 +1441,20 @@ function durableLineageArtifact(
  * evidence. A revision round therefore could not fit, whatever the evidence
  * block did.
  *
+ * The first live #195 retry after that fix produced a larger round-1 pair and
+ * failed before evaluator dispatch at 66,818 bytes: the pair was again the
+ * dominant 43,179-byte term. Pair size is not bounded by the envelope, so
+ * "round 1 fits" is not a safe distinction.
+ *
  * Reference rather than omission: the evaluator runs in the slice's worktree,
  * so both files are at the named paths, and the changed regions — the only
- * text a fresh finding may cite — are reproduced verbatim in the evidence
- * block. No evidence leaves the round; the bulk stops being copied into the
- * prompt. The round-1 envelope still inlines the pair: it fits, and a first
- * review has no delta to anchor on.
+ * text a fresh revision finding may cite — are reproduced verbatim in the
+ * revision evidence block. No evidence leaves either round; the bulk stops
+ * being copied into the prompt.
  */
-const REVISED_PAIR_BY_REFERENCE =
-  "the revised pair travels by reference to its worktree path; the round's " +
-  "citable text is inlined as revision evidence (#196)";
+const CONTRACT_PAIR_BY_REFERENCE =
+  "the contract pair travels by reference to its worktree path; evaluator " +
+  "rounds must open both files before review (#196)";
 
 export function assembleContractEvaluatorRevisionEnvelope(
   input: ContractEvaluatorRevisionEnvelopeInput,
@@ -1511,12 +1509,12 @@ export function assembleContractEvaluatorRevisionEnvelope(
       {
         artifactClass: "revised-contract",
         artifactId: `${input.sliceDir}/contract.md`,
-        locatorExemption: REVISED_PAIR_BY_REFERENCE,
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       {
         artifactClass: "revised-acceptance-manifest",
         artifactId: `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`,
-        locatorExemption: REVISED_PAIR_BY_REFERENCE,
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       ...(openFindings.length > 0
         ? [{

@@ -18,15 +18,14 @@ Stop after both review artifacts are written. An unreviewable contract is a
 
 # Proposed contract
 
-```markdown
-{{PROPOSED_CONTRACT}}
-```
+Open and read `{{SLICE_DIR}}/contract.md` from the worktree.
 
 # Acceptance manifest
 
-```json
-{{ACCEPTANCE_MANIFEST}}
-```
+Open and read `{{SLICE_DIR}}/{{ACCEPTANCE_MANIFEST_FILE}}` from the worktree.
+
+Do not review until you have read both files. If either file cannot be opened,
+return `REVISE` with a BLOCKING finding that names the unreadable path.
 
 # Durable finding lineage
 

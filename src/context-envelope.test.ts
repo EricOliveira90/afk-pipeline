@@ -664,9 +664,9 @@ describe("planner and contract-evaluator context envelopes", () => {
     ).not.toContain("proposed-contract-pair");
     const markers = [
       "# Proposed contract",
-      "PROPOSED-CONTRACT",
+      "`.kiro/specs/demo/slices/03-envelope/contract.md`",
       "# Acceptance manifest",
-      '"id": "B-01"',
+      "`.kiro/specs/demo/slices/03-envelope/acceptance-manifest.json`",
       "# Executable gate catalog",
       "- tests: pnpm test:fast",
       "# Explorer behavior and preservation evidence",
@@ -688,6 +688,8 @@ describe("planner and contract-evaluator context envelopes", () => {
     }
     expect(result.prompt).not.toContain("generator output");
     expect(result.prompt).not.toContain("feedback-r0.md");
+    expect(result.prompt).not.toContain("PROPOSED-CONTRACT");
+    expect(result.prompt).not.toContain('"id": "B-01"');
     expect(result.evidence.includedArtifactClasses).toEqual([
       "proposed-contract",
       "acceptance-manifest",
@@ -1322,18 +1324,64 @@ describe("planner and contract-evaluator context envelopes", () => {
     });
   });
 
+  it("#196 a regenerated #195 round-1 pair travels by reference and fits", () => {
+    const result = assembleContractEvaluatorInitialEnvelope({
+      sliceDir:
+        ".kiro/specs/afk-v2-acceptance-scope-gates/slices/08-file-scope-gate",
+      round: 1,
+      contractReviewFile: "contract-review.json",
+      proposedContract: "C".repeat(25_043),
+      acceptanceManifest: {
+        ...acceptanceManifest,
+        behaviors: Array.from({ length: 22 }, (_, index) => ({
+          id: `B-${String(index + 1).padStart(2, "0")}`,
+          source: "GH #195 D22",
+          given: "G".repeat(180),
+          when: "W".repeat(180),
+          then: "T".repeat(300),
+          observableResult: "O".repeat(220),
+          preservation: false,
+          gateIds: ["tests"],
+        })),
+      },
+      baseGateCatalog: "- tests: pnpm test:fast",
+      explorerContext: [
+        "## Files and current behavior",
+        "F".repeat(6_000),
+        "## Unknowns",
+        "U".repeat(4_500),
+      ].join("\n"),
+      durableLineage: "L".repeat(8_612),
+    });
+
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+    expect(result.prompt).not.toContain("C".repeat(1_000));
+    expect(
+      result.evidence.includedArtifactClasses.slice(0, 2),
+    ).toEqual(["proposed-contract", "acceptance-manifest"]);
+  });
+
   it("#196 an overflow error names the byte weight of each inlined artifact class", () => {
     expect(() =>
       assembleContractEvaluatorInitialEnvelope({
         sliceDir: ".kiro/specs/demo/slices/03-envelope",
         round: 1,
         contractReviewFile: "contract-review.json",
-        proposedContract: "C".repeat(70_000),
+        proposedContract: "contract travels by reference",
         acceptanceManifest,
         baseGateCatalog: "- tests: pnpm test:fast",
-        explorerContext,
+        explorerContext: [
+          "## Files and current behavior",
+          "F".repeat(70_000),
+          "## Unknowns",
+          "none",
+        ].join("\n"),
       }),
-    ).toThrow(/inlined bytes by artifact class: proposed-contract 70000, /);
+    ).toThrow(
+      /inlined bytes by artifact class: explorer-behavior-preservation 70047/,
+    );
   });
 });
 
