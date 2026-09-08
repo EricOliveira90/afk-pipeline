@@ -596,6 +596,17 @@ Each is stated so it can be checked rather than asserted. Verified against
    gate-command descendants for this launch; #135 stays OPEN because an
    unwrapped later launch would still inherit the operator's full environment.
 
+   **Backend changed to Claude Code on 2026-09-08, and the waiver's evidence was
+   re-earned for it.** The paragraph above was written about Codex; the operator
+   switched backends after observing Codex stopping mid-response. The minimized
+   environment was re-smoke-tested against the new backend: `claude` resolves
+   under the wrapper's forwarded `PATH` and authenticated successfully with only
+   the wrapper's approved keys present, because Claude Code's credentials live
+   under `USERPROFILE`/`HOME`, both of which the wrapper forwards. The
+   `AWS_PROFILE` / `AWS_DEFAULT_PROFILE` / `AWS_CONFIG_FILE` paragraph below is
+   Codex-specific and does not bind a Claude launch; all three were absent on the
+   launch machine either way.
+
    Accepted residual exposure: this is not an OS or network sandbox, so
    credential files under the operator's profile remain readable; applying the
    wrapper is an operator launch obligation rather than an AFK-enforced
@@ -613,5 +624,27 @@ Each is stated so it can be checked rather than asserted. Verified against
    accepted-and-ignored until slice 01 parses it, so the pre-recorded waiver is
    inert on this launch. That is the intent (see D5 and `issues.md`).
 6. Launch with the verification command explicit until slice 05 derives
-   it: `afk-codex --prd-dir .kiro/specs/afk-v2-acceptance-scope-gates
+   it: `afk-claude --prd-dir .kiro/specs/afk-v2-acceptance-scope-gates
    --test-command "pnpm typecheck && pnpm test:fast"`.
+
+   Two launch mechanics that cost the 2026-09-07 attempts real time, recorded so
+   the next operator does not rediscover them:
+
+   - **The globally linked `afk-claude` / `afk-codex` on this machine is not this
+     worktree.** It resolves through `PNPM_HOME` to a git-installed copy of
+     afk-pipeline, so launching by bare name silently runs old code. A self-run
+     invokes `node <repo>/dist/afk-claude.js` after `pnpm build`.
+   - **`scripts/min-env.sh` cannot be invoked from a bare `cmd.exe`.** It resolves
+     its clean intermediate shell with `type -P bash`, and on an unmodified
+     Windows `PATH` that finds `C:\Windows\System32\bash.exe` (WSL), which
+     deadlocks with `get_proc_lock: Couldn't acquire sync_proc_subproc`. Put Git's
+     `usr\bin` ahead on `PATH` before invoking it. Worth hardening in the script
+     itself — prefer `/usr/bin/bash` when it exists.
+
+7. Slice-level code anchors are on the six slice issues, not here: each was
+   verified against this branch on 2026-09-08 after slice 01 escalated three
+   times on details `prd.md` had validated for paths but not for type signatures
+   or persisted schema versions. See `LAUNCH-BLOCKERS.md` for the full account and
+   #192 for the planner-policy issue it exposed. Deliberately kept off this
+   document: the explorer's cost rose 154s → 206s → 268s across the three
+   attempts as `prd.md` grew, so slice-specific detail belongs on the slice.
