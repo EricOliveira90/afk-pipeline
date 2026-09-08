@@ -70,6 +70,16 @@ raise `deleted-test` or `skipped-test` per D6 and D7.
 }
 ```
 
+**An unknown member of `gatePolicy` is malformed and refuses the launch,
+naming the key.** Slice 01's validator knows `version`, `protectedPaths`
+and `riskClasses`; slice 02 widens the known set with `acceptance` and
+slice 05 with `cost`. This is safe because the PRD's lanes are serial, so
+each slice's validator merges before the config key that needs it. It is
+D5's own lesson applied forward: `parseAfkManifest` accepted and silently
+discarded `protectedChangeWaivers`, and a validator that passes over what
+it does not understand reproduces exactly that defect. Accepted cost: an
+`afk.config.json` written for a newer AFK refuses on an older one.
+
 Both members are optional; each defaults to the values shown, which are
 the derived baseline D6 and D5 already specify. The rejected alternative
 was records associating a `riskClass` with paths or globs plus per-class
@@ -146,6 +156,20 @@ Contract file scope never implies a waiver (plan §3d item 17). Each
 applied waiver's four fields are recorded in gate evidence and
 `run-summary.md`; an unwaived protected change parks the slice through
 PRD 2's park-and-continue machinery with its risk class and exact path.
+
+**A waiver's `path` is one exact repository-relative path, never a glob.**
+Recorded 2026-09-07 after slice 01's planner escalated
+`LOAD_BEARING_SILENCE` on it. Matching is string equality after
+normalization to forward slashes with no leading `./`; a `path` containing
+`*`, `?` or `[` refuses the launch, as does a duplicate
+`riskClass` + `path` pair. `src/acceptance-manifest.ts` already refuses a
+`fileScope` path containing those characters, so this keeps one rule for
+both operator-authored path lists. The rejected alternative was globs with
+overlap-precedence rules: a broad pattern silently exempts files nobody
+reviewed, which is the posture this gate exists to prevent, and it would
+have made slice 01 build precedence rules no consumer in this PRD needs.
+Accepted cost: slices 02 and 05 each need their own `afk.config.json`
+waiver record rather than sharing one pattern.
 
 *Test fired: load-bearing silence about a security posture.* The whole
 point of the gate is that the actor being constrained cannot author its
@@ -343,6 +367,45 @@ evaluator, with no exception for a change that "looks cosmetic".
 Behavior IDs keep their `B-01` spelling. The finding schema, the
 canonical verdict artifacts, `MERGE-PENDING` semantics (ADR 0029) and the
 merge mutex are unchanged.
+
+### D22 — how a code gate plugs into the gate runner, and what it is called
+
+Recorded 2026-09-07, ahead of the escalation it would otherwise have
+fired. The scope gate compares trees in process; it does not shell out.
+Two facts about today's runner make that unbuildable as written:
+`src/gate-runner.ts` treats a `GateDeclaration` with no `command` as
+`SKIPPED` with detail "Optional gate has no command", and `GateResult`
+carries only `detail?: string`, so there is nowhere to put a violation
+path list or an applied-waiver record. #84 requires violations to reach
+"the next generator round as structured evidence" and D5 requires each
+applied waiver's four fields in gate evidence, so slice 01 grows both
+types:
+
+- `GateDeclaration` gains an optional in-process `run`. A declaration
+  supplies **either** `command` or `run`; neither is a configuration
+  failure, not a skip.
+- `GateResult` gains an optional typed `findings` payload with
+  `outOfScopePaths`, `deletedTests`, `protectedChanges` and
+  `appliedWaivers` (the four D5 fields per record). Prose in `detail`
+  stays human-facing only; nothing parses it.
+- `GATE_EVIDENCE_VERSION` goes **1 → 2**. `readGateEvidence` accepts
+  version 1 and version 2; only version 2 may carry `findings`.
+
+**Two gate IDs, both at stage `deterministic`:** `scope` for the D2/D3/D4
+file-scope comparison, and `feedback-integrity` for the D5/D6
+protected-change and deleted-test checks. Two rather than one because
+D12's `gateEvidence.gateId` is what a `GATE-SCOPE` revision cites, and a
+single ID would leave the citation ambiguous about which rule fired. The
+existing IDs `typecheck`, `lint` and `tests` are unchanged.
+
+The rejected alternative was keeping the gate command-shaped — a hidden
+`afk-codex gate scope` subcommand writing findings to a side artifact.
+It needs no schema change, but it spawns a process per gate run and puts
+the structured findings outside the evidence record that cites them.
+
+*Test fired: declared risk class (schema history), twice — the gate
+evidence version and the gate declaration's shape.* Decided here so the
+planner does not spend a dispatch on either.
 
 ## File-scope map
 
