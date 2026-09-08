@@ -1,0 +1,72 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-08", "B-12"],
+      "evidence": "Scope lock: \"Three deliverables: two pure functions ... plus one explicitly impure function, `loadGatePolicy(repoRoot)`, which reads `<repoRoot>/afk.config.json` and delegates to the validator. All three ship with a success-path assertion.\" Manifest B-08 then: \"the first returns the policy deep-equal to what was written\", observed by \"asserts all four outcomes, so an implementation that always returns null fails case one\"; manifest B-12 when: \"loadGatePolicy(repoRoot) is called\".",
+      "expected": "Every export in the pinned surface is covered by the scope lock and has a declared observable for its primary success path, so the slice cannot ship green with that export broken.",
+      "observed": "loadGatePolicy is now named in the scope lock as the third, explicitly impure deliverable, and its read-and-parse success path is asserted twice: B-08 case one over a mkdtempSync config carrying a well-formed gatePolicy, and B-12 over this repository's committed afk.config.json. The definition of done also requires a passing assertion for loadGatePolicy's success path. An always-null implementation fails B-08 and B-12.",
+      "clearCondition": "Either drop loadGatePolicy from the pinned surface, or name it in the scope lock as an explicitly impure deliverable with a declared success-path assertion (loadGatePolicy over a directory that does contain a gatePolicy-bearing afk.config.json).",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01"],
+      "evidence": "Manifest B-01: given \"src/gate-policy.ts imported as a namespace\", when \"Object.keys of that namespace is sorted\", observed by \"asserts the sorted keys deep-equal that six-name list, so an extra or missing runtime export fails\".",
+      "expected": "The contract's \"exports the surface pinned above and no other runtime value\" clause, repeated in the definition of done, needs an observable that can fail when the surface is wrong.",
+      "observed": "B-01 no longer leans on typecheck alone for the exactness claim: the observable enumerates the module's runtime exports and compares them against the six pinned names, so an extra export fails the tests gate while typecheck keeps pinning the signatures.",
+      "clearCondition": "B-01's observable names an assertion that enumerates the module's exports, or the \"exactly\" wording is softened to the set the declared evidence actually pins.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["P-01", "P-02", "P-03"],
+      "evidence": "P-01 observable: \"asserts declarations.map(d => d.id) equals [typecheck, lint, tests] and the no-config load is null; pnpm run typecheck still accepts src/base-gates.ts\"; P-02 observable: \"asserts those three values and that the sorted top-level keys equal [architectureDoc, gatePolicy, resourceKeys, version]\"; P-03 observable: \"asserts the source has no acceptance-manifest import and no toLowerCase\".",
+      "expected": "Each clause of an observable result is producible by one of the gates the behavior lists — here typecheck (pnpm run typecheck) and tests (pnpm run test).",
+      "observed": "Every remaining static clause now names the assertion in src/gate-policy.test.ts that produces it: resolveBaseGateDeclarations ids for P-01 (verified producible — src/base-gates.ts:16-24 maps BASE_GATE_IDS to declarations regardless of whether the sanity plan resolves a step, so the ids hold on an empty temp directory), readFileSync + JSON.parse over the committed config for P-02, and a readFileSync source scan for P-03. The byte-identity claim moved to the definition of done.",
+      "clearCondition": "Each static clause either names the assertion in src/gate-policy.test.ts that produces it, or is dropped from the observable and left to the definition of done.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-11"],
+      "evidence": "Manifest B-11 given: \"one glob per rejected metacharacter of the enumerated set — src/?.ts, src/[ab].ts, src/a].ts, src/{a,b}.ts, src/a}.ts, src/(a).ts, src/a).ts, src/!a.ts, src/a+.ts, src/a@.ts, src\\\\a.ts — plus src/***.ts and a**/b.ts\"; observed by \"the backslash case pins the pair against B-09, where a backslash in a path is normalized\".",
+      "expected": "The observable covers the rejection set the behavior enumerates, or the behavior states that the listed values are representative.",
+      "observed": "The given now carries one glob per character of the contract's enumerated set `? [ ] { } ( ) ! + @ \\`, backslash included, plus the two malformed-star segments; and the backslash glob is deliberately paired with B-09's backslash-bearing path, pinning the reject-in-glob / normalize-in-path split that D6 leaves implicit.",
+      "clearCondition": "B-11's given either covers the full enumerated set (a backslash-bearing glob included) or says the values are a representative sample of one shared validator.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03"],
+      "evidence": "Contract B-03: \"A policy omitting `protectedPaths`, `riskClasses`, or either member of `protectedPaths` parses and returns the documented baselines\", against manifest B-03's given: \"four reduced policies: {version:1}, one without protectedPaths, one without riskClasses, one whose protectedPaths omits testGlobs\".",
+      "expected": "Both halves of the \"either member of protectedPaths\" clause have a declared case, since prd.md D1 says \"Both members are optional; each defaults to the values shown\".",
+      "observed": "Only the testGlobs-omitted half is declared. No case supplies a protectedPaths object that carries testGlobs but omits gatePolicyPaths, so an implementation that defaults gatePolicyPaths only when the whole protectedPaths object is absent — and throws when it is present without that member — passes every declared observable while violating B-03's own text. B-05's rejection of the unknown member testGlob makes a partial protectedPaths object a realistic hand-edit.",
+      "clearCondition": "B-03's given adds a fifth policy whose protectedPaths supplies testGlobs and omits gatePolicyPaths, with the result deep-equal to the baseline-filled policy; or B-03's wording narrows to the single member the declared cases cover.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-06",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "evidence": "Non-goals: \"An `ARCHITECTURE.md` row; no check requires one and that file is shared.\" Against prd.md:526-527's ownership table, whose `ARCHITECTURE.md` row reads \"own rows\" in every slice column including 01, and prd.md D6: \"Accepted cost: the dialect is AFK's own and must be documented, not inherited.\"",
+      "expected": "A non-goal that overrides a parent-PRD ownership row says so and names where the deferred obligation lands, so the glob dialect's documentation is not lost between slices.",
+      "observed": "The \"no check requires one\" half checks out — no gate or test in this repository asserts ARCHITECTURE.md module coverage (the only src reader of architectureDoc is src/context-envelope.ts, which ships the file's contents into the envelope), so nothing goes red and the lock stays reliable. But the non-goal contradicts prd.md's file map without citing it, and D6's documentation obligation for AFK's own dialect is left with no owner named.",
+      "clearCondition": "The non-goal cites prd.md:527's \"own rows\" and names who documents the dialect instead (a later slice, or a follow-up), or ARCHITECTURE.md joins the file scope with a behavior pinning the added row.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}
