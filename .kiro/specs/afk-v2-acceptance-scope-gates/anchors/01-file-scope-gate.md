@@ -35,3 +35,27 @@ has not run for the tree being gated.
 twice — once on the contract pair, once on the planner prompt. State each
 behavior once, cite `prd.md` and this issue by reference, and do not mirror these
 anchors into `contract.md`. Use tracked casing for paths (`ARCHITECTURE.md`).
+
+## Manifest path casing — settled, and state it in the contract
+
+`normalizePath` (`src/acceptance-manifest.ts:64-71`) **lowercases**, and the
+parser stores the normalized form (`line 269`:
+`fileScope.paths.map((path) => normalizePath(path, source))`).
+`outOfScopeChangedPaths` lowercases each changed path before comparing against
+that stored set. So **manifest path comparison is case-insensitive by
+construction** and a casing mismatch in `fileScope` can never cause a false
+out-of-scope report.
+
+Round 1 of 2026-09-08 was nonetheless blocked (F-03) on `architecture.md` versus
+`ARCHITECTURE.md`. Do two things so it does not recur:
+
+1. **Write the tracked casing in `fileScope`** — `ARCHITECTURE.md`, as
+   `git ls-files` and this repo's `afk.config.json` `architectureDoc` both record
+   it. It costs nothing and it matches every other statement of the path.
+2. **Say in the contract that the comparison is case-insensitive**, citing
+   `src/acceptance-manifest.ts:64-71` and `:269`. A reviewer that does not know
+   this reads a casing mismatch as a live scope hazard.
+
+Do not conflate this with B-03. D6's `testGlobs` matching is **case-sensitive on
+every platform** — that is a deliberate decision about matching test-file paths,
+and it is a different comparison from the manifest's, for a different purpose.

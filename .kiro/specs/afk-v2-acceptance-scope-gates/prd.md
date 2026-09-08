@@ -194,7 +194,13 @@ dialect it does not own.
 Slice 01 writes a pure matcher in `src/gate-policy.ts` supporting exactly
 literal segments, `*` (within one segment) and `**` (zero or more
 segments), over paths normalized to forward slashes, **case-sensitive on
-every platform**. Any other metacharacter in a `testGlob` refuses the
+every platform**. This is deliberately *not* the same case rule as the
+acceptance manifest's `fileScope` comparison, which is case-**in**sensitive
+because `normalizePath` (`src/acceptance-manifest.ts:64-71`) lowercases and
+the parser stores the normalized form. Two comparisons, two purposes: glob
+matching decides which paths are test files, manifest comparison decides
+which paths a contract declared. Do not conflate them — round 1 of
+2026-09-08 lost a round to a reviewer that did. Any other metacharacter in a `testGlob` refuses the
 launch and names the offending character. That covers the default
 `**/*.test.ts` and every glob this PRD needs. Gitignore semantics were
 rejected for their platform-native case sensitivity, which would make the
