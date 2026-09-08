@@ -685,6 +685,31 @@ across slice 01's early attempts as `prd.md` grew.
   from "does not reach evaluation or merge" to "does not merge"; the merge block,
   which is the security property, is unchanged.
 
+### Two ownership gaps the splits created, closed 2026-09-08
+
+Both were raised as `SPEC_CONTRADICTION` by wave 2's planners, and both are
+consequences of splitting slice 01 rather than of the original design.
+
+- **#85 gains a dependency on #195.** The acceptance gate's verdict is
+  content-derived — `numTotalTests === 0` is FAIL even when vitest exits 0 — but
+  `GateResult.status` is classified from the exit code, and D22's in-process
+  `GateDeclaration.run` seam that lets a gate return its own status went to #195.
+  #85 declares its gate through that seam. Rejected: a second per-declaration
+  output assessor in `src/gate-runner.ts` (two competing mechanisms for one
+  concern), and deciding the verdict after `runGates` returns (which would leave
+  the persisted `GateResult` asserting a status the gate did not have, defeating
+  the point of gate evidence).
+- **Waiver authorization of an intentional skip moves from #86 to #193.** #86 is
+  an earlier wave than #193, which owns D5's `protectedChangeWaivers` reader, so
+  no waiver reader exists at #86's merge base. #86 ships the TypeScript/Vitest
+  skip detector and fails closed without a waiver — plan item 17's stated and
+  accepted failure mode — and the authorization criterion lands on #193.
+  Rejected: #86 building the reader (which would put `src/afk-manifest.ts` in two
+  slices' file scopes, the exact ADR 0060 conflict this PRD exists to prevent) and
+  reordering the DAG.
+
+Waves are now 1:#84, 2:#86/#195, 3:#85/#193, 4:#91/#132, 5:#96.
+
 ## Launch preconditions
 
 Each is stated so it can be checked rather than asserted. Verified against
