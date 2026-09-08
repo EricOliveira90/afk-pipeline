@@ -67,3 +67,22 @@ spawn, with a comment saying why. `pnpm test` ends with
 `pnpm test:budgets`, a per-suite wall-clock budget; when it goes red, move
 the assertion up that list rather than raising the number. The full
 reasoning is in AGENTS.md.
+
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Triage rules (repo-specific)
+
+Vision citation against `docs/PRODUCT.md`, stale-issue refresh, batch parallelism note. See `docs/agents/triage-rules.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

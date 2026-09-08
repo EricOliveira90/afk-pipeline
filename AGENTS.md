@@ -134,3 +134,22 @@ host-installed gitconfig or hook (e.g. git-defender's `core.hooksPath`)
 reaches fixture repos. Do not remove this — it is correctness first
 (host-independent results) and it is worth ~45% of the suite's former
 runtime (see `docs/slow-test-consolidation-round2-2026-08-26.md`).
+
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Triage rules (repo-specific)
+
+Vision citation against `docs/PRODUCT.md`, stale-issue refresh, batch parallelism note. See `docs/agents/triage-rules.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
