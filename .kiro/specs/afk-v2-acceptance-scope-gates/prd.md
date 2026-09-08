@@ -401,8 +401,21 @@ applied waiver's four fields in gate evidence, so slice 01 grows both
 types:
 
 - `GateDeclaration` gains an optional in-process `run`. A declaration
-  supplies **either** `command` or `run`; neither is a configuration
-  failure, not a skip.
+  supplies **either** `command` or `run`. A **required** declaration
+  supplying neither is a configuration failure; an **optional** one keeps
+  today's `SKIPPED`.
+
+  *Corrected 2026-09-08 after slice 01's planner raised it as a
+  `SPEC_CONTRADICTION` and the contract evaluator raised it as F-01 —
+  correctly, against an earlier flat version of this rule.*
+  `projectSanityGateDeclarations` (`src/base-gates.ts:16-24`) sets
+  `required: step != null` and spreads `command` only when the step exists,
+  so a project with no `lint` script gets `{ id: "lint", stage: "base",
+  required: false }` **with no command** — and `adopt-command.ts:647-649`
+  counts that gate as passing *only while its status is `SKIPPED`*. A flat
+  rule would therefore have turned the pre-QA gate set red for every
+  consuming project without a lint script. `src/base-gates.ts` stays
+  unedited, which is what preservation demanded all along.
 - `GateResult` gains an optional typed `findings` payload with
   `outOfScopePaths`, `deletedTests`, `protectedChanges` and
   `appliedWaivers` (the four D5 fields per record). Prose in `detail`
@@ -428,13 +441,30 @@ must extend rather than by reading this PRD:
   array empty. Recording waivers only in gate evidence was rejected: a
   resumed run could then not tell which waivers were already applied, and
   D5 reads the record once at launch.
-- `GateEvidenceArtifact` (`src/gate-runner.ts`) carries `evidencePath` and
-  `evidenceSha256` and **no id field**, so D12's `evidenceArtifactId` had
-  no referent. It is defined as the existing `evidenceSha256`:
-  content-addressed, so a `GATE-SCOPE` revision cannot cite an ID that has
-  drifted from the bytes it claims as warrant, and no new ID generator is
-  built. A separate opaque `artifactId` was rejected as a second identity
-  for one artifact.
+- **`evidenceArtifactId` is the repo-relative evidence path, and that
+  convention already exists.** `GateEvidenceArtifact`
+  (`src/gate-runner.ts:92`) carries `evidencePath` and `evidenceSha256` and
+  no id field, which is why D12's `evidenceArtifactId` looked unreferenced —
+  but `src/candidate-gate-phase.ts:111-116` already computes
+  `relative(repoRoot, evidencePath)` with forward slashes and passes it as
+  `evidenceArtifactId` to every `gate-outcome` run event. D12 uses that same
+  value.
+
+  *Corrected 2026-09-08: an earlier version of this decision defined it as
+  the `evidenceSha256`.* That would have given one artifact two identities
+  and made a `GATE-SCOPE` citation impossible to cross-reference against the
+  `gate-outcome` event for the same gate run, which is the whole point of
+  citing an ID. The sha256 stays what it is — the integrity check
+  `verifyGateEvidence` already performs.
+
+**The bounded infrastructure retry is status-driven, not command-shaped, so
+`src/candidate-gate-phase.ts` stays out of slice 01's file scope.** Recorded
+2026-09-08 to close the contract evaluator's F-02, which the explorer had left
+open. The retry loop (`src/candidate-gate-phase.ts:93-144`) wraps the whole
+`runGates` call and re-runs while *any required gate's status is
+`INFRASTRUCTURE`* — it never inspects whether the declaration carried a
+`command` or a `run`. An in-process gate returning `INFRASTRUCTURE` therefore
+gets the bounded retry for free, and no edit to that file is required.
 
 The rejected alternative was keeping the gate command-shaped — a hidden
 `afk-codex gate scope` subcommand writing findings to a side artifact.
