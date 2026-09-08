@@ -182,6 +182,25 @@ comparison base and not in the candidate tree is a deletion. Absent
 policy, AFK's TypeScript/Vitest default glob `**/*.test.ts` applies. A
 deletion fails closed naming the exact path unless a D5 waiver covers it.
 
+**The glob dialect is a narrow hand-rolled subset, not minimatch and not
+gitignore.** Recorded 2026-09-07 after slice 01's planner escalated
+`LOAD_BEARING_SILENCE` on the matcher semantics. Neither option the
+planner offered named the real cost: **AFK has no runtime dependencies at
+all** — `package.json` has no `dependencies` key and `src/` contains no
+glob matcher — so "minimatch-compatible" means either AFK's first runtime
+dependency or a reimplementation that then has to stay faithful to a
+dialect it does not own.
+
+Slice 01 writes a pure matcher in `src/gate-policy.ts` supporting exactly
+literal segments, `*` (within one segment) and `**` (zero or more
+segments), over paths normalized to forward slashes, **case-sensitive on
+every platform**. Any other metacharacter in a `testGlob` refuses the
+launch and names the offending character. That covers the default
+`**/*.test.ts` and every glob this PRD needs. Gitignore semantics were
+rejected for their platform-native case sensitivity, which would make the
+gate decide differently on Windows than on CI. Accepted cost: the dialect
+is AFK's own and must be documented, not inherited.
+
 ### D7 — skip detection ships one detector, and fails closed elsewhere
 
 Slice 05 ships AFK's TypeScript/Vitest detector for newly introduced
@@ -397,6 +416,25 @@ protected-change and deleted-test checks. Two rather than one because
 D12's `gateEvidence.gateId` is what a `GATE-SCOPE` revision cites, and a
 single ID would leave the citation ambiguous about which rule fired. The
 existing IDs `typecheck`, `lint` and `tests` are unchanged.
+
+**`RunState` goes version 3 → 4, and `evidenceArtifactId` is the
+evidence sha256.** Two more silences found by reading the code slice 01
+must extend rather than by reading this PRD:
+
+- `src/run-state.ts` declares `RunState { version: 3 }`, a persisted
+  schema, so the waiver record the file-scope map assigns to slice 01 is a
+  schema bump: **3 → 4**, adding an optional per-slice `appliedWaivers`
+  array of D5's four fields. The reader accepts version 3 and defaults the
+  array empty. Recording waivers only in gate evidence was rejected: a
+  resumed run could then not tell which waivers were already applied, and
+  D5 reads the record once at launch.
+- `GateEvidenceArtifact` (`src/gate-runner.ts`) carries `evidencePath` and
+  `evidenceSha256` and **no id field**, so D12's `evidenceArtifactId` had
+  no referent. It is defined as the existing `evidenceSha256`:
+  content-addressed, so a `GATE-SCOPE` revision cannot cite an ID that has
+  drifted from the bytes it claims as warrant, and no new ID generator is
+  built. A separate opaque `artifactId` was rejected as a second identity
+  for one artifact.
 
 The rejected alternative was keeping the gate command-shaped — a hidden
 `afk-codex gate scope` subcommand writing findings to a side artifact.
