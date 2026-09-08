@@ -663,6 +663,28 @@ gates, and mutation testing. Three more, added here:
 - **`afk.config.json`'s `resourceKeys` and `architectureDoc`.** Slice 01
   adds `gatePolicy` beside them and changes neither.
 
+## Decisions delegated to the slice anchors files
+
+Wave 2 (2026-09-08) escalated three more decisions. They are recorded in
+`anchors/<NN>-<slug>.md` rather than here, because each is slice-local and this
+document's growth is itself a cost — the explorer's wall-clock rose 154s → 268s
+across slice 01's early attempts as `prd.md` grew.
+
+- **`gatePolicy.acceptance`'s JSON shape** (#85) — `anchors/02-behavior-coverage-gate.md`.
+  A `{ command, args, matcher }` object with a literal `{behaviorId}` placeholder
+  that must appear in `args`, or the launch refuses.
+- **`gatePolicy.cost`'s JSON shape** (#86) — `anchors/05-test-cost-split.md`. A
+  hybrid: records only for `skipDetectors` and `relatedTests`, where a consuming
+  project must express its own rules; `expectedCostMs` and gate prerequisites stay
+  code in `src/base-gates.ts`.
+- **Where the `scope` gate's call site goes** (#195) — `anchors/08-file-scope-gate.md`.
+  On the final candidate after the QA window and before the merge, **not** in the
+  pre-QA set. Binding ADR 0048's amendment warrant is an independent evaluator
+  finding, and a required pre-QA scope gate makes that warrant unobtainable, since
+  a red deterministic gate never dispatches an evaluator (D19). #195's AC1 weakens
+  from "does not reach evaluation or merge" to "does not merge"; the merge block,
+  which is the security property, is unchanged.
+
 ## Launch preconditions
 
 Each is stated so it can be checked rather than asserted. Verified against
