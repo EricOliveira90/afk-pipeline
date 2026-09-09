@@ -63,7 +63,9 @@ A test that spawns a pipeline costs seconds on every run from now on, so a
 new spawned scenario is the last resort, not the default. Prefer, in
 order: a unit test → an `it` on an existing spawned scenario's shared
 result → another slice in a fixture that already runs a wave → a new
-spawn, with a comment saying why. `pnpm test` ends with
-`pnpm test:budgets`, a per-suite wall-clock budget; when it goes red, move
-the assertion up that list rather than raising the number. The full
-reasoning is in AGENTS.md.
+spawn, with a comment saying why. `pnpm test:ratchet` runs the suites and
+then `pnpm test:budgets`, a per-suite wall-clock budget; when it goes red,
+move the assertion up that list rather than raising the number. Run it when
+you add a spawned scenario — it is deliberately not part of `pnpm test`,
+which is what the deterministic gates run (ADR 0063). The full reasoning is
+in AGENTS.md.

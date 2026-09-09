@@ -104,11 +104,18 @@ spawned scenario. In order:
    differs and no existing one can reach it. Say so in a comment, so the
    next reader knows the cost was deliberate.
 
-`pnpm test` ends with `pnpm test:budgets`, a per-suite wall-clock budget
-(`suite-budgets.json`). If it goes red, the fix is normally to move the
-assertion up this list — not to raise the number. Raising one is fine
-when the cost is genuinely necessary, but record the measurement in the
-commit message.
+`pnpm test:ratchet` runs the suites and then `pnpm test:budgets`, a
+per-suite wall-clock budget (`suite-budgets.json`). If it goes red, the fix
+is normally to move the assertion up this list — not to raise the number.
+Raising one is fine when the cost is genuinely necessary, but record the
+measurement in the commit message.
+
+Run `pnpm test:ratchet` when you add a spawned scenario. It is not part of
+`pnpm test`, because `pnpm test` is what AFK's deterministic gates and its
+pre-ship sanity gate run, and a wall-clock number is a measurement of the
+host rather than of the code (ADR 0063). An agent inside a run cannot make
+the machine faster, so a red budget there only teaches it to raise the
+number — which is what happened to slice #78 and to run 3's babysitter.
 
 Record it in `suite-budgets.json` as well, as a block named
 `_measured<YYYY_MM_DD>[_<qualifier>]@<branch>` — the branch you measured
