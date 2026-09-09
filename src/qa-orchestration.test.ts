@@ -987,7 +987,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(evaluators).toBe(1);
   });
 
-  it("records checkpoint evidence and authorizes QA for the passing tree", async () => {
+  // The pre-QA/post-QA split itself is what this scenario proves, so it is the
+  // test #86's P-03 is named on rather than a second spawned run of the same
+  // shape (`CLAUDE.md`, "Where a new assertion goes").
+  it("[behavior:P-03] records checkpoint evidence and authorizes QA for the passing tree", async () => {
     const repo = makeRepo();
     // Outside the repo: the evaluator stub and gate scripts append to it,
     // and an in-repo marker would (correctly) trip the A1 tree-authority
@@ -1066,9 +1069,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     ).toEqual(
       expect.arrayContaining([
         ["typecheck", "lint"],
-        // The post-QA phase declares the file-scope gate ahead of the full
-        // suite (#195 AC1), so the second attempt carries both.
-        ["scope", "tests"],
+        // The post-QA phase declares the two content-derived gates ahead of the
+        // full suite (#195 AC1; #86 B-06), so the second attempt carries all
+        // three.
+        ["scope", "tests:skipped", "tests"],
       ]),
     );
     expect(
@@ -2279,6 +2283,7 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
       // the declarations behind it.
       expect(redRound!.results.map((gate) => gate.gateId)).toEqual([
         "scope",
+        "tests:skipped",
         "tests",
       ]);
       expect(redRound!.results[0]).toMatchObject({
@@ -2287,7 +2292,7 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
         findings: { outOfScopePaths: [SMUGGLED] },
       });
       expect(redRound!.results[0]!.detail).toContain(SMUGGLED);
-      expect(redRound!.results[1]).toMatchObject({
+      expect(redRound!.results[2]).toMatchObject({
         gateId: "tests",
         status: "PASS",
       });
@@ -2307,6 +2312,7 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
       // And the repaired candidate passes the same gate.
       expect(repairedRound!.results.map((gate) => gate.gateId)).toEqual([
         "scope",
+        "tests:skipped",
         "tests",
       ]);
       expect(
@@ -2426,10 +2432,10 @@ describe("provider-independent policy-less base gates", () => {
       ).toEqual(
         expect.arrayContaining([
           ["typecheck", "lint"],
-          // The file-scope gate leads the post-QA phase (#195 AC1): a
-          // deterministic comparison that needs no toolchain must not sit
-          // behind the suite.
-          ["scope", "tests"],
+          // The two content-derived gates lead the post-QA phase (#195 AC1;
+          // #86 B-06): a comparison that needs no toolchain must not sit behind
+          // the suite.
+          ["scope", "tests:skipped", "tests"],
         ]),
       );
       expect(
