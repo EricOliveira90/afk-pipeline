@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveBaseGateDeclarations } from "./base-gates.js";
+import {
+  BEHAVIOR_ID_TOKEN,
+  resolveAcceptancePlan,
+  resolveBaseGateDeclarations,
+} from "./base-gates.js";
 import * as gatePolicyModule from "./gate-policy.js";
 import {
   DEFAULT_GATE_POLICY_PATHS,
@@ -158,17 +162,17 @@ describe("parseGatePolicy", () => {
     ).toThrow(/riskClasses/);
   });
 
+  /**
+   * `acceptance: {}` used to live in B-05 below as an unknown key. Slice 02
+   * (#85) widened `POLICY_KEYS`, so it is now a *known* member refused for its
+   * missing sub-members — the assertion moved here rather than disappearing.
+   */
   it("B-05 refuses an unknown member naming it", () => {
     expect(
       messageOf(() =>
         parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), cost: {} }),
       ),
     ).toContain("cost");
-    expect(
-      messageOf(() =>
-        parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), acceptance: {} }),
-      ),
-    ).toContain("acceptance");
     expect(
       messageOf(() =>
         parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), typo: 1 }),
@@ -197,6 +201,123 @@ describe("parseGatePolicy", () => {
       gatePolicy: { version: 2 },
     });
     expect(() => loadGatePolicy(root)).toThrow(/version/);
+  });
+
+  it("B-01 accepts the anchors file's acceptance member, and leaves it absent when omitted", () => {
+    const acceptance = {
+      command: "pnpm",
+      args: [
+        "exec",
+        "vitest",
+        "run",
+        "--reporter=json",
+        "--testNamePattern",
+        "{behaviorId}",
+      ],
+      matcher: "vitest-json",
+    };
+    expect(
+      parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), acceptance }),
+    ).toEqual({ ...structuredClone(EXAMPLE_POLICY), acceptance });
+
+    // Omission is the signal `src/base-gates.ts` reads as "derive the
+    // baseline", so it must not arrive as an explicit `undefined` key.
+    const withoutMember = parseGatePolicy(structuredClone(EXAMPLE_POLICY));
+    expect("acceptance" in withoutMember).toBe(false);
+  });
+
+  it("B-01 refuses a non-object, missing, unknown or blank acceptance member naming the offender", () => {
+    const wellFormed = {
+      command: "pnpm",
+      args: ["exec", "vitest", "--testNamePattern", "{behaviorId}"],
+      matcher: "vitest-json",
+    };
+    const refuse = (acceptance: unknown): string =>
+      messageOf(() =>
+        parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), acceptance }),
+      );
+
+    for (const notAnObject of [null, 7, "pnpm test", ["pnpm"], true]) {
+      expect(refuse(notAnObject)).toContain("acceptance");
+    }
+    // Every member is mandatory: there is nothing to default a runner to.
+    expect(refuse({})).toContain('"command"');
+    expect(refuse({})).toContain('"args"');
+    expect(refuse({})).toContain('"matcher"');
+    const { command: _command, ...noCommand } = wellFormed;
+    expect(refuse(noCommand)).toContain('"command"');
+    expect(refuse({ ...wellFormed, runner: "vitest" })).toContain('"runner"');
+
+    expect(refuse({ ...wellFormed, command: "" })).toContain("command");
+    expect(refuse({ ...wellFormed, command: "  " })).toContain("command");
+    expect(refuse({ ...wellFormed, command: 7 })).toContain("command");
+    expect(refuse({ ...wellFormed, args: "exec vitest" })).toContain("args");
+    expect(refuse({ ...wellFormed, args: [] })).toContain("args");
+    expect(refuse({ ...wellFormed, args: ["exec", " "] })).toContain("args");
+  });
+
+  it("B-01 refuses args with no literal {behaviorId} token, naming the key", () => {
+    const refuse = (args: string[]): string =>
+      messageOf(() =>
+        parseGatePolicy({
+          ...structuredClone(EXAMPLE_POLICY),
+          acceptance: { command: "pnpm", args, matcher: "vitest-json" },
+        }),
+      );
+
+    // Without the token every behavior would run the same unfiltered suite and
+    // all of them would report as covered.
+    expect(refuse(["exec", "vitest", "run"])).toContain(
+      "gatePolicy.acceptance.args",
+    );
+    expect(refuse(["exec", "vitest", "run"])).toContain("{behaviorId}");
+    expect(refuse(["--testNamePattern", "{behaviourId}"])).toContain(
+      "{behaviorId}",
+    );
+    expect(refuse(["--testNamePattern", "behaviorId"])).toContain(
+      "{behaviorId}",
+    );
+
+    // The token is literal, not the D6 glob dialect that refuses `{` and `}`:
+    // a substring occurrence is enough, and no glob check runs over it.
+    expect(
+      parseGatePolicy({
+        ...structuredClone(EXAMPLE_POLICY),
+        acceptance: {
+          command: "pnpm",
+          args: ["exec", "vitest", "--testNamePattern=^{behaviorId}$"],
+          matcher: "vitest-json",
+        },
+      }).acceptance?.args,
+    ).toEqual(["exec", "vitest", "--testNamePattern=^{behaviorId}$"]);
+  });
+
+  it("B-01 refuses a matcher other than vitest-json, naming it", () => {
+    const refuse = (matcher: unknown): string =>
+      messageOf(() =>
+        parseGatePolicy({
+          ...structuredClone(EXAMPLE_POLICY),
+          acceptance: {
+            command: "pnpm",
+            args: ["--testNamePattern", "{behaviorId}"],
+            matcher,
+          },
+        }),
+      );
+
+    expect(refuse("jest-json")).toContain("jest-json");
+    expect(refuse("vitest")).toContain("vitest-json");
+    expect(refuse("VITEST-JSON")).toContain("VITEST-JSON");
+    expect(refuse(7)).toContain("matcher");
+  });
+
+  it("B-01 spells {behaviorId} the same way src/base-gates.ts substitutes it", () => {
+    // The token is declared in both modules — the config reader must not
+    // import the gate modules it configures — so the two spellings are pinned
+    // together rather than trusted to stay in sync.
+    expect(readFileSync(MODULE_SOURCE_PATH, "utf-8")).toContain(
+      `const BEHAVIOR_ID_TOKEN = "${BEHAVIOR_ID_TOKEN}"`,
+    );
   });
 
   it("B-07 refuses an unrecognised risk class naming it", () => {
@@ -312,7 +433,37 @@ describe("this repository's own afk.config.json", () => {
         testGlobs: ["**/*.test.ts"],
       },
       riskClasses: ["gate-policy", "deleted-test", "skipped-test"],
+      // Added by slice 02 (#85): this repo declares its own acceptance runner,
+      // so B-02's declared branch — not its derived baseline — is the live one
+      // whenever AFK runs on itself.
+      acceptance: {
+        command: "pnpm",
+        args: [
+          "exec",
+          "vitest",
+          "run",
+          "--reporter=json",
+          "--testNamePattern",
+          BEHAVIOR_ID_TOKEN,
+        ],
+        matcher: "vitest-json",
+      },
     });
+  });
+
+  it("B-07 declares the anchors file's acceptance shape, which resolves as the plan", () => {
+    const declared = loadGatePolicy(REPO_ROOT)?.acceptance;
+    expect(declared).toBeDefined();
+    expect(resolveAcceptancePlan(REPO_ROOT)).toEqual({
+      command: declared!.command,
+      args: declared!.args,
+      matcher: "vitest-json",
+    });
+    // The declared branch wins over the derived baseline. They happen to agree
+    // here, so the proof is that the plan is the *policy's* array: mutating the
+    // returned copy must not be able to reach it.
+    const plan = resolveAcceptancePlan(REPO_ROOT)!;
+    expect(plan.args).not.toBe(declared!.args);
   });
 
   it("P-02 leaves version, resourceKeys and architectureDoc untouched", () => {

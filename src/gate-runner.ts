@@ -33,6 +33,24 @@ export type GateStatus = "PASS" | "FAIL" | "INFRASTRUCTURE" | "SKIPPED";
 export type GateFailureKind = "COMMAND" | "CONFIGURATION" | null;
 
 /**
+ * The acceptance gate's declared id and stage (`prd.md` D8). They live here,
+ * beside {@link GateStatus}, rather than in `src/acceptance-gate.ts`, because
+ * three modules that must not import the gate itself still have to spell the
+ * id: `src/base-gates.ts` puts it in the lock-time bindable catalog, and the
+ * orchestrator keys its per-behavior coverage events off it. One aggregate
+ * gate, never one declaration per behavior — the behaviors are named in its
+ * `detail`, not in its id.
+ */
+export const ACCEPTANCE_GATE_ID = "acceptance:behaviors";
+
+/**
+ * Its own stage, not `deterministic`: the acceptance gate is the only gate
+ * whose verdict is derived from a runner's own report about named behaviors,
+ * and evidence readers group by stage.
+ */
+export const ACCEPTANCE_GATE_STAGE = "acceptance";
+
+/**
  * What an in-process gate reports. Structured, not prose: `detail` is
  * human-facing and nothing parses it, while `findings` is the machine-readable
  * half a later round or an operator surface reads.

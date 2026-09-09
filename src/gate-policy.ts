@@ -15,14 +15,36 @@ import { parseJsonWithUniqueKeys } from "./json-scan.js";
  * character. A validator that passes over what it does not understand
  * reproduces the defect this PRD exists to remove — `parseAfkManifest`
  * accepted and silently discarded `protectedChangeWaivers` — so an unknown
- * member is malformed, not forward compatibility. `acceptance` and `cost` are
- * unknown here until the slices that own them widen the known set.
+ * member is malformed, not forward compatibility. `cost` is unknown here until
+ * the slice that owns it widens the known set (#86).
  */
 
 const CONFIG_FILENAME = "afk.config.json";
 
-const POLICY_KEYS = ["version", "protectedPaths", "riskClasses"] as const;
+const POLICY_KEYS = [
+  "version",
+  "protectedPaths",
+  "riskClasses",
+  "acceptance",
+] as const;
 const PROTECTED_PATHS_KEYS = ["gatePolicyPaths", "testGlobs"] as const;
+const ACCEPTANCE_KEYS = ["command", "args", "matcher"] as const;
+
+/** Every runner-output matcher this version of AFK implements (D8). */
+const ACCEPTANCE_MATCHERS = ["vitest-json"] as const;
+
+/**
+ * The literal token an `args` entry must carry, substituted per behavior id by
+ * `src/acceptance-gate.ts`. Spelled here as well as in `src/base-gates.ts`
+ * (`BEHAVIOR_ID_TOKEN`) on purpose: this module is the config reader every gate
+ * module imports, so it must not import one of them back. A test in
+ * `src/gate-policy.test.ts` pins the two spellings together.
+ *
+ * Unrelated to {@link REJECTED_GLOB_CHARACTERS} below, which refuses `{` and
+ * `}` in the D6 glob dialect — this is literal string substitution, never
+ * matched as a glob.
+ */
+const BEHAVIOR_ID_TOKEN = "{behaviorId}";
 
 /**
  * Characters the D6 dialect refuses, in the order they are reported. The
@@ -69,10 +91,31 @@ export interface GatePolicyProtectedPaths {
   testGlobs: string[];
 }
 
+export type GateAcceptanceMatcher = (typeof ACCEPTANCE_MATCHERS)[number];
+
+/**
+ * How a project proves one behavior id is covered: the command to run per id,
+ * and the matcher that reads its output. Both halves are needed — a command
+ * with no matcher is an exit code, and D8 exists because an exit code cannot
+ * tell "zero tests matched" from "every matched test passed".
+ */
+export interface GatePolicyAcceptance {
+  command: string;
+  /** At least one entry carries the literal `{behaviorId}` token. */
+  args: string[];
+  matcher: GateAcceptanceMatcher;
+}
+
 export interface GatePolicy {
   version: 1;
   protectedPaths: GatePolicyProtectedPaths;
   riskClasses: GateRiskClass[];
+  /**
+   * Absent means the derived baseline in `src/base-gates.ts` decides, which is
+   * why this member is optional rather than defaulted here: the baseline needs
+   * a `package.json` probe, and this parser is pure.
+   */
+  acceptance?: GatePolicyAcceptance;
 }
 
 /**
@@ -95,6 +138,29 @@ function requireKnownKeys(
         unknown.length === 1 ? "member" : "members"
       } ${unknown.map((key) => `"${key}"`).join(", ")}; this version of AFK ` +
         `knows only ${known.join(", ")}`,
+    );
+  }
+}
+
+/**
+ * {@link requireKnownKeys} plus the other half, for a member whose sub-members
+ * are all mandatory. `gatePolicy`'s own members default when omitted, so this
+ * is not the rule up there; inside `acceptance` there is nothing to default to
+ * — a half-declared runner would launch the wrong command.
+ */
+function requireExactKeys(
+  value: Record<string, unknown>,
+  known: readonly string[],
+  field: string,
+  source: string,
+): void {
+  requireKnownKeys(value, known, field, source);
+  const missing = known.filter((key) => value[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `${source} ${field} is missing required ${
+        missing.length === 1 ? "member" : "members"
+      } ${missing.map((key) => `"${key}"`).join(", ")}`,
     );
   }
 }
@@ -277,6 +343,68 @@ function parseRiskClasses(value: unknown, source: string): GateRiskClass[] {
 }
 
 /**
+ * The three refusals the acceptance member owns (#85 AC4), each naming the
+ * offender: a shape that is not an exact `{ command, args, matcher }` object;
+ * `args` that never mention {@link BEHAVIOR_ID_TOKEN}, which would run the same
+ * unfiltered suite for every behavior and call all of them covered; and a
+ * matcher this version cannot read, which would be a verdict from an exit code.
+ */
+function parseAcceptance(
+  value: unknown,
+  source: string,
+): GatePolicyAcceptance {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} gatePolicy.acceptance must be a JSON object holding ` +
+        `command, args and matcher`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireExactKeys(input, ACCEPTANCE_KEYS, "gatePolicy.acceptance", source);
+
+  if (typeof input.command !== "string" || input.command.trim() === "") {
+    throw new Error(
+      `${source} gatePolicy.acceptance.command must be a non-blank string; ` +
+        `got ${JSON.stringify(input.command)}`,
+    );
+  }
+  const args = parseStringArray(
+    input.args,
+    "gatePolicy.acceptance.args",
+    source,
+  );
+  if (args.length === 0) {
+    throw new Error(
+      `${source} gatePolicy.acceptance.args must be a non-empty array of ` +
+        `strings`,
+    );
+  }
+  if (!args.some((entry) => entry.includes(BEHAVIOR_ID_TOKEN))) {
+    throw new Error(
+      `${source} gatePolicy.acceptance.args must carry the literal ` +
+        `${BEHAVIOR_ID_TOKEN} token in at least one entry, so each behavior ` +
+        `id selects its own tests; got ${JSON.stringify(args)}`,
+    );
+  }
+  if (
+    !ACCEPTANCE_MATCHERS.includes(input.matcher as GateAcceptanceMatcher)
+  ) {
+    throw new Error(
+      `${source} gatePolicy.acceptance.matcher ` +
+        `${JSON.stringify(input.matcher)} is not a matcher this version of ` +
+        `AFK implements; the supported matcher is ` +
+        `${ACCEPTANCE_MATCHERS.join(", ")}`,
+    );
+  }
+
+  return {
+    command: input.command,
+    args,
+    matcher: input.matcher as GateAcceptanceMatcher,
+  };
+}
+
+/**
  * Validate an already-parsed `gatePolicy` value. Pure: no filesystem access,
  * and the returned arrays are copies, so a caller mutating one cannot reach
  * the baseline constants.
@@ -309,6 +437,11 @@ export function parseGatePolicy(
       input.riskClasses === undefined
         ? [...GATE_RISK_CLASSES]
         : parseRiskClasses(input.riskClasses, source),
+    // Omitted stays omitted rather than becoming an explicit `undefined`: the
+    // absence is what `src/base-gates.ts` reads as "derive the baseline".
+    ...(input.acceptance === undefined
+      ? {}
+      : { acceptance: parseAcceptance(input.acceptance, source) }),
   };
 }
 
