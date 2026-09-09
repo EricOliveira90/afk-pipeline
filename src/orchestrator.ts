@@ -59,10 +59,16 @@ import {
   MAX_RESUME_ATTEMPTS,
 } from "./resume.js";
 import {
-  resolveBaseGateDeclarations,
+  resolveAcceptancePlan,
+  resolveBindableGateCatalog,
   resolveFullSuiteGateDeclarations,
   resolvePreQAGateDeclarations,
+  type BindableGate,
 } from "./base-gates.js";
+import {
+  acceptanceGateDeclaration,
+  type BehaviorCoverageRecord,
+} from "./acceptance-gate.js";
 import {
   lifecycle,
   type SliceIdentity,
@@ -98,6 +104,7 @@ import {
   withCrossProcessLock,
 } from "./command-runtime.js";
 import {
+  ACCEPTANCE_GATE_ID,
   createCandidateCheckpoint,
   resolveCandidateTreeId,
   verifyGateEvidence,
@@ -380,7 +387,12 @@ function longCommandRoleBounds(bounds: {
   };
 }
 
-function formatBaseGateCatalog(catalog: readonly GateDeclaration[]): string {
+/**
+ * The planner-facing catalog. Typed as {@link BindableGate} rather than
+ * `GateDeclaration` because the acceptance entry has no stage or `required` of
+ * its own — it is a binding target, and its declaration is built later.
+ */
+function formatBaseGateCatalog(catalog: readonly BindableGate[]): string {
   return catalog
     .map((gate) => {
       const command = gate.command
@@ -1332,7 +1344,7 @@ async function reviseAcceptedContract(
     contractResponseFilename: CONTRACT_RESPONSE_FILENAME,
     migrationReservation: migrationReservationBlock(config, slice.ghIssue),
     baseGateCatalog: formatBaseGateCatalog(
-      resolveBaseGateDeclarations(ctx.worktreeDir),
+      resolveBindableGateCatalog(ctx.worktreeDir),
     ),
     inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
   });
@@ -1372,7 +1384,7 @@ async function reviseAcceptedContract(
     revisedManifest,
     contractPath,
   );
-  const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
+  const gateCatalog = resolveBindableGateCatalog(ctx.worktreeDir);
   validateAcceptanceManifestBindings(revisedManifest, gateCatalog);
   const requestedPaths = escalation.paths.map((path) =>
     normalizeAcceptanceManifestPath(path, ESCALATION_FILENAME),
@@ -2751,7 +2763,7 @@ async function runImpasseAdjudication(
           );
           validateAcceptanceManifestBindings(
             manifest,
-            resolveBaseGateDeclarations(ctx.worktreeDir),
+            resolveBindableGateCatalog(ctx.worktreeDir),
           );
         } catch (error) {
           const defect = error instanceof Error ? error.message : String(error);
@@ -2858,7 +2870,7 @@ async function runImpasseAdjudication(
               ctx.slice.ghIssue,
             ),
             baseGateCatalog: formatBaseGateCatalog(
-              resolveBaseGateDeclarations(ctx.worktreeDir),
+              resolveBindableGateCatalog(ctx.worktreeDir),
             ),
             inlineSizeBudgetBytes: config.plannerInlineSizeBudgetBytes,
           });
@@ -3254,7 +3266,7 @@ async function negotiateAttempt(
         manifest,
         contractPath,
       );
-      const gateCatalog = resolveBaseGateDeclarations(ctx.worktreeDir);
+      const gateCatalog = resolveBindableGateCatalog(ctx.worktreeDir);
       validateAcceptanceManifestBindings(manifest, gateCatalog);
       return { manifest, gateCatalog };
     };
@@ -3322,7 +3334,7 @@ async function negotiateAttempt(
             ].join("\n")
           : `Do not write ${CONTRACT_RESPONSE_FILENAME} in this round.`;
         const baseGateCatalog = formatBaseGateCatalog(
-          resolveBaseGateDeclarations(ctx.worktreeDir),
+          resolveBindableGateCatalog(ctx.worktreeDir),
         );
         /**
          * Planner dispatch for this round. The loop runs more than once only
@@ -5520,19 +5532,54 @@ export async function runSliceExecute(
       // Automatic related-suite selection is PRD 4 scope (#86). PRD 3 keeps
       // the ADR 0012 amendment sequence: cheap typecheck/lint, then candidate
       // QA, then the full slice suite (architect A1).
-      const preQaDeclarations = resolvePreQAGateDeclarations(ctx.worktreeDir);
+      /**
+       * Per-behavior records the acceptance gate pushes as each filtered run
+       * settles, drained in `onGateOutcome` below. A buffer and not a callback
+       * straight into the journal because the artifact ids the event carries
+       * only exist once the attempt is written — and because
+       * `src/candidate-gate-phase.ts` must stay unedited (D22), so it cannot
+       * learn about this gate.
+       */
+      const acceptanceCoverage: BehaviorCoverageRecord[] = [];
+      // Undefined unless the locked manifest binds at least one behavior, which
+      // is what keeps every project that never opted in on today's path.
+      const acceptanceDeclaration = acceptanceGateDeclaration({
+        absSliceDir: ctx.absSliceDir,
+        plan: resolveAcceptancePlan(ctx.worktreeDir),
+        bounds: {
+          inactivityTimeoutMs:
+            config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+          heartbeatIntervalMs:
+            config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+          wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+        },
+        onBehaviorResult: (record) => acceptanceCoverage.push(record),
+      });
+      const preQaDeclarations = [
+        ...resolvePreQAGateDeclarations(ctx.worktreeDir),
+        // Pre-QA, not post-QA: an untested behavior must go back to the
+        // generator instead of costing an evaluator read (#85 AC1, D19).
+        ...(acceptanceDeclaration ? [acceptanceDeclaration] : []),
+      ];
       const fullSuiteDeclarations =
         resolveFullSuiteGateDeclarations(ctx.worktreeDir);
-      const preQaHasExecutable = preQaDeclarations.some(
-        (declaration) => declaration.command != null,
-      );
-      const checkpoint = [...preQaDeclarations, ...fullSuiteDeclarations].some(
-        (declaration) => declaration.command != null,
-      )
-        ? createCandidateCheckpoint(ctx.worktreeDir, checkpointDir)
-        : createCandidateCheckpoint(ctx.worktreeDir, checkpointDir, {
-            materialize: false,
-          });
+      // Both predicates widen on *bound work*, never on plan presence: the
+      // acceptance gate spawns the project's runner inside `gateCwd`, so it
+      // needs the materialized checkpoint and the `prepare` install exactly
+      // when it is going to run. A resolved plan with nothing bound to it must
+      // still leave a scriptless project paying neither.
+      const preQaHasExecutable =
+        acceptanceDeclaration != null ||
+        preQaDeclarations.some((declaration) => declaration.command != null);
+      const checkpoint =
+        acceptanceDeclaration != null ||
+        [...preQaDeclarations, ...fullSuiteDeclarations].some(
+          (declaration) => declaration.command != null,
+        )
+          ? createCandidateCheckpoint(ctx.worktreeDir, checkpointDir)
+          : createCandidateCheckpoint(ctx.worktreeDir, checkpointDir, {
+              materialize: false,
+            });
       implementationCandidateTreeIds.push(checkpoint.treeId);
       const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
@@ -5567,6 +5614,28 @@ export async function runSliceExecute(
               round,
               ...outcome,
             });
+            if (outcome.gateId !== ACCEPTANCE_GATE_ID) return;
+            // Drained, not copied: an infrastructure retry runs the gate
+            // again, and each attempt's records belong to that attempt's tree
+            // and artifacts.
+            for (const record of acceptanceCoverage.splice(0)) {
+              logger.event({
+                type: "behavior-coverage",
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                round,
+                attemptId: outcome.attemptId,
+                behaviorId: record.behaviorId,
+                gateId: outcome.gateId,
+                status: record.status,
+                matched: record.matched,
+                passed: record.passed,
+                failed: record.failed,
+                treeId: outcome.treeId,
+                evidenceArtifactId: outcome.evidenceArtifactId,
+                logArtifactId: outcome.logArtifactId,
+              });
+            }
           },
           onInfrastructureRetry: (message) => {
             logger.phase(message, "error", {

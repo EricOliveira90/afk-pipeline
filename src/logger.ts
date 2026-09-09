@@ -348,6 +348,32 @@ export class Logger {
 |-------|-------|------|--------|---------|----------|-----|
 ${gateRows}
 `;
+    // The acceptance gate reports one aggregate outcome above; this is the
+    // per-behavior breakdown behind it (#85 AC6). Rendered only when a
+    // coverage event exists, so a run with no bound behavior — every run on a
+    // project that never opted in — keeps today's summary byte-for-byte.
+    const coverageAttempts = runEvents.filter(
+      (event) => event.type === "behavior-coverage",
+    );
+    const coverageRows = coverageAttempts
+      .map(
+        (event) =>
+          `| ${event.ghIssue} | ${event.round} | ${event.behaviorId} | ` +
+          `${event.gateId} | ${event.status} | ${event.matched} | ` +
+          `${event.passed} | ${event.failed} | ${event.evidenceArtifactId} | ` +
+          `${event.logArtifactId} |`,
+      )
+      .join("\n");
+    const coverageSection =
+      coverageAttempts.length === 0
+        ? ""
+        : `
+## Behavior Coverage
+
+| Slice | Round | Behavior | Gate | Status | Matched | Passed | Failed | Evidence | Log |
+|-------|-------|----------|------|--------|---------|--------|--------|----------|-----|
+${coverageRows}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -401,7 +427,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}
+${gateSection}${coverageSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

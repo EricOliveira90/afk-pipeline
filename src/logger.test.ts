@@ -179,6 +179,103 @@ PM review: N/A
     }
   });
 
+  it("B-06 renders per-behavior coverage as its own section beside Base Gates", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "coverage");
+    recordTerminal(log, id("85", "Coverage gate", "afk/85"), { phase: "PASS" });
+    const shared = {
+      ghIssue: "85",
+      sliceNumber: "02",
+      round: 1,
+      attemptId: "a1",
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    };
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "acceptance:behaviors",
+      stage: "acceptance",
+      status: "FAIL",
+      failureKind: "COMMAND",
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:04.000Z",
+      durationMs: 4000,
+      exitCode: null,
+    });
+    log.event({
+      type: "behavior-coverage",
+      ...shared,
+      behaviorId: "B-01",
+      gateId: "acceptance:behaviors",
+      status: "covered",
+      matched: 3,
+      passed: 3,
+      failed: 0,
+    });
+    log.event({
+      type: "behavior-coverage",
+      ...shared,
+      behaviorId: "B-02",
+      gateId: "acceptance:behaviors",
+      status: "untested",
+      matched: 0,
+      passed: 0,
+      failed: 0,
+    });
+
+    const md = log.writeSummary();
+    // Beside the aggregate outcome, not instead of it: the gate reports one
+    // row above, and this section is the per-behavior breakdown behind it.
+    expect(md.indexOf("## Base Gates")).toBeGreaterThan(-1);
+    expect(md.indexOf("## Behavior Coverage")).toBeGreaterThan(
+      md.indexOf("## Base Gates"),
+    );
+    const coverage = md.slice(md.indexOf("## Behavior Coverage"));
+    expect(coverage).toContain(
+      "| 85 | 1 | B-01 | acceptance:behaviors | covered | 3 | 3 | 0 | ev-1 | log-1 |",
+    );
+    expect(coverage).toContain(
+      "| 85 | 1 | B-02 | acceptance:behaviors | untested | 0 | 0 | 0 | ev-1 | log-1 |",
+    );
+    expect(md).toContain("Pre-ship sanity gate: N/A");
+  });
+
+  it("P-03 renders no empty coverage section when no coverage event exists", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "no-coverage");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.event({
+      type: "gate-outcome",
+      ghIssue: "1",
+      sliceNumber: "01",
+      round: 1,
+      attemptId: "a1",
+      gateId: "typecheck",
+      stage: "base",
+      status: "PASS",
+      failureKind: null,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:01.000Z",
+      durationMs: 1000,
+      exitCode: 0,
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain("## Base Gates");
+    expect(md).not.toContain("## Behavior Coverage");
+    // The existing section keeps its exact tail, so an opted-out project's
+    // summary is byte-for-byte today's.
+    expect(md).toContain(
+      "| 1 | 1 | typecheck | PASS | 1000ms | ev-1 | log-1 |\n\n\n" +
+        "Pre-ship sanity gate: N/A",
+    );
+  });
+
   it("renders provenance for an adopted completed slice only", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "adopted");

@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SliceLifecycle } from "./slice-lifecycle.js";
+import type { BehaviorCoverageStatus } from "./acceptance-gate.js";
 import type {
   GateFailureKind,
   GateStatus,
@@ -152,6 +153,32 @@ export type RunEventPayload =
       endedAt: string;
       durationMs: number;
       exitCode: number | null;
+      treeId: string;
+      evidenceArtifactId: string;
+      logArtifactId: string;
+    }
+  | {
+      /**
+       * One behavior id's coverage verdict from one acceptance-gate attempt
+       * (#85 AC6). The aggregate gate reports a single `gate-outcome`, so
+       * without this event the per-behavior detail exists only as prose inside
+       * the gate log; here it is one line per behavior per attempt, carrying
+       * the same tree and artifact identity as its `gate-outcome` so a reader
+       * can join them. Descriptive: the gate's own status is the verdict, and
+       * nothing thresholds or acts on these counts.
+       */
+      type: "behavior-coverage";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      attemptId: string;
+      behaviorId: string;
+      gateId: string;
+      status: BehaviorCoverageStatus;
+      /** Tests the id's filter selected: `passed + failed`. */
+      matched: number;
+      passed: number;
+      failed: number;
       treeId: string;
       evidenceArtifactId: string;
       logArtifactId: string;

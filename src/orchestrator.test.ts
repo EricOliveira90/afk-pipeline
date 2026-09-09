@@ -37,10 +37,13 @@ import {
   assertSliceWorktreeOwnership,
 } from "./orchestrator.js";
 import {
+  resolveAcceptancePlan,
   resolveBaseGateDeclarations,
   resolveFullSuiteGateDeclarations,
   resolvePreQAGateDeclarations,
 } from "./base-gates.js";
+import { acceptanceGateDeclaration } from "./acceptance-gate.js";
+import { ACCEPTANCE_GATE_ID } from "./gate-runner.js";
 import type { NegotiateOutcome } from "./orchestrator.js";
 import { loadRunState } from "./run-state.js";
 import { createWorktree } from "./git.js";
@@ -552,6 +555,122 @@ describe("candidate and aggregate sanity sequencing", () => {
       },
     ]);
     expect(resolveCandidateQACommands(dir)).toEqual(["pnpm run typecheck"]);
+  });
+
+  /**
+   * The pre-QA call site's two decisions, as units (#85 B-06). The site builds
+   * `preQaDeclarations` and then asks two questions of it: does anything need a
+   * materialized checkpoint, and does anything need the `prepare` install. Both
+   * key off the same fact — whether an acceptance declaration exists — so that
+   * is what these assert.
+   */
+  function sliceWithBindings(gateIds: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), "afk-acceptance-slice-"));
+    tempDirs.push(dir);
+    writeFileSync(
+      join(dir, "acceptance-manifest.json"),
+      JSON.stringify({
+        version: 2,
+        fileScope: { kind: "paths", paths: ["src/a.ts"] },
+        migrationCount: 0,
+        behaviors: [
+          {
+            id: "B-01",
+            source: "contract.md",
+            given: "a candidate",
+            when: "the gate runs",
+            then: "coverage is decided",
+            observableResult: "a test named B-01",
+            preservation: false,
+            gateIds,
+          },
+        ],
+      }),
+      "utf-8",
+    );
+    return dir;
+  }
+
+  it("B-06 appends the acceptance declaration to the pre-QA set when a behavior is bound", () => {
+    const project = makeProject({ typecheck: "tsc", test: "vitest" });
+    const declaration = acceptanceGateDeclaration({
+      absSliceDir: sliceWithBindings(["tests", ACCEPTANCE_GATE_ID]),
+      plan: resolveAcceptancePlan(project),
+    });
+    const preQaDeclarations = [
+      ...resolvePreQAGateDeclarations(project),
+      ...(declaration ? [declaration] : []),
+    ];
+
+    // Pre-QA, so a red set takes the existing repair path instead of costing an
+    // evaluator read — and the full suite set is untouched.
+    expect(preQaDeclarations.map((d) => d.id)).toEqual([
+      "typecheck",
+      "lint",
+      ACCEPTANCE_GATE_ID,
+    ]);
+    expect(resolveFullSuiteGateDeclarations(project).map((d) => d.id)).toEqual([
+      "tests",
+    ]);
+    // Required, so `assertGateEvidenceReleasesEvaluation` demands its PASS.
+    expect(preQaDeclarations.at(-1)!.required).toBe(true);
+  });
+
+  it("B-06 widens both call-site predicates on bound work, never on plan presence", () => {
+    // A project with a resolvable plan but no typecheck/lint script: today both
+    // predicates are false, and they must stay false until a behavior binds.
+    const project = withLockfile(makeProject({ test: "vitest" }));
+    expect(resolveAcceptancePlan(project)).not.toBeNull();
+
+    const preQa = resolvePreQAGateDeclarations(project);
+    const fullSuite = resolveFullSuiteGateDeclarations(project);
+    const decide = (declaration: GateDeclaration | undefined) => ({
+      prepare:
+        declaration != null || preQa.some((d) => d.command != null),
+      materialize:
+        declaration != null ||
+        [...preQa, ...(declaration ? [declaration] : []), ...fullSuite].some(
+          (d) => d.command != null,
+        ),
+    });
+
+    const unbound = acceptanceGateDeclaration({
+      absSliceDir: sliceWithBindings(["tests"]),
+      plan: resolveAcceptancePlan(project),
+    });
+    expect(unbound).toBeUndefined();
+    // `tests` still carries a command, so materialization is already true here
+    // for today's reason; the install is the predicate that must not widen.
+    expect(decide(unbound).prepare).toBe(false);
+
+    const bound = acceptanceGateDeclaration({
+      absSliceDir: sliceWithBindings(["tests", ACCEPTANCE_GATE_ID]),
+      plan: resolveAcceptancePlan(project),
+    });
+    expect(bound).toBeDefined();
+    // The gate spawns the project's runner inside the checkpoint, so it needs
+    // both — even though its declaration carries no `command` of its own.
+    expect(bound!.command).toBeUndefined();
+    expect(decide(bound)).toEqual({ prepare: true, materialize: true });
+  });
+
+  it("P-03 leaves a scriptless project's checkpoint and install decisions alone", () => {
+    // A project with a `tests` script but no typecheck or lint, binding
+    // nothing: no acceptance declaration, so nothing about today changes.
+    const project = withLockfile(makeProject({ test: "vitest" }));
+    expect(
+      acceptanceGateDeclaration({
+        absSliceDir: sliceWithBindings(["tests"]),
+        plan: resolveAcceptancePlan(project),
+      }),
+    ).toBeUndefined();
+    expect(resolvePreQAGateDeclarations(project)).toEqual([
+      { id: "typecheck", stage: "base", required: false },
+      { id: "lint", stage: "base", required: false },
+    ]);
+    // And a project with no test runner at all resolves no plan, so a bound
+    // behavior cannot even reach lock-time validation.
+    expect(resolveAcceptancePlan(makeProject({ lint: "eslint" }))).toBeNull();
   });
 
   it("matches when all three steps are defined", () => {
@@ -2301,6 +2420,40 @@ describe("focused generator scope revision", () => {
     );
     expect(freshGeneratorPrompt).toContain("qa-review-r1-a1.json");
     expect(freshGeneratorPrompt).toContain("qa-report-r1-a1.md");
+  });
+
+  /**
+   * The one spawned assertion this slice adds (#85, AGENTS.md ladder): an `it`
+   * on the pre-QA evidence this scenario already produces, rather than a new
+   * spawned scenario. The fixture manifest binds its behaviors to `tests`, so
+   * nothing binds the acceptance gate — which is exactly the case P-03 is
+   * about, and the case every existing project is in.
+   */
+  it("P-03 leaves the pre-QA gate outcomes untouched for a slice binding nothing", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const events = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const gateOutcomes = events.filter(
+      (event) => event.type === "gate-outcome",
+    );
+
+    // The gate ran — otherwise this assertion would pass vacuously.
+    expect(gateOutcomes.length).toBeGreaterThan(0);
+    expect(new Set(gateOutcomes.map(({ gateId }) => gateId))).not.toContain(
+      ACCEPTANCE_GATE_ID,
+    );
+    expect(
+      events.filter((event) => event.type === "behavior-coverage"),
+    ).toEqual([]);
+    // No empty section in the artifact an operator reads, either.
+    expect(
+      readFileSync(join(runDir, "run-summary.md"), "utf-8"),
+    ).not.toContain("## Behavior Coverage");
   });
 
   it("resumes generation in the same implementation round", () => {
