@@ -1122,6 +1122,46 @@ describe("readReviewVerdict", () => {
     });
   });
 
+  it("accepts the JSON one or more blank lines below the findings heading", () => {
+    // Newly accepted input. Both guardian prompts say "immediately below", and
+    // both reviewers wrote ordinary Markdown spacing instead — twice in a row
+    // on PRD 4 slice #195, each time discarding a favorable review for a
+    // terminal UNPARSEABLE (ADR 0015). The blank line carries no meaning, so
+    // the parser skips it. What must stay rejected is covered below.
+    const spaced = (gap: string, guardian: "architect" | "pm" = "pm") =>
+      artifact("SHIP", [], guardian).replace(
+        `\n{"version":${guardian === "architect" ? 2 : 1},"findings":[]}`,
+        `${gap}{"version":${guardian === "architect" ? 2 : 1},"findings":[]}`,
+      );
+    for (const gap of ["\n\n", "\n\n\n", "\n   \n"]) {
+      expect(parseGuardianReview(spaced(gap))).toEqual({
+        outcome: "SHIP",
+        findings: [],
+      });
+      expect(parseGuardianReview(spaced(gap, "architect"), "architect")).toEqual(
+        { outcome: "SHIP", findings: [] },
+      );
+    }
+    // The findings themselves still arrive intact across the gap.
+    expect(
+      parseGuardianReview(
+        artifact("ACCEPT-WITH-NOTES", [finding]).replace(
+          '\n{"version":1',
+          '\n\n{"version":1',
+        ),
+      ),
+    ).toEqual({
+      outcome: "ACCEPT-WITH-NOTES",
+      findings: [
+        {
+          ...finding,
+          reachableTrigger: null,
+          introducedByReviewedDiff: null,
+        },
+      ],
+    });
+  });
+
   it("B-04 rejects missing, malformed, or verdict-inconsistent findings blocks", () => {
     const invalid = [
       "**Verdict:** SHIP\n",
@@ -1137,11 +1177,17 @@ describe("readReviewVerdict", () => {
         '{"version":1,"findings":[]}',
         '{"version":1,"findings":[],"extra":true}',
       ),
-      artifact("SHIP", []).replace(
-        "## Structured findings (v1)\n",
-        "## Structured findings (v1)\n\n",
-      ),
       artifact("SHIP", []).replace("**Verdict:** SHIP", "## Verdict: SHIP"),
+      // Still rejected: the heading is the last thing in the file, or it is
+      // followed by nothing but blank lines. Skipping blank lines must not
+      // turn an absent findings block into a parse.
+      artifact("SHIP", []).replace('{"version":1,"findings":[]}', ""),
+      artifact("SHIP", []).replace('{"version":1,"findings":[]}', "\n\n"),
+      // Still rejected: prose where the JSON belongs.
+      artifact("SHIP", []).replace(
+        '{"version":1,"findings":[]}',
+        "No findings this round.",
+      ),
     ];
     for (const content of invalid) {
       expect(parseGuardianReview(content)).toEqual({
