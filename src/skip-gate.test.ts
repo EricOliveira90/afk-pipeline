@@ -6,9 +6,16 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_SKIP_DETECTORS, DEFAULT_TEST_GLOBS } from "./gate-policy.js";
 import {
   runSkipGate,
@@ -129,6 +136,60 @@ describe("tests:skipped gate", () => {
     expect(outcome.status).toBe("FAIL");
     expect(outcome.detail).toContain("it\\.todo");
     expect(outcome.detail).toContain("describe\\.only");
+  });
+
+  it("[behavior:B-06] counts detector text only where it is code, not in a string or a comment", () => {
+    const repo = makeRepo();
+    // Exactly the shape of this gate's own fixtures and of the parser examples
+    // in `src/gate-policy.test.ts`: a test file that must *spell* a skip in
+    // order to test one. Counting these made the gate fail the slice that
+    // introduced it (QA-01).
+    write(
+      repo,
+      "src/detector.test.ts",
+      [
+        'import { it, expect } from "vitest";',
+        '// A comment about it.skip and describe.only must not count.',
+        '/* Nor a block comment naming it.todo. */',
+        'const patterns = ["it\\\\.skip", "describe\\\\.only", "it\\\\.todo"];',
+        'const sample = `it.skip("x", () => {});`;',
+        'it("counts nothing here", () => expect(patterns.length + sample.length).toBeGreaterThan(0));',
+        "",
+      ].join("\n"),
+    );
+    expect(runOn(repo)).toMatchObject({ status: "PASS", failureKind: null });
+
+    // The same file with one real call is still caught.
+    write(
+      repo,
+      "src/detector.test.ts",
+      [
+        'import { it, expect } from "vitest";',
+        '// A comment about it.skip must not count.',
+        'it.skip("genuinely disabled", () => expect(1).toBe(1));',
+        "",
+      ].join("\n"),
+    );
+    const outcome = runOn(repo);
+    expect(outcome).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
+    expect(outcome.detail).toContain("it\\.skip");
+    expect(outcome.detail).toContain("1 → 2");
+  });
+
+  it("[behavior:B-06] keeps its own module a text file Git can diff", () => {
+    // A raw control byte in the source makes Git classify the module as binary,
+    // and then no diff, review or text merge can read it (QA-02). The composite
+    // key's separator is written as an escape instead.
+    const source = readFileSync(
+      fileURLToPath(new URL("./skip-gate.ts", import.meta.url)),
+      "utf-8",
+    );
+    const control = [...source].filter((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 && char !== "\n" && char !== "\r" && char !== "\t";
+    });
+    expect(control).toEqual([]);
+    expect(source).toContain('const KEY_SEPARATOR = "\\u001f"');
   });
 
   it("[behavior:B-06] fails closed with no detector, and with a declared test file no detector covers", () => {
