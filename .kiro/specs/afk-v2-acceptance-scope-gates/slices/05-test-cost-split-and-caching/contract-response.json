@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "round": 3,
+  "responses": [
+    {
+      "findingId": "F-14",
+      "position": "CONDITION_MET",
+      "evidence": "src/acceptance-gate.test.ts is added to '## Files expected to change' (after src/gate-cache.test.ts) and to the manifest fileScope.paths, with a named observable result: the 'Changes to existing behavior' bullet, the new Test plan scenario and the GATE_EVIDENCE_VERSION DoD item all name src/acceptance-gate.test.ts:326 (expect(GATE_EVIDENCE_VERSION).toBe(2), imported at :24) as becoming 3 alongside src/gate-runner.test.ts:629 and :978-979, and B-03's observableResult carries the same three assertions. The contract also records that :134's 'version: 2' is an acceptance-manifest fixture, not gate evidence, and stays 2, so no other edit to that file is authorized."
+    },
+    {
+      "findingId": "F-15",
+      "position": "CONDITION_MET",
+      "evidence": "The contract now settles the reader side: SUPPORTED_GATE_EVIDENCE_VERSIONS (src/gate-runner.ts:27) becomes [1, 2, 3] so verifyGateEvidence (:804-807) accepts version 1, 2 and 3 and the version-1 branch at :835 is unchanged; the version-keyed findings rule in the docstring at src/gate-runner.ts:22-27 is rewritten to 'version 1 may not carry findings; version 2 and version 3 may', a version-3 document carrying findings behaves exactly as a version-2 one because this slice adds no findings semantics, and the docstring records both bumps. The DoD item and the new Test plan scenario assert the accepted list, the refusals that remain (unsupported version, version-1 with findings) and acceptance of a version-3 document with findings."
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/gate-policy.ts",
+      "src/gate-policy.test.ts",
+      "src/base-gates.ts",
+      "src/base-gates.test.ts",
+      "src/gate-runner.ts",
+      "src/gate-runner.test.ts",
+      "src/gate-cache.ts",
+      "src/gate-cache.test.ts",
+      "src/acceptance-gate.test.ts",
+      "src/skip-gate.ts",
+      "src/skip-gate.test.ts",
+      "src/candidate-gate-phase.ts",
+      "src/post-qa-gates.ts",
+      "src/post-qa-gates.test.ts",
+      "src/preship.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/qa-orchestration.test.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/run-events.ts",
+      "src/ship-gate.ts",
+      "src/ship-gate.test.ts",
+      "architecture.md",
+      "agents.md",
+      "claude.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #86 \"adds the cost key ... and to its reader src/gate-policy.ts\"",
+      "given": "gatePolicy.cost declares cheapThresholdMs, environmentSensitive, cacheEnabled, relatedTests and skipDetectors",
+      "when": "parseGatePolicy parses it and resolveTestCostPlan(cwd) in src/base-gates.ts loads it for a live run",
+      "then": "the typed cost returns with defaults applied, malformed input is refused naming the path, and declaration assembly, resolveCheapGateCatalog, the orchestrator's cache options and the skip-gate declaration each take their part from that one plan with no second policy read",
+      "observableResult": "src/gate-policy.test.ts accepts the full cost object and refuses an unknown sub-key, a non-number cheapThresholdMs, empty patterns and a bad testGlob metacharacter; src/base-gates.test.ts asserts resolveTestCostPlan reads loadGatePolicy(cwd).cost at the src/base-gates.ts:108 site and that a declared environmentSensitive entry changes the declaration resolvePreQAGateDeclarations assembles",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #86 \"test:budgets is the first declared member\"; D16; ADR 0063",
+      "given": "cost.environmentSensitive lists test:budgets, package.json:33 declares the script, and SANITY_STEPS is unchanged so the step is declared outside the sanity plan",
+      "when": "src/base-gates.ts assembles the declarations through resolveScriptStep and a phase runs that gate red",
+      "then": "it carries environmentSensitive true and required false, executes, records its real FAIL, stays out of the repair failure set, consumes no round, is listed as advisory in run-summary.md and the draft PR body, and appears in neither resolveSanityCommands nor resolveCandidateQACommands nor resolveBindableGateCatalog, so a red budget cannot fail the pre-ship gate or candidate QA",
+      "observableResult": "src/base-gates.test.ts asserts the declaration fields, that resolveFullSuiteGateDeclarations appends it after tests, and that resolveSanityPlan(repoRoot) step names stay [\"typecheck\",\"lint\",\"tests\"] while resolveSanityCommands(repoRoot), resolveCandidateQACommands(repoRoot) and resolveBindableGateCatalog(repoRoot) contain no test:budgets entry; src/post-qa-gates.test.ts asserts decideCandidateGatePhase does not name it; src/logger.test.ts and src/ship-gate.test.ts assert the advisory block lists it; package.json is unmodified",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #86 AC \"A green gate result on an identical tree ... is reused\"; D17",
+      "given": "gate-cache.json holds a PASS keyed by gate ID, resolved command and args, and tree ID, with cacheEnabled true",
+      "when": "runGates reaches that declaration at the same tree ID with the same command and args",
+      "then": "the gate is not spawned, the cached PASS is recorded marked reused, and run-summary.md states the reuse",
+      "observableResult": "src/gate-cache.test.ts and src/gate-runner.test.ts assert no process spawned and the reuse marker; src/logger.test.ts asserts the reuse line",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #86 AC \"a changed tree or definition invalidates it\"; D17",
+      "given": "a cache entry for gate typecheck at tree T",
+      "when": "the gate runs at another tree, with changed command or args, with cacheEnabled false, or against a malformed cache file",
+      "then": "the lookup misses, the gate executes normally, and nothing throws",
+      "observableResult": "src/gate-cache.test.ts covers each miss case and asserts the gate executed; a corrupt file is a miss, not an exception",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #86 \"verification command is derived from the catalog\"; D18; ADR 0038",
+      "given": "the cheap-gate catalog resolved from cost.cheapThresholdMs (default 120000) in src/base-gates.ts, and a --test-command check defined over required cheap gate IDs rather than over the derived command string",
+      "when": "src/orchestrator.ts:6364 calls resolveGeneratorTestCommand with no override, with \"pnpm run typecheck && pnpm test:fast\", with \"pnpm typecheck\", and with \"pnpm test:fast\"",
+      "then": "the derived command is the required cheap gates' commands joined with && in gate order excluding the full-suite tests gate (pnpm run typecheck for this repo), an override covering every required cheap gate is accepted even when it adds segments such as pnpm test:fast, pnpm typecheck normalizes to the same segment as pnpm run typecheck, and an override omitting a required cheap gate refuses the launch naming the omitted gate IDs",
+      "observableResult": "src/orchestrator.test.ts:466's describe block asserts the derived command, the accepted override, the normalization and the refusal naming typecheck; a further assertion reads the --test-command value out of AGENTS.md and CLAUDE.md, asserts both are the literal \"pnpm run typecheck && pnpm test:fast\" and that the check accepts it",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #86 \"detector for newly introduced skip and only forms\"; D7",
+      "given": "tests:skipped declared in postQaDeclarations (src/orchestrator.ts:5899-5915) between scopeGateDeclaration and fullSuiteDeclarations, taking ctx.worktreeDir and featBranch from the pair the scope gate uses",
+      "when": "the post-QA phase runs against a candidate adding it.skip to a file matching a detector's testGlobs, a candidate whose only skip was already on the base tree, and a project whose test files match no declared detector",
+      "then": "the gate returns FAIL through GateDeclaration.run and decideCandidateGatePhase returns REPAIR naming it, returns PASS for the pre-existing skip, and fails closed with no matching detector",
+      "observableResult": "src/skip-gate.test.ts asserts the three outcomes and the declaration shape; the four existing spawned assertions at src/qa-orchestration.test.ts:1071, :2281-2287, :2309-2315 and :2432 that assert post-QA gate IDs as [\"scope\", \"tests\"] are updated to [\"scope\", \"tests:skipped\", \"tests\"] and are green",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #86 AC \"never pays for a dependent suite; independent failures still arrive together\"; D16, D17",
+      "given": "tests declared with prerequisite typecheck and test:budgets with prerequisite tests, alongside an independent lint declaration",
+      "when": "typecheck fails in an attempt",
+      "then": "the dependents are recorded SKIPPED naming the failed prerequisite, lint still executes and reports in the same attempt, and both skips are explicit in evidence and run-summary.md",
+      "observableResult": "src/gate-runner.test.ts asserts the dependent spawned nothing and carries the prerequisite name while the independent gate's result is in the same evidence document; src/logger.test.ts asserts the skip line",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "src/gate-policy.ts:458-468 loadGatePolicy",
+      "given": "a repo with no afk.config.json, or a gatePolicy with no cost member",
+      "when": "the policy is loaded and the cost plan resolved",
+      "then": "the documented defaults apply and protectedPaths, riskClasses and acceptance behavior is unchanged",
+      "observableResult": "src/gate-policy.test.ts passes unchanged apart from the added cost cases",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "ADR 0012; src/preship.ts:105-153",
+      "given": "resolveSanityPlan as the single source for the sanity command set, with SANITY_STEPS unchanged by this slice",
+      "when": "resolveSanityCommands, resolveCandidateQACommands, projectSanityGateDeclarations and runPreShipSanity read it",
+      "then": "they still agree about which script backs each step, the aggregate pre-ship suite still runs, and no environment-sensitive gate command enters either command list",
+      "observableResult": "existing preship and pre-ship gate assertions stay green, with resolveSanityPlan's step names still [\"typecheck\", \"lint\", \"tests\"] and resolveSanityCommands(repoRoot)/resolveCandidateQACommands(repoRoot) free of test:budgets as asserted in src/base-gates.test.ts",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "src/orchestrator.ts:5558-5563 preQaDeclarations",
+      "given": "the pre-QA/post-QA split with the acceptance gate in the pre-QA set",
+      "when": "a slice round runs",
+      "then": "cheap gates and the acceptance gate run before candidate QA, the full suite runs only after QA accepts that exact tree, and a full-suite failure returns evidence to the next repair round",
+      "observableResult": "the existing spawned pre-QA gate-ID assertions of [\"typecheck\", \"lint\"] in src/qa-orchestration.test.ts stay green unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "src/base-gates.ts:107-160",
+      "given": "a project declaring no gatePolicy.cost",
+      "when": "resolveAcceptancePlan and resolveBindableGateCatalog run",
+      "then": "they return today's answers, and a malformed policy still throws rather than degrading to the derived baseline",
+      "observableResult": "existing acceptance-plan and bindable-catalog assertions stay green after the cost plumbing lands",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

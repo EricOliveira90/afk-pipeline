@@ -61,8 +61,10 @@ import {
 import {
   resolveAcceptancePlan,
   resolveBindableGateCatalog,
+  resolveCheapGateCatalog,
   resolveFullSuiteGateDeclarations,
   resolvePreQAGateDeclarations,
+  resolveTestCostPlan,
   type BindableGate,
 } from "./base-gates.js";
 import {
@@ -122,6 +124,7 @@ import {
   runPostQAGates,
 } from "./post-qa-gates.js";
 import { scopeGateDeclaration } from "./scope-gate.js";
+import { skipGateDeclaration } from "./skip-gate.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -5583,6 +5586,22 @@ export async function runSliceExecute(
       implementationCandidateTreeIds.push(checkpoint.treeId);
       const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
+      // One read of the test-cost policy for this round, shared by the gate
+      // cache and the skip gate below (#86 B-01: `resolveTestCostPlan` is the
+      // only production reader of `gatePolicy.cost`).
+      const costPlan = resolveTestCostPlan(ctx.worktreeDir);
+      // Per-run, under this run's own artifact directory: reuse is scoped to a
+      // run's attempts, never shared across runs (#86 B-03).
+      const gateCache = {
+        path: join(
+          config.repoRoot,
+          ".afk",
+          "artifacts",
+          pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+          "gate-cache.json",
+        ),
+        enabled: costPlan.cacheEnabled,
+      };
       try {
         const preQaGateRun = await runCandidateGatePhase({
           repoRoot: config.repoRoot,
@@ -5597,6 +5616,7 @@ export async function runSliceExecute(
           ...(gatePrepare && preQaHasExecutable
               ? { prepare: gatePrepare }
               : {}),
+          cache: gateCache,
           label: "pre-QA gates",
           signal,
           infrastructureRetries:
@@ -5911,6 +5931,17 @@ export async function runSliceExecute(
               acceptedPairIntact,
               options: { migrationPathPattern: config.migrationPathPattern },
             }),
+            // Between the file-scope gate and the suite (#86 B-06): a candidate
+            // that went green by disabling a test is caught by comparison, not
+            // by running anything, so it must not sit behind the ~7-minute
+            // suite — and unlike the suite it cannot be made green by a
+            // toolchain that is missing.
+            skipGateDeclaration({
+              worktreeDir: ctx.worktreeDir,
+              featureRef: featBranch,
+              detectors: costPlan.skipDetectors,
+              testFileGlobs: costPlan.testFileGlobs,
+            }),
             ...fullSuiteDeclarations,
           ];
           const postQaGates = await runPostQAGates({
@@ -5924,6 +5955,7 @@ export async function runSliceExecute(
             evidenceDir,
             declarations: postQaDeclarations,
             ...(gatePrepare ? { prepare: gatePrepare } : {}),
+            cache: gateCache,
             signal,
             infrastructureRetries:
               config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
@@ -6360,8 +6392,15 @@ export async function runPipeline(
   const featBranch = featureBranch(prdSlug, provider);
   logger.setFeatureBranch(featBranch);
   const relevantFilesBlock = formatRelevantFiles(readRelevantFiles(prdDir));
-  // Resolve the generator's local verification command once per run.
-  const testCommand = resolveGeneratorTestCommand(repoRoot, config.testCommand);
+  // Resolve the generator's local verification command once per run, derived
+  // from the cheap-gate catalog so what the generator iterates on cannot drop a
+  // gate the candidate must pass (#86 B-05, D18). The catalog is passed in
+  // rather than imported by `preship.ts`, because `base-gates.ts` imports it.
+  const testCommand = resolveGeneratorTestCommand(
+    repoRoot,
+    resolveCheapGateCatalog(repoRoot),
+    config.testCommand,
+  );
   let scope: ResolvedRunScope | undefined;
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;

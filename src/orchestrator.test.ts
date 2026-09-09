@@ -27,6 +27,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -39,6 +40,7 @@ import {
 import {
   resolveAcceptancePlan,
   resolveBaseGateDeclarations,
+  resolveCheapGateCatalog,
   resolveFullSuiteGateDeclarations,
   resolvePreQAGateDeclarations,
 } from "./base-gates.js";
@@ -57,6 +59,7 @@ import {
   resolveSanityCommands,
   resolveTestCommand,
   runPreShipSanity,
+  uncoveredCheapGateIds,
   type SanityCommandOutcome,
   type SanityGateResult,
 } from "./preship.js";
@@ -466,19 +469,27 @@ describe("resolveTestCommand", () => {
 describe("resolveGeneratorTestCommand", () => {
   it("prefers an explicit override over the project's test script", () => {
     const dir = makeProject({ "test:run": "vitest run" });
-    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
-      "pnpm test:fast",
-    );
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        resolveCheapGateCatalog(dir),
+        "pnpm test:fast",
+      ),
+    ).toBe("pnpm test:fast");
   });
 
   it("resolves the project's test script when no override is given", () => {
     const dir = makeProject({ "test:run": "vitest run" });
-    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test:run");
+    expect(resolveGeneratorTestCommand(dir, resolveCheapGateCatalog(dir))).toBe(
+      "pnpm test:run",
+    );
   });
 
   it("falls back to `pnpm test` when the project defines no test script", () => {
     const dir = makeProject({ build: "tsc" });
-    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test");
+    expect(resolveGeneratorTestCommand(dir, resolveCheapGateCatalog(dir))).toBe(
+      "pnpm test",
+    );
   });
 
   it("resolves independently of the sanity gate's command set", () => {
@@ -487,10 +498,93 @@ describe("resolveGeneratorTestCommand", () => {
       "test:run": "vitest run",
     });
     // The two answers can differ, and the gate keeps the full one.
-    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
-      "pnpm test:fast",
-    );
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        resolveCheapGateCatalog(dir),
+        "pnpm run typecheck && pnpm test:fast",
+      ),
+    ).toBe("pnpm run typecheck && pnpm test:fast");
     expect(resolveSanityCommands(dir).join(" ")).toContain("pnpm run test:run");
+  });
+
+  /**
+   * [behavior:B-05] The derivation and the override check, as one block: with no
+   * override the command *is* the required cheap gates' own commands, and an
+   * override is judged by which gate ids it covers rather than by string
+   * equality with that derivation.
+   */
+  it("[behavior:B-05] derives the command from the cheap-gate catalog and validates an override over gate ids", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      test: "vitest",
+    });
+    const catalog = resolveCheapGateCatalog(dir);
+
+    // The full-suite gate is excluded by identity, so a ~7-minute suite never
+    // enters an edit cycle (D18) — and `lint`, absent from this project, has no
+    // command to contribute.
+    expect(catalog.map((gate) => gate.id)).toEqual(["typecheck", "lint"]);
+    expect(resolveGeneratorTestCommand(dir, catalog)).toBe("pnpm run typecheck");
+
+    // An override may add a faster subset; it may not drop a required cheap
+    // gate, and the refusal names the gate id, not the command string.
+    expect(() =>
+      resolveGeneratorTestCommand(dir, catalog, "pnpm test:fast"),
+    ).toThrow(/typecheck/);
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        catalog,
+        "pnpm run typecheck && pnpm test:fast",
+      ),
+    ).toBe("pnpm run typecheck && pnpm test:fast");
+    // `pnpm <script>` and `pnpm run <script>` are the same instruction.
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        catalog,
+        "pnpm typecheck && pnpm test:fast",
+      ),
+    ).toBe("pnpm typecheck && pnpm test:fast");
+    // Extra segments are permitted and unvalidated (ADR 0038).
+    expect(uncoveredCheapGateIds(catalog, "pnpm run typecheck && pnpm x")).toEqual(
+      [],
+    );
+    expect(uncoveredCheapGateIds(catalog, "pnpm test:fast")).toEqual([
+      "typecheck",
+    ]);
+  });
+
+  /**
+   * [behavior:B-05] The two documents that tell an operator (and a babysit
+   * prompt) how to launch a self-run must agree with each other and with the
+   * check, because a documented command the check refuses stops a run before it
+   * starts. Read out of the documents rather than restated here, so a future
+   * edit to either one is what fails.
+   */
+  it("[behavior:B-05] AGENTS.md and CLAUDE.md document the same accepted self-run --test-command", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const documented = ["AGENTS.md", "CLAUDE.md"].map((name) => {
+      const text = readFileSync(join(repoRoot, name), "utf-8");
+      const match = text.match(/--test-command "([^"]+)"/);
+      expect(match, `${name} must document a self-run --test-command`).not.toBe(
+        null,
+      );
+      return match![1]!;
+    });
+    expect(documented[0]).toBe(documented[1]);
+    expect(documented[0]).toBe("pnpm run typecheck && pnpm test:fast");
+
+    // And this repo's own check accepts it.
+    const catalog = resolveCheapGateCatalog(repoRoot);
+    expect(catalog.map((gate) => gate.id)).toEqual(["typecheck", "lint"]);
+    for (const command of documented) {
+      expect(uncoveredCheapGateIds(catalog, command)).toEqual([]);
+      expect(resolveGeneratorTestCommand(repoRoot, catalog, command)).toBe(
+        command,
+      );
+    }
   });
 });
 
@@ -535,6 +629,9 @@ describe("candidate and aggregate sanity sequencing", () => {
       "pnpm run typecheck",
       "pnpm run test",
     ]);
+    // The two phase resolvers additionally stamp the cost metadata AFK declares
+    // in code (#86 B-01); `resolveBaseGateDeclarations` above deliberately does
+    // not, because its other consumer is the bindable catalog.
     expect(resolvePreQAGateDeclarations(dir)).toEqual([
       {
         id: "typecheck",
@@ -542,8 +639,9 @@ describe("candidate and aggregate sanity sequencing", () => {
         required: true,
         command: "pnpm",
         args: ["run", "typecheck"],
+        expectedCostMs: 20_000,
       },
-      { id: "lint", stage: "base", required: false },
+      { id: "lint", stage: "base", required: false, expectedCostMs: 20_000 },
     ]);
     expect(resolveFullSuiteGateDeclarations(dir)).toEqual([
       {
@@ -552,6 +650,8 @@ describe("candidate and aggregate sanity sequencing", () => {
         required: true,
         command: "pnpm",
         args: ["run", "test"],
+        expectedCostMs: 420_000,
+        prerequisiteGateIds: ["typecheck"],
       },
     ]);
     expect(resolveCandidateQACommands(dir)).toEqual(["pnpm run typecheck"]);
@@ -664,9 +764,12 @@ describe("candidate and aggregate sanity sequencing", () => {
         plan: resolveAcceptancePlan(project),
       }),
     ).toBeUndefined();
+    // The declared cost (#86 B-01) is stamped on every phase declaration,
+    // commandless ones included: the cheap-gate catalog reads it, and a gate
+    // with no script is trivially cheap rather than unpriced.
     expect(resolvePreQAGateDeclarations(project)).toEqual([
-      { id: "typecheck", stage: "base", required: false },
-      { id: "lint", stage: "base", required: false },
+      { id: "typecheck", stage: "base", required: false, expectedCostMs: 20_000 },
+      { id: "lint", stage: "base", required: false, expectedCostMs: 20_000 },
     ]);
     // And a project with no test runner at all resolves no plan, so a bound
     // behavior cannot even reach lock-time validation.
