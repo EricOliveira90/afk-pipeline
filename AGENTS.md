@@ -47,17 +47,21 @@ Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
 ```bash
-afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm typecheck && pnpm test:fast"
+afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm run typecheck && pnpm test:fast"
 ```
 
 (Substitute `afk`/`afk-claude` for other backends; keep the flag.)
 
-**Typecheck is mandatory in the command.** Vitest strips types without
-checking them: run 5 of the PRD 1 self-runs used the bare `test:fast`
-form, the generator drove 8 commits to green over code that did not
-compile, and the slice died to a misclassified gate failure (#120).
-This is the interim form until the command is derived from the gate
-catalog (`docs/specs/afk-v2-plan.md` §3 item 2).
+**Typecheck is mandatory in the command, and now enforced.** Vitest strips
+types without checking them: run 5 of the PRD 1 self-runs used the bare
+`test:fast` form, the generator drove 8 commits to green over code that did
+not compile, and the slice died to a misclassified gate failure (#120).
+Since #86 the command is *derived* from the cheap-gate catalog — with no
+`--test-command` at all this repo gets `pnpm run typecheck` — and an
+override is checked against the catalog's required gate **ids**: it may add a
+faster subset, but dropping `typecheck` is refused before the run starts.
+`CLAUDE.md` carries the same literal command, and
+`src/orchestrator.test.ts` reads it out of both documents.
 
 Why the flag at all: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
 shipped `--test-command`, but the flag only helps if the launch uses

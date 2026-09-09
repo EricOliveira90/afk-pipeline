@@ -44,10 +44,16 @@ Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
 ```bash
-afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm test:fast"
+afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm run typecheck && pnpm test:fast"
 ```
 
 (Substitute `afk`/`afk-claude` for other backends; keep the flag.)
+
+`typecheck` is not optional here: vitest strips types without checking them,
+and a bare `test:fast` override is now **refused** before the run starts,
+because the command is derived from the cheap-gate catalog and an override is
+checked against that catalog's required gate ids (#86). `AGENTS.md` carries
+the same literal command, and `src/orchestrator.test.ts` reads it out of both.
 
 Why: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
 shipped `--test-command`, but the flag only helps if the launch uses
