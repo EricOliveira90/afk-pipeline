@@ -74,7 +74,8 @@ when one is quoting the other.
   (bold, with colon). This is parsed by the orchestrator. Do not use a
   markdown heading for it.
 - The file MUST contain exactly one `## Structured findings (v2)` heading.
-  Put exactly one single-line JSON object immediately below it:
+  Put exactly one single-line JSON object below it. A blank line between the
+  heading and the JSON is fine; nothing but blank lines may come between them.
   `{"version":2,"findings":[{"id":"A-01","title":"...","class":"INTEGRITY","clearCondition":"...","disposition":"OPEN","reachableTrigger":"A normal retry reads the invalid durable state.","introducedByReviewedDiff":true}]}`.
   Use an empty `findings` array for SHIP. ACCEPT-WITH-NOTES and
   FIX-BEFORE-SHIP require at least one finding. IDs must be unique and
