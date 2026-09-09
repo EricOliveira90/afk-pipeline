@@ -1,0 +1,102 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03", "B-05"],
+      "evidence": "\"matched is `numPassedTests + numFailedTests`; matched `0` is untested, `numFailedTests > 0` is failed, PASS is matched `>= 1` with `numFailedTests === 0`\" plus \"in this tree's vitest 3.2.4 a filtered run leaves every non-matching test collected and counted there as skipped (`@vitest/runner`'s `interpretTaskModes`; the reporter counts only `pass`/`fail` into `numPassedTests`/`numFailedTests`)\" and B-03's observableResult \"unit tests over documents transcribed verbatim from three real filtered runs — match-and-pass, match-and-fail, no-match — spawning no vitest\"",
+      "expected": "The matcher rule must be tied to the shape a real `vitest run --reporter=json --testNamePattern <id>` run actually emits, so that the gate's two load-bearing verdicts — untested and PASS — are reachable in production and are proved by evidence rather than by fixtures the slice author invents.",
+      "observed": "The condition is met. B-03 restates PASS and untested over `numPassedTests`/`numFailedTests`, whose filtered-run behavior is evidenced, and records why `numTotalTests` is not the match count with a source that checks out in this tree: `@vitest/runner@3.2.4`'s `interpretTaskModes` sets a non-matching test's mode to `\"skip\"` while leaving it in the collected tree (`chunk-hooks.js:1031-1033`, called with `config.testNamePattern` at `:1212`), and the JSON reporter computes `numTotalTests = getTests(files).length` while filtering `numPassedTests`/`numFailedTests` on result state `pass`/`fail` (`vitest/dist/chunks/index.VByaPkjc.js:1702-1707`) — so the prior rule's `numTotalTests === 0` and `numPassedTests === numTotalTests` were both unreachable under a filter, and the new rule is reachable. The no-match case is now B-05's untested `FAIL`/`COMMAND` rather than CONFIGURATION, which the same reporter source supports: absent an output file `writeReport` logs the document to the console (`:1773-1781`), so a run that matches nothing still emits one, and `FAIL`/`CONFIGURATION` is narrowed to an unsupported matcher and stdout with no reporter document. B-03's observableResult pins the fixtures to documents transcribed from three real filtered runs while keeping the suite free of a real vitest spawn.",
+      "clearCondition": "B-03 (and B-05's unparseable-output clause) state the filtered-run counting semantics with a cited source, and B-03's observableResult pins the matcher fixtures to documents recorded from real filtered runs — one match-and-pass, one match-and-fail, one no-match — checked in as fixtures so the suite still spawns no vitest; alternatively the PASS and untested rules are restated over fields whose filtered-run behavior is evidenced, and the no-match case is explicitly assigned to the untested FAIL branch rather than to CONFIGURATION.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-04", "B-07"],
+      "evidence": "\"`src/base-gates.ts` resolves the acceptance plan in one order: a declared `gatePolicy.acceptance` wins and needs no `tests` script; the derived baseline … applies only when that member is absent and `resolveSanityPlan` … yields a `tests` step; with neither there is no plan\"; B-04's \"substitutes each bound ID into every `{behaviorId}` occurrence of B-02's plan\"; B-02's observableResult \"declared with a tests script, declared without, baseline only, neither — asserting the plan, the per-behavior argv and matcher under both sources\"",
+      "expected": "Every branch of plan resolution the scope lock promises needs a behavior ID with an observable result, since the declared-policy branch is the branch this repository itself will take once B-07 lands.",
+      "observed": "The condition is met. B-02 now states the preference order explicitly in both directions (declared wins and needs no `tests` script; the derived baseline applies only when the member is absent and a `tests` step exists; neither means no plan), and its observableResult enumerates all four temp-root combinations while asserting the plan, the per-behavior argv and the matcher under both sources. B-04 no longer says \"the plan\" without a source — it substitutes into \"B-02's plan\" — and B-07 makes the declared branch this repository's live one with `loadGatePolicy` on the repo root plus B-02's declared case as its observable result. `loadGatePolicy` is exported at `src/gate-policy.ts:325` and has no non-test caller today, so the contract's \"first non-test caller\" note is accurate.",
+      "clearCondition": "B-02 or B-04 states the resolution order explicitly (declared `gatePolicy.acceptance` wins; derived baseline only when the member is absent) and its observableResult asserts the per-behavior argv and matcher for both sources, including the declared shape from `afk.config.json` after B-07.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-07"],
+      "evidence": "\"The same module exports the lock-time bindable catalog: the three base declarations plus `{ id: \\\"acceptance:behaviors\\\", command, args }` from whichever plan resolved, no entry when none did, reading the policy itself through `loadGatePolicy(cwd)` (`src/gate-policy.ts:325`). All six `resolveBaseGateDeclarations(...)` sites in `src/orchestrator.ts` call that catalog\" and P-01's \"The acceptance entry lives only in the new bindable catalog, so `src/adopt-command.ts:582` … the wave and orchestrator fixtures and `src/gate-runner.test.ts` need no edit\"",
+      "expected": "The lock-time catalog must declare `acceptance:behaviors` whenever the gate can run, in both the declared-policy and derived-baseline cases, or #85 AC9's refusal fires on legitimate bindings.",
+      "observed": "The condition is met, and the named mechanism checks out. The catalog entry now carries the resolved plan's `command`/`args` from whichever source resolved, and B-02 names how the policy reaches the lock-time site: a new bindable catalog exported from `src/base-gates.ts` that calls `loadGatePolicy(cwd)` itself, consumed by the six `resolveBaseGateDeclarations(ctx.worktreeDir)` sites at `src/orchestrator.ts:1335, 1375, 2754, 2861, 3257, 3325`. Those six are in fact the complete feed into `formatBaseGateCatalog` and `validateAcceptanceManifestBindings` — the seventh `formatBaseGateCatalog` call at `:3506` renders `loadBehaviorLockArtifacts().gateCatalog`, which is the `:3257` catalog — so nothing displays or validates against a catalog the widening misses. Routing the entry through a new function rather than through `resolveBaseGateDeclarations` keeps P-01's promise verifiable: `src/adopt-command.ts:582` (which executes that resolver's output as `defaultGatePlan.declarations`), `src/orchestrator.fixtures.ts:325`, `src/wave.fixtures.ts:131`, `src/gate-runner.test.ts:1033,1113`, `src/gate-policy.test.ts:340` and `src/orchestrator.test.ts:514` all keep today's three-declaration list. B-02's observableResult adds the declared-with-a-tests-script, declared-without, and neither cases, asserting the catalog entry, its display, the accepted binding and the still-refused undeclared ID.",
+      "clearCondition": "B-02 states that the catalog entry and `formatBaseGateCatalog`'s display carry the resolved plan's command for the declared-policy case as well as the derived baseline — naming how the policy reaches the lock-time catalog site — and its observableResult adds the declared-policy lock case (binding accepted, undeclared ID still refused by name), including the declares-policy-without-a-test-script combination.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06", "P-03"],
+      "evidence": "\"That site materializes the checkpoint and runs the `prepare` install when the declaration is present — by B-04 at least one bound behavior — so the two predicates at `:5526-5535` … widen on bound work, never on plan presence\" and P-03's \"A slice binding nothing appends no acceptance declaration, so its checkpoint materialization, `prepare` install and outcomes stay today's on every project — including one with a `tests` script but no `typecheck` or `lint` script\"",
+      "expected": "The widened predicates should be keyed on work the gate will actually do, so a slice that binds no behavior pays nothing new.",
+      "observed": "The condition is met by the first alternative. B-04's builder now returns nothing when the locked manifest binds no behavior to `acceptance:behaviors`, and B-06 keys the widening on the declaration's presence rather than on plan presence, so `preQaHasExecutable` (`src/orchestrator.ts:5526-5527`), the `checkpoint` ternary (`:5529-5535`) and the `prepare` gate (`:5550-5552`) only widen when at least one behavior is bound. P-03 additionally names the no-typecheck-no-lint project as unchanged, so the case is stated as well as fixed. B-06's observableResult covers both widened predicates.",
+      "clearCondition": "Either key the widening on at least one behavior bound to `acceptance:behaviors` rather than on plan presence, or state in P-03 that an unbound slice in a project with no typecheck or lint script now materializes the checkpoint and runs `prepare`.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "evidence": "B-07's observableResult \"loadGatePolicy on the repo root returns the member and B-02's declared case resolves it as the plan; the row and cap are DoD checks\" and the Definition of done item \"`afk.config.json` carries the declared member; `ARCHITECTURE.md`'s Gates row names `src/acceptance-gate.ts` and the file stays inside its 150-line cap.\"",
+      "expected": "Each clause of an observable result should be producible by the behavior's gate.",
+      "observed": "The condition is met by the third alternative. The unproducible line-cap clause is out of the observable result, which now claims only executable evidence (`loadGatePolicy` is exported at `src/gate-policy.ts:325`; B-02's declared case resolves the member as the plan), and the Gates row plus the cap moved to the Definition of done. The cap itself is real and checkable there — `ARCHITECTURE.md:11` declares \"Cap: 150 lines\" and the file is currently 61 lines — and the contract correctly claims no `src/` assertion for it.",
+      "clearCondition": "Name the existing assertion that enforces the cap, or replace the clause with a checkable observable (for example the Gates row content asserted by a test) or move it to the definition of done.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-06",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "evidence": "Measured on disk after the revision: `contract.md` 10,011 bytes and `acceptance-manifest.json` 9,950 bytes — 19,961 combined against the anchors file's \"Keep `contract.md` plus `acceptance-manifest.json` under 20,000 bytes combined\".",
+      "expected": "The revised pair must still fit the anchors' hard budget, whose breach kills the slice at CONFIGURATION rather than on its merits (#196).",
+      "observed": "The condition is met: 19,961 bytes, 39 under the budget. The additions were paid for out of restated rationale — the scope lock no longer re-derives the behaviors, the test plan no longer restates observable results, the Definition of done no longer re-lists behavior clauses, and B-02's line numbers, B-03's reporter narration and B-05's ADR 0041 gloss are compressed to citations — with every behavior ID, the 14-path file scope, the migration count and every gate binding intact. The headroom is thinner than the planner's own figure and part of it was spent on mechanical JSON reformatting rather than content (see F-07's companion note in the feedback), so a further round has almost no room, but the budget holds as written.",
+      "clearCondition": "The revised pair stays under 20,000 bytes combined, with the added statements paid for by trimming restated PRD and ADR rationale rather than by dropping obligations.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-07",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "evidence": "The manifest's `fileScope.paths` entry changed from `\"ARCHITECTURE.md\"` to `\"architecture.md\"`, while `contract.md`'s \"Files expected to change\" list and B-07's `then` (\"ARCHITECTURE.md's Gates row names src/acceptance-gate.ts\") both keep the tracked casing.",
+      "expected": "A declared file-scope path should use the repository's tracked casing, which the anchors file asks for by name: \"Use the repository's tracked casing for every declared path.\"",
+      "observed": "The revision lowercased the one path in the manifest whose tracked name is uppercase — `git ls-files` records `ARCHITECTURE.md` — so the manifest and the contract's own file list now disagree on casing for the same file, against an explicit anchors directive. The consequence is contained rather than fatal: `normalizePath` lowercases every `fileScope` path at `src/acceptance-manifest.ts:71`, so scope comparison is case-insensitive and no gate fires on this today. The change also saves no bytes. It is a gratuitous divergence a reader of the pair has to reconcile, and it makes the manifest a misleading record of which file the slice edits.",
+      "clearCondition": "The manifest's `fileScope` lists `ARCHITECTURE.md` with the repository's tracked casing, matching `contract.md`'s file list and B-07.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"ARCHITECTURE.md\"",
+        "after": "      \"architecture.md\""
+      }
+    },
+    {
+      "id": "F-08",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-04", "B-05"],
+      "evidence": "B-04's \"returning `{ id: \\\"acceptance:behaviors\\\", stage: \\\"acceptance\\\", required: true, run }` … and nothing when the locked manifest binds no behavior to it\" against B-05's \"A manifest binding nothing is PASS saying so (a required SKIPPED would block evaluation).\"",
+      "expected": "One input state should get one rule, and a stated rationale should describe a branch the contract still has.",
+      "observed": "The F-04 fix gave B-04 a new rule for the empty-binding state — no declaration at all — but B-05 kept the older rule for the same state, a PASS whose `detail` says nothing is bound, and kept the rationale that a required gate reporting SKIPPED would block evaluation. With no declaration there is no SKIPPED to avoid, so that rationale no longer describes anything. The two are reconcilable — the builder omits the declaration at build time, and `run`, which B-04 says re-reads the manifest at call time, defends with PASS if the bytes changed underneath — and the manifest pins both observable results (B-04 asserts \"absence when nothing is bound\", B-05 asserts one outcome per case), so an implementer following the manifest writes both and neither #85 AC nor P-03 is at risk. But the contract never says that is the relationship, and the reading that keeps B-05's PASS as the primary rule would put the declaration back on every unbound slice and undo F-04.",
+      "clearCondition": "B-05's no-binding clause states that it is the call-time guard behind B-04's build-time omission — or is dropped — so that a single rule governs the empty-binding state and no clause rests on a SKIPPED the contract no longer produces.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "contract.md",
+        "before": "manifest binding no behavior to `acceptance:behaviors` is PASS with a `detail`\n  saying so — nothing bound is nothing unproved, and a required gate reporting\n  SKIPPED would block evaluation.",
+        "after": "A manifest binding nothing is PASS saying so (a required SKIPPED\n  would block evaluation)."
+      }
+    }
+  ]
+}
