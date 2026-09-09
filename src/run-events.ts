@@ -156,6 +156,22 @@ export type RunEventPayload =
       treeId: string;
       evidenceArtifactId: string;
       logArtifactId: string;
+      /**
+       * Why this gate cost what it cost, when there is something to say (#86).
+       * All three are optional and additive, so every existing reader of this
+       * event keeps working:
+       *
+       * - `cacheReused` — a `PASS` replayed from the tree-identity cache
+       *   instead of executed (B-03). A 0ms PASS is otherwise indistinguishable
+       *   from a gate that did nothing.
+       * - `prerequisiteSkipped` — the gate id whose non-PASS result caused this
+       *   `SKIPPED` (B-07). Named, because a silent skip reads as a green run.
+       * - `environmentSensitive` — the gate is advisory: its result is reported
+       *   and never blocks (B-02, ADR 0063).
+       */
+      cacheReused?: boolean;
+      prerequisiteSkipped?: string;
+      environmentSensitive?: boolean;
     }
   | {
       /**

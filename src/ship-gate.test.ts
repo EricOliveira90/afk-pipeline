@@ -73,6 +73,9 @@ function makeJournal(): JournalFixture {
     setPrOverrideNote,
     setPrUrl,
     journal: {
+      // The gate reads this run's `events.jsonl` for advisory gate outcomes
+      // (#86 B-02); this fixture writes none, so the block stays absent.
+      runDir: logDir,
       agentLog(sliceId, agent, round) {
         const suffix = round == null ? "" : `-${round}`;
         return createWriteStream(
@@ -200,6 +203,66 @@ describe("buildPrCreationPlan adoption provenance", () => {
     expect(plan.body).toContain("manual/demo-01");
     expect(plan.body).toContain("abc123");
     expect(plan.body).not.toContain("#130\n- Adopter:");
+  });
+
+  it("[behavior:B-02] reports advisory gates in the PR body, above the closes list, and omits the section when none ran", () => {
+    const withAdvisory = buildPrCreationPlan({
+      prdSlug: "demo",
+      specsDir: ".kiro/specs/demo",
+      architect: "SHIP",
+      pm: "SHIP",
+      openPrOnOverride: false,
+      closesIssues: ["86"],
+      adoptions: [],
+      advisoryGates: [
+        {
+          ghIssue: "86",
+          sliceNumber: "05",
+          round: 2,
+          gateId: "test:budgets",
+          status: "FAIL (COMMAND)",
+          durationMs: 300,
+        },
+      ],
+    });
+
+    expect(withAdvisory.body).toContain(
+      "## Advisory gates (reported, never blocking)",
+    );
+    // The row is reported with its real red status: hiding it would defeat the
+    // point of running the gate, and blocking on it would defeat ADR 0063.
+    expect(withAdvisory.body).toContain(
+      "| #86 | 2 | test:budgets | FAIL (COMMAND) | 300ms |",
+    );
+    expect(withAdvisory.body).toContain("ADR 0063");
+    expect(
+      withAdvisory.body.indexOf("## Advisory gates (reported, never blocking)"),
+    ).toBeLessThan(withAdvisory.body.indexOf("Closes #86"));
+
+    // A run with no advisory gate has no such section, so an opted-out
+    // project's PR body is byte-for-byte today's.
+    const without = buildPrCreationPlan({
+      prdSlug: "demo",
+      specsDir: ".kiro/specs/demo",
+      architect: "SHIP",
+      pm: "SHIP",
+      openPrOnOverride: false,
+      closesIssues: ["86"],
+      adoptions: [],
+      advisoryGates: [],
+    });
+    expect(without.body).not.toContain("Advisory gates");
+    expect(without.body).toBe(
+      buildPrCreationPlan({
+        prdSlug: "demo",
+        specsDir: ".kiro/specs/demo",
+        architect: "SHIP",
+        pm: "SHIP",
+        openPrOnOverride: false,
+        closesIssues: ["86"],
+        adoptions: [],
+      }).body,
+    );
   });
 });
 

@@ -11,6 +11,10 @@ import * as artifacts from "./artifacts.js";
 import * as git from "./git.js";
 import { parseDraftPrNumber } from "./handoff.js";
 import {
+  readAdvisoryGateOutcomes,
+  type AdvisoryGateOutcome,
+} from "./logger.js";
+import {
   runPreShipSanity,
   type SanityCommandRunner,
   type SanityGateResult,
@@ -334,6 +338,14 @@ export function buildPrCreationPlan(args: {
   closesIssues: readonly string[];
   adoptions?: readonly AdoptedSlice[];
   capExit?: GuardianCapExit;
+  /**
+   * Declared `environmentSensitive` gate outcomes from this run's events (#86
+   * B-02), read by the caller via `readAdvisoryGateOutcomes`. Rendered as its
+   * own block so a reviewer sees a budget overage without it ever having
+   * blocked the run (ADR 0063). Absent or empty adds no section, so every PR
+   * body on a project that declares none is unchanged.
+   */
+  advisoryGates?: readonly AdvisoryGateOutcome[];
 }): PrCreationPlan {
   const architectOk = artifacts.isFavorableReviewOutcome(args.architect);
   const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
@@ -410,6 +422,24 @@ export function buildPrCreationPlan(args: {
       ].join("\n\n"),
     );
   }
+  if (args.advisoryGates && args.advisoryGates.length > 0) {
+    sections.push(
+      [
+        "## Advisory gates (reported, never blocking)",
+        "",
+        "These gates ran and reported; none of them can fail a candidate, " +
+          "because a wall-clock or environment-dependent result is not evidence " +
+          "about the tree (ADR 0063).",
+        "",
+        "| Slice | Round | Gate | Status | Elapsed |",
+        "|-------|-------|------|--------|---------|",
+        ...args.advisoryGates.map(
+          (outcome) =>
+            `| #${outcome.ghIssue} | ${outcome.round} | ${inlineMarkdown(outcome.gateId)} | ${outcome.status} | ${outcome.durationMs}ms |`,
+        ),
+      ].join("\n"),
+    );
+  }
   sections.push(
     args.closesIssues.map((issue) => `Closes #${issue}`).join("\n"),
   );
@@ -438,6 +468,9 @@ export function buildPrCreationPlan(args: {
 
 export type ShipGateJournal = Pick<
   RunJournal,
+  // The run's own log directory, so the PR body's advisory block is read from
+  // the same `events.jsonl` the run summary reads (#86 B-02).
+  | "runDir"
   | "agentLog"
   | "event"
   | "phase"
@@ -1185,6 +1218,7 @@ export async function runShipGate(
     return outcome;
   };
 
+  const advisoryGates = readAdvisoryGateOutcomes(journal.runDir);
   let prPlan = buildPrCreationPlan({
     prdSlug,
     specsDir,
@@ -1193,6 +1227,7 @@ export async function runShipGate(
     openPrOnOverride: options.openPrOnOverride,
     closesIssues,
     adoptions,
+    advisoryGates,
   });
 
   // The gate has a clock (ADR 0057 decision 4). A blocked round that has spent
@@ -1255,6 +1290,7 @@ export async function runShipGate(
       openPrOnOverride: options.openPrOnOverride,
       closesIssues,
       adoptions,
+      advisoryGates,
       capExit: {
         cap: capDecision.cap,
         unfavorableRounds: capDecision.unfavorableRounds,
