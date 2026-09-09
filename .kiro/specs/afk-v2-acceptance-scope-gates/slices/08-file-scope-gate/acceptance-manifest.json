@@ -1,0 +1,227 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/scope-gate.ts",
+      "src/scope-gate.test.ts",
+      "src/gate-runner.ts",
+      "src/gate-runner.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/orchestrator-runs.test.ts",
+      "src/orchestrator.fixtures.ts",
+      "src/qa-orchestration.test.ts",
+      "src/wave.test.ts",
+      "src/wave-migrations.test.ts",
+      "src/wave.fixtures.ts",
+      "src/resume-integration.test.ts",
+      "src/resume-integration.fixtures.ts",
+      "src/clean-failed.test.ts",
+      "ARCHITECTURE.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "prd.md D22; GH #195 \"The gate plumbing (D22)\"",
+      "given": "a GateDeclaration carrying an in-process run and no command, reached by runGates with an options.cwd that does not exist",
+      "when": "runGates processes that declaration",
+      "then": "the run is awaited before the cwd, prepareFailure and restoreCheckpoint branches, and its status, failureKind ?? null, detail and findings are recorded with exitCode null, treeId options.treeId, measured timings, and the detail written into the gate log",
+      "observableResult": "src/gate-runner.test.ts asserts the recorded GateResult fields, that the missing cwd did not turn the in-process gate INFRASTRUCTURE, and that the gate log holds the detail text",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-02",
+      "source": "prd.md D22; ADR 0041; carried finding F-02",
+      "given": "one declaration whose run throws synchronously and one whose promise rejects",
+      "when": "runGates processes them",
+      "then": "each records status INFRASTRUCTURE with failureKind null and the error message as detail, the loop continues, the evidence document is still written, and every declaration binds to one result",
+      "observableResult": "src/gate-runner.test.ts asserts both statuses, both details, that the evidence file exists, and that results.length equals declarations.length",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-03",
+      "source": "prd.md D22 (GateResult gains findings with the four D5 fields)",
+      "given": "the gate-runner type declarations",
+      "when": "a GateResult carries findings",
+      "then": "GateFindings types outOfScopePaths, deletedTests, protectedChanges and appliedWaivers (riskClass typed as GateRiskClass, path, author, reason), with only outOfScopePaths populated by this slice",
+      "observableResult": "pnpm typecheck accepts a GateResult carrying all four members and src/gate-runner.test.ts round-trips a findings payload with outOfScopePaths through the evidence document",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-04",
+      "source": "prd.md D22 (GATE_EVIDENCE_VERSION 1 to 2)",
+      "given": "gate evidence documents at version 1, version 2 and version 3, one version-1 document carrying findings",
+      "when": "readGateEvidence reads each and runGates writes a fresh document",
+      "then": "versions 1 and 2 parse, version 3 and a version-1 document carrying findings are refused, and the fresh document stamps version 2",
+      "observableResult": "src/gate-runner.test.ts asserts the two accepted reads, the two refusals, and the stamped version",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-05",
+      "source": "prd.md D2 (ChangedFilesProbe fails closed); GH #195",
+      "given": "a candidate-source scope gate pointed at a directory git cannot probe",
+      "when": "the gate runs and listChangedFiles returns ok: false",
+      "then": "the result is INFRASTRUCTURE with failureKind null, the probe's failure string as detail, and no findings",
+      "observableResult": "src/scope-gate.test.ts asserts the status, the failure text in detail, and that findings is absent rather than an empty violation list",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-06",
+      "source": "prd.md D3; carried finding F-05",
+      "given": "a candidate comparison source { kind: \"candidate\", worktreeDir, featureRef } whose worktreeDir differs from the gate's ctx.cwd and holds committed, working-tree and untracked changes",
+      "when": "the gate runs",
+      "then": "listChangedFiles(worktreeDir, featureRef) probes the source's directory and not ctx.cwd, featureRef is used verbatim as git's three-dot base with no second merge-base call, and the recorded treeId stays options.treeId",
+      "observableResult": "src/scope-gate.test.ts asserts uncommitted and untracked paths from worktreeDir appear while ctx.cwd is a different directory, and that the result's treeId is the treeId passed in",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-07",
+      "source": "anchors/08-file-scope-gate.md (settled acceptedPairIntact source); ADR 0048; carried finding F-01",
+      "given": "a declaration built before the QA window and a manifest on disk whose fileScope an applied scope amendment widened during it, plus a per-attempt latch set only after the accepted-pair integrity check passed",
+      "when": "the gate runs on a tree holding the newly declared path",
+      "then": "the gate loads the manifest at gate time, compares against the amended fileScope, reports no violation for that path, and takes acceptedPairIntact from the latch, which starts false each attempt",
+      "observableResult": "src/scope-gate.test.ts asserts a manifest rewritten after declaration build produces no violation for the added path, and src/orchestrator.test.ts asserts the declaration receives the attestation only after the integrity check passed",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-08",
+      "source": "prd.md D22 (corrected 2026-09-08); GH #195 AC8",
+      "given": "a required declaration with neither command nor run, an optional declaration with neither, a declaration supplying both, and the derived lint declaration for a project with no lint script",
+      "when": "runGates processes them",
+      "then": "required-neither and both-supplied are FAIL / CONFIGURATION, optional-neither is SKIPPED with detail \"Optional gate has no command\", and the derived lint declaration is SKIPPED",
+      "observableResult": "src/gate-runner.test.ts asserts all four outcomes, the lint one explicitly",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-09",
+      "source": "prd.md D2; GH #195 AC2, AC3; anchors/08-file-scope-gate.md (casing)",
+      "given": "a real repository whose changed set holds a declared path, an undeclared source path, an untracked file, a slice-artifact-directory file, a migration path, and a declared path spelled with different casing than fileScope",
+      "when": "the candidate-source gate runs with acceptedPairIntact true",
+      "then": "only the undeclared source path and the untracked file are violations, the artifact, migration and case-differing paths are not, and the offenders appear in findings.outOfScopePaths and in detail",
+      "observableResult": "src/scope-gate.test.ts asserts the exact violation list and that detail names each offending path",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-10",
+      "source": "src/escalation.ts:196-262 (acceptedPairIntact has no default); carried finding F-04",
+      "given": "a gated tree in which both contract.md and acceptance-manifest.json differ from the feature branch, as a negotiated slice tree does, and a caller that cannot prove the pair",
+      "when": "the gate runs with acceptedPairIntact false",
+      "then": "both accepted-pair paths appear in findings.outOfScopePaths and the gate is red",
+      "observableResult": "src/scope-gate.test.ts asserts both pair files appear in the violation list and the status is FAIL",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-11",
+      "source": "prd.md D4; GH #195 AC5",
+      "given": "a role comparison source { kind: \"role\", cwd, inputCheckpointTree, outputCheckpointTree } and an uncommitted working-tree edit in cwd",
+      "when": "the gate runs",
+      "then": "the changed set is diffTreePaths(cwd, inputCheckpointTree, outputCheckpointTree) and the working-tree edit is not in it",
+      "observableResult": "src/scope-gate.test.ts asserts the tree-to-tree paths are compared and the uncommitted path is absent from the violation list",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #195 AC1, AC6; anchors/08-file-scope-gate.md call-site decision; ADR 0048; carried finding F-06",
+      "given": "a spawned slice whose stub generator writes a source path the locked fileScope does not declare and whose QA evaluator passes it",
+      "when": "the post-QA phase runs with [scopeDeclaration, ...fullSuiteDeclarations]",
+      "then": "the scope declaration is recorded first in that phase's evidence, is red naming the exact path, the remaining declarations still run, the post-QA decision is REPAIR, and the slice is not merged into the feature branch",
+      "observableResult": "an it on an existing describe in src/qa-orchestration.test.ts asserts the gate id order, the red scope gate and its named path, the non-PASS outcome, and that the feature branch does not contain the slice commit",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-13",
+      "source": "GH #195 AC4; prd.md D2",
+      "given": "a manifest declaring {\"kind\":\"no-repository-changes\"}",
+      "when": "the gate runs first on a tree that changed only artifact-directory and migration paths, then on a tree that also changed a source path",
+      "then": "the first run passes and the second names that source path as a violation",
+      "observableResult": "src/scope-gate.test.ts asserts PASS for the first tree and the exact violation list for the second",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-14",
+      "source": "prd.md D3 (re-resolved base); GH #195 AC7",
+      "given": "a slice branch with the feature branch merged into it and a sibling's path present only from that merge",
+      "when": "the gate runs with featureRef set to that feature branch",
+      "then": "the merge base is the merged feature-branch tip, so the sibling's path is absent from the changed set and from the violation list",
+      "observableResult": "src/scope-gate.test.ts asserts the sibling path is reported by neither the changed set nor findings.outOfScopePaths",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-01",
+      "source": "src/gate-runner.ts:398-620 (current runGates behavior)",
+      "given": "declarations carrying command, including an invalid one, a missing cwd, a prepare failure and a cancelled execution",
+      "when": "runGates runs after this slice's edits",
+      "then": "every existing branch, detail string, checkpoint restore, status classification, evidence wx write and per-log hash behaves exactly as before",
+      "observableResult": "the existing src/gate-runner.test.ts assertions for command declarations still pass unchanged",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-02",
+      "source": "prd.md D2; src/escalation.ts:196-262; src/git.ts:1272-1346",
+      "given": "the scope gate's need for a comparison and a changed-set probe",
+      "when": "src/scope-gate.ts is built",
+      "then": "outOfScopeChangedPaths, listChangedFiles and diffTreePaths are called unmodified, with no second path normalizer or probe, and acceptedPairIntact still has no default",
+      "observableResult": "the existing src/escalation.test.ts and src/git.test.ts suites pass unchanged and src/scope-gate.ts contains no reimplementation of either helper",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-03",
+      "source": "src/orchestrator.ts:5420-5444; ADR 0052; ADR 0048",
+      "given": "a generator that edits an undeclared path and then writes an escalation",
+      "when": "the pre-build escalation guard runs",
+      "then": "it still probes with listChangedFiles against featBranch, still passes acceptedPairIntact true, and still refuses the focused revision by throw",
+      "observableResult": "the existing src/orchestrator.test.ts assertion that the grant is refused after an undeclared edit still passes",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-04",
+      "source": "src/post-qa-gates.ts:51-286; prd.md file-scope map (post-qa-gates.ts is #193's)",
+      "given": "the post-QA transition with the new declaration in its list",
+      "when": "runPostQAGates runs",
+      "then": "src/post-qa-gates.ts is unedited: the review-artifact allowlist and blob provenance, the executable-driven materialization, the fail-closed ERROR before the gates, and the PASS / REPAIR / ERROR / CANCELLED mapping are unchanged",
+      "observableResult": "src/post-qa-gates.test.ts passes unchanged and git diff shows no edit to src/post-qa-gates.ts",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-05",
+      "source": "prd.md D22; src/base-gates.ts:8-25; src/adopt-command.ts:647-649",
+      "given": "a project with no lint script",
+      "when": "the derived declarations run through the edited runGates",
+      "then": "src/base-gates.ts is unedited, the lint declaration is still { required: false } with no command, its status is SKIPPED, and adopt counts it as passing",
+      "observableResult": "the existing base-gate and adopt assertions pass unchanged and git diff shows no edit to src/base-gates.ts",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-06",
+      "source": "anchors/08-file-scope-gate.md (candidate-gate-phase.ts is out of scope); src/candidate-gate-phase.ts:114-177",
+      "given": "an in-process gate returning INFRASTRUCTURE for a required declaration",
+      "when": "runCandidateGatePhase wraps the run",
+      "then": "src/candidate-gate-phase.ts is unedited, the bounded infrastructure retry re-runs it, the one-result-per-declaration check still holds, and evidenceArtifactId is still the repo-relative evidencePath",
+      "observableResult": "src/gate-runner.test.ts or src/qa-orchestration.test.ts asserts the retry fires for an in-process INFRASTRUCTURE result, and git diff shows no edit to src/candidate-gate-phase.ts",
+      "preservation": true,
+      "gateIds": ["tests"]
+    }
+  ]
+}

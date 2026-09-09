@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-12", "P-04"],
+      "summary": "The B-12/P-04 coverage lands in a new spawned scenario, which the contract's test plan told the slice not to add, and qa-orchestration has only ~35s of measured budget headroom.",
+      "evidence": "src/qa-orchestration.test.ts:2135 opens `describe(\"a red file-scope gate at the post-QA transition\")` whose `beforeAll` (timeout 180_000) calls `runSliceExecute` on a fresh fixture repo with two generator rounds, two evaluator rounds and four gate phases. The contract's test plan for that assertion reads \"(an `it` on an existing `describe` in `src/qa-orchestration.test.ts`; no new spawned scenario)\". `suite-budgets.json` budgets `qa-orchestration` at 151s against a last recorded measurement of 115.7s (`_measured2026_09_01_prd3_slice01_five_chain@afk-codex/afk-v2-context-envelopes-slice-01-generator-runs-on-the-focused-envelope`), so `pnpm test:budgets` has about 35s of headroom for the new spawn plus the extra `scope` gate every other spawned scenario in the file now runs.",
+      "expected": "The contract's test plan asks for the red-gate assertion to hang off an existing spawned scenario in src/qa-orchestration.test.ts rather than a new spawned run, and CLAUDE.md ranks a new spawn last among the places a new assertion can go.",
+      "observed": "A new spawned run was added. The deviation is necessary and documented rather than careless: every pre-existing spawned scenario in the file goes through `makeContext`, which runs the slice on `main` with `featBranch: \"main\"` (src/qa-orchestration.test.ts:163), so `git diff main...HEAD` is empty by construction and a red-scope assertion is unreachable there; the file's other scope tests call `runQAStage` directly and never reach the post-QA transition. The new block carries the CLAUDE.md-required comment explaining why, shares one run across three `it`s, and reads every fact inside the hook so the shared `afterEach` cleanup does not race it. What is unverified is the wall clock: this QA stage's command list does not include a test run, so the budget outcome is not measured here.",
+      "clearCondition": "`pnpm run test:heavy:qa` followed by `pnpm run test:budgets` reports `qa-orchestration` inside its budget, or the budget is raised with the recorded measurement in the commit message per scripts/check-suite-budgets.mjs.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
