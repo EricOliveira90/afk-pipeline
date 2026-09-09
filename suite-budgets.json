@@ -1,7 +1,10 @@
 {
   "_comment": [
     "Wall-clock budgets in seconds per `test:*` suite, checked by",
-    "scripts/check-suite-budgets.mjs at the end of `pnpm test`.",
+    "scripts/check-suite-budgets.mjs at the end of `pnpm test:ratchet`.",
+    "Not at the end of `pnpm test` — that is what AFK's deterministic",
+    "gates and its pre-ship sanity gate run, and a host measurement must",
+    "not be able to turn one of those red (ADR 0063).",
     "Raise a number only with a recorded measurement in the commit",
     "message — this file is the ratchet that keeps a twenty-minute suite",
     "from growing back one reasonable-looking test at a time. AGENTS.md",
