@@ -157,6 +157,14 @@ export function buildProvider(opts: {
     sliceNumber: string,
   ) => Promise<void> | void;
   records?: PromptRecord[];
+  /**
+   * Paths this run's generator writes beyond `src/work-<NN>.ts`, declared in
+   * the slice's acceptance manifest so the post-QA file-scope gate (#195)
+   * stays green on a scenario that is not about scope. Per-slice by design:
+   * a shared path declared for every slice would collapse the fixture's
+   * disjoint lanes.
+   */
+  extraScopePaths?: (sliceNumber: string) => string[];
   /** Deterministic QA verdict for every evaluator-qa invocation. */
   qaVerdict?: "PASS" | "FAIL";
   /** Explicit lifecycle disposition for the fixture's deterministic finding. */
@@ -212,7 +220,13 @@ export function buildProvider(opts: {
           join(artifactDir, "acceptance-manifest.json"),
           JSON.stringify({
             version: 2,
-            fileScope: { kind: "paths", paths: [`src/work-${sliceNumber}.ts`] },
+            fileScope: {
+              kind: "paths",
+              paths: [
+                `src/work-${sliceNumber}.ts`,
+                ...(opts.extraScopePaths?.(sliceNumber) ?? []),
+              ],
+            },
             migrationCount: 0,
             behaviors: [
               {

@@ -111,6 +111,22 @@ describe("retried slice resume (spec #33)", () => {
     const logFor = (ghIssue: string): string =>
       sliceLogLines(repo, `${slug}-stub`, ghIssue);
 
+    /**
+     * What each slice's generator writes beyond `src/work-<NN>.ts`, declared
+     * so the post-QA file-scope gate (#195) is not the thing this fixture
+     * measures. Both runs pass the same function: a resumed slice keeps run
+     * 1's manifest (its planner is skipped), while a from-base restart writes
+     * a fresh one in run 2.
+     */
+    const extraScopePaths = (sliceNumber: string): string[] =>
+      sliceNumber === "01"
+        ? ["src/finish.ts"]
+        : sliceNumber === "02"
+          ? ["README.md"]
+          : sliceNumber === "05"
+            ? ["src/finish-05.ts"]
+            : [`src/redo-${sliceNumber}.ts`];
+
     beforeAll(async () => {
       repo = makeRepo({ lifetime: "describe" });
       const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -128,6 +144,7 @@ describe("retried slice resume (spec #33)", () => {
         ...runConfig,
         dag,
         provider: buildProvider({
+          extraScopePaths,
           qaResult: (sliceNumber) =>
             sliceNumber === "05"
               ? { verdict: "FAIL", findingState: "OPEN" }
@@ -219,6 +236,7 @@ describe("retried slice resume (spec #33)", () => {
         forceRestart: ["03"],
         provider: buildProvider({
           records,
+          extraScopePaths,
           qaResult: (sliceNumber) =>
             sliceNumber === "05"
               ? ++resumedQAAttempts === 1
@@ -607,6 +625,18 @@ describe("retried slice resume (spec #33)", () => {
       statePath = join(repo, ".afk", "state", `${slug}-stub.json`);
       const runConfig = { repoRoot: repo, prdSlug: slug, prdDir, specsDir };
       const dag = buildDAG([named, unnamed, failing]);
+      // Only the named slice ships, so only its STUCK-life commits and its
+      // finished in-flight edit need declaring against the file-scope gate
+      // (#195). Per-slice, so the three slices keep their disjoint lanes.
+      const extraScopePaths = (sliceNumber: string): string[] =>
+        sliceNumber === "01"
+          ? [
+              "src/round-1.ts",
+              "src/round-2.ts",
+              "src/in-flight.ts",
+              "src/cleared.ts",
+            ]
+          : [];
       const ghIssueOf = (n: string) =>
         n === "01" ? named.ghIssue : n === "02" ? unnamed.ghIssue : failing.ghIssue;
 
@@ -622,6 +652,7 @@ describe("retried slice resume (spec #33)", () => {
         dag,
         provider: buildProvider({
           records: firstRunRecords,
+          extraScopePaths,
           qaVerdict: "FAIL",
           generator: (cwd, _options, sliceNumber) => {
             const round = (rounds.get(sliceNumber) ?? 0) + 1;
@@ -1047,6 +1078,9 @@ describe("retried slice resume (spec #33)", () => {
     const records: PromptRecord[] = [];
     const succeedingProvider = buildProvider({
       records,
+      // Run 5's from-base restart re-runs the planner, so this is the manifest
+      // the shipping candidate is scoped against (#195).
+      extraScopePaths: () => ["src/healthy.ts"],
       generator: (cwd) => {
         mkdirSync(join(cwd, "src"), { recursive: true });
         writeFileSync(join(cwd, "src", "healthy.ts"), "export const ok = 1;\n", "utf-8");
