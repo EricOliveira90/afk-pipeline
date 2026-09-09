@@ -15,8 +15,8 @@ import { parseJsonWithUniqueKeys } from "./json-scan.js";
  * character. A validator that passes over what it does not understand
  * reproduces the defect this PRD exists to remove — `parseAfkManifest`
  * accepted and silently discarded `protectedChangeWaivers` — so an unknown
- * member is malformed, not forward compatibility. `cost` is unknown here until
- * the slice that owns it widens the known set (#86).
+ * member is malformed, not forward compatibility. `cost` joined the known set
+ * in #86; every other member is still refused.
  */
 
 const CONFIG_FILENAME = "afk.config.json";
@@ -26,9 +26,19 @@ const POLICY_KEYS = [
   "protectedPaths",
   "riskClasses",
   "acceptance",
+  "cost",
 ] as const;
 const PROTECTED_PATHS_KEYS = ["gatePolicyPaths", "testGlobs"] as const;
 const ACCEPTANCE_KEYS = ["command", "args", "matcher"] as const;
+const COST_KEYS = [
+  "cheapThresholdMs",
+  "environmentSensitive",
+  "cacheEnabled",
+  "relatedTests",
+  "skipDetectors",
+] as const;
+const RELATED_TESTS_KEYS = ["command", "args"] as const;
+const SKIP_DETECTOR_KEYS = ["id", "testGlobs", "patterns"] as const;
 
 /** Every runner-output matcher this version of AFK implements (D8). */
 const ACCEPTANCE_MATCHERS = ["vitest-json"] as const;
@@ -106,6 +116,78 @@ export interface GatePolicyAcceptance {
   matcher: GateAcceptanceMatcher;
 }
 
+/**
+ * Default `cost.cheapThresholdMs`: D18's own figure. A required gate whose
+ * `expectedCostMs` is at or below it is cheap enough to sit in the generator's
+ * own edit cycle.
+ */
+export const DEFAULT_CHEAP_THRESHOLD_MS = 120_000;
+
+/** Default `cost.cacheEnabled` (D17). */
+export const DEFAULT_CACHE_ENABLED = true;
+
+/**
+ * One project-declared way of spotting a disabled test. Records, not a
+ * name-only list, because D7 requires a project on another runner to be able
+ * to declare its own detector — a name could not carry the patterns.
+ *
+ * `patterns` are regular-expression sources, compiled with the `g` flag and
+ * counted. `testGlobs` is the D6 dialect {@link matchesGlob} implements.
+ */
+export interface GatePolicySkipDetector {
+  id: string;
+  testGlobs: string[];
+  patterns: string[];
+}
+
+/**
+ * The detector AFK ships when a project declares none: TypeScript/Vitest, the
+ * runner this repo and its consumers use. `.only` is in the list because it
+ * disables every sibling test, which is a skip by another name.
+ */
+export const DEFAULT_SKIP_DETECTORS: readonly GatePolicySkipDetector[] = [
+  {
+    id: "vitest-ts",
+    testGlobs: ["**/*.test.ts"],
+    patterns: [
+      "describe\\.skip",
+      "it\\.skip",
+      "test\\.skip",
+      "it\\.todo",
+      "test\\.todo",
+      "describe\\.only",
+      "it\\.only",
+      "test\\.only",
+    ],
+  },
+];
+
+/** One declared command that receives changed paths (project-specific, D18). */
+export interface GatePolicyRelatedTests {
+  command: string;
+  args: string[];
+}
+
+/**
+ * The test-cost half of the policy (#86). Every member is resolved here — the
+ * declared value or the documented default — so the one production reader
+ * (`resolveTestCostPlan` in `src/base-gates.ts`) hands each consumer a settled
+ * answer rather than a maybe.
+ *
+ * `expectedCostMs` and gate prerequisites are deliberately absent: those are
+ * AFK's own gate metadata and live in `src/base-gates.ts` as code, because a
+ * consuming project does not author AFK's gate catalog (D1's rule that the
+ * association between a class and what it covers is code).
+ */
+export interface GatePolicyCost {
+  cheapThresholdMs: number;
+  /** Gate ids that run but may not block (D16), e.g. `test:budgets`. */
+  environmentSensitive: string[];
+  cacheEnabled: boolean;
+  relatedTests?: GatePolicyRelatedTests;
+  skipDetectors: GatePolicySkipDetector[];
+}
+
 export interface GatePolicy {
   version: 1;
   protectedPaths: GatePolicyProtectedPaths;
@@ -116,6 +198,12 @@ export interface GatePolicy {
    * a `package.json` probe, and this parser is pure.
    */
   acceptance?: GatePolicyAcceptance;
+  /**
+   * Absent means every documented default applies. Optional for the same
+   * reason `acceptance` is: the absence is itself what `src/base-gates.ts`
+   * reads, and only it knows the project's gate catalog.
+   */
+  cost?: GatePolicyCost;
 }
 
 /**
@@ -404,6 +492,205 @@ function parseAcceptance(
   };
 }
 
+function parsePositiveInteger(
+  value: unknown,
+  field: string,
+  source: string,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < 0
+  ) {
+    throw new Error(
+      `${source} ${field} must be a non-negative whole number of ` +
+        `milliseconds; got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+function parseRelatedTests(
+  value: unknown,
+  source: string,
+): GatePolicyRelatedTests {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} gatePolicy.cost.relatedTests must be a JSON object holding ` +
+        `command and args`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireExactKeys(
+    input,
+    RELATED_TESTS_KEYS,
+    "gatePolicy.cost.relatedTests",
+    source,
+  );
+  if (typeof input.command !== "string" || input.command.trim() === "") {
+    throw new Error(
+      `${source} gatePolicy.cost.relatedTests.command must be a non-blank ` +
+        `string; got ${JSON.stringify(input.command)}`,
+    );
+  }
+  return {
+    command: input.command,
+    args: parseStringArray(
+      input.args,
+      "gatePolicy.cost.relatedTests.args",
+      source,
+    ),
+  };
+}
+
+/**
+ * One detector, refused naming its own index so an operator can find it in a
+ * list. `patterns` may not be empty: a detector that matches nothing is a
+ * detector that reports every candidate clean, which is the silent-pass defect
+ * this reader exists to refuse. Each pattern must compile, because a regular
+ * expression that throws at gate time is a configuration defect discovered at
+ * the worst moment.
+ */
+function parseSkipDetector(
+  value: unknown,
+  field: string,
+  source: string,
+): GatePolicySkipDetector {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} ${field} must be a JSON object holding id, testGlobs and ` +
+        `patterns`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireExactKeys(input, SKIP_DETECTOR_KEYS, field, source);
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    throw new Error(
+      `${source} ${field}.id must be a non-blank string; got ` +
+        `${JSON.stringify(input.id)}`,
+    );
+  }
+  const testGlobs = parseStringArray(
+    input.testGlobs,
+    `${field}.testGlobs`,
+    source,
+  ).map((glob) => assertGlobDialect(glob, source));
+  if (testGlobs.length === 0) {
+    throw new Error(
+      `${source} ${field}.testGlobs must name at least one glob, or the ` +
+        `detector can never read a file`,
+    );
+  }
+  const patterns = parseStringArray(
+    input.patterns,
+    `${field}.patterns`,
+    source,
+  );
+  if (patterns.length === 0) {
+    throw new Error(
+      `${source} ${field}.patterns must be a non-empty array of regular ` +
+        `expressions; a detector with no pattern reports every candidate clean`,
+    );
+  }
+  for (const pattern of patterns) {
+    try {
+      new RegExp(pattern, "g");
+    } catch (error) {
+      throw new Error(
+        `${source} ${field}.patterns entry ${JSON.stringify(pattern)} is not ` +
+          `a valid regular expression: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return { id: input.id, testGlobs, patterns };
+}
+
+/**
+ * The test-cost member (#86 B-01), modelled on {@link parseProtectedPaths}:
+ * every sub-key optional with a documented default, every unknown sub-key and
+ * every wrong type fatal and named. `cost: {}` is therefore legal and means
+ * exactly the defaults.
+ */
+function parseCost(value: unknown, source: string): GatePolicyCost {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} gatePolicy.cost must be a JSON object holding ` +
+        `${COST_KEYS.join(", ")}`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireKnownKeys(input, COST_KEYS, "gatePolicy.cost", source);
+
+  if (
+    input.cacheEnabled !== undefined &&
+    typeof input.cacheEnabled !== "boolean"
+  ) {
+    throw new Error(
+      `${source} gatePolicy.cost.cacheEnabled must be a boolean; got ` +
+        `${JSON.stringify(input.cacheEnabled)}`,
+    );
+  }
+  const skipDetectors =
+    input.skipDetectors === undefined
+      ? DEFAULT_SKIP_DETECTORS.map((detector) => ({
+          id: detector.id,
+          testGlobs: [...detector.testGlobs],
+          patterns: [...detector.patterns],
+        }))
+      : (() => {
+          if (!Array.isArray(input.skipDetectors)) {
+            throw new Error(
+              `${source} gatePolicy.cost.skipDetectors must be an array of ` +
+                `{ id, testGlobs, patterns } objects`,
+            );
+          }
+          return input.skipDetectors.map((entry, index) =>
+            parseSkipDetector(
+              entry,
+              `gatePolicy.cost.skipDetectors[${index}]`,
+              source,
+            ),
+          );
+        })();
+  const ids = skipDetectors.map((detector) => detector.id);
+  const duplicate = ids.find((id, index) => ids.indexOf(id) !== index);
+  if (duplicate !== undefined) {
+    throw new Error(
+      `${source} gatePolicy.cost.skipDetectors declares the id ` +
+        `"${duplicate}" twice; a detector id names one rule`,
+    );
+  }
+
+  return {
+    cheapThresholdMs:
+      input.cheapThresholdMs === undefined
+        ? DEFAULT_CHEAP_THRESHOLD_MS
+        : parsePositiveInteger(
+            input.cheapThresholdMs,
+            "gatePolicy.cost.cheapThresholdMs",
+            source,
+          ),
+    environmentSensitive:
+      input.environmentSensitive === undefined
+        ? []
+        : parseStringArray(
+            input.environmentSensitive,
+            "gatePolicy.cost.environmentSensitive",
+            source,
+          ),
+    cacheEnabled:
+      input.cacheEnabled === undefined
+        ? DEFAULT_CACHE_ENABLED
+        : input.cacheEnabled,
+    ...(input.relatedTests === undefined
+      ? {}
+      : { relatedTests: parseRelatedTests(input.relatedTests, source) }),
+    skipDetectors,
+  };
+}
+
 /**
  * Validate an already-parsed `gatePolicy` value. Pure: no filesystem access,
  * and the returned arrays are copies, so a caller mutating one cannot reach
@@ -442,6 +729,9 @@ export function parseGatePolicy(
     ...(input.acceptance === undefined
       ? {}
       : { acceptance: parseAcceptance(input.acceptance, source) }),
+    // Same rule as `acceptance`: omitted stays omitted, because the absence is
+    // what `resolveTestCostPlan` reads as "every default applies".
+    ...(input.cost === undefined ? {} : { cost: parseCost(input.cost, source) }),
   };
 }
 

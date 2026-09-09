@@ -10,7 +10,10 @@ import {
 } from "./base-gates.js";
 import * as gatePolicyModule from "./gate-policy.js";
 import {
+  DEFAULT_CACHE_ENABLED,
+  DEFAULT_CHEAP_THRESHOLD_MS,
   DEFAULT_GATE_POLICY_PATHS,
+  DEFAULT_SKIP_DETECTORS,
   DEFAULT_TEST_GLOBS,
   GATE_RISK_CLASSES,
   loadGatePolicy,
@@ -65,8 +68,15 @@ function messageOf(call: () => unknown): string {
 
 describe("gate-policy module surface", () => {
   it("B-01 exports exactly the pinned runtime surface", () => {
+    // The three `DEFAULT_*` cost baselines joined the surface with #86's
+    // `cost` member: `resolveTestCostPlan` needs them by name to fill an
+    // omitted block, and the tests that assert a default read the constant
+    // rather than restating the number.
     expect(Object.keys(gatePolicyModule).sort()).toEqual([
+      "DEFAULT_CACHE_ENABLED",
+      "DEFAULT_CHEAP_THRESHOLD_MS",
       "DEFAULT_GATE_POLICY_PATHS",
+      "DEFAULT_SKIP_DETECTORS",
       "DEFAULT_TEST_GLOBS",
       "GATE_RISK_CLASSES",
       "loadGatePolicy",
@@ -166,13 +176,15 @@ describe("parseGatePolicy", () => {
    * `acceptance: {}` used to live in B-05 below as an unknown key. Slice 02
    * (#85) widened `POLICY_KEYS`, so it is now a *known* member refused for its
    * missing sub-members — the assertion moved here rather than disappearing.
+   * Slice 05 (#86) did the same to `cost`, whose own cases live in
+   * "parseGatePolicy's cost member" below.
    */
   it("B-05 refuses an unknown member naming it", () => {
     expect(
       messageOf(() =>
-        parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), cost: {} }),
+        parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), costs: {} }),
       ),
-    ).toContain("cost");
+    ).toContain("costs");
     expect(
       messageOf(() =>
         parseGatePolicy({ ...structuredClone(EXAMPLE_POLICY), typo: 1 }),
@@ -342,6 +354,173 @@ describe("parseGatePolicy", () => {
   });
 });
 
+/**
+ * `gatePolicy.cost` (#86 B-01). The reader is the only place these members are
+ * validated, so every wrong type is asserted here as a named message rather
+ * than through a gate that would have to run first to discover it.
+ */
+describe("parseGatePolicy's cost member", () => {
+  it("[behavior:B-01] fills every omitted cost member with the documented default", () => {
+    // `cost: {}` is legal and means exactly the defaults, so a project can
+    // declare the block to hold one member without restating the rest.
+    expect(parseGatePolicy({ version: 1, cost: {} }).cost).toEqual({
+      cheapThresholdMs: DEFAULT_CHEAP_THRESHOLD_MS,
+      environmentSensitive: [],
+      cacheEnabled: DEFAULT_CACHE_ENABLED,
+      skipDetectors: DEFAULT_SKIP_DETECTORS.map((detector) => ({
+        id: detector.id,
+        testGlobs: [...detector.testGlobs],
+        patterns: [...detector.patterns],
+      })),
+    });
+    // `relatedTests` has no default: an absent member means the feature is off,
+    // which a fabricated command could not express.
+    expect(parseGatePolicy({ version: 1, cost: {} }).cost?.relatedTests).toBe(
+      undefined,
+    );
+    // Omitting the block entirely leaves it absent, so the policy-less and
+    // cost-less paths stay one path in every consumer.
+    expect(parseGatePolicy({ version: 1 }).cost).toBe(undefined);
+  });
+
+  it("[behavior:B-01] returns copies, so a caller mutating the plan cannot reach the baselines", () => {
+    const parsed = parseGatePolicy({ version: 1, cost: {} });
+    parsed.cost!.skipDetectors[0]!.patterns.push("mutated");
+    parsed.cost!.skipDetectors.push({
+      id: "extra",
+      testGlobs: ["**/*.x"],
+      patterns: ["y"],
+    });
+    expect(DEFAULT_SKIP_DETECTORS).toHaveLength(1);
+    expect(DEFAULT_SKIP_DETECTORS[0]!.patterns).not.toContain("mutated");
+  });
+
+  it("[behavior:B-01] accepts a fully declared cost block verbatim", () => {
+    expect(
+      parseGatePolicy({
+        version: 1,
+        cost: {
+          cheapThresholdMs: 0,
+          environmentSensitive: ["test:budgets"],
+          cacheEnabled: false,
+          relatedTests: { command: "pnpm", args: ["vitest", "related"] },
+          skipDetectors: [
+            {
+              id: "rspec",
+              testGlobs: ["spec/**/*_spec.rb"],
+              patterns: ["xit ", "\\bpending\\b"],
+            },
+          ],
+        },
+      }).cost,
+    ).toEqual({
+      // Zero is a legal threshold: it means "no gate is cheap enough".
+      cheapThresholdMs: 0,
+      environmentSensitive: ["test:budgets"],
+      cacheEnabled: false,
+      relatedTests: { command: "pnpm", args: ["vitest", "related"] },
+      skipDetectors: [
+        {
+          id: "rspec",
+          testGlobs: ["spec/**/*_spec.rb"],
+          patterns: ["xit ", "\\bpending\\b"],
+        },
+      ],
+    });
+  });
+
+  it("[behavior:B-01] refuses an unknown cost sub-key naming it", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy({ version: 1, cost: { cacheEnable: true } }),
+      ),
+    ).toContain("cacheEnable");
+    expect(
+      messageOf(() =>
+        parseGatePolicy({
+          version: 1,
+          cost: {
+            skipDetectors: [
+              { id: "x", testGlobs: ["**/*.test.ts"], pattern: ["it.skip"] },
+            ],
+          },
+        }),
+      ),
+    ).toContain("pattern");
+    expect(
+      messageOf(() =>
+        parseGatePolicy({
+          version: 1,
+          cost: { relatedTests: { command: "pnpm", args: [], cwd: "." } },
+        }),
+      ),
+    ).toContain("cwd");
+  });
+
+  it("[behavior:B-01] refuses every wrong type naming the offending key", () => {
+    const refusals: [unknown, string][] = [
+      [{ cost: [] }, "gatePolicy.cost"],
+      [{ cost: { cheapThresholdMs: "fast" } }, "cheapThresholdMs"],
+      [{ cost: { cheapThresholdMs: -1 } }, "cheapThresholdMs"],
+      [{ cost: { cheapThresholdMs: 1.5 } }, "cheapThresholdMs"],
+      [{ cost: { cacheEnabled: "yes" } }, "cacheEnabled"],
+      [{ cost: { environmentSensitive: "test:budgets" } }, "environmentSensitive"],
+      [{ cost: { environmentSensitive: [7] } }, "environmentSensitive"],
+      [{ cost: { relatedTests: "pnpm vitest related" } }, "relatedTests"],
+      [{ cost: { relatedTests: { command: " ", args: [] } } }, "command"],
+      [{ cost: { skipDetectors: {} } }, "skipDetectors"],
+      [{ cost: { skipDetectors: [null] } }, "skipDetectors[0]"],
+    ];
+    for (const [policy, named] of refusals) {
+      expect(
+        messageOf(() => parseGatePolicy({ version: 1, ...(policy as object) })),
+      ).toContain(named);
+    }
+  });
+
+  it("[behavior:B-01] refuses a detector that can never fire, a bad glob, a bad pattern and a duplicate id", () => {
+    function refuse(detector: unknown): string {
+      return messageOf(() =>
+        parseGatePolicy({ version: 1, cost: { skipDetectors: [detector] } }),
+      );
+    }
+    // No pattern and no glob both mean the detector reports every candidate
+    // clean, which is the silent pass this reader exists to refuse.
+    expect(refuse({ id: "x", testGlobs: ["**/*.test.ts"], patterns: [] })).toContain(
+      "patterns",
+    );
+    expect(refuse({ id: "x", testGlobs: [], patterns: ["it.skip"] })).toContain(
+      "testGlobs",
+    );
+    expect(refuse({ id: " ", testGlobs: ["**/*.test.ts"], patterns: ["a"] })).toContain(
+      "id",
+    );
+    // Globs go through the same D6 dialect check as every other policy glob.
+    expect(
+      refuse({ id: "x", testGlobs: ["src/**test.ts"], patterns: ["a"] }),
+    ).toContain("src/**test.ts");
+    // And a pattern that cannot compile is a configuration defect now, not a
+    // thrown regular expression at gate time.
+    expect(
+      refuse({ id: "x", testGlobs: ["**/*.test.ts"], patterns: ["it.skip("] }),
+    ).toContain("it.skip(");
+
+    expect(
+      messageOf(() =>
+        parseGatePolicy({
+          version: 1,
+          cost: {
+            skipDetectors: [
+              { id: "dup", testGlobs: ["**/*.test.ts"], patterns: ["it.skip"] },
+              { id: "dup", testGlobs: ["**/*.spec.ts"], patterns: ["it.todo"] },
+            ],
+          },
+        }),
+      ),
+    ).toContain("dup");
+  });
+});
+
 describe("loadGatePolicy", () => {
   it("B-08 returns the validated policy, null for no policy, and throws on a malformed one", () => {
     const withPolicy = tempRoot({
@@ -364,9 +543,9 @@ describe("loadGatePolicy", () => {
 
     const malformed = tempRoot({
       version: 1,
-      gatePolicy: { ...structuredClone(EXAMPLE_POLICY), cost: {} },
+      gatePolicy: { ...structuredClone(EXAMPLE_POLICY), costs: {} },
     });
-    expect(messageOf(() => loadGatePolicy(malformed))).toContain("cost");
+    expect(messageOf(() => loadGatePolicy(malformed))).toContain("costs");
   });
 });
 
