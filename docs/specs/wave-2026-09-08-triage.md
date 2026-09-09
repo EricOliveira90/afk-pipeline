@@ -108,6 +108,27 @@ of done is the full suite, not `test:fast` (CLAUDE.md).
 
 ### Batch A — now
 
+**Parked 2026-09-08: implemented, verified, not merged.** All three are
+complete and committed in worktrees, held because the machine was loaded
+(the #195 run) and the pre-merge full chain produced false-red budgets
+(§6 note 1 — every suite moved with load, all tests pass, alone-runs
+green). Resume condition: after the #195 run finishes, one quiet full
+`pnpm test` per branch, then merge serially **#206 → #143 → #144**,
+close each issue naming the merge commit, tick these boxes. Watch
+`fast`: it ran 236.8s on pristine-main content against a 258s budget on
+a loaded machine — if it straddles on a *quiet* machine, report it as a
+finding (measured, `@main`-labelled block); do not raise the number.
+
+| # | branch | commit | worktree |
+|---|---|---|---|
+| 206 | `fix/206-kiro-prompt-via-stdin` | `0560134` | `C:\tmp\afk-206` |
+| 143 | `feat/143-lint-mixed-impasse-outcome` | `b249ce9` | `C:\tmp\afk-143` |
+| 144 | `test/144-estate-audit-assertion-gaps` | `719cf69` | `C:\tmp\afk-144` |
+
+All three branch off `2fc0379`; diffs are file-disjoint from each other,
+so no cross-rebase is needed unless main moves first. `suite-budgets.json`
+is untouched on all three.
+
 - [ ] **#206** kiro prompt via stdin — `fix/206-kiro-prompt-via-stdin`
       `pnpm vitest run src/kiro.test.ts src/invocation-runtime.test.ts`
 - [ ] **#143** mixed-IMPASSE outcome lint — `feat/143-lint-mixed-impasse-outcome`
