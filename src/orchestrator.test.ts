@@ -1615,7 +1615,7 @@ describe("generator scope escalation", () => {
    * "focused generator scope revision" run above. This is the one assertion
    * neither could carry.
    */
-  it("refuses the grant when the escalation follows an undeclared edit", async () => {
+  it("P-03: refuses the grant when the escalation follows an undeclared edit", async () => {
     const repo = makeRepo();
     const slug = "laundered-scope-escalation";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2039,6 +2039,32 @@ describe("generator scope escalation", () => {
           "utf-8",
         ),
       ).toContain("src/smuggled-05.ts");
+    });
+
+    it("B-07: never grants the accepted-pair attestation when the integrity check refused", () => {
+      // The attestation the file-scope gate consumes is earned in exactly one
+      // place — after `mutatedAcceptedContractFiles` finds nothing (#195). This
+      // slice's generator rewrote both pair files, so the check threw and the
+      // latch stayed false for the attempt. Nothing downstream could have
+      // received `acceptedPairIntact: true`: the phase that declares the scope
+      // gate was never reached at all, so no `scope` outcome exists for the
+      // slice. A reordering that set the latch before the check would show up
+      // here as a scope gate running on a tree whose lock the generator wrote.
+      const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+      const runDir = readdirSync(runRoot)
+        .map((name) => join(runRoot, name))
+        .find((path) => statSync(path).isDirectory())!;
+      const gateOutcomes = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter(
+          (event) =>
+            event.type === "gate-outcome" &&
+            event.ghIssue === slices[4]!.ghIssue,
+        );
+
+      expect(gateOutcomes.map(({ gateId }) => gateId)).not.toContain("scope");
     });
 
     it("does not resume generation after the additive guard refuses", () => {

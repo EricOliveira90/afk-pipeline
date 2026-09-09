@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
   chmodSync,
@@ -47,6 +47,24 @@ import { rmDirWithRetry, writeQAReview } from "./test-support.js";
 
 const dirs: string[] = [];
 const fixtureChildren = new Set<ChildProcess>();
+/**
+ * Every path this file's stub generators write into the fixture repository.
+ *
+ * The post-QA phase now runs the file-scope gate (#195), so a fixture whose
+ * generator writes a path its own locked manifest does not declare is a red
+ * gate and a REPAIR round — correctly, because that is exactly the defect the
+ * gate exists to catch. The fix is to declare the path here, never to narrow
+ * the gate: `src/scope-gate.test.ts` owns the negative cases deliberately.
+ * Migration paths are absent on purpose — they are exempt by pattern
+ * (`src/escalation.ts`) — and so is anything under the slice artifact
+ * directory.
+ */
+const GENERATOR_FIXTURE_SCOPE = [
+  "README.md",
+  "change.txt",
+  "provider-output.txt",
+];
+
 const GENERATOR_FIXTURE_CONTRACT = [
   "# Slice Contract",
   "",
@@ -71,7 +89,7 @@ const GENERATOR_FIXTURE_CONTRACT = [
   "- None.",
   "",
   "## Files expected to change",
-  "- README.md",
+  ...GENERATOR_FIXTURE_SCOPE.map((path) => `- ${path}`),
   "",
   "## Migration requirements",
   "- New migration files: 0",
@@ -166,7 +184,7 @@ function makeContext(
     join(absSliceDir, "acceptance-manifest.json"),
     JSON.stringify({
       version: 2,
-      fileScope: { kind: "paths", paths: ["README.md"] },
+      fileScope: { kind: "paths", paths: GENERATOR_FIXTURE_SCOPE },
       migrationCount: 0,
       behaviors: [
         {
@@ -1048,7 +1066,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     ).toEqual(
       expect.arrayContaining([
         ["typecheck", "lint"],
-        ["tests"],
+        // The post-QA phase declares the file-scope gate ahead of the full
+        // suite (#195 AC1), so the second attempt carries both.
+        ["scope", "tests"],
       ]),
     );
     expect(
@@ -2105,6 +2125,241 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
       ).fileScope.paths,
     ).toEqual(["src/declared.ts"]);
   });
+
+  /**
+   * The post-QA transition with a candidate that never escalated at all.
+   *
+   * A spawned run, and one shared by both assertions below: the claim is
+   * about the *order* of the post-QA declarations, the decision the phase
+   * derives from them, and what the next generator round is told — and none
+   * of that exists outside a run that reaches the post-QA transition. The
+   * comparison itself is unit-tested in `src/scope-gate.test.ts` and the
+   * amendment door is the `describe` above; this is the one thing neither can
+   * carry. Two rounds rather than three: round 1 smuggles an undeclared path
+   * and round 2 reverts it, so the run also shows what a repaired candidate
+   * does, at the cost of one extra (empty) suite run.
+   */
+  describe("a red file-scope gate at the post-QA transition", () => {
+    const SMUGGLED = "src/smuggled.ts";
+    let phase: unknown;
+    let generatorRounds = 0;
+    let evaluators = 0;
+    let finalAcceptedCommits = 0;
+    let qaReportKept = false;
+    /** Accepted slice commits visible at each generator dispatch. */
+    const acceptedCommitsAtDispatch: number[] = [];
+    let generatorPrompts: string[] = [];
+    let scopeGateLogs: string[] = [];
+    let postQaAttempts: Array<{
+      results: Array<{
+        gateId: string;
+        status: string;
+        failureKind: string | null;
+        detail?: string;
+        findings?: { outOfScopePaths?: string[] };
+      }>;
+    }> = [];
+
+    const acceptedCommits = (cwd: string): number =>
+      execFileSync("git", ["log", "--oneline", "--grep=feat(#70)", "--fixed-strings"], {
+        cwd,
+        encoding: "utf-8",
+      })
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== "").length;
+
+    // One run, several assertions, and every fact read off disk *inside* the
+    // hook: the shared `afterEach` removes the fixture repository, so the
+    // `it`s below read captured values rather than the filesystem.
+    beforeAll(async () => {
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const repo = makeRepo();
+      // A real `tests` command, so "the remaining declarations still run"
+      // means a command actually ran rather than a declaration being skipped.
+      writeFileSync(
+        join(repo, "package.json"),
+        JSON.stringify({
+          name: "scope-gate-fixture",
+          private: true,
+          scripts: { "test:run": "node -e \"process.exit(0)\"" },
+        }),
+        "utf-8",
+      );
+      git(repo, ["add", "package.json"]);
+      git(repo, ["commit", "-m", "add a test script"]);
+      generatorPrompts = [];
+      let artifactDir = "";
+      const provider: AgentProvider = {
+        name: "stub",
+        async invoke(options: InvokeOptions): Promise<InvokeResult> {
+          if (options.role === "generator") {
+            generatorRounds++;
+            generatorPrompts.push(options.prompt);
+            acceptedCommitsAtDispatch.push(acceptedCommits(repo));
+            mkdirSync(join(repo, "src"), { recursive: true });
+            if (generatorRounds === 1) {
+              // Never declared, never escalated: the shape ADR 0048 refuses
+              // to reconcile.
+              writeFileSync(
+                join(repo, SMUGGLED),
+                "export const smuggled = 1;\n",
+                "utf-8",
+              );
+            } else {
+              rmSync(join(repo, SMUGGLED), { force: true });
+            }
+            writeFileSync(
+              join(repo, "change.txt"),
+              `round ${generatorRounds}\n`,
+              "utf-8",
+            );
+          } else if (options.role === "evaluator-qa") {
+            evaluators++;
+            writeFileSync(
+              join(artifactDir, "qa-report.md"),
+              "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+              "utf-8",
+            );
+            writeQAReview(artifactDir, "deterministic");
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+      const ctx = makeContext(repo, provider, {
+        commandTimeoutMs: 30_000,
+        heartbeatIntervalMs: 20,
+        infrastructureRetries: 0,
+      });
+      artifactDir = ctx.absSliceDir;
+      // The shared context runs the slice on `main`, which is also its feature
+      // branch — a base its candidate can never differ from, so a file-scope
+      // comparison against it is empty by construction. This gate is about
+      // exactly that difference, so the fixture cuts a real slice branch.
+      git(repo, ["checkout", "-b", "slice-01"]);
+      ctx.branch = "slice-01";
+
+      phase = await runSliceExecute(ctx);
+
+      const evidenceDir = join(ctx.logger.runDir, "gates", "s01");
+      postQaAttempts = readdirSync(evidenceDir)
+        .filter((name) => name.endsWith(".json"))
+        .sort()
+        .map((name) =>
+          JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
+        )
+        .filter((attempt) =>
+          attempt.results.some(
+            (gate: { gateId: string }) => gate.gateId === "scope",
+          ),
+        );
+      const logDir = join(evidenceDir, "gate-logs");
+      scopeGateLogs = readdirSync(logDir)
+        .filter((name) => name.endsWith("-scope.log"))
+        .map((name) => readFileSync(join(logDir, name), "utf-8"));
+      finalAcceptedCommits = acceptedCommits(repo);
+      qaReportKept = existsSync(join(artifactDir, "qa-report-r2-a1.md"));
+    }, 180_000);
+
+    it("B-12: declares the scope gate first, red, and buys a repair round rather than a merge", () => {
+      expect(postQaAttempts).toHaveLength(2);
+      // Attempt ids are random hex, so the two documents are told apart by
+      // what they say and not by filename order.
+      const redRound = postQaAttempts.find((attempt) =>
+        attempt.results.some(
+          (gate) => gate.gateId === "scope" && gate.status === "FAIL",
+        ),
+      );
+      const repairedRound = postQaAttempts.find((attempt) =>
+        attempt.results.every((gate) => gate.status === "PASS"),
+      );
+      expect(redRound).toBeDefined();
+      expect(repairedRound).toBeDefined();
+
+      // First in the phase's evidence, and a red scope did not short-circuit
+      // the declarations behind it.
+      expect(redRound!.results.map((gate) => gate.gateId)).toEqual([
+        "scope",
+        "tests",
+      ]);
+      expect(redRound!.results[0]).toMatchObject({
+        gateId: "scope",
+        status: "FAIL",
+        findings: { outOfScopePaths: [SMUGGLED] },
+      });
+      expect(redRound!.results[0]!.detail).toContain(SMUGGLED);
+      expect(redRound!.results[1]).toMatchObject({
+        gateId: "tests",
+        status: "PASS",
+      });
+
+      // REPAIR, not acceptance: the candidate reached the evaluator (ADR 0048
+      // needs that for an amendment warrant) but never the feature branch.
+      // At the moment round 2 was dispatched there was still no accepted
+      // slice commit, and the failed gate is what the round was told about.
+      expect(generatorRounds).toBe(2);
+      expect(acceptedCommitsAtDispatch).toEqual([0, 0]);
+      expect(generatorPrompts[1]).toContain("Gate ID: `scope`");
+      // The prompt's failure set cites the gate's evidence rather than
+      // inlining it, so the named path has to be in the log it cites.
+      expect(generatorPrompts[1]).toMatch(/-scope\.log/);
+      expect(scopeGateLogs.some((log) => log.includes(SMUGGLED))).toBe(true);
+
+      // And the repaired candidate passes the same gate.
+      expect(repairedRound!.results.map((gate) => gate.gateId)).toEqual([
+        "scope",
+        "tests",
+      ]);
+      expect(
+        repairedRound!.results.every((gate) => gate.status === "PASS"),
+      ).toBe(true);
+      expect(phase).toEqual({ phase: "PASS" });
+      expect(evaluators).toBe(2);
+      expect(finalAcceptedCommits).toBe(1);
+    });
+
+    it("P-04: leaves the post-QA phase's materialization, allowlist and outcome mapping alone", () => {
+      // `src/post-qa-gates.ts` is unedited, and prepending a commandless
+      // declaration changed none of its three jobs:
+      //
+      // 1. Executable-driven materialization — the `tests` command needed a
+      //    checkout and got one, in both rounds.
+      for (const attempt of postQaAttempts) {
+        expect(
+          attempt.results.find((gate) => gate.gateId === "tests"),
+        ).toMatchObject({ status: "PASS" });
+      }
+      // 2. The PASS / REPAIR mapping — a red required gate became a repair
+      //    round, a green phase became the accepted candidate.
+      expect(generatorRounds).toBe(2);
+      expect(phase).toEqual({ phase: "PASS" });
+      // 3. The review-artifact allowlist and blob provenance — QA wrote
+      //    reports into the slice directory between the authorized tree and
+      //    the accepted one, and the phase accepted the tree anyway rather
+      //    than failing closed on the difference (ADR 0012).
+      expect(qaReportKept).toBe(true);
+      expect(finalAcceptedCommits).toBe(1);
+    });
+
+    it("B-07: exempts the accepted pair, which the negotiated tree always changes", () => {
+      // Both rounds' trees differ from `main` in `contract.md` and
+      // `acceptance-manifest.json`, because negotiation wrote them there. The
+      // attestation the orchestrator earned by finding the pair unmutated is
+      // what keeps them off the violation list — without it every negotiated
+      // slice would be red, and the one honest violation would be lost in the
+      // noise.
+      for (const attempt of postQaAttempts) {
+        const offenders =
+          attempt.results.find((gate) => gate.gateId === "scope")?.findings
+            ?.outOfScopePaths ?? [];
+        expect(offenders).not.toContain(
+          "specs/slices/01-prd-070-regression/contract.md",
+        );
+        expect(offenders).not.toContain(
+          "specs/slices/01-prd-070-regression/acceptance-manifest.json",
+        );
+      }
+    });
+  });
 });
 
 describe("provider-independent policy-less base gates", () => {
@@ -2171,7 +2426,10 @@ describe("provider-independent policy-less base gates", () => {
       ).toEqual(
         expect.arrayContaining([
           ["typecheck", "lint"],
-          ["tests"],
+          // The file-scope gate leads the post-QA phase (#195 AC1): a
+          // deterministic comparison that needs no toolchain must not sit
+          // behind the suite.
+          ["scope", "tests"],
         ]),
       );
       expect(

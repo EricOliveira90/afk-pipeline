@@ -114,6 +114,7 @@ import {
   reviewArtifactViolations,
   runPostQAGates,
 } from "./post-qa-gates.js";
+import { scopeGateDeclaration } from "./scope-gate.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -5173,8 +5174,18 @@ export async function runSliceExecute(
       let generatorAttempt = 0;
       let scopeRevisions = 0;
       let scopeRevisionNote = "";
+      // Proof, not assumption, that the accepted `contract.md` /
+      // `acceptance-manifest.json` pair still holds the orchestrator's bytes —
+      // the attestation `outOfScopeChangedPaths` refuses to default
+      // (`src/escalation.ts`). Latched true only after the integrity check
+      // below passed for *this* generator attempt, and reset to false at the
+      // top of every attempt: a reordering that skips the check leaves it
+      // false, and the scope gate then names both pair files and fails closed
+      // rather than exempting a lock the generator may have widened.
+      let acceptedPairIntact = false;
       while (true) {
         generatorAttempt++;
+        acceptedPairIntact = false;
         logger.phase(
           `${ctx.tag}: implementing (round ${round}/${finalRound})...`,
           "error",
@@ -5375,6 +5386,10 @@ export async function runSliceExecute(
               `contract by hand or resume the slice.`,
           );
         }
+        // Reached only because the check above found no mutation, so the pair
+        // on disk is byte-for-byte the accepted pair. This is the one place
+        // the attestation is earned.
+        acceptedPairIntact = true;
 
         if (!existsSync(escalationPath)) break;
 
@@ -5801,6 +5816,34 @@ export async function runSliceExecute(
           if (signal?.aborted) {
             return { phase: "CANCELLED", error: CANCELLED_BY_USER };
           }
+          // The file-scope gate goes first, and this is its only declaration
+          // site (ADR 0048; #195 AC1, AC6). Prepended rather than appended for
+          // two reasons: a deterministic comparison that needs no toolchain
+          // must not sit behind the ~7-minute suite, and it must not be
+          // skippable by an earlier declaration's INFRASTRUCTURE or
+          // checkpoint `break`. A red `scope` does not short-circuit the rest
+          // — `runGates` continues past FAIL — so the suite still runs and
+          // `decideCandidateGatePhase` returns REPAIR naming `scope`, which
+          // becomes the next generator round instead of a merge. The candidate
+          // still reaches the evaluator, which ADR 0048's amendment warrant
+          // requires; what it does not reach is the feature branch.
+          const postQaDeclarations = [
+            scopeGateDeclaration({
+              source: {
+                kind: "candidate",
+                // The live worktree, not the checkpoint directory: only it
+                // carries the working-tree and untracked changes, and the
+                // candidate is not committed until after these gates pass.
+                worktreeDir: ctx.worktreeDir,
+                featureRef: featBranch,
+              },
+              absSliceDir: ctx.absSliceDir,
+              sliceArtifactDir: ctx.relSliceDir,
+              acceptedPairIntact,
+              options: { migrationPathPattern: config.migrationPathPattern },
+            }),
+            ...fullSuiteDeclarations,
+          ];
           const postQaGates = await runPostQAGates({
             repoRoot: config.repoRoot,
             worktreeDir: ctx.worktreeDir,
@@ -5810,7 +5853,7 @@ export async function runSliceExecute(
             tag: ctx.tag,
             round,
             evidenceDir,
-            declarations: fullSuiteDeclarations,
+            declarations: postQaDeclarations,
             ...(gatePrepare ? { prepare: gatePrepare } : {}),
             signal,
             infrastructureRetries:
