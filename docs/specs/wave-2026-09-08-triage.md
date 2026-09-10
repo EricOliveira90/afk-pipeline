@@ -131,8 +131,16 @@ is untouched on all three.
 
 - [ ] **#206** kiro prompt via stdin — `fix/206-kiro-prompt-via-stdin`
       `pnpm vitest run src/kiro.test.ts src/invocation-runtime.test.ts`
-- [ ] **#143** mixed-IMPASSE outcome lint — `feat/143-lint-mixed-impasse-outcome`
+- [x] **#143** mixed-IMPASSE outcome lint — `feat/143-lint-mixed-impasse-outcome`
       `pnpm vitest run src/lint-tickets.test.ts && pnpm run lint:tickets`
+      *(merged 2026-09-10 as `2d0f1ba`, rebased onto `b0b4548`, out of the
+      #206 → #143 → #144 order because the three diffs are file-disjoint.
+      Every suite green — `fast` 1710, `orchestrator` 216 — but `test:budgets`
+      was red on all six suites at once (total 3399s / 1877s, `clean-failed`
+      55.7s / 46s included, and this diff adds no spawned scenario): the
+      loaded-machine false red of §6 note 1, not a measurement. Budgets
+      untouched. One `fast` run also died on a git `index.lock` collision and
+      passed on a rerun.)*
 - [ ] **#144** estate-audit assertion gaps — `test/144-estate-audit-assertion-gaps`
       `pnpm vitest run src/adjudication.test.ts src/adjudication-estate.test.ts src/adopt-command.test.ts`
       then `pnpm run test:heavy:wave && pnpm test:budgets`
