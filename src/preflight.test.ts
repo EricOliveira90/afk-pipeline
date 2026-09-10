@@ -8,6 +8,8 @@ import {
   formatPreflightRefusal,
   formatPreflightReport,
   gbToBytes,
+  MIN_FREE_DISK_GB_ENV,
+  resolveMinFreeDiskGb,
   runLaunchPreflight,
   type PreflightDirEntry,
   type PreflightFs,
@@ -212,6 +214,43 @@ describe("preflight — free disk floor", () => {
   it("defaults to a five-gigabyte floor", () => {
     expect(DEFAULT_MIN_FREE_DISK_GB).toBe(5);
     expect(gbToBytes(DEFAULT_MIN_FREE_DISK_GB)).toBe(5 * 1024 ** 3);
+  });
+});
+
+/**
+ * Unit tests rather than a spawned scenario, per AGENTS.md's assertion
+ * ladder: the whole of #233 is which number one pure function returns.
+ * The suite's own `AFK_MIN_FREE_DISK_GB=0` is set in `vitest.config.ts`,
+ * so these pass an explicit env object instead of reading the ambient one.
+ */
+describe("resolveMinFreeDiskGb — a fixture must not inherit the host's floor (#233)", () => {
+  it("uses the production default when nothing overrides it", () => {
+    expect(resolveMinFreeDiskGb(undefined, {})).toBe(DEFAULT_MIN_FREE_DISK_GB);
+  });
+
+  it("lets the env disable the floor, which is what the suite relies on", () => {
+    expect(resolveMinFreeDiskGb(undefined, { [MIN_FREE_DISK_GB_ENV]: "0" })).toBe(
+      0,
+    );
+  });
+
+  it("prefers an explicit floor over the env, so a floor test still asserts on it", () => {
+    expect(resolveMinFreeDiskGb(5, { [MIN_FREE_DISK_GB_ENV]: "0" })).toBe(5);
+    expect(resolveMinFreeDiskGb(0, {})).toBe(0);
+  });
+
+  it("fails closed on a malformed override rather than disabling the floor", () => {
+    for (const raw of ["", "  ", "not-a-number", "-1", "NaN"]) {
+      expect(resolveMinFreeDiskGb(undefined, { [MIN_FREE_DISK_GB_ENV]: raw })).toBe(
+        DEFAULT_MIN_FREE_DISK_GB,
+      );
+    }
+  });
+
+  it("accepts a fractional override", () => {
+    expect(resolveMinFreeDiskGb(undefined, { [MIN_FREE_DISK_GB_ENV]: "0.5" })).toBe(
+      0.5,
+    );
   });
 });
 

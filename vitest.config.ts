@@ -33,6 +33,13 @@ export default defineConfig({
       GIT_AUTHOR_EMAIL: "afk-test@example.com",
       GIT_COMMITTER_NAME: "AFK Test",
       GIT_COMMITTER_EMAIL: "afk-test@example.com",
+      // A spawned pipeline would otherwise inherit the production 5 GB
+      // free-disk floor and refuse to launch on a fullish host, turning a
+      // full disk into "your branch is broken" — which once blocked a
+      // ship gate no code change could turn green (#233). Fixture repos
+      // are megabytes, so the floor buys the suite nothing. A test that
+      // asserts *on* the floor sets it explicitly, which wins over this.
+      AFK_MIN_FREE_DISK_GB: "0",
     },
 
     // Integration suites spawn many synchronous git/pnpm processes. Bound
