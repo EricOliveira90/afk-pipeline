@@ -150,9 +150,28 @@ is untouched on all three.
       loaded-machine false red of §6 note 1, not a measurement. Budgets
       untouched. One `fast` run also died on a git `index.lock` collision and
       passed on a rerun.)*
-- [ ] **#144** estate-audit assertion gaps — `test/144-estate-audit-assertion-gaps`
-      `pnpm vitest run src/adjudication.test.ts src/adjudication-estate.test.ts src/adopt-command.test.ts`
-      then `pnpm run test:heavy:wave && pnpm test:budgets`
+- [x] **#144** estate-audit assertion gaps — `test/144-estate-audit-assertion-gaps`
+      `pnpm vitest run src/adopt-command.test.ts src/orchestrator-runs.test.ts`
+      *(merged 2026-09-10 as `744b688` via PR #229, rebased twice — onto
+      `b0b4548`, then onto `a54853d` after #206 and #143 landed; the diff is
+      the same three files either way and `tsc --noEmit` is clean on the
+      final base. The checked files above are the ones the commit actually
+      touches; the planned list named `adjudication*.test.ts`, which it does
+      not. Touched files 83/83, then one full `pnpm test`: every suite green,
+      1698 tests in `fast` plus all five heavy suites, zero test failures.
+      `test:budgets` red on five of six suites (3164.5s / 1877s) — the third
+      recorded false red of §6 note 1's kind, after #206 and #143. This run
+      pinned the attribution instead of asserting it: an alone-run of the
+      untouched `qa-orchestration` suite took 345.0s against the 241.7s it had
+      just taken inside the same chain, and nothing this repo controls makes a
+      suite slower alone than in-chain. Budgets untouched, and #232 filed to
+      make the check warn on host load rather than fail. The one spawned run
+      this diff adds was measured directly rather than left as a claim —
+      scenario-scoped and interleaved against main's version of the same
+      files, 34.9s vs 27.5s by per-variant minimum, ~+7.4s, ~0.9% of the
+      orchestrator suite's 842s budget. Recorded in the commit message; no
+      `_measured…@<branch>` block added, since the number does not move a
+      budget.)*
 
 ### Batch A′ — after PRD 4 merges
 
