@@ -1701,49 +1701,48 @@ function repairSituationSection(
 }
 
 /**
- * Replaces every fenced block in `body` with `replacement`, matching each
- * opening fence to its own closing fence. An unterminated fence runs to the end
- * of the body.
+ * Replaces the quoted document in `body` — the span from its first fence line
+ * to its last — with a single `replacement` line, keeping the framing prose on
+ * either side.
  *
- * Written line-by-line rather than as one regular expression: with the `m`
- * flag, `$` matches at every line end, so a lazy `[\s\S]*?` fallback for an
- * unterminated fence stops at the first line and leaves most of the quoted
- * document behind.
+ * Deliberately *not* fence pairing. The quoted documents carry fences of their
+ * own: `stuck.md` embeds JSON and diff blocks, and the note builders in
+ * `resume.ts` wrap the whole file in a plain ``` fence, so an inner ``` is
+ * indistinguishable from the outer close. Pairing therefore mis-terminates the
+ * quote at the document's first inner fence and reads the rest as alternating
+ * quote and prose — which leaked fragments of the document back inline,
+ * interleaved with a repeated pointer, instead of removing it (three pointers
+ * and two leaked passages on a `stuck.md` with two inner fences).
+ *
+ * A span has no pairing to get wrong: everything between the outer fences is
+ * the document, whatever it contains. The cost is that prose *between* two
+ * genuinely separate quotes in one section would go too — neither section in
+ * REPAIR_SITUATION_BY_REFERENCE_SECTIONS has that shape, since each wraps one
+ * file in one fence.
  */
-function replaceFencedBlocks(body: string, replacement: string): string {
+function replaceQuotedDocument(body: string, replacement: string): string {
   const lines = body.split("\n");
-  const out: string[] = [];
-  let fence: { marker: string; length: number } | undefined;
-  for (const line of lines) {
-    const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence === undefined) {
-      // A backtick fence whose info string contains a backtick is not a fence,
-      // matching markdownSections.
-      const opensFence =
-        fenceMatch !== null &&
-        !(fenceMatch[1]![0] === "`" && fenceMatch[2]!.includes("`"));
-      if (!opensFence) {
-        out.push(line);
-        continue;
-      }
-      fence = { marker: fenceMatch![1]![0]!, length: fenceMatch![1]!.length };
-      out.push(replacement);
-      continue;
-    }
-    if (
-      fenceMatch !== null &&
-      fenceMatch[1]![0] === fence.marker &&
-      fenceMatch[1]!.length >= fence.length &&
-      /^[ \t]*$/.test(fenceMatch[2]!)
-    ) {
-      fence = undefined;
-    }
-  }
-  return out.join("\n");
+  const isFence = (line: string): boolean => {
+    const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    // A backtick fence whose info string contains a backtick is not a fence,
+    // matching markdownSections.
+    return (
+      match !== null &&
+      !(match[1]![0] === "`" && match[2]!.includes("`"))
+    );
+  };
+  const first = lines.findIndex(isFence);
+  if (first === -1) return body;
+  let last = lines.length - 1;
+  while (!isFence(lines[last]!)) last--;
+  // An unterminated fence — the whole tail is document.
+  return [...lines.slice(0, first), replacement, ...lines.slice(last + 1)].join(
+    "\n",
+  );
 }
 
 /**
- * Replaces the fenced blocks in the repair situation's document-quoting
+ * Replaces the quoted document in the repair situation's document-quoting
  * sections with a pointer to the path the round already carries by reference.
  *
  * A section is only rewritten when its file is actually in
@@ -1763,7 +1762,7 @@ export function projectGeneratorRepairSituation(
     const section = repairSituationSection(projected, title);
     if (section === undefined) continue;
     const body = projected.slice(section.bodyStart, section.bodyEnd);
-    const pointed = replaceFencedBlocks(
+    const pointed = replaceQuotedDocument(
       body,
       `Read it at \`${artifactId}\` in your worktree.`,
     );
