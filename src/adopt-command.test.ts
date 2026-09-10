@@ -687,7 +687,7 @@ describe("afk adopt", () => {
         | "AWAITING-ADJUDICATION"
         | "ADJUDICATION-LOCK-REFUSED"
         | "ERROR" = "AWAITING-ADJUDICATION",
-      options: { detached?: boolean } = {},
+      options: { detached?: boolean; midDecision?: boolean } = {},
     ): string {
       const worktree = join(repo, ".afk", "worktrees", "afk-demo-s06");
       git(repo, ["branch", PARKED_BRANCH, "main"]);
@@ -716,12 +716,29 @@ describe("afk adopt", () => {
         JSON.stringify({ version: 1, classification: "IMPASSE", findings: [] }),
         "utf-8",
       );
-      if (phase !== "AWAITING-ADJUDICATION") {
-        // Decisions already recorded: a refused lock, or an apply that died
-        // after the last decision was accepted.
+      if (phase !== "AWAITING-ADJUDICATION" || options.midDecision) {
+        // Decisions already recorded: a refused lock, an apply that died
+        // after the last decision was accepted, or — with `midDecision` — a
+        // multi-finding park part-way through, still awaiting a decision on
+        // its second contested finding.
         writeFileSync(
           join(sliceDir, "adjudication-decisions.json"),
           JSON.stringify({ version: 1, decisions: [{ findingId: "F-01" }] }),
+          "utf-8",
+        );
+      }
+      if (options.midDecision) {
+        // The fourth estate member, and the only one that exists nowhere
+        // else: an `adjudication.md` the run has not consumed yet is the
+        // operator's answer in its sole copy (ADR 0055 Seam 2 §6).
+        writeFileSync(
+          join(sliceDir, "adjudication.md"),
+          JSON.stringify({
+            version: 1,
+            findingId: "F-02",
+            winningPosition: "PLANNER",
+            author: "Ada Lovelace",
+          }),
           "utf-8",
         );
       }
@@ -815,6 +832,67 @@ describe("afk adopt", () => {
       // And the estate is still the next run's legitimate input rather than
       // a leftover, because the record still says the slice is live.
       expect((await nextLaunchPreflight(repo)).refuse).toBe(false);
+    });
+
+    it("leaves every estate file byte-identical when it refuses a park", async () => {
+      // The second half of the invariant, and the half the estate audit
+      // recorded as unasserted (#144): the tests above pin that adoption
+      // *refuses* a parked slice and moves no ref, but none of them reads the
+      // slice directory back. "Safe by construction" is the claim — this
+      // makes it an assertion, so a future change to adopt's preconditions or
+      // to the estate reader cannot quietly start touching these files.
+      //
+      // The park is mid-decision on purpose: a multi-finding impasse with one
+      // decision recorded and the next one written but not yet consumed. That
+      // is the state in which all four estate members exist at once, and
+      // `adjudication.md` is the member with no second copy anywhere — losing
+      // it loses the operator's answer outright.
+      const repo = makeRepo();
+      const worktree = park(repo, "AWAITING-ADJUDICATION", {
+        midDecision: true,
+      });
+      const sliceDir = join(
+        worktree,
+        ".kiro",
+        "specs",
+        "demo",
+        "slices",
+        "06-afk-adopt",
+      );
+      const ESTATE = [
+        "contract-negotiation-outcome.json",
+        "adjudication-decisions.json",
+        "adjudication.md",
+      ] as const;
+      const estateBefore = new Map(
+        ESTATE.map((name) => [
+          name,
+          readFileSync(join(sliceDir, name), "utf-8"),
+        ]),
+      );
+      const parkedBranchBefore = resolveCommit(repo, PARKED_BRANCH)!;
+
+      const result = await adopt(repo, {
+        resolveGatePlan: () => ({ declarations: GATES }),
+        runBaseGates: async () => [],
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("live adjudication estate");
+      // Named, not counted: a file that survived with different bytes fails
+      // on its own name rather than as an opaque directory mismatch.
+      for (const [name, contents] of estateBefore) {
+        expect(readFileSync(join(sliceDir, name), "utf-8"), name).toBe(
+          contents,
+        );
+      }
+      // ...and the tree and branch they live in are still there. Byte-stable
+      // files inside a deregistered worktree, or on a deleted branch, would
+      // satisfy the loop above and still fail the invariant.
+      expect(
+        git(repo, ["worktree", "list", "--porcelain"]).replace(/\\/g, "/"),
+      ).toContain(worktree.replace(/\\/g, "/"));
+      expect(resolveCommit(repo, PARKED_BRANCH)).toBe(parkedBranchBefore);
     });
 
     it("refuses a lock-refused estate too, and points at the base fix", async () => {
