@@ -140,6 +140,63 @@ function git(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
 }
 
+/**
+ * Is every id in `expected` present in `actual`, in that relative order?
+ *
+ * A subsequence match, not an equality: ids may sit anywhere in `actual` as
+ * long as they appear in the given order relative to one another.
+ */
+function declaresInOrder(
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean {
+  let from = 0;
+  for (const id of expected) {
+    const at = actual.indexOf(id, from);
+    if (at === -1) return false;
+    from = at + 1;
+  }
+  return true;
+}
+
+/**
+ * The gate-ID expectation every post-QA scenario below shares: the named gates
+ * are **present** and in the named **relative order** (#231).
+ *
+ * Deliberately not exhaustive. These assertions exist to catch a gate that
+ * fails to declare itself or declares itself in the wrong position, and
+ * containment catches both. Exhaustiveness caught only "a gate was added",
+ * which is the intended change of any gate-shipping slice and not a
+ * regression — as exact arrays here it turned five assertions red for #86 and
+ * #193, forcing an unrelated test file into a slice's `fileScope` both times.
+ * No exhaustive gate-ID pin is kept anywhere in this file for that reason; a
+ * gate's own declaration is covered by `src/base-gates.test.ts`.
+ */
+function expectDeclaresInOrder(
+  actual: readonly string[],
+  expected: readonly string[],
+): void {
+  expect(
+    declaresInOrder(actual, expected),
+    `expected gate ids ${JSON.stringify(expected)} present and in that relative order, got ${JSON.stringify(actual)}`,
+  ).toBe(true);
+}
+
+/**
+ * `expectDeclaresInOrder` over a phase's evidence: some one attempt declares
+ * the named gates in the named relative order. Attempt ids are random hex, so
+ * a scenario's attempts are told apart by what they declare, not by order.
+ */
+function expectSomeAttemptDeclaresInOrder(
+  attempts: readonly (readonly string[])[],
+  expected: readonly string[],
+): void {
+  expect(
+    attempts.some((ids) => declaresInOrder(ids, expected)),
+    `expected one attempt to declare gate ids ${JSON.stringify(expected)} in that relative order, got ${JSON.stringify(attempts)}`,
+  ).toBe(true);
+}
+
 function makeRepo(): string {
   const repo = mkdtempSync(join(tmpdir(), "afk-qa-070-"));
   dirs.push(repo);
@@ -1062,19 +1119,18 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     const attempts = evidenceFiles.map((name) =>
       JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
     );
-    expect(
-      attempts.map((attempt) =>
-        attempt.results.map((gate: { gateId: string }) => gate.gateId),
-      ),
-    ).toEqual(
-      expect.arrayContaining([
-        ["typecheck", "lint"],
-        // The post-QA phase declares the two content-derived gates ahead of the
-        // full suite (#195 AC1; #86 B-06), so the second attempt carries all
-        // three.
-        ["scope", "tests:skipped", "tests"],
-      ]),
+    const attemptGateIds = attempts.map((attempt) =>
+      attempt.results.map((gate: { gateId: string }) => gate.gateId),
     );
+    expectSomeAttemptDeclaresInOrder(attemptGateIds, ["typecheck", "lint"]);
+    // The post-QA phase declares the two content-derived gates ahead of the
+    // full suite (#195 AC1; #86 B-06), so the second attempt carries all
+    // three.
+    expectSomeAttemptDeclaresInOrder(attemptGateIds, [
+      "scope",
+      "tests:skipped",
+      "tests",
+    ]);
     expect(
       attempts.some(
         (attempt) =>
@@ -2281,18 +2337,21 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
 
       // First in the phase's evidence, and a red scope did not short-circuit
       // the declarations behind it.
-      expect(redRound!.results.map((gate) => gate.gateId)).toEqual([
-        "scope",
-        "tests:skipped",
-        "tests",
-      ]);
+      expectDeclaresInOrder(
+        redRound!.results.map((gate) => gate.gateId),
+        ["scope", "tests:skipped", "tests"],
+      );
       expect(redRound!.results[0]).toMatchObject({
         gateId: "scope",
         status: "FAIL",
         findings: { outOfScopePaths: [SMUGGLED] },
       });
       expect(redRound!.results[0]!.detail).toContain(SMUGGLED);
-      expect(redRound!.results[2]).toMatchObject({
+      // Found by id, not by index: a gate declared ahead of `tests` by a later
+      // slice must not move this assertion (#231).
+      expect(
+        redRound!.results.find((gate) => gate.gateId === "tests"),
+      ).toMatchObject({
         gateId: "tests",
         status: "PASS",
       });
@@ -2310,11 +2369,10 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
       expect(scopeGateLogs.some((log) => log.includes(SMUGGLED))).toBe(true);
 
       // And the repaired candidate passes the same gate.
-      expect(repairedRound!.results.map((gate) => gate.gateId)).toEqual([
-        "scope",
-        "tests:skipped",
-        "tests",
-      ]);
+      expectDeclaresInOrder(
+        repairedRound!.results.map((gate) => gate.gateId),
+        ["scope", "tests:skipped", "tests"],
+      );
       expect(
         repairedRound!.results.every((gate) => gate.status === "PASS"),
       ).toBe(true);
@@ -2365,6 +2423,37 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
         );
       }
     });
+  });
+});
+
+// A unit test on the shared expectation itself, so the containment relaxation
+// (#231) cannot quietly become an assertion that passes on anything. No
+// pipeline is spawned; see AGENTS.md on where a new assertion goes.
+describe("the shared gate-ID expectation", () => {
+  it("accepts a declaration set that gained an unrelated gate", () => {
+    expect(
+      declaresInOrder(["scope", "acceptance", "tests:skipped", "tests"], [
+        "scope",
+        "tests:skipped",
+        "tests",
+      ]),
+    ).toBe(true);
+  });
+
+  it("rejects a set missing an expected gate", () => {
+    expect(declaresInOrder(["scope", "tests"], ["scope", "tests:skipped", "tests"])).toBe(
+      false,
+    );
+  });
+
+  it("rejects two expected gates in the wrong relative order", () => {
+    expect(
+      declaresInOrder(["tests", "tests:skipped", "scope"], [
+        "scope",
+        "tests:skipped",
+        "tests",
+      ]),
+    ).toBe(false);
   });
 });
 
@@ -2425,19 +2514,18 @@ describe("provider-independent policy-less base gates", () => {
         .map((name) =>
           JSON.parse(readFileSync(join(evidenceDir, name), "utf-8")),
         );
-      expect(
-        evidence.map((attempt) =>
-          attempt.results.map((gate: { gateId: string }) => gate.gateId),
-        ),
-      ).toEqual(
-        expect.arrayContaining([
-          ["typecheck", "lint"],
-          // The two content-derived gates lead the post-QA phase (#195 AC1;
-          // #86 B-06): a comparison that needs no toolchain must not sit behind
-          // the suite.
-          ["scope", "tests:skipped", "tests"],
-        ]),
+      const attemptGateIds = evidence.map((attempt) =>
+        attempt.results.map((gate: { gateId: string }) => gate.gateId),
       );
+      expectSomeAttemptDeclaresInOrder(attemptGateIds, ["typecheck", "lint"]);
+      // The two content-derived gates lead the post-QA phase (#195 AC1;
+      // #86 B-06): a comparison that needs no toolchain must not sit behind
+      // the suite.
+      expectSomeAttemptDeclaresInOrder(attemptGateIds, [
+        "scope",
+        "tests:skipped",
+        "tests",
+      ]);
       expect(
         evidence.every((attempt) =>
           attempt.results.every(
