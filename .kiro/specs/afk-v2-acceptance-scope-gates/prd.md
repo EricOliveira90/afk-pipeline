@@ -761,6 +761,18 @@ branch** — structurally the cleaner data flow, but it takes
 declare it, which is the ADR 0060 file-overlap conflict this PRD exists to
 prevent.
 
+### Role write-scope enforcement is owned by #211, not by any slice in this PRD
+
+Recorded 2026-09-10. D4's `role` comparison source ships as a seam with no
+production call site — architect finding `A-02`, PM finding `P-01`, both raised
+against #195 and shipped as unfixed notes. **#211 owns it.** It is not #91's and
+not #96's, and it must not be re-homed onto either: neither slice ships a gate,
+and adding a write-scope grader to a candidate-evaluator or final-evaluation
+slice would widen a scope this PRD deliberately bounded. #216 was closed as
+#211's duplicate. This note satisfies the second branch of `P-01`'s clear
+condition — "the prd/issues record which later slice owns role write-scope
+enforcement" — so a guardian round can dispose of it without a slice taking it.
+
 ### D24 — a deterministic gate finding "parks" by blocking the merge, not through the adjudication estate
 
 Settled 2026-09-09, after #193's planner raised `SPEC_CONTRADICTION` between D5
