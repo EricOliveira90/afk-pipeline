@@ -159,6 +159,10 @@ Contract file scope never implies a waiver (plan §3d item 17). Each
 applied waiver's four fields are recorded in gate evidence and
 `run-summary.md`; an unwaived protected change parks the slice through
 PRD 2's park-and-continue machinery with its risk class and exact path.
+**Superseded in part by D24:** the evidence half of that sentence stands
+unchanged, but "parks the slice" is realized as "does not merge until an operator
+waives it" — a red required gate blocking the merge through the existing `REPAIR`
+path, not an adjudication-estate park.
 
 **A waiver's `path` is one exact repository-relative path, never a glob.**
 Recorded 2026-09-07 after slice 01's planner escalated
@@ -755,6 +759,46 @@ branch** — structurally the cleaner data flow, but it takes
 `src/post-qa-gates.ts` out of the frozen set for #193 while #91 and #132 also
 declare it, which is the ADR 0060 file-overlap conflict this PRD exists to
 prevent.
+
+### D24 — a deterministic gate finding "parks" by blocking the merge, not through the adjudication estate
+
+Settled 2026-09-09, after #193's planner raised `SPEC_CONTRADICTION` between D5
+and D23 on its next dispatch. **This decision supersedes D5's
+park-and-continue reference for deterministic gate findings**, and D5's sentence
+"an unwaived protected change parks the slice through PRD 2's park-and-continue
+machinery with its risk class and exact path" is to be read through it. The PRD
+text and the implementation must not silently disagree.
+
+The contradiction: a post-QA gate phase can only return `PASS`, `ERROR` or
+`REPAIR` (`src/candidate-gate-policy.ts:16-24`,
+`src/post-qa-gates.ts:99-125`), and PRD 2's park resolves a *finding ID* through
+an adjudication estate that no deterministic gate produces
+(`src/adjudication.ts`, `contestedFindingIds`, `appendAdjudicationDecision`).
+D23 froze `PostQAGateResult`'s shape for #193 and named `src/orchestrator.ts`
+plus `src/run-state.ts` as its only new producing seam, so the wide route is
+closed by that decision rather than by omission.
+
+**"Parks the slice" is realized as "does not merge until an operator waives
+it."** An unwaived protected change makes the required `feedback-integrity` gate
+fail closed. The merge is blocked through the existing `REPAIR` path. No park
+record is written and no adjudication-estate identity is reserved. The operator
+unblocks the slice by adding the waiver to the PRD directory's `afk.json`.
+
+**D5's evidence clause survives the narrowing in full** — it is the half of D5
+that is *not* superseded. The blocking outcome must carry the `riskClass` and the
+exact repository-relative path into `GateResult.findings.protectedChanges`, into
+gate evidence, and into `run-summary.md`; and the failure text must name the
+exact waiver fields to add to `afk.json` (`riskClass`, `path`, `author`,
+`reason`) so the operator can act from the failure alone. A narrowing that drops
+the evidence clause does not satisfy this decision.
+
+Rejected: **building the gate-to-park route in #193** — a new
+`AWAITING-ADJUDICATION` phase, an adjudication-estate producer for a non-agent
+finding identity, an unpark predicate and a new operator-facing resolution
+interface. It honours D5 literally but adds an operator surface and a file scope
+wider than D23 assumed. Rejected: **deferring the park to a new slice after wave
+3** — the runtime behaviour would be identical to what is decided here, so the
+deferral would buy nothing but an owed ticket.
 
 ## Launch preconditions
 
