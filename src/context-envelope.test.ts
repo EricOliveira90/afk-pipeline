@@ -15,8 +15,10 @@ import {
   assembleGeneratorEnvelope,
   assemblePlannerInitialEnvelope,
   assemblePlannerRevisionEnvelope,
+  boundRepairSituationCommitLog,
   buildExplorerRepositoryContext,
   projectContractEvaluatorEvidence,
+  projectGeneratorRepairSituation,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateContextEnvelopeManifest,
@@ -1813,6 +1815,253 @@ describe("generator context envelope", () => {
   });
 });
 
+/**
+ * #230. Regression cover for the repair round that could not be dispatched at
+ * all: PRD 4 slice #193 (`run-20260910-131250`, `--resume-stuck 07`) refused at
+ * 73,607 bytes against the 65,536-byte budget, with `repair-situation` the
+ * dominant 33,745-byte term, and the slice held ten committed rounds of working
+ * implementation needing a few-line repair.
+ *
+ * The fixture reproduces the two forces that got it there: fenced copies of
+ * `stuck.md` and `handoff.md` inside the situation while both files were already
+ * registered by reference as `repair-context`, and a `git log --stat` that grows
+ * with every round the slice survives.
+ */
+describe("generator repair situation size (#230)", () => {
+  const sliceDir = ".kiro/specs/demo/slices/07-focused";
+  // #193's measured byte weights, so the fixture is refused for the same reason
+  // the live round was rather than an invented one: stuck.md 16,327 and
+  // handoff.md 6,766 quoted inside the situation, against a round whose other
+  // blocks came to 73,607 - 33,745 = 39,862. #193's 39,862 was mostly a
+  // contract view (14,297) plus an acceptance manifest (18,492); this file's
+  // manifest fixture is deliberately tiny, so the contract view carries the
+  // difference.
+  const stuckBody = `STUCK-DIAGNOSIS-BODY\n${"unresolved finding detail line\n".repeat(
+    525,
+  )}`;
+  const handoffBody = `HANDOFF-BODY\n${"what shipped detail line\n".repeat(
+    270,
+  )}`;
+  const contractView = `LOCKED-CONTRACT-VIEW\n${"contract detail line\n".repeat(
+    1_780,
+  )}`;
+
+  const commitLogOf = (commits: number): string =>
+    Array.from(
+      { length: commits },
+      (_unused, index) =>
+        [
+          `commit ${String(index).padStart(40, "0")}`,
+          "Author: Generator <generator@example.com>",
+          "Date:   Wed Sep 10 13:12:50 2026 -0300",
+          "",
+          `    feat(gate-scope): behavior B-${index} (#193)`,
+          "",
+          ...Array.from(
+            { length: 12 },
+            (_ignored, file) =>
+              ` src/gate-scope-${file}.ts | 42 ++++++++++++++++++++++++++++`,
+          ),
+          " 12 files changed, 504 insertions(+)",
+          "",
+        ].join("\n"),
+    ).join("");
+
+  const repairSituationOf = (commits: number): string =>
+    [
+      `Implementation round: ${commits} of ${commits}.`,
+      "Generator dispatch in this round: 2.",
+      "Resume mode: stuck.",
+      `Commits ahead of base: ${commits}.`,
+      "# Commit log",
+      commitLogOf(commits),
+      "# Worktree state",
+      "**Your worktree was not touched.** Treat dirty-tree state as real work-in-progress.",
+      "# Base refresh",
+      "The feature branch was merged into your branch just before this run.",
+      "# Preserved STUCK evidence",
+      [
+        "# Why you were declared STUCK",
+        "",
+        "Your previous run exhausted its implementation rounds and the",
+        "pipeline wrote this diagnosis:",
+        "",
+        "```",
+        stuckBody.trim(),
+        "```",
+      ].join("\n"),
+      "# Prior handoff",
+      [
+        "# Your prior handoff",
+        "",
+        "You wrote this handoff after your last commit:",
+        "",
+        "```",
+        handoffBody.trim(),
+        "```",
+      ].join("\n"),
+    ].join("\n\n");
+
+  const assembleRepair = (
+    commits: number,
+    additionalArtifactIds: readonly string[] = [
+      `${sliceDir}/stuck.md`,
+      `${sliceDir}/handoff.md`,
+    ],
+  ): ReturnType<typeof assembleGeneratorEnvelope> =>
+    assembleGeneratorEnvelope({
+      mode: "repair",
+      sliceDir,
+      contractView,
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:fast",
+      migrationReservation: "NO-MIGRATIONS",
+      repairSituation: repairSituationOf(commits),
+      additionalArtifactIds,
+      failureSet: {
+        findings: [
+          {
+            id: "QA-OPEN",
+            clearCondition: "OPEN-CLEAR-CONDITION",
+            artifactReferences: [`${sliceDir}/qa-report.md`],
+          },
+        ],
+        gates: [],
+      },
+    });
+
+  it("the #193-shaped repair round would have overflowed while quoting files it carries by reference", () => {
+    const raw = repairSituationOf(10);
+    const projected = projectGeneratorRepairSituation(raw, sliceDir, [
+      `${sliceDir}/stuck.md`,
+      `${sliceDir}/handoff.md`,
+    ]);
+    const result = assembleRepair(10);
+
+    // The arithmetic the issue reported, as an assertion: the round's other
+    // blocks plus the *unprojected* situation do not fit, so a #193-shaped
+    // repair round could not be dispatched at all. This is what was missing.
+    const otherBlockBytes =
+      result.evidence.assembledByteSize -
+      Buffer.byteLength(projected, "utf-8");
+    expect(otherBlockBytes + Buffer.byteLength(raw, "utf-8")).toBeGreaterThan(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+    // De-duplication, not truncation, is what makes it fit: a ten-round slice
+    // keeps its whole commit log.
+    expect(result.prompt).not.toContain("omitted to fit the inline-size budget");
+    expect(result.prompt).toContain(`commit ${"0".repeat(39)}9`);
+
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+    expect(result.prompt).not.toContain("STUCK-DIAGNOSIS-BODY");
+    expect(result.prompt).not.toContain("HANDOFF-BODY");
+    expect(result.prompt).toContain(
+      `Read it at \`${sliceDir}/stuck.md\` in your worktree.`,
+    );
+    expect(result.prompt).toContain(
+      `Read it at \`${sliceDir}/handoff.md\` in your worktree.`,
+    );
+    // The framing prose is instruction, not duplication, and stays.
+    expect(result.prompt).toContain("Your previous run exhausted its");
+    expect(result.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/stuck.md`,
+    );
+    expect(result.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/handoff.md`,
+    );
+  });
+
+  it("round count cannot push a repair round over the budget", () => {
+    // Headroom is a number; the bound is the property. `git log <base>..HEAD
+    // --stat` grows with every surviving round, so the assembled size must stay
+    // under budget however many rounds the slice reaches.
+    const sizes = [1, 10, 40, 200, 1_000].map(
+      (commits) => assembleRepair(commits).evidence.assembledByteSize,
+    );
+
+    for (const size of sizes) {
+      expect(size).toBeLessThanOrEqual(
+        GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+      );
+    }
+    // Past the point where the log is bounded, adding rounds stops adding
+    // bytes: growth is capped, not merely comfortable. The only residual
+    // variation is the digit width of the omitted-commit count in the drop note.
+    expect(Math.abs(sizes.at(-1)! - sizes.at(-2)!)).toBeLessThanOrEqual(8);
+    // The log the bound is holding back is far larger than the whole budget.
+    expect(
+      Buffer.byteLength(commitLogOf(1_000), "utf-8"),
+    ).toBeGreaterThan(GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes * 5);
+    expect(assembleRepair(1_000).prompt).toContain(
+      "older commits omitted to fit the inline-size budget",
+    );
+  });
+
+  it("a stricter budget override still holds, and is never widened", () => {
+    const result = assembleRepair(200);
+    const stricter = assembleGeneratorEnvelope({
+      mode: "repair",
+      sliceDir,
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm test:fast",
+      migrationReservation: "NO-MIGRATIONS",
+      repairSituation: repairSituationOf(200),
+      additionalArtifactIds: [
+        `${sliceDir}/stuck.md`,
+        `${sliceDir}/handoff.md`,
+      ],
+      inlineSizeBudgetBytes: 32_768,
+      failureSet: { findings: [], gates: [] },
+    });
+
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+    expect(stricter.evidence.assembledByteSize).toBeLessThanOrEqual(32_768);
+    expect(GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes).toBe(65_536);
+  });
+
+  it("a quote whose file is not carried by reference stays inline", () => {
+    // The situation may only stop carrying text the generator can still reach.
+    const result = assembleRepair(1, [`${sliceDir}/handoff.md`]);
+
+    expect(result.prompt).toContain("STUCK-DIAGNOSIS-BODY");
+    expect(result.prompt).not.toContain("HANDOFF-BODY");
+  });
+
+  it("projection is a no-op for a situation that quotes nothing", () => {
+    const situation = "Implementation round: 2 of 5.";
+
+    expect(
+      projectGeneratorRepairSituation(situation, sliceDir, [
+        `${sliceDir}/stuck.md`,
+      ]),
+    ).toBe(situation);
+  });
+
+  it("the commit log is truncated by whole commits, newest kept, drop named", () => {
+    const log = commitLogOf(6);
+    const bounded = boundRepairSituationCommitLog(log, 2_000);
+
+    expect(Buffer.byteLength(bounded, "utf-8")).toBeLessThanOrEqual(2_000);
+    expect(bounded).toContain(`commit ${"0".repeat(40)}`);
+    expect(bounded).not.toContain(`commit ${"0".repeat(39)}5`);
+    // Whole commits, never a half-parsed entry: every kept `commit` header still
+    // has its stat summary.
+    expect(bounded.match(/^commit /gm)?.length).toBe(
+      bounded.match(/^ 12 files changed, 504 insertions\(\+\)$/gm)?.length,
+    );
+    expect(bounded).toMatch(
+      /\(\d+ older commits omitted to fit the inline-size budget; run `git log` in your worktree for the full history\.\)$/,
+    );
+    expect(boundRepairSituationCommitLog(log, log.length)).toBe(log);
+  });
+});
 
 describe("role contract manifests", () => {
   const registeredManifests: ContextEnvelopeManifest[] = [
