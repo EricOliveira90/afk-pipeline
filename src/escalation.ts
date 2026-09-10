@@ -47,17 +47,50 @@ export const ORCHESTRATOR_OWNED_SLICE_FILENAMES: readonly string[] = [
  */
 export const PRE_BUILD_SCOPE_FINDING_ID = "PRE-BUILD-SCOPE";
 
+/**
+ * The reserved `findingIds` identity for a **gate-evidenced revision**: a
+ * generator that a failing orchestrator-run deterministic gate has just told
+ * the file scope is too narrow for behavior the locked contract already
+ * decided (ADR 0060, `prd.md` D12).
+ *
+ * It is a sibling of {@link PRE_BUILD_SCOPE_FINDING_ID}, not a new door: the
+ * request travels ADR 0052's one focused-revision channel, and every other
+ * check — the non-blank `reason`, manifest path validation, the migration
+ * refusal, the per-round revision bound and the out-of-scope guard — still
+ * applies. What distinguishes it is that the evidence is a gate, so citing one
+ * is mandatory: `gateEvidence` names the gate and the evidence artifact a
+ * reader can go and look at. An unevidenced `GATE-SCOPE` would be a scope
+ * widening justified by nothing.
+ */
+export const GATE_SCOPE_FINDING_ID = "GATE-SCOPE";
+
+/** The gate a {@link GATE_SCOPE_FINDING_ID} escalation cites. */
+export interface ScopeEscalationGateEvidence {
+  gateId: string;
+  evidenceArtifactId: string;
+}
+
 export interface ScopeEscalation {
-  version: 1;
+  /**
+   * The document's schema version — 2 admits the optional `gateEvidence`
+   * member. A version is a schema version and not a document kind: a version-2
+   * document without `gateEvidence` is an ordinary cited-finding or
+   * `PRE-BUILD-SCOPE` escalation, and reading version as kind is how a schema
+   * grows a second meaning nobody can migrate.
+   */
+  version: 1 | 2;
   findingIds: string[];
   paths: string[];
   reason: string;
+  /** Present only on a `GATE-SCOPE` escalation, and required there. */
+  gateEvidence?: ScopeEscalationGateEvidence;
 }
 
 function requireExactKeys(
   value: Record<string, unknown>,
   expected: readonly string[],
   source: string,
+  what = "root object",
 ): void {
   const keys = Object.keys(value);
   const expectedSet = new Set(expected);
@@ -66,9 +99,39 @@ function requireExactKeys(
     expected.some((key) => !(key in value))
   ) {
     throw new Error(
-      `${source} root object must contain exactly ${expected.join(", ")}`,
+      `${source} ${what} must contain exactly ${expected.join(", ")}`,
     );
   }
+}
+
+function parseGateEvidence(
+  value: unknown,
+  source: string,
+): ScopeEscalationGateEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} gateEvidence must be a JSON object holding gateId and ` +
+        `evidenceArtifactId`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireExactKeys(
+    input,
+    ["gateId", "evidenceArtifactId"],
+    source,
+    "gateEvidence",
+  );
+  for (const field of ["gateId", "evidenceArtifactId"] as const) {
+    if (typeof input[field] !== "string" || input[field].trim() === "") {
+      throw new Error(
+        `${source} gateEvidence.${field} must be a non-blank string`,
+      );
+    }
+  }
+  return {
+    gateId: (input.gateId as string).trim(),
+    evidenceArtifactId: (input.evidenceArtifactId as string).trim(),
+  };
 }
 
 function parseNonBlankStrings(
@@ -283,14 +346,21 @@ export function parseScopeEscalation(
     throw new Error(`${source} must contain a JSON object`);
   }
   const input = parsed as Record<string, unknown>;
+  // The version is read before the key check, because it decides which keys
+  // are legal: `gateEvidence` is admitted at version 2 only, so a version-1
+  // document carrying it is refused as an unknown key rather than silently
+  // honoured under a schema that never declared it.
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error(`${source} must declare version 1 or 2`);
+  }
+  const version = input.version;
   requireExactKeys(
     input,
-    ["version", "findingIds", "paths", "reason"],
+    version === 2 && "gateEvidence" in input
+      ? ["version", "findingIds", "paths", "reason", "gateEvidence"]
+      : ["version", "findingIds", "paths", "reason"],
     source,
   );
-  if (input.version !== 1) {
-    throw new Error(`${source} must declare version 1`);
-  }
 
   const findingIds = parseNonBlankStrings(
     input.findingIds,
@@ -300,16 +370,42 @@ export function parseScopeEscalation(
   if (new Set(findingIds).size !== findingIds.length) {
     throw new Error(`${source} findingIds must be unique`);
   }
-  if (
-    findingIds.includes(PRE_BUILD_SCOPE_FINDING_ID) &&
-    findingIds.length > 1
-  ) {
+  // Both reserved identities are sole entries, and neither may mix with the
+  // other: an escalation that claims two of the three kinds at once describes
+  // no single event, and accepting the mixture would let a generator launder
+  // an uncited path in beside a cited one.
+  for (const reserved of [
+    PRE_BUILD_SCOPE_FINDING_ID,
+    GATE_SCOPE_FINDING_ID,
+  ]) {
+    if (findingIds.includes(reserved) && findingIds.length > 1) {
+      throw new Error(
+        `${source} findingIds must not mix ${reserved} with ` +
+          `cited finding IDs (${findingIds
+            .filter((id) => id !== reserved)
+            .join(", ")}); an escalation is a pre-build scope discovery, a ` +
+          `gate-evidenced revision, or a cited-finding fix`,
+      );
+    }
+  }
+
+  const gateEvidence =
+    "gateEvidence" in input
+      ? parseGateEvidence(input.gateEvidence, source)
+      : undefined;
+  if (gateEvidence && findingIds[0] !== GATE_SCOPE_FINDING_ID) {
     throw new Error(
-      `${source} findingIds must not mix ${PRE_BUILD_SCOPE_FINDING_ID} with ` +
-        `cited finding IDs (${findingIds
-          .filter((id) => id !== PRE_BUILD_SCOPE_FINDING_ID)
-          .join(", ")}); an escalation is either a pre-build scope ` +
-        `discovery or a cited-finding fix`,
+      `${source} gateEvidence requires findingIds to be exactly ` +
+        `["${GATE_SCOPE_FINDING_ID}"]; a cited-finding escalation cites the ` +
+        `finding, not the gate`,
+    );
+  }
+  if (findingIds.includes(GATE_SCOPE_FINDING_ID) && !gateEvidence) {
+    throw new Error(
+      `${source} ${GATE_SCOPE_FINDING_ID} requires a version 2 document with ` +
+        `gateEvidence naming the failing gate ({gateId, ` +
+        `evidenceArtifactId}); a scope widening justified by nothing is the ` +
+        `posture this identity exists to avoid`,
     );
   }
 
@@ -344,9 +440,13 @@ export function parseScopeEscalation(
   }
 
   return {
-    version: 1,
+    version,
     findingIds,
     paths: rawPaths.map(displayPath),
     reason: input.reason.trim(),
+    // Absent stays absent rather than becoming an explicit `undefined`: the
+    // archive round-trips this object through JSON, and the two are not the
+    // same document.
+    ...(gateEvidence ? { gateEvidence } : {}),
   };
 }
