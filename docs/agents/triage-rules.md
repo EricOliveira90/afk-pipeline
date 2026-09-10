@@ -77,3 +77,49 @@ what keeps YAGNI viable). The fence:
 
 Decision recorded 2026-09-08 (option 2 of the first batch's escalation);
 supersedes the strict-citation-only reading of §1.
+
+## 5. Opening moves — read the worktrees, not only the checklist
+
+Run this before triaging anything, and again before recommending that
+work be *started*:
+
+```bash
+git worktree list
+git branch -vv          # look for branches with no [origin/...] upstream
+```
+
+For every worktree that is not the primary one and every branch with no
+upstream, in that worktree:
+
+```bash
+git cherry -v main HEAD   # + = commit not on main; - = already landed
+git status -sb            # dirty tree, and upstream sync state
+```
+
+A `+` line or a dirty tree means finished or in-progress work exists that
+no remote, no PR and no checklist knows about. That work is the triage
+outcome: **verify and merge it**, not "ready to start".
+
+**Why this is a rule.** On 2026-09-09 a triage pass reported #143, #144
+and #206 as not started while all three sat fully implemented in
+`C:\tmp` worktrees — clean trees, one commit each, unpushed, no PR. The
+pass had read `docs/specs/wave-2026-09-08-triage.md`'s unchecked boxes
+and stopped there. A second pass the same day repeated it. The
+postmortem line is the rule: *both read the checklist instead of the
+worktrees.*
+
+This also cuts the other way, so run the check before agreeing that a
+worktree is leftover: `C:\tmp\afk-149`'s issue was closed and its patch
+had landed on main (`268b5a9`), which only `git cherry` proved —
+while `C:\tmp\afk-guardian-review-convergence` checked clean the same
+way (tip an ancestor of main, zero ahead, in sync with origin). Both
+were safe to remove; neither was safe to *assume* removable.
+
+Two consequences for the write-up:
+
+- A stale checklist is a finding. Say so, and fix the box.
+- "Already implemented" here does not mean the skill's
+  already-implemented `wontfix` — the code exists but has not shipped.
+  Keep the issue open and record the merge path.
+
+Recorded 2026-09-09, from that pass's own miss.

@@ -67,6 +67,40 @@ because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
 
+## Push a commit the moment it exists
+
+A commit that lives only in a local worktree is invisible work. Nobody can
+review it, no triage pass counts it, and the next session that looks at the
+issue starts building it again.
+
+**The convention: push the branch as soon as the first commit lands, before
+verification.** Not after the suite passes, not after the PR is ready.
+`git push -u origin <branch>` costs a second, and pushing is not merging —
+an unverified branch on the remote blocks nothing and risks nothing.
+
+Two failure modes this exists for, both observed here on 2026-09-09:
+
+- **#143, #144 and #206 were fully implemented** in `C:\tmp` worktrees with
+  clean trees, no remote branch and no PR. Two consecutive triage passes
+  reported them as not started, because both read the wave checklist rather
+  than the worktrees. One machine failure would have lost three finished
+  issues that nobody remembered writing.
+- **A closed issue's worktree lingers** (`C:\tmp\afk-149`), and the only way
+  to tell "its patch landed" from "its patch died unpushed" is
+  `git cherry -v main HEAD`. That check is only cheap while the worktree
+  still exists.
+
+Corollaries, both cheap:
+
+- **Before removing any worktree**, run `git cherry -v main HEAD` and
+  `git status -sb` in it. A `+` line or a dirty tree means work would be
+  destroyed. Clean, zero-ahead, and in sync with `origin` is the only safe
+  removal.
+- **When you finish something, tick its box** in the wave or plan document
+  that lists it. The checklist is what the next session reads; a checklist
+  that disagrees with the worktrees sends the next agent to rebuild
+  finished work.
+
 ## Ticket authoring — do not leave a load-bearing decision unmade
 
 The planner decides mechanical, reversible, in-contract details itself and
