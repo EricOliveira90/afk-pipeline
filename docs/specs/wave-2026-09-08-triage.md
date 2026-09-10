@@ -129,8 +129,17 @@ All three branch off `2fc0379`; diffs are file-disjoint from each other,
 so no cross-rebase is needed unless main moves first. `suite-budgets.json`
 is untouched on all three.
 
-- [ ] **#206** kiro prompt via stdin — `fix/206-kiro-prompt-via-stdin`
+- [x] **#206** kiro prompt via stdin — `fix/206-kiro-prompt-via-stdin`
       `pnpm vitest run src/kiro.test.ts src/invocation-runtime.test.ts`
+      *(merged 2026-09-10 as `1e32a4b` via PR #227, rebased onto `b0b4548`
+      as `d197ff3`. `kiro.test.ts` 17/17; `test:fast` 1698/1698 on its own
+      run; all five heavy suites green. The one chained `pnpm test` failed
+      three git tests in `git.test.ts` / `gate-runner.test.ts` on
+      `fatal: not a git repository` against vanished temp repos — the same
+      loaded-machine environment flake as §6 note 1, and both files pass
+      108/108 alone. `test:budgets` not run: suite wall clocks ran 2-3x
+      inflated under the concurrent AFK run, so it would be the same false
+      red #143 recorded. Budgets untouched.)*
 - [x] **#143** mixed-IMPASSE outcome lint — `feat/143-lint-mixed-impasse-outcome`
       `pnpm vitest run src/lint-tickets.test.ts && pnpm run lint:tickets`
       *(merged 2026-09-10 as `2d0f1ba`, rebased onto `b0b4548`, out of the
