@@ -488,7 +488,14 @@ describe("retried slice resume (spec #33)", () => {
       // 125_* plus the sibling's 125_* merged in), and the prompt names
       // the renumber rule (#38 AC4).
       expect(generatorRecord("01").migrationCollisionPresent).toBe(true);
-      expect(prompt).toContain("Checkpoint: behavior A done, starting behavior B.");
+      // The fresh handoff is spliced in by reference, not quoted (#230): it is
+      // already a repair-context artifact, so the prompt names its path and the
+      // framing prose that says why it matters.
+      expect(prompt).not.toContain("Checkpoint: behavior A done, starting behavior B.");
+      expect(prompt).toContain("it is fresher than");
+      expect(prompt).toContain(
+        `Read it at \`.kiro/specs/${slug}/slices/01-resumable/handoff.md\` in your worktree.`,
+      );
       expect(prompt).toContain("the current tree wins over the contract");
       expect(prompt).toContain("renumber yours to the next free prefix");
     });
@@ -817,7 +824,13 @@ describe("retried slice resume (spec #33)", () => {
       expect(prompt).toMatch(/declared STUCK/i);
       expect(prompt).toContain("QA-01");
       expect(prompt).not.toContain("qa-review-r1-a1-record.json");
-      expect(prompt).toContain("retained in the on-disk");
+      // The diagnosis rides in by reference, not quoted (#230): stuck.md is
+      // already a repair-context artifact, so the prompt carries the framing
+      // prose and the path, and the round-evidence trail stays on disk.
+      expect(prompt).toContain("It is preserved, not discarded");
+      expect(prompt).toContain(
+        `Read it at \`.kiro/specs/${slug}/slices/01-named/stuck.md\` in your worktree.`,
+      );
       expect(prompt).toContain(
         "The fixture evaluator observes the behavior passing",
       );

@@ -2034,6 +2034,61 @@ describe("generator repair situation size (#230)", () => {
     expect(result.prompt).not.toContain("HANDOFF-BODY");
   });
 
+  it("a quoted document's own fences do not fragment it back inline", () => {
+    // `stuck.md` embeds JSON and diff blocks, and `resume.ts` wraps the whole
+    // file in a plain ``` fence, so an inner fence is indistinguishable from the
+    // outer close. Pairing fences mis-terminated the quote at the first inner
+    // one and read the rest as alternating quote and prose — leaking passages of
+    // the document back inline behind a repeated pointer.
+    const situation = [
+      "# Preserved STUCK evidence",
+      "",
+      "# Why you were declared STUCK",
+      "",
+      "FRAMING-PROSE-BEFORE",
+      "",
+      "```",
+      "STUCK-BODY-ONE",
+      "",
+      "```json",
+      '{"id":"QA-01"}',
+      "```",
+      "",
+      "STUCK-BODY-BETWEEN-INNER-FENCES",
+      "",
+      "```",
+      "STUCK-BODY-INNER-TWO",
+      "```",
+      "",
+      "STUCK-BODY-TAIL",
+      "```",
+      "",
+      "FRAMING-PROSE-AFTER",
+    ].join("\n");
+
+    const projected = projectGeneratorRepairSituation(situation, sliceDir, [
+      `${sliceDir}/stuck.md`,
+    ]);
+
+    for (const leak of [
+      "STUCK-BODY-ONE",
+      "STUCK-BODY-BETWEEN-INNER-FENCES",
+      "STUCK-BODY-INNER-TWO",
+      "STUCK-BODY-TAIL",
+      '{"id":"QA-01"}',
+    ]) {
+      expect(projected).not.toContain(leak);
+    }
+    // One pointer, not one per fence the document happened to contain.
+    expect(
+      projected.match(/Read it at `.*stuck\.md` in your worktree\./g),
+    ).toHaveLength(1);
+    // Framing prose on both sides of the quote is instruction, and stays.
+    expect(projected).toContain("FRAMING-PROSE-BEFORE");
+    expect(projected).toContain("FRAMING-PROSE-AFTER");
+    expect(projected).not.toContain("```");
+  });
+
   it("projection is a no-op for a situation that quotes nothing", () => {
     const situation = "Implementation round: 2 of 5.";
 
