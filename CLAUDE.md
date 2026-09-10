@@ -57,6 +57,22 @@ because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
 
+## Push a commit the moment it exists
+
+A commit in a local worktree is invisible work: unreviewable, uncounted by
+triage, and rebuilt from scratch by the next session. Push the branch as
+soon as the first commit lands — **before** verification, not after.
+Pushing is not merging, so an unverified branch on the remote blocks and
+risks nothing.
+
+On 2026-09-09 three finished issues (#143, #144, #206) were found sitting
+unpushed in `C:\tmp` worktrees, reported as "not started" by two triage
+passes that read the wave checklist instead of the worktrees. So: tick the
+checklist box when you finish, and before removing any worktree run
+`git cherry -v main HEAD` plus `git status -sb` in it — a `+` line or a
+dirty tree means removal would destroy work. The full reasoning is in
+AGENTS.md.
+
 ## Where a new assertion goes
 
 A test that spawns a pipeline costs seconds on every run from now on, so a
