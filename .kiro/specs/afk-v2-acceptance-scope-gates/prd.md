@@ -721,6 +721,41 @@ which defeats gate evidence as the source of truth.
 
 Waves are now 1:#84, 2:#195, 3:#85/#86/#193, 4:#91/#132, 5:#96.
 
+### D23 — #193 reads an applied waiver back out of gate evidence
+
+Settled 2026-09-09, after #193's contract oscillated three times on the same
+finding (`OSCILLATION` for F-05, `interventionClass: PRODUCT_DECISION`,
+`run-20260909-190141`). AC11 says each applied waiver "reaches gate evidence, run
+state and `run-summary.md`", but on the gate's **PASS** path nothing hands the
+orchestrator `findings.appliedWaivers`: `GateEvidenceArtifact` carries
+`evidencePath`/`declarations`/`logs` and no findings
+(`src/gate-runner.ts:170-185`), `PostQAGateResult`'s PASS branch returns only
+`candidateTreeId` and `artifacts` (`src/post-qa-gates.ts:99-125`), and
+`CandidateGateOutcome` carries no findings either — while #193's own Definition of
+done freezes all three files. As declared, a generator could satisfy B-05, B-09
+and B-10 exactly and still ship a `waiver-applied` variant nothing emits and a
+run-state field nothing writes, with no red gate to catch it.
+
+**#193 declares the producing seam, and it re-reads the evidence file.**
+Immediately after `gateArtifacts.push(...postQaGates.artifacts)`
+(`src/orchestrator.ts:5900`, which precedes the CANCELLED/ERROR/REPAIR branches)
+`src/orchestrator.ts` calls the already-exported
+`readGateEvidence(artifact.evidencePath)` (`src/gate-runner.ts:781`), passes the
+evidence through a new pure export `appliedWaiversFrom(evidence)`, emits one
+`waiver-applied` run event per waiver, and persists them through a new
+`saveAppliedWaivers(repoRoot, prdSlug, ghIssue, waivers)` in `src/run-state.ts`
+modeled on `saveFiledFindings` (`src/run-state.ts:1058-1078`). Both files are
+already in #193's `fileScope`; no frozen file is touched; `readGateEvidence` is a
+read, so the gate's `run` stays pure.
+
+Rejected: **narrowing #193** to the schema, reader and renderer with emission and
+persistence declared a non-goal — that defers AC11 out of wave 3 and needs a new
+issue to re-home it. Rejected: **carrying `findings` on `PostQAGateResult`'s PASS
+branch** — structurally the cleaner data flow, but it takes
+`src/post-qa-gates.ts` out of the frozen set for #193 while #91 and #132 also
+declare it, which is the ADR 0060 file-overlap conflict this PRD exists to
+prevent.
+
 ## Launch preconditions
 
 Each is stated so it can be checked rather than asserted. Verified against
