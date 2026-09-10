@@ -126,6 +126,7 @@ concrete regression evidence is. A parser-language change that binds only one
 half of the evidence, or that leaves the fixture surface its established
 harness implies undeclared, is a BLOCKING finding under scenario honesty and
 evidence-backed scope.
+
 # Canonical review artifacts
 
 Write `{{SLICE_DIR}}/{{CONTRACT_REVIEW_FILE}}` with exactly this version-2
