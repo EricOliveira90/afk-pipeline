@@ -1187,12 +1187,12 @@ export function saveFiledFindings(
  */
 export function saveAppliedWaivers(
   repoRoot: string,
-  prdSlug: string,
+  runSlug: string,
   ghIssue: string,
   waivers: readonly PersistedAppliedWaiver[],
 ) {
   if (waivers.length === 0) return;
-  updateRunState(repoRoot, prdSlug, (current) => {
+  updateRunState(repoRoot, runSlug, (current) => {
     const records = [...(current.appliedWaivers?.[ghIssue] ?? [])];
     for (const waiver of waivers) {
       const duplicate = records.some(

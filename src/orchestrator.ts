@@ -6062,9 +6062,12 @@ export async function runSliceExecute(
                 reason: waiver.reason,
               });
             }
+            // The run's own state file, keyed by the provider-suffixed run
+            // slug every other writer uses — the bare PRD slug would create a
+            // second state file no reader ever opens.
             saveAppliedWaivers(
               config.repoRoot,
-              config.prdSlug,
+              pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
               slice.ghIssue,
               applied,
             );
