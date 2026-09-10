@@ -464,6 +464,36 @@ ${advisoryAttempts
 |-------|-------|----------|------|--------|---------|--------|--------|----------|-----|
 ${coverageRows}
 `;
+    /**
+     * Human authorizations a gate actually applied (#193 D5/D24). Rendered from
+     * the `waiver-applied` events alone, so the summary and `events.jsonl`
+     * cannot disagree, and present only when one was applied — a run nobody
+     * waived anything for keeps today's summary byte-for-byte.
+     *
+     * All four fields are named, the path exactly: a waiver is a record of a
+     * named human accepting a specific risk, and a section that said only "1
+     * waiver applied" would be an audit trail nobody can audit.
+     */
+    const waiverEvents = runEvents.filter(
+      (event) => event.type === "waiver-applied",
+    );
+    const waiverSection =
+      waiverEvents.length === 0
+        ? ""
+        : `
+## Applied Waivers
+
+| Slice | Risk class | Path | Author | Reason |
+|-------|------------|------|--------|--------|
+${waiverEvents
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${inlineMarkdown(event.riskClass)} | ` +
+      `${inlineMarkdown(event.path)} | ${inlineMarkdown(event.author)} | ` +
+      `${inlineMarkdown(event.reason)} |`,
+  )
+  .join("\n")}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -517,7 +547,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}
+${gateSection}${advisorySection}${coverageSection}${waiverSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

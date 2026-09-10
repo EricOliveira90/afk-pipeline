@@ -175,6 +175,27 @@ export type RunEventPayload =
     }
   | {
       /**
+       * One human-authored protected-change waiver a gate actually applied
+       * (#193 D5/D23). Emitted per waiver rather than per gate phase, because
+       * the operator-meaningful unit is the authorization: this is the event
+       * that turns "the gate passed" into "the gate passed because a named
+       * human signed off on this exact path, for this reason".
+       *
+       * All four of D5's fields travel with it. `run-summary.md`'s
+       * `## Applied Waivers` section is rendered from this event alone, so a
+       * reader of `events.jsonl` and a reader of the summary see one record.
+       */
+      type: "waiver-applied";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      riskClass: string;
+      path: string;
+      author: string;
+      reason: string;
+    }
+  | {
+      /**
        * One behavior id's coverage verdict from one acceptance-gate attempt
        * (#85 AC6). The aggregate gate reports a single `gate-outcome`, so
        * without this event the per-behavior detail exists only as prose inside

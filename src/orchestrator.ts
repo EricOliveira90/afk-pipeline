@@ -109,6 +109,7 @@ import {
   ACCEPTANCE_GATE_ID,
   createCandidateCheckpoint,
   resolveCandidateTreeId,
+  readGateEvidence,
   verifyGateEvidence,
   type GateDeclaration,
   type GateEvidence,
@@ -126,6 +127,11 @@ import {
 import { scopeGateDeclaration } from "./scope-gate.js";
 import { skipGateDeclaration } from "./skip-gate.js";
 import {
+  appliedWaiversFrom,
+  feedbackIntegrityGateDeclaration,
+} from "./feedback-integrity-gate.js";
+import { loadGatePolicy } from "./gate-policy.js";
+import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
   type BaseGateSkipAuthorization,
@@ -133,6 +139,7 @@ import {
 import {
   loadRunState,
   updateRunState,
+  saveAppliedWaivers,
   isSliceComplete,
   getResumeAttempts,
   recordRetryDecision,
@@ -5590,6 +5597,14 @@ export async function runSliceExecute(
       // cache and the skip gate below (#86 B-01: `resolveTestCostPlan` is the
       // only production reader of `gatePolicy.cost`).
       const costPlan = resolveTestCostPlan(ctx.worktreeDir);
+      /**
+       * The human-authored protected-change waivers, read once at launch from
+       * the PRD directory's `afk.json` (#193 D5). Deliberately taken from the
+       * launch manifest and not re-read from `ctx.worktreeDir`: a waiver a
+       * candidate wrote for itself is not an authorization, and re-reading here
+       * is exactly how it would become one.
+       */
+      const launchWaivers = config.manifest?.protectedChangeWaivers ?? [];
       // Per-run, under this run's own artifact directory: reuse is scoped to a
       // run's attempts, never shared across runs (#86 B-03).
       const gateCache = {
@@ -5941,6 +5956,21 @@ export async function runSliceExecute(
               featureRef: featBranch,
               detectors: costPlan.skipDetectors,
               testFileGlobs: costPlan.testFileGlobs,
+              // Launch authorization, never candidate authorization (#193 D5).
+              waivers: launchWaivers,
+            }),
+            // Beside the skip gate and for the same reasons (#193 D22): the
+            // verdict is a comparison of the candidate against the feature
+            // branch, so it needs no toolchain and must not sit behind the
+            // suite. `acceptedPairIntact` is the value the orchestrator's own
+            // pre-dispatch integrity check already produced — never a fresh
+            // check here, which would read the bytes the candidate left.
+            feedbackIntegrityGateDeclaration({
+              worktreeDir: ctx.worktreeDir,
+              featureRef: featBranch,
+              waivers: launchWaivers,
+              policy: loadGatePolicy(ctx.worktreeDir),
+              acceptedPairIntact,
             }),
             ...fullSuiteDeclarations,
           ];
@@ -5999,6 +6029,46 @@ export async function runSliceExecute(
               logger.phase(`${ctx.tag}: ${message}`),
           });
           gateArtifacts.push(...postQaGates.artifacts);
+          /**
+           * Record the human authorizations this gate phase actually spent
+           * (#193 D23), before any of the branches below can return: an applied
+           * waiver is a fact about what ran, and it is the same fact whether the
+           * phase ends in a merge, a repair or an error. The evidence artifact
+           * is the source — a gate reports its applied waivers in
+           * `findings.appliedWaivers`, and reading them back means the record
+           * and the audit trail cannot disagree.
+           */
+          for (const artifact of postQaGates.artifacts) {
+            let applied: ReturnType<typeof appliedWaiversFrom> = [];
+            try {
+              applied = appliedWaiversFrom(
+                readGateEvidence(artifact.evidencePath),
+              );
+            } catch {
+              // Unreadable evidence is the gate phase's own failure to report,
+              // not a reason to abandon a round that otherwise succeeded; the
+              // verified-evidence checks own that refusal.
+              continue;
+            }
+            for (const waiver of applied) {
+              logger.event({
+                type: "waiver-applied",
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                round,
+                riskClass: waiver.riskClass,
+                path: waiver.path,
+                author: waiver.author,
+                reason: waiver.reason,
+              });
+            }
+            saveAppliedWaivers(
+              config.repoRoot,
+              config.prdSlug,
+              slice.ghIssue,
+              applied,
+            );
+          }
           if (postQaGates.action === "CANCELLED") {
             return { phase: "CANCELLED", error: CANCELLED_BY_USER };
           }

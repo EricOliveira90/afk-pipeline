@@ -277,6 +277,65 @@ PM review: N/A
     );
   });
 
+  it("[behavior:B-14] renders an Applied Waivers section naming all four fields", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "waived");
+    recordTerminal(log, id("193", "Feedback integrity", "afk/193"), {
+      phase: "PASS",
+    });
+    log.event({
+      type: "waiver-applied",
+      ghIssue: "193",
+      sliceNumber: "07",
+      round: 1,
+      riskClass: "deleted-test",
+      path: "src/legacy-parser.test.ts",
+      author: "eric",
+      reason: "the module it covered was deleted with it",
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain("## Applied Waivers");
+    const section = md.slice(md.indexOf("## Applied Waivers"));
+    expect(section).toContain(
+      "| 193 | deleted-test | src/legacy-parser.test.ts | eric | " +
+        "the module it covered was deleted with it |",
+    );
+  });
+
+  it("[behavior:P-06] renders no Applied Waivers section when nothing was waived", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "unwaived");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.event({
+      type: "gate-outcome",
+      ghIssue: "1",
+      sliceNumber: "01",
+      round: 1,
+      attemptId: "a1",
+      gateId: "typecheck",
+      stage: "base",
+      status: "PASS",
+      failureKind: null,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:01.000Z",
+      durationMs: 1000,
+      exitCode: 0,
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    });
+
+    const md = log.writeSummary();
+    expect(md).not.toContain("## Applied Waivers");
+    // The same exact tail the pre-#193 summary had: a run nobody waived
+    // anything for is byte-for-byte today's.
+    expect(md).toContain(
+      "| 1 | 1 | typecheck | PASS | 1000ms | ev-1 | log-1 |\n\n\n" +
+        "Pre-ship sanity gate: N/A",
+    );
+  });
+
   it("[behavior:B-03] renders a reused PASS as a reused one, and a prerequisite skip naming the gate that failed", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "cheap");
