@@ -444,7 +444,8 @@ single ID would leave the citation ambiguous about which rule fired. The
 existing IDs `typecheck`, `lint` and `tests` are unchanged.
 
 **`RunState` goes version 3 → 4, and `evidenceArtifactId` is the
-evidence sha256.** Two more silences found by reading the code slice 01
+repo-relative evidence path — not the evidence sha256.** Two more silences
+found by reading the code slice 01
 must extend rather than by reading this PRD:
 
 - `src/run-state.ts` declares `RunState { version: 3 }`, a persisted

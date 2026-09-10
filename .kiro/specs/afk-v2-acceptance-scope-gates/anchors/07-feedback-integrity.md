@@ -73,6 +73,18 @@ with no default.
    glob dialect for `testGlobs` is #84's narrow hand-rolled subset — literal
    segments, `*`, `**`, case-sensitive on every platform (prd.md D5, D6). Call
    #84's matcher; do not write a second one.
+8. **Adding a post-QA gate declaration requires `src/qa-orchestration.test.ts`
+   in `fileScope`.** Recorded 2026-09-10 after the omission cost this slice a
+   run. Existing spawned scenarios pin the post-QA attempt's gate-ID array
+   exactly — `src/qa-orchestration.test.ts:1069` (`["typecheck","lint"]` and
+   `["scope","tests:skipped","tests"]`), `:2284` and the three
+   `provider-independent policy-less base gates` cases at `:2432` — so
+   prepending `feedback-integrity` turns five green assertions red. The edit is
+   therefore mandatory, and a `fileScope` that omits the file makes it an
+   undeclared write and a red file-scope gate. #86's contract evaluator forced
+   the same declaration for `tests:skipped`; this is the same fact, not a new
+   one. Update the pinned arrays rather than loosening them to
+   `arrayContaining` — the assertions exist to catch exactly this.
 
 ### Size discipline
 
