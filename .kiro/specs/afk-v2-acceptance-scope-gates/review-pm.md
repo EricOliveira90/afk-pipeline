@@ -1,122 +1,94 @@
-# PM review — PRD 4 (acceptance and scope gates), slice 08 (#195) only
+# PM review — PRD 4 (acceptance and scope gates), slice 05 (#86) only
 
 **Verdict:** ACCEPT-WITH-NOTES
 
-Run scope judged: slice 08 (#195) File-scope gate. Slices 01-07 were not run by
-this invocation and did not drive this verdict (#84's code is on the branch from
-an earlier invocation; I read it only where slice 08 depends on it).
+Run scope judged: slice 05 (#86) "Test cost split and caching". Slices 01-04 and
+06-08 were not run by this invocation; where their code is on the branch from an
+earlier invocation I read it only where slice 05 depends on it, and it did not
+drive this verdict.
 
-Method note for this round: this worktree now has `node_modules`, so this
-review rests on fresh narrow runs as well as reading. I ran
-`pnpm vitest run src/scope-gate.test.ts` (10/10 pass, 7.1s),
-`pnpm run test:heavy:qa` (33/33 pass, suite time 88.2s) and
-`pnpm run test:budgets` (every suite within budget) — no full-suite run; the
-pre-ship gate already did that against this tree.
+Method: reading plus two narrow fresh runs —
+`pnpm vitest run src/gate-cache.test.ts src/skip-gate.test.ts` (12/12 pass,
+12.8s). No full-suite run; the pre-ship gate already covered this tree.
 
 ## What the PRD promised, and what a user gets
 
-The user is the operator watching an unattended run. The promise is one
-sentence: a candidate that changed a file its locked contract never declared
-does not reach the feature branch, and the next generator round is told which
-path. That promise is delivered end to end.
+The user is the operator of an unattended run. The promise: the generator
+iterates on a cheap command instead of a 7-minute suite, a green gate on an
+unchanged tree is not paid for twice, a dependent gate is not paid for at all
+when its prerequisite failed, a wall-clock budget can report without blocking,
+and a candidate cannot smuggle in a disabled test. All five arrive.
 
 | PRD requirement | Where it landed | How I checked |
 |---|---|---|
-| D2 — one gate reusing `outOfScopeChangedPaths` and `listChangedFiles`, no second normalizer or probe | `src/scope-gate.ts:19-22,94-157` | read the module; `src/scope-gate.test.ts:232-246` pins the reuse (no `toLowerCase`, no `execFileSync` in the module) and passed in my run |
-| D3 — candidate base is the slice's own work; working tree and untracked count | `src/scope-gate.ts:97-100` passes `featureRef` verbatim into `listChangedFiles` (git's three-dot base) | ran `src/scope-gate.test.ts`: B-09 asserts the untracked `src/orphan.ts` and the undeclared committed path are the only two offenders |
-| D3 — base re-resolves after a merge-resolution round | same verbatim `featureRef`, so `merge-base(featureRef, HEAD)` is the merged tip | B-14 (`src/scope-gate.test.ts:274-312`) builds a real repo where a sibling path arrives only via the merge and asserts PASS with no findings — passed in my run |
-| D4 — role write-scope is a tree-to-tree diff, never a working-tree probe | `src/scope-gate.ts:56-61,101-111` (`diffTreePaths`) | B-11 asserts an uncommitted file is absent from the diff (see note P-01 about the missing consumer) |
-| D22 — `run` either/or with `command`; required-neither is CONFIGURATION, optional-neither stays SKIPPED | `classifyDeclaration` plus the unchanged FAIL/SKIPPED split at `src/gate-runner.ts:509-535` | read the branch; the in-process branch at `:543-595` sits ahead of the `existsSync(options.cwd)` break at `:597` |
-| D22 — typed `GateResult.findings` with the four named fields; prose in `detail` parsed by nothing | `GateFindings` at `src/gate-runner.ts:60-70` (only `outOfScopePaths` populated, per the split); `isGateFindingsField` validates on read | read the types and the reader guard |
-| D22 — evidence version 1 → 2, reader accepts both, only v2 may carry findings | `GATE_EVIDENCE_VERSION = 2` (`:24`), `SUPPORTED_GATE_EVIDENCE_VERSIONS = [1,2]` (`:27`), explicit refusal at `:812-822` | read `readGateEvidence` |
-| Anchors — the `scope` gate runs on the final candidate after the QA window and before the merge, not pre-QA | exactly one declaration site, `src/orchestrator.ts:5830-5846`, prepended to the post-QA declarations | `Select-String 'scope-gate.js'` finds one importer in `src/` outside tests (`orchestrator.ts:117`) and one construction site |
-| #195 AC1/AC6 as amended — the undeclared change does not merge, but still reaches the evaluator | REPAIR path at `src/orchestrator.ts:5907-5926`; the only acceptance path (`dispatchAcceptedCandidate`, `:5959`) is behind a green phase | `src/qa-orchestration.test.ts:2263-2318` asserts `["scope","tests"]` order, `findings.outOfScopePaths == ["src/smuggled.ts"]`, `acceptedCommitsAtDispatch == [0,0]` and `evaluators == 2`; it passed in my `test:heavy:qa` run |
-| The gate cannot be skipped by a candidate with no runnable suite | the in-process branch runs before the missing-`cwd` INFRASTRUCTURE break, and `runPostQAGates` never short-circuits when no declaration has a `command` (`src/post-qa-gates.ts:164-226`) | read both; B-06 (`src/scope-gate.test.ts:191-230`) runs the gate with a `cwd` that is not a repository and still gets FAIL with the offender |
-| AFK-owned artifacts never trigger violations | exemptions live in the reused `outOfScopeChangedPaths` | B-09 asserts the artifact file, the migration and a case-differing declared path are all exempt |
-| The explicit no-repository-change declaration passes only when nothing outside the allowlist changed | `acceptanceManifestPaths` returns `[]` for that scope | B-13 passes on artifacts+migration only, then names `src/sneaked.ts` |
-| The violation reaches the next generator round as evidence, naming the exact path | `detail` emitted into the gate log before the status line (`src/gate-runner.ts:569-573`); `findings` persisted in evidence; `decideCandidateGatePhase` hands both as `references` (`src/candidate-gate-policy.ts:80-101`) | the spawned scenario asserts round 2's prompt contains ``Gate ID: `scope` `` and a `-scope.log` reference, and that the log holds the smuggled path |
-| Manifest bytes read at gate time, so an ADR 0048 amendment applied during the QA window is honored | `loadAcceptanceManifest` inside the `run` closure (`src/scope-gate.ts:129,164-173`) | B-07 widens the manifest after the declaration is built and asserts the newly declared path is no longer a violation |
-| Fails closed rather than reporting a tree it could not prove clean | probe `ok:false` → INFRASTRUCTURE with no findings (`src/scope-gate.ts:117-127`); a throwing `run` → INFRASTRUCTURE (`src/gate-runner.ts:556-567`) | B-05 asserts `findings` stays `undefined` |
-| The actor being constrained cannot author its own exemption | `acceptedPairIntact` is latched false per attempt and set true only after the pair-integrity refusal at `src/orchestrator.ts:5359-5392` | read the latch; B-10 shows an unproven pair makes both files violations |
-| Preservation — `src/base-gates.ts`, `src/post-qa-gates.ts`, `src/candidate-gate-phase.ts`, `src/acceptance-manifest.ts` unedited | none appears in the four slice-08 commits (`6a40f16`, `0462c65`, `a8efbce`, `d375169`) | `git show --stat` on each |
-| `ARCHITECTURE.md` names the new module | `ARCHITECTURE.md:25` Gates row and `:46-49` seam note | read it |
+| D1/anchors — `gatePolicy.cost` is a parsed, validated member with the settled hybrid shape | `src/gate-policy.ts:37` (`POLICY_KEYS` holds `cost`), `parseCost`/`parseRelatedTests`/`parseSkipDetector` (`:514-700`), defaults at `:124-160` | read the parser; `src/gate-policy.test.ts:376-470` covers unknown sub-keys, wrong types, blank command, bad glob |
+| D1 — one production reader, each consumer handed its part | `resolveTestCostPlan` (`src/base-gates.ts:134-145`) is the only non-test caller of `policy.cost`; consumers at `:155`, `:185`, `src/orchestrator.ts:5594`, `:6403`, `src/skip-gate.ts:46` | `Select-String 'resolveTestCostPlan|relatedTests|cost?\.' src/*.ts` — no second reader outside tests |
+| D16 — advisory gate excluded from the required set, never from evidence | `environmentSensitiveDeclarations` (`src/base-gates.ts:184-201`) emits `required: false` + `environmentSensitive: true`, appended by `resolveFullSuiteGateDeclarations` (`:230-239`); no second exclusion path added to `candidate-gate-phase.ts`/`candidate-gate-policy.ts` | read all four `required` readers; `src/gate-runner.ts:924-931` stamps the real status with the advisory marker |
+| D16 — `run-summary.md` and the draft PR carry an advisory section | `src/logger.ts:403-434` (`## Advisory Gates`, filtered on the advisory marker), `src/ship-gate.ts:425-436` (`## Advisory gates (reported, never blocking)`), fed by `readAdvisoryGateOutcomes` (`logger.ts:118`) at `ship-gate.ts:1221` | read both renderers and the wiring — see note P-01: nothing in this repo's shipped config makes the block appear |
+| D16 — `test:budgets` stays blocking for a plain developer run | `package.json` untouched (`git diff --stat main...HEAD` lists no `package.json`), and `resolveScriptStep` (`src/preship.ts:80-87`) is not a `SanityPlan` member | read `preship.ts`; `SANITY_STEPS` unchanged, so neither sanity command list can see the budgets command (ADR 0063 holds) |
+| D17 — cache keyed by gate id + resolved command/args + tree id, under `.afk/artifacts/<run-slug>/gate-cache.json` | `src/gate-cache.ts:66-68`, path assembled at `src/orchestrator.ts:5597-5606` and forwarded to both phases (`:5621`, `:5960`) | read; `src/gate-cache.test.ts` passed in my run |
+| D17 — a changed tree or definition invalidates; a bad cache is a miss, never a throw | `readDocument`/`isEntry` (`gate-cache.ts:70-135`) treat absent, malformed, wrong-version and mis-filed entries as misses; only `PASS` is written (`:147`) | read; the entry's own fields must re-derive its key, so a hand-moved record cannot answer for another gate |
+| D17 — every reuse and every prerequisite skip is explicit | `GateResult.cacheReused` / `.prerequisiteSkipped` (`src/gate-runner.ts:164-168`), reuse recorded at `:795-814`, rendered by `src/logger.ts:91-93` as `PASS (cache reuse)` and `SKIPPED (prerequisite tests failed)` | read the runner branch and the summary cell — a silent skip is not possible |
+| D16/D17 — declared prerequisites, independent gates still report together | `prerequisiteGateIds` (`gate-runner.ts:144`), the branch at `:601-622` records SKIPPED and `continue`s; catalog in `src/base-gates.ts:53-56` (`tests`←`typecheck`, `test:budgets`←`tests`) | read the loop: it continues rather than breaking, so an independent `lint` still executes in the same attempt |
+| D18 — the verification command is derived from required cheap gates in gate order, excluding the full suite | `resolveCheapGateCatalog` (`src/base-gates.ts:154-174`, full suite excluded by identity *and* cost), `resolveGeneratorTestCommand` (`src/preship.ts:168-190`), single call site `src/orchestrator.ts:6401` | read both; `GATE_EXPECTED_COST_MS` puts `tests` at 420_000 against the 120_000 default |
+| D18 — `--test-command` may only narrow; a launch that drops a required cheap gate is refused naming it | `uncoveredCheapGateIds` (`src/preship.ts:138-148`) + the throw at `:175-186`, which names the omitted ids and prints the derived command | read; `src/orchestrator.test.ts:528-554` asserts `"pnpm test:fast"` alone throws naming `typecheck` while `"pnpm run typecheck && pnpm test:fast"` is accepted, and `pnpm x` normalizes against `pnpm run x` |
+| D18 — the self-run sections of `AGENTS.md` and `CLAUDE.md` are corrected | `AGENTS.md:60` and `CLAUDE.md:47` both read `--test-command "pnpm run typecheck && pnpm test:fast"` | `Select-String '--test-command' AGENTS.md CLAUDE.md` — identical strings; `src/orchestrator.test.ts:566-584` reads the value out of both files and runs it through the check |
+| D7 — one TypeScript/Vitest skip detector, base-vs-candidate counting, fails closed elsewhere | `DEFAULT_SKIP_DETECTORS` (`src/gate-policy.ts:148-160`: `.skip`, `.todo`, `.only`), `src/skip-gate.ts` declared through the in-process `run` seam and wired at `src/orchestrator.ts:5941` between `scope` and the full suite | ran `src/skip-gate.test.ts`: 7/7 pass, including "passes a pre-existing skip", "fails on an increase, naming the detector and the pattern", "catches a skip smuggled into a brand-new test file", "fails closed with no detector" |
+| Contract's own evidence-version rule | `GATE_EVIDENCE_VERSION = 3` (`src/gate-runner.ts:43`), `SUPPORTED_GATE_EVIDENCE_VERSIONS = [1,2,3]` (`:46`), the three new markers optional and validated on read (`:1158-1164`) | read; older evidence still loads, so a resumed run does not lose its history |
 
-Two things I checked specifically, because this is where such a promise is
-usually only half-kept.
+Two things I specifically tried to break and could not: the skip gate counting
+its own fixture prose (the QA round's `stripNonCode` fix holds — the "counts
+detector text only where it is code, not in a string or a comment" test passed
+in my run), and the cache answering for the wrong gate (an entry filed under a
+key it does not describe is rejected at `gate-cache.ts:91-98`).
 
-- **No gate was made optional and no assertion was deleted to reach green.**
-  The spawned fixtures were corrected by *declaring* what their stub generators
-  already write, and only that: `src/orchestrator.fixtures.ts:463-497` adds
-  `fixture.outputFile` to the declared list, skips migration outputs, and
-  decides from round 1 so the additive revision guard still sees a dropped
-  path. The deliberate out-of-scope fixtures stay undeclared —
-  `src/orchestrator.test.ts:1618-1728` still drives `undeclaredEdits` and still
-  asserts the ADR 0052 refusal, its error text and that QA never ran.
-- **A resumed run cannot merge around the gate.** The exact-stage resume path
-  (`src/orchestrator.ts:5098-5108`) finalizes without re-running the gates, but
-  the checkpoint it reads is written only after the post-QA phase passed on
-  that exact tree (`src/accepted-candidate.ts:130-141`) and `inspectResume`
-  requires the current candidate tree to equal it, so the green `scope` result
-  is tied to the tree that merges.
+## Notes (not blocking)
 
-## Notes (non-blocking)
+- **P-01 — the advisory block is built but nothing turns it on.** `afk.config.json`
+  on this branch (whole file, 26 lines) has `gatePolicy.version`,
+  `protectedPaths`, `riskClasses` and `acceptance` — and **no `cost` member**,
+  although the PRD's file-scope map assigns `afk.config.json` → `cost` to slice
+  05. Consequence, read end to end: `resolveTestCostPlan` defaults
+  `environmentSensitive` to `[]` (`src/base-gates.ts:139`),
+  `environmentSensitiveDeclarations` returns `[]` unless the set names the gate
+  (`:185-187`), and `src/logger.ts:403` filters the advisory block on attempts
+  carrying the advisory marker — so no run of this repo, and no consuming project
+  out of the box, ever renders `## Advisory Gates` or the PR's advisory section.
+  D16's "`test:budgets` is the first declared member" is therefore unrealized in
+  the product even though the mechanism, the declaration path and the renderers
+  are all present and unit-covered (`src/base-gates.test.ts:106-260`). Kept a
+  note rather than a blocker because the capability is complete and switching it
+  on is one config array, and because the locked contract deliberately left
+  `afk.config.json` out of `## Files expected to change` (so the generator could
+  not have added it without a scope violation). It is worth a decision, not a
+  round: enabling it makes every post-QA phase spawn the budgets script.
+- **P-02 — `cost.relatedTests` is a config surface with no behavior.** It is
+  parsed and validated (`src/gate-policy.ts:514-541`) and threaded into
+  `TestCostPlan` (`src/base-gates.ts:123,141`), but no non-test file reads it
+  (`Select-String 'relatedTests' src/*.ts` — every remaining hit is the parser,
+  the plan field or a test). D1 lists "related-test selection" among `cost`'s
+  contents, so an operator who declares it today gets no change in what runs and
+  no warning that the member is inert. Same class as slice 08's D4 seam note.
+- **P-03 — the `--test-command` refusal happens after the run journal opens.**
+  The check runs inside `runPipeline` at `src/orchestrator.ts:6401`, after
+  `logger.setFeatureBranch` (`:6395`), not at CLI option parse
+  (`src/cli-options.ts`). The operator still gets a named, actionable refusal
+  before any agent is dispatched, so the promise ("a bare `test:fast` override is
+  refused before the run starts") holds in substance; a run directory exists by
+  then, which is cosmetic.
 
-- **P-01 — D4's role comparison source ships as a seam with no consumer.**
-  `kind: "role"` is implemented and unit-tested, but the only `src/` importer
-  of `./scope-gate.js` is `src/orchestrator.ts:117` and it builds only the
-  `candidate` source. No role's write scope is graded by this gate today; the
-  pre-existing review-window allowlist in `src/post-qa-gates.ts` is still what
-  catches a reviewer editing source. The contract scoped B-11 as a seam, so
-  this is shipped intent — recorded so the operator knows D4 is a capability,
-  not yet an enforcement.
-- **P-02 — the structured findings do not reach `run-summary.md` or the
-  `gate-outcome` event.** The `gate-outcome` payload (`src/run-events.ts:141-158`)
-  carries status, `evidenceArtifactId` and `logArtifactId` and no path list, so
-  an operator sees `scope` red in the summary and then opens the cited evidence
-  or log to learn which path. The contract lists this as an explicit non-goal
-  (it needs `src/candidate-gate-phase.ts`, which the anchors file puts outside
-  slice 08), and the paths do reach both the generator and a human through the
-  cited log — one hop from the summary.
-- **P-03 — the repair note the generator receives still says the suite failed.**
-  `src/candidate-gate-policy.ts:102-106` writes "The full slice suite failed on
-  the accepted candidate" for every red required gate in that phase, which is
-  now inaccurate for `scope`: nothing about the suite failed. The failure set
-  still carries `Gate ID: scope` and its evidence, so the round is actionable,
-  and that file belongs to #86 in the PRD's file-scope map rather than to this
-  slice. Recorded as wording an operator or a generator can misread.
-- **P-04 (now cleared) — the new spawned scenario's budget effect is measured.**
-  `src/qa-orchestration.test.ts:2142` opens a new spawned `describe` although
-  the contract's test plan asked for an `it` on an existing one; I re-confirmed
-  the argument for the deviation (every pre-existing spawned scenario there
-  runs the slice on `main` as its own feature branch via `makeContext`, so a
-  scope comparison is empty by construction) and the block carries the required
-  comment and shares one run across three `it`s. This round I measured it:
-  `pnpm run test:heavy:qa` → 33/33 passing, `qa-orchestration` 88.2s, and
-  `pnpm run test:budgets` reports 88.2s / 151s with every suite inside budget.
-  The finding's clear condition is met.
+## Out-of-scope PRD gaps (for the operator, not part of this verdict)
 
-## Out-of-scope PRD gaps (for the operator, not the verdict)
-
-Everything below belongs to slices this invocation did not run.
-
-- 01 (#84) policy reader and D6's glob matcher: on the branch from an earlier
-  invocation, not judged here. Note that #195's issue text said this gate would
-  read `gatePolicy.protectedPaths` and call the glob matcher; `prd.md`'s split
-  note reassigns that to #193, and the contract follows `prd.md`, which
-  `prd.md:22-25` makes controlling.
-- 02 (#85) behavior-coverage gate and D8's `vitest-json` match count.
-- 03 (#91) candidate evaluator isolation, D11's change summary, D14's wording.
-- 04 (#96) final evaluator, D10's approved baseline, D20's exact-tree reuse.
-- 05 (#86) test cost split, D7's skip detector, D16 advisory gates, D17's cache,
-  D18's derived verification command (so `AGENTS.md` / `CLAUDE.md` still
-  prescribe the hand-written launch command).
-- 06 (#132) the merge-resolution round, including the caller that re-resolves
-  `featureRef`; slice 08 ships the seam and asserts the rule.
-- 07 (#193) D5 waivers (`protectedChangeWaivers` is still parsed-and-ignored),
-  D6's deletion rule, the `feedback-integrity` gate, D12's `GATE-SCOPE` channel
-  and D13's rubric. `findings.deletedTests`, `protectedChanges` and
-  `appliedWaivers` are therefore typed and empty by design.
+- Waiver **authorization** of an intentional skip is #193's (prd.md's
+  "Two ownership gaps the splits created"), so a legitimately skipped test
+  currently has no way to be waived — the gate fails closed, which is plan item
+  17's stated and accepted failure mode.
+- D18's derived command excludes `lint` for this repo simply because
+  `package.json` declares no `lint` script; that is a property of the repo, not
+  of the slice.
+- Everything else in the PRD that is unmet belongs to slices 01-04, 06 and 07,
+  which this invocation did not run.
 
 ## Structured findings (v1)
 
-{"version":1,"findings":[{"id":"P-01","title":"D4's role comparison source ships as a seam with no production consumer","class":"PRODUCT","clearCondition":"A production call site grades a writing role through the `role` comparison source, or the PRD/issues record which later slice owns role write-scope enforcement.","disposition":"REPEATED"},{"id":"P-02","title":"Structured scope findings are absent from run-summary.md and the gate-outcome event","class":"PRODUCT","clearCondition":"The offending paths appear in the run summary or the gate-outcome event, or the PRD records that reading them from the gate evidence is the intended operator path.","disposition":"REPEATED"},{"id":"P-03","title":"The post-QA repair note blames the full suite even when the failing gate is `scope`","class":"PRODUCT","clearCondition":"The repair note names the failing gate class rather than asserting the suite failed, or #86 records that wording as intended when it takes src/candidate-gate-policy.ts.","disposition":"REPEATED"},{"id":"P-04","title":"Red-gate coverage added a new spawned scenario against the contract's test plan, with unmeasured budget effect","class":"PRODUCT","clearCondition":"`pnpm run test:heavy:qa` followed by `pnpm run test:budgets` reports qa-orchestration inside its 151s budget, or the budget is adjusted with the recorded measurement.","disposition":"RESOLVED"}]}
+{"version":1,"findings":[{"id":"P-01","title":"Advisory test:budgets gate is implemented but no shipped config declares it, so the advisory run-summary/PR block never renders","class":"PRODUCT","clearCondition":"Either this repo's afk.config.json declares gatePolicy.cost.environmentSensitive with \"test:budgets\", or prd.md/issues records the decision not to enable it and which issue owns it.","disposition":"OPEN"},{"id":"P-02","title":"gatePolicy.cost.relatedTests is parsed and threaded but has no production consumer","class":"PRODUCT","clearCondition":"A production call site consumes TestCostPlan.relatedTests, or the PRD/issues records which later slice owns related-test selection so a declared member is not silently inert.","disposition":"OPEN"},{"id":"P-03","title":"--test-command narrowing refusal fires inside runPipeline after the run journal opens rather than at option parse","class":"PRODUCT","clearCondition":"The refusal is raised during CLI option validation, or the PRD records that a refusal after the journal opens satisfies \"refused before the run starts\".","disposition":"OPEN"}]}

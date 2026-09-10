@@ -1,96 +1,80 @@
-# Architecture review — PRD 4 (acceptance and scope gates), round 3 (verification)
+# Architecture review — round 4 (verification)
 
-**Scope read:** `git diff 54712fab..HEAD` — 4 files, +70/-9:
-`src/artifacts.ts` (`parseGuardianReview`), `src/artifacts.test.ts`,
-`prompts/architect-review.md`, `prompts/pm-review.md`. Plus a re-check of the
-six open findings against the current tree. I did not resample the rest of the
-branch.
+Scope: `git diff d45e31c..HEAD`, dispositioning the six open findings from
+round 3. No resampling of the rest of the branch.
 
 **Verdict:** ACCEPT-WITH-NOTES
 
-## The fix under review
+One finding is resolved by the fix diff (A-05). Five are unchanged and stay
+notes: none of them names a normal-operation reachable trigger, so under the
+round-2+ prior-lineage branch none carries blocking authority.
 
-The fix is the guardian-artifact parser tolerating a blank line between the
-`## Structured findings` heading and the JSON body, with both prompts reworded
-to match. Structurally this is the right shape and the right place:
+## A-05 INCOMPLETE_WIRING — RESOLVED
 
-- The widening is a whitespace skip and nothing else
-  (`src/artifacts.ts:352-366`): the loop advances only over lines whose `trim()`
-  is empty, then the single existing `jsonLine` path takes over unchanged. The
-  fail-closed exits below it (absent body, blank-only body, prose body,
-  non-object JSON, extra keys, verdict/findings inconsistency) are untouched, so
-  the accepted language grows by exactly the ignorable characters. The comment
-  at the site states the reason (an `UNPARSEABLE` guardian verdict is terminal
-  per ADR 0015, so whitespace was blocking ships) rather than leaving a future
-  reader to guess why adjacency was dropped.
-- The test edit is a net tightening, not a relaxation. The old
-  "heading followed by a blank line" case was removed from the invalid list —
-  correct, it is now valid — and three new invalid cases replace it: heading
-  with the body deleted, heading followed by blank lines only, and prose where
-  the JSON belongs (`src/artifacts.test.ts:1180-1190`). The positive case
-  covers `\n\n`, `\n\n\n` and `\n   \n` for both guardian dialects and asserts
-  findings survive the gap. Fresh evidence: `pnpm vitest run
-  src/artifacts.test.ts -t "findings"` passes (2 tests, 58 skipped).
-- Cost discipline held: two unit `it`s on an existing `describe`, no new
-  spawned scenario (AGENTS.md / CLAUDE.md "where a new assertion goes").
-- Prompt and parser moved together, so the contract text and the reader still
-  agree — the failure mode that produced this bug was exactly the two drifting.
+`gatePolicy` now has a launch-time production reader. `src/orchestrator.ts:6401`
+calls `resolveGeneratorTestCommand(repoRoot, resolveCheapGateCatalog(repoRoot),
+config.testCommand)` in the run setup, before any wave; `resolveCheapGateCatalog`
+(`src/base-gates.ts:154-155`) goes through `resolveTestCostPlan`, which calls
+`loadGatePolicy(cwd)` (`:135`). `loadGatePolicy`
+(`src/gate-policy.ts:748-758`) returns `null` only for "absent file / no
+`gatePolicy` key" and otherwise propagates `parseGatePolicy`'s `Error`
+(documented `:742`, exercised by `src/gate-policy.test.ts:548` and `:215`). A
+second production reader consumes the `acceptance` member
+(`src/base-gates.ts:290`), which is the member this branch added to
+`afk.config.json`. So a malformed member now aborts the run at launch instead of
+sitting inert. Clear condition met.
 
-No new finding. The one behavior worth naming and dismissing: skipping blanks
-could in principle swallow a *missing* findings block by reading a later line
-as the body, but only the first non-blank line is examined, and a section
-heading or prose there still returns `UNPARSEABLE` — the two new invalid cases
-pin that.
+## A-01 TYPE_SAFETY — REPEATED (note)
 
-## Disposition of the open findings
+`readGateEvidence`'s validator still checks `appliedWaivers[].riskClass` with
+`typeof entry.riskClass === "string"` (`src/gate-runner.ts:1190`), while the
+declared type is `GateRiskClass` (`:102`). `git show d45e31c:src/gate-runner.ts`
+grepped for `riskClass` produces the same four lines as HEAD, so neither the
+check nor its comment (`:1168-1172`) changed in the fix diff. The clear
+condition's alternate branch ("documented as unvalidated at the boundary **and**
+its consumer re-validates") is still half-met: the documentation exists, the
+consumer does not — no writer populates `appliedWaivers` yet (#193). Note, not
+a blocker: nothing reads the field, so there is no normal-operation trigger.
 
-The fix diff touches `src/artifacts.ts`, `src/artifacts.test.ts` and the two
-prompt files only (`git diff --stat`), and the only commits in range are
-`e5ede23` plus its merge. None of the six findings' subjects
-(`src/gate-runner.ts`, `src/scope-gate.ts`, `afk.config.json`,
-`src/context-envelope.ts`, `src/contract-revision-evidence.ts`, CONTEXT.md /
-ARCHITECTURE.md) changed. I re-verified each clear condition against the
-current tree rather than inferring it from the diff:
+## A-02 DEAD_SEAM — REPEATED (note)
 
-- **A-01 — REPEATED.** `src/gate-runner.ts:976-999` (`isGateFindingsField`)
-  still checks `typeof entry.riskClass === "string"`; `GATE_RISK_CLASSES`
-  appears in `src/gate-policy.ts:52,268,310` and in tests only, never in the
-  evidence reader. The clear condition's alternative branch (documented as
-  unvalidated at the boundary *and* the consumer re-validates) is half met —
-  the comment at `:971-975` says the policy reader owns the vocabulary — but
-  there is still no consumer, so no re-validation exists to point at. Note:
-  nothing populates `appliedWaivers` until #193, so no normal-operation
-  trigger reaches the unvalidated value.
-- **A-02 — REPEATED.** `scopeGateDeclaration` still has exactly one production
-  call site (`src/orchestrator.ts:5831`) and it passes `{ kind: "candidate" }`;
-  `kind: "role"` appears at `src/scope-gate.ts:57` and in
-  `src/scope-gate.test.ts:333` only. Unconsumed union arm, unchanged.
-- **A-03 — REPEATED.** `SCOPE_GATE_STAGE = "deterministic"`
-  (`src/scope-gate.ts:29`) is unchanged and no gate-stage vocabulary entry was
-  added to CONTEXT.md or ARCHITECTURE.md (grep for "gate stage"/"stage
-  vocabulary" finds none). Naming drift only — nothing switches on gate stage.
-- **A-04 — REPEATED.** `src/scope-gate.ts:171` is still
-  `run: () => runScopeGate(input)`, and the `run` doc comment
-  (`src/gate-runner.ts:78-87`) still advertises `signal` without saying who
-  owns cooperative cancellation.
-- **A-05 — REPEATED.** `loadGatePolicy` (`src/gate-policy.ts:325`) still has no
-  non-test caller, so the shipped `gatePolicy` block in `afk.config.json` is
-  still inert at launch. As slice 01's contract says it is; the first consumer
-  owns proving launch-time refusal.
-- **A-06 — REPEATED.** `CONTRACT_PAIR_BY_REFERENCE` is still applied at
-  `src/context-envelope.ts:1385,1390,1512,1517`, and the omission count
-  computed at `src/contract-revision-evidence.ts:307` is still not surfaced in
-  the `prompt-assembly` evidence. Observability gap, unchanged.
+`ScopeComparisonSource`'s `{ kind: "role" }` arm (`src/scope-gate.ts:56-61`) is
+still constructed only from `src/scope-gate.test.ts:333`. The single production
+call site (`src/orchestrator.ts:5922-5936`) passes `kind: "candidate"`; a
+repo-wide grep for `kind: "role"` returns those two hits only. Unchanged by the
+fix diff.
 
-All six carry `reachableTrigger: null` from round 1 and I found no
-normal-operation trigger for any of them this round: A-01 and A-05 are
-unreachable until their first consumer lands, A-02 is test-only, A-03 is
-vocabulary, A-04 is a doc-vs-seam gap on a gate that finishes in
-milliseconds, and A-06 is a missing record rather than an incorrect one. Under
-the prior-lineage branch of the rubric a continuing block requires a non-blank
-reachable trigger, so none of them blocks. They stay notes, addressed by the
-slices that first consume the seams (#85, #86, #193).
+## A-03 NAMING — REPEATED (note)
+
+`SCOPE_GATE_STAGE = "deterministic"` (`src/scope-gate.ts:29`) still shares its
+token with the QA review stage vocabulary, and the fix diff's `ARCHITECTURE.md`
+change (gates row + the new gate-cost bullet) documents cost, not the stage
+vocabulary; `CONTEXT.md` is untouched in the range. The new
+`ACCEPTANCE_GATE_STAGE` comment (`src/gate-runner.ts:44-49`, "Its own stage, not
+`deterministic`") is the closest thing to a distinction and lives in a module
+doc comment, not in the documents the clear condition names.
+
+## A-04 ABSTRACTION — REPEATED (note)
+
+`GateDeclaration.run` still advertises `signal?: AbortSignal`
+(`src/gate-runner.ts:120-124`) with no statement of who honours it, and
+`runGates` still only checks `options.signal?.aborted` *before* the call
+(`:667`) and passes the signal through (`:672-676`) — it does not enforce
+cancellation around an in-process callee that ignores it. Neither the field's
+doc comment nor the in-process branch gained the ownership sentence in this
+diff.
+
+## A-06 OBSERVABILITY — REPEATED (note)
+
+`src/context-envelope.ts` and `src/contract-revision-evidence.ts` are absent
+from `git diff --stat d45e31c..HEAD`, so the round-3 state stands: the
+by-reference artifact classes are composed only into the overflow error string
+(`src/context-envelope.ts:1032-1066`) and the omitted-region count only into the
+evidence artifact's own heading (`src/contract-revision-evidence.ts:307-337`);
+neither reaches the `prompt-assembly` run event. The fix diff's only run-event
+change is additive and unrelated (`src/run-events.ts`: gate-cost markers and
+`behavior-coverage`).
 
 ## Structured findings (v2)
 
-{"version":2,"findings":[{"id":"A-01","title":"Gate evidence reader validates appliedWaivers.riskClass as a bare string, not against GATE_RISK_CLASSES","class":"TYPE_SAFETY","clearCondition":"readGateEvidence validates each appliedWaivers[].riskClass against GATE_RISK_CLASSES (or the field is documented as unvalidated at the boundary and its consumer re-validates).","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-02","title":"scope-gate's role comparison source has no production call site","class":"DEAD_SEAM","clearCondition":"The role write-scope source has a production caller, or is removed until one exists.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-03","title":"Gate stage token 'deterministic' collides with the QA review stage vocabulary","class":"NAMING","clearCondition":"The gate-stage vocabulary is documented distinctly from the QA review stage union (CONTEXT.md or ARCHITECTURE.md), or the gate stage is renamed.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-04","title":"GateDeclaration.run advertises a cancellation signal the seam does not enforce","class":"ABSTRACTION","clearCondition":"The run seam documents that the callee owns cooperative cancellation, or runGates enforces it around the call.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-05","title":"gatePolicy is shipped in afk.config.json with no launch-time reader, so its malformed-refuses-launch rule is not yet true","class":"INCOMPLETE_WIRING","clearCondition":"The first gatePolicy consumer loads and validates the policy at launch, so a malformed member refuses the run rather than being inert.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-06","title":"Contract pair travels by reference and revision evidence may drop regions, with no run-event record of what was dropped","class":"OBSERVABILITY","clearCondition":"The prompt-assembly evidence records the by-reference pair and the count of omitted revision regions for the round.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false}]}
+{"version":2,"findings":[{"id":"A-01","title":"Gate evidence reader validates appliedWaivers.riskClass as a bare string, not against GATE_RISK_CLASSES","class":"TYPE_SAFETY","clearCondition":"readGateEvidence validates each appliedWaivers[].riskClass against GATE_RISK_CLASSES (or the field is documented as unvalidated at the boundary and its consumer re-validates).","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-02","title":"scope-gate's role comparison source has no production call site","class":"DEAD_SEAM","clearCondition":"The role write-scope source has a production caller, or is removed until one exists.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-03","title":"Gate stage token 'deterministic' collides with the QA review stage vocabulary","class":"NAMING","clearCondition":"The gate-stage vocabulary is documented distinctly from the QA review stage union (CONTEXT.md or ARCHITECTURE.md), or the gate stage is renamed.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-04","title":"GateDeclaration.run advertises a cancellation signal the seam does not enforce","class":"ABSTRACTION","clearCondition":"The run seam documents that the callee owns cooperative cancellation, or runGates enforces it around the call.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-05","title":"gatePolicy is shipped in afk.config.json with no launch-time reader, so its malformed-refuses-launch rule is not yet true","class":"INCOMPLETE_WIRING","clearCondition":"The first gatePolicy consumer loads and validates the policy at launch, so a malformed member refuses the run rather than being inert.","disposition":"RESOLVED","reachableTrigger":null,"introducedByReviewedDiff":false},{"id":"A-06","title":"Contract pair travels by reference and revision evidence may drop regions, with no run-event record of what was dropped","class":"OBSERVABILITY","clearCondition":"The prompt-assembly evidence records the by-reference pair and the count of omitted revision regions for the round.","disposition":"REPEATED","reachableTrigger":null,"introducedByReviewedDiff":false}]}
