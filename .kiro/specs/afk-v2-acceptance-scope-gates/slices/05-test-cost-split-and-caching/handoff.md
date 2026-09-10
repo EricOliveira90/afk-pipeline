@@ -25,7 +25,9 @@
   literal in `AGENTS.md` and `CLAUDE.md`
 - B-06: `src/skip-gate.ts:runSkipGate` / `skipGateDeclaration` /
   `SKIP_GATE_ID`, declared in `src/orchestrator.ts` between
-  `scopeGateDeclaration` and `...fullSuiteDeclarations`
+  `scopeGateDeclaration` and `...fullSuiteDeclarations`, counting through
+  `src/skip-gate.ts:stripNonCode` so only code contributes and keyed through
+  `countKey`
 - B-07: `GateDeclaration.prerequisiteGateIds` and the prerequisite branch in
   `src/gate-runner.ts:runGates`, surfaced as `GateResult.prerequisiteSkipped`
   and rendered by `src/logger.ts:gateStatusCell`
@@ -68,6 +70,16 @@
 - `resolveFullSuiteGateDeclarations` emits no `test:budgets` declaration when
   the project has no such script, so opting out needs no `package.json`
   change.
+- A detector pattern counts only over *code*: `stripNonCode` blanks comments
+  and string/template literals (preserving line breaks) before matching, so
+  the pattern text a test or a parser example has to spell is not a finding.
+  The alternative — narrowing the shipped patterns to require a following `(`
+  — was rejected because `patterns` are project-declared regex sources and the
+  gate may not assume a call shape (QA-01).
+- Regular-expression literals are deliberately *not* tracked by
+  `stripNonCode`: `/.../` cannot be told from division without a real parse,
+  and a false positive from a detector's text inside a regex source is the
+  safer error than a scanner that loses the rest of a line.
 
 ## Gotchas / learnings
 
@@ -93,4 +105,14 @@
 - A post-QA gate test must write its marker, evidence and cache **outside**
   the worktree: anything it drops inside is post-QA tree drift and
   `reviewArtifactViolations` correctly rejects the run.
+- A content-derived gate that scans this repo's own test files will read the
+  gate's own fixtures. Any new detector-style check has to decide up front
+  whether a pattern inside a string or a comment counts, or it will fail the
+  slice that introduces it.
+- Never write a separator byte literally into a source file. A raw control
+  character makes Git treat the module as binary — `git diff` emits
+  `Binary files ... differ`, `--numstat` reports `-  -`, and a wave merge has
+  no textual resolution. `KEY_SEPARATOR` in `src/skip-gate.ts` is the escape
+  sequence for U+001F, and `src/skip-gate.test.ts` asserts the module carries
+  no raw control byte.
 - New migration files: 0
