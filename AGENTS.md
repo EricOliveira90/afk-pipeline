@@ -43,6 +43,16 @@ Before a PRD's tickets enter AFK, run `pnpm lint:tickets <issue>...`
 (ADR 0049); check 1 (compound predicates) is an authoring-checklist item,
 not a lint.
 
+If you hand-wrote or migrated a `contract-negotiation-outcome.json`, lint
+it too: `pnpm lint:tickets --outcome .afk`. Check 5 gates the one shape
+that parks forever — an `IMPASSE` carrying `CONTESTED` findings *and* an
+unresolved `OPEN` `BLOCKING` finding. Only a `CONTESTED` finding can be
+adjudicated, so the open blocker never leaves the lock's completion
+predicate: every contest gets decided and the slice parks again on the
+same finding. The runtime writes `NON_CONVERGENCE` for a mixed
+exhaustion (ADR 0055 §1); a hand-written file has to do the same, or
+close the open blocker first.
+
 Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
@@ -70,6 +80,40 @@ on three full-suite runs inside a single writing round. This is safe
 because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
+
+## Push a commit the moment it exists
+
+A commit that lives only in a local worktree is invisible work. Nobody can
+review it, no triage pass counts it, and the next session that looks at the
+issue starts building it again.
+
+**The convention: push the branch as soon as the first commit lands, before
+verification.** Not after the suite passes, not after the PR is ready.
+`git push -u origin <branch>` costs a second, and pushing is not merging —
+an unverified branch on the remote blocks nothing and risks nothing.
+
+Two failure modes this exists for, both observed here on 2026-09-09:
+
+- **#143, #144 and #206 were fully implemented** in `C:\tmp` worktrees with
+  clean trees, no remote branch and no PR. Two consecutive triage passes
+  reported them as not started, because both read the wave checklist rather
+  than the worktrees. One machine failure would have lost three finished
+  issues that nobody remembered writing.
+- **A closed issue's worktree lingers** (`C:\tmp\afk-149`), and the only way
+  to tell "its patch landed" from "its patch died unpushed" is
+  `git cherry -v main HEAD`. That check is only cheap while the worktree
+  still exists.
+
+Corollaries, both cheap:
+
+- **Before removing any worktree**, run `git cherry -v main HEAD` and
+  `git status -sb` in it. A `+` line or a dirty tree means work would be
+  destroyed. Clean, zero-ahead, and in sync with `origin` is the only safe
+  removal.
+- **When you finish something, tick its box** in the wave or plan document
+  that lists it. The checklist is what the next session reads; a checklist
+  that disagrees with the worktrees sends the next agent to rebuild
+  finished work.
 
 ## Ticket authoring — do not leave a load-bearing decision unmade
 
@@ -145,3 +189,22 @@ host-installed gitconfig or hook (e.g. git-defender's `core.hooksPath`)
 reaches fixture repos. Do not remove this — it is correctness first
 (host-independent results) and it is worth ~45% of the suite's former
 runtime (see `docs/slow-test-consolidation-round2-2026-08-26.md`).
+
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Triage rules (repo-specific)
+
+Vision citation against `docs/PRODUCT.md`, stale-issue refresh, batch parallelism note. See `docs/agents/triage-rules.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

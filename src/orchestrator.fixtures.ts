@@ -192,6 +192,25 @@ export interface SliceFixture {
   revisionRejected?: boolean;
   /** Exhaust contract negotiation in round two with a contested finding. */
   contractImpasse?: boolean;
+  /**
+   * The contested finding IDs a `contractImpasse` exhaustion carries.
+   * Defaults to the single `F-IMPASSE`.
+   *
+   * More than one is the shape ADR 0054's "one adjudication decides one
+   * finding" rule is about: the slice re-parks after each recorded decision
+   * until every contested finding has one, so a multi-finding impasse is the
+   * only way to observe a *non-empty* decision log surviving a re-dispatch.
+   * Each finding's evidence names its own ID, so a decision log that lost or
+   * duplicated an entry is distinguishable from one that carried them all.
+   */
+  contractImpasseFindings?: string[];
+}
+
+/** The contested findings a `contractImpasse` fixture exhausts on. */
+export function impasseFindingIds(fixture: {
+  contractImpasseFindings?: string[];
+}): string[] {
+  return fixture.contractImpasseFindings ?? ["F-IMPASSE"];
 }
 
 export interface InvocationRecord {
@@ -496,7 +515,11 @@ export function buildStubProvider(opts: {
         );
         writeAcceptanceManifest(sliceArtifactDir, files);
         if (fixture.contractImpasse && plannerRound === 2) {
-          writeContractResponse(sliceArtifactDir, ["F-IMPASSE"], "CONTESTED");
+          writeContractResponse(
+            sliceArtifactDir,
+            impasseFindingIds(fixture),
+            "CONTESTED",
+          );
         }
       } else if (
         role === "evaluator-contract" &&
@@ -536,22 +559,21 @@ export function buildStubProvider(opts: {
             sliceArtifactDir,
             impasse ? "REVISE" : "ACCEPT",
             impasse
-              ? [
-                  {
-                    id: "F-IMPASSE",
-                    severity: "BLOCKING",
-                    behaviorIds: ["B-01"],
-                    evidence: '"the evaluator-held interpretation"',
-                    expected: "one agreed interpretation",
-                    observed:
-                      "the planner contests the evaluator interpretation",
-                    clearCondition: "a human adjudicates the finding",
-                    state:
-                      plannerRounds.get(ghIssue) === 2
-                        ? "CONTESTED"
-                        : "OPEN",
-                  },
-                ]
+              ? impasseFindingIds(fixture).map((findingId) => ({
+                  id: findingId,
+                  severity: "BLOCKING" as const,
+                  behaviorIds: ["B-01"],
+                  // Each finding's evidence names its own ID so a decision
+                  // log that lost one entry is distinguishable from one that
+                  // carried both (issue #144).
+                  evidence: `"the evaluator-held interpretation of ${findingId}"`,
+                  expected: `one agreed interpretation of ${findingId}`,
+                  observed: `the planner contests the evaluator interpretation of ${findingId}`,
+                  clearCondition: `a human adjudicates ${findingId}`,
+                  state: (plannerRounds.get(ghIssue) === 2
+                    ? "CONTESTED"
+                    : "OPEN") as "CONTESTED" | "OPEN",
+                }))
               : undefined,
           );
         }

@@ -116,3 +116,44 @@ archived-nowhere criterion.
   killed in the debate on Reversibility grounds and not re-proposed here.
 - **Gate check 4.** A lexicon gate teaches authors to phrase around the
   lexicon, which is the defect with extra steps.
+
+## Amendment (2026-09-08) — check 5 lints an outcome file, not a ticket (#143)
+
+One structural defect an author can make is not in a ticket at all. A
+hand-written or migrated `contract-negotiation-outcome.json` classified
+`IMPASSE` that carries `CONTESTED` findings *and* an unresolved `OPEN`
+`BLOCKING` finding parks the slice permanently: only a `CONTESTED` finding is
+adjudicable (`adjudication.ts` refuses any other state), so the open blocker
+never leaves the lock's completion predicate — every contest gets decided, the
+lock is still refused, and the slice parks again on the same finding.
+
+The runtime is already honest about this. The classifier routes a mixed
+exhaustion to `NON_CONVERGENCE` (ADR 0055 §1) and the refusal names the
+inadjudicable findings. What was missing is the warning *before* the run.
+
+| Check | What it decides | Verdict |
+|---|---|---|
+| 5 | An `IMPASSE` outcome file mixes `CONTESTED` findings with unresolved `OPEN` `BLOCKING` ones. | Gates |
+
+Two things this changes about the shape above:
+
+- **The lint no longer only reads issues.** `--outcome <file-or-dir>` takes a
+  path; a directory is scanned for `contract-negotiation-outcome.json`. The
+  entry point is unchanged — `pnpm lint:tickets --outcome .afk` — because that
+  is the command an operator already runs before a launch, and a second script
+  would be one more thing to remember. A ticket's input model
+  (`gh issue view --json number,title,body`) cannot carry an artifact, so the
+  flag is the seam.
+- **A check-5 waiver is keyed by path, not issue number**, since the finding is
+  about a file. `{ "check": "5", "outcome": "<path substring>", "reason": … }`.
+  The two forms do not cross in either direction. The `match` property keeps
+  its anti-rubber-stamp meaning against the flagged finding IDs.
+
+Check 5 gates rather than warns, and unlike checks 2 and 3 it has no
+false-positive class to be careful about: the defect is two enum values in a
+JSON file, with no prose to misread.
+
+Deliberately narrow, per the issue: only the *mixed* shape. An outcome with
+only contested findings is the adjudicable case the park exists for, and an
+`IMPASSE` spelling of a purely open exhaustion is a different defect from the
+one this check was filed for.
