@@ -72,10 +72,10 @@ import {
   formatSliceBounds,
 } from "./bounds.js";
 import {
-  DEFAULT_MIN_FREE_DISK_GB,
   formatPreflightRefusal,
   formatPreflightReport,
   gbToBytes,
+  resolveMinFreeDiskGb,
   runLaunchPreflight,
   type RunNamespace,
 } from "./preflight.js";
@@ -498,7 +498,9 @@ export interface PipelineConfig {
 
   /**
    * Free-space floor the launch preflight refuses below, in GB. Defaults
-   * to `DEFAULT_MIN_FREE_DISK_GB`; 0 disables the floor. See ADR 0042.
+   * to `DEFAULT_MIN_FREE_DISK_GB`, or to `AFK_MIN_FREE_DISK_GB` when that
+   * is set; 0 disables the floor. Resolved by `resolveMinFreeDiskGb`.
+   * See ADR 0042.
    */
   minFreeDiskGb?: number;
   /**
@@ -6055,7 +6057,7 @@ export async function runPipeline(
           : [];
       }),
     }),
-    minFreeBytes: gbToBytes(config.minFreeDiskGb ?? DEFAULT_MIN_FREE_DISK_GB),
+    minFreeBytes: gbToBytes(resolveMinFreeDiskGb(config.minFreeDiskGb)),
     reportOnly: config.preflightReportOnly,
   });
   const preflightBlock = formatPreflightReport(preflight);
