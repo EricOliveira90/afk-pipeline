@@ -857,7 +857,10 @@ function archivedScopeEscalations(
         if (
           !parsed ||
           typeof parsed !== "object" ||
-          parsed.version !== 1 ||
+          // Both live schema versions, because the archive is evidence: a
+          // gate-evidenced revision request (#193) is a record a later STUCK
+          // diagnosis has to read out, not one to mark unreadable.
+          (parsed.version !== 1 && parsed.version !== 2) ||
           !Array.isArray(parsed.findingIds) ||
           !Array.isArray(parsed.paths) ||
           typeof parsed.reason !== "string"
@@ -954,14 +957,24 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
             if ("invalid" in record) {
               return [
                 `- Round ${record.round} attempt ${record.attempt}`,
-                `  - Invalid artifact: \`${record.name}\` is not a valid version 1 scope escalation`,
+                `  - Invalid artifact: \`${record.name}\` is not a valid scope escalation`,
               ].join("\n");
             }
+            const gateEvidence = record.escalation.gateEvidence;
             return [
               `- Round ${record.round} attempt ${record.attempt}`,
               `  - Finding IDs: ${record.escalation.findingIds.map((id) => `\`${id}\``).join(", ")}`,
               `  - Paths: ${record.escalation.paths.map((path) => `\`${path}\``).join(", ")}`,
               `  - Reason: ${record.escalation.reason}`,
+              // The cited gate, when there is one: a GATE-SCOPE revision's
+              // whole justification is a gate a reader can go and look at, so
+              // a diagnosis that dropped it would name a widening with no
+              // evidence.
+              ...(gateEvidence
+                ? [
+                    `  - Gate evidence: \`${gateEvidence.gateId}\` / \`${gateEvidence.evidenceArtifactId}\``,
+                  ]
+                : []),
             ].join("\n");
           })
           .join("\n");

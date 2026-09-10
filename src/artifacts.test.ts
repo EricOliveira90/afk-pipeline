@@ -243,7 +243,70 @@ describe("renderStuckDiagnosis", () => {
       expect(diagnosis).toContain("[QA-OPEN-01] BLOCKING OPEN");
       expect(diagnosis).toContain("- Round 1 attempt 1");
       expect(diagnosis).toContain(
-        "Invalid artifact: `escalation-r1-a1.md` is not a valid version 1 scope escalation",
+        "Invalid artifact: `escalation-r1-a1.md` is not a valid scope escalation",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("[behavior:B-11] renders an archived version 2 escalation with its cited gate", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-gate-escalation-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    try {
+      writeFileSync(
+        join(reviewArchiveDir, "escalation-r1-a1.md"),
+        JSON.stringify({
+          version: 2,
+          findingIds: ["GATE-SCOPE"],
+          paths: ["src/extra.ts"],
+          reason: "the failing gate names a file the lock does not declare",
+          gateEvidence: {
+            gateId: "tests",
+            evidenceArtifactId: "gate-evidence/candidate-r1-a1.json",
+          },
+        }),
+        "utf-8",
+      );
+
+      const diagnosis = renderStuckDiagnosis({
+        reason: STUCK_DIAGNOSIS_REASON,
+        reviewArchiveDir,
+        commitLog: "",
+      });
+
+      // A valid record, not an invalid one: the whole point of the archive is
+      // that a later reader can see what was requested and why.
+      expect(diagnosis).not.toContain("Invalid artifact");
+      expect(diagnosis).toContain("Finding IDs: `GATE-SCOPE`");
+      expect(diagnosis).toContain("Reason: the failing gate names a file");
+      expect(diagnosis).toContain("Gate evidence: `tests`");
+      expect(diagnosis).toContain("gate-evidence/candidate-r1-a1.json");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("[behavior:B-11] still retains a malformed version 2 record as invalid", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-stuck-bad-v2-escalation-"));
+    const reviewArchiveDir = join(root, "reviews");
+    mkdirSync(reviewArchiveDir, { recursive: true });
+    try {
+      writeFileSync(
+        join(reviewArchiveDir, "escalation-r1-a1.md"),
+        JSON.stringify({ version: 2, findingIds: ["GATE-SCOPE"] }),
+        "utf-8",
+      );
+
+      expect(
+        renderStuckDiagnosis({
+          reason: STUCK_DIAGNOSIS_REASON,
+          reviewArchiveDir,
+          commitLog: "",
+        }),
+      ).toContain(
+        "Invalid artifact: `escalation-r1-a1.md` is not a valid scope escalation",
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
