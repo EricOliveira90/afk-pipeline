@@ -43,6 +43,16 @@ Before a PRD's tickets enter AFK, run `pnpm lint:tickets <issue>...`
 (ADR 0049); check 1 (compound predicates) is an authoring-checklist item,
 not a lint.
 
+If you hand-wrote or migrated a `contract-negotiation-outcome.json`, lint
+it too: `pnpm lint:tickets --outcome .afk`. Check 5 gates the one shape
+that parks forever — an `IMPASSE` carrying `CONTESTED` findings *and* an
+unresolved `OPEN` `BLOCKING` finding. Only a `CONTESTED` finding can be
+adjudicated, so the open blocker never leaves the lock's completion
+predicate: every contest gets decided and the slice parks again on the
+same finding. The runtime writes `NON_CONVERGENCE` for a mixed
+exhaustion (ADR 0055 §1); a hand-written file has to do the same, or
+close the open blocker first.
+
 Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
