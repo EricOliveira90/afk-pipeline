@@ -14,8 +14,10 @@ import {
   loadRunState,
   saveSliceState,
   saveRunState,
+  saveAppliedWaivers,
   saveFiledFindings,
   saveReviewPhase,
+  CURRENT_RUN_STATE_VERSION,
   sanitizeReviewPhase,
   isSliceComplete,
   adaptLoadedState,
@@ -144,14 +146,14 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v0, "demo");
-    expect(adapted.version).toBe(3);
+    expect(adapted.version).toBe(4);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
     expect(adapted.slices["100"]!.mergedToFeature).toBe(true);
     expect(adapted.slices["200"]!.phase).toBe("STUCK");
     expect(adapted.slices["300"]!.phase).toBe("ESCALATE");
   });
 
-  it("upgrades v1 files to v3", () => {
+  it("upgrades v1 files to v4", () => {
     const v1 = {
       version: 1,
       prdSlug: "demo",
@@ -161,7 +163,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v1, "demo");
-    expect(adapted.version).toBe(3);
+    expect(adapted.version).toBe(4);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
   });
 
@@ -241,7 +243,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     );
 
     const loaded = loadRunState(repo, slug);
-    expect(loaded.version).toBe(3);
+    expect(loaded.version).toBe(4);
     expect(loaded.slices["100"]!.phase).toBe("PASS");
     expect(isSliceComplete(loaded, "100")).toBe(true);
     expect(isSliceComplete(loaded, "200")).toBe(false);
@@ -253,7 +255,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.version).toBe(3);
+    expect(onDisk.version).toBe(4);
     expect(onDisk.slices["100"].phase).toBe("PASS");
     expect(onDisk.slices["300"].phase).toBe("ERROR");
     expect(onDisk.slices["300"].error).toBe("boom");
@@ -278,11 +280,11 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     expect(isSliceComplete(loadRunState(repo, "parked"), "8181")).toBe(false);
   });
 
-  it("returns a fresh v3 state when no file exists", () => {
+  it("returns a fresh v4 state when no file exists", () => {
     const repo = makeRepo();
     const loaded = loadRunState(repo, "fresh");
     expect(loaded).toEqual({
-      version: 3,
+      version: 4,
       prdSlug: "fresh",
       featureBranch: "feat/fresh",
       slices: {},
@@ -1356,6 +1358,115 @@ describe("RunState.specsDir", () => {
         "demo",
       ).specsDir,
     ).toBe(".kiro/specs/demo");
+  });
+});
+
+/**
+ * Applied protected-change waivers (#193, D5). The record is an audit note: a
+ * reader — the run summary, a resumed run, a human after the fact — has to be
+ * able to see which human authorizations a gate actually spent, without
+ * re-reading every gate-evidence artifact the run wrote.
+ */
+describe("RunState.appliedWaivers", () => {
+  const WAIVER = {
+    riskClass: "deleted-test",
+    path: "src/gone.test.ts",
+    author: "eric",
+    reason: "the module it covered was deleted with it",
+  };
+
+  it("[behavior:B-13] upgrades every earlier version to 4 with the field absent", () => {
+    expect(CURRENT_RUN_STATE_VERSION).toBe(4);
+    for (const version of [undefined, 1, 2, 3, 4]) {
+      const adapted = adaptLoadedState(
+        {
+          ...(version === undefined ? {} : { version }),
+          prdSlug: "demo",
+          featureBranch: "feat/demo",
+          specsDir: ".kiro/specs/demo",
+          slices: { "100": version === undefined
+            ? { status: "PASS", mergedToFeature: true }
+            : { phase: "PASS", mergedToFeature: true } },
+        },
+        "demo",
+      );
+      expect(adapted.version).toBe(4);
+      // Absent, not an empty record: "nobody waived anything" and "this file
+      // predates waivers" are the same fact to every reader.
+      expect(adapted.appliedWaivers).toBeUndefined();
+      expect("appliedWaivers" in adapted).toBe(false);
+      expect(adapted.slices["100"]!.phase).toBe("PASS");
+      expect(adapted.specsDir).toBe(".kiro/specs/demo");
+    }
+  });
+
+  it("[behavior:B-13] carries a v4 record through load and re-stamps the version on write", () => {
+    const repo = makeRepo();
+    // A caller-built object still carrying the old literal: the writer stamps
+    // its own schema, so the file never claims a version its bytes contradict.
+    saveRunState(repo, {
+      version: 3,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+      appliedWaivers: { "100": [WAIVER] },
+    });
+    const file = join(repo, ".afk", "state", "demo.json");
+    expect(JSON.parse(readFileSync(file, "utf-8")).version).toBe(4);
+
+    const loaded = loadRunState(repo, "demo");
+    expect(loaded.version).toBe(4);
+    expect(loaded.appliedWaivers).toEqual({ "100": [WAIVER] });
+
+    // And it survives an unrelated focused write, like `resume` does.
+    saveSliceState(repo, "demo", "200", { phase: "ERROR", error: "boom" });
+    expect(loadRunState(repo, "demo").appliedWaivers).toEqual({
+      "100": [WAIVER],
+    });
+  });
+
+  it("[behavior:B-13] appends per issue and ignores an already-recorded riskClass + path", () => {
+    const repo = makeRepo();
+    saveAppliedWaivers(repo, "demo", "100", [WAIVER]);
+    // The same pair reported by a second gate is one authorization, so the
+    // differing reason text does not create a second record.
+    saveAppliedWaivers(repo, "demo", "100", [
+      { ...WAIVER, reason: "reported again by the skipped-test gate" },
+      { ...WAIVER, riskClass: "gate-policy" },
+    ]);
+    saveAppliedWaivers(repo, "demo", "200", [WAIVER]);
+    // An empty list is not a write at all.
+    saveAppliedWaivers(repo, "demo", "300", []);
+
+    expect(loadRunState(repo, "demo").appliedWaivers).toEqual({
+      "100": [WAIVER, { ...WAIVER, riskClass: "gate-policy" }],
+      "200": [WAIVER],
+    });
+  });
+
+  it("[behavior:B-13] degrades a malformed record to absent rather than wedging the load", () => {
+    expect(
+      adaptLoadedState(
+        {
+          version: 4,
+          featureBranch: "feat/demo",
+          slices: {},
+          appliedWaivers: "not a record",
+        },
+        "demo",
+      ).appliedWaivers,
+    ).toBeUndefined();
+    expect(
+      adaptLoadedState(
+        {
+          version: 4,
+          featureBranch: "feat/demo",
+          slices: {},
+          appliedWaivers: { "100": [{ riskClass: "deleted-test", path: " " }] },
+        },
+        "demo",
+      ).appliedWaivers,
+    ).toBeUndefined();
   });
 });
 

@@ -46,8 +46,26 @@ export interface PersistedSliceState {
   adoption?: SliceAdoption;
 }
 
+/**
+ * The schema version every write stamps on the file (#193 raised it to 4 for
+ * `appliedWaivers`). Exported because it is the one number a reader has to
+ * compare against, and a duplicated literal is how two modules disagree about
+ * what "current" means.
+ */
+export const CURRENT_RUN_STATE_VERSION = 4;
+
+/**
+ * Versions an in-memory `RunState` may carry. `adaptLoadedState` normalizes
+ * every loaded file to {@link CURRENT_RUN_STATE_VERSION}, and `writeRunState`
+ * stamps it on every write, so a stale literal on a caller-built object can
+ * never reach disk. The union exists so that raising the version is genuinely
+ * additive: objects hand-built against version 3 stay assignable, exactly as
+ * `appliedWaivers` being absent stays readable.
+ */
+export type RunStateVersion = 3 | 4;
+
 export interface RunState {
-  version: 3;
+  version: RunStateVersion;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -105,6 +123,25 @@ export interface RunState {
   nonProgress?: unknown;
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
+  /**
+   * Protected-change waivers a gate actually applied, keyed by GH issue
+   * (#193). Kept beside `slices` rather than inside `PersistedSliceState` for
+   * the same reason `resume` is: a RUNNING slice has no persisted record at
+   * all (ADR 0018), and the waiver is written at gate time, mid-slice. Absent
+   * entries read as none, so state files predating the field stay loadable.
+   */
+  appliedWaivers?: Record<string, PersistedAppliedWaiver[]>;
+}
+
+/**
+ * One applied waiver as persisted — D5's four fields, so a resumed run can see
+ * which authorizations were already spent without re-reading gate evidence.
+ */
+export interface PersistedAppliedWaiver {
+  riskClass: string;
+  path: string;
+  author: string;
+  reason: string;
 }
 
 export interface MigrationClaimState {
@@ -605,6 +642,37 @@ function sanitizeMigrationClaims(value: unknown): MigrationClaimState | undefine
   return { pool: [...input.pool], claims };
 }
 
+/**
+ * Keep only well-formed applied-waiver records (#193). A malformed entry
+ * degrades to absent rather than throwing, for the same reason
+ * `prefixesOf` does: this record is an audit note the summary reads, and a
+ * broken field must not wedge a re-run of the pipeline that wrote it.
+ */
+function sanitizeAppliedWaivers(
+  value: unknown,
+): Record<string, PersistedAppliedWaiver[]> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const out: Record<string, PersistedAppliedWaiver[]> = {};
+  for (const [issue, entries] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(entries)) continue;
+    const kept = entries.filter((entry): entry is PersistedAppliedWaiver => {
+      if (typeof entry !== "object" || entry === null) return false;
+      const record = entry as Record<string, unknown>;
+      return (["riskClass", "path", "author", "reason"] as const).every(
+        (field) =>
+          typeof record[field] === "string" &&
+          (record[field] as string).trim() !== "",
+      );
+    });
+    if (kept.length > 0) out[issue] = kept.map((entry) => ({ ...entry }));
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function statePath(repoRoot: string, prdSlug: string): string {
   return join(repoRoot, ".afk", "state", `${prdSlug}.json`);
 }
@@ -618,7 +686,17 @@ export function withRunStateLock<T>(
 }
 
 function writeRunState(path: string, state: RunState): void {
-  writeFileSync(path, JSON.stringify(state, null, 2));
+  // The version on disk is the writer's schema, not whatever literal the
+  // caller's in-memory object happened to carry: a v3 literal written back
+  // beside a v4 field would describe a file that does not exist.
+  writeFileSync(
+    path,
+    JSON.stringify(
+      { ...state, version: CURRENT_RUN_STATE_VERSION },
+      null,
+      2,
+    ),
+  );
 }
 
 /**
@@ -676,13 +754,20 @@ export function listRunStateSlugs(repoRoot: string): string[] {
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
  * checkpoint storage whose focused reader owns validation. v3 adds adoption
- * provenance to terminal slice records. Throws on unknown status strings
- * rather than silently producing an invalid record.
+ * provenance to terminal slice records. v4 adds applied protected-change
+ * waivers (#193), a purely additive field that reads as none when absent.
+ * Throws on unknown status strings rather than silently producing an invalid
+ * record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
   if (!existsSync(p)) {
-    return { version: 3, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
+    return {
+      version: CURRENT_RUN_STATE_VERSION,
+      prdSlug,
+      featureBranch: `feat/${prdSlug}`,
+      slices: {},
+    };
   }
   const raw = JSON.parse(readFileSync(p, "utf-8")) as unknown;
   return adaptLoadedState(raw, prdSlug);
@@ -703,6 +788,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     qaConvergence?: unknown;
     nonProgress?: unknown;
     migrations?: unknown;
+    appliedWaivers?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -714,7 +800,12 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ? r.specsDir
       : undefined;
 
-  if (r.version === 1 || r.version === 2 || r.version === 3) {
+  if (
+    r.version === 1 ||
+    r.version === 2 ||
+    r.version === 3 ||
+    r.version === 4
+  ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
@@ -722,8 +813,9 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     const resume = sanitizeResumeMap(r.resume);
     const migrations = sanitizeMigrationClaims(r.migrations);
+    const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
     return {
-      version: 3,
+      version: CURRENT_RUN_STATE_VERSION,
       prdSlug,
       featureBranch,
       ...(specsDir !== undefined ? { specsDir } : {}),
@@ -744,6 +836,10 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         ? { nonProgress: r.nonProgress }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
+      // v1–v3 files have no such field at all, so the upgrade leaves it
+      // absent: "no waiver was applied" and "this file predates waivers"
+      // are the same fact to every reader.
+      ...(appliedWaivers !== undefined ? { appliedWaivers } : {}),
     };
   }
 
@@ -775,7 +871,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     };
   }
   return {
-    version: 3,
+    version: CURRENT_RUN_STATE_VERSION,
     prdSlug,
     featureBranch,
     ...(specsDir !== undefined ? { specsDir } : {}),
@@ -1074,6 +1170,40 @@ export function saveFiledFindings(
       records.push(record);
     }
     current.reviewPhase = { ...reviewPhase, filedFindings: records };
+  });
+}
+
+/**
+ * Append the protected-change waivers a gate actually applied for one slice,
+ * ignoring a `riskClass` + `path` pair already recorded (#193).
+ *
+ * Modelled on `saveFiledFindings` and for the same reason: the write happens
+ * mid-slice, at gate time, when the slice has no persisted terminal record to
+ * attach to (ADR 0018). Re-reads state inside the lock so a waiver survives
+ * whatever a parallel slice wrote in between, and de-duplicates because two
+ * gates can each apply the same launch authorization — `feedback-integrity`
+ * and the skipped-test gate both report a `skipped-test` waiver they honored,
+ * and that is one human decision, not two.
+ */
+export function saveAppliedWaivers(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  waivers: readonly PersistedAppliedWaiver[],
+) {
+  if (waivers.length === 0) return;
+  updateRunState(repoRoot, prdSlug, (current) => {
+    const records = [...(current.appliedWaivers?.[ghIssue] ?? [])];
+    for (const waiver of waivers) {
+      const duplicate = records.some(
+        (existing) =>
+          existing.riskClass === waiver.riskClass &&
+          existing.path === waiver.path,
+      );
+      if (duplicate) continue;
+      records.push({ ...waiver });
+    }
+    current.appliedWaivers = { ...current.appliedWaivers, [ghIssue]: records };
   });
 }
 
