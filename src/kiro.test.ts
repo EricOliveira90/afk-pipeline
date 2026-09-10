@@ -66,7 +66,7 @@ beforeEach(() => {
 });
 
 describe("kiro invoke spawn args", () => {
-  it("P-05 keeps the exact prompt as Kiro's final argument with existing flags", async () => {
+  it("P-05 keeps the exact prompt on stdin with existing Kiro flags", async () => {
     const proc = makeFakeProc();
     spawnMock.mockReturnValue(proc);
     const exactPrompt = "EXACT-KIRO-ENVELOPE";
@@ -87,10 +87,36 @@ describe("kiro invoke spawn args", () => {
     expect(args).toContain("--trust-all-tools");
     expect(args[args.indexOf("--agent") + 1]).toBe("planner");
     expect(args[args.indexOf("--model") + 1]).toBe("claude-fable-5");
-    expect(args[args.length - 1]).toBe(exactPrompt);
+    expect(proc.stdinText).toBe(exactPrompt);
     // Caller-supplied agent configs are the caller's responsibility —
     // the managed worker config is not written.
     expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("keeps a prompt past the win32 argv ceiling out of argv entirely", async () => {
+    const proc = makeFakeProc();
+    spawnMock.mockReturnValue(proc);
+    // Well past CreateProcess's 32,767-character command line, which is
+    // where #188 defect 3 died with ENAMETOOLONG.
+    const hugePrompt = "X".repeat(64_000);
+
+    const promise = invoke({
+      role: "generator",
+      agent: "planner",
+      prompt: hugePrompt,
+      cwd: "/tmp/x",
+    });
+    proc.emit("exit", 0);
+    await promise;
+
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args.join(" ").length).toBeLessThan(200);
+    expect(args).not.toContain(hugePrompt);
+    expect(proc.stdinText).toBe(hugePrompt);
+    // The runtime can only write a prompt if it opened a pipe for it.
+    expect(spawnMock.mock.calls[0]![2]).toEqual(
+      expect.objectContaining({ stdio: ["pipe", "pipe", "pipe"] }),
+    );
   });
 
   it("uses Sonnet for explorer and Fable for other roles", async () => {
