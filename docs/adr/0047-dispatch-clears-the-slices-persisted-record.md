@@ -52,11 +52,18 @@ the run summary.
 ### What is deliberately not cleared
 
 `resume` bookkeeping. Its `attempts` counter is the poison-tree cap
-(#36), the dispatch this clearing accompanies is about to increment it,
-and resetting it would hand an unattended launcher an unlimited supply of
-resumes onto a tree that has already killed two. `scope`, `migrations`
-and `reviewPhase` stay for the same reason in general form: none of them
-is a per-attempt outcome claim.
+(#36), and resetting it would hand an unattended launcher an unlimited
+supply of resumes onto a tree that has already killed two. `scope`,
+`migrations` and `reviewPhase` stay for the same reason in general form:
+none of them is a per-attempt outcome claim.
+
+*(Amended 2026-09-07, #188 defect 4.)* This paragraph used to add "the
+dispatch this clearing accompanies is about to increment it". It no longer
+does: the increment moved to the generator dispatch, so a dispatch that
+never reaches a generator leaves the counter alone (ADR 0039's 2026-09-07
+amendment). The reason the counter survives this clearing is now the
+stronger one — it counts resumed generator dispatches the *tree* has
+absorbed, which is not a claim about this attempt's outcome at all.
 
 Also not cleared: a record for a slice **this run has already decided**.
 `recordTerminal` marks the slice terminal, and a re-dispatch after that

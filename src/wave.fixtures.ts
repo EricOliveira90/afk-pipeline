@@ -279,11 +279,23 @@ export function buildStubProvider(opts: {
           `# Slice Contract\n\n**Status:** DRAFT\n\n## Files expected to change\n${filesBlock}\n`,
           "utf-8",
         );
-        writeAcceptanceManifest(
-          sliceArtifactDir,
+        const declared =
           fixture.manifestFiles === undefined
             ? fixture.files
-            : fixture.manifestFiles,
+            : fixture.manifestFiles;
+        // The generator stub always writes `fixture.outputFile`, so a declared
+        // list that omits it is now red at the post-QA file-scope gate (#195)
+        // — correctly, but for a reason the scenario is not about. A `null`
+        // declaration is left alone: that fixture means "no repository
+        // changes", and the generator honours it by writing under the slice
+        // artifact directory instead (see the generator branch below).
+        writeAcceptanceManifest(
+          sliceArtifactDir,
+          declared === null ||
+          declared.includes(fixture.outputFile) ||
+          /(^|[\\/])migrations[\\/].*\.sql$/i.test(fixture.outputFile)
+            ? declared
+            : [...declared, fixture.outputFile],
         );
         if (fixture.contractImpasse && round === 2) {
           writeContractResponse(sliceArtifactDir, ["F-IMPASSE"], "CONTESTED");
@@ -320,7 +332,14 @@ export function buildStubProvider(opts: {
       } else if (role === "generator" && sliceArtifactDir && fixture) {
         const round = (generatorRounds.get(ghIssue) ?? 0) + 1;
         generatorRounds.set(ghIssue, round);
-        const outPath = join(cwd, fixture.outputFile);
+        // A fixture that declared `no-repository-changes` writes its output
+        // under the slice artifact directory, which the file-scope gate
+        // exempts (#195). Writing it at the worktree root would contradict the
+        // very scope the fixture exists to declare.
+        const outPath =
+          fixture.manifestFiles === null
+            ? join(sliceArtifactDir, fixture.outputFile)
+            : join(cwd, fixture.outputFile);
         mkdirSync(join(outPath, ".."), { recursive: true });
         writeFileSync(
           outPath,

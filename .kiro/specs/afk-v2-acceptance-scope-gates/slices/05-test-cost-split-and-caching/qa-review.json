@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-06"],
+      "summary": "The tests:skipped gate returned FAIL on this slice's own candidate tree, counting fixture string literals in src/skip-gate.test.ts and src/gate-policy.test.ts as newly disabled tests.",
+      "evidence": "Re-ran the clear condition against the live worktree with the shipped build: runSkipGate({ worktreeDir: <worktree>, featureRef: \"feat-claude-code/afk-v2-acceptance-scope-gates\", detectors: DEFAULT_SKIP_DETECTORS, testFileGlobs: [\"**/*.test.ts\"] }) now returns {\"status\":\"PASS\",\"failureKind\":null,\"detail\":\"No detector counts more disabled tests on this candidate than on feat-claude-code/afk-v2-acceptance-scope-gates (1 detector(s) over 529 candidate path(s)).\"}. The negative half was re-run in a scratch git repo outside the tree under review: a committed base with two live it(\"...\") tests, then one rewritten to it.skip(\"subtracts\", returns {\"status\":\"FAIL\",\"failureKind\":\"COMMAND\",\"detail\":\"This candidate disables more tests than HEAD does: vitest-ts \\\"it\\\\.skip\\\" 0 \\u2192 1. Re-enable the test, or fix what it caught.\"}. Fix is commit bc8bfef: src/skip-gate.ts:139-187 stripNonCode blanks comments and string/template literals (preserving line breaks) once per file in countAll (:220-227) before countPattern (:189-191) runs.",
+      "expected": "B-06: the gate counts each detector's patterns on the base tree and the candidate tree and fails only on an increase, so pre-existing occurrences do not fire; definition of done: it fires on a newly introduced skip or .only and not a pre-existing one.",
+      "observed": "The gate returns PASS on this slice's own tree, where no test is disabled, and still returns FAIL naming the detector pattern when a real it(\"x\") is rewritten to it.skip(\"x\").",
+      "clearCondition": "runSkipGate with DEFAULT_SKIP_DETECTORS, testFileGlobs [\"**/*.test.ts\"], this worktree and featureRef feat-claude-code/afk-v2-acceptance-scope-gates returns status PASS, while a candidate that genuinely disables a test returns status FAIL naming it.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-06"],
+      "summary": "src/skip-gate.ts embedded three raw U+0000 bytes as a Map-key separator, so Git classified the slice's central new module as binary: no reviewable diff and no textual merge.",
+      "evidence": "git diff --numstat b732ce0..HEAD -- src/skip-gate.ts now reports \"362\\t0\\tsrc/skip-gate.ts\" instead of \"-\\t-\", and git diff b732ce0..HEAD -- src/skip-gate.ts emits a textual patch (\"new file mode 100644 ... @@ -0,0 +1,362 @@\" followed by the source lines). A byte scan of the file ([System.IO.File]::ReadAllBytes) counts 0 NUL bytes and 0 control bytes other than CR/LF/TAB. The separator is now the escape KEY_SEPARATOR = \"\\u001f\" at src/skip-gate.ts:206, and countKey (:208-210) still composes detectorId + separator + pattern, so the composite Map key keeps distinguishing detector/pattern pairs; src/skip-gate.test.ts adds an assertion that the module carries no raw control byte and that the escape is spelled out. (git show --stat bc8bfef still prints \"Bin 9536 -> 12957 bytes\" because the pre-fix blob was the binary side of that pair; the file as shipped at HEAD is text.)",
+      "expected": "src/skip-gate.ts is a TypeScript source module reviewable by git diff and mergeable by Git's text merge driver, as ARCHITECTURE.md's Gates row presents it beside src/scope-gate.ts.",
+      "observed": "Git treats the file as text: numeric numstat counts and a full textual patch, with the composite key semantics unchanged.",
+      "clearCondition": "git diff --numstat <slice-base>..HEAD -- src/skip-gate.ts reports numeric added/removed line counts instead of \"-  -\", and git diff emits a textual patch for the file, with the composite Map key still distinguishing detector/pattern pairs.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

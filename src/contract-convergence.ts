@@ -2,7 +2,10 @@ import type {
   ContractReview,
   ContractReviewFinding,
 } from "./contract-review.js";
-import { parseContractReview } from "./contract-review.js";
+import {
+  ACTIVE_CONTRACT_FINDING_STATES,
+  parseContractReview,
+} from "./contract-review.js";
 import {
   loadRunState,
   updateRunState,
@@ -49,11 +52,26 @@ export type ContractContinuationDecision =
 
 interface LineageLocation {
   repoRoot: string;
-  prdSlug: string;
+  /**
+   * The provider-qualified run slug, not the bare PRD slug (#178). Durable
+   * lineage lives in the same `.afk/state/<run-slug>.json` file as the run's
+   * scope, slice records and resume counters. Keying it on the bare slug split
+   * a codex or claude run's memory across two state files: `afk clean-failed`,
+   * the resume counters and an operator editing "the" state file all reached a
+   * different file than the tamper guard's memory.
+   *
+   * The move is a key change, not a schema change — nothing about the
+   * persisted shape or version differs — so a build on either side of it
+   * reads an *empty* lineage from the other's file rather than failing.
+   * {@link findOrphanedContractLineage} exists to make that one silent case
+   * loud; see ADR 0061.
+   */
+  runSlug: string;
   ghIssue: string;
 }
 
-const ACTIVE_STATES = new Set(["OPEN", "CONTESTED"]);
+// One set, shared with the informing side. See ACTIVE_CONTRACT_FINDING_STATES.
+const ACTIVE_STATES = ACTIVE_CONTRACT_FINDING_STATES;
 const TERMINAL_STATES = new Set(["RESOLVED", "WITHDRAWN"]);
 
 export function emptyContractFindingLineage(): ContractFindingLineage {
@@ -511,7 +529,7 @@ export function parseContractFindingLineage(
 export function loadContractFindingLineage(
   location: LineageLocation,
 ): ContractFindingLineage {
-  const state = loadRunState(location.repoRoot, location.prdSlug);
+  const state = loadRunState(location.repoRoot, location.runSlug);
   const map = convergenceMap(state);
   if (!map || map[location.ghIssue] === undefined) {
     return emptyContractFindingLineage();
@@ -519,11 +537,48 @@ export function loadContractFindingLineage(
   return parseContractFindingLineage(map[location.ghIssue]);
 }
 
+/**
+ * Lineage a pre-#178 build left in the bare-PRD-slug state file that this
+ * run's provider-qualified file does not hold — or `null` when there is no
+ * such split. Returns an operator-facing message; the caller journals it.
+ *
+ * Deliberately a diagnostic and not a migration. On a non-kiro run the
+ * bare-slug file is *someone else's*: either a live kiro run's state for the
+ * same PRD, or an orphan an older build fabricated with the wrong
+ * `featureBranch`. Adopting from it silently would import another run's
+ * tamper-guard memory, which is a worse failure than the one it fixes — the
+ * lineage this build cannot see is recoverable by hand (#178 records the
+ * surgery), a lineage it wrongly *adopts* refuses contracts for findings that
+ * were never this slice's. So: name both files and adopt nothing.
+ */
+export function findOrphanedContractLineage(location: {
+  repoRoot: string;
+  prdSlug: string;
+  runSlug: string;
+  ghIssue: string;
+}): string | null {
+  if (location.runSlug === location.prdSlug) return null;
+  const qualified = convergenceMap(
+    loadRunState(location.repoRoot, location.runSlug),
+  );
+  if (qualified?.[location.ghIssue] !== undefined) return null;
+  const bare = convergenceMap(loadRunState(location.repoRoot, location.prdSlug));
+  if (bare?.[location.ghIssue] === undefined) return null;
+  return (
+    `durable contract lineage for #${location.ghIssue} exists in ` +
+    `.afk/state/${location.prdSlug}.json but not in this run's ` +
+    `.afk/state/${location.runSlug}.json, so this negotiation starts with no ` +
+    `lineage. Lineage moved to the provider-qualified state file in ADR 0061; ` +
+    `nothing is adopted automatically because the bare-slug file may belong to ` +
+    `another run. Copy the entry across by hand if it is this slice's.`
+  );
+}
+
 export function saveContractFindingLineage(
   location: LineageLocation,
   lineage: ContractFindingLineage,
 ): void {
-  updateRunState(location.repoRoot, location.prdSlug, (state) => {
+  updateRunState(location.repoRoot, location.runSlug, (state) => {
     const existing = convergenceMap(state) ?? {};
     state.contractConvergence = {
       ...existing,

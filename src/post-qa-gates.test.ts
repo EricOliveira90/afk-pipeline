@@ -1,10 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveCandidateTreeId } from "./gate-runner.js";
-import { reviewArtifactViolations } from "./post-qa-gates.js";
+import { reviewArtifactViolations, runPostQAGates } from "./post-qa-gates.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
@@ -18,6 +24,8 @@ function git(cwd: string, args: string[]): string {
 describe("reviewArtifactViolations (architect A1 tree authority)", () => {
   let repo: string;
   const sliceDir = "specs/demo/slices/01-fixture";
+  /** Directories outside the worktree, so nothing a run writes drifts its tree. */
+  const hosts: string[] = [];
 
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "afk-tree-authority-"));
@@ -34,6 +42,9 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
 
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true });
+    for (const host of hosts.splice(0)) {
+      rmSync(host, { recursive: true, force: true });
+    }
   });
 
   it("returns nothing for the identical tree", () => {
@@ -182,4 +193,70 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
       }),
     ).toEqual([`${sliceDir}-evil/x.ts`]);
   });
+
+  it("[behavior:B-03] forwards the gate cache to the full-suite phase, which reuses a PASS for the same tree", async () => {
+    // The post-QA phase is where reuse pays: the pre-QA phase already ran the
+    // cheap gates on this exact tree, so the suite is the one gate whose
+    // second run can be skipped. The pass-through is asserted end to end
+    // because a forwarded-or-not argument is exactly the kind of wiring a unit
+    // stub cannot prove.
+    // Everything this run writes lives outside the worktree: a marker or an
+    // evidence file inside it would itself be post-QA tree drift.
+    const host = mkdtempSync(join(tmpdir(), "afk-post-qa-cache-"));
+    hosts.push(host);
+    const marker = join(host, "ran.txt");
+    const cache = { path: join(host, "gate-cache.json"), enabled: true };
+    const qaApprovedTreeId = resolveCandidateTreeId(repo);
+    const outcomes: { gateId: string; cacheReused?: boolean }[] = [];
+    async function run(round: number) {
+      return runPostQAGates({
+        repoRoot: host,
+        worktreeDir: repo,
+        prdSlug: "demo",
+        ghIssue: "86",
+        sliceNumber: "05",
+        tag: "s05",
+        round,
+        evidenceDir: join(host, "evidence", String(round)),
+        declarations: [
+          {
+            id: "tests",
+            stage: "base",
+            required: true,
+            command: process.execPath,
+            args: [
+              "-e",
+              `require("fs").appendFileSync(${JSON.stringify(marker)}, "x")`,
+            ],
+          },
+        ],
+        cache,
+        infrastructureRetries: 0,
+        inactivityTimeoutMs: 15_000,
+        wallClockTimeoutMs: 30_000,
+        heartbeatIntervalMs: 20,
+        priorAttemptTreeIds: [],
+        priorArtifacts: [],
+        qaApprovedTreeId,
+        reviewArtifactDir: sliceDir,
+        onGateOutcome: (outcome) => outcomes.push(outcome),
+        onInfrastructureRetry: () => {},
+        onCleanupWarning: () => {},
+      });
+    }
+
+    const first = await run(1);
+    expect(first.action).toBe("PASS");
+    expect(outcomes.at(-1)?.cacheReused).toBeUndefined();
+    expect(readFileSync(marker, "utf-8")).toBe("x");
+
+    const second = await run(2);
+    expect(second.action).toBe("PASS");
+    expect(outcomes.at(-1)).toMatchObject({
+      gateId: "tests",
+      cacheReused: true,
+    });
+    // The suite command never ran a second time.
+    expect(readFileSync(marker, "utf-8")).toBe("x");
+  }, 60_000);
 });

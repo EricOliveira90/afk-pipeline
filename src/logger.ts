@@ -70,6 +70,70 @@ function sanityGateLabel(gate: SanityGateResult | undefined): string {
   return `FAIL (CONFIGURATION) — ${steps}${gate.detail ? `: ${gate.detail}` : ""}`;
 }
 
+/**
+ * The status cell for one gate row: the status, its failure kind when it
+ * failed, and *why it cost nothing* when it cost nothing (#86 B-03, B-07).
+ *
+ * Both annotations are load-bearing for an operator: a bare `PASS (0ms)` reads
+ * as a gate that did nothing, and a bare `SKIPPED` reads as a gate that was
+ * quietly dropped. Naming the reuse and naming the failed prerequisite is what
+ * keeps a cheaper run readable as the same verdict.
+ */
+function gateStatusCell(event: {
+  status: string;
+  failureKind: string | null;
+  cacheReused?: boolean;
+  prerequisiteSkipped?: string;
+}): string {
+  if (event.status === "FAIL" && event.failureKind) {
+    return `FAIL (${event.failureKind})`;
+  }
+  if (event.status === "PASS" && event.cacheReused) return "PASS (cache reuse)";
+  if (event.prerequisiteSkipped) {
+    return `${event.status} (prerequisite ${event.prerequisiteSkipped} failed)`;
+  }
+  return event.status;
+}
+
+/**
+ * One advisory gate outcome, for a reader outside this module. `src/ship-gate.ts`
+ * renders these in the draft PR body from the same events the run summary
+ * renders (#86 B-02), so the PR and the summary cannot disagree about which
+ * advisory gate reported what.
+ */
+export interface AdvisoryGateOutcome {
+  ghIssue: string;
+  sliceNumber: string;
+  round: number;
+  gateId: string;
+  status: string;
+  durationMs: number;
+}
+
+/**
+ * Every `environmentSensitive` gate outcome recorded in a run, in event order.
+ * Empty when the run directory has no events or no advisory gate ran — an
+ * absent block, never a throw, because a PR body must not depend on a log file.
+ */
+export function readAdvisoryGateOutcomes(
+  runDir: string,
+): AdvisoryGateOutcome[] {
+  return (readRunEvents(runDir)?.events ?? []).flatMap((event) =>
+    event.type === "gate-outcome" && event.environmentSensitive
+      ? [
+          {
+            ghIssue: event.ghIssue,
+            sliceNumber: event.sliceNumber,
+            round: event.round,
+            gateId: event.gateId,
+            status: gateStatusCell(event),
+            durationMs: event.durationMs,
+          },
+        ]
+      : [],
+  );
+}
+
 export interface RunLog {
   prdSlug: string;
   startedAt: Date;
@@ -329,17 +393,23 @@ export class Logger {
       .join("\n");
 
     const totalsRow = `| **Run totals** | | | | **${runCost > 0 ? `$${runCost.toFixed(4)}` : "—"}** | **${runToolCalls}** | **${runPromptBytes > 0 ? runPromptBytes : "—"}** | **${formatTokenCounts(runTokenCounts)}** |`;
-    const gateRows = gateAttempts
+    // Advisory outcomes are rendered in their own block below rather than
+    // among the base gates: an operator scanning this table is asking "what
+    // blocked the candidate", and a red row that can never block does not
+    // belong to that answer (#86 B-02, ADR 0063).
+    const blockingAttempts = gateAttempts.filter(
+      (event) => !event.environmentSensitive,
+    );
+    const advisoryAttempts = gateAttempts.filter(
+      (event) => event.environmentSensitive,
+    );
+    const gateRows = blockingAttempts
       .map((event) => {
-        const status =
-          event.status === "FAIL" && event.failureKind
-            ? `${event.status} (${event.failureKind})`
-            : event.status;
-        return `| ${event.ghIssue} | ${event.round} | ${event.gateId} | ${status} | ${event.durationMs}ms | ${event.evidenceArtifactId} | ${event.logArtifactId} |`;
+        return `| ${event.ghIssue} | ${event.round} | ${event.gateId} | ${gateStatusCell(event)} | ${event.durationMs}ms | ${event.evidenceArtifactId} | ${event.logArtifactId} |`;
       })
       .join("\n");
     const gateSection =
-      gateAttempts.length === 0
+      blockingAttempts.length === 0
         ? ""
         : `
 ## Base Gates
@@ -347,6 +417,52 @@ export class Logger {
 | Slice | Round | Gate | Status | Elapsed | Evidence | Log |
 |-------|-------|------|--------|---------|----------|-----|
 ${gateRows}
+`;
+    // Declared `environmentSensitive` gates: reported, never blocking. Present
+    // only when such a gate ran, so every other run's summary is unchanged.
+    const advisorySection =
+      advisoryAttempts.length === 0
+        ? ""
+        : `
+## Advisory Gates
+
+Reported, never blocking: a wall-clock or environment-dependent result cannot
+fail a gate (ADR 0063).
+
+| Slice | Round | Gate | Status | Elapsed | Evidence | Log |
+|-------|-------|------|--------|---------|----------|-----|
+${advisoryAttempts
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${event.round} | ${event.gateId} | ${gateStatusCell(event)} | ${event.durationMs}ms | ${event.evidenceArtifactId} | ${event.logArtifactId} |`,
+  )
+  .join("\n")}
+`;
+    // The acceptance gate reports one aggregate outcome above; this is the
+    // per-behavior breakdown behind it (#85 AC6). Rendered only when a
+    // coverage event exists, so a run with no bound behavior — every run on a
+    // project that never opted in — keeps today's summary byte-for-byte.
+    const coverageAttempts = runEvents.filter(
+      (event) => event.type === "behavior-coverage",
+    );
+    const coverageRows = coverageAttempts
+      .map(
+        (event) =>
+          `| ${event.ghIssue} | ${event.round} | ${event.behaviorId} | ` +
+          `${event.gateId} | ${event.status} | ${event.matched} | ` +
+          `${event.passed} | ${event.failed} | ${event.evidenceArtifactId} | ` +
+          `${event.logArtifactId} |`,
+      )
+      .join("\n");
+    const coverageSection =
+      coverageAttempts.length === 0
+        ? ""
+        : `
+## Behavior Coverage
+
+| Slice | Round | Behavior | Gate | Status | Matched | Passed | Failed | Evidence | Log |
+|-------|-------|----------|------|--------|---------|--------|--------|----------|-----|
+${coverageRows}
 `;
     const dependencyRows = this.dependencyHolds
       .map(
@@ -401,7 +517,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}
+${gateSection}${advisorySection}${coverageSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

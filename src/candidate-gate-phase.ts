@@ -1,4 +1,5 @@
 import { relative } from "node:path";
+import type { GateCacheOptions } from "./gate-cache.js";
 import {
   runGates,
   verifyGateEvidence,
@@ -28,6 +29,15 @@ export interface CandidateGateOutcome {
   treeId: string;
   evidenceArtifactId: string;
   logArtifactId: string;
+  /**
+   * The version-3 gate markers, carried through so the run journal and the run
+   * summary can say *why* a gate cost nothing (#86 B-03, B-07) rather than
+   * showing a 0ms PASS an operator has to guess at. Each is present only when
+   * the gate result carried it.
+   */
+  cacheReused?: boolean;
+  prerequisiteSkipped?: string;
+  environmentSensitive?: boolean;
 }
 
 /**
@@ -45,6 +55,12 @@ export async function runCandidateGatePhase(args: {
   evidenceDir: string;
   declarations: readonly GateDeclaration[];
   prepare?: GateDeclaration;
+  /**
+   * Tree-identity gate cache, forwarded verbatim to `runGates` (#86 B-03). A
+   * pure pass-through: this phase decides nothing about reuse, so there is one
+   * place — the declaration loop — that can consult or write the cache.
+   */
+  cache?: GateCacheOptions;
   label: string;
   signal?: AbortSignal;
   infrastructureRetries: number;
@@ -65,6 +81,7 @@ export async function runCandidateGatePhase(args: {
     evidenceDir,
     declarations,
     prepare,
+    cache,
     label,
     signal,
     infrastructureRetries,
@@ -101,6 +118,7 @@ export async function runCandidateGatePhase(args: {
       evidenceDir,
       declarations,
       ...(prepare ? { prepare } : {}),
+      ...(cache ? { cache } : {}),
       signal,
       inactivityTimeoutMs,
       wallClockTimeoutMs,
@@ -129,6 +147,15 @@ export async function runCandidateGatePhase(args: {
         treeId: result.treeId,
         evidenceArtifactId,
         logArtifactId: result.logArtifactId,
+        ...(result.cacheReused === undefined
+          ? {}
+          : { cacheReused: result.cacheReused }),
+        ...(result.prerequisiteSkipped === undefined
+          ? {}
+          : { prerequisiteSkipped: result.prerequisiteSkipped }),
+        ...(result.environmentSensitive === undefined
+          ? {}
+          : { environmentSensitive: result.environmentSensitive }),
       });
     }
     const infrastructureFailure = evidence.results.some(

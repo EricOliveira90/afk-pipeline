@@ -479,12 +479,34 @@ export function buildStubProvider(opts: {
           });
           return { exitCode: 0, stdout: "", stats: {} };
         }
-        const files =
+        const declared =
           plannerRound > 1
             ? (fixture.revisionFileScopes?.[plannerRound - 2] ??
               fixture.revisedFiles ??
               fixture.files)
             : fixture.files;
+        // The generator stub always writes `fixture.outputFile`, so a fixture
+        // whose declared list omits it is now red at the post-QA file-scope
+        // gate (#195) — correctly, but for a reason its scenario is not about.
+        // Declared here rather than in every fixture, because the deliberate
+        // out-of-scope cases go through `undeclaredEdits`, which stays
+        // undeclared on purpose. Migration outputs are skipped: the gate
+        // exempts them by pattern, and declaring one would move this
+        // manifest's `migrationCount` out from under the prefix-claim
+        // fixtures that assert on it.
+        //
+        // Whether to add it is decided from the *first* round's list and then
+        // held for every later one, so this stays invisible to the additive
+        // revision guard: a fixture that drops a locked path on revision still
+        // drops it, and one that gained the output path in round 1 still
+        // carries it in round 2.
+        const augment =
+          !fixture.files.includes(fixture.outputFile) &&
+          !/(^|[\\/])migrations[\\/].*\.sql$/i.test(fixture.outputFile);
+        const files =
+          augment && !declared.includes(fixture.outputFile)
+            ? [...declared, fixture.outputFile]
+            : declared;
         const filesBlock = files.map((f) => `- ${f}`).join("\n");
         writeFileSync(
           join(sliceArtifactDir, "contract.md"),

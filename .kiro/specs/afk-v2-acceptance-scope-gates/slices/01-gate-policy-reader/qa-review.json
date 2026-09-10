@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-11"],
+      "summary": "assertGlobDialect hard-codes the source label \"afk.config.json\", so a rejection raised through matchesGlob attributes the bad glob to the config file even when the caller supplied it from somewhere else.",
+      "evidence": "src/gate-policy.ts:212 calls assertGlobDialect(glob, CONFIG_FILENAME); matchesGlob(\"src/[ab].ts\", \"src/a.ts\") throws \"afk.config.json testGlobs glob \\\"src/[ab].ts\\\" contains the metacharacter \\\"[\\\"...\\\"\" even though no afk.config.json was read and no testGlobs member was involved.",
+      "expected": "B-11 requires one shared validator so both entry points refuse identically and name what they rejected; it does not require the message to assert a provenance the matcher cannot know.",
+      "observed": "Every matchesGlob rejection claims the glob came from afk.config.json's testGlobs. #193 and #195 will be the first consumers to call matchesGlob with globs from a waiver or a CLI argument, and those users will be sent to the wrong file to fix it.",
+      "clearCondition": "matchesGlob either accepts an optional source/field label (defaulting to today's value, so parseGatePolicy and the default call still produce byte-identical messages and B-11 keeps passing) or its message drops the file/field attribution while still naming the offending character or segment.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

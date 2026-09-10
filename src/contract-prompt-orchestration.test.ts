@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import {
   assembleContractEvaluatorPrompt,
+  assembleNegotiationPlannerPrompt,
   assemblePlannerPrompt,
 } from "./contract-prompt-orchestration.js";
 import type { RunEventPayload } from "./run-events.js";
@@ -85,6 +86,73 @@ describe("contract prompt orchestration", () => {
       "base-gate-catalog",
       "migration-reservation",
     ]);
+  });
+
+  it("ADR 0061 concatenates a gate objection and a repair instruction, objection first", () => {
+    const { context } = captureEvents();
+    const revisionInput = {
+      ghIssue: "95",
+      specsDir: ".kiro/specs/demo",
+      sliceDir: ".kiro/specs/demo/slices/03-envelope",
+      repoRoot: fileURLToPath(new URL(".", import.meta.url)),
+      useInitialEnvelope: false,
+      sliceBody: "SLICE-REQUEST",
+      explorerContext: "context",
+      currentContract: "contract",
+      currentAcceptanceManifest: JSON.stringify(acceptanceManifest),
+      findings: [],
+      contractResponseInstructions: "Do not write a response.",
+      baseGateCatalog: "- tests: pnpm test:fast",
+      migrationReservation: "none",
+    };
+    const objection = "migration prefix 0042 already exists on the feature branch";
+    const repair = "contract-response.json must declare round 2";
+
+    // Both at once. The round that answers a gate objection is exactly the
+    // round whose response artifact can be refused, so one must not silently
+    // replace the other.
+    const both = assembleNegotiationPlannerPrompt({
+      context,
+      ...revisionInput,
+      pendingObjection: objection,
+      repairInstruction: repair,
+    });
+    expect(both.prompt).toContain(objection);
+    expect(both.prompt).toContain(repair);
+    expect(both.prompt.indexOf(objection)).toBeLessThan(
+      both.prompt.indexOf(repair),
+    );
+
+    // ...and each alone still renders, without the other's framing.
+    const objectionOnly = assembleNegotiationPlannerPrompt({
+      context,
+      ...revisionInput,
+      pendingObjection: objection,
+      repairInstruction: null,
+    });
+    expect(objectionOnly.prompt).toContain(objection);
+    expect(objectionOnly.prompt).not.toContain(repair);
+
+    const repairOnly = assembleNegotiationPlannerPrompt({
+      context,
+      ...revisionInput,
+      pendingObjection: null,
+      repairInstruction: repair,
+    });
+    expect(repairOnly.prompt).toContain(repair);
+    expect(repairOnly.prompt).not.toContain(objection);
+    expect(repairOnly.prompt).not.toContain("REJECTED the previous contract");
+
+    // Neither: the control-plane slot renders its own absence rather than an
+    // empty block that reads as a fact.
+    const neither = assembleNegotiationPlannerPrompt({
+      context,
+      ...revisionInput,
+      pendingObjection: null,
+      repairInstruction: null,
+    });
+    expect(neither.prompt).not.toContain(objection);
+    expect(neither.prompt).not.toContain(repair);
   });
 
   it("B-05 prepares evaluator evidence for completion-time journaling", () => {

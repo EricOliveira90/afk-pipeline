@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readAdvisoryGateOutcomes } from "./logger.js";
 import {
   RunJournal as Logger,
   type TerminalOutcome,
@@ -177,6 +178,257 @@ PM review: N/A
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("B-06 renders per-behavior coverage as its own section beside Base Gates", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "coverage");
+    recordTerminal(log, id("85", "Coverage gate", "afk/85"), { phase: "PASS" });
+    const shared = {
+      ghIssue: "85",
+      sliceNumber: "02",
+      round: 1,
+      attemptId: "a1",
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    };
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "acceptance:behaviors",
+      stage: "acceptance",
+      status: "FAIL",
+      failureKind: "COMMAND",
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:04.000Z",
+      durationMs: 4000,
+      exitCode: null,
+    });
+    log.event({
+      type: "behavior-coverage",
+      ...shared,
+      behaviorId: "B-01",
+      gateId: "acceptance:behaviors",
+      status: "covered",
+      matched: 3,
+      passed: 3,
+      failed: 0,
+    });
+    log.event({
+      type: "behavior-coverage",
+      ...shared,
+      behaviorId: "B-02",
+      gateId: "acceptance:behaviors",
+      status: "untested",
+      matched: 0,
+      passed: 0,
+      failed: 0,
+    });
+
+    const md = log.writeSummary();
+    // Beside the aggregate outcome, not instead of it: the gate reports one
+    // row above, and this section is the per-behavior breakdown behind it.
+    expect(md.indexOf("## Base Gates")).toBeGreaterThan(-1);
+    expect(md.indexOf("## Behavior Coverage")).toBeGreaterThan(
+      md.indexOf("## Base Gates"),
+    );
+    const coverage = md.slice(md.indexOf("## Behavior Coverage"));
+    expect(coverage).toContain(
+      "| 85 | 1 | B-01 | acceptance:behaviors | covered | 3 | 3 | 0 | ev-1 | log-1 |",
+    );
+    expect(coverage).toContain(
+      "| 85 | 1 | B-02 | acceptance:behaviors | untested | 0 | 0 | 0 | ev-1 | log-1 |",
+    );
+    expect(md).toContain("Pre-ship sanity gate: N/A");
+  });
+
+  it("P-03 renders no empty coverage section when no coverage event exists", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "no-coverage");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.event({
+      type: "gate-outcome",
+      ghIssue: "1",
+      sliceNumber: "01",
+      round: 1,
+      attemptId: "a1",
+      gateId: "typecheck",
+      stage: "base",
+      status: "PASS",
+      failureKind: null,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:01.000Z",
+      durationMs: 1000,
+      exitCode: 0,
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain("## Base Gates");
+    expect(md).not.toContain("## Behavior Coverage");
+    // The existing section keeps its exact tail, so an opted-out project's
+    // summary is byte-for-byte today's.
+    expect(md).toContain(
+      "| 1 | 1 | typecheck | PASS | 1000ms | ev-1 | log-1 |\n\n\n" +
+        "Pre-ship sanity gate: N/A",
+    );
+  });
+
+  it("[behavior:B-03] renders a reused PASS as a reused one, and a prerequisite skip naming the gate that failed", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "cheap");
+    recordTerminal(log, id("86", "Cost", "afk/86"), { phase: "PASS" });
+    const shared = {
+      ghIssue: "86",
+      sliceNumber: "05",
+      round: 1,
+      attemptId: "a1",
+      stage: "base" as const,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:00.000Z",
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    };
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "typecheck",
+      status: "PASS",
+      failureKind: null,
+      durationMs: 0,
+      exitCode: 0,
+      cacheReused: true,
+    });
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "lint",
+      status: "FAIL",
+      failureKind: "COMMAND",
+      durationMs: 900,
+      exitCode: 1,
+    });
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "tests",
+      status: "SKIPPED",
+      failureKind: null,
+      durationMs: 0,
+      exitCode: null,
+      prerequisiteSkipped: "lint",
+    });
+
+    const md = log.writeSummary();
+    // A 0ms PASS is otherwise indistinguishable from a gate that did nothing,
+    // so reuse is named in the cell rather than left to be inferred.
+    expect(md).toContain("| 86 | 1 | typecheck | PASS (cache reuse) | 0ms |");
+    expect(md).toContain("| 86 | 1 | lint | FAIL (COMMAND) | 900ms |");
+    expect(md).toContain(
+      "| 86 | 1 | tests | SKIPPED (prerequisite lint failed) | 0ms |",
+    );
+  });
+
+  it("[behavior:B-02] renders an environmentSensitive gate in its own advisory block, never among the base gates", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "advisory");
+    recordTerminal(log, id("86", "Cost", "afk/86"), { phase: "PASS" });
+    const shared = {
+      ghIssue: "86",
+      sliceNumber: "05",
+      round: 2,
+      attemptId: "a1",
+      stage: "base" as const,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:02.000Z",
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    };
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "tests",
+      status: "PASS",
+      failureKind: null,
+      durationMs: 2000,
+      exitCode: 0,
+    });
+    log.event({
+      type: "gate-outcome",
+      ...shared,
+      gateId: "test:budgets",
+      status: "FAIL",
+      failureKind: "COMMAND",
+      durationMs: 300,
+      exitCode: 1,
+      environmentSensitive: true,
+    });
+
+    const md = log.writeSummary();
+    const gates = md.slice(
+      md.indexOf("## Base Gates"),
+      md.indexOf("## Advisory Gates"),
+    );
+    // An operator scanning `## Base Gates` is asking what blocked the
+    // candidate, and a red row that can never block is not part of that
+    // answer (ADR 0063).
+    expect(gates).toContain("| 86 | 2 | tests | PASS | 2000ms |");
+    expect(gates).not.toContain("test:budgets");
+    expect(md.indexOf("## Advisory Gates")).toBeGreaterThan(
+      md.indexOf("## Base Gates"),
+    );
+    const advisory = md.slice(md.indexOf("## Advisory Gates"));
+    expect(advisory).toContain("never blocking");
+    expect(advisory).toContain("| 86 | 2 | test:budgets | FAIL (COMMAND) | 300ms |");
+
+    // The same events answer the PR body's reader, so the two renderings
+    // cannot disagree about which advisory gate reported what.
+    expect(readAdvisoryGateOutcomes(log.runDir)).toEqual([
+      {
+        ghIssue: "86",
+        sliceNumber: "05",
+        round: 2,
+        gateId: "test:budgets",
+        status: "FAIL (COMMAND)",
+        durationMs: 300,
+      },
+    ]);
+  });
+
+  it("[behavior:B-02] renders no advisory block, and reads no advisory outcome, for a run with none", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "no-advisory");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.event({
+      type: "gate-outcome",
+      ghIssue: "1",
+      sliceNumber: "01",
+      round: 1,
+      attemptId: "a1",
+      gateId: "typecheck",
+      stage: "base",
+      status: "PASS",
+      failureKind: null,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:01.000Z",
+      durationMs: 1000,
+      exitCode: 0,
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    });
+
+    const md = log.writeSummary();
+    expect(md).not.toContain("## Advisory Gates");
+    expect(readAdvisoryGateOutcomes(log.runDir)).toEqual([]);
+    // And a directory with no events at all is an empty list, not a throw: a
+    // PR body must not depend on a log file existing.
+    expect(readAdvisoryGateOutcomes(join(repo, "nowhere"))).toEqual([]);
   });
 
   it("renders provenance for an adopted completed slice only", () => {

@@ -65,20 +65,131 @@ export function resolveTestCommand(cwd: string): string | undefined {
 }
 
 /**
+ * One `package.json` script as a runnable step, for a gate that is declared
+ * outside the sanity plan (#86 B-02). Deliberately **not** a `SanityPlan`
+ * member and deliberately not reachable from {@link resolveSanityCommands} or
+ * {@link resolveCandidateQACommands}: `test:budgets` is a wall-clock budget,
+ * and ADR 0063 requires that a red budget cannot fail the pre-ship gate or
+ * candidate QA. `SANITY_STEPS` stays as it is, so the three readers that know
+ * nothing about `GateDeclaration` never see this command; that absence, not a
+ * declaration field, is what honours the ADR.
+ *
+ * `null` when the project declares no such script — an absent script yields no
+ * declaration at all rather than a commandless one.
+ */
+export function resolveScriptStep(
+  cwd: string,
+  scriptName: string,
+): SanityCommand | null {
+  const scripts = readPackageScripts(cwd);
+  if (!scripts || scripts[scriptName] == null) return null;
+  return { name: scriptName, command: "pnpm", args: ["run", scriptName] };
+}
+
+/**
+ * One entry of the cheap-gate catalog `src/base-gates.ts` resolves: a gate
+ * whose `expectedCostMs` is at or below the policy's `cheapThresholdMs`.
+ * Structural, and passed in as a parameter rather than imported, because
+ * `src/base-gates.ts` imports this module and the dependency may not reverse
+ * (#86 B-05).
+ */
+export interface CheapGate {
+  id: string;
+  required: boolean;
+  command?: string;
+  args?: readonly string[];
+}
+
+/** Renders one cheap-gate entry the way an operator would type it. */
+function formatCheapGate(gate: CheapGate): string {
+  return [gate.command, ...(gate.args ?? [])].join(" ");
+}
+
+/**
+ * `pnpm <script>` and `pnpm run <script>` are the same instruction, so they
+ * must compare equal: an override written the short way is not an omission.
+ * Whitespace is collapsed for the same reason.
+ */
+function normalizeCommandSegment(segment: string): string {
+  const collapsed = segment.trim().replace(/\s+/g, " ");
+  return collapsed.replace(/^(\S+) run (\S.*)$/, "$1 $2");
+}
+
+/** Required cheap gates that carry a resolved command, in gate order. */
+function requiredCheapCommands(
+  catalog: readonly CheapGate[],
+): { id: string; command: string }[] {
+  return catalog
+    .filter((gate) => gate.required && gate.command != null)
+    .map((gate) => ({ id: gate.id, command: formatCheapGate(gate) }));
+}
+
+/**
+ * The gate ids an override fails to cover: a required cheap gate whose own
+ * resolved command is absent from the override's `&&`-separated segments.
+ * Empty means the override is accepted.
+ *
+ * The check is over **gate ids, not over the derived command string** (#86
+ * B-05). Segments naming no cheap gate are permitted and unvalidated, because
+ * which extra fast subset the generator iterates on is ADR 0038's decision —
+ * so `--test-command "pnpm run typecheck && pnpm test:fast"` is accepted while
+ * `--test-command "pnpm test:fast"` alone is refused naming `typecheck`.
+ */
+export function uncoveredCheapGateIds(
+  catalog: readonly CheapGate[],
+  override: string,
+): string[] {
+  const segments = new Set(
+    override.split("&&").map(normalizeCommandSegment).filter(Boolean),
+  );
+  return requiredCheapCommands(catalog)
+    .filter(({ command }) => !segments.has(normalizeCommandSegment(command)))
+    .map(({ id }) => id);
+}
+
+/**
  * The command the generator is told to verify with while it iterates —
  * deliberately a separate decision from `resolveSanityPlan` below, which
  * owns what the gate executes and what QA is told to run. ADR 0038 has
  * the reasoning; ADR 0012 has why the gate's answer stays put.
  *
- * Precedence: the explicit override, then the project's own test script,
- * then `pnpm test` — the same forgiving fallback the gate applies when a
- * project defines no test script at all.
+ * With no override the command is **derived from the cheap-gate catalog**
+ * (#86 B-05, D18): the required cheap gates' own commands joined with ` && ` in
+ * gate order. The full-suite `tests` gate is not in that catalog, so a ~7
+ * minute suite never enters an edit cycle. For this repo, which declares no
+ * `lint` script, that is exactly `pnpm run typecheck`.
+ *
+ * An override is validated rather than passed through, and refused naming the
+ * required cheap gates it omits (see {@link uncoveredCheapGateIds}). `cwd`
+ * stays the first parameter for the one case the catalog cannot answer: a
+ * project with no cheap gate at all keeps today's forgiving fallback to its own
+ * test script, then `pnpm test`.
  */
 export function resolveGeneratorTestCommand(
   cwd: string,
+  catalog: readonly CheapGate[],
   override?: string,
 ): string {
-  return override ?? resolveTestCommand(cwd) ?? "pnpm test";
+  if (override !== undefined) {
+    const uncovered = uncoveredCheapGateIds(catalog, override);
+    if (uncovered.length > 0) {
+      throw new Error(
+        `--test-command "${override}" does not cover required cheap ` +
+          `${uncovered.length === 1 ? "gate" : "gates"} ` +
+          `${uncovered.join(", ")}. The generator's verification command may ` +
+          `add a faster subset, but it may not drop a gate the candidate must ` +
+          `pass; the derived command is ` +
+          `"${requiredCheapCommands(catalog)
+            .map(({ command }) => command)
+            .join(" && ")}".`,
+      );
+    }
+    return override;
+  }
+  const derived = requiredCheapCommands(catalog)
+    .map(({ command }) => command)
+    .join(" && ");
+  return derived || resolveTestCommand(cwd) || "pnpm test";
 }
 
 /**

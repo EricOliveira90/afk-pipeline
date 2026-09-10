@@ -22,7 +22,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Git operations | Worktrees, branches, atomic merge attempts (ADR 0010) | `src/git.ts` | `src/worktree-processes.ts` |
 | Run identity | Provider-qualified state, branch, and worktree names (ADR 0002, 0053) | `src/run-identity.ts` | — |
 | Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031, 0056) | `src/run-state.ts`, `src/run-journal.ts` | `src/file-lock.ts`, `src/adoption-provenance.ts`, `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
-| Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts` |
+| Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
 | Review rails | Contract/QA lifecycle and accepted-candidate policy (PRD 1, PRD 3) | `src/contract-review.ts`, `src/qa-review.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
@@ -43,7 +43,17 @@ entry in `afk.config.json`. Cap: 150 lines.
 - `AgentProvider` (`src/agent-provider.ts`) — a new agent backend implements
   this interface; nothing else changes (ADR 0002).
 - `GateDeclaration` (`src/gate-runner.ts`) — a new check is a declared gate
-  with evidence, not an inline check in the orchestrator.
+  with evidence, not an inline check in the orchestrator. A check the
+  orchestrator computes itself supplies `run` instead of `command` (never
+  both) and reports through `GateFindings`; `src/scope-gate.ts` and
+  `src/skip-gate.ts` are the worked examples.
+- Gate cost (`gatePolicy.cost` → `resolveTestCostPlan` in `src/base-gates.ts`)
+  — a gate's price is declared, not discovered: `expectedCostMs` decides what
+  the generator's verification command may contain, `prerequisiteGateIds`
+  decides what is worth spawning at all, `environmentSensitive` marks a gate
+  that reports and can never block (ADR 0063), and `src/gate-cache.ts` reuses
+  a `PASS` for an identical tree. A miss on any path pays the gate; no cache
+  path can turn a run redder.
 - `laneResourceGroups` (`src/lanes.ts`) — a new contended resource is a
   resource key, not a scheduling special case (ADR 0027).
 - Review artifacts (`src/contract-review.ts`, `src/qa-review.ts`) — new

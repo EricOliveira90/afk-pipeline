@@ -1,0 +1,160 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": ["src/gate-policy.ts", "src/gate-policy.test.ts", "afk.config.json"]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #84 What to build; prd.md D1 ownership table",
+      "given": "src/gate-policy.ts imported as a namespace",
+      "when": "Object.keys of that namespace is sorted",
+      "then": "the keys equal exactly DEFAULT_GATE_POLICY_PATHS, DEFAULT_TEST_GLOBS, GATE_RISK_CLASSES, loadGatePolicy, matchesGlob, parseGatePolicy",
+      "observableResult": "src/gate-policy.test.ts asserts the sorted keys deep-equal that six-name list, so an extra or missing runtime export fails; pnpm run typecheck accepts the pinned signatures and types",
+      "preservation": false,
+      "gateIds": ["tests", "typecheck"]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #84 What to build (pure validator); prd.md D1 example JSON",
+      "given": "prd.md D1's fully populated example policy, already parsed",
+      "when": "parseGatePolicy(policy) is called with no filesystem access",
+      "then": "it returns a GatePolicy with version 1, gatePolicyPaths [afk.config.json, suite-budgets.json], testGlobs [**/*.test.ts] and all three risk classes",
+      "observableResult": "src/gate-policy.test.ts asserts the result deep-equals that policy, pinning the validator's success path",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #84 AC5; prd.md D1",
+      "given": "four reduced policies: {version:1}, one without protectedPaths, one without riskClasses, one whose protectedPaths omits testGlobs",
+      "when": "each is passed to parseGatePolicy",
+      "then": "each parses and the omitted members return the documented baselines: [afk.config.json, suite-budgets.json], [**/*.test.ts], and all three risk classes",
+      "observableResult": "src/gate-policy.test.ts asserts each result deep-equals the baseline-filled policy, and that mutating a returned array leaves the DEFAULT_ constants unchanged",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #84 AC1",
+      "given": "malformed inputs: null; \"policy\"; protectedPaths as []; protectedPaths as a string; gatePolicyPaths as [7]; riskClasses as {}",
+      "when": "each is passed to parseGatePolicy",
+      "then": "each throws an Error naming the offending key rather than returning a partial policy",
+      "observableResult": "src/gate-policy.test.ts asserts the six calls reject with messages matching /protectedPaths/, /gatePolicyPaths/ or /riskClasses/ as applicable",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #84 AC2; prd.md D1 unknown-member rule",
+      "given": "a valid policy extended once each with the unknown top-level keys cost, acceptance and typo, and once with the unknown protectedPaths member testGlob",
+      "when": "each is passed to parseGatePolicy",
+      "then": "each throws an Error naming that exact member, so a key #85 or #86 has not landed yet is never silently ignored",
+      "observableResult": "src/gate-policy.test.ts asserts the four rejection messages contain cost, acceptance, typo and testGlob respectively",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #84 AC3 and its independent-version note",
+      "given": "policies whose version is absent, 2, and \"1\"; plus a temp-directory afk.config.json whose top-level version is 1 while gatePolicy.version is 2",
+      "when": "the first three go to parseGatePolicy and the fourth is read by loadGatePolicy",
+      "then": "all four are refused with an Error naming version, proving gatePolicy.version is checked independently of the file's own top-level version",
+      "observableResult": "src/gate-policy.test.ts asserts four rejections matching /version/, the last from loadGatePolicy against a file whose top-level version is valid",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #84 AC6; prd.md D1 and D5's three classes",
+      "given": "policies whose riskClasses are [gate-policy, gatePolicy] and [deleted-tests]",
+      "when": "each is passed to parseGatePolicy",
+      "then": "each throws at parse time naming the unrecognised string gatePolicy or deleted-tests",
+      "observableResult": "src/gate-policy.test.ts asserts each message contains the offending literal, and GATE_RISK_CLASSES holds exactly the three declared classes",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #84 AC7",
+      "given": "four mkdtempSync directories: one whose afk.config.json carries a well-formed gatePolicy; one with no afk.config.json; one whose config has no gatePolicy key; one whose gatePolicy has an unknown member",
+      "when": "loadGatePolicy(root) is called on each",
+      "then": "the first returns the policy deep-equal to what was written, the second and third return null, the fourth throws naming the member",
+      "observableResult": "src/gate-policy.test.ts asserts all four outcomes, so an implementation that always returns null fails case one",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-09",
+      "source": "prd.md D6 glob dialect",
+      "given": "glob **/*.test.ts against src/deep/nested/a.test.ts, a.test.ts, src/gate-policy.ts and src\\\\deep\\\\a.test.ts; glob src/*.test.ts against src/a.test.ts and src/deep/a.test.ts",
+      "when": "matchesGlob(glob, path) is called on each pair",
+      "then": "** spans zero or more segments so both test paths match; the non-test path does not; the backslash path matches because the path is normalized to forward slashes first; * does not cross a segment, so src/deep/a.test.ts fails src/*.test.ts",
+      "observableResult": "src/gate-policy.test.ts asserts true, true, false, true for the first glob and true, false for the second",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-10",
+      "source": "prd.md D6 case rule; anchors/01-gate-policy-reader.md Do not conflate two case rules",
+      "given": "glob **/*.test.ts against src/a.Test.ts and SRC/a.test.ts; glob src/Gate.ts against src/gate.ts",
+      "when": "matchesGlob runs on each pair on the current platform, Windows included",
+      "then": "a path differing from a literal only in case does not match: .Test.ts fails and src/gate.ts fails, while SRC/a.test.ts matches because ** absorbs SRC and no literal is compared there",
+      "observableResult": "src/gate-policy.test.ts asserts false, true, false for those pairs and reads src/gate-policy.ts to assert no toLowerCase and no toUpperCase call, so the rule cannot become platform-dependent",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #84 AC10; prd.md D6 (any other metacharacter refuses the launch and names the character)",
+      "given": "one glob per rejected metacharacter of the enumerated set — src/?.ts, src/[ab].ts, src/a].ts, src/{a,b}.ts, src/a}.ts, src/(a).ts, src/a).ts, src/!a.ts, src/a+.ts, src/a@.ts, src\\\\a.ts — plus src/***.ts and a**/b.ts, where ** is not the whole segment",
+      "when": "each is passed as the glob argument to matchesGlob, and separately as a testGlobs member to parseGatePolicy",
+      "then": "every call throws an Error naming what it rejected: the character for the eleven metacharacters, the segment for the two malformed-star globs; both entry points share one validator and refuse identically",
+      "observableResult": "src/gate-policy.test.ts asserts each glob rejects from both matchesGlob and parseGatePolicy with a message containing that character or segment; the backslash case pins the pair against B-09, where a backslash in a path is normalized",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #84 What to build; prd.md D1 example JSON and slice-01 file map",
+      "given": "this repository's committed afk.config.json after the slice lands, with the root resolved as fileURLToPath(new URL('..', import.meta.url))",
+      "when": "loadGatePolicy(repoRoot) is called",
+      "then": "it returns prd.md D1's example gatePolicy, validated, rather than null",
+      "observableResult": "src/gate-policy.test.ts asserts the result deep-equals {version:1, protectedPaths:{gatePolicyPaths:[afk.config.json, suite-budgets.json], testGlobs:[**/*.test.ts]}, riskClasses:[gate-policy, deleted-test, skipped-test]}",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #84 AC4; anchors/01-gate-policy-reader.md (#195 owns the gate-runner changes)",
+      "given": "src/base-gates.ts unchanged by this slice, and a temp directory with no afk.config.json",
+      "when": "src/gate-policy.test.ts calls resolveBaseGateDeclarations(repoRoot) and loadGatePolicy on that directory",
+      "then": "the declaration ids are exactly typecheck, lint, tests and the load returns null, so a project with no gatePolicy still reaches today's baseline catalog",
+      "observableResult": "src/gate-policy.test.ts asserts declarations.map(d => d.id) equals [typecheck, lint, tests] and the no-config load is null; pnpm run typecheck still accepts src/base-gates.ts",
+      "preservation": true,
+      "gateIds": ["tests", "typecheck"]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #84 (the file's resourceKeys and architectureDoc are untouched)",
+      "given": "this repository's committed afk.config.json after gatePolicy is added",
+      "when": "src/gate-policy.test.ts reads it with readFileSync and JSON.parse",
+      "then": "version is still 1, architectureDoc is still ARCHITECTURE.md, resourceKeys still holds exactly the orchestrator-core entry with its current regex, and gatePolicy is the only added top-level key",
+      "observableResult": "src/gate-policy.test.ts asserts those three values and that the sorted top-level keys equal [architectureDoc, gatePolicy, resourceKeys, version]",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-03",
+      "source": "prd.md D6; anchors/01-gate-policy-reader.md Two comparisons, two purposes (#194)",
+      "given": "src/acceptance-manifest.ts unmodified, whose normalizePath at line 64 lowercases for the case-insensitive fileScope comparison",
+      "when": "src/gate-policy.test.ts reads src/gate-policy.ts with readFileSync, and the existing src/acceptance-manifest.test.ts suite runs",
+      "then": "src/gate-policy.ts imports nothing from ./acceptance-manifest.js and calls no toLowerCase, so the two case rules stay two implementations, and the manifest suite still passes",
+      "observableResult": "src/gate-policy.test.ts asserts the source has no acceptance-manifest import and no toLowerCase; the unchanged src/acceptance-manifest.test.ts suite passes",
+      "preservation": true,
+      "gateIds": ["tests"]
+    }
+  ]
+}

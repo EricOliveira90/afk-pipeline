@@ -88,6 +88,16 @@ Parent PRD: `{{SPECS_DIR}}/prd.md`
 
 {{SLICE_BODY}}
 
+# Carried open findings
+
+A previous attempt at this slice ended with these contract findings still open.
+They survive as durable lineage, so this contract is not a clean sheet: write it
+so each finding's clear-condition is already met, keeping the finding's exact
+ID out of the contract text. The review of this contract must disposition every
+one of these IDs, and a review that omits one is refused.
+
+{{CARRIED_OPEN_FINDINGS}}
+
 # Explorer evidence map
 
 {{EXPLORER_CONTEXT}}

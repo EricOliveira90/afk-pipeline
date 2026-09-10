@@ -297,6 +297,17 @@ _Avoid_: "shared file" (the point is that no path is shared), "lock"
 (nothing is held; the slices are serialised), "migration conflict"
 (the grouping exists so that no conflict occurs)
 
+**Artifact repair pass**:
+A re-dispatch of the role whose negotiation artifact deterministic validation
+refused, carrying the validator's message verbatim. One per artifact per
+**round**, and explicitly not a round: the round number, the routed findings and
+the durable lineage are unchanged, so a repair buys no revision and no
+extension (ADR 0061).
+_Avoid_: "artifact repair round", or bare "repair round" for this pass
+(#188's phrasing; it costs no round — a *generator* repair round does, and
+keeps its name), "retry" (an infrastructure retry replaces a dead attempt and
+tells the agent nothing about why its artifact was refused)
+
 **Contract-lock gate**:
 A check the wave runs on a slice contract the moment it locks, with the
 power to refuse the lock and send the contract back to the planner for
@@ -310,6 +321,12 @@ ADR 0028.
 _Avoid_: "pre-flight check" (it is not before the pipeline, it is inside
 negotiation), "validation" (too generic), "merge check" (the merge-mutex
 collision check is a different, and still authoritative, thing)
+
+**Gate-evidenced scope discovery**:
+A deterministic gate's proof that already-decided behavior requires an
+undeclared path. It may support a focused scope revision only before that path
+is edited; it never authorizes existing out-of-scope work (ADR 0060).
+_Avoid_: "gate-failure amendment", "post-hoc scope amendment"
 
 **Lane leader**:
 The first slice in a lane (by ascending slice number). Negotiates its

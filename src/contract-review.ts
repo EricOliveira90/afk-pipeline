@@ -209,6 +209,17 @@ export function requireNonBlankString(
   return value;
 }
 
+function requireString(
+  value: unknown,
+  field: string,
+  source: string,
+): string {
+  if (typeof value !== "string") {
+    throw new Error(`${source} ${field} must be a string`);
+  }
+  return value;
+}
+
 function parseFindings(
   value: unknown,
   source: string,
@@ -301,17 +312,25 @@ function parseFindings(
       }
       revisionCitation = {
         artifact: citation.artifact as ContractRevisionCitation["artifact"],
-        before: requireNonBlankString(
+        before: requireString(
           citation.before,
           `${field} revisionCitation before`,
           source,
         ),
-        after: requireNonBlankString(
+        after: requireString(
           citation.after,
           `${field} revisionCitation after`,
           source,
         ),
       };
+      if (
+        revisionCitation.before === "" &&
+        revisionCitation.after === ""
+      ) {
+        throw new Error(
+          `${source} ${field} revisionCitation requires at least one non-empty side`,
+        );
+      }
     }
 
     return {
@@ -668,6 +687,31 @@ export function openContractReviewFindings(
   return findings.filter((finding) => finding.state === "OPEN");
 }
 
+/**
+ * The states durable lineage still holds a slice to: a CONTESTED finding is
+ * unresolved, not retired, so the review that omits it is refused exactly as
+ * one omitting an OPEN finding is.
+ *
+ * Declared here, at the bottom of the dependency chain, so the enforcing side
+ * (`validateContractReviewAgainstLineage`) and the informing side (the
+ * carried-findings block a round-1 prompt renders) cannot drift apart — a
+ * validator enforcing a set the prompt was never shown is the wedge #178 was
+ * filed for.
+ */
+export const ACTIVE_CONTRACT_FINDING_STATES: ReadonlySet<string> = new Set([
+  "OPEN",
+  "CONTESTED",
+]);
+
+/** Findings durable lineage still enforces, in evaluator order (#178). */
+export function activeContractReviewFindings(
+  findings: readonly ContractReviewFinding[],
+): ContractReviewFinding[] {
+  return findings.filter((finding) =>
+    ACTIVE_CONTRACT_FINDING_STATES.has(finding.state),
+  );
+}
+
 /** Build the code-derived audit record for one valid evaluator attempt. */
 export function buildContractReviewAttemptRecord(
   round: number,
@@ -821,30 +865,40 @@ export function validateRound2ContractReview(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} requires a revisionCitation`,
       );
     }
-    if (citation.before === citation.after) {
-      throw new Error(
-        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before and after must differ`,
-      );
-    }
     const artifact = revisions?.[citation.artifact];
     if (!artifact) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} cannot validate revisionCitation without revision artifacts`,
       );
     }
-    if (!artifact.before.includes(citation.before)) {
+    const normalizeCitationText = (text: string): string =>
+      text.replace(/\r\n?/g, "\n");
+    const priorArtifact = normalizeCitationText(artifact.before);
+    const currentArtifact = normalizeCitationText(artifact.after);
+    const priorCitation = normalizeCitationText(citation.before);
+    const currentCitation = normalizeCitationText(citation.after);
+    if (
+      priorCitation !== "" &&
+      currentCitation !== "" &&
+      priorCitation === currentCitation
+    ) {
+      throw new Error(
+        `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before and after must differ`,
+      );
+    }
+    if (priorCitation !== "" && !priorArtifact.includes(priorCitation)) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation before does not match prior ${citation.artifact}`,
       );
     }
-    if (!artifact.after.includes(citation.after)) {
+    if (currentCitation !== "" && !currentArtifact.includes(currentCitation)) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation after does not match current ${citation.artifact}`,
       );
     }
     if (
-      artifact.after.includes(citation.before) ||
-      artifact.before.includes(citation.after)
+      (priorCitation !== "" && currentArtifact.includes(priorCitation)) ||
+      (currentCitation !== "" && priorArtifact.includes(currentCitation))
     ) {
       throw new Error(
         `${CONTRACT_REVIEW_FILENAME} fresh finding ${finding.id} revisionCitation does not identify changed ${citation.artifact} text`,

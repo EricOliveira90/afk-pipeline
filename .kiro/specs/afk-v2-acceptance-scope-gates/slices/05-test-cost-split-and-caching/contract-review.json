@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-14",
+      "severity": "BLOCKING",
+      "behaviorIds": [],
+      "evidence": "\"`GATE_EVIDENCE_VERSION` (`src/gate-runner.ts:24`) becomes `3` in this slice — unconditionally, not left to the implementation.\"",
+      "expected": "If the bump is unconditional, the contract's declared file scope must contain every file the bump breaks, so the slice can be both green and inside scope; the last DoD item forbids touching anything outside `## Files expected to change`.",
+      "observed": "The revision declares `src/acceptance-gate.test.ts` in `## Files expected to change` (contract.md:236) and in the manifest's `fileScope.paths` (acceptance-manifest.json:14), and names the version-3 result observably in two places: the Test plan scenario at contract.md:312-319 (\"the three in-tree assertions of the constant — `src/gate-runner.test.ts:629`, `:978-979` and `src/acceptance-gate.test.ts:326` — read `3` and are green\") and the DoD item at :349-355 with the same three assertions. The `## Changes to existing behavior` bullet at :218-224 enumerates the same three and records that `src/acceptance-gate.test.ts:134`'s `version: 2` is an acceptance-manifest fixture that stays `2`, bounding the authorized edit to that file. The enumeration is complete against the tree: `GATE_EVIDENCE_VERSION` and the evidence version are asserted only at `src/gate-runner.test.ts:629`, `:979` and `src/acceptance-gate.test.ts:326`, all three now in scope, so an unconditional bump to `3` can be green without touching an undeclared path.",
+      "clearCondition": "`src/acceptance-gate.test.ts` is added to `## Files expected to change` and to the manifest's `fileScope.paths`, with a named observable result for the version-3 assertion there — or the contract states some other in-scope way that `src/acceptance-gate.test.ts:326` stays green with `GATE_EVIDENCE_VERSION === 3`.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-15",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "evidence": "\"the version still bumps because a version-2 reader must not silently ignore a reuse or prerequisite-skip marker\"",
+      "expected": "A now-unconditional version bump should also say what the reader side does with `3`, since the reader list and the version-keyed `findings` rule live in the same file the slice edits.",
+      "observed": "The revision settles the reader side in the contract rather than leaving it open: `3` joins `SUPPORTED_GATE_EVIDENCE_VERSIONS` (`src/gate-runner.ts:27`), which becomes `[1, 2, 3]`, the version-1 branch at `:835` is unchanged, and the version-keyed rule at `src/gate-runner.ts:22-27` is rewritten to \"version 1 may not carry `findings`; version 2 and version 3 may\", with a version-3 document carrying `findings` behaving exactly as a version-2 one because this slice adds no findings semantics (contract.md:207-217). The same three facts are restated in `## New patterns` (:268-269), asserted in the Test plan (:312-319, accepted versions plus the two refusals that remain) and locked in the DoD (:349-355). This matches the code: the enforcing branch at `src/gate-runner.ts:834-841` keys on `version === 1`, so version 3 carrying `findings` passes with no logic change.",
+      "clearCondition": "The contract states that `3` joins `SUPPORTED_GATE_EVIDENCE_VERSIONS` and how the version-keyed `findings` rule at `src/gate-runner.ts:22-27` reads for a version-3 document.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

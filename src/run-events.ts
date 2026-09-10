@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SliceLifecycle } from "./slice-lifecycle.js";
+import type { BehaviorCoverageStatus } from "./acceptance-gate.js";
 import type {
   GateFailureKind,
   GateStatus,
@@ -155,6 +156,48 @@ export type RunEventPayload =
       treeId: string;
       evidenceArtifactId: string;
       logArtifactId: string;
+      /**
+       * Why this gate cost what it cost, when there is something to say (#86).
+       * All three are optional and additive, so every existing reader of this
+       * event keeps working:
+       *
+       * - `cacheReused` — a `PASS` replayed from the tree-identity cache
+       *   instead of executed (B-03). A 0ms PASS is otherwise indistinguishable
+       *   from a gate that did nothing.
+       * - `prerequisiteSkipped` — the gate id whose non-PASS result caused this
+       *   `SKIPPED` (B-07). Named, because a silent skip reads as a green run.
+       * - `environmentSensitive` — the gate is advisory: its result is reported
+       *   and never blocks (B-02, ADR 0063).
+       */
+      cacheReused?: boolean;
+      prerequisiteSkipped?: string;
+      environmentSensitive?: boolean;
+    }
+  | {
+      /**
+       * One behavior id's coverage verdict from one acceptance-gate attempt
+       * (#85 AC6). The aggregate gate reports a single `gate-outcome`, so
+       * without this event the per-behavior detail exists only as prose inside
+       * the gate log; here it is one line per behavior per attempt, carrying
+       * the same tree and artifact identity as its `gate-outcome` so a reader
+       * can join them. Descriptive: the gate's own status is the verdict, and
+       * nothing thresholds or acts on these counts.
+       */
+      type: "behavior-coverage";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      attemptId: string;
+      behaviorId: string;
+      gateId: string;
+      status: BehaviorCoverageStatus;
+      /** Tests the id's filter selected: `passed + failed`. */
+      matched: number;
+      passed: number;
+      failed: number;
+      treeId: string;
+      evidenceArtifactId: string;
+      logArtifactId: string;
     }
   | {
       /**
@@ -263,7 +306,12 @@ export type RunEventPayload =
        * record dropped when this run dispatched the slice (#111), and each
        * guardian finding the ship gate filed as an issue — or could not file:
        * a blocking finding that cannot be filed refuses the round-cap exit,
-       * while an unfilable note only warns (ADR 0057 decision 4).
+       * while an unfilable note only warns (ADR 0057 decision 4), and a
+       * negotiation artifact refused by deterministic validation and handed
+       * back to its author with the exact error for one repair pass — or
+       * denied one — plus durable contract lineage found only under the bare
+       * PRD slug, which this run reads as empty and adopts nothing from
+       * (both ADR 0061).
        */
       reason:
         | "cancellation-requested"
@@ -280,6 +328,8 @@ export type RunEventPayload =
         | "resume-stuck"
         | "contract-lock-refused"
         | "scope-amended"
+        | "negotiation-artifact-repair"
+        | "orphaned-contract-lineage"
         | "contract-review-archive-failed"
         | "qa-review-archive-failed"
         | "feature-branch-fast-forward"

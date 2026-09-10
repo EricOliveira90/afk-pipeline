@@ -149,6 +149,9 @@ per routed finding ID and no others:
 }
 ```
 
+`round` is the number {{ROUND}} exactly, not the count of rounds you have seen
+and not the next one: a response declaring any other round is refused.
+
 The contract and manifest retain the initial template's public artifact
 contracts: exact matching file scope and migration count, stable behavior
 anchors, version-2 behavior bindings, explicit non-goals, Given/When/Then test

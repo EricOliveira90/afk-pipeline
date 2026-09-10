@@ -3,5 +3,25 @@
   "resourceKeys": {
     "orchestrator-core": "^src/(orchestrator|wave)\\.ts$"
   },
-  "architectureDoc": "ARCHITECTURE.md"
+  "architectureDoc": "ARCHITECTURE.md",
+  "gatePolicy": {
+    "version": 1,
+    "protectedPaths": {
+      "gatePolicyPaths": ["afk.config.json", "suite-budgets.json"],
+      "testGlobs": ["**/*.test.ts"]
+    },
+    "riskClasses": ["gate-policy", "deleted-test", "skipped-test"],
+    "acceptance": {
+      "command": "pnpm",
+      "args": [
+        "exec",
+        "vitest",
+        "run",
+        "--reporter=json",
+        "--testNamePattern",
+        "{behaviorId}"
+      ],
+      "matcher": "vitest-json"
+    }
+  }
 }

@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "summary": "boundedAcceptanceRunner discards CommandExecutionResult.outcome, so a spawn error or a timeout is reported as FAIL/CONFIGURATION rather than INFRASTRUCTURE, against ADR 0041's explicit narrow decision.",
+      "evidence": "src/acceptance-gate.ts:157-173 awaits runBoundedCommand and returns only `{ output }`. src/command-runtime.ts:99 resolves (never rejects) for SPAWN_ERROR, INACTIVITY_TIMEOUT and WALL_CLOCK_TIMEOUT, so those outcomes reach src/acceptance-gate.ts:285 with no reporter document in `output`, become status \"unparsable\", and fall into the FAIL/CONFIGURATION branch at src/acceptance-gate.ts:294-310. docs/adr/0041-uncertain-classification-picks-the-branch-that-cannot-loop.md:76-77 states that \"every non-`EXITED` outcome (spawn error, inactivity and wall-clock timeouts, a signal kill that leaves no exit code), stays INFRASTRUCTURE and the orchestrator's retry applies\".",
+      "expected": "contract.md B-05 routes output with no reporter document to FAIL/CONFIGURATION, and the module's comment at src/acceptance-gate.ts:296-299 cites ADR 0041 as its reason. ADR 0041's own decision keeps the non-EXITED outcomes — which the runner already has in hand as `CommandExecutionResult.outcome` — on the INFRASTRUCTURE branch, so that a machine-side interruption reaches the bounded retry instead of a repair round.",
+      "observed": "The outcome field is dropped before the matcher runs, so a 30-minute wall-clock kill, an inactivity kill under machine load, and `pnpm` missing from PATH are all indistinguishable from a genuinely misconfigured runner: each produces one FAIL/CONFIGURATION that the pre-QA repair path hands to the generator with a detail it cannot act on. Not blocking: B-05's locked text does name \"stdout with no reporter document\" as the CONFIGURATION case, so the letter of the contract is satisfied, and ADR 0041's asymmetry puts this on the recoverable side (at most one round, versus a burned slice).",
+      "clearCondition": "boundedAcceptanceRunner returns the command outcome alongside the output, and runAcceptanceGate maps a non-EXITED outcome to status INFRASTRUCTURE with the outcome named in the detail, with a unit test injecting each of SPAWN_ERROR, INACTIVITY_TIMEOUT and WALL_CLOCK_TIMEOUT.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06"],
+      "summary": "The B-06 predicate test reimplements the two call-site predicates inside the test instead of exercising src/orchestrator.ts, so the assertion cannot fail if the production expression regresses.",
+      "evidence": "src/orchestrator.test.ts:627-635 defines a local `decide(declaration)` returning `{ prepare, materialize }` built from `declaration != null || preQa.some(...)`, a hand copy of src/orchestrator.ts:5546-5556. The test then asserts on `decide(...)`, never on anything src/orchestrator.ts exports. Reverting src/orchestrator.ts:5546-5548 to the pre-slice `preQaDeclarations.some((declaration) => declaration.command != null)` leaves the whole suite green: the only other B-06 coverage is src/orchestrator.test.ts:2425 (P-03), which asserts a slice binding *nothing*, the case in which both predicates are unchanged by definition.",
+      "expected": "contract.md B-06: \"the two predicates at `:5526-5535`, today asking only whether a declaration carries a `command`, widen on bound work, never on plan presence.\" The predicates are the contract behavior, so a test of them has to read the predicates the orchestrator runs.",
+      "observed": "A mirror test. It documents the intended rule and it did catch the rule's shape during implementation, but it is not a regression guard on the shipped call site — the two expressions can drift apart silently.",
+      "clearCondition": "The two predicates are lifted into a named exported helper in src/orchestrator.ts that both the call site and src/orchestrator.test.ts call, so mutating the production expression fails the B-06 assertion.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

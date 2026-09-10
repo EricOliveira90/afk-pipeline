@@ -299,8 +299,8 @@ function parseGuardianFindings(
  * Parse the canonical guardian artifact contract introduced by GH #170.
  *
  * The exact verdict line remains human-readable, while the single JSON object
- * immediately below the guardian-specific structured-findings heading is the
- * only findings input. Architect uses v2 authority evidence; PM remains v1.
+ * below the guardian-specific structured-findings heading is the only findings
+ * input. Architect uses v2 authority evidence; PM remains v1.
  * Favorable architect v1 artifacts remain readable for compatibility, but a
  * v1 architect blocker cannot claim authority without the v2 evidence.
  * Any malformed or verdict-inconsistent structure makes the whole invoked
@@ -349,8 +349,21 @@ export function parseGuardianReview(
   ) {
     return { outcome: "UNPARSEABLE", findings: [] };
   }
-  const jsonLine = lines[headingMatch.index + 1];
-  if (jsonLine === undefined || jsonLine.trim() === "") {
+  // The first non-blank line after the heading, not literally the next one.
+  // Both guardian prompts ask for the JSON "immediately below" the heading and
+  // both reviewers wrote it one blank line below instead — ordinary Markdown
+  // spacing. Demanding the adjacent line threw away two complete PM reviews on
+  // PRD 4 slice #195, each favorable and otherwise well-formed, and an
+  // UNPARSEABLE verdict is terminal (ADR 0015): the run cannot recover the
+  // opinion, so the ship blocks on whitespace. Blank lines are skipped and
+  // nothing else is: an absent, blank-only or non-JSON body still fails closed
+  // below, so the accepted language widens by exactly the whitespace.
+  let jsonIndex = headingMatch.index + 1;
+  while (jsonIndex < lines.length && lines[jsonIndex]!.trim() === "") {
+    jsonIndex++;
+  }
+  const jsonLine = lines[jsonIndex];
+  if (jsonLine === undefined) {
     return { outcome: "UNPARSEABLE", findings: [] };
   }
   let structured: unknown;

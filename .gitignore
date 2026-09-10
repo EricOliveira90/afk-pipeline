@@ -2,3 +2,8 @@ node_modules/
 dist/
 .afk/
 .vitest-reports/
+# Operator scratch — briefs, captured run logs, one-off launch scripts. The
+# post-review guardian artifact commit stages the whole worktree, so an
+# unignored scratch dir here lands on the feature branch and then on main
+# (it swept 45 files and ~42k lines into c77c54a on 2026-09-10).
+.tmp/

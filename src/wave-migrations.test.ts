@@ -1201,20 +1201,51 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
       { number: "01", ghIssue: "611", title: "Alpha", type: "AFK", blockedBy: [], userStories: "" },
       { number: "02", ghIssue: "612", title: "Beta", type: "AFK", blockedBy: [], userStories: "" },
     ];
-    // Disjoint declared files → separate lanes → both generate from the
-    // same base; both add the same untracked path with different content,
-    // so whichever merges second hits a real add/add conflict. No
-    // migrations anywhere near it.
+    // Disjoint declared files → separate lanes. The conflict comes from the
+    // feature branch advancing under slice 02 rather than from two slices
+    // writing one undeclared path: since #195 an undeclared write is a red
+    // file-scope gate, so the only candidate that can still reach a merge
+    // with a conflict in it is one whose own declared file moved on the base
+    // after its worktree was cut. No migrations anywhere near it.
     const fixtures = new Map<string, SliceFixture>([
-      ["611", { files: ["src/alpha.txt"], qaPasses: true, outputFile: "src/clash.txt", outputContent: "from alpha" }],
-      ["612", { files: ["src/beta.txt"], qaPasses: true, outputFile: "src/clash.txt", outputContent: "from beta" }],
+      ["611", { files: ["src/alpha.txt"], qaPasses: true, outputFile: "src/alpha.txt", outputContent: "from alpha" }],
+      ["612", { files: ["src/beta.txt"], qaPasses: true, outputFile: "src/beta.txt", outputContent: "from beta" }],
     ]);
-    const { config, dag, logger, featBranch } = setupWave(
+    const { config, dag, logger, featBranch, provider } = setupWave(
       repo,
       "wave-real-conflict",
       slices,
       fixtures,
     );
+    // Phase A negotiates every slice before any lane runs, so a commit made
+    // from a contract evaluation is a sibling of both slice branches and
+    // cannot race a merge for the main repository's index.
+    let advanced = false;
+    config.provider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const result = await provider.invoke(options);
+        if (
+          !advanced &&
+          options.role === "evaluator-contract" &&
+          sliceFromCwd(options.cwd, slices)?.ghIssue === "612"
+        ) {
+          advanced = true;
+          const head = git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+          git(repo, ["checkout", featBranch]);
+          mkdirSync(join(repo, "src"), { recursive: true });
+          writeFileSync(
+            join(repo, "src", "beta.txt"),
+            "from the feature branch\n",
+            "utf-8",
+          );
+          git(repo, ["add", "--", "src/beta.txt"]);
+          git(repo, ["commit", "-m", "feat: beta.txt landed out of band"]);
+          git(repo, ["checkout", head]);
+        }
+        return result;
+      },
+    };
 
     const { outcomes } = await runWave({
       waveNumber: 1,

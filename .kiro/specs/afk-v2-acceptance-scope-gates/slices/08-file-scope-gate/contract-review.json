@@ -1,0 +1,83 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-05", "B-07"],
+      "evidence": "B-07: \"The gate reads the manifest bytes **at gate time**: `run` calls `loadAcceptanceManifest(absSliceDir)` (`src/acceptance-manifest.ts:290`) when it executes, not when the declaration is built, so a `fileScope` widened by an ADR 0048 scope amendment applied during the QA window is the scope the gate compares against and the newly declared path is not a violation.\"",
+      "expected": "The contract names where the gate's manifest bytes come from at the post-QA call site, and covers the amended-manifest case the call-site decision exists to protect.",
+      "observed": "B-07 now names the source (a gate-time `loadAcceptanceManifest(absSliceDir)` call inside `run`, verified at `src/acceptance-manifest.ts:290`, which reads the pair as it stands and throws when absent) rather than a snapshot taken at declaration-build time, and the amendment door is covered end to end: test-plan line \"Given a manifest on disk whose `fileScope` was widened after the declaration was built (the applied-amendment case) ... then the gate passes and reports no violation\" (`src/scope-gate.test.ts`), plus B-07's manifest observable. The `acceptedPairIntact` half is also now sourced from the existing per-attempt integrity check, which `src/orchestrator.ts:5348-5377` runs before `existsSync(escalationPath)` on every generator dispatch — not only escalating ones — so the latch is set on the same loop iteration that later reaches `runPostQAGates` at `:5804`, and starts false, which fails closed through B-10.",
+      "clearCondition": "A behavior states which manifest bytes the post-QA `scope` gate compares against (the accepted pair as it stands at gate time, including bytes an audited scope amendment wrote), and the test plan declares an assertion that a path added to `fileScope` by an applied amendment produces no violation in that round's `scope` gate.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01", "B-05", "B-11"],
+      "evidence": "B-02: \"A `run` that throws, or whose promise rejects, is recorded as `status: \\\"INFRASTRUCTURE\\\"`, `failureKind: null`, `detail` the error's message (`String(error)` for a non-`Error`), and the loop continues to the next declaration, so `runGates` still writes its evidence document (`src/gate-runner.ts:593-600`) and every declaration still binds to one result.\"",
+      "expected": "The plumbing every later content-derived gate declares through says what `runGates` records when `run` throws or its promise rejects, so the evidence document is still written and the gate still has a result.",
+      "observed": "B-02 is a new behavior covering exactly that: recorded status, `failureKind`, `detail` source, loop continuation, the evidence write at `src/gate-runner.ts:593-600`, and one-result-per-declaration binding. `INFRASTRUCTURE` over `FAIL` is justified against the throwing helper (`diffTreePaths`) and ADR 0041, and it hands the case to P-06's bounded retry, which `src/candidate-gate-phase.ts:134-138` keys on status alone. The test plan declares it: \"Given a declaration whose `run` throws synchronously and one whose promise rejects ... then each records `INFRASTRUCTURE` / `failureKind: null` with the error message as `detail`, the evidence document exists, and `results.length` equals `declarations.length` (`src/gate-runner.test.ts`).\"",
+      "clearCondition": "A behavior states the recorded outcome for a `run` that throws or rejects (status, `failureKind`, `detail` source) with the evidence document still written and the declaration still bound to a result, and the test plan declares an assertion for it in `src/gate-runner.test.ts`.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03"],
+      "evidence": "B-03: \"`GateFindings` types all four fields `prd.md` D22 names in this one bump: `outOfScopePaths?: readonly string[]`, `deletedTests?: readonly string[]`, `protectedChanges?: readonly string[]`, and `appliedWaivers?: readonly { riskClass: GateRiskClass; path: string; author: string; reason: string }[]` ... This slice populates only `outOfScopePaths`; the other three are typed and unpopulated until #193, so version 2 has one shape regardless of merge order.\"",
+      "expected": "The slice that owns the persisted bump defines version 2's `findings` shape once, as D22 states it.",
+      "observed": "B-03 now types all four D22 fields in this slice and says so for the reason the finding was raised — one shape for version 2 regardless of merge order. It matches D22's own words (\"`GateResult` gains an optional typed `findings` payload with `outOfScopePaths`, `deletedTests`, `protectedChanges` and `appliedWaivers` (the four D5 fields per record)\"), and `riskClass` is type-imported from `src/gate-policy.ts`, which #84 already merged and which exports `GateRiskClass` beside `GATE_RISK_CLASSES`, so a persisted waiver cannot name a class the policy reader refuses. No hand-off of the remaining type edit to #193 is left in the contract.",
+      "clearCondition": "B-03 types all four D22 fields on `GateFindings` (only `outOfScopePaths` populated here, the others typed and unpopulated), or it cites explicit PRD/anchor authority for #193 extending `GateFindings` in `src/gate-runner.ts` after this slice bumped the evidence version.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-10"],
+      "evidence": "B-10: \"in a gated tree where both `contract.md` and `acceptance-manifest.json` differ from the feature branch (which a negotiated slice tree always does — the pair is written into the worktree, `src/escalation.ts:172-177`), both appear in `findings.outOfScopePaths` and the gate is red.\"",
+      "expected": "The Given supports the Then, because `outOfScopePaths` is a filter over the changed set and can only name a pair file that actually changed.",
+      "observed": "The Given now puts both pair files in the changed set, in the contract and in the manifest entry (\"a gated tree in which both contract.md and acceptance-manifest.json differ from the feature branch, as a negotiated slice tree does\"), and the test-plan line matches. The Then is reachable from the Given: with `acceptedPairIntact: false`, `outOfScopeChangedPaths` pushes both normalized pair paths as offenders even when the manifest declares them (`src/escalation.ts:227-250`).",
+      "clearCondition": "B-10's Given states that both accepted-pair files differ from the feature branch in the gated tree (as a negotiated slice tree does), or its Then narrows to the pair files that changed.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01", "B-06"],
+      "evidence": "B-06: \"The gate calls `listChangedFiles(worktreeDir, featureRef)` and probes **that** directory, not `ctx.cwd`: only the live slice worktree carries the working-tree and untracked changes D3 requires, while `ctx.cwd` at the post-QA call site is a checkpoint directory that may not even be materialized ... The recorded result's `treeId` stays `options.treeId`.\"",
+      "expected": "The contract says which directory the candidate probe reads and what the recorded `treeId` is, because `ctx.cwd` and the slice worktree are different directories at the post-QA call site.",
+      "observed": "B-06 states both, and states why the recorded `treeId` is still sound (the post-QA checkpoint is captured from that same worktree and `reviewArtifactViolations` has already fenced the two against each other before any gate runs, `src/post-qa-gates.ts:185-206`). The unmaterialized-checkpoint case is real and now handled: `runPostQAGates` only materializes when some declaration carries a `command` (`:164-178`), and B-01 puts the `run` branch ahead of the `existsSync(options.cwd)` break at `src/gate-runner.ts:442-460`.",
+      "clearCondition": "B-01 or B-06 states that the candidate source probes the directory named by the comparison source rather than `ctx.cwd`, and that the recorded `treeId` stays `options.treeId`.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-06",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-12"],
+      "evidence": "B-12: \"Prepended, not appended, so the deterministic check that needs no toolchain cannot be preceded by the ~7-minute suite (`CLAUDE.md`) and cannot be skipped by an earlier declaration's `INFRASTRUCTURE` or checkpoint `break` (`src/gate-runner.ts:459`, `:504`, `:527`).\"",
+      "expected": "The declaration's position is stated with its consequence when an earlier declaration ends the run loop, since `scope` is required.",
+      "observed": "The contract takes the second branch of the clear condition: the declaration is prepended (`[scopeDeclaration, ...fullSuiteDeclarations]`), so no earlier declaration can `break` the loop before `scope` records, and the cost argument is stated rather than left implicit. The complementary case is stated too — a red `scope` does not short-circuit the remaining declarations, which matches `runGates` continuing past a `FAIL` classification (`src/gate-runner.ts:574-590`) and defers sequencing to #86.",
+      "clearCondition": "B-12 states the declaration's position with its rationale and names the outcome when an earlier declaration ends the loop before `scope` runs, or places the deterministic declaration ahead of the suite declarations.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-07",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06", "P-06"],
+      "evidence": "P-06 manifest observable: \"src/gate-runner.test.ts or src/qa-orchestration.test.ts asserts the retry fires for an in-process INFRASTRUCTURE result\"; B-06 manifest observable: \"src/scope-gate.test.ts asserts uncommitted and untracked paths from worktreeDir appear while ctx.cwd is a different directory, and that the result's treeId is the treeId passed in\"",
+      "expected": "Each assertion a manifest observable promises appears as a test-plan line naming the file that carries it, since the definition of done requires one assertion per anchor and `src/candidate-gate-phase.test.ts` is deliberately outside the declared file scope.",
+      "observed": "The test plan's fifteen lines cover every other anchor but neither of these two. P-06's retry lives in `src/candidate-gate-phase.ts:134-138`, which `runGates` does not wrap, so the only in-scope home is a `src/gate-runner.test.ts` case that imports `runCandidateGatePhase` and drives it with a `run` returning `INFRASTRUCTURE` — feasible, but the plan's \"or\" leaves the file unchosen. B-06's differing-`ctx.cwd` and `treeId` assertions are implied by the plan's real-repo candidate-source line, which mentions the untracked file but neither `ctx.cwd` nor `treeId`. Neither omission is a scope or evidence problem; both are places a generator could reach the definition of done's checklist while leaving the promised observable unwritten.",
+      "clearCondition": "The test plan gains a line for P-06's in-process `INFRASTRUCTURE` retry naming the single file that carries it, and B-06's candidate-source line states the differing `ctx.cwd` and the asserted `treeId`.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}

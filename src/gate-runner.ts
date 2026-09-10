@@ -14,11 +14,97 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { runBoundedCommand } from "./command-runtime.js";
 import { resolveCommit, resolveTree } from "./git.js";
+import {
+  readGateCacheEntry,
+  writeGateCacheEntry,
+  type GateCacheOptions,
+} from "./gate-cache.js";
+import type { GateRiskClass } from "./gate-policy.js";
 
-export const GATE_EVIDENCE_VERSION = 1;
+/**
+ * Bumped twice, and both bumps are recorded here so the version-keyed rules
+ * below stay readable next to the accepted list:
+ *
+ * - **1 → 2** for {@link GateFindings} (`prd.md` D22). Version 1 may not carry
+ *   `findings`; version 2 and version 3 may — a version-3 document carries them
+ *   exactly as a version-2 one does, because the cache and prerequisite markers
+ *   add no findings semantics.
+ * - **2 → 3** for the optional `cacheReused`, `prerequisiteSkipped` and
+ *   `environmentSensitive` markers (#86 D17). All three are optional and
+ *   present only on the gate they describe, so absence means "not reused" /
+ *   "not skipped" and no existing fixture or writer carries a false flag. The
+ *   version still bumps because a version-2 reader must not silently ignore a
+ *   reuse or prerequisite-skip marker: a `PASS` that was reused and a `PASS`
+ *   that was earned are different facts.
+ *
+ * Additive and backward-readable throughout: {@link readGateEvidence} accepts a
+ * version-1, version-2 or version-3 document.
+ */
+export const GATE_EVIDENCE_VERSION = 3;
+
+/** Every evidence version a reader in this process accepts. */
+const SUPPORTED_GATE_EVIDENCE_VERSIONS = [1, 2, 3] as const;
+
+export type GateEvidenceVersion =
+  (typeof SUPPORTED_GATE_EVIDENCE_VERSIONS)[number];
 
 export type GateStatus = "PASS" | "FAIL" | "INFRASTRUCTURE" | "SKIPPED";
 export type GateFailureKind = "COMMAND" | "CONFIGURATION" | null;
+
+/**
+ * The acceptance gate's declared id and stage (`prd.md` D8). They live here,
+ * beside {@link GateStatus}, rather than in `src/acceptance-gate.ts`, because
+ * three modules that must not import the gate itself still have to spell the
+ * id: `src/base-gates.ts` puts it in the lock-time bindable catalog, and the
+ * orchestrator keys its per-behavior coverage events off it. One aggregate
+ * gate, never one declaration per behavior — the behaviors are named in its
+ * `detail`, not in its id.
+ */
+export const ACCEPTANCE_GATE_ID = "acceptance:behaviors";
+
+/**
+ * Its own stage, not `deterministic`: the acceptance gate is the only gate
+ * whose verdict is derived from a runner's own report about named behaviors,
+ * and evidence readers group by stage.
+ */
+export const ACCEPTANCE_GATE_STAGE = "acceptance";
+
+/**
+ * What an in-process gate reports. Structured, not prose: `detail` is
+ * human-facing and nothing parses it, while `findings` is the machine-readable
+ * half a later round or an operator surface reads.
+ */
+export interface GateRunOutcome {
+  status: GateStatus;
+  failureKind?: GateFailureKind;
+  detail?: string;
+  findings?: GateFindings;
+}
+
+/**
+ * The typed payload a content-derived gate names its offenders in
+ * (`prd.md` D22). All four fields are declared in this one version bump so
+ * evidence version 2 has a single shape regardless of the order the gates
+ * that populate them ship in: the file-scope gate populates
+ * `outOfScopePaths`, and `deletedTests` / `protectedChanges` /
+ * `appliedWaivers` stay typed and unpopulated until the feedback-integrity
+ * gate lands (#193).
+ *
+ * `riskClass` is `GateRiskClass` and not a bare `string` on purpose: a
+ * persisted waiver naming a class the policy reader refuses would be a record
+ * nothing can act on.
+ */
+export interface GateFindings {
+  outOfScopePaths?: readonly string[];
+  deletedTests?: readonly string[];
+  protectedChanges?: readonly string[];
+  appliedWaivers?: readonly {
+    riskClass: GateRiskClass;
+    path: string;
+    author: string;
+    reason: string;
+  }[];
+}
 
 export interface GateDeclaration {
   id: string;
@@ -26,10 +112,36 @@ export interface GateDeclaration {
   required: boolean;
   command?: string;
   args?: readonly string[];
+  /**
+   * An in-process check, for a gate that needs no toolchain and no working
+   * directory — a comparison the orchestrator can make itself. Exactly one of
+   * `command` and `run` may be supplied; see {@link classifyDeclaration}.
+   */
+  run?: (ctx: {
+    treeId: string;
+    cwd: string;
+    signal?: AbortSignal;
+  }) => GateRunOutcome | Promise<GateRunOutcome>;
   /** Project policy's expected wall-clock cost, for budgeting/reporting. */
   expectedCostMs?: number;
   /** Per-gate wall-clock ceiling; falls back to the phase default. */
   wallClockTimeoutMs?: number;
+  /**
+   * This gate reports about the machine it ran on as much as about the tree, so
+   * it runs and records its real status but may not block (#86 D16). It is
+   * always emitted `required: false`, and that — not a second exclusion path in
+   * `src/candidate-gate-phase.ts` or `src/candidate-gate-policy.ts` — is the
+   * whole gate-phase mechanism. This flag exists so evidence and the run
+   * summary can say *why* a red gate did not block.
+   */
+  environmentSensitive?: boolean;
+  /**
+   * Gates that must have passed in this same run before this one is worth
+   * spawning (#86 B-07). A prerequisite that failed makes this gate `SKIPPED`
+   * naming it; a prerequisite that is not part of this phase's declarations is
+   * not a failure, so a phase may legitimately declare a dependent alone.
+   */
+  prerequisiteGateIds?: readonly string[];
 }
 
 export interface GateResult {
@@ -44,10 +156,20 @@ export interface GateResult {
   treeId: string;
   logArtifactId: string;
   detail?: string;
+  findings?: GateFindings;
+  /**
+   * A `PASS` this run reused from the gate cache instead of earning (D17).
+   * Optional and present only when true, so absence means "not reused".
+   */
+  cacheReused?: boolean;
+  /** The failed prerequisite this gate was skipped for (B-07). */
+  prerequisiteSkipped?: string;
+  /** Copied from the declaration, so evidence records why a red gate is advisory. */
+  environmentSensitive?: boolean;
 }
 
 export interface GateEvidence {
-  version: typeof GATE_EVIDENCE_VERSION;
+  version: GateEvidenceVersion;
   attemptId: string;
   treeId: string;
   results: GateResult[];
@@ -81,6 +203,13 @@ export interface RunGatesOptions {
   wallClockTimeoutMs: number;
   heartbeatIntervalMs: number;
   onOutput?: (gateId: string, text: string) => void;
+  /**
+   * The tree-identity gate cache (#86 B-03/B-04). Absent, or `enabled: false`,
+   * means no lookup and no write. Only the command path consults it: an
+   * in-process gate reads the world at gate time and costs no process, so
+   * replaying it would only add a way to be wrong.
+   */
+  cache?: GateCacheOptions;
 }
 
 export interface RunGatesResult {
@@ -275,6 +404,42 @@ function outputTail(output: string, maxLines = 5, maxChars = 500): string {
   return tail.length > maxChars ? `${tail.slice(0, maxChars)}…` : tail;
 }
 
+/**
+ * Which of the four shapes one declaration is, resolved once so the loop
+ * cannot read `command` and `run` as independent options.
+ *
+ * A declaration supplies **either** `command` or `run`. Supplying both is as
+ * invalid as a blank id — two answers to "how does this gate run" is a
+ * configuration defect, not a preference. Supplying neither keeps today's
+ * split exactly, and that split is load-bearing rather than tidy:
+ * `projectSanityGateDeclarations` derives `{ id: "lint", stage: "base",
+ * required: false }` with no command for a project with no lint script, and
+ * `src/adopt-command.ts` counts that gate as passing only while its status is
+ * `SKIPPED` (`prd.md` D22, corrected 2026-09-08).
+ */
+type GateDeclarationShape =
+  | { kind: "invalid" }
+  | { kind: "undeclared" }
+  | { kind: "in-process"; run: NonNullable<GateDeclaration["run"]> }
+  | { kind: "command"; command: string; args: readonly string[] };
+
+function classifyDeclaration(
+  declaration: GateDeclaration,
+): GateDeclarationShape {
+  const { command, run } = declaration;
+  if (
+    declaration.id.trim() === "" ||
+    declaration.stage.trim() === "" ||
+    command?.trim() === "" ||
+    (command != null && run != null)
+  ) {
+    return { kind: "invalid" };
+  }
+  if (run != null) return { kind: "in-process", run };
+  if (command == null) return { kind: "undeclared" };
+  return { kind: "command", command, args: declaration.args ?? [] };
+}
+
 export async function runGates(
   options: RunGatesOptions,
 ): Promise<RunGatesResult> {  const attemptId = randomUUID();
@@ -283,6 +448,17 @@ export async function runGates(
   const logsDir = join(options.evidenceDir, "gate-logs");
   mkdirSync(logsDir, { recursive: true });
   const results: GateResult[] = [];
+  /**
+   * The same results, keyed by gate id, so the prerequisite check below can ask
+   * "did `typecheck` pass in this attempt" without re-scanning the array. One
+   * writer for both, because a result recorded in one and not the other would
+   * make a prerequisite silently satisfied.
+   */
+  const resultsByGateId = new Map<string, GateResult>();
+  const record = (result: GateResult): void => {
+    results.push(result);
+    resultsByGateId.set(result.gateId, result);
+  };
   let restoreCheckpoint: (() => void) | undefined;
   let checkpointError: string | undefined;
   if (existsSync(options.cwd)) {
@@ -410,14 +586,54 @@ export async function runGates(
     };
     emit(`[gate:${declaration.id}] START\n`);
 
-    const invalid =
-      declaration.id.trim() === "" ||
-      declaration.stage.trim() === "" ||
-      declaration.command?.trim() === "";
-    if (invalid || declaration.command == null) {
+    // --- Declared prerequisites, ahead of every other branch (#86 B-07). A
+    // dependent whose prerequisite did not pass in this same run is never
+    // spawned: the suite cannot be meaningful on a tree that did not compile,
+    // and paying for it buys a second copy of the same failure. The loop then
+    // *continues*, so declarations naming no failed prerequisite still run and
+    // independent failures still arrive together in one attempt.
+    //
+    // A prerequisite absent from this phase's declarations is not a failure —
+    // the post-QA phase declares `tests` without `typecheck` — so only a
+    // recorded non-PASS blocks. The skip is explicit in both the result and the
+    // log, because a silent skip is indistinguishable from a gate that never
+    // ran (D17).
+    const blockingPrerequisite = (declaration.prerequisiteGateIds ?? [])
+      .map((gateId) => resultsByGateId.get(gateId))
+      .find((prior) => prior != null && prior.status !== "PASS");
+    if (blockingPrerequisite) {
+      const now = new Date().toISOString();
+      const detail =
+        `Skipped: prerequisite gate "${blockingPrerequisite.gateId}" ` +
+        `recorded ${blockingPrerequisite.status} in this attempt, so this ` +
+        `gate could not produce a meaningful result.`;
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "SKIPPED",
+        failureKind: null,
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        detail,
+        prerequisiteSkipped: blockingPrerequisite.gateId,
+      };
+      emit(`${detail}\n`);
+      emit(`[gate:${declaration.id}] SKIPPED (0ms)\n`);
+      record(result);
+      continue;
+    }
+
+    const shape = classifyDeclaration(declaration);
+    if (shape.kind === "invalid" || shape.kind === "undeclared") {
       const now = new Date().toISOString();
       const status =
-        !invalid && !declaration.required ? "SKIPPED" : "FAIL";
+        shape.kind === "undeclared" && !declaration.required
+          ? "SKIPPED"
+          : "FAIL";
       const result: GateResult = {
         gateId: declaration.id,
         stage: declaration.stage,
@@ -435,7 +651,67 @@ export async function runGates(
             : "Invalid required gate declaration",
       };
       emit(`[gate:${declaration.id}] ${result.status} (0ms)\n`);
-      results.push(result);
+      record(result);
+      continue;
+    }
+
+    // --- The in-process gate, ahead of the three command-path preconditions
+    // below (`prd.md` D22). It needs none of them: there is no working
+    // directory to test, no toolchain to prepare and nothing to restore
+    // between runs — and a post-QA checkpoint captured with
+    // `materialize: false` has no directory at all, so testing `options.cwd`
+    // first would record INFRASTRUCTURE for a check that never touches it.
+    if (shape.kind === "in-process") {
+      // Same rule as the command path's CANCELLED break: a cancelled run
+      // records nothing rather than inventing a result (`:543`).
+      if (options.signal?.aborted) break;
+      const startedAtMs = Date.now();
+      const startedAt = new Date(startedAtMs).toISOString();
+      let outcome: GateRunOutcome;
+      try {
+        outcome = await shape.run({
+          treeId: options.treeId,
+          cwd: options.cwd,
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch (error) {
+        // INFRASTRUCTURE, not FAIL: the checks that throw here throw because
+        // they could not read the world (a tree that cannot be diffed, a
+        // manifest that cannot be parsed), and no generator edit repairs
+        // that. This is the branch that cannot loop, so it goes to the
+        // bounded retry and then to the operator (ADR 0041).
+        outcome = {
+          status: "INFRASTRUCTURE",
+          failureKind: null,
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+      const endedAtMs = Date.now();
+      // Before the status line, so the paths a red gate names travel in the
+      // log the repair round receives as a reference.
+      if (outcome.detail != null && outcome.detail !== "") {
+        emit(`${outcome.detail}\n`);
+      }
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: outcome.status,
+        failureKind: outcome.failureKind ?? null,
+        startedAt,
+        endedAt: new Date(endedAtMs).toISOString(),
+        durationMs: endedAtMs - startedAtMs,
+        exitCode: null,
+        treeId: options.treeId,
+        logArtifactId,
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+        ...(outcome.findings !== undefined
+          ? { findings: outcome.findings }
+          : {}),
+      };
+      emit(
+        `[gate:${declaration.id}] ${result.status} (${result.durationMs}ms)\n`,
+      );
+      record(result);
       continue;
     }
 
@@ -455,7 +731,7 @@ export async function runGates(
         detail: `Gate working directory is unavailable: ${options.cwd}`,
       };
       emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
-      results.push(result);
+      record(result);
       break;
     }
 
@@ -480,7 +756,7 @@ export async function runGates(
         detail: prepareFailure,
       };
       emit(`[gate:${declaration.id}] FAIL (0ms)\n`);
-      results.push(result);
+      record(result);
       continue;
     }
 
@@ -500,8 +776,47 @@ export async function runGates(
         detail: checkpointError ?? "Gate checkpoint is unavailable",
       };
       emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
-      results.push(result);
+      record(result);
       break;
+    }
+
+    // --- The gate cache, consulted before anything is spawned (#86 B-03).
+    // The key is this gate's id plus the *resolved* command and args plus the
+    // tree id, so a changed tree, a changed command or a changed argument list
+    // is a miss and the gate runs (B-04). A hit records the cached `PASS`
+    // marked reused: an operator reading evidence must be able to tell a
+    // reused answer from an earned one.
+    const cacheKey = {
+      gateId: declaration.id,
+      command: shape.command,
+      args: shape.args,
+      treeId: options.treeId,
+    };
+    const cached = readGateCacheEntry(options.cache, cacheKey);
+    if (cached) {
+      const now = new Date().toISOString();
+      const detail =
+        `Reused the cached PASS recorded at ${cached.recordedAt} for tree ` +
+        `${options.treeId}: identical gate command and identical tree, so ` +
+        `nothing was spawned.`;
+      const result: GateResult = {
+        gateId: declaration.id,
+        stage: declaration.stage,
+        status: "PASS",
+        failureKind: null,
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        exitCode: cached.exitCode,
+        treeId: options.treeId,
+        logArtifactId,
+        detail,
+        cacheReused: true,
+      };
+      emit(`${detail}\n`);
+      emit(`[gate:${declaration.id}] PASS (0ms, cache reuse)\n`);
+      record(result);
+      continue;
     }
 
     try {
@@ -523,13 +838,13 @@ export async function runGates(
         detail,
       };
       emit(`[gate:${declaration.id}] INFRASTRUCTURE (0ms)\n`);
-      results.push(result);
+      record(result);
       break;
     }
 
     const execution = await runBoundedCommand(
-      declaration.command,
-      declaration.args ?? [],
+      shape.command,
+      shape.args,
       {
         cwd: options.cwd,
         signal: options.signal,
@@ -562,7 +877,7 @@ export async function runGates(
       emit(
         `[gate:${declaration.id}] INFRASTRUCTURE (${result.durationMs}ms)\n`,
       );
-      results.push(result);
+      record(result);
       break;
     }
 
@@ -587,7 +902,34 @@ export async function runGates(
     emit(
       `[gate:${declaration.id}] ${result.status} (${result.durationMs}ms)\n`,
     );
-    results.push(result);
+    record(result);
+    // Only a `PASS` is written. A FAIL is a fact the next round exists to
+    // change, and an INFRASTRUCTURE result is a fact about the machine rather
+    // than the tree — caching either would replay a transient as a verdict.
+    if (result.status === "PASS") {
+      writeGateCacheEntry(options.cache, {
+        ...cacheKey,
+        args: [...cacheKey.args],
+        status: "PASS",
+        durationMs: result.durationMs,
+        exitCode: result.exitCode,
+        recordedAt: result.endedAt,
+      });
+    }
+  }
+
+  // Copied from the declarations in one place rather than at each of the eight
+  // result-construction sites: which gates are advisory is a property of the
+  // declaration list, and stamping it once means no branch can forget.
+  const environmentSensitiveIds = new Set(
+    options.declarations
+      .filter((declaration) => declaration.environmentSensitive)
+      .map((declaration) => declaration.id),
+  );
+  for (const result of results) {
+    if (environmentSensitiveIds.has(result.gateId)) {
+      result.environmentSensitive = true;
+    }
   }
 
   const evidence: GateEvidence = {
@@ -628,7 +970,11 @@ export function readGateEvidence(path: string): GateEvidence {
   if (!isRecord(parsed) || !("version" in parsed)) {
     throw new Error("Missing gate evidence version");
   }
-  if (parsed.version !== GATE_EVIDENCE_VERSION) {
+  if (
+    !SUPPORTED_GATE_EVIDENCE_VERSIONS.includes(
+      parsed.version as GateEvidenceVersion,
+    )
+  ) {
     throw new Error(`Unsupported gate evidence version: ${String(parsed.version)}`);
   }
   if (
@@ -649,6 +995,18 @@ export function readGateEvidence(path: string): GateEvidence {
       evidence.results.length
   ) {
     throw new Error("Invalid gate evidence");
+  }
+  // Version 1 may not carry `findings`; version 2 and version 3 may. A
+  // version-1 document carrying them was written by something that did not
+  // know what it was stamping, and is refused rather than read past: the
+  // version is the reader's contract with the writer (`prd.md` D22, #86).
+  if (
+    evidence.version === 1 &&
+    evidence.results.some((result) => result.findings !== undefined)
+  ) {
+    throw new Error(
+      "Gate evidence version 1 cannot carry findings; findings require version 2",
+    );
   }
   return evidence;
 }
@@ -792,7 +1150,48 @@ function isGateResult(value: unknown): value is GateResult {
     (value.exitCode === null || typeof value.exitCode === "number") &&
     typeof value.treeId === "string" &&
     typeof value.logArtifactId === "string" &&
-    isSafeLogArtifactId(value.logArtifactId)
+    isSafeLogArtifactId(value.logArtifactId) &&
+    isGateFindingsField(value.findings) &&
+    // The version-3 markers: each absent, or exactly its declared type. A
+    // reused `PASS` and a prerequisite skip are facts a reader may act on, so a
+    // document claiming them in the wrong shape is refused rather than ignored.
+    (value.cacheReused === undefined ||
+      typeof value.cacheReused === "boolean") &&
+    (value.prerequisiteSkipped === undefined ||
+      (typeof value.prerequisiteSkipped === "string" &&
+        value.prerequisiteSkipped.trim() !== "")) &&
+    (value.environmentSensitive === undefined ||
+      typeof value.environmentSensitive === "boolean")
+  );
+}
+
+/**
+ * `findings` is absent, or every field it declares has the declared shape.
+ * The waiver record's `riskClass` is checked as a string only: the policy
+ * reader owns which classes exist, and this slice populates no waivers.
+ */
+function isGateFindingsField(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const isStringList = (candidate: unknown): boolean =>
+    candidate === undefined ||
+    (Array.isArray(candidate) &&
+      candidate.every((entry) => typeof entry === "string"));
+  const waivers = value.appliedWaivers;
+  return (
+    isStringList(value.outOfScopePaths) &&
+    isStringList(value.deletedTests) &&
+    isStringList(value.protectedChanges) &&
+    (waivers === undefined ||
+      (Array.isArray(waivers) &&
+        waivers.every(
+          (entry) =>
+            isRecord(entry) &&
+            typeof entry.riskClass === "string" &&
+            typeof entry.path === "string" &&
+            typeof entry.author === "string" &&
+            typeof entry.reason === "string",
+        )))
   );
 }
 

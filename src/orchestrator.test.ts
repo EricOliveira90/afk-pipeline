@@ -27,6 +27,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   collectRequiredGateFailures,
   isCancelled,
@@ -37,10 +38,14 @@ import {
   assertSliceWorktreeOwnership,
 } from "./orchestrator.js";
 import {
+  resolveAcceptancePlan,
   resolveBaseGateDeclarations,
+  resolveCheapGateCatalog,
   resolveFullSuiteGateDeclarations,
   resolvePreQAGateDeclarations,
 } from "./base-gates.js";
+import { acceptanceGateDeclaration } from "./acceptance-gate.js";
+import { ACCEPTANCE_GATE_ID } from "./gate-runner.js";
 import type { NegotiateOutcome } from "./orchestrator.js";
 import { loadRunState } from "./run-state.js";
 import { createWorktree } from "./git.js";
@@ -54,6 +59,7 @@ import {
   resolveSanityCommands,
   resolveTestCommand,
   runPreShipSanity,
+  uncoveredCheapGateIds,
   type SanityCommandOutcome,
   type SanityGateResult,
 } from "./preship.js";
@@ -102,6 +108,11 @@ import {
   type AdjudicationDecisionLog,
 } from "./adjudication.js";
 import type { ContractNegotiationOutcome } from "./contract-review.js";
+import {
+  advanceContractFindingLineage,
+  emptyContractFindingLineage,
+  saveContractFindingLineage,
+} from "./contract-convergence.js";
 import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
 
 /**
@@ -458,19 +469,27 @@ describe("resolveTestCommand", () => {
 describe("resolveGeneratorTestCommand", () => {
   it("prefers an explicit override over the project's test script", () => {
     const dir = makeProject({ "test:run": "vitest run" });
-    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
-      "pnpm test:fast",
-    );
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        resolveCheapGateCatalog(dir),
+        "pnpm test:fast",
+      ),
+    ).toBe("pnpm test:fast");
   });
 
   it("resolves the project's test script when no override is given", () => {
     const dir = makeProject({ "test:run": "vitest run" });
-    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test:run");
+    expect(resolveGeneratorTestCommand(dir, resolveCheapGateCatalog(dir))).toBe(
+      "pnpm test:run",
+    );
   });
 
   it("falls back to `pnpm test` when the project defines no test script", () => {
     const dir = makeProject({ build: "tsc" });
-    expect(resolveGeneratorTestCommand(dir)).toBe("pnpm test");
+    expect(resolveGeneratorTestCommand(dir, resolveCheapGateCatalog(dir))).toBe(
+      "pnpm test",
+    );
   });
 
   it("resolves independently of the sanity gate's command set", () => {
@@ -479,10 +498,93 @@ describe("resolveGeneratorTestCommand", () => {
       "test:run": "vitest run",
     });
     // The two answers can differ, and the gate keeps the full one.
-    expect(resolveGeneratorTestCommand(dir, "pnpm test:fast")).toBe(
-      "pnpm test:fast",
-    );
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        resolveCheapGateCatalog(dir),
+        "pnpm run typecheck && pnpm test:fast",
+      ),
+    ).toBe("pnpm run typecheck && pnpm test:fast");
     expect(resolveSanityCommands(dir).join(" ")).toContain("pnpm run test:run");
+  });
+
+  /**
+   * [behavior:B-05] The derivation and the override check, as one block: with no
+   * override the command *is* the required cheap gates' own commands, and an
+   * override is judged by which gate ids it covers rather than by string
+   * equality with that derivation.
+   */
+  it("[behavior:B-05] derives the command from the cheap-gate catalog and validates an override over gate ids", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      test: "vitest",
+    });
+    const catalog = resolveCheapGateCatalog(dir);
+
+    // The full-suite gate is excluded by identity, so a ~7-minute suite never
+    // enters an edit cycle (D18) — and `lint`, absent from this project, has no
+    // command to contribute.
+    expect(catalog.map((gate) => gate.id)).toEqual(["typecheck", "lint"]);
+    expect(resolveGeneratorTestCommand(dir, catalog)).toBe("pnpm run typecheck");
+
+    // An override may add a faster subset; it may not drop a required cheap
+    // gate, and the refusal names the gate id, not the command string.
+    expect(() =>
+      resolveGeneratorTestCommand(dir, catalog, "pnpm test:fast"),
+    ).toThrow(/typecheck/);
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        catalog,
+        "pnpm run typecheck && pnpm test:fast",
+      ),
+    ).toBe("pnpm run typecheck && pnpm test:fast");
+    // `pnpm <script>` and `pnpm run <script>` are the same instruction.
+    expect(
+      resolveGeneratorTestCommand(
+        dir,
+        catalog,
+        "pnpm typecheck && pnpm test:fast",
+      ),
+    ).toBe("pnpm typecheck && pnpm test:fast");
+    // Extra segments are permitted and unvalidated (ADR 0038).
+    expect(uncoveredCheapGateIds(catalog, "pnpm run typecheck && pnpm x")).toEqual(
+      [],
+    );
+    expect(uncoveredCheapGateIds(catalog, "pnpm test:fast")).toEqual([
+      "typecheck",
+    ]);
+  });
+
+  /**
+   * [behavior:B-05] The two documents that tell an operator (and a babysit
+   * prompt) how to launch a self-run must agree with each other and with the
+   * check, because a documented command the check refuses stops a run before it
+   * starts. Read out of the documents rather than restated here, so a future
+   * edit to either one is what fails.
+   */
+  it("[behavior:B-05] AGENTS.md and CLAUDE.md document the same accepted self-run --test-command", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const documented = ["AGENTS.md", "CLAUDE.md"].map((name) => {
+      const text = readFileSync(join(repoRoot, name), "utf-8");
+      const match = text.match(/--test-command "([^"]+)"/);
+      expect(match, `${name} must document a self-run --test-command`).not.toBe(
+        null,
+      );
+      return match![1]!;
+    });
+    expect(documented[0]).toBe(documented[1]);
+    expect(documented[0]).toBe("pnpm run typecheck && pnpm test:fast");
+
+    // And this repo's own check accepts it.
+    const catalog = resolveCheapGateCatalog(repoRoot);
+    expect(catalog.map((gate) => gate.id)).toEqual(["typecheck", "lint"]);
+    for (const command of documented) {
+      expect(uncoveredCheapGateIds(catalog, command)).toEqual([]);
+      expect(resolveGeneratorTestCommand(repoRoot, catalog, command)).toBe(
+        command,
+      );
+    }
   });
 });
 
@@ -527,6 +629,9 @@ describe("candidate and aggregate sanity sequencing", () => {
       "pnpm run typecheck",
       "pnpm run test",
     ]);
+    // The two phase resolvers additionally stamp the cost metadata AFK declares
+    // in code (#86 B-01); `resolveBaseGateDeclarations` above deliberately does
+    // not, because its other consumer is the bindable catalog.
     expect(resolvePreQAGateDeclarations(dir)).toEqual([
       {
         id: "typecheck",
@@ -534,8 +639,9 @@ describe("candidate and aggregate sanity sequencing", () => {
         required: true,
         command: "pnpm",
         args: ["run", "typecheck"],
+        expectedCostMs: 20_000,
       },
-      { id: "lint", stage: "base", required: false },
+      { id: "lint", stage: "base", required: false, expectedCostMs: 20_000 },
     ]);
     expect(resolveFullSuiteGateDeclarations(dir)).toEqual([
       {
@@ -544,9 +650,130 @@ describe("candidate and aggregate sanity sequencing", () => {
         required: true,
         command: "pnpm",
         args: ["run", "test"],
+        expectedCostMs: 420_000,
+        prerequisiteGateIds: ["typecheck"],
       },
     ]);
     expect(resolveCandidateQACommands(dir)).toEqual(["pnpm run typecheck"]);
+  });
+
+  /**
+   * The pre-QA call site's two decisions, as units (#85 B-06). The site builds
+   * `preQaDeclarations` and then asks two questions of it: does anything need a
+   * materialized checkpoint, and does anything need the `prepare` install. Both
+   * key off the same fact — whether an acceptance declaration exists — so that
+   * is what these assert.
+   */
+  function sliceWithBindings(gateIds: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), "afk-acceptance-slice-"));
+    tempDirs.push(dir);
+    writeFileSync(
+      join(dir, "acceptance-manifest.json"),
+      JSON.stringify({
+        version: 2,
+        fileScope: { kind: "paths", paths: ["src/a.ts"] },
+        migrationCount: 0,
+        behaviors: [
+          {
+            id: "B-01",
+            source: "contract.md",
+            given: "a candidate",
+            when: "the gate runs",
+            then: "coverage is decided",
+            observableResult: "a test named B-01",
+            preservation: false,
+            gateIds,
+          },
+        ],
+      }),
+      "utf-8",
+    );
+    return dir;
+  }
+
+  it("B-06 appends the acceptance declaration to the pre-QA set when a behavior is bound", () => {
+    const project = makeProject({ typecheck: "tsc", test: "vitest" });
+    const declaration = acceptanceGateDeclaration({
+      absSliceDir: sliceWithBindings(["tests", ACCEPTANCE_GATE_ID]),
+      plan: resolveAcceptancePlan(project),
+    });
+    const preQaDeclarations = [
+      ...resolvePreQAGateDeclarations(project),
+      ...(declaration ? [declaration] : []),
+    ];
+
+    // Pre-QA, so a red set takes the existing repair path instead of costing an
+    // evaluator read — and the full suite set is untouched.
+    expect(preQaDeclarations.map((d) => d.id)).toEqual([
+      "typecheck",
+      "lint",
+      ACCEPTANCE_GATE_ID,
+    ]);
+    expect(resolveFullSuiteGateDeclarations(project).map((d) => d.id)).toEqual([
+      "tests",
+    ]);
+    // Required, so `assertGateEvidenceReleasesEvaluation` demands its PASS.
+    expect(preQaDeclarations.at(-1)!.required).toBe(true);
+  });
+
+  it("B-06 widens both call-site predicates on bound work, never on plan presence", () => {
+    // A project with a resolvable plan but no typecheck/lint script: today both
+    // predicates are false, and they must stay false until a behavior binds.
+    const project = withLockfile(makeProject({ test: "vitest" }));
+    expect(resolveAcceptancePlan(project)).not.toBeNull();
+
+    const preQa = resolvePreQAGateDeclarations(project);
+    const fullSuite = resolveFullSuiteGateDeclarations(project);
+    const decide = (declaration: GateDeclaration | undefined) => ({
+      prepare:
+        declaration != null || preQa.some((d) => d.command != null),
+      materialize:
+        declaration != null ||
+        [...preQa, ...(declaration ? [declaration] : []), ...fullSuite].some(
+          (d) => d.command != null,
+        ),
+    });
+
+    const unbound = acceptanceGateDeclaration({
+      absSliceDir: sliceWithBindings(["tests"]),
+      plan: resolveAcceptancePlan(project),
+    });
+    expect(unbound).toBeUndefined();
+    // `tests` still carries a command, so materialization is already true here
+    // for today's reason; the install is the predicate that must not widen.
+    expect(decide(unbound).prepare).toBe(false);
+
+    const bound = acceptanceGateDeclaration({
+      absSliceDir: sliceWithBindings(["tests", ACCEPTANCE_GATE_ID]),
+      plan: resolveAcceptancePlan(project),
+    });
+    expect(bound).toBeDefined();
+    // The gate spawns the project's runner inside the checkpoint, so it needs
+    // both — even though its declaration carries no `command` of its own.
+    expect(bound!.command).toBeUndefined();
+    expect(decide(bound)).toEqual({ prepare: true, materialize: true });
+  });
+
+  it("P-03 leaves a scriptless project's checkpoint and install decisions alone", () => {
+    // A project with a `tests` script but no typecheck or lint, binding
+    // nothing: no acceptance declaration, so nothing about today changes.
+    const project = withLockfile(makeProject({ test: "vitest" }));
+    expect(
+      acceptanceGateDeclaration({
+        absSliceDir: sliceWithBindings(["tests"]),
+        plan: resolveAcceptancePlan(project),
+      }),
+    ).toBeUndefined();
+    // The declared cost (#86 B-01) is stamped on every phase declaration,
+    // commandless ones included: the cheap-gate catalog reads it, and a gate
+    // with no script is trivially cheap rather than unpriced.
+    expect(resolvePreQAGateDeclarations(project)).toEqual([
+      { id: "typecheck", stage: "base", required: false, expectedCostMs: 20_000 },
+      { id: "lint", stage: "base", required: false, expectedCostMs: 20_000 },
+    ]);
+    // And a project with no test runner at all resolves no plan, so a bound
+    // behavior cannot even reach lock-time validation.
+    expect(resolveAcceptancePlan(makeProject({ lint: "eslint" }))).toBeNull();
   });
 
   it("matches when all three steps are defined", () => {
@@ -1610,7 +1837,7 @@ describe("generator scope escalation", () => {
    * "focused generator scope revision" run above. This is the one assertion
    * neither could carry.
    */
-  it("refuses the grant when the escalation follows an undeclared edit", async () => {
+  it("P-03: refuses the grant when the escalation follows an undeclared edit", async () => {
     const repo = makeRepo();
     const slug = "laundered-scope-escalation";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -2036,6 +2263,32 @@ describe("generator scope escalation", () => {
       ).toContain("src/smuggled-05.ts");
     });
 
+    it("B-07: never grants the accepted-pair attestation when the integrity check refused", () => {
+      // The attestation the file-scope gate consumes is earned in exactly one
+      // place — after `mutatedAcceptedContractFiles` finds nothing (#195). This
+      // slice's generator rewrote both pair files, so the check threw and the
+      // latch stayed false for the attempt. Nothing downstream could have
+      // received `acceptedPairIntact: true`: the phase that declares the scope
+      // gate was never reached at all, so no `scope` outcome exists for the
+      // slice. A reordering that set the latch before the check would show up
+      // here as a scope gate running on a tree whose lock the generator wrote.
+      const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+      const runDir = readdirSync(runRoot)
+        .map((name) => join(runRoot, name))
+        .find((path) => statSync(path).isDirectory())!;
+      const gateOutcomes = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter(
+          (event) =>
+            event.type === "gate-outcome" &&
+            event.ghIssue === slices[4]!.ghIssue,
+        );
+
+      expect(gateOutcomes.map(({ gateId }) => gateId)).not.toContain("scope");
+    });
+
     it("does not resume generation after the additive guard refuses", () => {
       // The dropped-path revision fails before the fresh generator: the only
       // generator invocation is the one that raised the escalation.
@@ -2270,6 +2523,40 @@ describe("focused generator scope revision", () => {
     );
     expect(freshGeneratorPrompt).toContain("qa-review-r1-a1.json");
     expect(freshGeneratorPrompt).toContain("qa-report-r1-a1.md");
+  });
+
+  /**
+   * The one spawned assertion this slice adds (#85, AGENTS.md ladder): an `it`
+   * on the pre-QA evidence this scenario already produces, rather than a new
+   * spawned scenario. The fixture manifest binds its behaviors to `tests`, so
+   * nothing binds the acceptance gate — which is exactly the case P-03 is
+   * about, and the case every existing project is in.
+   */
+  it("P-03 leaves the pre-QA gate outcomes untouched for a slice binding nothing", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const events = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const gateOutcomes = events.filter(
+      (event) => event.type === "gate-outcome",
+    );
+
+    // The gate ran — otherwise this assertion would pass vacuously.
+    expect(gateOutcomes.length).toBeGreaterThan(0);
+    expect(new Set(gateOutcomes.map(({ gateId }) => gateId))).not.toContain(
+      ACCEPTANCE_GATE_ID,
+    );
+    expect(
+      events.filter((event) => event.type === "behavior-coverage"),
+    ).toEqual([]);
+    // No empty section in the artifact an operator reads, either.
+    expect(
+      readFileSync(join(runDir, "run-summary.md"), "utf-8"),
+    ).not.toContain("## Behavior Coverage");
   });
 
   it("resumes generation in the same implementation round", () => {
@@ -4100,7 +4387,11 @@ describe("round-scoped contract feedback", () => {
     expect(plannerPrompts[1]).toContain(
       "Clear when: B-01 names a command that fails when the header is absent",
     );
-    expect(evaluatorPrompts[1]).toContain('"id": "B-01"');
+    // ADR 0062: the revision round names the pair at its worktree path
+    // instead of inlining it, so the manifest body is no longer in the prompt.
+    expect(evaluatorPrompts[1]).toContain(
+      `- \`${ctx.relSliceDir}/acceptance-manifest.json\``,
+    );
     expect(evaluatorPrompts[1]).toContain("tests: pnpm run test:run");
     expect(evaluatorPrompts[1]).toContain('"position": "CONDITION_MET"');
     expect(plannerPrompts[2]).toContain("[F-02] BLOCKING OPEN");
@@ -5044,10 +5335,13 @@ describe("round-scoped contract feedback", () => {
       expect(errorSpy.mock.calls.flat().join(" ")).toContain(
         "granting final contract response",
       );
+      // The provider-qualified run-state file: durable lineage lives beside
+      // this run's scope, slice records and resume counters, not in a second
+      // file keyed on the bare PRD slug (#178).
       expect(
         JSON.parse(
           readFileSync(
-            join(repo, ".afk", "state", `${slug}.json`),
+            join(repo, ".afk", "state", `${slug}-stub.json`),
             "utf-8",
           ),
         ),
@@ -5446,7 +5740,12 @@ describe("contract review fails closed", () => {
         "NEGOTIATING",
       );
       expect(plannerRounds()).toBe(1);
-      expect(evaluatorRounds()).toBe(1);
+      // The exit is unchanged; what precedes it is not. A written-but-refused
+      // artifact earns exactly one repair pass carrying the validation error
+      // (ADR 0061), and the stub repeats the same defect, so the slice still
+      // fails closed on it. An artifact that was never written earns none:
+      // there is no validation error to hand back.
+      expect(evaluatorRounds()).toBe(artifact === null ? 1 : 2);
     },
     60_000,
   );
@@ -5645,6 +5944,231 @@ describe("contract review fails closed", () => {
       ],
     });
   });
+
+  // New spawned scenario, deliberately: no existing fixture starts a
+  // negotiation with durable lineage already in run state, which is the state
+  // both defects need. It carries all four assertions of the
+  // negotiation-reliability track so the wave cost is paid once — the
+  // informing side of durable lineage in the round-1 planner and evaluator
+  // prompts (#178), a repair pass for each refused artifact (#188 defect 1),
+  // and the state file the lineage is written back to (#178 comment).
+  it(
+    "informs a restarted round 1 of durable lineage and repairs refused negotiation artifacts",
+    async () => {
+      const repo = makeRepo();
+      const slug = "negotiation-reliability";
+      const { prdDir, specsDir } = writePrdFixture(repo, slug);
+      const slice: Slice = {
+        number: "01",
+        ghIssue: "9178",
+        title: "Negotiation reliability",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      };
+      // What the operator's restart leaves behind: a blocker the previous
+      // attempt never closed, persisted under the provider-qualified run slug.
+      const carried = {
+        id: "F-01",
+        severity: "BLOCKING" as const,
+        behaviorIds: ["B-01"],
+        evidence: '"the contract as written"',
+        expected: "an unambiguous identity-precedence rule",
+        observed: "two rules that contradict each other",
+        clearCondition: "the contract states one precedence rule",
+        state: "OPEN" as const,
+        revisionCitation: null,
+      };
+      saveContractFindingLineage(
+        {
+          repoRoot: repo,
+          runSlug: `${slug}-stub`,
+          ghIssue: slice.ghIssue,
+        },
+        advanceContractFindingLineage(emptyContractFindingLineage(), {
+          version: 2,
+          verdict: "REVISE",
+          findings: [carried],
+        }).lineage,
+      );
+
+      const plannerPrompts: string[] = [];
+      const evaluatorPrompts: string[] = [];
+      let plannerInvocations = 0;
+      let evaluatorInvocations = 0;
+      const provider: AgentProvider = {
+        name: "stub",
+        async invoke(opts: InvokeOptions): Promise<InvokeResult> {
+          const artifactDir = findSliceArtifactDir(opts.cwd, slice.number);
+          if (!artifactDir) throw new Error("slice artifact directory missing");
+          if (opts.role === "explorer") {
+            writeFileSync(
+              join(artifactDir, "context.md"),
+              validExplorerContext(),
+              "utf-8",
+            );
+          } else if (opts.role === "planner") {
+            plannerInvocations++;
+            plannerPrompts.push(opts.prompt!);
+            // Round 2 is invocation 2 — an evaluator repair pass costs no
+            // planner dispatch. It commits the exact PRD 072 planner refusal, a
+            // response declaring the wrong round; invocation 3 is its repair.
+            //
+            // Invocation 3 obeys the repair instruction literally: it rewrites
+            // the refused artifact and *nothing else*. That is the whole point
+            // of the pass, and it is what proves the pass costs no round —
+            // the contract and manifest this round already wrote have to still
+            // be on disk for it, or the missing manifest is routed as an
+            // acceptance-manifest gate objection and the round is spent.
+            if (plannerInvocations === 3) {
+              writeContractResponse(artifactDir, ["F-01"], "CONDITION_MET", 2);
+            } else {
+              writeFileSync(
+                join(artifactDir, "contract.md"),
+                `# Contract\n\n**Status:** NEGOTIATING\n\nInvocation ${plannerInvocations}\n`,
+                "utf-8",
+              );
+              writeAcceptanceManifest(artifactDir);
+              if (plannerInvocations === 2) {
+                writeContractResponse(artifactDir, ["F-01"], "CONDITION_MET", 7);
+              }
+            }
+          } else if (opts.role === "evaluator-contract") {
+            evaluatorInvocations++;
+            evaluatorPrompts.push(opts.prompt!);
+            if (evaluatorInvocations === 1) {
+              // The exact PRD 072 evaluator refusal: a severity outside the
+              // schema. Terminal before ADR 0061.
+              writeFileSync(
+                join(artifactDir, "contract-review.json"),
+                JSON.stringify({
+                  version: 2,
+                  verdict: "REVISE",
+                  findings: [{ ...carried, severity: "MINOR" }],
+                }),
+                "utf-8",
+              );
+            } else if (evaluatorInvocations === 2) {
+              writeContractReview(artifactDir, "REVISE", [carried]);
+            } else {
+              writeContractReview(artifactDir, "ACCEPT", [
+                { ...carried, state: "RESOLVED" },
+              ]);
+            }
+          }
+          return { exitCode: 0, stdout: "", stats: {} };
+        },
+      };
+      const dag = buildDAG([slice]);
+      const featBranch = `feat-stub/${slug}`;
+      git(repo, ["branch", featBranch]);
+      const logger = new Logger(repo, `${slug}-stub`);
+      const ctx = makeSliceContext(
+        {
+          repoRoot: repo,
+          prdSlug: slug,
+          prdDir,
+          specsDir,
+          dag,
+          provider,
+          maxContractRounds: 2,
+        },
+        slice,
+        logger,
+        featBranch,
+        "- README.md",
+        "pnpm test",
+      );
+
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      let outcome: NegotiateOutcome;
+      try {
+        outcome = await runSliceNegotiate(ctx);
+      } finally {
+        errorSpy.mockRestore();
+      }
+
+      // #178: the round-1 planner is told what the round-1 review will be
+      // enforced against, so the contract can address it before the evaluator
+      // dispositions it.
+      expect(plannerPrompts[0]).toContain("# Carried open findings");
+      expect(plannerPrompts[0]).toContain("[F-01]");
+      expect(plannerPrompts[0]).toContain("the contract states one precedence rule");
+      // #178: so is the round-1 evaluator, whose history note had no caller.
+      expect(evaluatorPrompts[0]).toContain("# Durable finding lineage");
+      expect(evaluatorPrompts[0]).toContain("[F-01]");
+      expect(evaluatorPrompts[0]).toContain(
+        "fresh attempt with durable finding lineage",
+      );
+
+      // #188 defect 1: each refused artifact bought one repair pass carrying
+      // the verbatim validation error, not an ERROR for the slice.
+      expect(evaluatorPrompts[1]).toContain("repair pass, not a new round");
+      expect(evaluatorPrompts[1]).toContain(
+        "severity must be BLOCKING or ADVISORY",
+      );
+      expect(plannerPrompts[2]).toContain("repair pass, not a new round");
+      expect(plannerPrompts[2]).toContain(
+        "contract-response.json must declare round 2",
+      );
+      // A repair pass is not a round: the two rounds still ran one planner and
+      // one evaluator dispatch each, plus exactly one repair pass apiece.
+      expect(plannerInvocations).toBe(3);
+      expect(evaluatorInvocations).toBe(3);
+      expect(outcome.phase).toBe("LOCKED");
+      // ...and the planner repair pass left the round's artifacts alone, as it
+      // was told to. Nothing deleted the manifest under it, so no
+      // acceptance-manifest gate objection was fabricated against a round that
+      // had already produced a valid one. (LOCKED above is the primary guard:
+      // a deleted manifest refuses round 2, which is the last allowed round,
+      // and the slice would ESCALATE instead.)
+      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(
+        "contract lock refused before evaluation",
+      );
+      expect(
+        existsSync(join(ctx.absSliceDir, "acceptance-manifest.json")),
+      ).toBe(true);
+
+      // Every attempt of the round is archived, repair passes included, under
+      // a numbering that continues rather than colliding.
+      const reviews = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-01",
+        "reviews",
+      );
+      expect(
+        readdirSync(reviews).filter((name) => name.endsWith(".json")).sort(),
+      ).toEqual([
+        "contract-review-r1-a1.json",
+        "contract-review-r1-a2-record.json",
+        "contract-review-r1-a2.json",
+        "contract-review-r2-a1-record.json",
+        "contract-review-r2-a1.json",
+      ]);
+
+      // #178 comment: lineage is written back beside the rest of this run's
+      // state — scope, slice records, resume counters — not into a second file
+      // keyed on the bare PRD slug, where `afk clean-failed` and an operator
+      // editing "the" state file could not reach it.
+      expect(
+        loadRunState(repo, `${slug}-stub`).contractConvergence,
+      ).toMatchObject({
+        "9178": {
+          revision: 3,
+          findings: { "F-01": { finding: { state: "RESOLVED" } } },
+        },
+      });
+      expect(
+        loadRunState(repo, slug).contractConvergence,
+      ).toBeUndefined();
+    },
+    60_000,
+  );
 
   // New spawned scenario, deliberately: this state combines provider death
   // after a partial evaluator artifact, successful retry archival, and a

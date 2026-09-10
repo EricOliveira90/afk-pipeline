@@ -57,17 +57,21 @@ Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
 ```bash
-afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm typecheck && pnpm test:fast"
+afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm run typecheck && pnpm test:fast"
 ```
 
 (Substitute `afk`/`afk-claude` for other backends; keep the flag.)
 
-**Typecheck is mandatory in the command.** Vitest strips types without
-checking them: run 5 of the PRD 1 self-runs used the bare `test:fast`
-form, the generator drove 8 commits to green over code that did not
-compile, and the slice died to a misclassified gate failure (#120).
-This is the interim form until the command is derived from the gate
-catalog (`docs/specs/afk-v2-plan.md` §3 item 2).
+**Typecheck is mandatory in the command, and now enforced.** Vitest strips
+types without checking them: run 5 of the PRD 1 self-runs used the bare
+`test:fast` form, the generator drove 8 commits to green over code that did
+not compile, and the slice died to a misclassified gate failure (#120).
+Since #86 the command is *derived* from the cheap-gate catalog — with no
+`--test-command` at all this repo gets `pnpm run typecheck` — and an
+override is checked against the catalog's required gate **ids**: it may add a
+faster subset, but dropping `typecheck` is refused before the run starts.
+`CLAUDE.md` carries the same literal command, and
+`src/orchestrator.test.ts` reads it out of both documents.
 
 Why the flag at all: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
 shipped `--test-command`, but the flag only helps if the launch uses
@@ -148,11 +152,18 @@ spawned scenario. In order:
    differs and no existing one can reach it. Say so in a comment, so the
    next reader knows the cost was deliberate.
 
-`pnpm test` ends with `pnpm test:budgets`, a per-suite wall-clock budget
-(`suite-budgets.json`). If it goes red, the fix is normally to move the
-assertion up this list — not to raise the number. Raising one is fine
-when the cost is genuinely necessary, but record the measurement in the
-commit message.
+`pnpm test:ratchet` runs the suites and then `pnpm test:budgets`, a
+per-suite wall-clock budget (`suite-budgets.json`). If it goes red, the fix
+is normally to move the assertion up this list — not to raise the number.
+Raising one is fine when the cost is genuinely necessary, but record the
+measurement in the commit message.
+
+Run `pnpm test:ratchet` when you add a spawned scenario. It is not part of
+`pnpm test`, because `pnpm test` is what AFK's deterministic gates and its
+pre-ship sanity gate run, and a wall-clock number is a measurement of the
+host rather than of the code (ADR 0063). An agent inside a run cannot make
+the machine faster, so a red budget there only teaches it to raise the
+number — which is what happened to slice #78 and to run 3's babysitter.
 
 Record it in `suite-budgets.json` as well, as a block named
 `_measured<YYYY_MM_DD>[_<qualifier>]@<branch>` — the branch you measured

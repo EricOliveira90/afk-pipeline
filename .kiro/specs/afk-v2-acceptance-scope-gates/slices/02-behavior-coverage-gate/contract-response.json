@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-03 now states the filtered-run counting semantics with a cited source and drops numTotalTests as the match count: matched is numPassedTests + numFailedTests, matched 0 is untested, numFailedTests > 0 is failed, PASS is matched >= 1 with numFailedTests === 0. The citation is this tree's vitest 3.2.4 — @vitest/runner's interpretTaskModes sets a non-matching test's mode to \"skip\" while leaving it collected (chunk-hooks.js:1031-1033, called with config.testNamePattern at :1212), and the JSON reporter counts numTotalTests as getTests(files).length while filtering numPassedTests/numFailedTests on state \"pass\"/\"fail\" (vitest/dist/chunks/index.VByaPkjc.js:1678-1782) — so numTotalTests never reaches 0 under a filter and both D8 verdicts would be unreachable; B-03 records that this keeps D8's semantics and refines only the field read. The same reporter source shows the document is logged to stdout as one JSON.stringify line when no outputFile is set, so a no-match run still emits a document: B-05 now assigns the no-match case to the untested FAIL/COMMAND branch and limits FAIL/CONFIGURATION to exactly an unsupported matcher and stdout with no reporter document. B-03's observableResult pins the fixtures to documents transcribed verbatim from three real filtered runs — match-and-pass, match-and-fail, no-match — pasted into src/acceptance-gate.test.ts, so the suite still spawns no vitest and the file scope is unchanged."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "B-02 now states the resolution order explicitly: a declared gatePolicy.acceptance wins and needs no tests script; the derived baseline (pnpm exec vitest run --reporter=json --testNamePattern {behaviorId}, matcher vitest-json) applies only when the member is absent and resolveSanityPlan yields a tests step; with neither there is no plan. B-04 substitutes each bound ID into every {behaviorId} occurrence of B-02's plan, so the spawned argv is that resolved plan's. B-02's observableResult asserts the plan, the per-behavior argv and the matcher under both sources across four temp-root cases — declared with a tests script, declared without, baseline only, neither — and B-07 adds that afk.config.json declares the member with the anchors shape, making the declared branch this repository's live one, with loadGatePolicy on the repo root plus B-02's declared case as its observable result."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "B-02 now names the mechanism by which the policy reaches the lock-time site: src/base-gates.ts exports the bindable catalog and reads the policy itself through loadGatePolicy(cwd) (src/gate-policy.ts:325), so the catalog is the three base declarations plus { id: \"acceptance:behaviors\", command, args } from whichever plan resolved — declared or derived — and no entry only when neither resolved. All six resolveBaseGateDeclarations(ctx.worktreeDir) sites in src/orchestrator.ts (:1335, :1375, :2754, :2861, :3257, :3325) call that catalog, so validateAcceptanceManifestBindings (src/acceptance-manifest.ts:360-392) accepts the binding under either source and formatBaseGateCatalog displays the ID with its command. B-02's observableResult includes the declared-with-a-tests-script and declared-without-a-tests-script cases, asserting the catalog entry and display, the accepted binding and the still-refused undeclared ID. P-01 records that the entry lives only in the new bindable catalog, so src/adopt-command.ts:582, the wave and orchestrator fixtures and src/gate-runner.test.ts need no edit, and P-02 that classifyDeclaration's exactly-one-of rule still holds — the catalog entry carries command, the declaration carries run."
+    },
+    {
+      "findingId": "F-04",
+      "position": "CONDITION_MET",
+      "evidence": "The widening is now keyed on bound work, not on plan presence: B-04 returns no declaration when the locked manifest binds no behavior to acceptance:behaviors, and B-06 states that the call site materializes the checkpoint and runs the prepare install only when that declaration is present — by B-04 at least one bound behavior — so the two predicates at :5526-5535 widen on bound work, never on plan presence. B-06's observableResult covers both widened predicates. P-03 keeps the unchanged case explicit: a slice binding nothing appends no acceptance declaration, so its checkpoint materialization, prepare install and outcomes stay today's on every project, including one with a tests script but no typecheck or lint script (named in P-03's given)."
+    },
+    {
+      "findingId": "F-05",
+      "position": "CONDITION_MET",
+      "evidence": "The unproducible clause is out of B-07's observableResult, which now claims only the executable evidence — loadGatePolicy on the repo root returns the member and B-02's declared case resolves it as the plan — and the Gates row and the 150-line cap are a Definition of done item: \"afk.config.json carries the declared member; ARCHITECTURE.md's Gates row names src/acceptance-gate.ts and the file stays inside its 150-line cap.\" No line-cap assertion is claimed in src/, since none exists."
+    },
+    {
+      "findingId": "F-06",
+      "position": "CONDITION_MET",
+      "evidence": "Measured after the revision: contract.md 10,011 bytes + acceptance-manifest.json 9,885 bytes = 19,896 combined, 104 bytes under the anchors file's 20,000-byte budget. The added statements for F-01 through F-05 were paid for by deleting restated rationale, not obligations: the scope lock no longer re-derives B-01 through B-06, the test plan no longer restates the manifest's observableResults, the Definition of done no longer re-lists behavior clauses, and B-02's six orchestrator line numbers, B-03's reporter narration and B-05's ADR 0041 gloss were compressed to their citations. Every behavior ID, the 14-path file scope, the migration count of 0 and every gate binding are unchanged."
+    }
+  ]
+}

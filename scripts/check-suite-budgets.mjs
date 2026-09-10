@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Per-suite time budget check — the ratchet on `pnpm test`.
+ * Per-suite time budget check — the ratchet on `pnpm test:ratchet`.
  *
  * The integration suites spawn real git processes, so every new scenario
  * that spawns a pipeline costs seconds of wall clock forever. Nothing used
@@ -8,6 +8,15 @@
  * reasonable-looking test at a time. Each `test:*` script now records its
  * own wall clock (see `timed-suite.mjs`); this compares those against
  * `suite-budgets.json` and fails when one is over.
+ *
+ * Deliberately NOT part of `pnpm test`, which is the command AFK's own
+ * deterministic gates and its pre-ship sanity gate run (ADR 0063). A budget
+ * is a measurement of the host, so an agent inside a run cannot act on a red
+ * one: it cannot make the machine faster, and the only move left to it is to
+ * raise the number. Wire it to a human or to CI, where the reader can
+ * actually decide. `suite-budgets.json` records what the other arrangement
+ * cost — slice #78 took a blocking Major finding for a 130.5s `fast` against
+ * a 110s budget with zero failing tests.
  *
  * Raising a budget is a normal thing to do — but do it with a recorded
  * measurement in the commit message, not because the number went red.

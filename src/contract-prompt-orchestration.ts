@@ -230,6 +230,27 @@ export function assembleAdjudicationPlannerPrompt(input: {
   );
 }
 
+/**
+ * Compose the one control-plane block a planner revision may carry. A gate
+ * objection and an artifact repair pass can coincide — the round that answers
+ * the objection is the round whose response artifact was refused — so they are
+ * concatenated rather than one silently replacing the other.
+ */
+function plannerControlSituation(
+  pendingObjection: string | null,
+  repairInstruction: string | null,
+): string | undefined {
+  const blocks = [
+    pendingObjection === null
+      ? null
+      : `The pipeline REJECTED the previous contract before ` +
+        `any code was generated:\n\n${pendingObjection}\n\n` +
+        `Resolve exactly that in this revision.`,
+    repairInstruction,
+  ].filter((block): block is string => block !== null);
+  return blocks.length === 0 ? undefined : blocks.join("\n\n");
+}
+
 export function assembleNegotiationPlannerPrompt(input: {
   context: PromptAssemblyContext;
   repoRoot: string;
@@ -239,14 +260,22 @@ export function assembleNegotiationPlannerPrompt(input: {
   currentContract: string;
   currentAcceptanceManifest: string;
   findings: readonly ContractReviewFinding[];
+  /** Durable open findings a fresh round 1 must already address (#178). */
+  carriedFindings?: readonly ContractReviewFinding[];
   resolvedFindings?: readonly ContractReviewFinding[];
   pendingObjection: string | null;
+  /** Exact validation error of a refused artifact this pass must repair. */
+  repairInstruction?: string | null;
   contractResponseInstructions: string;
   migrationReservation: string;
   baseGateCatalog: string;
   inlineSizeBudgetBytes?: number;
 }): PreparedEnvelopePrompt {
   const { context } = input;
+  const controlSituation = plannerControlSituation(
+    input.pendingObjection,
+    input.repairInstruction ?? null,
+  );
   const request: PlannerPromptRequest = input.useInitialEnvelope
     ? {
         mode: "initial",
@@ -258,6 +287,9 @@ export function assembleNegotiationPlannerPrompt(input: {
           round: context.round,
           sliceBody: input.sliceBody,
           explorerContext: input.explorerContext,
+          ...(input.carriedFindings === undefined
+            ? {}
+            : { carriedFindings: input.carriedFindings }),
           migrationReservation: input.migrationReservation,
           baseGateCatalog: input.baseGateCatalog,
         },
@@ -276,14 +308,7 @@ export function assembleNegotiationPlannerPrompt(input: {
           ...(input.resolvedFindings === undefined
             ? {}
             : { resolvedFindings: input.resolvedFindings }),
-          ...(input.pendingObjection === null
-            ? {}
-            : {
-                controlSituation:
-                  `The pipeline REJECTED the previous contract before ` +
-                  `any code was generated:\n\n${input.pendingObjection}\n\n` +
-                  `Resolve exactly that in this revision.`,
-              }),
+          ...(controlSituation === undefined ? {} : { controlSituation }),
           contractResponseInstructions: input.contractResponseInstructions,
           migrationReservation: input.migrationReservation,
           baseGateCatalog: input.baseGateCatalog,
@@ -305,6 +330,13 @@ export function assembleNegotiationEvaluatorPrompt(input: {
   baseGateCatalog: string;
   explorerContext: string;
   previousFindings: readonly ContractReviewFinding[];
+  /**
+   * The durable-lineage block, rendered by the round lifecycle. Present
+   * whenever lineage carries a revision, initial envelope included (#178).
+   */
+  durableLineage?: string | null;
+  /** Exact validation error of a refused review this pass must repair. */
+  repairInstruction?: string | null;
   plannerResponse: ContractResponse | null;
   revisions: ContractRevisionArtifacts | null;
   inlineSizeBudgetBytes?: number;
@@ -317,6 +349,13 @@ export function assembleNegotiationEvaluatorPrompt(input: {
     acceptanceManifest: input.acceptanceManifest,
     baseGateCatalog: input.baseGateCatalog,
     explorerContext: input.explorerContext,
+    ...(input.durableLineage === undefined || input.durableLineage === null
+      ? {}
+      : { durableLineage: input.durableLineage }),
+    ...(input.repairInstruction === undefined ||
+    input.repairInstruction === null
+      ? {}
+      : { controlSituation: input.repairInstruction }),
   };
   return assembleContractEvaluatorPrompt(
     input.useInitialEnvelope

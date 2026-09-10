@@ -9,12 +9,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { resolveBaseGateDeclarations } from "./base-gates.js";
+import { runCandidateGatePhase } from "./candidate-gate-phase.js";
 import {
   createCandidateCheckpoint,
   readGateEvidence,
   runGates,
   verifyGateEvidence,
+  GATE_EVIDENCE_VERSION,
+  type GateDeclaration,
+  type GateFindings,
 } from "./gate-runner.js";
 import { rmDirWithRetry } from "./test-support.js";
 
@@ -620,7 +625,8 @@ describe("runGates", () => {
       onOutput: (gateId, text) => output.push(`${gateId}:${text}`),
     });
 
-    expect(result.evidence.version).toBe(1);
+    // B-04: a fresh document stamps the current version, now 3.
+    expect(result.evidence.version).toBe(3);
     expect(result.evidence.results.map(({ gateId }) => gateId)).toEqual([
       "typecheck",
       "tests",
@@ -710,6 +716,853 @@ describe("runGates", () => {
       failureKind: "CONFIGURATION",
       exitCode: null,
     });
+  });
+
+  it("B-01: awaits an in-process run ahead of the cwd, prepare and restore branches", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const inProcess: GateDeclaration = {
+      id: "scope",
+      stage: "deterministic",
+      required: true,
+      run: () => ({
+        status: "FAIL",
+        failureKind: "COMMAND",
+        detail: "1 changed path(s) are outside the accepted file scope: src/x.ts",
+        findings: { outOfScopePaths: ["src/x.ts"] },
+      }),
+    };
+    const commandGate: GateDeclaration = {
+      id: "tests",
+      stage: "base",
+      required: true,
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+    };
+    const shared = {
+      treeId,
+      evidenceDir,
+      declarations: [inProcess, commandGate],
+      // A prepare the candidate broke: every *command* declaration carries its
+      // FAIL/CONFIGURATION, and the in-process gate must still report its own
+      // answer, because no toolchain was ever needed to reach it.
+      prepare: {
+        id: "install",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          "console.error('ERR_PNPM_OUTDATED_LOCKFILE lockfile is not up to date');" +
+            "process.exit(1)",
+        ],
+      },
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    } as const;
+
+    const withPrepare = await runGates({ ...shared, cwd });
+
+    expect(withPrepare.evidence.results[0]).toMatchObject({
+      gateId: "scope",
+      stage: "deterministic",
+      status: "FAIL",
+      failureKind: "COMMAND",
+      // Never a command's exit code, and never a substituted tree id.
+      exitCode: null,
+      treeId,
+      findings: { outOfScopePaths: ["src/x.ts"] },
+    });
+    expect(withPrepare.evidence.results[0]!.detail).toContain("src/x.ts");
+    expect(withPrepare.evidence.results[0]!.durationMs).toBeGreaterThanOrEqual(0);
+    expect(withPrepare.evidence.results[0]!.startedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T/,
+    );
+    expect(withPrepare.evidence.results[0]!.endedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T/,
+    );
+    expect(withPrepare.evidence.results[1]).toMatchObject({
+      gateId: "tests",
+      status: "FAIL",
+      failureKind: "CONFIGURATION",
+    });
+    // The paths a red gate names travel in the log, because the repair round
+    // reads the log rather than the JSON.
+    expect(
+      readFileSync(
+        join(evidenceDir, withPrepare.evidence.results[0]!.logArtifactId),
+        "utf-8",
+      ),
+    ).toContain("src/x.ts");
+
+    // An unmaterialized post-QA checkpoint has no directory at all. The
+    // command gate is INFRASTRUCTURE for that; the in-process gate is not.
+    const missing = await runGates({
+      ...shared,
+      cwd: join(cwd, "..", "never-materialized"),
+    });
+
+    expect(
+      missing.evidence.results.map(({ gateId, status }) => ({ gateId, status })),
+    ).toEqual([
+      { gateId: "scope", status: "FAIL" },
+      { gateId: "tests", status: "INFRASTRUCTURE" },
+    ]);
+  });
+
+  it("B-01: records nothing for an in-process gate once the run is cancelled", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "scope",
+          stage: "deterministic",
+          required: true,
+          run: () => {
+            throw new Error("must not run after cancellation");
+          },
+        },
+      ],
+      signal: controller.signal,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    // Same rule as the command path: a cancelled run records no result rather
+    // than inventing one.
+    expect(result.evidence.results).toEqual([]);
+  });
+
+  it("B-02: records a throwing and a rejecting run as infrastructure and keeps going", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const declarations: GateDeclaration[] = [
+      {
+        id: "throws",
+        stage: "deterministic",
+        required: true,
+        run: () => {
+          throw new Error("tree 0000 could not be diffed");
+        },
+      },
+      {
+        id: "rejects",
+        stage: "deterministic",
+        required: true,
+        run: () => Promise.reject(new Error("acceptance-manifest.json is missing")),
+      },
+      {
+        id: "still-runs",
+        stage: "deterministic",
+        required: true,
+        run: () => ({ status: "PASS", failureKind: null }),
+      },
+    ];
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    // INFRASTRUCTURE, not FAIL: a check that could not read the world is the
+    // branch no generator edit repairs (ADR 0041).
+    expect(
+      result.evidence.results.map(({ gateId, status, failureKind, detail }) => ({
+        gateId,
+        status,
+        failureKind,
+        detail,
+      })),
+    ).toEqual([
+      {
+        gateId: "throws",
+        status: "INFRASTRUCTURE",
+        failureKind: null,
+        detail: "tree 0000 could not be diffed",
+      },
+      {
+        gateId: "rejects",
+        status: "INFRASTRUCTURE",
+        failureKind: null,
+        detail: "acceptance-manifest.json is missing",
+      },
+      {
+        gateId: "still-runs",
+        status: "PASS",
+        failureKind: null,
+        detail: undefined,
+      },
+    ]);
+    // The evidence document is still written, and every declaration still
+    // binds to exactly one result — the check `assertGateEvidenceReleasesEvaluation`
+    // makes positionally.
+    expect(existsSync(result.evidencePath)).toBe(true);
+    expect(result.evidence.results).toHaveLength(declarations.length);
+    expect(verifyGateEvidence(result.artifact)).toEqual(result.evidence);
+  });
+
+  it("B-03: round-trips a findings payload through the evidence document", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    // All four D5 members, so `pnpm typecheck` proves the shape and the reader
+    // proves it survives a JSON round trip. Only `outOfScopePaths` is
+    // populated by a gate this slice ships; the rest belong to later slices.
+    const findings: GateFindings = {
+      outOfScopePaths: ["src/undeclared.ts"],
+      deletedTests: [],
+      protectedChanges: [],
+      appliedWaivers: [
+        {
+          riskClass: "deleted-test",
+          path: "src/legacy.test.ts",
+          author: "operator",
+          reason: "superseded by src/legacy-split.test.ts",
+        },
+      ],
+    };
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "scope",
+          stage: "deterministic",
+          required: true,
+          run: () => ({ status: "FAIL", failureKind: "COMMAND", findings }),
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results[0]!.findings).toEqual(findings);
+    expect(readGateEvidence(result.evidencePath)).toEqual(result.evidence);
+  });
+
+  it("B-04: accepts version 1, 2 and 3 evidence, refuses version 4 and findings under version 1", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "scope",
+          stage: "deterministic",
+          required: true,
+          run: () => ({
+            status: "FAIL",
+            failureKind: "COMMAND",
+            findings: { outOfScopePaths: ["src/undeclared.ts"] },
+          }),
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(GATE_EVIDENCE_VERSION).toBe(3);
+    expect(result.evidence.version).toBe(3);
+    expect(readGateEvidence(result.evidencePath)).toEqual(result.evidence);
+
+    // A version-2 document — the shape every run between #195 and #86 wrote —
+    // still reads: version 3 only added optional markers.
+    const v2Path = join(evidenceDir, "version-2.json");
+    writeFileSync(
+      v2Path,
+      JSON.stringify({ ...result.evidence, version: 2 }),
+      "utf-8",
+    );
+    expect(readGateEvidence(v2Path).version).toBe(2);
+
+    // A version-1 document a run before this slice wrote still reads: an
+    // evidence version bump that stranded the journals mid-run would make an
+    // in-flight resume unreadable.
+    const [scope, ...rest] = result.evidence.results;
+    const legacy = {
+      ...result.evidence,
+      version: 1,
+      results: [{ ...scope!, findings: undefined }, ...rest],
+    };
+    const legacyPath = join(evidenceDir, "version-1.json");
+    writeFileSync(legacyPath, JSON.stringify(legacy), "utf-8");
+    expect(readGateEvidence(legacyPath).version).toBe(1);
+
+    // But a version-1 document carrying findings is not a document any
+    // version of this code wrote, so it is refused rather than read
+    // optimistically.
+    const legacyWithFindings = join(evidenceDir, "version-1-findings.json");
+    writeFileSync(
+      legacyWithFindings,
+      JSON.stringify({ ...result.evidence, version: 1 }),
+      "utf-8",
+    );
+    expect(() => readGateEvidence(legacyWithFindings)).toThrow(
+      /version 1 cannot carry findings/i,
+    );
+
+    const future = join(evidenceDir, "version-4.json");
+    writeFileSync(
+      future,
+      JSON.stringify({ ...result.evidence, version: 4 }),
+      "utf-8",
+    );
+    expect(() => readGateEvidence(future)).toThrow(
+      /unsupported gate evidence version: 4/i,
+    );
+  });
+
+  it("[behavior:B-03] reuses a cached PASS for an identical tree and says so in the evidence and the log", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    const cache = { path: join(root, "gate-cache.json"), enabled: true };
+    // A gate that appends a line per run, so a reused answer is provable by the
+    // command *not* having happened rather than by its status alone.
+    const marker = join(root, "ran.txt");
+    const declarations: GateDeclaration[] = [
+      {
+        id: "typecheck",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          `require("fs").appendFileSync(${JSON.stringify(marker)}, "x")`,
+        ],
+      },
+    ];
+    const common = {
+      treeId,
+      cwd,
+      declarations,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+      cache,
+    };
+
+    const first = await runGates({ ...common, evidenceDir });
+    expect(first.evidence.results[0]).toMatchObject({ status: "PASS" });
+    expect(first.evidence.results[0]!.cacheReused).toBeUndefined();
+    expect(readFileSync(marker, "utf-8")).toBe("x");
+
+    const output: string[] = [];
+    const second = await runGates({
+      ...common,
+      evidenceDir: join(root, "evidence-2"),
+      onOutput: (gateId, text) => output.push(`${gateId}:${text}`),
+    });
+    // Same tree, same command: the answer is reused and the command never ran
+    // a second time.
+    expect(readFileSync(marker, "utf-8")).toBe("x");
+    expect(second.evidence.results[0]).toMatchObject({
+      status: "PASS",
+      failureKind: null,
+      exitCode: 0,
+      cacheReused: true,
+    });
+    // Reuse is explicit wherever the result is read, not inferable only from a
+    // suspiciously short duration.
+    expect(second.evidence.results[0]!.detail).toContain("cached PASS");
+    expect(output.join("")).toContain("cache reuse");
+    expect(
+      readFileSync(
+        join(root, "evidence-2", second.evidence.results[0]!.logArtifactId),
+        "utf-8",
+      ),
+    ).toContain("cached PASS");
+  });
+
+  it("[behavior:B-04] runs the gate again when the tree changed, and when the cache document is unreadable", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    const cachePath = join(root, "gate-cache.json");
+    const marker = join(root, "ran.txt");
+    const declarations: GateDeclaration[] = [
+      {
+        id: "typecheck",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          `require("fs").appendFileSync(${JSON.stringify(marker)}, "x")`,
+        ],
+      },
+    ];
+    const common = {
+      cwd,
+      declarations,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+      cache: { path: cachePath, enabled: true },
+    };
+
+    await runGates({ ...common, treeId, evidenceDir });
+    expect(readFileSync(marker, "utf-8")).toBe("x");
+
+    // A different tree is a different question, so the gate is paid again.
+    writeFileSync(join(cwd, "tracked.txt"), "edited", "utf-8");
+    git(cwd, ["add", "-A"]);
+    git(cwd, ["commit", "-m", "edit"]);
+    const editedTreeId = git(cwd, ["rev-parse", "HEAD^{tree}"]);
+    expect(editedTreeId).not.toBe(treeId);
+    const other = await runGates({
+      ...common,
+      treeId: editedTreeId,
+      evidenceDir: join(root, "evidence-2"),
+    });
+    expect(other.evidence.results[0]).toMatchObject({ status: "PASS" });
+    expect(other.evidence.results[0]!.cacheReused).toBeUndefined();
+    expect(readFileSync(marker, "utf-8")).toBe("xx");
+
+    // A corrupt document is a miss, never a throw: a cache can make a run
+    // cheaper, and must not be able to make it redder.
+    writeFileSync(cachePath, "{ not json", "utf-8");
+    const corrupt = await runGates({
+      ...common,
+      treeId: editedTreeId,
+      evidenceDir: join(root, "evidence-3"),
+    });
+    expect(corrupt.evidence.results[0]).toMatchObject({ status: "PASS" });
+    expect(corrupt.evidence.results[0]!.cacheReused).toBeUndefined();
+    expect(readFileSync(marker, "utf-8")).toBe("xxx");
+
+    // With no cache options at all the runner behaves exactly as it did before
+    // this slice.
+    const uncached = await runGates({
+      ...common,
+      cache: undefined,
+      treeId: editedTreeId,
+      evidenceDir: join(root, "evidence-4"),
+    });
+    expect(uncached.evidence.results[0]).toMatchObject({ status: "PASS" });
+    expect(readFileSync(marker, "utf-8")).toBe("xxxx");
+  });
+
+  it("[behavior:B-04] never caches a FAIL, an INFRASTRUCTURE result or an in-process PASS it cannot key", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    const cache = { path: join(root, "gate-cache.json"), enabled: true };
+    const marker = join(root, "ran.txt");
+    const common = {
+      treeId,
+      cwd,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+      cache,
+    };
+    const failing: GateDeclaration[] = [
+      {
+        id: "tests",
+        stage: "base",
+        required: true,
+        command: process.execPath,
+        args: [
+          "-e",
+          `require("fs").appendFileSync(${JSON.stringify(marker)}, "x");` +
+            `process.exit(1)`,
+        ],
+      },
+    ];
+
+    const first = await runGates({
+      ...common,
+      declarations: failing,
+      evidenceDir,
+    });
+    expect(first.evidence.results[0]).toMatchObject({
+      status: "FAIL",
+      failureKind: "COMMAND",
+    });
+    const second = await runGates({
+      ...common,
+      declarations: failing,
+      evidenceDir: join(root, "evidence-2"),
+    });
+    // The next round exists to change this tree, so a red answer is re-earned.
+    expect(second.evidence.results[0]!.status).toBe("FAIL");
+    expect(second.evidence.results[0]!.cacheReused).toBeUndefined();
+    expect(readFileSync(marker, "utf-8")).toBe("xx");
+
+    // An in-process gate has no command to key a cache entry on, so it is
+    // simply never consulted and never recorded.
+    let runs = 0;
+    const inProcess: GateDeclaration[] = [
+      {
+        id: "scope",
+        stage: "deterministic",
+        required: true,
+        run: () => {
+          runs += 1;
+          return { status: "PASS", failureKind: null, detail: "clean" };
+        },
+      },
+    ];
+    await runGates({ ...common, declarations: inProcess, evidenceDir: join(root, "e3") });
+    const repeat = await runGates({
+      ...common,
+      declarations: inProcess,
+      evidenceDir: join(root, "e4"),
+    });
+    expect(runs).toBe(2);
+    expect(repeat.evidence.results[0]!.cacheReused).toBeUndefined();
+  });
+
+  it("[behavior:B-07] skips a dependent whose prerequisite failed, naming it, and leaves independent gates alone", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    const marker = join(root, "ran.txt");
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(2)"],
+        },
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: [
+            "-e",
+            `require("fs").appendFileSync(${JSON.stringify(marker)}, "x")`,
+          ],
+          prerequisiteGateIds: ["typecheck"],
+        },
+        {
+          id: "lint",
+          stage: "base",
+          required: false,
+          command: process.execPath,
+          args: ["-e", "process.exit(3)"],
+        },
+        {
+          // A prerequisite that is not part of this phase is not a failure: the
+          // gate cannot be held responsible for a declaration it never saw.
+          id: "docs",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+          prerequisiteGateIds: ["acceptance:behaviors"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results.map((gate) => gate.status)).toEqual([
+      "FAIL",
+      "SKIPPED",
+      "FAIL",
+      "PASS",
+    ]);
+    // The skip is not a red gate and not a silent absence: it names what has
+    // to go green first.
+    expect(result.evidence.results[1]).toMatchObject({
+      gateId: "tests",
+      status: "SKIPPED",
+      failureKind: null,
+      exitCode: null,
+      prerequisiteSkipped: "typecheck",
+    });
+    expect(result.evidence.results[1]!.detail).toContain("typecheck");
+    expect(existsSync(marker)).toBe(false);
+    // `lint` declared no prerequisite, so its own failure still arrives in the
+    // same round as `typecheck`'s rather than being deferred behind it.
+    expect(result.evidence.results[2]).toMatchObject({
+      gateId: "lint",
+      status: "FAIL",
+      failureKind: "COMMAND",
+    });
+    expect(result.evidence.results[3]!.prerequisiteSkipped).toBeUndefined();
+  });
+
+  it("[behavior:B-02] carries a declared environmentSensitive marker into every result that names it", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        },
+        {
+          id: "test:budgets",
+          stage: "base",
+          required: false,
+          environmentSensitive: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(1)"],
+          prerequisiteGateIds: ["tests"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.results[0]!.environmentSensitive).toBeUndefined();
+    expect(result.evidence.results[1]).toMatchObject({
+      gateId: "test:budgets",
+      status: "FAIL",
+      environmentSensitive: true,
+    });
+    // The marker survives the round trip, so the summary and PR body readers
+    // can tell an advisory red row from a blocking one.
+    expect(
+      readGateEvidence(result.evidencePath).results[1]!.environmentSensitive,
+    ).toBe(true);
+  });
+
+  it("B-08: classifies every either-or declaration shape, the derived lint gate included", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    // A project with a test script and no lint script, so the derived lint
+    // declaration is the real commandless optional gate rather than a
+    // hand-written stand-in for one (P-05).
+    writeFileSync(
+      join(cwd, "package.json"),
+      JSON.stringify({
+        name: "either-or-fixture",
+        private: true,
+        scripts: { "test:run": "node -e \"process.exit(0)\"" },
+      }),
+      "utf-8",
+    );
+    const derivedLint = resolveBaseGateDeclarations(cwd).find(
+      (gate) => gate.id === "lint",
+    );
+
+    expect(derivedLint).toMatchObject({ required: false });
+    expect(derivedLint?.command).toBeUndefined();
+    expect(derivedLint?.run).toBeUndefined();
+
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        { id: "required-neither", stage: "base", required: true },
+        { id: "optional-neither", stage: "base", required: false },
+        {
+          id: "both-supplied",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+          run: () => ({ status: "PASS", failureKind: null }),
+        },
+        derivedLint!,
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(
+      result.evidence.results.map(({ gateId, status, failureKind, detail }) => ({
+        gateId,
+        status,
+        failureKind,
+        detail,
+      })),
+    ).toEqual([
+      {
+        gateId: "required-neither",
+        status: "FAIL",
+        failureKind: "CONFIGURATION",
+        detail: "Invalid required gate declaration",
+      },
+      {
+        gateId: "optional-neither",
+        status: "SKIPPED",
+        failureKind: null,
+        detail: "Optional gate has no command",
+      },
+      // Both is a declaration bug, not a preference: silently picking one
+      // would run a check nobody declared.
+      {
+        gateId: "both-supplied",
+        status: "FAIL",
+        failureKind: "CONFIGURATION",
+        detail: "Invalid required gate declaration",
+      },
+      {
+        gateId: "lint",
+        status: "SKIPPED",
+        failureKind: null,
+        detail: "Optional gate has no command",
+      },
+    ]);
+  });
+
+  it("P-05: leaves the derived declarations for a project with no lint script alone", () => {
+    const { cwd } = makeCheckpoint();
+    writeFileSync(
+      join(cwd, "package.json"),
+      JSON.stringify({
+        name: "no-lint-fixture",
+        private: true,
+        scripts: { typecheck: "tsc --noEmit", "test:run": "vitest run" },
+      }),
+      "utf-8",
+    );
+
+    expect(
+      resolveBaseGateDeclarations(cwd).map(
+        ({ id, stage, required, command }) => ({ id, stage, required, command }),
+      ),
+    ).toEqual([
+      { id: "typecheck", stage: "base", required: true, command: "pnpm" },
+      // Still commandless and still optional: the either-or rule in `runGates`
+      // did not turn an absent script into a required declaration.
+      { id: "lint", stage: "base", required: false, command: undefined },
+      { id: "tests", stage: "base", required: true, command: "pnpm" },
+    ]);
+  });
+
+  it("P-01: keeps every command-path branch, detail string and evidence write intact", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const options = {
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "empty-command",
+          stage: "base",
+          required: true,
+          command: "   ",
+        },
+        {
+          id: "tests",
+          stage: "base",
+          required: true,
+          command: process.execPath,
+          args: ["-e", "process.stdout.write('ran'); process.exit(7)"],
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    } as const;
+
+    const first = await runGates(options);
+
+    expect(
+      first.evidence.results.map(
+        ({ gateId, status, failureKind, exitCode, detail, findings }) => ({
+          gateId,
+          status,
+          failureKind,
+          exitCode,
+          detail,
+          findings,
+        }),
+      ),
+    ).toEqual([
+      {
+        gateId: "empty-command",
+        status: "FAIL",
+        failureKind: "CONFIGURATION",
+        exitCode: null,
+        detail: "Invalid required gate declaration",
+        // A command gate carries no findings, so nothing changed for a
+        // consumer that reads a command result.
+        findings: undefined,
+      },
+      {
+        gateId: "tests",
+        status: "FAIL",
+        failureKind: "COMMAND",
+        exitCode: 7,
+        detail: undefined,
+        findings: undefined,
+      },
+    ]);
+    // The `wx` write and the per-log hash: a second attempt cannot overwrite
+    // the first, and the artifact still verifies both.
+    const second = await runGates(options);
+    expect(second.evidencePath).not.toBe(first.evidencePath);
+    expect(verifyGateEvidence(first.artifact)).toEqual(first.evidence);
+    expect(verifyGateEvidence(second.artifact)).toEqual(second.evidence);
+  });
+
+  it("P-06: retries an in-process infrastructure result through the unedited candidate gate phase", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    let runs = 0;
+    const retries: string[] = [];
+
+    const phase = await runCandidateGatePhase({
+      repoRoot: root,
+      ghIssue: "195",
+      sliceNumber: "08",
+      tag: "#195 slice 08",
+      round: 1,
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "scope",
+          stage: "deterministic",
+          required: true,
+          run: () => {
+            runs++;
+            return { status: "INFRASTRUCTURE", failureKind: null, detail: "probe failed" };
+          },
+        },
+      ],
+      label: "post-QA gates",
+      infrastructureRetries: 1,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+      onGateOutcome: () => {},
+      onInfrastructureRetry: (message) => retries.push(message),
+    });
+
+    // The bounded retry treats an in-process INFRASTRUCTURE result exactly as
+    // it treats a command one, with no edit to `src/candidate-gate-phase.ts`.
+    expect(runs).toBe(2);
+    expect(phase.attempts).toHaveLength(2);
+    expect(retries).toEqual(["#195 slice 08: post-QA gates infrastructure retry 1/1"]);
+    expect(phase.evidence.results[0]).toMatchObject({
+      gateId: "scope",
+      status: "INFRASTRUCTURE",
+      failureKind: null,
+    });
+    // Still one result per declaration, and still the repo-relative evidence
+    // path the run journal records.
+    expect(phase.evidence.results).toHaveLength(1);
+    expect(relative(root, phase.evidencePath).replace(/\\/g, "/")).not.toMatch(
+      /^\.\./,
+    );
   });
 
   it("retains a partial log without inventing a result on cancellation", async () => {
@@ -875,11 +1728,11 @@ describe("runGates", () => {
     const unsupportedVersionPath = join(evidenceDir, "future-version.json");
     writeFileSync(
       unsupportedVersionPath,
-      JSON.stringify({ ...first.evidence, version: 2 }),
+      JSON.stringify({ ...first.evidence, version: 4 }),
       "utf-8",
     );
     expect(() => readGateEvidence(unsupportedVersionPath)).toThrow(
-      /unsupported gate evidence version: 2/i,
+      /unsupported gate evidence version: 4/i,
     );
   });
 

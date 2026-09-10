@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import type { GateCacheOptions } from "./gate-cache.js";
 import * as git from "./git.js";
 import {
   createCandidateCheckpoint,
@@ -140,6 +141,8 @@ export async function runPostQAGates(args: {
   evidenceDir: string;
   declarations: readonly GateDeclaration[];
   prepare?: GateDeclaration;
+  /** Tree-identity gate cache, forwarded unchanged to the gate phase (#86 B-03). */
+  cache?: GateCacheOptions;
   signal?: AbortSignal;
   infrastructureRetries: number;
   inactivityTimeoutMs: number;
@@ -215,6 +218,7 @@ export async function runPostQAGates(args: {
       evidenceDir: args.evidenceDir,
       declarations: args.declarations,
       ...(args.prepare && executable ? { prepare: args.prepare } : {}),
+      ...(args.cache ? { cache: args.cache } : {}),
       label: "full slice suite",
       signal: args.signal,
       infrastructureRetries: args.infrastructureRetries,

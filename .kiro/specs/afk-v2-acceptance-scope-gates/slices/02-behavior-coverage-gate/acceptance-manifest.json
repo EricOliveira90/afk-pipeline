@@ -1,0 +1,146 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/gate-policy.ts",
+      "src/gate-policy.test.ts",
+      "src/base-gates.ts",
+      "src/acceptance-gate.ts",
+      "src/acceptance-gate.test.ts",
+      "src/gate-runner.ts",
+      "src/acceptance-manifest.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/run-events.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "afk.config.json",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "#85 AC4; D1, D8; anchors/02",
+      "given": "a gatePolicy carrying an acceptance member",
+      "when": "parseGatePolicy validates it",
+      "then": "acceptance is known, parsed as an exact-key object of non-blank command, non-empty args of non-blank strings and matcher; three refusals name the offender — a non-object, missing, unknown or blank member; args with no {behaviorId} token; a matcher other than \"vitest-json\"",
+      "observableResult": "unit tests: the parsed anchors shape and each refusal message",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "#85 AC8, AC9; D8; ADR 0012; src/gate-policy.ts:325; src/acceptance-manifest.ts:360-392",
+      "given": "a project with or without gatePolicy.acceptance and with or without a tests script, and a manifest binding a behavior to that gate",
+      "when": "the plan and the lock-time bindable catalog resolve and validateAcceptanceManifestBindings runs",
+      "then": "the declared member is the plan and needs no tests script; the derived plan — pnpm exec vitest run --reporter=json --testNamePattern {behaviorId}, matcher vitest-json — applies only when the member is absent and resolveSanityPlan yields a tests step; with neither there is no plan and no entry; otherwise the catalog carries { id: acceptance:behaviors, command, args } from the resolved plan, read via loadGatePolicy(cwd) and shown by formatBaseGateCatalog, so the binding is accepted under either source and an undeclared ID refused by name",
+      "observableResult": "unit tests on temp roots — declared with a tests script, declared without, baseline only, neither — asserting the plan, the per-behavior argv and matcher under both sources, the catalog entry and display, the accepted binding and the refused undeclared ID",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "#85 AC3; D8; Testing decision 1; vitest 3.2.4 JSON reporter and @vitest/runner interpretTaskModes",
+      "given": "a parsed --reporter=json document from a name-filtered run",
+      "when": "the exported vitest-json matcher grades it",
+      "then": "matched is numPassedTests + numFailedTests; matched 0 is untested; numFailedTests > 0 is failed; PASS is matched >= 1 with numFailedTests === 0; numTotalTests is not the match count (a filtered run counts non-matching tests there as skipped); a skipped- or todo-only match is not covered",
+      "observableResult": "unit tests over documents transcribed verbatim from three real filtered runs — match-and-pass, match-and-fail, no-match — spawning no vitest",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "#85 'What to build'; D8, D22; ADR 0003",
+      "given": "a locked acceptance-manifest.json and a candidate checkpoint",
+      "when": "the declaration builder runs and its run executes",
+      "then": "one aggregate { id: acceptance:behaviors, stage: acceptance, required: true, run }, and nothing when the manifest binds no behavior to that ID; run reads the manifest at call time, selects the bound behaviors, substitutes each into every {behaviorId} occurrence of B-02's plan, runs it once per behavior in ctx.cwd, and stops on an aborted ctx.signal without reporting PASS",
+      "observableResult": "unit tests with an injected runner: declaration shape, absence when nothing is bound, per-behavior argv, abort",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "#85 AC1, AC2, AC4, AC5; D8; ADR 0041",
+      "given": "all bound behaviors green, or an untested, no-match or failing one, an unsupported matcher, stdout with no document, an unreadable manifest, or no binding",
+      "when": "the gate produces its outcome",
+      "then": "all green is PASS; untested, no-match or failing is one FAIL/COMMAND whose detail names every failing ID with its counts and reason; only an unsupported matcher or stdout with no reporter document is FAIL/CONFIGURATION naming the ID and matcher; an unreadable manifest throws and records INFRASTRUCTURE; no binding is PASS detailing that",
+      "observableResult": "unit tests: one outcome per case, plus the multi-ID detail",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "#85 AC1, AC5, AC6, AC7; D19, D22; src/orchestrator.ts:5523-5535",
+      "given": "a slice whose locked manifest binds behaviors to acceptance:behaviors",
+      "when": "the pre-QA gate phase runs on the candidate checkpoint and run-summary.md is written",
+      "then": "the declaration is in preQaDeclarations at one call site; a red set takes the existing repair path with every failing ID in one generatorFailureSet and no evaluator dispatch; a green set passes assertGateEvidenceReleasesEvaluation; the checkpoint is materialized and prepare runs only when that declaration is present, i.e. on bound work; the ID and stage literals live in src/gate-runner.ts; one coverage event per behavior per attempt carries behavior ID, gate ID, tree ID, status, counts and the evidence and log artifact IDs, rendered in a new run-summary.md section beside ## Base Gates",
+      "observableResult": "one it on an existing spawned scenario's shared pre-QA evidence asserts the acceptance:behaviors result at stage acceptance with the checkpoint tree ID and a log artifact; unit tests cover the declaration set, both widened predicates, the event, the section and no section without one",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "file-scope map (afk.config.json, ARCHITECTURE.md); anchors/02",
+      "given": "this repository's own config and architecture document",
+      "when": "the slice ships",
+      "then": "afk.config.json declares gatePolicy.acceptance with the anchors shape, making the declared branch this repository's live one, and ARCHITECTURE.md's Gates row names src/acceptance-gate.ts as a public seam",
+      "observableResult": "loadGatePolicy on the repo root returns the member and B-02's declared case resolves it as the plan; the row and cap are DoD checks",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "src/gate-policy.test.ts:63-72,161-191; src/base-gates.ts:8-50",
+      "given": "a gatePolicy carrying cost, a typo, a bad version or a rejected glob metacharacter, and a project with or without typecheck, lint and test scripts",
+      "when": "parseGatePolicy and the three base-gate resolvers run after the widening",
+      "then": "each policy input is still refused by name, version must still be 1, protectedPaths and riskClasses still default, the D6 glob dialect and the six pinned exports are unchanged; the resolvers still yield exactly typecheck, lint, tests with required: step != null and no command when the script is absent, so a scriptless gate still records SKIPPED and adopt still counts it as passing; the acceptance entry is a separate resolver",
+      "observableResult": "the existing gate-policy and base-gate assertions still pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "D13, D22, Out of scope; src/gate-runner.ts:24-92,543-595",
+      "given": "any declaration processed by runGates, and any version-2 manifest validated against a catalog",
+      "when": "gates run, evidence is written and bindings are validated",
+      "then": "GATE_EVIDENCE_VERSION stays 2 with GateFindings's four members, classifyDeclaration still allows exactly one of command and run, the in-process branch keeps its cancellation break, throw-to-INFRASTRUCTURE mapping, detail-before-status log line and null exitCode, and validateAcceptanceManifestBindings keeps version 2, its signature and its refusal message",
+      "observableResult": "the existing gate-runner and acceptance-manifest tests still pass; no schema version or findings member is added",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "D22; src/orchestrator.ts:5603-5655; src/candidate-gate-phase.ts:93-177",
+      "given": "a pre-QA phase with a required failure, an INFRASTRUCTURE result or all gates green, on a slice binding nothing, including a project with a tests script but no typecheck or lint script",
+      "when": "the orchestrator decides the next step and run-summary.md is written",
+      "then": "collectRequiredGateFailures, the generatorFailureSet records, the exhausted-round intervention, the positional release check and the bounded INFRASTRUCTURE retry behave as today with src/candidate-gate-phase.ts unedited; the unbound slice appends no acceptance declaration, so its checkpoint and prepare install are unchanged and it still reaches QA and merge; existing sections and the gate-outcome event are unchanged with no new empty section",
+      "observableResult": "the existing pre-QA, logger and spawned pipeline assertions still pass and that file's diff is empty",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

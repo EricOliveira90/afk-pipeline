@@ -44,10 +44,16 @@ Every self-run launch — babysit prompts included — passes the
 generator's verification command explicitly:
 
 ```bash
-afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm test:fast"
+afk-codex --prd-dir .kiro/specs/<prd-slug> --test-command "pnpm run typecheck && pnpm test:fast"
 ```
 
 (Substitute `afk`/`afk-claude` for other backends; keep the flag.)
+
+`typecheck` is not optional here: vitest strips types without checking them,
+and a bare `test:fast` override is now **refused** before the run starts,
+because the command is derived from the cheap-gate catalog and an override is
+checked against that catalog's required gate ids (#86). `AGENTS.md` carries
+the same literal command, and `src/orchestrator.test.ts` reads it out of both.
 
 Why: ADR 0038 (`docs/adr/0038-generator-verification-command.md`)
 shipped `--test-command`, but the flag only helps if the launch uses
@@ -79,10 +85,12 @@ A test that spawns a pipeline costs seconds on every run from now on, so a
 new spawned scenario is the last resort, not the default. Prefer, in
 order: a unit test → an `it` on an existing spawned scenario's shared
 result → another slice in a fixture that already runs a wave → a new
-spawn, with a comment saying why. `pnpm test` ends with
-`pnpm test:budgets`, a per-suite wall-clock budget; when it goes red, move
-the assertion up that list rather than raising the number. The full
-reasoning is in AGENTS.md.
+spawn, with a comment saying why. `pnpm test:ratchet` runs the suites and
+then `pnpm test:budgets`, a per-suite wall-clock budget; when it goes red,
+move the assertion up that list rather than raising the number. Run it when
+you add a spawned scenario — it is deliberately not part of `pnpm test`,
+which is what the deterministic gates run (ADR 0063). The full reasoning is
+in AGENTS.md.
 
 
 ## Agent skills
