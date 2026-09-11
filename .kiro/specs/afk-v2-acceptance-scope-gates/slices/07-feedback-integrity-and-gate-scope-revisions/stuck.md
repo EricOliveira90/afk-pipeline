@@ -2,12 +2,19 @@
 
 ## Reason
 
-AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests. Structured intervention: .kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/intervention.json. Inspect tests on preserved candidate tree 193521df8fd73cc6871d5f970276d2be281f32cd, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice.
+AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests. Structured intervention: .kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/intervention.json. Inspect tests on preserved candidate tree f0f1b223397f6af2c8d33355da5055d7bd58a033, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice.
 
 ## Finding lifecycle
 
 ### RESOLVED
 
+- [QA-01] ADVISORY RESOLVED
+  - Stage: deterministic
+  - Summary: `## Applied Waivers` repeated one authorization once per implementation round with no column to tell the rows apart.
+  - Clear condition: The summary either de-duplicates on slice + risk class + path or carries the round the event already holds, with a logger test covering two `waiver-applied` events for one waiver in different rounds.
+  - Artifact references:
+    - `.afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r4-a1.json`
+    - `.kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r4-a1.md`
 - [QA-02] ADVISORY RESOLVED
   - Stage: deterministic
   - Summary: The handoff attributed two shipped behaviors to functions and files that did not hold them.
@@ -18,13 +25,7 @@ AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests.
 
 ### OPEN
 
-- [QA-01] ADVISORY OPEN
-  - Stage: deterministic
-  - Summary: `## Applied Waivers` can repeat one authorization once per implementation round, and the table has no round column to tell the rows apart.
-  - Clear condition: The summary either de-duplicates on slice + risk class + path or carries the round the event already holds, with a logger test covering two `waiver-applied` events for one waiver in different rounds.
-  - Artifact references:
-    - `.afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r3-a1.json`
-    - `.kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r3-a1.md`
+(none)
 
 ## Scope escalations
 
@@ -50,15 +51,69 @@ AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests.
   - Artifact references:
     - `.afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r3-a1.json`
     - `.kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r3-a1.md`
+- Round 4 attempt 1 (deterministic): PASS / NONE
+  - Lifecycle record: `qa-review-r4-a1-record.json`
+  - Artifact references:
+    - `.afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r4-a1.json`
+    - `.kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r4-a1.md`
 - Additional artifact: `.kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/intervention.json`
 - Additional artifact: `C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260910-000620/gates/s07/attempt-d8eaa36d9652.json`
 - Additional artifact: `C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260910-000620/gates/s07/attempt-ddd30f856962.json`
 - Additional artifact: `C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260910-000620/gates/s07/gate-logs/d8eaa36d9652-01-tests.log`
 - Additional artifact: `C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260910-000620/gates/s07/gate-logs/ddd30f856962-01-tests.log`
+- Additional artifact: `C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260911-134538/gates/s07/attempt-399094e44381.json`
+- Additional artifact: `C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260911-134538/gates/s07/gate-logs/399094e44381-03-tests.log`
 
 ## Commit evidence
 
 ```text
+commit 5c99caf6c7d9ef3602eb3b9696c54d49d43d3b29
+Author: Eric Oliveira <ericfaria@gmail.com>
+Date:   Fri Sep 11 13:57:34 2026 -0300
+
+    docs(#193): slice 07 handoff — QA-01 repair and the two stale-base failures
+
+ .../acceptance-manifest.json                       | 264 +++++++++++++
+ .../context.md                                     | 431 +++++++++++++++++++++
+ .../contract-review.json                           |  61 +++
+ .../contract.md                                    | 356 +++++++++++++++++
+ .../feedback-r1.md                                 |  83 ++++
+ .../feedback-r2.md                                 |  96 +++++
+ .../handoff.md                                     | 143 +++++++
+ .../intervention.json                              |  81 ++++
+ .../qa-report-r1-a1.md                             | 193 +++++++++
+ .../qa-report-r2-a1.md                             |  63 +++
+ .../qa-report-r3-a1.md                             | 156 ++++++++
+ .../qa-report.md                                   | 156 ++++++++
+ .../qa-review.json                                 |  21 +
+ .../stuck.md                                       | 289 ++++++++++++++
+ 14 files changed, 2393 insertions(+)
+
+commit 82700654b4d441aaca8bce62941081e12436ec37
+Author: Eric Oliveira <ericfaria@gmail.com>
+Date:   Fri Sep 11 13:55:11 2026 -0300
+
+    fix(#193): QA-01 one Applied Waivers row per authorization, carrying its round
+    
+    The post-QA gate phase re-runs on every implementation round, so the same
+    launch authorization was journalled — and rendered — once per round, and the
+    table had no column to tell the repeats apart. `## Applied Waivers` now keys on
+    slice + risk class + path and keeps the first application, whose row carries the
+    `round` the event already held. The event stream is untouched: `events.jsonl` is
+    a journal of what each round did, the summary is the audit of what was
+    authorized.
+
+ src/logger.test.ts | 52 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/logger.ts      | 24 +++++++++++++++++++-----
+ 2 files changed, 70 insertions(+), 6 deletions(-)
+
+commit 882f7756fff35fd91bfd976cca14339a8715f65e
+Merge: cbe9b1f fb4c4ac
+Author: Eric Oliveira <ericfaria@gmail.com>
+Date:   Thu Sep 10 13:12:54 2026 -0300
+
+    Merge branch 'feat-claude-code/afk-v2-acceptance-scope-gates' into afk-claude-code/afk-v2-acceptance-scope-gates-slice-07-feedback-integrity-and-gate-scope-revisions
+
 commit cbe9b1f09aa00a5469c9093b04e3399c2ccd1f4c
 Author: Eric Oliveira <ericfaria@gmail.com>
 Date:   Thu Sep 10 00:20:11 2026 -0300
