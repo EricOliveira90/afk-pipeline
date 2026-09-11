@@ -26,6 +26,15 @@ import type { GeneratorFailureSet } from "./context-envelope.js";
  *   (`prompts/evaluator-qa.md`; canonical names in `src/qa-review.ts`).
  * - `qa-report-rN-aM.md` / `uat-report-rN-aM.md` — the orchestrator's
  *   in-slice-dir report archives (`archiveQAReport`).
+ * - `final-report.md` / `final-review.json` and the attempt-stamped
+ *   `final-report-rN-aM.md` — the final evaluator's only instructed writes
+ *   (`prompts/evaluator-final.md`; canonical names in
+ *   `src/final-evaluation.ts`, and the only two entries on its
+ *   `allowedWriteScope`, #96 B-06/B-07). Admitted here rather than through a
+ *   second constant so that the copy-back boundary out of the final
+ *   evaluator's review worktree is the same one sentence as the other two
+ *   stages': anything else the final evaluator writes is discarded and
+ *   journaled as a reviewer-write violation.
  * - `stuck.md` — the orchestrator restores the operator's diagnosis bytes
  *   before the accepted commit (#82 AC3).
  *
@@ -41,7 +50,7 @@ import type { GeneratorFailureSet } from "./context-envelope.js";
  * whereas a second dialect of the same list could.
  */
 export const QA_WINDOW_ARTIFACT_NAME =
-  /^(?:qa|uat)-report(?:-r[1-9]\d*-a[1-9]\d*)?\.md$|^(?:qa|uat)-review\.json$|^stuck\.md$/;
+  /^(?:qa|uat|final)-report(?:-r[1-9]\d*-a[1-9]\d*)?\.md$|^(?:qa|uat|final)-review\.json$|^stuck\.md$/;
 
 /**
  * Paths by which `toTree` differs from the QA-approved `fromTree` that no

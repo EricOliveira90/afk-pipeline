@@ -6,6 +6,7 @@ import {
   CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
   CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
   EXPLORER_CONTEXT_MANIFEST,
+  FINAL_EVALUATOR_CONTEXT_MANIFEST,
   GENERATOR_CONTEXT_MANIFEST,
   MERGE_RESOLUTION_SITUATION_SECTION,
   PLANNER_CONTEXT_MANIFEST,
@@ -2128,6 +2129,7 @@ describe("role contract manifests", () => {
     PLANNER_CONTEXT_MANIFEST,
     CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
     CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
+    FINAL_EVALUATOR_CONTEXT_MANIFEST,
     GENERATOR_CONTEXT_MANIFEST,
   ];
 
@@ -2322,6 +2324,52 @@ describe("role contract manifests", () => {
     expect(() =>
       validateContextEnvelopeManifest(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST),
     ).not.toThrow();
+  });
+
+  it("[behavior:B-06] declares the evaluator-final role contract on the existing schema", () => {
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "evaluator-final",
+      outputArtifact: "final-review-pair",
+      inlineSizeBudgetBytes: 65_536,
+    });
+    // The same completeness check every other role contract passes — a new
+    // entry on the existing schema, not a parallel one.
+    expect(() =>
+      validateContextEnvelopeManifest(FINAL_EVALUATOR_CONTEXT_MANIFEST),
+    ).not.toThrow();
+    // Exactly the two artifacts the copy-back allowlist admits (#96 B-07).
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST.allowedWriteScope).toEqual([
+      "slice/final-review.json",
+      "slice/final-report.md",
+    ]);
+    // The baseline → final change summary is the input the review starts from.
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST.inputOrder[0]).toBe(
+      "change-summary",
+    );
+    // No handoff and no prior stage's findings reach this role.
+    const accepted: readonly string[] =
+      FINAL_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses;
+    expect(accepted.filter((entry) => entry.includes("handoff"))).toEqual([]);
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses).toContain(
+      "other-qa-stage-findings",
+    );
+  });
+
+  it("[behavior:B-06] ships an evaluator-final prompt asking exactly the two questions", () => {
+    const prompt = readFileSync(join(PROMPTS_DIR, "evaluator-final.md"), "utf-8");
+
+    expect(prompt).toContain("# The two questions");
+    expect(prompt).toContain("**Preservation**");
+    expect(prompt).toContain("**Gate-invisible drift**");
+    // Both canonical artifacts are named, and the change summary is read first.
+    expect(prompt).toContain("final-review.json");
+    expect(prompt).toContain("final-report.md");
+    expect(prompt).toContain("{{CHANGE_SUMMARY_PATH}}");
+    // Every repair the schema admits is stated for the class that admits it.
+    expect(prompt).toContain("PRESERVATION");
+    expect(prompt).toContain("GATE_INVISIBLE_DRIFT");
+    expect(prompt).toContain("BASELINE_IS_WRONG");
   });
 
   it("clamps a budget override larger than the manifest budget and applies a smaller one", () => {
