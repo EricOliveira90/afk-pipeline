@@ -35,11 +35,19 @@ import { renderPrompt } from "./prompt-template.js";
 import {
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
+  mergeResolutionBlockRoom,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateExplorerEvidenceMap,
+  withMergeResolutionSituation,
+  type GeneratorEnvelopeInput,
   type GeneratorFailureSet,
 } from "./context-envelope.js";
+import {
+  resolveRef,
+  runMergeResolutionRound,
+  type MergeResolutionRoundResult,
+} from "./merge-resolution.js";
 import {
   assembleAdjudicationPlannerPrompt,
   assembleFocusedScopeEvaluatorPrompt,
@@ -6548,6 +6556,291 @@ export async function runSliceExecute(
   }
 }
 /**
+ * One scoped merge-resolution round for a slice whose merge git refused with a
+ * real textual conflict (#132).
+ *
+ * Wired into `WaveInput.resolveMergeConflict` by `runPipeline`, and called from
+ * the one new call site in `src/wave.ts` — inside the merge mutex the refused
+ * attempt already holds. Everything expensive the round needs is assembled
+ * here, because `src/merge-resolution.ts` owns the git and verdict mechanics
+ * and this function owns the orchestrator's knowledge: the repair envelope, the
+ * slice's own required gate declarations, and the journal.
+ *
+ * Nothing in here re-acquires `mergeMutex`.
+ *
+ * Never throws for a round that merely failed — a failed round's fallback is
+ * the terminal `CONFLICT` the merge path would have recorded anyway, and a
+ * throw would turn that into `ERROR` and hide git's own details. A cancellation
+ * is the one exception: it belongs to the wave's own CANCELLED path.
+ */
+export async function runSliceMergeResolution(args: {
+  slice: Slice;
+  ctx: SliceContext;
+  branch: string;
+  conflictDetails: string;
+}): Promise<MergeResolutionRoundResult> {
+  const { slice, ctx, conflictDetails } = args;
+  const { config, logger, featBranch } = ctx;
+  const signal = config.signal;
+  // Round 0: the implementation rounds are 1..n and this dispatch is none of
+  // them — it happens after the candidate passed its gates and its QA, on the
+  // merge path. The number is event and log identity only.
+  const round = 0;
+  let genLog: WriteStream | undefined;
+  try {
+    // The tip, proven, not the branch label: the scope gate's comparison and
+    // the merge the round performs must name the same commit (B-07), and under
+    // the held mutex this sha cannot move for the rest of the round.
+    const featureTip = resolveRef(ctx.worktreeDir, featBranch);
+    const contract = readFileSync(
+      join(ctx.absSliceDir, "contract.md"),
+      "utf-8",
+    );
+    const acceptanceManifest = loadAcceptanceManifest(ctx.absSliceDir);
+    if (acceptanceManifest.version !== 2) {
+      throw new Error(
+        "Generator envelope requires an acceptance manifest with behavior bindings",
+      );
+    }
+    const contextPath = join(ctx.absSliceDir, "context.md");
+    const hasExplorerContext = existsSync(contextPath);
+    const situationFacts = [
+      "Merge resolution round: 1 of 1.",
+      `This slice's candidate is already committed on \`${ctx.branch}\` and ` +
+        `already passed its gates and review; the only thing left is merging ` +
+        `it into \`${featBranch}\`, and that merge conflicted. This is the ` +
+        `only resolution round the slice gets: if the in-progress merge is ` +
+        `not resolved and committed when you stop, the slice ends in ` +
+        `CONFLICT and a human finishes the merge by hand.`,
+      `Your slice's own required gates — including the file-scope gate and the ` +
+        `acceptance behavior bindings — are re-run on the tree you commit, and ` +
+        `the tree is refused if any conflict marker survives in a conflicted ` +
+        `path.`,
+    ].join("\n\n");
+    const envelopeInput: GeneratorEnvelopeInput & { repairSituation: string } = {
+      mode: "repair",
+      sliceDir: ctx.relSliceDir,
+      contractView: projectGeneratorContractView(contract),
+      acceptanceManifest,
+      patternsAndHarness: projectGeneratorPatternsAndHarness(
+        hasExplorerContext
+          ? readFileSync(contextPath, "utf-8")
+          : "(no explorer context artifact is available for this slice)",
+      ),
+      ...(!hasExplorerContext ? { patternsAndHarnessArtifactId: null } : {}),
+      testCommand: ctx.testCommand,
+      migrationReservation: migrationReservationBlock(config, slice.ghIssue),
+      failureSet: { findings: [], gates: [] },
+      ...(config.generatorInlineSizeBudgetBytes !== undefined
+        ? { inlineSizeBudgetBytes: config.generatorInlineSizeBudgetBytes }
+        : {}),
+      repairSituation: situationFacts,
+    };
+
+    // --- The slice's own required declarations, built here and passed in.
+    const acceptanceCoverage: BehaviorCoverageRecord[] = [];
+    const acceptanceDeclaration = acceptanceGateDeclaration({
+      absSliceDir: ctx.absSliceDir,
+      plan: resolveAcceptancePlan(ctx.worktreeDir),
+      bounds: {
+        inactivityTimeoutMs:
+          config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        heartbeatIntervalMs:
+          config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+        wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+      },
+      onBehaviorResult: (record) => acceptanceCoverage.push(record),
+    });
+    /**
+     * Mutable on purpose: `scopeGateDeclaration` reads this object inside its
+     * `run` closure, so the attestation the gate sees is the one proven after
+     * the generator returned — never the literal `true` the gate refuses to
+     * default (B-07). It starts `false`, which is the failing-closed answer if
+     * the round never gets as far as proving anything.
+     */
+    const scopeGateInput = {
+      source: {
+        kind: "candidate" as const,
+        worktreeDir: ctx.worktreeDir,
+        featureRef: featureTip,
+      },
+      absSliceDir: ctx.absSliceDir,
+      sliceArtifactDir: ctx.relSliceDir,
+      acceptedPairIntact: false,
+      options: { migrationPathPattern: config.migrationPathPattern },
+    };
+    const declarations: GateDeclaration[] = [
+      scopeGateDeclaration(scopeGateInput),
+      ...resolvePreQAGateDeclarations(ctx.worktreeDir),
+      ...(acceptanceDeclaration ? [acceptanceDeclaration] : []),
+      ...resolveFullSuiteGateDeclarations(ctx.worktreeDir),
+    ];
+    const costPlan = resolveTestCostPlan(ctx.worktreeDir);
+    const gateCache = {
+      path: join(
+        config.repoRoot,
+        ".afk",
+        "artifacts",
+        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+        "gate-cache.json",
+      ),
+      enabled: costPlan.cacheEnabled,
+    };
+    // No `prepare`: the gates run in the slice's own worktree — the one the
+    // generator has been verifying in all along — so its install already
+    // happened, and re-running one under the held merge mutex would stall every
+    // other lane's merge for nothing.
+    const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
+    // Captured before the dispatch, so the attestation below is a comparison
+    // and not a hope (ADR 0055 Seam 1; the implementation loop does the same).
+    const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
+    genLog = logger.agentLog(slice.number, "generator-merge-resolution");
+    const dispatchLog = genLog;
+
+    const result = await runMergeResolutionRound({
+      worktreeDir: ctx.worktreeDir,
+      featureRef: featureTip,
+      conflictDetails,
+      blockBudgetBytes: mergeResolutionBlockRoom(envelopeInput),
+      dispatchGenerator: async (block) => {
+        const assembled = assembleGeneratorEnvelope({
+          ...envelopeInput,
+          repairSituation: withMergeResolutionSituation(
+            situationFacts,
+            block,
+          ),
+        });
+        await ctx.invoke({
+          role: "generator",
+          prompt: assembled.prompt,
+          contextEnvelope: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            ...assembled.evidence,
+          },
+          cwd: ctx.worktreeDir,
+          logStream: dispatchLog,
+          ...longCommandRoleBounds({
+            idleTimeoutMs: config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS,
+            idleWarningIntervalMs:
+              config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+            maxDurationMs: config.maxAgentDurationMs,
+          }),
+        });
+        // Earned here and nowhere else: the pair on disk is byte-for-byte the
+        // accepted pair, so the scope gate may exempt it. A round that widened
+        // its own lock leaves this `false` and gets both files named.
+        const mutated = mutatedAcceptedContractFiles(
+          ctx.absSliceDir,
+          acceptedPair,
+        );
+        scopeGateInput.acceptedPairIntact = mutated.length === 0;
+        if (mutated.length > 0) {
+          logger.phase(
+            `${ctx.tag}: merge resolution round changed ` +
+              `orchestrator-owned contract file(s) (${mutated.join(", ")}) — ` +
+              `the file-scope gate will name them and refuse the tree`,
+            "error",
+          );
+        }
+      },
+      gatePhase: {
+        repoRoot: config.repoRoot,
+        ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
+        tag: ctx.tag,
+        round,
+        evidenceDir,
+        declarations,
+        cache: gateCache,
+        label: "merge resolution gates",
+        ...(signal ? { signal } : {}),
+        infrastructureRetries:
+          config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+        inactivityTimeoutMs:
+          config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+        heartbeatIntervalMs:
+          config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+        onGateOutcome: (outcome) => {
+          logger.event({
+            type: "gate-outcome",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            ...outcome,
+          });
+          if (outcome.gateId !== ACCEPTANCE_GATE_ID) return;
+          for (const record of acceptanceCoverage.splice(0)) {
+            logger.event({
+              type: "behavior-coverage",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              round,
+              attemptId: outcome.attemptId,
+              behaviorId: record.behaviorId,
+              gateId: outcome.gateId,
+              status: record.status,
+              matched: record.matched,
+              passed: record.passed,
+              failed: record.failed,
+              treeId: outcome.treeId,
+              evidenceArtifactId: outcome.evidenceArtifactId,
+              logArtifactId: outcome.logArtifactId,
+            });
+          }
+        },
+        onInfrastructureRetry: (message) => {
+          logger.phase(message, "error", {
+            type: "warn",
+            reason: "infrastructure-retry",
+            ghIssue: slice.ghIssue,
+            message,
+          });
+        },
+      },
+      log: (message) => logger.phase(`${ctx.tag}: ${message}`),
+    });
+    logger.event({
+      type: "merge-resolution-round",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      verdict: result.verdict,
+      durationMs: result.durationMs,
+      conflictedPaths: [...result.conflictedPaths],
+      ...(result.treeId ? { treeId: result.treeId } : {}),
+      detail: result.detail,
+    });
+    return result;
+  } catch (err) {
+    if (isCancelled(err, signal)) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    // The slice falls back to terminal CONFLICT, which is where it was before
+    // this round existed. The worktree is left exactly as the failure found it
+    // — including an in-progress merge, if the throw landed mid-merge — because
+    // nothing here may destroy work (ADR 0039); the operator gets the tree.
+    const failed: MergeResolutionRoundResult = {
+      verdict: "UNRESOLVED",
+      durationMs: 0,
+      conflictedPaths: [],
+      detail: `The merge resolution round could not run: ${message}`,
+    };
+    logger.event({
+      type: "merge-resolution-round",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      verdict: failed.verdict,
+      durationMs: failed.durationMs,
+      detail: failed.detail,
+    });
+    return failed;
+  } finally {
+    if (genLog) await closeAgentLog(genLog);
+  }
+}
+
+/**
  * Legacy single-call wrapper: negotiate → execute. Kept for callers
  * (and tests) that don't need the lane-aware split. The new wave loop
  * uses `runSliceNegotiate` + `runSliceExecute` directly so the
@@ -7537,6 +7830,11 @@ export async function runPipeline(
       relevantFilesBlock,
       testCommand,
       mergeMutex,
+      // One scoped resolution round per conflicted merge (#132 B-01). Supplied
+      // here and only here: the pre-wave MERGE-PENDING recovery path is
+      // explicitly out of its scope, and a caller that leaves this unset keeps
+      // today's terminal CONFLICT exactly as it was.
+      resolveMergeConflict: runSliceMergeResolution,
       onOutcome: persistOutcome,
     });
 
