@@ -148,7 +148,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v0, "demo");
-    expect(adapted.version).toBe(4);
+    expect(adapted.version).toBe(5);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
     expect(adapted.slices["100"]!.mergedToFeature).toBe(true);
     expect(adapted.slices["200"]!.phase).toBe("STUCK");
@@ -165,7 +165,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v1, "demo");
-    expect(adapted.version).toBe(4);
+    expect(adapted.version).toBe(5);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
   });
 
@@ -356,7 +356,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     );
 
     const loaded = loadRunState(repo, slug);
-    expect(loaded.version).toBe(4);
+    expect(loaded.version).toBe(5);
     expect(loaded.slices["100"]!.phase).toBe("PASS");
     expect(isSliceComplete(loaded, "100")).toBe(true);
     expect(isSliceComplete(loaded, "200")).toBe(false);
@@ -368,7 +368,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.version).toBe(4);
+    expect(onDisk.version).toBe(5);
     expect(onDisk.slices["100"].phase).toBe("PASS");
     expect(onDisk.slices["300"].phase).toBe("ERROR");
     expect(onDisk.slices["300"].error).toBe("boom");
@@ -1488,8 +1488,8 @@ describe("RunState.appliedWaivers", () => {
     reason: "the module it covered was deleted with it",
   };
 
-  it("[behavior:B-13] upgrades every earlier version to 4 with the field absent", () => {
-    expect(RUN_STATE_VERSION).toBe(4);
+  it("[behavior:B-13] upgrades every earlier version to 5 with the field absent", () => {
+    expect(RUN_STATE_VERSION).toBe(5);
     for (const version of [undefined, 1, 2, 3, 4]) {
       const adapted = adaptLoadedState(
         {
@@ -1503,7 +1503,7 @@ describe("RunState.appliedWaivers", () => {
         },
         "demo",
       );
-      expect(adapted.version).toBe(4);
+      expect(adapted.version).toBe(5);
       // Absent, not an empty record: "nobody waived anything" and "this file
       // predates waivers" are the same fact to every reader.
       expect(adapted.appliedWaivers).toBeUndefined();
@@ -1525,10 +1525,10 @@ describe("RunState.appliedWaivers", () => {
       appliedWaivers: { "100": [WAIVER] },
     });
     const file = join(repo, ".afk", "state", "demo.json");
-    expect(JSON.parse(readFileSync(file, "utf-8")).version).toBe(4);
+    expect(JSON.parse(readFileSync(file, "utf-8")).version).toBe(5);
 
     const loaded = loadRunState(repo, "demo");
-    expect(loaded.version).toBe(4);
+    expect(loaded.version).toBe(5);
     expect(loaded.appliedWaivers).toEqual({ "100": [WAIVER] });
 
     // And it survives an unrelated focused write, like `resume` does.
