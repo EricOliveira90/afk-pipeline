@@ -1,65 +1,88 @@
-# Architecture review — round 5 (verification)
+# Architecture review — round 6 (verification)
 
-Scope: `git diff c77c54a..HEAD` (slice 03 candidate-evaluator isolation, slice
-06 merge-resolution round, the #230/#232 fixes, ADR 0064), dispositioning the
-five open findings from round 4. No resampling of the rest of the branch.
+Scope: `git diff e84068df..HEAD` (the fix diff for slice 07, "Feedback
+integrity and gate-scope revisions") dispositioned against the five open
+findings. No resampling of the rest of the branch.
 
 **Verdict:** ACCEPT-WITH-NOTES
 
-None of the five open findings is cleared by the fix diff, and none names a
-normal-operation reachable trigger, so under the round-2+ prior-lineage branch
-none carries blocking authority. All five stay notes; no new findings.
+The fix diff is a substantial, coherent slice: `src/afk-manifest.ts` (waiver
+reader), `src/feedback-integrity-gate.ts` (new deterministic gate),
+`src/skip-gate.ts` (launch waivers honored on both trees), `src/run-state.ts`
+(v4 `appliedWaivers`), `src/escalation.ts` (schema 2 with gate evidence),
+`src/artifacts.ts` (STUCK diagnosis reads both schema versions), plus the
+orchestrator wiring at `src/orchestrator.ts:6363-6480`. Nothing in it addresses
+the five open findings, and every one of them remains a note under the round-6
+rubric: none names a normal-operation reachable trigger and none was introduced
+by the reviewed diff. So: ACCEPT-WITH-NOTES, no blockers.
 
-## A-01 TYPE_SAFETY — REPEATED (note)
+## Dispositions
 
-`src/gate-runner.ts` is absent from `git diff --stat c77c54a..HEAD`. Grepping
-`riskClass` in the current tree gives the unchanged shape: the declared type is
-`GateRiskClass` (`:102`) while `readGateEvidence`s validator still accepts any
-string (`:1190`), with the boundary comment at `:1168-1172`. The alternate clear
-branch stays half-met — documented, but no consumer re-validates, because no
-writer populates `appliedWaivers` yet (#193). Nothing reads the field, so there
-is no normal-operation trigger.
+### A-01 TYPE_SAFETY — REPEATED
+`src/gate-runner.ts` is untouched by the fix diff (`git diff --stat` lists no
+`gate-runner.ts`). Its evidence validator still reads
+`typeof entry.riskClass === "string"` (`gate-runner.ts:1190`), and the TSDoc
+above it (`:1170-1171`) still justifies that with "this slice populates no
+waivers" — which the fix diff has now falsified: both `runSkipGate`
+(`skip-gate.ts`, `appliedWaivers` in `findings`) and
+`runFeedbackIntegrityGate` (`feedback-integrity-gate.ts:241`) populate it.
 
-## A-02 DEAD_SEAM — REPEATED (note)
+The clear condition's alternative branch — consumer re-validates — is not met
+either. `appliedWaiversFrom` (`feedback-integrity-gate.ts:126-146`) copies
+`waiver.riskClass` straight into a `ProtectedChangeWaiver`, whose `riskClass`
+is `GateRiskClass`, with no membership check; and the new persistence
+(`run-state.ts`, `PersistedAppliedWaiver.riskClass: string`) widens it back to
+a bare string. So a hand-edited or future-written evidence file can put an
+unknown class into `run-state.json` and the summary's Applied Waivers rows.
+Note, not blocker: the reader that decides *authorization* is
+`parseAfkManifest`, which does validate against `GATE_RISK_CLASSES`
+(`afk-manifest.ts:120`), so no normal-operation path grants a waiver from an
+unvalidated class — the leak is confined to reporting.
 
-`src/scope-gate.ts` is not in the fix diff. A repo-wide grep for `kind: "role"`
-still returns exactly two hits: the type arm (`src/scope-gate.ts:57`) and the
-test that constructs it (`src/scope-gate.test.ts:333`). The single production
-call site still passes `kind: "candidate"`.
+### A-02 DEAD_SEAM — REPEATED
+`scope-gate.ts:56-60` still declares the `kind: "role"` comparison source, and
+`Select-String 'kind: "role"' src\*.ts` finds exactly two hits: the
+declaration and `scope-gate.test.ts:333`. Still no production caller; the fix
+diff added none.
 
-## A-03 NAMING — REPEATED (note)
+### A-03 NAMING — REPEATED
+The fix diff touches no documentation that could distinguish the vocabularies
+(`--stat` shows only `agents/generator.md` and four `prompts/*.md`, none of
+which is CONTEXT.md or ARCHITECTURE.md). The `deterministic` gate stage token
+and the QA review stage union remain undocumented against each other; the only
+doc mention found is `docs/adr/0037` line 37, which uses the phrase for the
+review stage.
 
-`SCOPE_GATE_STAGE = "deterministic"` (`src/scope-gate.ts:29`) is unchanged.
-`CONTEXT.md` is untouched in the range. `ARCHITECTURE.md` did change, but the
-added rows and bullets cover the merge-resolution module, candidate review
-isolation, and the change-summary builder — not the gate-stage vocabulary
-against the QA review stage union. Clear condition unmet.
+### A-04 ABSTRACTION — REPEATED
+`GateDeclaration.run` still advertises `signal?: AbortSignal`
+(`gate-runner.ts:123`), and `runGates` still only checks
+`options.signal?.aborted` *before* dispatch (`:667`) and forwards the signal
+(`:675`) without enforcing anything around the awaited call. Unchanged by the
+fix diff; the new `feedbackIntegrityGateDeclaration` is one more synchronous
+`run` implementation that ignores the signal, which is consistent with the
+existing gates but confirms the seam's promise is still callee-owned and
+undocumented.
 
-## A-04 ABSTRACTION — REPEATED (note)
+### A-06 OBSERVABILITY — REPEATED
+`run-events.ts`'s `prompt-assembly` payload still carries only
+`includedArtifactClasses` / `includedArtifactIds` / `omittedArtifactClasses`
+(`:97-107`); the fix diff's only `run-events.ts` change is the new
+`waiver-applied` payload. There is still no field recording the by-reference
+contract pair (`context-envelope.ts:1048-1076` computes `byReference` for the
+human-readable line only) nor a count of omitted revision regions.
 
-Unchanged file. `GateDeclaration.run` still advertises `signal?: AbortSignal`
-(`src/gate-runner.ts:123`) with no ownership statement, and `runGates` still
-only checks `options.signal?.aborted` before the call (`:667`) and forwards the
-signal (`:675`); no enforcement wraps an in-process callee that ignores it.
+## Notes on the fix diff itself (not findings)
 
-## A-06 OBSERVABILITY — REPEATED (note)
-
-The `prompt-assembly` payload (`src/run-events.ts:97-107`) is unchanged by the
-fix diff: it carries `includedArtifactClasses`, `includedArtifactIds`,
-`omittedArtifactClasses` and byte size, and neither the by-reference contract
-pair nor a count of omitted revision regions. `src/contract-revision-evidence.ts`
-is absent from the diff stat, so its omitted-region count still reaches only the
-evidence artifacts own heading. The only run-event additions in this range are
-`approved-baseline`, `reviewer-write-violation` and `merge-resolution-round`
-(`src/run-events.ts:202-262`) — additive and unrelated.
-
-Worth noting in the same lineage rather than as a new finding: the #230 repair
-projection now drops content deliberately (fenced copies replaced by pointers,
-older commits truncated by `boundRepairSituationCommitLog`,
-`src/context-envelope.ts`). The drop count is named inline in the prompt prose
-and the `locatorExemption` string, so the omission is visible to the reader but
-still not to the `prompt-assembly` record — the same gap A-06 already describes,
-now on a second path.
+- The waiver-journalling loop (`orchestrator.ts:6439-6480`) re-reads the
+  written evidence rather than trusting the in-memory outcome, and swallows an
+  unreadable artifact with `continue` while `verifyGateEvidence` owns the
+  refusal. That is the right layering.
+- `skip-gate.ts` applies waivers to the base scan as well as the candidate,
+  with the reason recorded inline. Applying them to only one side would have
+  been the classic asymmetry bug; good that the comment says so.
+- `run-state.ts` keeps `appliedWaivers` beside `slices` with the ADR 0018
+  reason spelled out, and `sanitizeAppliedWaivers` degrades to absent rather
+  than throwing. Consistent with `sanitizeMigrationClaims`.
 
 ## Structured findings (v2)
 
