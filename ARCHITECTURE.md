@@ -24,7 +24,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031, 0056) | `src/run-state.ts`, `src/run-journal.ts` | `src/file-lock.ts`, `src/adoption-provenance.ts`, `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
 | Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
-| Review rails | Contract/QA lifecycle and accepted-candidate policy (PRD 1, PRD 3) | `src/contract-review.ts`, `src/qa-review.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
+| Review rails | Contract/QA lifecycle, candidate review isolation, accepted-candidate policy (PRD 1, PRD 3, PRD 4) | `src/contract-review.ts`, `src/qa-review.ts`, `src/change-summary.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
@@ -59,6 +59,16 @@ entry in `afk.config.json`. Cap: 150 lines.
 - Review artifacts (`src/contract-review.ts`, `src/qa-review.ts`) — new
   verdict or finding kinds extend the schema; consumers parse, never regex
   prose.
+- Candidate review isolation (`QA_WINDOW_ARTIFACT_NAME` in
+  `src/post-qa-gates.ts`, `scanReviewWorktreeWrites` in `src/qa-review.ts`) —
+  deterministic QA reads a disposable worktree at the candidate checkpoint, and
+  the one artifact-name allowlist is both the copy-back boundary out of it and
+  the post-QA window check. A new reviewer output extends that constant; a
+  reviewer write it does not admit is discarded and journaled as
+  `reviewer-write-violation`, never enforced by prompt prose.
+- Change summary (`src/change-summary.ts`) — one builder over
+  `(cwd, fromRef, toRef)`; a new evaluator's input is a variant binding those
+  two refs, never a second producer.
 - Review lifecycle (`src/convergence-coordinator.ts`,
   `src/accepted-candidate.ts`) — the orchestrator sequences typed outcomes;
   these modules own validation, continuation, cap, resume, and terminal policy.
