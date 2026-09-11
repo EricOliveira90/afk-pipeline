@@ -5,6 +5,7 @@ import {
   type ContractFindingSeverity,
 } from "./contract-review.js";
 import type { BaseGateSkipCitation } from "./qa-gate-authorization.js";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -891,6 +892,121 @@ export function scopeAmendmentRequests(
       findingId: finding.id,
       paths: [...finding.amendmentPaths],
     }));
+}
+
+/**
+ * Artifact roots inside a review worktree that the repository ignores, and
+ * whose contents a plain `git status` therefore cannot see at all (`.afk/`
+ * is gitignored in every consumer). A reviewer write under one of them is
+ * exactly the kind that would otherwise be invisible, so the scan asks for
+ * them by name.
+ */
+export const IGNORED_REVIEW_ARTIFACT_ROOTS = [".afk"] as const;
+
+export interface ReviewWorktreeWriteScan {
+  /** Review worktree to scan — never the generator's worktree. */
+  cwd: string;
+  /** Repo-relative slice directory (forward slashes). */
+  reviewArtifactDir: string;
+  /**
+   * Basenames the copy-back allowlist admits directly inside
+   * `reviewArtifactDir` — the caller passes `QA_WINDOW_ARTIFACT_NAME`, the
+   * one constant shared with the post-QA window check, so the scan and the
+   * copy-back cannot disagree about the same directory.
+   */
+  copyBackAllowlist: RegExp;
+  /**
+   * Repo-relative paths the orchestrator itself wrote while seeding this
+   * attempt, recorded at write time. Subtracting them is what makes the
+   * seeded contract pair invisible here, so an amendment attempt reports no
+   * violation for `contract.md` or `acceptance-manifest.json`.
+   */
+  seededPaths?: readonly string[];
+  /** Defaults to {@link IGNORED_REVIEW_ARTIFACT_ROOTS}. */
+  ignoredRoots?: readonly string[];
+}
+
+/**
+ * Everything the evaluator changed in its disposable review worktree that
+ * neither the copy-back allowlist nor this attempt's seed manifest explains
+ * (#91 AC2/AC6). Reported, never fatal: the discard already happened — a
+ * path not on the allowlist was never copied back — so this is the record of
+ * what was thrown away, not a decision about it.
+ *
+ * Two `git status` reads of its own, with `execFileSync`, rather than
+ * `git.statusPorcelain`: that export's argv carries neither
+ * `--untracked-files=all` nor `--ignored`, so it cannot report the `.afk/`
+ * paths this scan makes load-bearing, and widening its argv would change what
+ * the ship gate parses out of it. A tree-object diff is ruled out for the
+ * same reason: a tree built through a throwaway index cannot see an ignored
+ * path at all.
+ */
+export function scanReviewWorktreeWrites(
+  input: ReviewWorktreeWriteScan,
+): string[] {
+  const dir = input.reviewArtifactDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const seeded = new Set(
+    (input.seededPaths ?? []).map((path) => path.replace(/\\/g, "/")),
+  );
+  // Only roots that exist: an absent pathspec is not a scan the reviewer
+  // failed, and asking git about one buys nothing.
+  const roots = (input.ignoredRoots ?? IGNORED_REVIEW_ARTIFACT_ROOTS).filter(
+    (root) => existsSync(join(input.cwd, root)),
+  );
+  const paths = new Set<string>([
+    ...readStatusPaths(input.cwd, ["--untracked-files=all"]),
+    ...(roots.length === 0
+      ? []
+      : readStatusPaths(input.cwd, [
+          "--untracked-files=all",
+          "--ignored",
+          "--",
+          ...roots,
+        ])),
+  ]);
+  return [...paths]
+    .filter((path) => !seeded.has(path))
+    .filter((path) => !copiedBack(path, dir, input.copyBackAllowlist))
+    .sort();
+}
+
+/** True for a path the copy-back allowlist already admitted. */
+function copiedBack(path: string, dir: string, allowlist: RegExp): boolean {
+  const prefix = `${dir}/`;
+  if (!path.startsWith(prefix)) return false;
+  const rest = path.slice(prefix.length);
+  // Directly inside, never nested: a nested name is not copied back, so it
+  // is a violation like any other write.
+  if (rest.includes("/")) return false;
+  return allowlist.test(rest);
+}
+
+function readStatusPaths(cwd: string, args: readonly string[]): string[] {
+  const out = execFileSync(
+    "git",
+    [
+      // Paths verbatim rather than git's C-quoted escaping, for the reason
+      // `src/git.ts:1299-1305` records.
+      "-c",
+      "core.quotePath=false",
+      "status",
+      "--porcelain=v1",
+      ...args,
+    ],
+    { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+  ) as string;
+  const paths: string[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    // `XY <path>`, or `XY <old> -> <new>` for a rename: the new path is
+    // what the reviewer wrote.
+    if (line.length < 4) continue;
+    const raw = line.slice(3);
+    const renamed = raw.split(" -> ");
+    const path = (renamed[renamed.length - 1] ?? "").trim();
+    if (path === "") continue;
+    paths.push(path.replace(/\\/g, "/").replace(/\/+$/, ""));
+  }
+  return paths;
 }
 
 export function buildQAReviewAttemptRecord(details: {
