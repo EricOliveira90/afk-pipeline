@@ -1,94 +1,144 @@
-# PM review — PRD 4 (acceptance and scope gates), slice 05 (#86) only
+# PM review — PRD 4 (acceptance and scope gates), invocation scope: slice 06 (#132)
 
 **Verdict:** ACCEPT-WITH-NOTES
 
-Run scope judged: slice 05 (#86) "Test cost split and caching". Slices 01-04 and
-06-08 were not run by this invocation; where their code is on the branch from an
-earlier invocation I read it only where slice 05 depends on it, and it did not
-drive this verdict.
+## What I judged
 
-Method: reading plus two narrow fresh runs —
-`pnpm vitest run src/gate-cache.test.ts src/skip-gate.test.ts` (12/12 pass,
-12.8s). No full-suite run; the pre-ship gate already covered this tree.
+Only slice 06 (#132) "Merge resolution round". The other manifest slices
+were not executed by this invocation and are recorded at the bottom as
+operator information only.
 
-## What the PRD promised, and what a user gets
+## The promised user outcome
 
-The user is the operator of an unattended run. The promise: the generator
-iterates on a cheap command instead of a 7-minute suite, a green gate on an
-unchanged tree is not paid for twice, a dependent gate is not paid for at all
-when its prerequisite failed, a wall-clock budget can report without blocking,
-and a candidate cannot smuggle in a disabled test. All five arrive.
+PRD D15: "the conflict hunks and the merged sibling diffs enter
+`prompts/generator-repair.md` as a data block. The resolved tree re-runs the
+slice's candidate gate phase (`src/candidate-gate-phase.ts`) and its behavior
+bindings before the merge retries inside the same mutex critical section; a
+resolution failing any gate writes terminal `CONFLICT` with both branches
+preserved." PRD D3: after a resolution round the scope comparison base is
+"re-resolved to the feature-branch tip that was merged in". PRD D21:
+`MERGE-PENDING` semantics unchanged.
 
-| PRD requirement | Where it landed | How I checked |
-|---|---|---|
-| D1/anchors — `gatePolicy.cost` is a parsed, validated member with the settled hybrid shape | `src/gate-policy.ts:37` (`POLICY_KEYS` holds `cost`), `parseCost`/`parseRelatedTests`/`parseSkipDetector` (`:514-700`), defaults at `:124-160` | read the parser; `src/gate-policy.test.ts:376-470` covers unknown sub-keys, wrong types, blank command, bad glob |
-| D1 — one production reader, each consumer handed its part | `resolveTestCostPlan` (`src/base-gates.ts:134-145`) is the only non-test caller of `policy.cost`; consumers at `:155`, `:185`, `src/orchestrator.ts:5594`, `:6403`, `src/skip-gate.ts:46` | `Select-String 'resolveTestCostPlan|relatedTests|cost?\.' src/*.ts` — no second reader outside tests |
-| D16 — advisory gate excluded from the required set, never from evidence | `environmentSensitiveDeclarations` (`src/base-gates.ts:184-201`) emits `required: false` + `environmentSensitive: true`, appended by `resolveFullSuiteGateDeclarations` (`:230-239`); no second exclusion path added to `candidate-gate-phase.ts`/`candidate-gate-policy.ts` | read all four `required` readers; `src/gate-runner.ts:924-931` stamps the real status with the advisory marker |
-| D16 — `run-summary.md` and the draft PR carry an advisory section | `src/logger.ts:403-434` (`## Advisory Gates`, filtered on the advisory marker), `src/ship-gate.ts:425-436` (`## Advisory gates (reported, never blocking)`), fed by `readAdvisoryGateOutcomes` (`logger.ts:118`) at `ship-gate.ts:1221` | read both renderers and the wiring — see note P-01: nothing in this repo's shipped config makes the block appear |
-| D16 — `test:budgets` stays blocking for a plain developer run | `package.json` untouched (`git diff --stat main...HEAD` lists no `package.json`), and `resolveScriptStep` (`src/preship.ts:80-87`) is not a `SanityPlan` member | read `preship.ts`; `SANITY_STEPS` unchanged, so neither sanity command list can see the budgets command (ADR 0063 holds) |
-| D17 — cache keyed by gate id + resolved command/args + tree id, under `.afk/artifacts/<run-slug>/gate-cache.json` | `src/gate-cache.ts:66-68`, path assembled at `src/orchestrator.ts:5597-5606` and forwarded to both phases (`:5621`, `:5960`) | read; `src/gate-cache.test.ts` passed in my run |
-| D17 — a changed tree or definition invalidates; a bad cache is a miss, never a throw | `readDocument`/`isEntry` (`gate-cache.ts:70-135`) treat absent, malformed, wrong-version and mis-filed entries as misses; only `PASS` is written (`:147`) | read; the entry's own fields must re-derive its key, so a hand-moved record cannot answer for another gate |
-| D17 — every reuse and every prerequisite skip is explicit | `GateResult.cacheReused` / `.prerequisiteSkipped` (`src/gate-runner.ts:164-168`), reuse recorded at `:795-814`, rendered by `src/logger.ts:91-93` as `PASS (cache reuse)` and `SKIPPED (prerequisite tests failed)` | read the runner branch and the summary cell — a silent skip is not possible |
-| D16/D17 — declared prerequisites, independent gates still report together | `prerequisiteGateIds` (`gate-runner.ts:144`), the branch at `:601-622` records SKIPPED and `continue`s; catalog in `src/base-gates.ts:53-56` (`tests`←`typecheck`, `test:budgets`←`tests`) | read the loop: it continues rather than breaking, so an independent `lint` still executes in the same attempt |
-| D18 — the verification command is derived from required cheap gates in gate order, excluding the full suite | `resolveCheapGateCatalog` (`src/base-gates.ts:154-174`, full suite excluded by identity *and* cost), `resolveGeneratorTestCommand` (`src/preship.ts:168-190`), single call site `src/orchestrator.ts:6401` | read both; `GATE_EXPECTED_COST_MS` puts `tests` at 420_000 against the 120_000 default |
-| D18 — `--test-command` may only narrow; a launch that drops a required cheap gate is refused naming it | `uncoveredCheapGateIds` (`src/preship.ts:138-148`) + the throw at `:175-186`, which names the omitted ids and prints the derived command | read; `src/orchestrator.test.ts:528-554` asserts `"pnpm test:fast"` alone throws naming `typecheck` while `"pnpm run typecheck && pnpm test:fast"` is accepted, and `pnpm x` normalizes against `pnpm run x` |
-| D18 — the self-run sections of `AGENTS.md` and `CLAUDE.md` are corrected | `AGENTS.md:60` and `CLAUDE.md:47` both read `--test-command "pnpm run typecheck && pnpm test:fast"` | `Select-String '--test-command' AGENTS.md CLAUDE.md` — identical strings; `src/orchestrator.test.ts:566-584` reads the value out of both files and runs it through the check |
-| D7 — one TypeScript/Vitest skip detector, base-vs-candidate counting, fails closed elsewhere | `DEFAULT_SKIP_DETECTORS` (`src/gate-policy.ts:148-160`: `.skip`, `.todo`, `.only`), `src/skip-gate.ts` declared through the in-process `run` seam and wired at `src/orchestrator.ts:5941` between `scope` and the full suite | ran `src/skip-gate.test.ts`: 7/7 pass, including "passes a pre-existing skip", "fails on an increase, naming the detector and the pattern", "catches a skip smuggled into a brand-new test file", "fails closed with no detector" |
-| Contract's own evidence-version rule | `GATE_EVIDENCE_VERSION = 3` (`src/gate-runner.ts:43`), `SUPPORTED_GATE_EVIDENCE_VERSIONS = [1,2,3]` (`:46`), the three new markers optional and validated on read (`:1158-1164`) | read; older evidence still loads, so a resumed run does not lose its history |
+For an operator, that means: a wave that used to stop with "CONFLICT, finish
+the merge by hand" now spends one automated round and, when it works, ships
+both slices — and when it does not work, the operator is left exactly where
+they were before, with nothing destroyed.
 
-Two things I specifically tried to break and could not: the skip gate counting
-its own fixture prose (the QA round's `stripNonCode` fix holds — the "counts
-detector text only where it is code, not in a string or a comment" test passed
-in my run), and the cache answering for the wrong gate (an entry filed under a
-key it does not describe is rejected at `gate-cache.ts:91-98`).
+### D15 — data block in the existing repair prompt: delivered
+
+`prompts/generator-repair.md` (diff `main..HEAD`, +11 lines after the
+`stuck.md` paragraph) gains framing prose for a `# Merge conflict to resolve`
+block and no new template file. `src/context-envelope.ts` adds
+`MERGE_RESOLUTION_SITUATION_SECTION`, registers it in
+`REPAIR_SITUATION_SECTION_TITLES` (so surrounding section extents stay
+correct), and adds `withMergeResolutionSituation` /
+`mergeResolutionBlockRoom`. `src/merge-resolution.ts:185-250`
+(`boundMergeResolutionBlock`) drops whole files with a note naming them and
+the worktree to read them in, so the block cannot overflow the envelope
+budget. Verified by reading both files plus the named tests
+`src/context-envelope.test.ts:2708, 2741, 2766, 2805`.
+
+### D15 — gates re-run on the resolved tree, inside one mutex: delivered
+
+`src/merge-resolution.ts:331-498` merges the feature tip into the slice
+branch with `git merge --no-commit --no-ff`, dispatches the generator,
+verifies the resulting commit really is that in-progress merge
+(`:410-428`), computes `HEAD^{tree}` and re-enters the exported
+`runCandidateGatePhase` (`:432-437`) with declarations passed in by
+`src/orchestrator.ts:6672-6677` — `scopeGateDeclaration`, the pre-QA set,
+`acceptanceGateDeclaration` (behavior bindings) and the full-suite set. A
+required gate not `PASS` returns `GATES-RED` with no retry (`:438-460`).
+`src/wave.ts:596-672` performs first attempt → resolution → retry inside a
+single `mergeMutex(...)` callback; the round is only dispatched when
+`first.result.status === "conflict"` and the resolver is wired.
+`src/merge-resolution.ts:507-522` refuses a declaration set that omits a
+required `scope` gate, so the gate re-run cannot silently lose the
+comparison D3 needs.
+
+### D15 — failure preserves both branches: delivered
+
+`UNRESOLVED` aborts only the merge this module started (`:397-409`,
+`abortStartedMerge` at `:560`); every other failure keeps the generator's
+resolution commit on the slice branch and never resets (ADR 0039). The
+feature tip is untouched on all failure paths because the retry is the only
+thing that moves it. `src/wave.ts` maps any non-`RESOLVED` verdict back to
+today's terminal `CONFLICT` with git's own details.
+
+### D3 — re-resolved base: delivered
+
+`src/orchestrator.ts:6594` resolves the feature branch label to a sha
+(`resolveRef`) and passes that sha as both the merge base of the round and
+the scope gate's `featureRef` (`:6661-6671`), so a path owned by an
+already-merged sibling is attributed to that sibling. `acceptedPairIntact`
+starts `false` and is set only from a real comparison after the generator
+returns (`:6734-6738`) — not hard-coded true. Covered by
+`src/merge-resolution.test.ts:313` and `:337`.
+
+### D21 — `MERGE-PENDING` untouched: delivered
+
+`src/wave.ts:611-616` returns before any resolution dispatch when
+`first.kind === "collision"`, so a prefix-collision deferral still records
+`MERGE-PENDING` and never spends a round
+(`src/wave-migrations.test.ts:1145`).
+
+### The end-to-end outcome is proven, not asserted
+
+`src/wave-migrations.test.ts:1311-1463` builds a real two-lane wave, advances
+the feature branch out of band to create a genuine textual conflict, runs
+one resolution round and asserts both slices end `PASS`, exactly one round
+was dispatched, and a competing mutex acquisition queued inside the round
+does not settle until the retry has already merged. That is the user outcome
+this slice exists for, observed rather than described.
+
+Also delivered: the round is recorded distinctly from repair rounds — the
+`merge-resolution-round` run event (`src/run-events.ts`, with `verdict` and
+`durationMs`) and its own `## Merge Resolution Rounds` section in
+`run-summary.md` (`src/logger.ts`), rendered only when such a round ran.
+`src/git.ts`, `src/candidate-gate-phase.ts`, `src/scope-gate.ts`,
+`src/acceptance-gate.ts` and `src/run-state.ts` are untouched by this
+slice's commits (`git diff --stat 88e5e8a..HEAD`), as its contract froze.
 
 ## Notes (not blocking)
 
-- **P-01 — the advisory block is built but nothing turns it on.** `afk.config.json`
-  on this branch (whole file, 26 lines) has `gatePolicy.version`,
-  `protectedPaths`, `riskClasses` and `acceptance` — and **no `cost` member**,
-  although the PRD's file-scope map assigns `afk.config.json` → `cost` to slice
-  05. Consequence, read end to end: `resolveTestCostPlan` defaults
-  `environmentSensitive` to `[]` (`src/base-gates.ts:139`),
-  `environmentSensitiveDeclarations` returns `[]` unless the set names the gate
-  (`:185-187`), and `src/logger.ts:403` filters the advisory block on attempts
-  carrying the advisory marker — so no run of this repo, and no consuming project
-  out of the box, ever renders `## Advisory Gates` or the PR's advisory section.
-  D16's "`test:budgets` is the first declared member" is therefore unrealized in
-  the product even though the mechanism, the declaration path and the renderers
-  are all present and unit-covered (`src/base-gates.test.ts:106-260`). Kept a
-  note rather than a blocker because the capability is complete and switching it
-  on is one config array, and because the locked contract deliberately left
-  `afk.config.json` out of `## Files expected to change` (so the generator could
-  not have added it without a scope violation). It is worth a decision, not a
-  round: enabling it makes every post-QA phase spawn the budgets script.
-- **P-02 — `cost.relatedTests` is a config surface with no behavior.** It is
-  parsed and validated (`src/gate-policy.ts:514-541`) and threaded into
-  `TestCostPlan` (`src/base-gates.ts:123,141`), but no non-test file reads it
-  (`Select-String 'relatedTests' src/*.ts` — every remaining hit is the parser,
-  the plan field or a test). D1 lists "related-test selection" among `cost`'s
-  contents, so an operator who declares it today gets no change in what runs and
-  no warning that the member is inert. Same class as slice 08's D4 seam note.
-- **P-03 — the `--test-command` refusal happens after the run journal opens.**
-  The check runs inside `runPipeline` at `src/orchestrator.ts:6401`, after
-  `logger.setFeatureBranch` (`:6395`), not at CLI option parse
-  (`src/cli-options.ts`). The operator still gets a named, actionable refusal
-  before any agent is dispatched, so the promise ("a bare `test:fast` override is
-  refused before the run starts") holds in substance; a run directory exists by
-  then, which is cosmetic.
+### P-01 — on a retry prefix collision the operator is told the merge was deferred, then gets terminal CONFLICT
 
-## Out-of-scope PRD gaps (for the operator, not part of this verdict)
+**Evidence I gathered.** `src/wave.ts:645-660` maps
+`retry.kind === "collision"` to a synthetic conflict attempt whose details
+are `"The resolved tree could not be merged: " +
+git.mergePendingReason(retry.prefixes, featBranch)`. I read
+`mergePendingReason` at `src/git.ts:795-805`: its text ends
+`"merge deferred; the next run retries the merge (no agent, no
+regeneration)."` The phase actually recorded on that path is terminal
+`CONFLICT`, which no next run retries. So the recorded outcome is right
+(contract B-06) and the sentence the operator reads is wrong about what
+happens next. Narrow and rare (it needs a migration-prefix collision to
+appear between the gate re-run and the retry, inside a held mutex), text
+only, nothing parses the string — hence a note. This is the same ground as
+the slice's own QA-01; the reading above is mine.
 
-- Waiver **authorization** of an intentional skip is #193's (prd.md's
-  "Two ownership gaps the splits created"), so a legitimately skipped test
-  currently has no way to be waived — the gate fails closed, which is plan item
-  17's stated and accepted failure mode.
-- D18's derived command excludes `lint` for this repo simply because
-  `package.json` declares no `lint` script; that is a property of the repo, not
-  of the slice.
-- Everything else in the PRD that is unmet belongs to slices 01-04, 06 and 07,
-  which this invocation did not run.
+### P-02 — the production seam that wires the round has no test through it
+
+**Evidence I gathered.** `runSliceMergeResolution` is the function that
+builds the envelope, the declaration set, the `acceptedPairIntact`
+attestation and the run event; grepping the tree, it appears only at
+`src/orchestrator.ts:6576` (definition) and `:7837` (the `WaveInput` wiring)
+— no test file names it. The wave-level fixture
+(`src/wave-migrations.test.ts:1385-1427`) supplies its own stub resolver that
+always returns `RESOLVED`, so neither the orchestrator seam nor the
+retry-collision branch executes under test. The user-facing risk is bounded:
+a defect there returns `UNRESOLVED` (`:6816-6837`) and the slice degrades to
+the terminal `CONFLICT` it would have had without the round, so the failure
+mode is the pre-slice status quo rather than a lost or corrupted merge.
+Worth a follow-up assertion, not a ship block.
+
+## Out-of-scope PRD gaps (operator information only, no bearing on the verdict)
+
+- Slices 01 (#84), 02 (#85), 03 (#91), 04 (#96), 05 (#86), 07 (#193) and
+  08 (#195) were not executed by this invocation; PRD requirements D1, D2,
+  D4-D14, D16-D20 and D22-D24 are therefore not judged here.
+- D4's role write-scope enforcement remains a seam without a production call
+  site; the PRD already records #226 as its owner.
 
 ## Structured findings (v1)
 
-{"version":1,"findings":[{"id":"P-01","title":"Advisory test:budgets gate is implemented but no shipped config declares it, so the advisory run-summary/PR block never renders","class":"PRODUCT","clearCondition":"Either this repo's afk.config.json declares gatePolicy.cost.environmentSensitive with \"test:budgets\", or prd.md/issues records the decision not to enable it and which issue owns it.","disposition":"OPEN"},{"id":"P-02","title":"gatePolicy.cost.relatedTests is parsed and threaded but has no production consumer","class":"PRODUCT","clearCondition":"A production call site consumes TestCostPlan.relatedTests, or the PRD/issues records which later slice owns related-test selection so a declared member is not silently inert.","disposition":"OPEN"},{"id":"P-03","title":"--test-command narrowing refusal fires inside runPipeline after the run journal opens rather than at option parse","class":"PRODUCT","clearCondition":"The refusal is raised during CLI option validation, or the PRD records that a refusal after the journal opens satisfies \"refused before the run starts\".","disposition":"OPEN"}]}
+{"version":1,"findings":[{"id":"P-01","title":"Retry prefix-collision detail promises a deferred merge while the run records terminal CONFLICT","class":"PRODUCT","clearCondition":"The retry-collision detail in src/wave.ts names the colliding prefixes without asserting a deferral or a next-run retry.","disposition":"OPEN"},{"id":"P-02","title":"runSliceMergeResolution, the production wiring of the round, is exercised by no test","class":"PRODUCT","clearCondition":"A test drives the merge path through runSliceMergeResolution (including the retry-collision branch) and asserts the outcome an operator sees.","disposition":"OPEN"}]}
