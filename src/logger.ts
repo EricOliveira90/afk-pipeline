@@ -473,22 +473,36 @@ ${coverageRows}
      * All four fields are named, the path exactly: a waiver is a record of a
      * named human accepting a specific risk, and a section that said only "1
      * waiver applied" would be an audit trail nobody can audit.
+     *
+     * One slice + risk class + path is one human decision, so it is one row no
+     * matter how many times a gate honored it: the post-QA phase re-runs on
+     * every implementation round and emits the event again each time, and a
+     * table repeating an authorization once per round reads as several
+     * authorizations. The surviving row carries the round the waiver was first
+     * applied, which is the fact the repeats were carrying.
      */
     const waiverEvents = runEvents.filter(
       (event) => event.type === "waiver-applied",
     );
+    const firstApplications = new Map<string, (typeof waiverEvents)[number]>();
+    for (const event of waiverEvents) {
+      const key = `${event.ghIssue} ${event.riskClass} ${event.path}`;
+      if (!firstApplications.has(key)) firstApplications.set(key, event);
+    }
+    const waiverRows = [...firstApplications.values()];
     const waiverSection =
-      waiverEvents.length === 0
+      waiverRows.length === 0
         ? ""
         : `
 ## Applied Waivers
 
-| Slice | Risk class | Path | Author | Reason |
-|-------|------------|------|--------|--------|
-${waiverEvents
+| Slice | Round | Risk class | Path | Author | Reason |
+|-------|-------|------------|------|--------|--------|
+${waiverRows
   .map(
     (event) =>
-      `| ${event.ghIssue} | ${inlineMarkdown(event.riskClass)} | ` +
+      `| ${event.ghIssue} | ${event.round} | ` +
+      `${inlineMarkdown(event.riskClass)} | ` +
       `${inlineMarkdown(event.path)} | ${inlineMarkdown(event.author)} | ` +
       `${inlineMarkdown(event.reason)} |`,
   )

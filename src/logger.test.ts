@@ -298,7 +298,57 @@ PM review: N/A
     expect(md).toContain("## Applied Waivers");
     const section = md.slice(md.indexOf("## Applied Waivers"));
     expect(section).toContain(
-      "| 193 | deleted-test | src/legacy-parser.test.ts | eric | " +
+      "| 193 | 1 | deleted-test | src/legacy-parser.test.ts | eric | " +
+        "the module it covered was deleted with it |",
+    );
+  });
+
+  it("[behavior:B-14] QA-01: renders one row per authorization, not one per round", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "waived-twice");
+    recordTerminal(log, id("193", "Feedback integrity", "afk/193"), {
+      phase: "PASS",
+    });
+    // The post-QA gate phase re-runs on every implementation round, so the same
+    // launch authorization is honored — and journalled — once per round. That is
+    // one human decision, and the summary has to read as one.
+    for (const round of [1, 2]) {
+      log.event({
+        type: "waiver-applied",
+        ghIssue: "193",
+        sliceNumber: "07",
+        round,
+        riskClass: "deleted-test",
+        path: "src/legacy-parser.test.ts",
+        author: "eric",
+        reason: "the module it covered was deleted with it",
+      });
+    }
+    // A different path under the same class is a different decision.
+    log.event({
+      type: "waiver-applied",
+      ghIssue: "193",
+      sliceNumber: "07",
+      round: 2,
+      riskClass: "deleted-test",
+      path: "src/other-parser.test.ts",
+      author: "eric",
+      reason: "the module it covered was deleted with it",
+    });
+
+    const md = log.writeSummary();
+    const section = md.slice(md.indexOf("## Applied Waivers"));
+    const rows = section
+      .split("\n")
+      .filter((line) => line.startsWith("| 193 |"));
+    expect(rows).toHaveLength(2);
+    // The surviving row carries the round the waiver was first applied.
+    expect(rows[0]).toBe(
+      "| 193 | 1 | deleted-test | src/legacy-parser.test.ts | eric | " +
+        "the module it covered was deleted with it |",
+    );
+    expect(rows[1]).toBe(
+      "| 193 | 2 | deleted-test | src/other-parser.test.ts | eric | " +
         "the module it covered was deleted with it |",
     );
   });
