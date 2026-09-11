@@ -68,8 +68,8 @@ same list in its quality pass; anything left here costs a review round.
 - A comment that restates the next line, or a section banner. Delete it.
 - A `catch` that logs and continues or returns a default. Propagate, unless
   the contract names that recovery.
-- A null or undefined check on a value this function just constructed or the
-  type already guarantees. Delete it. Validate at boundaries only.
+- A null or missing-value check on something this function just constructed
+  or the type already guarantees. Delete it. Validate at boundaries only.
 - `as any`, `as unknown as`, or a non-null `!` added to silence the compiler.
   Fix the type.
 - A new parameter, option, or flag read from exactly one place. Hard-code it.

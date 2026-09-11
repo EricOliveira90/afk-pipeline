@@ -121,8 +121,8 @@ in step when either changes):
 - comment that restates the next line; section banners
 - `catch` that logs and continues or returns a default without a contract-named
   recovery
-- null/undefined check on a value just constructed or already guaranteed by
-  its type
+- null or missing-value check on something just constructed or already
+  guaranteed by its type
 - `as any`, `as unknown as`, or `!` used to silence the compiler
 - parameter, option, or flag read from exactly one place
 - `V2`/`New`/`Impl` sibling of an existing function
