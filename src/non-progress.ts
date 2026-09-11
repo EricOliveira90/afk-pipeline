@@ -351,13 +351,27 @@ function activeSignature(observation: NonProgressObservation): string {
 
 function findingStates(
   observation: NonProgressObservation,
-): Map<string, string> {
+): Map<string, InterventionFinding> {
   return new Map(
-    observation.findings.map((finding) => [
-      finding.stableId,
-      finding.state,
-    ]),
+    observation.findings.map((finding) => [finding.stableId, finding]),
   );
+}
+
+/**
+ * Whether a historical entry and a current one are the same lineage, and not
+ * one stable ID naming two obligations across an ID space that moved on.
+ *
+ * `occurrences` is the lineage's own fold counter: it only ever grows while an
+ * identity is carried forward, so a *drop* is proof that this stable ID was
+ * renumbered rather than continued. A-B-A states compared across that break are
+ * two unrelated findings' states, and the OSCILLATION they used to report killed
+ * a negotiation at round 1 of 2 (#240).
+ */
+function continuesLineage(
+  earlier: InterventionFinding,
+  current: InterventionFinding,
+): boolean {
+  return earlier.occurrences <= current.occurrences;
 }
 
 function hasDispositionOscillation(
@@ -374,8 +388,10 @@ function hasDispositionOscillation(
     return (
       earlier !== undefined &&
       prior !== undefined &&
-      finding.state === earlier &&
-      finding.state !== prior
+      continuesLineage(earlier, finding) &&
+      continuesLineage(prior, finding) &&
+      finding.state === earlier.state &&
+      finding.state !== prior.state
     );
   });
 }

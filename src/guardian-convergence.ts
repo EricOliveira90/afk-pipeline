@@ -32,6 +32,32 @@ function normalizedFingerprint(finding: {
   ]);
 }
 
+/**
+ * Whether an ID match may resolve a finding onto a prior identity.
+ *
+ * The single statement of the rule #240 and #247 are two expressions of. Every
+ * lineage in this codebase resolved identity ID-first and treated the
+ * fingerprint as a fallback for "same obligation, renamed ID". Nothing guarded
+ * the inverse — "same ID, different obligation" — which is what a fresh round
+ * or a restart-from-base produces the moment the low IDs it numbers from are
+ * already spent. An ID alone is therefore not identity: it must be
+ * corroborated, either by the fingerprint agreeing (the same obligation,
+ * stated the same way) or by `priorIsLive` — the prior identity is still an
+ * open obligation in the *same* numbering, where one reviewer's IDs are
+ * authoritative and its wording legitimately drifts round to round.
+ *
+ * Callers that have no liveness signal pass `priorIsLive: false`, which reduces
+ * the rule to "the fingerprint must agree". That is the right reading for a
+ * guardian: a guardian closes a note by ceasing to report it rather than by
+ * recording a terminal disposition, so a live prior disposition proves nothing.
+ */
+export function idMatchIsCorroborated(args: {
+  fingerprintAgrees: boolean;
+  priorIsLive: boolean;
+}): boolean {
+  return args.fingerprintAgrees || args.priorIsLive;
+}
+
 function priorFindings(
   rounds: readonly PersistedGuardianReviewRound[],
   guardian: GuardianKind,
@@ -44,8 +70,12 @@ function priorFindings(
 /**
  * Assign stable identities to one guardian's newly parsed findings.
  *
- * IDs are authoritative even when the finding's fingerprint changed. Only an
- * ID miss permits the normalized class + clear-condition fallback.
+ * An ID match is authoritative only when the normalized class +
+ * clear-condition fingerprint agrees ({@link idMatchIsCorroborated}); an ID
+ * whose fingerprint disagrees names a different obligation and mints a fresh
+ * identity (#247). An ID miss still permits the fingerprint fallback, which
+ * searches every prior occurrence, so an identity whose wording drifted for one
+ * round and reverted rejoins its own lineage.
  *
  * Identity resolution is one-to-one within a round (ADR 0057 decision 1,
  * amendment 2026-09-06): one prior entry's stable identity goes to at most
@@ -83,6 +113,21 @@ export function advanceGuardianFindingLineage(
       prior.find((candidate) => candidate.stableId === finding.id) ??
       prior.find((candidate) => candidate.currentId === finding.id);
     if (!entry) return;
+    // An uncontested ID match used to win with no fingerprint comparison at
+    // all — the tiebreak below only ran for two or more claimants — so a round
+    // reusing a spent ID absorbed the prior identity and overwrote its title
+    // and clear condition (#247). Corroborate every claim, so a reused ID that
+    // carries a different obligation never reaches the tiebreak and mints a
+    // fresh identity instead.
+    if (
+      !idMatchIsCorroborated({
+        fingerprintAgrees:
+          normalizedFingerprint(finding) === normalizedFingerprint(entry),
+        priorIsLive: false,
+      })
+    ) {
+      return;
+    }
     const list = claimants.get(entry.stableId) ?? [];
     list.push({ index, entry });
     claimants.set(entry.stableId, list);
@@ -126,10 +171,16 @@ export function advanceGuardianFindingLineage(
   });
 
   // A new identity starts from the finding's own ID, which collides with a
-  // claimed identity only for a tiebreak loser whose ID equals the contested
-  // `stableId`; a deterministic suffix keeps that identity genuinely new.
+  // claimed identity for a tiebreak loser whose ID equals the contested
+  // `stableId`, and with an unclaimed *prior* identity for a finding that
+  // reused a spent ID; a deterministic suffix keeps that identity genuinely
+  // new. Minting the bare ID in the second case would hand the fresh
+  // obligation the prior one's identity, which is the #247 overwrite by
+  // another route.
   const mintStableId = (id: string): string => {
-    if (!claimed.has(id)) return id;
+    if (!claimed.has(id) && !prior.some((entry) => entry.stableId === id)) {
+      return id;
+    }
     for (let n = 2; ; n++) {
       const candidate = `${id}-${n}`;
       if (

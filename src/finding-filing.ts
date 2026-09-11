@@ -1,3 +1,4 @@
+import { idMatchIsCorroborated } from "./guardian-convergence.js";
 import type { LedgerFinding } from "./guardian-finding-ledger.js";
 import type { PersistedFiledFinding } from "./run-state.js";
 
@@ -94,6 +95,15 @@ export function buildFindingIssueDrafts(args: {
  * withheld when the matched record's own stable ID is still being filed in this
  * pass — two live identities sharing a fingerprint are two findings the ledger
  * decided to keep apart, and collapsing them would drop one.
+ *
+ * Neither match accepts a stable ID on its own ({@link idMatchIsCorroborated}).
+ * A guardian numbers each round's findings from `P-01` on the diff it was given,
+ * so once the early notes clear, the next round's fresh notes land on exactly
+ * the IDs already filed — and an unguarded ID match reported them as
+ * already-filed and dropped them. Five notes shipped unfixed and unfiled that
+ * way, against #174's "filed exactly once" (#247). A drifted fingerprint on a
+ * genuinely repeated obligation now files a second issue instead; that is the
+ * cheaper error, because a duplicate issue is visible and a dropped note is not.
  */
 function alreadyFiledRecord(
   draft: FindingIssueDraft,
@@ -102,7 +112,12 @@ function alreadyFiledRecord(
 ): PersistedFiledFinding | undefined {
   const byStableId = alreadyFiled.find(
     (record) =>
-      record.guardian === draft.guardian && record.stableId === draft.stableId,
+      record.guardian === draft.guardian &&
+      record.stableId === draft.stableId &&
+      idMatchIsCorroborated({
+        fingerprintAgrees: record.fingerprint === draft.fingerprint,
+        priorIsLive: false,
+      }),
   );
   if (byStableId) return byStableId;
   return alreadyFiled.find(

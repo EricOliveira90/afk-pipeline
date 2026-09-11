@@ -183,6 +183,60 @@ describe("fileFindingIssues", () => {
     ]);
   });
 
+  it("files a fresh obligation that reuses a filed stable ID", () => {
+    // #247, recorded: round 3 filed PM `P-01` as issue 216 — "a production call
+    // site grades a writing role through the role comparison source". Round 4's
+    // guardian numbered from P-01 again on a diff where that note was fixed, so
+    // its own first note ("advisory test:budgets gate is implemented but no
+    // shipped config declares it") arrived as P-01 too. The ID match reported it
+    // already filed and it shipped unfixed and unfiled, against #174.
+    const alreadyFiled: PersistedFiledFinding[] = [
+      {
+        guardian: "pm",
+        stableId: "P-01",
+        fingerprint: guardianFindingFingerprint({
+          class: "PRODUCT",
+          clearCondition:
+            "A production call site grades a writing role through the `role` comparison source.",
+        }),
+        kind: "NOTE",
+        round: 3,
+        issue: "https://github.com/EricOliveira90/afk-pipeline/issues/216",
+      },
+    ];
+    const create = vi.fn(
+      () => "https://github.com/EricOliveira90/afk-pipeline/issues/242",
+    );
+
+    const outcome = fileFindingIssues({
+      drafts: [
+        draft({
+          guardian: "pm",
+          stableId: "P-01",
+          round: 4,
+          fingerprint: guardianFindingFingerprint({
+            class: "PRODUCT",
+            clearCondition:
+              "This repo's afk.config.json declares gatePolicy.cost.environmentSensitive.",
+          }),
+        }),
+      ],
+      alreadyFiled,
+      create,
+      retries: 0,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(outcome.skipped).toEqual([]);
+    expect(outcome.filed).toEqual([
+      expect.objectContaining({
+        stableId: "P-01",
+        round: 4,
+        issue: "https://github.com/EricOliveira90/afk-pipeline/issues/242",
+      }),
+    ]);
+  });
+
   it("skips a renamed identity whose fingerprint was already filed", () => {
     const alreadyFiled: PersistedFiledFinding[] = [
       {
