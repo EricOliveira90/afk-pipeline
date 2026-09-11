@@ -41,6 +41,17 @@ Fix causes, not only listed examples.
 When the situation includes preserved `stuck.md` evidence, treat that file as
 read-only. Never delete, move, rewrite, or edit it.
 
+When the situation includes a `# Merge conflict to resolve` block, a merge of
+the feature branch into your slice branch is already in progress in your
+worktree, and that block carries its conflict hunks plus the diffs of the
+sibling work that has already merged. Resolve every conflicted path so both
+sides' intent survives, then commit the in-progress merge — do not abort it,
+do not reset, and do not start a new branch. Keep the resolution to the
+conflicted paths: this is not a round for rescoping, redesigning, or reverting
+a sibling's work, and the same write boundary and scope escalation above still
+apply. A conflict marker left anywhere in the tree fails the round even if the
+tests pass.
+
 # Locked contract view
 
 {{CONTRACT_VIEW}}
