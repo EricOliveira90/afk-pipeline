@@ -47,7 +47,7 @@ import {
 import { acceptanceGateDeclaration } from "./acceptance-gate.js";
 import { ACCEPTANCE_GATE_ID } from "./gate-runner.js";
 import type { NegotiateOutcome } from "./orchestrator.js";
-import { loadRunState } from "./run-state.js";
+import { loadRunState, RUN_STATE_VERSION } from "./run-state.js";
 import { createWorktree } from "./git.js";
 import {
   buildPrCreationPlan,
@@ -5346,7 +5346,7 @@ describe("round-scoped contract feedback", () => {
           ),
         ),
       ).toMatchObject({
-        version: 3,
+        version: RUN_STATE_VERSION,
         contractConvergence: {
           "9003": {
             version: 1,

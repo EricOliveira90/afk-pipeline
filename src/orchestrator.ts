@@ -4459,7 +4459,11 @@ function createReviewIsolation(
   commitSha: string,
 ): ReviewIsolation {
   const { config, slice, logger } = ctx;
-  const label = `${config.prdSlug}-s${slice.number}-r${round}-qa-review-${randomUUID()}`;
+  // The slice suffix stays last, matching every other AFK working directory:
+  // a slice's identity is read off the tail of its path (`-s01`), so a review
+  // worktree that buried it mid-name would read as "no slice" to anything
+  // resolving a slice from a cwd.
+  const label = `${config.prdSlug}-qa-review-r${round}-${randomUUID()}-s${slice.number}`;
   const dir = join(config.repoRoot, ".afk", "checkpoints", label);
   // A fresh UUID branch every stage: `git.createBranch` reuses an existing
   // branch name, which would silently pin the review worktree to a stale
