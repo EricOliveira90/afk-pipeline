@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-14"],
+      "summary": "`## Applied Waivers` can repeat one authorization once per implementation round, and the table has no round column to tell the rows apart.",
+      "evidence": "src/orchestrator.ts:6032-6072 emits a `waiver-applied` event on every post-QA gate phase, so a slice that repairs and re-runs the phase emits the same waiver again with a different `round`. src/logger.ts renders `## Applied Waivers` from `runEvents.filter((event) => event.type === \"waiver-applied\")` with columns Slice / Risk class / Path / Author / Reason only. src/orchestrator.test.ts:3494 pins one event, but that scenario is a single-round PASS, so the repeat case is unbound.",
+      "expected": "B-14: an `## Applied Waivers` section naming slice, risk class, exact path, author and reason for the waivers the run applied.",
+      "observed": "A multi-round slice would render one identical row per round, with nothing in the row distinguishing them; `saveAppliedWaivers` de-duplicates the persisted record but the summary table does not.",
+      "clearCondition": "The summary either de-duplicates on slice + risk class + path or carries the round the event already holds, with a logger test covering two `waiver-applied` events for one waiver in different rounds.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

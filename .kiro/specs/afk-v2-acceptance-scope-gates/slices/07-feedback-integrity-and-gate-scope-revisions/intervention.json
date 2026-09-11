@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "cause": {
+    "kind": "DETERMINISTIC_GATE_EXHAUSTION",
+    "interventionClass": "IMPLEMENTATION_INTERVENTION"
+  },
+  "interventionClass": "IMPLEMENTATION_INTERVENTION",
+  "phase": "deterministic-qa",
+  "reasonCodes": [
+    "DETERMINISTIC_GATE_EXHAUSTED"
+  ],
+  "blockerIds": [
+    "tests"
+  ],
+  "summary": "AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests.",
+  "findingLineage": [
+    {
+      "stableId": "QA-01",
+      "currentId": "QA-01",
+      "state": "OPEN",
+      "disposition": "REOPENED",
+      "occurrences": 3,
+      "summary": "`## Applied Waivers` can repeat one authorization once per implementation round, and the table has no round column to tell the rows apart.",
+      "evidence": "src/orchestrator.ts:6032-6072 emits a `waiver-applied` event on every post-QA gate phase, so a slice that repairs and re-runs the phase emits the same waiver again with a different `round`. src/logger.ts renders `## Applied Waivers` from `runEvents.filter((event) => event.type === \"waiver-applied\")` with columns Slice / Risk class / Path / Author / Reason only. src/orchestrator.test.ts:3494 pins one event, but that scenario is a single-round PASS, so the repeat case is unbound.",
+      "clearCondition": "The summary either de-duplicates on slice + risk class + path or carries the round the event already holds, with a logger test covering two `waiver-applied` events for one waiver in different rounds.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r3-a1.json",
+        ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r3-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-02",
+      "currentId": "QA-02",
+      "state": "RESOLVED",
+      "disposition": "RESOLVED",
+      "occurrences": 2,
+      "summary": "The handoff attributed two shipped behaviors to functions and files that did not hold them.",
+      "evidence": "handoff.md:11 now reads `B-02: src/afk-manifest.ts:trimUnclaimedMigrationPrefixes round-trips protectedChangeWaivers unchanged through the rewrite`; handoff.md:36 now reads `B-14/P-06: src/logger.ts:writeSummary renders ## Applied Waivers`. Both named symbols exist: `trimUnclaimedMigrationPrefixes` in src/afk-manifest.ts and `writeSummary` in src/logger.ts.",
+      "clearCondition": "`handoff.md` names `trimUnclaimedMigrationPrefixes` for B-02 and `src/logger.ts` for B-14.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r2-a1.md"
+      ]
+    }
+  ],
+  "attemptedRepairs": [
+    {
+      "phase": "deterministic-qa",
+      "revision": 2,
+      "candidateTreeId": "f754f45250b701f7db9a70f8148ba1bf2cae0727",
+      "activeBlockingIds": [
+        "tests"
+      ]
+    },
+    {
+      "phase": "deterministic-qa",
+      "revision": 3,
+      "candidateTreeId": "193521df8fd73cc6871d5f970276d2be281f32cd",
+      "activeBlockingIds": [
+        "tests"
+      ]
+    }
+  ],
+  "preservedCandidate": {
+    "branch": "afk-claude-code/afk-v2-acceptance-scope-gates-slice-07-feedback-integrity-and-gate-scope-revisions",
+    "treeId": "193521df8fd73cc6871d5f970276d2be281f32cd",
+    "phase": "deterministic-qa",
+    "revision": 3,
+    "recoveryRef": "refs/afk/recovery/afk-v2-acceptance-scope-gates-claude-code/193/deterministic-qa-r3-193521df8fd73cc6871d5f970276d2be281f32cd",
+    "recoveryCommit": "74efafe0e81714ecab6731a9a0f1dd892c391ff0"
+  },
+  "supportingEvidence": [
+    ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r2-a1.json",
+    ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r3-a1.json",
+    ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r2-a1.md",
+    ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r3-a1.md",
+    "C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260910-000620/gates/s07/attempt-d8eaa36d9652.json",
+    "C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260910-000620/gates/s07/gate-logs/d8eaa36d9652-01-tests.log"
+  ],
+  "requiredOperatorAction": "Inspect tests on preserved candidate tree 193521df8fd73cc6871d5f970276d2be281f32cd, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice."
+}

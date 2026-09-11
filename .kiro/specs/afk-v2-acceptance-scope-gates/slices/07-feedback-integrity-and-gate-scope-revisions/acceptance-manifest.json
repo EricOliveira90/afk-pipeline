@@ -1,0 +1,264 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/afk-manifest.ts",
+      "src/afk-manifest.test.ts",
+      "src/feedback-integrity-gate.ts",
+      "src/feedback-integrity-gate.test.ts",
+      "src/escalation.ts",
+      "src/escalation.test.ts",
+      "src/artifacts.ts",
+      "src/artifacts.test.ts",
+      "src/skip-gate.ts",
+      "src/skip-gate.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/run-events.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/prompt-template.test.ts",
+      "prompts/generator.md",
+      "prompts/generator-repair.md",
+      "prompts/evaluator-contract.md",
+      "prompts/evaluator-contract-revision.md",
+      "agents/generator.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #193 AC9/AC11 (prd.md D5)",
+      "given": "a PRD directory afk.json at version 1 whose protectedChangeWaivers holds one entry with riskClass, path, author and reason, and sibling cases with an unrecognised riskClass, a path containing `*`, a blank field, and a duplicate riskClass+path pair",
+      "when": "parseAfkManifest reads each document",
+      "then": "the valid entry survives on AfkManifest.protectedChangeWaivers with its four fields and its path normalized to forward slashes without a leading `./`, an absent key reads as an empty array, and each invalid document throws at launch naming the offending value",
+      "observableResult": "src/afk-manifest.test.ts asserts the parsed waiver array and one throw per refusal case",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #193 (prd.md D5)",
+      "given": "an afk.json carrying protectedChangeWaivers and an unclaimed migration prefix",
+      "when": "trimUnclaimedMigrationPrefixes rewrites the file",
+      "then": "the rewritten afk.json still carries every waiver entry unchanged",
+      "observableResult": "src/afk-manifest.test.ts reads the rewritten file back and asserts the waiver array",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #193 AC9/AC10 (prd.md D22, D24)",
+      "given": "a candidate worktree that changed afk.config.json, no protectedChangeWaivers at launch, and the path declared in the accepted fileScope",
+      "when": "the required in-process feedback-integrity gate (id `feedback-integrity`, stage `deterministic`) runs from src/feedback-integrity-gate.ts",
+      "then": "the outcome is FAIL with failureKind COMMAND, findings.protectedChanges naming exactly `afk.config.json`, and detail naming the `gate-policy` risk class plus the literal riskClass, path, author and reason fields to add to the PRD directory's afk.json; a failing changed-set probe returns INFRASTRUCTURE instead of an empty violation list",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts the status, findings.protectedChanges, the four field names in detail, and the INFRASTRUCTURE branch",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #193 AC8 (prd.md D6)",
+      "given": "src/foo.test.ts present on the feature ref and absent from the candidate worktree, with no gatePolicy file so the default testGlobs `**/*.test.ts` applies",
+      "when": "the feedback-integrity gate compares the candidate worktree against featureRef",
+      "then": "the outcome is FAIL with findings.deletedTests naming exactly `src/foo.test.ts`, matching performed by gate-policy's exported matchesGlob and no second matcher",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts the FAIL, the exact path in findings.deletedTests, and that a non-test deletion does not fire",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #193 AC11 (prd.md D5)",
+      "given": "the same deleted test file plus a launch waiver {riskClass: 'deleted-test', path: 'src/foo.test.ts', author, reason}",
+      "when": "the feedback-integrity gate runs",
+      "then": "the outcome is PASS and findings.appliedWaivers carries that waiver's four fields",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts PASS and the appliedWaivers record",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #193 AC12 (prd.md D5)",
+      "given": "a candidate worktree whose own afk.json adds a covering waiver while the launch manifest loaded from --prd-dir has none",
+      "when": "the feedback-integrity gate runs",
+      "then": "the candidate-authored waiver exempts nothing, the gate still FAILs naming the path, and findings.appliedWaivers is absent or empty",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts the FAIL with a worktree afk.json present and no waiver in the injected launch manifest",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #193 (\"the same comparison enforces the catalog-declared escalation risk classes in gatePolicy.riskClasses\")",
+      "given": "a gatePolicy whose riskClasses omits `deleted-test` and a candidate that deleted a test file",
+      "when": "the feedback-integrity gate runs",
+      "then": "the deletion does not make the gate FAIL and detail states that the class is not enforced by policy, while a declared class still fires",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts the PASS with the omitted class and the FAIL with it declared",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #193 (prd.md D5; slice-07 anchors detail 6)",
+      "given": "a declaration built with acceptedPairIntact false — the value the orchestrator's existing accepted-pair integrity check produced, never a fresh check",
+      "when": "the feedback-integrity gate runs, including with a `gate-policy` waiver naming contract.md",
+      "then": "the gate FAILs closed naming contract.md and acceptance-manifest.json as gate-policy-class protected changes, and no waiver exempts them",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts the fail-closed outcome with and without such a waiver",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #193 AC3 (prd.md D12)",
+      "given": "escalation documents: version 2 with gateEvidence {gateId, evidenceArtifactId} and findingIds exactly ['GATE-SCOPE']; version 2 without gateEvidence; gateEvidence with other findingIds; GATE-SCOPE without gateEvidence; GATE-SCOPE mixed with a cited ID or with PRE-BUILD-SCOPE; version 1 carrying gateEvidence; an unknown top-level key",
+      "when": "parseScopeEscalation parses each against the locked manifest",
+      "then": "the first two parse — a version-2 document without gateEvidence being an ordinary cited-finding or PRE-BUILD-SCOPE escalation — and every other case throws; GATE_SCOPE_FINDING_ID is exported as 'GATE-SCOPE' beside PRE_BUILD_SCOPE_FINDING_ID, and gateEvidence is admitted by the exact-key check only at version 2",
+      "observableResult": "src/escalation.test.ts asserts one parse or throw per case and the exported constant",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #193 AC3 (prd.md D12; ADR 0052)",
+      "given": "a locked slice whose worktree holds no change outside the locked file scope, and a generator that writes a version-2 escalation.md citing a failing orchestrator-run gate with findingIds ['GATE-SCOPE']",
+      "when": "the round returns and the orchestrator's existing focused-revision door reads the artifact",
+      "then": "the escalation is accepted through that one door, a focused scope revision runs, and the next generator round's file scope carries the requested path",
+      "observableResult": "an it on the existing describe(\"generator scope escalation\") spawned scenario in src/orchestrator.test.ts asserts the revised fileScope and the continued round",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #193 AC4",
+      "given": "a review-archive directory holding escalation-r1-a1.md whose JSON is version 2 with gateEvidence",
+      "when": "archivedScopeEscalations reads it and renderStuckDiagnosis renders the diagnosis",
+      "then": "the record is a valid record rather than invalid, and the rendered diagnosis names the record's gateId and evidenceArtifactId",
+      "observableResult": "src/artifacts.test.ts asserts both strings in the rendered diagnosis and that a malformed record is still retained as invalid",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #193 AC11 (prd.md D23)",
+      "given": "a post-QA gate phase whose written evidence carries findings.appliedWaivers on a PASS result, reached immediately after gateArtifacts.push(...postQaGates.artifacts) in src/orchestrator.ts and before the CANCELLED/ERROR/REPAIR branches",
+      "when": "the orchestrator calls readGateEvidence on each pushed artifact's evidencePath and passes the evidence through the new pure export appliedWaiversFrom",
+      "then": "every applied waiver is returned once, one waiver-applied run event is emitted per waiver through logger.event, and saveAppliedWaivers persists them for that GH issue — so no run-state field or event variant is written by nothing",
+      "observableResult": "src/feedback-integrity-gate.test.ts asserts appliedWaiversFrom over a fixture evidence document, and an it on an existing spawned src/orchestrator.test.ts scenario asserts the waiver-applied event and the persisted record from one run",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-13",
+      "source": "GH #193 AC11 (prd.md D22)",
+      "given": "a hand-written version-3 run-state file with every other field present, and a repeated saveAppliedWaivers call for the same riskClass and path",
+      "when": "loadRunState reads the file and saveAppliedWaivers writes",
+      "then": "the loaded state is version 4 with the per-slice appliedWaivers record defaulting to empty and every other field preserved, and the repeated write stores one record keyed by GH issue",
+      "observableResult": "src/run-state.test.ts asserts the upgraded version, the defaulted field, the preserved fields and the de-duplicated record",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "B-14",
+      "source": "GH #193 AC11 (prd.md D5, D24)",
+      "given": "a run whose event log holds one waiver-applied payload carrying a risk class, exact path, author and reason",
+      "when": "Logger.writeSummary renders run-summary.md",
+      "then": "the summary carries an `## Applied Waivers` section naming the slice, risk class, exact path, author and reason",
+      "observableResult": "src/logger.test.ts asserts the section and its four values",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-15",
+      "source": "GH #193 AC13 (prd.md D5)",
+      "given": "a candidate test file that introduces an it.skip and a launch waiver {riskClass: 'skipped-test', path: <that file>}, plus the same candidate with the path only in the contract fileScope and no waiver",
+      "when": "the tests:skipped gate runs with the launch waivers passed through SkipGateInput from the existing declaration site",
+      "then": "the waived path is excluded from both the base and candidate scans and from the uncovered-file check, the gate PASSes and records the waiver in findings.appliedWaivers; with file scope alone the gate still FAILs",
+      "observableResult": "src/skip-gate.test.ts asserts the waived PASS with appliedWaivers and the unwaived FAIL",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-16",
+      "source": "GH #193 AC3/AC7 (prd.md D12)",
+      "given": "prompts/generator.md, prompts/generator-repair.md and agents/generator.md",
+      "when": "their shared `Scope escalation` sections are read",
+      "then": "each carries the version-2 escalation JSON literal, all three branches (routed finding IDs, PRE-BUILD-SCOPE, GATE-SCOPE plus gateEvidence citing a failing orchestrator-run gate), the never-mix rule across the three identities, and the instruction to escalate for a human decision instead of revising scope when the discovery changes behavior, a public interface, a data format, security posture or acceptance criteria",
+      "observableResult": "src/prompt-template.test.ts asserts the literal and each branch in all three files, replacing the pinned version-1 assertions",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "B-17",
+      "source": "GH #193 AC1/AC2 (prd.md D13; ADR 0060)",
+      "given": "prompts/evaluator-contract.md and prompts/evaluator-contract-revision.md",
+      "when": "each rendered contract-evaluator prompt is read",
+      "then": "both carry ADR 0060's parser-regression rubric: a contract changing a parser's accepted input language binds positive and rejected-or-boundary regression evidence, and a fixture-backed established harness declares the owning fixture area and the concrete existing fixture paths expected to change or explicitly authorizes new fixtures there, with inline tests valid where they are the established harness",
+      "observableResult": "src/prompt-template.test.ts asserts the rubric text in both rendered prompts",
+      "preservation": false,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #193 AC5 (ADR 0052)",
+      "given": "the existing version-1 escalation fixtures, including a PRE-BUILD-SCOPE sole-entry document, a mixed PRE-BUILD-SCOPE document, an undeclared-path document and a migration-path document",
+      "when": "parseScopeEscalation parses them",
+      "then": "each outcome is exactly today's: mandatory non-empty unique findingIds, the PRE-BUILD-SCOPE sole-entry rule, manifest path validation, migration-path refusal and the non-blank reason all unchanged",
+      "observableResult": "src/escalation.test.ts keeps its version-1 cases passing unmodified",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #193 AC6 (ADR 0052)",
+      "given": "a worktree that already holds a change outside the locked file scope and a GATE-SCOPE escalation requesting that path",
+      "when": "the orchestrator's focused-revision door reads the artifact",
+      "then": "the round ends ERROR naming the undeclared change, the file scope is not widened and the existing out-of-scope work is not legalized",
+      "observableResult": "an it on the existing generator-scope-escalation scenario in src/orchestrator.test.ts asserts phase ERROR and the refusal text",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #193 (ADR 0050, ADR 0051)",
+      "given": "two accepted scope revisions already made in one implementation round, and a generator that mutated the accepted contract pair",
+      "when": "a third GATE-SCOPE escalation arrives, and when the mutated pair is detected",
+      "then": "the third escalation is refused instead of looping, and the accepted pair is archived and restored before any escalation is read",
+      "observableResult": "the existing MAX_SCOPE_REVISIONS_PER_ROUND and accepted-pair scenarios in src/orchestrator.test.ts still pass, extended to the GATE-SCOPE identity",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #193 AC2 (prd.md D13; ADR 0061)",
+      "given": "both evaluator prompt files after the rubric addition, and src/acceptance-manifest.ts",
+      "when": "the prompts are read and the manifest module's version literals are checked",
+      "then": "both prompts still carry `# Durable finding lineage`, `# Control-plane situation`, the {{DURABLE_FINDING_LINEAGE}} and {{CONTROL_SITUATION}} placeholders and the legal severity and state bullets, and the acceptance manifest is still version 2 with src/acceptance-manifest.ts unedited",
+      "observableResult": "src/prompt-template.test.ts asserts the retained sections and bullets; the acceptance-manifest suite passes with no diff to that module",
+      "preservation": true,
+      "gateIds": ["typecheck", "tests"]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #193 AC13 (#86)",
+      "given": "a candidate that increases a skip count with no covering waiver, a project with no declared skip detector, and a declared test file no detector covers",
+      "when": "the tests:skipped gate runs",
+      "then": "each case fails exactly as #86 shipped it — the increase FAILs, both configuration cases FAIL with failureKind CONFIGURATION — and counting still fires only on an increase over the base",
+      "observableResult": "src/skip-gate.test.ts keeps its existing cases passing unmodified",
+      "preservation": true,
+      "gateIds": ["tests"]
+    },
+    {
+      "id": "P-06",
+      "source": "GH #193 AC1/AC11",
+      "given": "a contract-evaluator REVISE verdict citing the new rubric rule, and a run in which no waiver was applied",
+      "when": "the contract lock is attempted and run-summary.md is written",
+      "then": "the REVISE verdict blocks the lock through the existing refusal path, and the summary carries no `## Applied Waivers` section with its other bytes unchanged",
+      "observableResult": "the existing REVISE-blocks-the-lock scenario in src/orchestrator.test.ts still passes, and src/logger.test.ts asserts the section's absence in the byte-stability case",
+      "preservation": true,
+      "gateIds": ["tests"]
+    }
+  ]
+}
