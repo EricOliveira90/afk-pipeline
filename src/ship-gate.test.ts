@@ -1265,8 +1265,8 @@ describe("runShipGate", () => {
               {
                 id: "A-05",
                 title: "Current-alias claimant",
-                class: "PRODUCT",
-                clearCondition: "Clear the current alias.",
+                class: "INTEGRITY",
+                clearCondition: "Commit the durable evidence.",
                 disposition: "REPEATED",
                 reachableTrigger: "A retry reaches the current alias.",
                 introducedByReviewedDiff: false,
@@ -1274,8 +1274,8 @@ describe("runShipGate", () => {
               {
                 id: "A-01",
                 title: "Stable-alias claimant",
-                class: "INTEGRITY",
-                clearCondition: "Clear the stable alias.",
+                class: " Integrity ",
+                clearCondition: "  Commit   the durable evidence. ",
                 disposition: "OPEN",
                 reachableTrigger: "A retry reaches the stable alias.",
                 introducedByReviewedDiff: false,
@@ -1330,9 +1330,12 @@ describe("runShipGate", () => {
     });
 
     const rounds = loadRunState(repo, slug).reviewPhase?.rounds;
-    // Both parsed findings persist distinctly: neither fingerprint matches the
-    // prior entry, so the stableId claimant keeps A-01 and the current-alias
-    // claimant mints a new identity (ADR 0057 decision 1 amendment).
+    // Both parsed findings persist distinctly: both claim the one prior
+    // identity, both fingerprints match it so no single fingerprint singles out
+    // a winner, and the stableId claimant keeps A-01 while the current-alias
+    // claimant mints a new identity (ADR 0057 decision 1 amendment). The
+    // fingerprints have to match for either alias to claim the identity at all
+    // (#247), which is why they restate the prior clear condition here.
     expect(rounds).toHaveLength(2);
     expect(rounds?.[1]?.architect).toEqual({
       source: "INVOKED",
@@ -1342,8 +1345,8 @@ describe("runShipGate", () => {
           stableId: "A-05",
           currentId: "A-05",
           title: "Current-alias claimant",
-          class: "PRODUCT",
-          clearCondition: "Clear the current alias.",
+          class: "INTEGRITY",
+          clearCondition: "Commit the durable evidence.",
           disposition: "REPEATED",
           reachableTrigger: "A retry reaches the current alias.",
           introducedByReviewedDiff: false,
@@ -1352,8 +1355,10 @@ describe("runShipGate", () => {
           stableId: "A-01",
           currentId: "A-01",
           title: "Stable-alias claimant",
-          class: "INTEGRITY",
-          clearCondition: "Clear the stable alias.",
+          // The parser trims; only the internal spacing survives, and the
+          // fingerprint normalizes it away.
+          class: "Integrity",
+          clearCondition: "Commit   the durable evidence.",
           disposition: "OPEN",
           reachableTrigger: "A retry reaches the stable alias.",
           introducedByReviewedDiff: false,
