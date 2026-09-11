@@ -1,0 +1,228 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/merge-resolution.ts",
+      "src/merge-resolution.test.ts",
+      "src/wave.ts",
+      "src/wave-migrations.test.ts",
+      "src/orchestrator.ts",
+      "src/context-envelope.ts",
+      "src/context-envelope.test.ts",
+      "src/run-events.ts",
+      "src/logger.ts",
+      "prompts/generator-repair.md",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #132 AC1",
+      "given": "two lanes whose slices edit the same lines, so the second slice's merge into the feature branch conflicts textually",
+      "when": "the wave's merge path reaches mergeResult.status === \"conflict\" in src/wave.ts",
+      "then": "src/wave.ts calls the resolver src/orchestrator.ts wired into WaveInput exactly once for that slice, and src/merge-resolution.ts runs the round's body",
+      "observableResult": "the run records exactly one resolution-round dispatch for the slice, and a stub provider capturing prompts is invoked once for it",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #132 AC2 / prd.md D15",
+      "given": "a resolution round with conflict hunks and already-merged sibling diffs to hand over",
+      "when": "the repair envelope is assembled in src/context-envelope.ts and rendered through prompts/generator-repair.md",
+      "then": "the data arrives as a data block inside the existing {{REPAIR_SITUATION}} slot whose level-1 heading is a member of REPAIR_SITUATION_SECTION_TITLES, with no new prompt template file",
+      "observableResult": "the rendered repair prompt contains the block under its heading, prompts/ gains no file, and the situation's other sections keep their extents",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #132 AC3 / prd.md D15",
+      "given": "the slice's own worktree at the generator's resolution merge commit — first parent the pre-round slice-branch tip, second parent the merged feature-branch tip (resolution tree model steps 1-3)",
+      "when": "the resolution round finishes, before any merge retry",
+      "then": "the exported runCandidateGatePhase is re-entered on that same worktree with a treeId computed from that merge commit's tree and with the slice's required declarations including the scope gate and the acceptance behavior bindings, all built by src/orchestrator.ts and passed in",
+      "observableResult": "gate evidence exists for the slice worktree's resolution merge commit, that commit has two parents with the merged feature tip second, its treeId is that commit's tree, and it carries results for the scope and acceptance:behaviors declarations",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #132 AC4 / ADR 0039",
+      "given": "a resolution round whose resolved tree leaves a required gate not PASS",
+      "when": "the gate re-run returns",
+      "then": "no merge retry runs, the slice's persisted phase is terminal CONFLICT, the feature branch tip is unmoved, and the generator's resolution merge commit is kept on the slice branch rather than reset away",
+      "observableResult": "the persisted slice state reads CONFLICT, both refs still exist, the feature branch tip equals its pre-round commit, and the resolution merge commit is still reachable from the slice branch",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #132 AC5 / ADR 0029",
+      "given": "the wave merge path holding the merge mutex for the first attempt",
+      "when": "a textual conflict triggers the resolution round, the gate re-run and the merge retry",
+      "then": "all four steps execute inside that single mergeMutex acquisition and nothing reached from inside that critical section re-acquires mergeMutex, so no sibling lane can merge between the proved tree and the merged tree and no reentrant acquisition can deadlock the run",
+      "observableResult": "an instrumented mutex that throws on reentrant acquisition records exactly one acquisition spanning first attempt, resolution and retry and never throws, and a concurrent sibling merge cannot interleave",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #132 AC6",
+      "given": "a stubbed gate phase forced to PASS over a generator that commits the merge with conflict markers left in a file no gate reads (the fixture lever, since under the merge-commit tree model and the held mutex the retry is a fast-forward and cannot conflict textually)",
+      "when": "the round reaches the pre-retry conflict-marker scan, and separately when a retry returns a prefix collision or any non-fast-forward result",
+      "then": "the marker scan refuses the retry and terminal CONFLICT is persisted; a refusing retry likewise persists terminal CONFLICT rather than MERGE-PENDING; and in every case no second resolution round is dispatched, enforced by control flow with no new persisted marker",
+      "observableResult": "the persisted slice phase is CONFLICT, the retry never ran in the marker case, the feature tip carries no conflict-marker lines, and exactly one resolution round was dispatched for the slice",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #132 AC7 / prd.md D3",
+      "given": "the slice's own worktree after the feature tip was merged into the slice branch, so it contains an already-merged sibling's files",
+      "when": "the scope gate runs on that worktree through the candidate comparison source with featureRef set to the merged feature-branch tip and a caller-proven acceptedPairIntact",
+      "then": "the sibling-owned paths are not reported as this slice's out-of-scope violations, and no second exemption is added",
+      "observableResult": "the scope gate result is PASS with no sibling-owned path in findings.outOfScopePaths, and acceptedPairIntact is passed a proven value rather than a literal true",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #132 AC8",
+      "given": "a completed resolution round with a verdict and a measured duration",
+      "when": "run events are emitted and run-summary.md is written from src/logger.ts",
+      "then": "a new src/run-events.ts payload variant records the round's verdict and durationMs, and run-summary.md carries its own resolution-round section distinct from the generator repair rounds",
+      "observableResult": "the run events file contains the resolution-round variant with verdict and durationMs, and run-summary.md shows that verdict and duration outside the repair-round section",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #132 AC9 / ADR 0029",
+      "given": "a slice whose merge is refused for a migration-prefix collision",
+      "when": "the wave merge path sees attempt.kind === \"collision\"",
+      "then": "MERGE-PENDING is recorded with its colliding prefixes and the resolver is never called",
+      "observableResult": "the slice's phase is MERGE-PENDING and no resolution-round dispatch is recorded for the run",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #132 AC1 (\"not full sibling histories\")",
+      "given": "conflict hunks read from the slice worktree's conflicted index and sibling diffs larger than the room the repair envelope's inline-size budget leaves",
+      "when": "the pure bounding function in src/merge-resolution.ts builds the data block",
+      "then": "whole files are dropped from the block with a note naming them and pointing at their paths in the slice's own worktree, and the rendered repair prompt stays inside the inline-size budget",
+      "observableResult": "the bounded block's byte length is within the budget, the drop note names the omitted paths in the slice worktree, and no sibling commit history appears in the block",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "src/wave.ts:579-588 / ADR 0029 / prd.md D21",
+      "given": "a merge refused for a colliding migration prefix",
+      "when": "the merge path handles it after this slice's change",
+      "then": "the MERGE-PENDING record still carries git.mergePendingReason's text and collidingPrefixes, and the lane still continues",
+      "observableResult": "the existing MERGE-PENDING wave assertions pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "src/git.ts:766-787, src/git.ts:1006-1058",
+      "given": "a conflicting git merge attempt",
+      "when": "git.attemptMerge and mergeSliceBranch run",
+      "then": "the migration-prefix check still precedes the merge, the conflicting merge is still aborted immediately, and both branches survive",
+      "observableResult": "src/git.ts is unmodified by this slice and the existing git suite passes unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "prompts/generator-repair.md:24-39, src/prompt-template.test.ts:167-190",
+      "given": "the repair prompt template's existing sections",
+      "when": "the data block is added",
+      "then": "the # Scope escalation literal, its \"Never mix PRE-BUILD-SCOPE with a real finding ID\" sentence and the {{REPAIR_SITUATION}} slot are unchanged",
+      "observableResult": "src/prompt-template.test.ts passes without being edited",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "src/context-envelope.ts:1755-1855 (#230)",
+      "given": "a repair round carrying stuck.md or handoff.md by reference and a long commit log",
+      "when": "the envelope is assembled after this slice's change",
+      "then": "projectGeneratorRepairSituation still replaces the quoted documents with pointers and the commit log is still the block that yields to the inline-size budget",
+      "observableResult": "the existing #230 context-envelope assertions pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "src/wave.ts:599-616",
+      "given": "a slice whose merge is clean",
+      "when": "the merge path completes",
+      "then": "the same cleanupWarning log, the same git.removeWorktreeOrWarn under the git-admin mutex and the same PASS are recorded",
+      "observableResult": "the existing clean-merge wave assertions pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-06",
+      "source": "src/candidate-gate-phase.ts:47, src/orchestrator.ts:5994, src/post-qa-gates.ts:215",
+      "given": "the pre-QA and post-QA candidate gate phases",
+      "when": "the resolution round re-enters runCandidateGatePhase",
+      "then": "the existing call sites and the phase's bounded infrastructure-retry behavior are unchanged, and the phase body is re-entered rather than duplicated",
+      "observableResult": "src/candidate-gate-phase.ts is unmodified by this slice and its existing suites pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "typecheck"
+      ]
+    }
+  ]
+}

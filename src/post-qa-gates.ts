@@ -34,8 +34,13 @@ import type { GeneratorFailureSet } from "./context-envelope.js";
  * and a change there voids the QA verdict (guardian round 3, architect
  * A1), except when the orchestrator itself amended the locked scope and
  * says so via `orchestratorAuthorizedPaths`.
+ *
+ * Exported because the same set is the copy-back boundary out of the
+ * disposable review worktree (#91 AC3/AC6, PRD D9): one constant shared with
+ * this window check cannot disagree with itself about the same directory,
+ * whereas a second dialect of the same list could.
  */
-const QA_WINDOW_ARTIFACT_NAME =
+export const QA_WINDOW_ARTIFACT_NAME =
   /^(?:qa|uat)-report(?:-r[1-9]\d*-a[1-9]\d*)?\.md$|^(?:qa|uat)-review\.json$|^stuck\.md$/;
 
 /**

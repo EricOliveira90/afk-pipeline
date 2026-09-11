@@ -18,12 +18,19 @@
  *   files rather than a green verdict about files it never read (D7, plan item
  *   17). A project on another runner declares its own detector.
  *
- * Waiver authorization is deliberately out of scope: #193 owns the one waiver
- * reader, and a second one is exactly the defect this PRD exists to remove.
+ * Authorization is a **launch** input, never a candidate one: the waivers this
+ * gate honors are the `skipped-test` entries `parseAfkManifest` read out of the
+ * PRD directory's `afk.json` (#193, `prd.md` D5). There is one waiver reader
+ * and one waiver shape — a second one is exactly the defect that PRD exists to
+ * remove — and a waiver a candidate wrote for itself is just a file.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  normalizeWaiverPath,
+  type ProtectedChangeWaiver,
+} from "./afk-manifest.js";
 import { matchesGlob, type GatePolicySkipDetector } from "./gate-policy.js";
 import type { GateDeclaration, GateRunOutcome } from "./gate-runner.js";
 
@@ -50,6 +57,15 @@ export interface SkipGateInput {
    * files are test files", and therefore the oracle for the fail-closed check.
    */
   testFileGlobs: readonly string[];
+  /**
+   * The launch manifest's `protectedChangeWaivers` (#193). Only `skipped-test`
+   * entries mean anything here, and only by exact path: a waiver names one file
+   * a human signed off on, so it is not a glob and it does not travel to a
+   * sibling. A declared `fileScope` is not one of these — that is what an agent
+   * negotiated, and the whole point of a waiver is that a human wrote it down
+   * somewhere no agent may write.
+   */
+  waivers?: readonly ProtectedChangeWaiver[];
 }
 
 function matchesAny(globs: readonly string[], path: string): boolean {
@@ -258,7 +274,25 @@ export function runSkipGate(input: SkipGateInput): GateRunOutcome {
     };
   }
 
-  const candidate = candidateFiles(input.worktreeDir);
+  /**
+   * Exact repo-relative paths a human waived for this risk class. Applied
+   * before every scan — the base one included — so a waived file is simply not
+   * a file this gate counts. Excluding it from the candidate side alone would
+   * turn a *removed* skip in a waived file into a base count the candidate can
+   * never match, and the gate would fail on the very file it was told to
+   * ignore.
+   */
+  const waivedPaths = new Set(
+    (input.waivers ?? [])
+      .filter((waiver) => waiver.riskClass === "skipped-test")
+      .map((waiver) => normalizeWaiverPath(waiver.path)),
+  );
+  const waived = (path: string): boolean =>
+    waivedPaths.has(normalizeWaiverPath(path));
+
+  const candidate = candidateFiles(input.worktreeDir).filter(
+    (path) => !waived(path),
+  );
 
   // Fail closed before counting: a declared test file no detector covers is a
   // file this gate has no evidence about, and reporting PASS would be a claim
@@ -283,9 +317,29 @@ export function runSkipGate(input: SkipGateInput): GateRunOutcome {
   }
 
   const base = baseFiles(input.worktreeDir, input.featureRef);
-  const relevantBase = base.filter((path) =>
-    input.detectors.some((detector) => matchesAny(detector.testGlobs, path)),
+  const relevantBase = base.filter(
+    (path) =>
+      !waived(path) &&
+      input.detectors.some((detector) => matchesAny(detector.testGlobs, path)),
   );
+  /**
+   * The waivers this run actually spent: one whose path exists on neither tree
+   * exempted nothing, and recording it would put an authorization in the run
+   * summary that changed no verdict.
+   */
+  const appliedWaivers = (input.waivers ?? []).filter(
+    (waiver) =>
+      waiver.riskClass === "skipped-test" &&
+      (existsSync(join(input.worktreeDir, waiver.path)) ||
+        base.some((path) => normalizeWaiverPath(path) === normalizeWaiverPath(waiver.path))),
+  );
+  const waiverFindings =
+    appliedWaivers.length > 0 ? { findings: { appliedWaivers } } : {};
+  const waiverDetail =
+    appliedWaivers.length > 0
+      ? ` ${appliedWaivers.length} path(s) excluded by a launch skipped-test ` +
+        `waiver: ${appliedWaivers.map((waiver) => waiver.path).join(", ")}.`
+      : "";
   const baseContents = readBaseContents(
     input.worktreeDir,
     input.featureRef,
@@ -324,7 +378,8 @@ export function runSkipGate(input: SkipGateInput): GateRunOutcome {
       detail:
         `No detector counts more disabled tests on this candidate than on ` +
         `${input.featureRef} (${input.detectors.length} detector(s) over ` +
-        `${candidate.length} candidate path(s)).`,
+        `${candidate.length} candidate path(s)).${waiverDetail}`,
+      ...waiverFindings,
     };
   }
   // Each increase named exactly, because this text is what the repair round
@@ -341,7 +396,11 @@ export function runSkipGate(input: SkipGateInput): GateRunOutcome {
               baseByKey.get(countKey(entry.detectorId, entry.pattern)) ?? 0
             } → ${entry.count}`,
         )
-        .join("; ")}. Re-enable the test, or fix what it caught.`,
+        .join("; ")}. Re-enable the test, or fix what it caught.${waiverDetail}`,
+    // A waiver that excluded one file is still an applied authorization even
+    // when another file failed the gate: the record is of what was spent, not
+    // of the verdict.
+    ...waiverFindings,
   };
 }
 

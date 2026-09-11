@@ -1,9 +1,39 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { GATE_RISK_CLASSES, type GateRiskClass } from "./gate-policy.js";
 
 export interface ProtectedIssue {
   number: number;
   state: "OPEN" | "CLOSED";
+}
+
+/**
+ * One human authorization for one protected change (#193, PRD 4 D1).
+ *
+ * The launch manifest is the only place a waiver can live, because it is the
+ * one file a slice agent cannot write: `afk.json` sits in the PRD directory of
+ * the host checkout, outside every slice's file scope, and the orchestrator
+ * reads it before any wave dispatches. A waiver a candidate could author would
+ * be a gate the candidate can turn off.
+ *
+ * Every field is load-bearing and none has a default: `riskClass` and `path`
+ * are what the waiver matches, and `author` plus `reason` are the audit record
+ * the gate copies into its evidence. A waiver with an empty reason is a waiver
+ * nobody can review later.
+ */
+export interface ProtectedChangeWaiver {
+  /** Which detection this waiver answers; one of `GATE_RISK_CLASSES`. */
+  riskClass: GateRiskClass;
+  /**
+   * One exact repo-relative path, never a glob. A waiver is a decision about
+   * a file somebody looked at; a pattern silently covers files nobody has
+   * seen yet, including files that do not exist when it is written.
+   */
+  path: string;
+  /** Who authorized it. */
+  author: string;
+  /** Why — the sentence a later reader needs. */
+  reason: string;
 }
 
 export interface AfkManifest {
@@ -11,6 +41,14 @@ export interface AfkManifest {
   selectedSlices: string[];
   migrationPrefixes: string[];
   protectedIssues: ProtectedIssue[];
+  /**
+   * Human authorizations for protected changes. Optional on the type and
+   * always present on a parsed manifest: absence reads as "no waiver", so a
+   * hand-built manifest that predates this member means the same thing as an
+   * `afk.json` that omits it — and every reader spells that one way,
+   * `protectedChangeWaivers ?? []`.
+   */
+  protectedChangeWaivers?: ProtectedChangeWaiver[];
 }
 
 function normalizeSlice(value: unknown): string {
@@ -43,6 +81,63 @@ function normalizeProtectedIssue(
     );
   }
   return { number, state };
+}
+
+/**
+ * One spelling for a waived path, so the manifest and the gate compare the
+ * same bytes: forward slashes, no `./` prefix, trimmed. A waiver written
+ * `./src\thing.ts` on Windows has to match the `src/thing.ts` git reports.
+ */
+export function normalizeWaiverPath(value: string): string {
+  return value.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+}
+
+function nonBlankField(
+  value: unknown,
+  field: string,
+  source: string,
+): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      `${source} protectedChangeWaivers entries require a non-blank ${field}`,
+    );
+  }
+  return value.trim();
+}
+
+function normalizeProtectedChangeWaiver(
+  entry: unknown,
+  source: string,
+): ProtectedChangeWaiver {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error(
+      `${source} protectedChangeWaivers entries must be JSON objects holding ` +
+        `riskClass, path, author and reason`,
+    );
+  }
+  const value = entry as Record<string, unknown>;
+  const riskClass = nonBlankField(value.riskClass, "riskClass", source);
+  if (!GATE_RISK_CLASSES.includes(riskClass as GateRiskClass)) {
+    throw new Error(
+      `${source} protectedChangeWaivers does not recognise riskClass ` +
+        `"${riskClass}"; the declared risk classes are ` +
+        `${GATE_RISK_CLASSES.join(", ")}`,
+    );
+  }
+  const path = normalizeWaiverPath(nonBlankField(value.path, "path", source));
+  if (/[*?[]/.test(path)) {
+    throw new Error(
+      `${source} protectedChangeWaivers path "${path}" looks like a glob; a ` +
+        `waiver names one exact path, because a pattern authorizes files ` +
+        `nobody has read`,
+    );
+  }
+  return {
+    riskClass: riskClass as GateRiskClass,
+    path,
+    author: nonBlankField(value.author, "author", source),
+    reason: nonBlankField(value.reason, "reason", source),
+  };
 }
 
 export function parseAfkManifest(
@@ -108,11 +203,31 @@ export function parseAfkManifest(
     throw new Error(`${source} protectedIssues must contain unique issue numbers`);
   }
 
+  const rawWaivers = input.protectedChangeWaivers ?? [];
+  if (!Array.isArray(rawWaivers)) {
+    throw new Error(`${source} protectedChangeWaivers must be an array`);
+  }
+  const protectedChangeWaivers = rawWaivers.map((entry) =>
+    normalizeProtectedChangeWaiver(entry, source),
+  );
+  // A risk class holds no space, so one space cannot make two distinct pairs
+  // collide on a single key.
+  const waiverKeys = protectedChangeWaivers.map(
+    (waiver) => `${waiver.riskClass} ${waiver.path}`,
+  );
+  if (new Set(waiverKeys).size !== waiverKeys.length) {
+    throw new Error(
+      `${source} protectedChangeWaivers must not repeat a riskClass and path ` +
+        `pair; two authorizations for one decision leave no single audit record`,
+    );
+  }
+
   return {
     version: 1,
     selectedSlices,
     migrationPrefixes,
     protectedIssues,
+    protectedChangeWaivers,
   };
 }
 

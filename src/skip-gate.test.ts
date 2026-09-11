@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ProtectedChangeWaiver } from "./afk-manifest.js";
 import { DEFAULT_SKIP_DETECTORS, DEFAULT_TEST_GLOBS } from "./gate-policy.js";
 import {
   runSkipGate,
@@ -62,12 +63,13 @@ function makeRepo(): string {
   return repo;
 }
 
-function runOn(repo: string) {
+function runOn(repo: string, waivers?: readonly ProtectedChangeWaiver[]) {
   return runSkipGate({
     worktreeDir: repo,
     featureRef: "main",
     detectors: DEFAULT_SKIP_DETECTORS,
     testFileGlobs: DEFAULT_TEST_GLOBS,
+    ...(waivers ? { waivers } : {}),
   });
 }
 
@@ -225,5 +227,138 @@ describe("tests:skipped gate", () => {
     // The same tree with that file undeclared is a PASS: the oracle is what the
     // project itself calls a test file, not what this gate guesses.
     expect(runOn(repo)).toMatchObject({ status: "PASS" });
+  });
+
+  /**
+   * Launch waiver authorization (#193 AC13, `prd.md` D5). The one authority is
+   * the PRD directory's `afk.json`, read at launch by `parseAfkManifest`; a
+   * contract `fileScope` is not one, because that is what an agent negotiated.
+   */
+  describe("launch skipped-test waivers", () => {
+    const WAIVER: ProtectedChangeWaiver = {
+      riskClass: "skipped-test",
+      path: "src/quarantined.test.ts",
+      author: "eric",
+      reason: "quarantined against a flaky upstream service until #201",
+    };
+
+    /** A candidate that adds a skip in the file the waiver names. */
+    function withSkip(repo: string): void {
+      write(
+        repo,
+        "src/quarantined.test.ts",
+        [
+          'import { it, expect } from "vitest";',
+          'it.skip("waits on the upstream fix", () => expect(1).toBe(1));',
+          "",
+        ].join("\n"),
+      );
+    }
+
+    it("[behavior:B-15] passes a waived path and records the waiver's four fields", () => {
+      const repo = makeRepo();
+      withSkip(repo);
+      expect(runOn(repo)).toMatchObject({ status: "FAIL" });
+
+      const outcome = runOn(repo, [WAIVER]);
+      expect(outcome).toMatchObject({ status: "PASS", failureKind: null });
+      expect(outcome.findings?.appliedWaivers).toEqual([WAIVER]);
+      expect(outcome.detail).toContain("src/quarantined.test.ts");
+    });
+
+    it("[behavior:B-15] excludes a waived path from the base scan too", () => {
+      // The waived file is committed *with* its skip, and the candidate removes
+      // it. Excluding only the candidate side would leave a base count the
+      // candidate can never match on any other detector's file.
+      const repo = makeRepo();
+      withSkip(repo);
+      git(repo, ["add", "."]);
+      git(repo, ["commit", "-m", "quarantine"]);
+      write(
+        repo,
+        "src/quarantined.test.ts",
+        'import { it, expect } from "vitest";\nit("fixed", () => expect(1).toBe(1));\n',
+      );
+      const outcome = runOn(repo, [WAIVER]);
+      expect(outcome).toMatchObject({ status: "PASS", failureKind: null });
+      expect(outcome.findings?.appliedWaivers).toEqual([WAIVER]);
+    });
+
+    it("[behavior:B-15] excludes a waived path from the uncovered-file check", () => {
+      const repo = makeRepo();
+      write(repo, "spec/thing.spec.rb", "describe 'thing'\n");
+      const globs = [...DEFAULT_TEST_GLOBS, "**/*.spec.rb"];
+      const run = (waivers: readonly ProtectedChangeWaiver[]) =>
+        runSkipGate({
+          worktreeDir: repo,
+          featureRef: "main",
+          detectors: DEFAULT_SKIP_DETECTORS,
+          testFileGlobs: globs,
+          waivers,
+        });
+      expect(run([])).toMatchObject({
+        status: "FAIL",
+        failureKind: "CONFIGURATION",
+      });
+      expect(
+        run([{ ...WAIVER, path: "spec/thing.spec.rb" }]),
+      ).toMatchObject({ status: "PASS", failureKind: null });
+    });
+
+    it("[behavior:B-15] gives a declared fileScope no authority at all", () => {
+      // The gate never reads a contract. Only the launch manifest's waivers
+      // reach it, and only for the class and the exact path they name.
+      const repo = makeRepo();
+      withSkip(repo);
+      for (const waivers of [
+        [],
+        [{ ...WAIVER, riskClass: "deleted-test" as const }],
+        [{ ...WAIVER, path: "src/other.test.ts" }],
+        [{ ...WAIVER, path: "src/*.test.ts" }],
+      ]) {
+        const outcome = runOn(repo, waivers);
+        expect(outcome.status).toBe("FAIL");
+        expect(outcome.findings?.appliedWaivers ?? []).toEqual([]);
+      }
+    });
+
+    it("[behavior:P-05] leaves every #86 refusal exactly as it shipped", () => {
+      // Waiver plumbing is additive: an unrelated waiver present at launch
+      // changes none of the three ways this gate refuses.
+      const unrelated = [{ ...WAIVER, path: "src/unrelated.test.ts" }];
+      const repo = makeRepo();
+      write(
+        repo,
+        "src/thing.test.ts",
+        PASSING_SUITE.replace('it("works"', 'it.skip("works"'),
+      );
+      const increase = runOn(repo, unrelated);
+      expect(increase).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
+      expect(increase.detail).toContain("1 → 2");
+      // A waiver for a file that exists on neither tree exempted nothing, so it
+      // is not recorded as applied.
+      expect(increase.findings?.appliedWaivers).toBeUndefined();
+
+      expect(
+        runSkipGate({
+          worktreeDir: repo,
+          featureRef: "main",
+          detectors: [],
+          testFileGlobs: DEFAULT_TEST_GLOBS,
+          waivers: unrelated,
+        }),
+      ).toMatchObject({ status: "FAIL", failureKind: "CONFIGURATION" });
+
+      write(repo, "spec/thing.spec.rb", "describe 'thing'\n");
+      expect(
+        runSkipGate({
+          worktreeDir: repo,
+          featureRef: "main",
+          detectors: DEFAULT_SKIP_DETECTORS,
+          testFileGlobs: [...DEFAULT_TEST_GLOBS, "**/*.spec.rb"],
+          waivers: unrelated,
+        }),
+      ).toMatchObject({ status: "FAIL", failureKind: "CONFIGURATION" });
+    });
   });
 });

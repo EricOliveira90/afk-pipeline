@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseAcceptanceManifest } from "./acceptance-manifest.js";
 import {
+  GATE_SCOPE_FINDING_ID,
   PRE_BUILD_SCOPE_FINDING_ID,
   outOfScopeChangedPaths,
   parseScopeEscalation,
@@ -27,6 +28,21 @@ describe("parseScopeEscalation", () => {
     expect(parseScopeEscalation(JSON.stringify(VALID), MANIFEST)).toEqual(VALID);
   });
 
+  it("[behavior:P-01] parses a version 1 document exactly as before schema 2", () => {
+    // Schema 2 is additive. A version-1 document keeps its version, gains no
+    // `gateEvidence` member, and every refusal below still fires on it — the
+    // whole `it.each` table that follows is the version-1 corpus.
+    const parsed = parseScopeEscalation(JSON.stringify(VALID), MANIFEST);
+    expect(parsed.version).toBe(1);
+    expect("gateEvidence" in parsed).toBe(false);
+    expect(
+      parseScopeEscalation(
+        JSON.stringify({ ...VALID, findingIds: [PRE_BUILD_SCOPE_FINDING_ID] }),
+        MANIFEST,
+      ),
+    ).toEqual({ ...VALID, findingIds: [PRE_BUILD_SCOPE_FINDING_ID] });
+  });
+
   it.each([
     ["invalid JSON", "{", /not valid JSON/],
     ["a non-object root", "[]", /must contain a JSON object/],
@@ -46,9 +62,12 @@ describe("parseScopeEscalation", () => {
       /must contain exactly/,
     ],
     [
+      // Version 2 is legal now, so the refusal case moved up one: the check
+      // is still that an unknown schema version is refused rather than read
+      // on a guess.
       "the wrong version",
-      JSON.stringify({ ...VALID, version: 2 }),
-      /must declare version 1/,
+      JSON.stringify({ ...VALID, version: 3 }),
+      /must declare version 1 or 2/,
     ],
     [
       "wrong-typed findingIds",
@@ -227,6 +246,138 @@ describe("parseScopeEscalation", () => {
           MANIFEST,
         ),
       ).toThrow(/paths already on the locked file scope/);
+    });
+  });
+
+  // The gate-evidenced identity (#193, ADR 0060). Schema version 2 exists to
+  // carry `gateEvidence`; it is not a document kind, so a version-2 document
+  // without it is still an ordinary escalation.
+  describe(`the reserved ${GATE_SCOPE_FINDING_ID} identity`, () => {
+    const GATE_EVIDENCE = {
+      gateId: "tests",
+      evidenceArtifactId: "gate-evidence/candidate-r1-a1.json",
+    };
+    const GATE_SCOPE = {
+      ...VALID,
+      version: 2,
+      findingIds: [GATE_SCOPE_FINDING_ID],
+      gateEvidence: GATE_EVIDENCE,
+    };
+
+    it("[behavior:B-09] exports the identity beside the pre-build one", () => {
+      expect(GATE_SCOPE_FINDING_ID).toBe("GATE-SCOPE");
+      expect(PRE_BUILD_SCOPE_FINDING_ID).toBe("PRE-BUILD-SCOPE");
+    });
+
+    it("[behavior:B-09] parses a version 2 document citing a failing gate", () => {
+      expect(
+        parseScopeEscalation(JSON.stringify(GATE_SCOPE), MANIFEST),
+      ).toEqual(GATE_SCOPE);
+    });
+
+    it("[behavior:B-09] parses a version 2 document with no gateEvidence as an ordinary escalation", () => {
+      // A version is a schema version, not a document kind.
+      const cited = { ...VALID, version: 2 };
+      expect(parseScopeEscalation(JSON.stringify(cited), MANIFEST)).toEqual(
+        cited,
+      );
+      const preBuild = {
+        ...VALID,
+        version: 2,
+        findingIds: [PRE_BUILD_SCOPE_FINDING_ID],
+      };
+      expect(parseScopeEscalation(JSON.stringify(preBuild), MANIFEST)).toEqual(
+        preBuild,
+      );
+    });
+
+    it.each([
+      [
+        "gateEvidence beside cited finding IDs",
+        { ...GATE_SCOPE, findingIds: ["F-17"] },
+        /gateEvidence requires findingIds to be exactly/,
+      ],
+      [
+        "gateEvidence beside PRE-BUILD-SCOPE",
+        { ...GATE_SCOPE, findingIds: [PRE_BUILD_SCOPE_FINDING_ID] },
+        /gateEvidence requires findingIds to be exactly/,
+      ],
+      [
+        "GATE-SCOPE with no gateEvidence",
+        { ...VALID, version: 2, findingIds: [GATE_SCOPE_FINDING_ID] },
+        /GATE-SCOPE requires a version 2 document with gateEvidence/,
+      ],
+      [
+        "GATE-SCOPE mixed with a cited finding ID",
+        { ...GATE_SCOPE, findingIds: [GATE_SCOPE_FINDING_ID, "F-17"] },
+        /must not mix GATE-SCOPE with cited finding IDs \(F-17\)/,
+      ],
+      [
+        "GATE-SCOPE mixed with PRE-BUILD-SCOPE",
+        {
+          ...GATE_SCOPE,
+          findingIds: [GATE_SCOPE_FINDING_ID, PRE_BUILD_SCOPE_FINDING_ID],
+        },
+        /must not mix/,
+      ],
+      [
+        // The member is admitted by the exact-key check at version 2 only, so
+        // a version-1 document carrying it is an unknown key.
+        "a version 1 document carrying gateEvidence",
+        { ...GATE_SCOPE, version: 1 },
+        /root object must contain exactly version, findingIds, paths, reason$/,
+      ],
+      [
+        "an unknown top-level key beside gateEvidence",
+        { ...GATE_SCOPE, extra: true },
+        /root object must contain exactly/,
+      ],
+      [
+        "a gateEvidence that is not an object",
+        { ...GATE_SCOPE, gateEvidence: "tests" },
+        /gateEvidence must be a JSON object/,
+      ],
+      [
+        "a gateEvidence missing evidenceArtifactId",
+        { ...GATE_SCOPE, gateEvidence: { gateId: "tests" } },
+        /gateEvidence must contain exactly gateId, evidenceArtifactId/,
+      ],
+      [
+        "a blank gateId",
+        { ...GATE_SCOPE, gateEvidence: { ...GATE_EVIDENCE, gateId: "  " } },
+        /gateEvidence.gateId must be a non-blank string/,
+      ],
+      [
+        "a blank evidenceArtifactId",
+        {
+          ...GATE_SCOPE,
+          gateEvidence: { ...GATE_EVIDENCE, evidenceArtifactId: "" },
+        },
+        /gateEvidence.evidenceArtifactId must be a non-blank string/,
+      ],
+    ])("[behavior:B-09] refuses %s", (_name, document, expected) => {
+      expect(() =>
+        parseScopeEscalation(JSON.stringify(document), MANIFEST),
+      ).toThrow(expected);
+    });
+
+    it("[behavior:B-09] relaxes none of the version 1 refusals", () => {
+      for (const [document, expected] of [
+        [{ ...GATE_SCOPE, reason: "  " }, /reason must be a non-blank string/],
+        [
+          { ...GATE_SCOPE, paths: ["src/declared.ts"] },
+          /paths already on the locked file scope/,
+        ],
+        [
+          { ...GATE_SCOPE, paths: ["supabase/migrations/0042_add.sql"] },
+          /migration prefixes are allocated at contract lock/,
+        ],
+        [{ ...GATE_SCOPE, findingIds: [] }, /must be a non-empty array/],
+      ] as const) {
+        expect(() =>
+          parseScopeEscalation(JSON.stringify(document), MANIFEST),
+        ).toThrow(expected);
+      }
     });
   });
 });

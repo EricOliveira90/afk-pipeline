@@ -42,24 +42,39 @@ its acceptance manifest do not declare:
    or its acceptance manifest.
 
 The payload contains no fields other than `version`, `findingIds`, `paths`,
-and `reason`. List every needed undeclared path, and give a non-blank reason
-that explains why those paths are required.
+`reason`, and — on a version 2 document only — `gateEvidence`. List every
+needed undeclared path, and give a non-blank reason that explains why those
+paths are required.
 
-`findingIds` is always required, and which identity belongs in it is decided
-by whether this invocation was handed findings:
+`findingIds` is always required, and which identity belongs in it is decided by
+what this invocation was handed:
 
-- **Findings were cited to you** above — unresolved QA findings, base-gate
-  failures, a stuck diagnosis, or contract-review findings. Cite the IDs of
-  the ones whose correct fix needs the undeclared paths, and only those:
-  `["QA-03"]`, `["F-01","F-02"]`.
-- **Nothing was cited to you** — this is a first attempt with no findings to
-  fix, so you discovered before building that the locked file scope is too
-  narrow. Use the reserved pre-build scope identity, alone:
+- **Findings were cited to you** — unresolved QA findings, base-gate failures,
+  a stuck diagnosis, or contract-review findings. Cite the IDs whose correct
+  fix needs the undeclared paths, and only those: `["QA-03"]`,
+  `["F-01","F-02"]`.
+- **Nothing was cited to you** — a first attempt with no findings to fix, so
+  you discovered before building that the locked file scope is too narrow. Use
+  the reserved pre-build identity, alone:
   `{"version":1,"findingIds":["PRE-BUILD-SCOPE"],"paths":["src/file.ts"],"reason":"..."}`.
+- **A failing orchestrator-run gate told you** — a deterministic gate the
+  pipeline itself ran reports that behavior the locked contract already decided
+  needs a path the file scope does not declare. Use the reserved gate identity,
+  alone, in a version 2 document that cites the gate:
+  `{"version":2,"findingIds":["GATE-SCOPE"],"paths":["src/file.ts"],"reason":"why the failing gate requires the paths","gateEvidence":{"gateId":"scope","evidenceArtifactId":"gate-evidence/candidate-r1-a1.json"}}`.
+  `gateEvidence` is required with `GATE-SCOPE` and legal only with it: a scope
+  widening justified by nothing is refused, and so is a cited-finding
+  escalation that cites a gate instead of its finding.
 
-Never mix `PRE-BUILD-SCOPE` with a real finding ID — the escalation is
-refused. If you were given findings, cite them; the reserved identity is for
-the case where there is nothing to cite.
+Never mix these three identities — not with each other, and not with a real
+finding ID. An escalation is a cited-finding fix, a pre-build discovery, or a
+gate-evidenced revision; a document claiming two of them describes no single
+event and is refused. `version` is 2 only for the `gateEvidence` document.
+
+A scope revision fixes a boundary drawn too narrow. It is not a way to decide
+something the contract did not decide. If what you discovered changes behavior,
+a public interface, a data format, security posture, or the acceptance
+criteria, escalate for a human decision instead of asking for a wider scope.
 
 # Tracer bullets
 

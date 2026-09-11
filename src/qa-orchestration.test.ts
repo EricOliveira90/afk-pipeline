@@ -1047,7 +1047,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
   // The pre-QA/post-QA split itself is what this scenario proves, so it is the
   // test #86's P-03 is named on rather than a second spawned run of the same
   // shape (`CLAUDE.md`, "Where a new assertion goes").
-  it("[behavior:P-03] records checkpoint evidence and authorizes QA for the passing tree", async () => {
+  it("[behavior:P-03] [behavior:B-06] records checkpoint evidence, authorizes QA for the passing tree, and establishes its approved baseline", async () => {
     const repo = makeRepo();
     // Outside the repo: the evaluator stub and gate scripts append to it,
     // and an in-repo marker would (correctly) trip the A1 tree-authority
@@ -1196,9 +1196,74 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
       gateIds: ["typecheck"],
     });
 
+    // B-06, asserted on this scenario because it is the only fixture that
+    // already reaches a deterministic PASS over real green gates — which is
+    // exactly the moment a baseline is established (#91 AC5).
+    const baselinePath = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "approved-baseline.json",
+    );
+    const baseline = JSON.parse(readFileSync(baselinePath, "utf-8"));
+    const qaTreeId = attempts[passingIndex].treeId;
+    expect(baseline).toMatchObject({
+      version: 1,
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 1,
+      treeId: qaTreeId,
+    });
+    // The commit holds the graded tree, and the pair's bytes are recorded by
+    // blob ID rather than by path.
+    expect(
+      execFileSync("git", ["rev-parse", `${baseline.commit}^{tree}`], {
+        cwd: repo,
+        encoding: "utf-8",
+      }).trim(),
+    ).toBe(qaTreeId);
+    expect(Object.keys(baseline.contractBlobs).sort()).toEqual([
+      "specs/slices/01-prd-070-regression/acceptance-manifest.json",
+      "specs/slices/01-prd-070-regression/contract.md",
+    ]);
+    for (const [path, blobId] of Object.entries(baseline.contractBlobs)) {
+      expect(blobId).toBe(gitModule.hashFileAsBlob(repo, path));
+    }
+    // Only evidence about this tree, and it names files that exist.
+    expect(baseline.gateEvidenceArtifactIds.length).toBeGreaterThan(0);
+    for (const artifactId of baseline.gateEvidenceArtifactIds) {
+      expect(existsSync(join(repo, artifactId))).toBe(true);
+    }
+    // Run state is a locator; the artifact is canonical.
+    const state = loadRunState(repo, "prd-070");
+    expect(state.version).toBe(4);
+    expect(state.approvedBaselines?.["70"]).toEqual({
+      treeId: baseline.treeId,
+      commit: baseline.commit,
+      artifactPath: ".afk/artifacts/prd-070-stub/slice-01/approved-baseline.json",
+    });
+    const baselineEvents = readFileSync(
+      join(ctx.logger.runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "approved-baseline");
+    expect(baselineEvents).toHaveLength(1);
+    expect(baselineEvents[0]).toMatchObject({
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 1,
+      treeId: baseline.treeId,
+      commit: baseline.commit,
+      artifactId: ".afk/artifacts/prd-070-stub/slice-01/approved-baseline.json",
+    });
   });
 
-  it("emits typed evidence when a resumed final-round checkpoint gate exhausts", async () => {
+  it("[behavior:P-01] emits typed evidence when a resumed final-round checkpoint gate exhausts, with no evaluator dispatched", async () => {
     const repo = makeRepo();
     const sequencePath = join(repo, "gate-sequence.txt").replace(/\\/g, "/");
     const cheapScript =
@@ -1366,6 +1431,30 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     expect(generators).toBe(1);
     expect(evaluators).toBe(0);
     expect(readFileSync(sequencePath, "utf-8")).toBe("cheap\n");
+    // P-01: a red *required* pre-QA gate is the cheap wall in front of the
+    // evaluator. The candidate never reaches a review worktree, so nothing
+    // charges an evaluation round and no isolation machinery runs for it —
+    // the repair path is still the generator's. (`evaluators` is the round
+    // ledger for *this* run; the progress counters additionally carry the
+    // seeded prior life this resume starts from.)
+    expect(
+      existsSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "change-summary.json",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      execFileSync("git", ["worktree", "list"], {
+        cwd: repo,
+        encoding: "utf-8",
+      }),
+    ).not.toContain("qa-review");
     const intervention = JSON.parse(
       readFileSync(join(artifactDir, "intervention.json"), "utf-8"),
     );
@@ -2381,6 +2470,25 @@ describe("scope amendments during QA", { timeout: 60_000 }, () => {
       expect(finalAcceptedCommits).toBe(1);
     });
 
+    it("[behavior:P-02] keeps the scope gate's single post-QA call site: the candidate still reaches the evaluator and a red scope buys a repair round", () => {
+      // Isolating the evaluator moved where it reads, not when the scope gate
+      // runs (#91 D8 non-goal: `scope` stays post-QA). Both rounds' candidates
+      // were graded by the evaluator before any gate saw them, and the red
+      // scope produced a REPAIR round rather than an ERROR or a merge.
+      expect(evaluators).toBe(2);
+      expect(generatorRounds).toBe(2);
+      expect(postQaAttempts).toHaveLength(2);
+      expect(
+        postQaAttempts.filter((attempt) =>
+          attempt.results.some(
+            (gate) => gate.gateId === "scope" && gate.status === "FAIL",
+          ),
+        ),
+      ).toHaveLength(1);
+      expect(acceptedCommitsAtDispatch).toEqual([0, 0]);
+      expect(phase).toEqual({ phase: "PASS" });
+    });
+
     it("P-04: leaves the post-QA phase's materialization, allowlist and outcome mapping alone", () => {
       // `src/post-qa-gates.ts` is unedited, and prepending a commandless
       // declaration changed none of its three jobs:
@@ -2640,7 +2748,7 @@ describe("base gate observability", () => {
 });
 
 describe("shared-preview QA", () => {
-  it("keeps deterministic and UAT findings isolated across a UAT retry", async () => {
+  it("[behavior:P-04] keeps deterministic and UAT findings isolated across a UAT retry, with UAT still in the generator worktree", async () => {
     const repo = makeRepo();
     // Outside the repo — the shared-preview verify/apply commands run in
     // the worktree after QA approval, and an in-repo marker would
@@ -2649,6 +2757,8 @@ describe("shared-preview QA", () => {
     const generatorPrompts: string[] = [];
     const deterministicPrompts: string[] = [];
     const uatPrompts: string[] = [];
+    const deterministicCwds: string[] = [];
+    const uatCwds: string[] = [];
     let artifactDir = "";
     const provider: AgentProvider = {
       name: "stub",
@@ -2666,6 +2776,7 @@ describe("shared-preview QA", () => {
         const isUAT = options.prompt.includes("Shared-preview UAT only");
         const prompts = isUAT ? uatPrompts : deterministicPrompts;
         prompts.push(options.prompt);
+        (isUAT ? uatCwds : deterministicCwds).push(options.cwd!);
         const state = prompts.length === 1 ? "OPEN" : "RESOLVED";
         const id = isUAT ? "UAT-OPEN" : "QA-ADVISORY";
         const severity = isUAT ? "BLOCKING" : "ADVISORY";
@@ -2729,6 +2840,15 @@ describe("shared-preview QA", () => {
     expect(uatPrompts[1]).toContain("UAT-OPEN");
     expect(uatPrompts[1]).not.toContain("QA-ADVISORY");
 
+    // Shared-preview UAT runs where the preview migrations were applied: the
+    // generator worktree, with no review worktree and no copy-back. Only the
+    // deterministic stage is isolated (#91 PRD D8 non-goal).
+    expect(uatCwds).toEqual([repo, repo]);
+    expect(deterministicCwds.every((cwd) => cwd !== repo)).toBe(true);
+    expect(
+      execFileSync("git", ["worktree", "list"], { cwd: repo, encoding: "utf-8" }),
+    ).not.toContain("qa-review");
+
     expect(existsSync(join(artifactDir, "qa-report-r1-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "qa-report-r2-a1.md"))).toBe(true);
     expect(existsSync(join(artifactDir, "uat-report-r1-a1.md"))).toBe(true);
@@ -2753,6 +2873,377 @@ describe("shared-preview QA", () => {
         ).toBe(true);
       }
     }
+  });
+});
+
+/**
+ * Candidate evaluator isolation (#91). Every scenario here drives `runQAStage`
+ * directly rather than spawning a slice: the mechanism under test is what the
+ * evaluator is handed and what leaves its worktree, and a stub provider that
+ * writes into `options.cwd` proves both without paying for gates or a
+ * generator round (AGENTS.md on where a new assertion goes).
+ */
+describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
+  const REVIEW_SLICE_REL = "specs/slices/01-prd-070-regression";
+  const runEvents = (ctx: SliceContext): Record<string, unknown>[] =>
+    readFileSync(join(ctx.logger.runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+  it("[behavior:B-01] [behavior:B-02] evaluates a disposable worktree at the candidate checkpoint, seeded per attempt", async () => {
+    const repo = makeRepo();
+    const absSliceDir = join(repo, "specs", "slices", "01-prd-070-regression");
+    // The amendment case B-02 exists for: bytes that differ from the
+    // checkpoint tree's, so the second attempt's seed is a *modification* in
+    // the review worktree and the seed manifest is what keeps it out of
+    // B-04's scan.
+    const AMENDED_CONTRACT = GENERATOR_FIXTURE_CONTRACT.replace(
+      "- provider-output.txt",
+      "- provider-output.txt\n- amended.txt",
+    );
+    const cwds: string[] = [];
+    const seenContract: string[] = [];
+    const seenManifestScope: string[][] = [];
+    const treeIds: string[] = [];
+    let attempts = 0;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        attempts++;
+        const cwd = options.cwd!;
+        cwds.push(cwd);
+        if (attempts === 1) {
+          // Both read before this attempt writes anything: the generator
+          // worktree is still the tree the checkpoint captured.
+          treeIds.push(
+            execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+              cwd,
+              encoding: "utf-8",
+            }).trim(),
+            resolveCandidateTreeId(repo),
+          );
+        }
+        const reviewSliceDir = join(cwd, REVIEW_SLICE_REL);
+        seenContract.push(
+          readFileSync(join(reviewSliceDir, "contract.md"), "utf-8"),
+        );
+        seenManifestScope.push(
+          JSON.parse(
+            readFileSync(join(reviewSliceDir, "acceptance-manifest.json"), "utf-8"),
+          ).fileScope.paths,
+        );
+        if (attempts === 1) {
+          // A reviewer that destroys its own inputs must not make the next
+          // attempt grade against a missing contract.
+          rmSync(join(reviewSliceDir, "contract.md"), { force: true });
+          rmSync(join(reviewSliceDir, "acceptance-manifest.json"), {
+            force: true,
+          });
+          // A scope amendment lands in the generator worktree between the two
+          // attempts (ADR 0048): the extra attempt has to grade the amended
+          // pair, not the pair the checkpoint captured.
+          writeFileSync(
+            join(absSliceDir, "contract.md"),
+            AMENDED_CONTRACT,
+            "utf-8",
+          );
+          const manifest = JSON.parse(
+            readFileSync(join(absSliceDir, "acceptance-manifest.json"), "utf-8"),
+          );
+          manifest.fileScope.paths = [...GENERATOR_FIXTURE_SCOPE, "amended.txt"];
+          writeFileSync(
+            join(absSliceDir, "acceptance-manifest.json"),
+            JSON.stringify(manifest),
+            "utf-8",
+          );
+          throw new Error("provider disconnected");
+        }
+        writeFileSync(
+          join(reviewSliceDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        writeQAReview(reviewSliceDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 1 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      { outcome: "PASS" },
+    );
+
+    expect(attempts).toBe(2);
+    // One worktree for the stage, and never the generator's.
+    expect(new Set(cwds).size).toBe(1);
+    const reviewCwd = cwds[0]!;
+    expect(reviewCwd).not.toBe(repo);
+    expect(reviewCwd.startsWith(join(repo, ".afk"))).toBe(true);
+    // Built from the candidate checkpoint, so the evaluator read the tree the
+    // verdict is tied to.
+    expect(treeIds[0]).toBe(treeIds[1]);
+    // Seeded before every attempt, with the generator worktree's bytes as
+    // they stand at that attempt — so the amended pair is what the extra
+    // attempt graded, not the checkpoint tree's copy.
+    expect(seenContract).toEqual([GENERATOR_FIXTURE_CONTRACT, AMENDED_CONTRACT]);
+    expect(seenManifestScope).toEqual([
+      GENERATOR_FIXTURE_SCOPE,
+      [...GENERATOR_FIXTURE_SCOPE, "amended.txt"],
+    ]);
+    // And the seed manifest is what keeps those orchestrator writes out of the
+    // reviewer-write scan: attempt 1's deletions and attempt 2's differing
+    // bytes both show up in the review worktree's `git status`.
+    const seededPaths = [
+      `${REVIEW_SLICE_REL}/contract.md`,
+      `${REVIEW_SLICE_REL}/acceptance-manifest.json`,
+    ];
+    const violated = runEvents(ctx)
+      .filter((event) => event.type === "reviewer-write-violation")
+      .map((event) => event.path);
+    for (const path of seededPaths) {
+      expect(violated).not.toContain(path);
+    }
+    // And gone on the way out, along with its throwaway branch.
+    expect(existsSync(reviewCwd)).toBe(false);
+    expect(
+      execFileSync("git", ["worktree", "list"], { cwd: repo, encoding: "utf-8" }),
+    ).not.toContain("qa-review");
+    expect(
+      execFileSync("git", ["branch", "--list", "afk/qa-review/*"], {
+        cwd: repo,
+        encoding: "utf-8",
+      }).trim(),
+    ).toBe("");
+  });
+
+  it("[behavior:B-01] removes the review worktree when the stage ends in a throw", async () => {
+    const repo = makeRepo();
+    let reviewCwd = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        reviewCwd = options.cwd!;
+        throw new Error("provider disconnected");
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /provider disconnected/,
+    );
+
+    expect(reviewCwd).not.toBe("");
+    expect(existsSync(reviewCwd)).toBe(false);
+    expect(
+      execFileSync("git", ["worktree", "list"], { cwd: repo, encoding: "utf-8" }),
+    ).not.toContain("qa-review");
+  });
+
+  it("[behavior:B-03] [behavior:B-04] copies back only allowlisted artifacts and journals every other reviewer write", async () => {
+    const repo = makeRepo();
+    // A tracked source file, so the reviewer can *edit* one rather than only
+    // add untracked files.
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "app.ts"), "export const app = 1;\n", "utf-8");
+    git(repo, ["add", "src/app.ts"]);
+    git(repo, ["commit", "-m", "source"]);
+    let reviewCwd = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        reviewCwd = options.cwd!;
+        const sliceDir = join(reviewCwd, REVIEW_SLICE_REL);
+        writeFileSync(
+          join(sliceDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        writeQAReview(sliceDir, "deterministic");
+        // Everything below is discarded: an unmatched name in the slice
+        // directory, a self-authored baseline, a nested match, an edit to a
+        // source file, a probe, and a write under the gitignored `.afk/` root
+        // that only the second `--ignored` status read can see.
+        writeFileSync(join(sliceDir, "notes.md"), "scratch\n", "utf-8");
+        writeFileSync(
+          join(sliceDir, "approved-baseline.json"),
+          '{"self":"certified"}\n',
+          "utf-8",
+        );
+        mkdirSync(join(sliceDir, "nested"), { recursive: true });
+        writeFileSync(
+          join(sliceDir, "nested", "qa-report.md"),
+          "nested\n",
+          "utf-8",
+        );
+        writeFileSync(join(reviewCwd, "README.md"), "reviewer edit\n", "utf-8");
+        writeFileSync(join(reviewCwd, "probe.txt"), "probe\n", "utf-8");
+        writeFileSync(
+          join(reviewCwd, "src", "app.ts"),
+          "export const app = 2;\n",
+          "utf-8",
+        );
+        mkdirSync(join(reviewCwd, ".afk", "artifacts", "deep"), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(reviewCwd, ".afk", "artifacts", "deep", "approved-baseline.json"),
+          '{"ignored":"root"}\n',
+          "utf-8",
+        );
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      { outcome: "PASS" },
+    );
+
+    // The two canonical artifacts made it out.
+    expect(
+      readFileSync(join(ctx.absSliceDir, "qa-report-r1-a1.md"), "utf-8"),
+    ).toContain("**Verdict:** PASS");
+    expect(
+      readFileSync(join(ctx.absSliceDir, "qa-review.json"), "utf-8"),
+    ).toContain('"verdict"');
+    // Nothing else did — including the baseline the evaluator wrote for
+    // itself, which only the orchestrator may author.
+    expect(existsSync(join(ctx.absSliceDir, "notes.md"))).toBe(false);
+    expect(existsSync(join(ctx.absSliceDir, "approved-baseline.json"))).toBe(
+      false,
+    );
+    expect(existsSync(join(ctx.absSliceDir, "nested"))).toBe(false);
+    expect(readFileSync(join(repo, "README.md"), "utf-8")).toBe("fixture\n");
+    expect(existsSync(join(repo, "probe.txt"))).toBe(false);
+    // The source edit reached neither the generator worktree nor its commit.
+    expect(readFileSync(join(repo, "src", "app.ts"), "utf-8")).toBe(
+      "export const app = 1;\n",
+    );
+    expect(
+      execFileSync("git", ["show", "HEAD:src/app.ts"], {
+        cwd: repo,
+        encoding: "utf-8",
+      }),
+    ).toBe("export const app = 1;\n");
+
+    const violations = runEvents(ctx).filter(
+      (event) => event.type === "reviewer-write-violation",
+    );
+    expect(violations.map((event) => event.path).sort()).toEqual(
+      [
+        "README.md",
+        "probe.txt",
+        "src/app.ts",
+        // Invisible to a plain `git status`: the second, `--ignored` read is
+        // the only reason this one is named.
+        ".afk/artifacts/deep/approved-baseline.json",
+        `${REVIEW_SLICE_REL}/approved-baseline.json`,
+        `${REVIEW_SLICE_REL}/nested/qa-report.md`,
+        `${REVIEW_SLICE_REL}/notes.md`,
+      ].sort(),
+    );
+    // Identity, and non-fatal: the stage still returned PASS above.
+    expect(violations[0]).toMatchObject({
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 1,
+      attempt: 1,
+    });
+    // The copied-back artifacts and the orchestrator's own seeds are not
+    // reviewer writes.
+    for (const path of [
+      `${REVIEW_SLICE_REL}/qa-report.md`,
+      `${REVIEW_SLICE_REL}/qa-review.json`,
+      `${REVIEW_SLICE_REL}/contract.md`,
+      `${REVIEW_SLICE_REL}/acceptance-manifest.json`,
+    ]) {
+      expect(violations.map((event) => event.path)).not.toContain(path);
+    }
+  });
+
+  it("[behavior:B-05] writes the git change summary before the evaluator is invoked", async () => {
+    const repo = makeRepo();
+    writeFileSync(join(repo, "change.txt"), "generated\n", "utf-8");
+    const summaryPath = join(
+      repo,
+      ".afk",
+      "artifacts",
+      "prd-070-stub",
+      "slice-01",
+      "change-summary.json",
+    );
+    let existedAtInvocation = false;
+    let promptedPath = false;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        existedAtInvocation = existsSync(summaryPath);
+        promptedPath = options.prompt.includes(
+          ".afk/artifacts/prd-070-stub/slice-01/change-summary.json",
+        );
+        const sliceDir = join(options.cwd!, REVIEW_SLICE_REL);
+        writeFileSync(
+          join(sliceDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        writeQAReview(sliceDir, "deterministic");
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).resolves.toMatchObject(
+      { outcome: "PASS" },
+    );
+
+    expect(existedAtInvocation).toBe(true);
+    expect(promptedPath).toBe(true);
+    const summary = JSON.parse(readFileSync(summaryPath, "utf-8"));
+    expect(summary).toMatchObject({ version: 1, fromRef: "main" });
+    expect(summary.files.map((file: { path: string }) => file.path)).toContain(
+      "change.txt",
+    );
+    expect(summary.totals.files).toBe(summary.files.length);
+  });
+
+  it("[behavior:P-05] refuses a PASS that leaves a blocking finding open", async () => {
+    const repo = makeRepo();
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        const sliceDir = join(options.cwd!, REVIEW_SLICE_REL);
+        writeFileSync(
+          join(sliceDir, "qa-report.md"),
+          "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+          "utf-8",
+        );
+        writeQAReview(sliceDir, "deterministic", {
+          verdict: "PASS",
+          failureClass: "NONE",
+          findings: [
+            {
+              id: "QA-01",
+              severity: "BLOCKING",
+              behaviorIds: [],
+              summary: "Still broken",
+              evidence: "The fixture evaluator observed a failing behavior",
+              expected: "The behavior passes",
+              observed: "The behavior fails",
+              clearCondition: "The behavior passes",
+              state: "OPEN",
+            },
+          ],
+        });
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const ctx = makeContext(repo, provider, { infrastructureRetries: 0 });
+
+    await expect(runQAStage(ctx, 1, "deterministic", [])).rejects.toThrow(
+      /must be one of PASS\/NONE/,
+    );
   });
 });
 

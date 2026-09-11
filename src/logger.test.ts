@@ -243,6 +243,68 @@ PM review: N/A
     expect(md).toContain("Pre-ship sanity gate: N/A");
   });
 
+  /**
+   * Candidate review isolation is invisible in the log otherwise: the approved
+   * baseline is a file an operator has to know exists, and a reviewer write
+   * that fell outside the allowlist was silently discarded (#91 AC5/AC3). One
+   * section answers both questions, and it renders only when such an event
+   * exists so every other run's summary keeps its bytes.
+   */
+  it("[behavior:B-09] renders the approved baseline and reviewer-write violations", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "isolation");
+    recordTerminal(log, id("70", "Isolated review", "afk/70"), {
+      phase: "PASS",
+    });
+    log.event({
+      type: "approved-baseline",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 2,
+      treeId: "tree-abc",
+      commit: "commit-def",
+      artifactId: "baseline-1",
+    });
+    log.event({
+      type: "reviewer-write-violation",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 2,
+      attempt: 1,
+      path: "src/orchestrator.ts",
+    });
+    log.event({
+      type: "reviewer-write-violation",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 2,
+      attempt: 2,
+      path: "probe.txt",
+    });
+
+    const md = log.writeSummary();
+    const section = md.slice(md.indexOf("## Candidate Review Isolation"));
+    expect(md).toContain("## Candidate Review Isolation");
+    expect(section).toContain(
+      "| 70 | 2 | approved-baseline | tree-abc | commit-def | baseline-1 |",
+    );
+    expect(section).toContain(
+      "| 70 | 2 | reviewer-write-violation | — | attempt 1 | src/orchestrator.ts |",
+    );
+    expect(section).toContain(
+      "| 70 | 2 | reviewer-write-violation | — | attempt 2 | probe.txt |",
+    );
+    expect(md).toContain("Pre-ship sanity gate: N/A");
+  });
+
+  it("[behavior:B-09] renders no isolation section for a run without those events", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "no-isolation");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+
+    expect(log.writeSummary()).not.toContain("## Candidate Review Isolation");
+  });
+
   it("P-03 renders no empty coverage section when no coverage event exists", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "no-coverage");
@@ -271,6 +333,115 @@ PM review: N/A
     expect(md).not.toContain("## Behavior Coverage");
     // The existing section keeps its exact tail, so an opted-out project's
     // summary is byte-for-byte today's.
+    expect(md).toContain(
+      "| 1 | 1 | typecheck | PASS | 1000ms | ev-1 | log-1 |\n\n\n" +
+        "Pre-ship sanity gate: N/A",
+    );
+  });
+
+  it("[behavior:B-14] renders an Applied Waivers section naming all four fields", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "waived");
+    recordTerminal(log, id("193", "Feedback integrity", "afk/193"), {
+      phase: "PASS",
+    });
+    log.event({
+      type: "waiver-applied",
+      ghIssue: "193",
+      sliceNumber: "07",
+      round: 1,
+      riskClass: "deleted-test",
+      path: "src/legacy-parser.test.ts",
+      author: "eric",
+      reason: "the module it covered was deleted with it",
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain("## Applied Waivers");
+    const section = md.slice(md.indexOf("## Applied Waivers"));
+    expect(section).toContain(
+      "| 193 | 1 | deleted-test | src/legacy-parser.test.ts | eric | " +
+        "the module it covered was deleted with it |",
+    );
+  });
+
+  it("[behavior:B-14] QA-01: renders one row per authorization, not one per round", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "waived-twice");
+    recordTerminal(log, id("193", "Feedback integrity", "afk/193"), {
+      phase: "PASS",
+    });
+    // The post-QA gate phase re-runs on every implementation round, so the same
+    // launch authorization is honored — and journalled — once per round. That is
+    // one human decision, and the summary has to read as one.
+    for (const round of [1, 2]) {
+      log.event({
+        type: "waiver-applied",
+        ghIssue: "193",
+        sliceNumber: "07",
+        round,
+        riskClass: "deleted-test",
+        path: "src/legacy-parser.test.ts",
+        author: "eric",
+        reason: "the module it covered was deleted with it",
+      });
+    }
+    // A different path under the same class is a different decision.
+    log.event({
+      type: "waiver-applied",
+      ghIssue: "193",
+      sliceNumber: "07",
+      round: 2,
+      riskClass: "deleted-test",
+      path: "src/other-parser.test.ts",
+      author: "eric",
+      reason: "the module it covered was deleted with it",
+    });
+
+    const md = log.writeSummary();
+    const section = md.slice(md.indexOf("## Applied Waivers"));
+    const rows = section
+      .split("\n")
+      .filter((line) => line.startsWith("| 193 |"));
+    expect(rows).toHaveLength(2);
+    // The surviving row carries the round the waiver was first applied.
+    expect(rows[0]).toBe(
+      "| 193 | 1 | deleted-test | src/legacy-parser.test.ts | eric | " +
+        "the module it covered was deleted with it |",
+    );
+    expect(rows[1]).toBe(
+      "| 193 | 2 | deleted-test | src/other-parser.test.ts | eric | " +
+        "the module it covered was deleted with it |",
+    );
+  });
+
+  it("[behavior:P-06] renders no Applied Waivers section when nothing was waived", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "unwaived");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.event({
+      type: "gate-outcome",
+      ghIssue: "1",
+      sliceNumber: "01",
+      round: 1,
+      attemptId: "a1",
+      gateId: "typecheck",
+      stage: "base",
+      status: "PASS",
+      failureKind: null,
+      startedAt: "2026-09-09T00:00:00.000Z",
+      endedAt: "2026-09-09T00:00:01.000Z",
+      durationMs: 1000,
+      exitCode: 0,
+      treeId: "tree-abc",
+      evidenceArtifactId: "ev-1",
+      logArtifactId: "log-1",
+    });
+
+    const md = log.writeSummary();
+    expect(md).not.toContain("## Applied Waivers");
+    // The same exact tail the pre-#193 summary had: a run nobody waived
+    // anything for is byte-for-byte today's.
     expect(md).toContain(
       "| 1 | 1 | typecheck | PASS | 1000ms | ev-1 | log-1 |\n\n\n" +
         "Pre-ship sanity gate: N/A",

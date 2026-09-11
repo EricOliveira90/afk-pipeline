@@ -2,11 +2,15 @@ import { describe, it, expect } from "vitest";
 import { renderPrompt } from "./prompt-template.js";
 import { buildGuardianRoundScope } from "./guardian-round-scope.js";
 import { parseQAReview } from "./qa-review.js";
-import { PRE_BUILD_SCOPE_FINDING_ID } from "./escalation.js";
+import {
+  GATE_SCOPE_FINDING_ID,
+  PRE_BUILD_SCOPE_FINDING_ID,
+} from "./escalation.js";
 import {
   PLANNER_ESCALATION_FILENAME,
   parsePlannerEscalation,
 } from "./planner-escalation.js";
+import { parseAcceptanceManifest } from "./acceptance-manifest.js";
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -71,6 +75,7 @@ describe("renderPrompt", () => {
         UNRESOLVED_FINDINGS: "(none)",
         COMMAND_TIMEOUT_SECONDS: 600,
         HEARTBEAT_SECONDS: 30,
+        CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
         EXTRA: "y",
       }),
     ).toThrow(/EXTRA/);
@@ -96,6 +101,7 @@ describe("renderPrompt", () => {
         UNRESOLVED_FINDINGS: "(none)",
         COMMAND_TIMEOUT_SECONDS: 600,
         HEARTBEAT_SECONDS: 30,
+        CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
         TEST_COMMAND: "pnpm test:fast",
       }),
     ).toThrow(/TEST_COMMAND/);
@@ -113,6 +119,7 @@ describe("renderPrompt", () => {
       UNRESOLVED_FINDINGS: "(none)",
       COMMAND_TIMEOUT_SECONDS: 600,
       HEARTBEAT_SECONDS: 30,
+      CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
     });
     expect(evaluatorPrompt).toContain("qa-review.json");
     expect(evaluatorPrompt).toContain("uat-review.json");
@@ -153,6 +160,58 @@ describe("renderPrompt", () => {
     );
   });
 
+  /**
+   * The evaluator's judgement frame and the probe rule are prompt-only
+   * obligations: no gate can check that a reviewer asked the right four
+   * questions, and the D14 probe rule is enforced mechanically by the
+   * disposable worktree plus the copy-back allowlist, so the prompt only has
+   * to *tell* the reviewer what the machinery already guarantees (#91 AC9).
+   */
+  it("[behavior:B-08] frames the candidate evaluator's judgement and the probe rule", () => {
+    const prompt = renderPrompt("evaluator-qa", {
+      SLICE_DIR: "specs/slices/01-foo",
+      RELEVANT_FILES: "",
+      SANITY_COMMANDS: "pnpm run typecheck",
+      BASE_GATE_AUTHORIZATION: "",
+      SIBLING_HANDOFFS: "(none)",
+      QA_SCOPE: "deterministic",
+      REPORT_PATH: "specs/slices/01-foo/qa-report.md",
+      UNRESOLVED_FINDINGS: "(none)",
+      COMMAND_TIMEOUT_SECONDS: 600,
+      HEARTBEAT_SECONDS: 30,
+      CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
+    });
+
+    // Four judgement questions, each named.
+    expect(prompt).toMatch(/\*\*Intent\*\*/);
+    expect(prompt).toMatch(/\*\*Boundaries\*\*/);
+    expect(prompt).toMatch(/\*\*Preservation\*\*/);
+    expect(prompt).toMatch(/\*\*Test honesty and sufficiency\*\*/);
+
+    // The disposable worktree, and the change summary it reads first.
+    expect(prompt).toMatch(/disposable worktree/i);
+    expect(prompt).toContain(
+      ".afk/artifacts/run/slice-01/change-summary.json",
+    );
+
+    // Discard statement: only the two canonical artifacts leave the worktree.
+    expect(prompt).toContain("specs/slices/01-foo/qa-review.json");
+    expect(prompt).toMatch(/leave this\s+worktree/);
+    expect(prompt).toMatch(/discarded/);
+
+    // D14, both halves: probes are allowed here, and never handed onward.
+    expect(prompt).toMatch(/Probes are allowed here, and only here/);
+    expect(prompt).toMatch(/quoting it in the finding's `evidence`/);
+    expect(prompt).toMatch(/Never hand a probe to the generator/);
+    expect(prompt).toMatch(
+      /No field of the canonical artifact\s+carries probe code/,
+    );
+
+    // The evaluator reads the manifest, not the generator's own handoff.
+    expect(prompt).toContain("specs/slices/01-foo/acceptance-manifest.json");
+    expect(prompt).not.toContain("handoff.md");
+  });
+
   it("tells the repair template to leave stuck.md alone", () => {
     const repairTemplate = readFileSync(
       new URL("../prompts/generator-repair.md", import.meta.url),
@@ -184,10 +243,216 @@ describe("renderPrompt", () => {
         '{"version":1,"findingIds":["F-01"],"paths":["src/file.ts"],"reason":"why the cited fix requires the paths"}',
       );
       expect(section).toContain(PRE_BUILD_SCOPE_FINDING_ID);
-      expect(section).toMatch(
-        /Never mix `PRE-BUILD-SCOPE` with a real finding\s+ID/i,
+      expect(section).toMatch(/Never mix these three identities/i);
+    }
+  });
+
+  /**
+   * The three-way escalation branch (#193 B-16, ADR 0060). All three generator
+   * surfaces teach it, and they teach it with the same bytes: a generator reads
+   * whichever of them its invocation renders, and a rule that holds in one is a
+   * rule the other two let it escape.
+   */
+  it("[behavior:B-16] teaches all three escalation identities identically in every generator surface", () => {
+    const surfaces = [
+      "../prompts/generator.md",
+      "../prompts/generator-repair.md",
+      "../agents/generator.md",
+    ].map((relative) =>
+      readFileSync(new URL(relative, import.meta.url), "utf-8"),
+    );
+
+    const blocks = surfaces.map((content) => {
+      const start = content.indexOf("`findingIds` is always required");
+      const endMarker =
+        "escalate for a human decision instead of asking for a wider scope.";
+      const end = content.indexOf(endMarker);
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      return content.slice(start, end + endMarker.length);
+    });
+    // Byte-identical, not merely equivalent.
+    expect(new Set(blocks).size).toBe(1);
+
+    const block = blocks[0]!;
+    // The version-2 literal, exactly — a generator copies this shape.
+    expect(block).toContain(
+      '{"version":2,"findingIds":["GATE-SCOPE"],"paths":["src/file.ts"],' +
+        '"reason":"why the failing gate requires the paths",' +
+        '"gateEvidence":{"gateId":"scope","evidenceArtifactId":' +
+        '"gate-evidence/candidate-r1-a1.json"}}',
+    );
+    // All three branches, each by the identity it cites.
+    expect(block).toMatch(/Findings were cited to you/);
+    expect(block).toContain(
+      `{"version":1,"findingIds":["${PRE_BUILD_SCOPE_FINDING_ID}"],` +
+        '"paths":["src/file.ts"],"reason":"..."}',
+    );
+    expect(block).toContain(GATE_SCOPE_FINDING_ID);
+    expect(block).toMatch(/failing orchestrator-run gate/i);
+    expect(block).toMatch(/gateEvidence` is required with `GATE-SCOPE`/);
+    // The never-mix rule spans all three identities, not just the pre-build one.
+    expect(block).toMatch(
+      /Never mix these three identities — not with each other, and not with a\s+real\s+finding ID/,
+    );
+    // A revision widens a boundary; it never decides what the contract did not.
+    for (const decision of [
+      /changes behavior/,
+      /a public interface/,
+      /a data format/,
+      /security posture/,
+      /the acceptance\s+criteria/,
+    ]) {
+      expect(block).toMatch(decision);
+    }
+    expect(block).toMatch(/escalate for a human decision/);
+  });
+
+  /**
+   * ADR 0060's parser-regression rubric, in both contract-evaluation surfaces
+   * (#193 B-17). Round 1 renders `evaluator-contract.md` and every later round
+   * renders `evaluator-contract-revision.md`, so a rubric present in only one
+   * of them is a rubric a revised contract escapes.
+   */
+  const renderContractEvaluation = (): Record<string, string> => ({
+    "evaluator-contract": renderPrompt("evaluator-contract", {
+      SLICE_DIR: "d",
+      ROUND: 1,
+      ACCEPTANCE_MANIFEST_FILE: "acceptance-manifest.json",
+      DURABLE_FINDING_LINEAGE: "(none)",
+      CONTROL_SITUATION: "(none)",
+      BASE_GATE_CATALOG: "- tests: pnpm run test",
+      CONTRACT_REVIEW_FILE: "contract-review.json",
+      EXPLORER_CONTEXT: "context",
+    }),
+    "evaluator-contract-revision": renderPrompt(
+      "evaluator-contract-revision",
+      {
+        SLICE_DIR: "d",
+        ROUND: 2,
+        CONTRACT_REVIEW_FILE: "contract-review.json",
+        ACCEPTANCE_MANIFEST_FILE: "acceptance-manifest.json",
+        PRIOR_OPEN_FINDINGS: "(none)",
+        DURABLE_FINDING_LINEAGE: "(none)",
+        PLANNER_RESPONSE: "(none)",
+        REVISION_CONTEXT: '{"before":"old","after":"new"}',
+        CONTROL_SITUATION: "(none)",
+        BASE_GATE_CATALOG: "- tests: pnpm run test",
+        EXPLORER_CONTEXT: "context",
+      },
+    ),
+  });
+
+  it("[behavior:B-17] gives both contract-evaluation prompts ADR 0060's parser-regression rubric", () => {
+    const rendered = renderContractEvaluation();
+
+    const rubrics = Object.entries(rendered).map(([name, prompt]) => {
+      const section = prompt.match(
+        /^# Parser regression surface\r?\n([\s\S]*?)(?=^# )/m,
+      );
+      expect(section, name).not.toBeNull();
+      return section![1]!;
+    });
+    // Both surfaces teach it with the same bytes, so neither can drift.
+    expect(new Set(rubrics.map((r) => r.trim())).size).toBe(1);
+
+    for (const [index, rubric] of rubrics.entries()) {
+      const name = Object.keys(rendered)[index]!;
+      expect(rubric, name).toMatch(
+        /changes a parser's accepted input language/,
+      );
+      expect(rubric, name).toMatch(/ADR 0060/);
+      // Both halves of the regression evidence are bound, not just the happy one.
+      expect(rubric, name).toMatch(
+        /positive evidence: at least one newly accepted input/,
+      );
+      expect(rubric, name).toMatch(
+        /rejected-or-boundary evidence: relevant rejected or boundary input\s+that must\s+remain rejected/,
+      );
+      // A fixture-backed harness declares its owning area and the concrete
+      // paths, or authorizes new fixtures there explicitly.
+      expect(rubric, name).toMatch(/established harness .* is fixture-backed/);
+      expect(rubric, name).toMatch(/owning fixture area/);
+      expect(rubric, name).toMatch(
+        /concrete existing\s+fixture paths expected to change/,
+      );
+      expect(rubric, name).toMatch(
+        /explicit authorization to add fixtures in\s+that area/,
+      );
+      // Inline tests stay legal where they are the harness: the rubric binds
+      // evidence, not a literal fixture path.
+      expect(rubric, name).toMatch(
+        /Inline parser tests are valid evidence where they are the\s+established harness/,
+      );
+      expect(rubric, name).toMatch(
+        /not universally mandatory —\s*concrete regression evidence is/,
+      );
+      expect(rubric, name).toMatch(/BLOCKING finding/);
+    }
+  });
+
+  /**
+   * The rubric is additive (#193 P-04): the lineage, control-plane and review
+   * artifact contracts the contract-evaluation prompts already carried still
+   * hold, and the manifest format itself is untouched at version 2.
+   */
+  it("[behavior:P-04] keeps the prior contract-evaluation contract intact", () => {
+    for (const [name, prompt] of Object.entries(renderContractEvaluation())) {
+      expect(prompt, name).toContain("# Durable finding lineage");
+      expect(prompt, name).toContain("# Control-plane situation");
+      // The placeholders still resolve — the rendered prompt carries the
+      // substituted values, not the raw tokens.
+      expect(prompt, name).not.toContain("{{DURABLE_FINDING_LINEAGE}}");
+      expect(prompt, name).not.toContain("{{CONTROL_SITUATION}}");
+      expect(prompt, name).toContain("# Canonical review artifacts");
+      expect(prompt, name).toContain(
+        "`severity` is exactly `BLOCKING` or `ADVISORY`",
+      );
+      expect(prompt, name).toContain(
+        "`state` is exactly one of `OPEN`, `RESOLVED`, `CONTESTED`, `WITHDRAWN`",
       );
     }
+
+    for (const relative of [
+      "../prompts/evaluator-contract.md",
+      "../prompts/evaluator-contract-revision.md",
+    ]) {
+      const template = readFileSync(
+        new URL(relative, import.meta.url),
+        "utf-8",
+      );
+      expect(template, relative).toContain("{{DURABLE_FINDING_LINEAGE}}");
+      expect(template, relative).toContain("{{CONTROL_SITUATION}}");
+    }
+
+    // The acceptance manifest format is still version 2: this slice taught the
+    // evaluator a rubric, it did not bump the machine format.
+    const manifest = parseAcceptanceManifest({
+      version: 2,
+      fileScope: { kind: "paths", paths: ["src/example.ts"] },
+      migrationCount: 0,
+      behaviors: [
+        {
+          id: "B-01",
+          source: "contract.md",
+          given: "a parser change",
+          when: "the evaluator reviews it",
+          then: "the regression surface is declared",
+          observableResult: "the review cites the fixture area",
+          preservation: false,
+          gateIds: ["tests"],
+        },
+      ],
+    });
+    expect(manifest.version).toBe(2);
+    expect(() =>
+      parseAcceptanceManifest({
+        version: 3,
+        fileScope: { kind: "paths", paths: ["src/example.ts"] },
+        migrationCount: 0,
+        behaviors: [],
+      }),
+    ).toThrow(/must declare version 1 or 2/);
   });
 
   it("B-08 limits escalation to plan-level contradictions, silence, and risk", () => {
@@ -344,7 +609,7 @@ describe("renderPrompt", () => {
       PATTERNS_AND_HARNESS: "patterns",
       FAILURE_SET: "(none)",
     })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30, CHANGE_SUMMARY_PATH: "s/change-summary.json" })).toBeTruthy();
     expect(renderPrompt("generator-repair", {
       SLICE_DIR: "d",
       FILE_SCOPE: "- `src/example.ts`",
