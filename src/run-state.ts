@@ -46,8 +46,39 @@ export interface PersistedSliceState {
   adoption?: SliceAdoption;
 }
 
+/**
+ * The schema version every writer emits. v4 adds the per-slice approved
+ * baseline locator below; `adaptLoadedState` normalizes a v3 file to it in
+ * memory, so a resumed run reads one shape.
+ */
+export const RUN_STATE_VERSION = 4;
+
+/**
+ * Where one slice's approved baseline artifact is, and which candidate it
+ * describes (#91 AC5, PRD D10).
+ *
+ * A locator, not an authority: `approved-baseline.json` itself is canonical,
+ * because D20 compares the final tree against that file. This record exists
+ * so a resumed run can *find* it without re-deriving the checkpoint, and
+ * nothing has two authorities for the same fact.
+ */
+export interface PersistedApprovedBaseline {
+  /** Candidate checkpoint tree object ID — not a commit. */
+  treeId: string;
+  /** Candidate checkpoint commit. */
+  commit: string;
+  /** Repo-relative path of the canonical `approved-baseline.json`. */
+  artifactPath: string;
+}
+
 export interface RunState {
-  version: 3;
+  /**
+   * Schema version. Writers emit {@link RUN_STATE_VERSION} and
+   * `adaptLoadedState` returns it for every accepted file; the literal `3`
+   * stays assignable so callers and fixtures holding a v3 record keep
+   * compiling, and nothing reads a `3` back out of a loaded state.
+   */
+  version: 3 | 4;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -105,6 +136,12 @@ export interface RunState {
   nonProgress?: unknown;
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
+  /**
+   * Per-slice approved-baseline locators, keyed by GitHub issue — the v4
+   * addition. Absent entries read as "no baseline recorded", so a v3 file
+   * loads unchanged.
+   */
+  approvedBaselines?: Record<string, PersistedApprovedBaseline>;
 }
 
 export interface MigrationClaimState {
@@ -672,17 +709,87 @@ export function listRunStateSlugs(repoRoot: string): string[] {
 }
 
 /**
+ * Keep only well-formed baseline locators. A malformed entry degrades to
+ * absent rather than throwing: the artifact file is canonical, so a broken
+ * locator costs a re-derivation, never the run.
+ */
+function sanitizeApprovedBaselines(
+  value: unknown,
+): Record<string, PersistedApprovedBaseline> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const out: Record<string, PersistedApprovedBaseline> = {};
+  for (const [ghIssue, raw] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as Partial<
+      Record<keyof PersistedApprovedBaseline, unknown>
+    >;
+    const nonblank = (field: unknown): field is string =>
+      typeof field === "string" && field.trim() !== "";
+    if (
+      !nonblank(record.treeId) ||
+      !nonblank(record.commit) ||
+      !nonblank(record.artifactPath)
+    ) {
+      continue;
+    }
+    out[ghIssue] = {
+      treeId: record.treeId,
+      commit: record.commit,
+      artifactPath: record.artifactPath,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The recorded baseline locator for one slice, or `undefined`. */
+export function approvedBaselineFor(
+  state: RunState,
+  ghIssue: string,
+): PersistedApprovedBaseline | undefined {
+  return state.approvedBaselines?.[ghIssue];
+}
+
+/**
+ * Record where one slice's approved baseline artifact is. Called by the
+ * orchestrator on a deterministic PASS, immediately after the artifact is
+ * written, so the locator never points at a file that does not exist.
+ */
+export function recordApprovedBaseline(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  record: PersistedApprovedBaseline,
+): void {
+  updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    state.approvedBaselines = {
+      ...(state.approvedBaselines ?? {}),
+      [ghIssue]: record,
+    };
+  });
+}
+
+/**
  * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
  * checkpoint storage whose focused reader owns validation. v3 adds adoption
- * provenance to terminal slice records. Throws on unknown status strings
+ * provenance to terminal slice records. v4 adds the per-slice approved
+ * baseline locator, which a v3 file simply does not have — it adapts to v4 in
+ * memory with no locator and no write. Throws on unknown status strings
  * rather than silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
   if (!existsSync(p)) {
-    return { version: 3, prdSlug, featureBranch: `feat/${prdSlug}`, slices: {} };
+    return {
+      version: RUN_STATE_VERSION,
+      prdSlug,
+      featureBranch: `feat/${prdSlug}`,
+      slices: {},
+    };
   }
   const raw = JSON.parse(readFileSync(p, "utf-8")) as unknown;
   return adaptLoadedState(raw, prdSlug);
@@ -703,6 +810,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     qaConvergence?: unknown;
     nonProgress?: unknown;
     migrations?: unknown;
+    approvedBaselines?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -714,7 +822,12 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       ? r.specsDir
       : undefined;
 
-  if (r.version === 1 || r.version === 2 || r.version === 3) {
+  if (
+    r.version === 1 ||
+    r.version === 2 ||
+    r.version === 3 ||
+    r.version === 4
+  ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
       slices[id] = validateV1Slice(id, val);
@@ -722,8 +835,11 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     const resume = sanitizeResumeMap(r.resume);
     const migrations = sanitizeMigrationClaims(r.migrations);
+    // A v3 file has no locator at all, which is exactly "no baseline
+    // recorded" — the adapter adds nothing and writes nothing.
+    const approvedBaselines = sanitizeApprovedBaselines(r.approvedBaselines);
     return {
-      version: 3,
+      version: RUN_STATE_VERSION,
       prdSlug,
       featureBranch,
       ...(specsDir !== undefined ? { specsDir } : {}),
@@ -744,6 +860,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         ? { nonProgress: r.nonProgress }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
+      ...(approvedBaselines !== undefined ? { approvedBaselines } : {}),
     };
   }
 
@@ -775,7 +892,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     };
   }
   return {
-    version: 3,
+    version: RUN_STATE_VERSION,
     prdSlug,
     featureBranch,
     ...(specsDir !== undefined ? { specsDir } : {}),
