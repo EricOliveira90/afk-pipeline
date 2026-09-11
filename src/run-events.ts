@@ -201,6 +201,39 @@ export type RunEventPayload =
     }
   | {
       /**
+       * The approved baseline one deterministic PASS established (#91 AC5,
+       * PRD D10): the candidate checkpoint the evaluator graded, and where
+       * the orchestrator wrote the artifact that is its canonical record.
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same way
+       * `behavior-coverage` arrived.
+       */
+      type: "approved-baseline";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      treeId: string;
+      commit: string;
+      /** Repo-relative path of `approved-baseline.json`. */
+      artifactId: string;
+    }
+  | {
+      /**
+       * One path the evaluator changed in its disposable review worktree
+       * that neither the copy-back allowlist nor the attempt's seed manifest
+       * explains (#91 AC2/AC6). Descriptive: the write was already discarded
+       * by not being copied back, so nothing acts on this event — it is the
+       * record that it happened.
+       */
+      type: "reviewer-write-violation";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      attempt: number;
+      /** Repo-relative path inside the review worktree. */
+      path: string;
+    }
+  | {
+      /**
        * The budgets one slice dispatch is running under (plan §3.9,
        * wave item 14): resume attempts, implementation rounds, contract
        * rounds, infrastructure retries. One per dispatch, emitted beside
