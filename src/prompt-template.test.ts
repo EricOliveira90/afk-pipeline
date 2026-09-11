@@ -71,6 +71,7 @@ describe("renderPrompt", () => {
         UNRESOLVED_FINDINGS: "(none)",
         COMMAND_TIMEOUT_SECONDS: 600,
         HEARTBEAT_SECONDS: 30,
+        CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
         EXTRA: "y",
       }),
     ).toThrow(/EXTRA/);
@@ -96,6 +97,7 @@ describe("renderPrompt", () => {
         UNRESOLVED_FINDINGS: "(none)",
         COMMAND_TIMEOUT_SECONDS: 600,
         HEARTBEAT_SECONDS: 30,
+        CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
         TEST_COMMAND: "pnpm test:fast",
       }),
     ).toThrow(/TEST_COMMAND/);
@@ -113,6 +115,7 @@ describe("renderPrompt", () => {
       UNRESOLVED_FINDINGS: "(none)",
       COMMAND_TIMEOUT_SECONDS: 600,
       HEARTBEAT_SECONDS: 30,
+      CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
     });
     expect(evaluatorPrompt).toContain("qa-review.json");
     expect(evaluatorPrompt).toContain("uat-review.json");
@@ -151,6 +154,58 @@ describe("renderPrompt", () => {
     expect(generatorPersona).not.toContain(
       "`qa-report.md` in the current slice folder IF this is a retry round",
     );
+  });
+
+  /**
+   * The evaluator's judgement frame and the probe rule are prompt-only
+   * obligations: no gate can check that a reviewer asked the right four
+   * questions, and the D14 probe rule is enforced mechanically by the
+   * disposable worktree plus the copy-back allowlist, so the prompt only has
+   * to *tell* the reviewer what the machinery already guarantees (#91 AC9).
+   */
+  it("[behavior:B-08] frames the candidate evaluator's judgement and the probe rule", () => {
+    const prompt = renderPrompt("evaluator-qa", {
+      SLICE_DIR: "specs/slices/01-foo",
+      RELEVANT_FILES: "",
+      SANITY_COMMANDS: "pnpm run typecheck",
+      BASE_GATE_AUTHORIZATION: "",
+      SIBLING_HANDOFFS: "(none)",
+      QA_SCOPE: "deterministic",
+      REPORT_PATH: "specs/slices/01-foo/qa-report.md",
+      UNRESOLVED_FINDINGS: "(none)",
+      COMMAND_TIMEOUT_SECONDS: 600,
+      HEARTBEAT_SECONDS: 30,
+      CHANGE_SUMMARY_PATH: ".afk/artifacts/run/slice-01/change-summary.json",
+    });
+
+    // Four judgement questions, each named.
+    expect(prompt).toMatch(/\*\*Intent\*\*/);
+    expect(prompt).toMatch(/\*\*Boundaries\*\*/);
+    expect(prompt).toMatch(/\*\*Preservation\*\*/);
+    expect(prompt).toMatch(/\*\*Test honesty and sufficiency\*\*/);
+
+    // The disposable worktree, and the change summary it reads first.
+    expect(prompt).toMatch(/disposable worktree/i);
+    expect(prompt).toContain(
+      ".afk/artifacts/run/slice-01/change-summary.json",
+    );
+
+    // Discard statement: only the two canonical artifacts leave the worktree.
+    expect(prompt).toContain("specs/slices/01-foo/qa-review.json");
+    expect(prompt).toMatch(/leave this\s+worktree/);
+    expect(prompt).toMatch(/discarded/);
+
+    // D14, both halves: probes are allowed here, and never handed onward.
+    expect(prompt).toMatch(/Probes are allowed here, and only here/);
+    expect(prompt).toMatch(/quoting it in the finding's `evidence`/);
+    expect(prompt).toMatch(/Never hand a probe to the generator/);
+    expect(prompt).toMatch(
+      /No field of the canonical artifact\s+carries probe code/,
+    );
+
+    // The evaluator reads the manifest, not the generator's own handoff.
+    expect(prompt).toContain("specs/slices/01-foo/acceptance-manifest.json");
+    expect(prompt).not.toContain("handoff.md");
   });
 
   it("tells the repair template to leave stuck.md alone", () => {
@@ -344,7 +399,7 @@ describe("renderPrompt", () => {
       PATTERNS_AND_HARNESS: "patterns",
       FAILURE_SET: "(none)",
     })).toBeTruthy();
-    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30 })).toBeTruthy();
+    expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30, CHANGE_SUMMARY_PATH: "s/change-summary.json" })).toBeTruthy();
     expect(renderPrompt("generator-repair", {
       SLICE_DIR: "d",
       FILE_SCOPE: "- `src/example.ts`",
