@@ -39,6 +39,13 @@ must survive, relevant source and test files, conventions, fixtures, commands,
 test/config blast radius, data shapes, integration seams, recent conflicts,
 and unresolved facts. Keep evidence concise and actionable.
 
+Under `## Patterns and test harness`, list the existing helpers, utilities,
+and fixtures this slice is likely to need, each cited by path and symbol
+(`FACT`). A generator writes from the prompt outward; a helper it does not
+know about is a helper it reimplements. Name the parser, the formatter, the
+git wrapper, the test fixture builder — whatever a reasonable implementation
+of this slice would otherwise write again.
+
 # Slice inputs
 
 ## Relevant files
