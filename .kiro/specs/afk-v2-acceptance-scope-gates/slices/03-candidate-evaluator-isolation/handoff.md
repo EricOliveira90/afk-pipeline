@@ -65,6 +65,20 @@
 - `approved-baseline.json` is written at the pre-QA call site, not inside
   `runQAStage`, because only there are `checkpoint.commitSha`,
   `checkpoint.treeId`, and `gateArtifacts` all in scope.
+- Two declared `observableResult` halves are recorded here as deviations rather
+  than asserted, because where they sit they would be vacuous. B-06's "an
+  evaluator FAIL writes none" and P-05's "no `approved-baseline.json` is
+  written": `writeApprovedBaseline` is only reachable from the `runSliceExecute`
+  pre-QA call site (`src/orchestrator.ts:6191`), which no direct `runQAStage`
+  scenario enters, so `expect(existsSync(baselinePath)).toBe(false)` there would
+  pass with the writer deleted. The positive half is asserted on the spawned
+  scenario that does reach it (`src/qa-orchestration.test.ts:1199`), and B-03's
+  scenario asserts an *evaluator-authored* `approved-baseline.json` is discarded
+  instead.
+- P-01's `observableResult` names `src/orchestrator.test.ts` and the
+  `slice-outcome` event's `evalRounds`; it is asserted in
+  `src/qa-orchestration.test.ts` on the per-run evaluator dispatch count, for
+  the resumed-lineage reason recorded under Gotchas.
 - `RunState.version` is typed `3 | 4` rather than `4`: fixtures outside this
   slice's write boundary (`adopt-command.test.ts`, `cli-run-scope.test.ts`,
   `run-snapshot.test.ts`) hold literal-3 records and must keep compiling.
@@ -89,7 +103,18 @@
 - `git status --porcelain` alone never lists `.afk`, which is gitignored, so
   the reviewer-write scan needs a second `--ignored` status scoped to that
   path; both reads pass `-c core.quotePath=false` so non-ASCII paths are not
-  escaped.
+  escaped. `--ignored` only names ignored files individually when
+  `--untracked-files=all` is also passed; without it git collapses them to
+  `!! .afk/`.
+- Both halves of B-04 are easy to cover vacuously, and the coverage has to be
+  built deliberately: the checkpoint tree already holds the seeded pair's bytes,
+  so a scenario that seeds *identical* bytes reports nothing for the pair
+  whether or not the seed manifest is subtracted. The B-01/B-02 scenario
+  therefore has its first attempt rewrite `contract.md` and
+  `acceptance-manifest.json` in `ctx.absSliceDir` — the amendment case — so the
+  second attempt's seed is a real `M` line that only `seededPaths` suppresses.
+  Likewise the `.afk/` write has to be made by a stub, or the second status read
+  can be deleted with the suite still green.
 - A working directory's slice identity is read off the *tail* of its path
   (`-s01`): `sliceFromCwd` in `src/orchestrator.fixtures.ts` matches
   `-s<number>` only at the end or before a `/`. The review worktree name must

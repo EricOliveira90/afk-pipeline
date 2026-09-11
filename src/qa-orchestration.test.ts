@@ -2893,8 +2893,18 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
 
   it("[behavior:B-01] [behavior:B-02] evaluates a disposable worktree at the candidate checkpoint, seeded per attempt", async () => {
     const repo = makeRepo();
+    const absSliceDir = join(repo, "specs", "slices", "01-prd-070-regression");
+    // The amendment case B-02 exists for: bytes that differ from the
+    // checkpoint tree's, so the second attempt's seed is a *modification* in
+    // the review worktree and the seed manifest is what keeps it out of
+    // B-04's scan.
+    const AMENDED_CONTRACT = GENERATOR_FIXTURE_CONTRACT.replace(
+      "- provider-output.txt",
+      "- provider-output.txt\n- amended.txt",
+    );
     const cwds: string[] = [];
     const seenContract: string[] = [];
+    const seenManifestScope: string[][] = [];
     const treeIds: string[] = [];
     let attempts = 0;
     const provider: AgentProvider = {
@@ -2918,9 +2928,11 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
         seenContract.push(
           readFileSync(join(reviewSliceDir, "contract.md"), "utf-8"),
         );
-        expect(
-          existsSync(join(reviewSliceDir, "acceptance-manifest.json")),
-        ).toBe(true);
+        seenManifestScope.push(
+          JSON.parse(
+            readFileSync(join(reviewSliceDir, "acceptance-manifest.json"), "utf-8"),
+          ).fileScope.paths,
+        );
         if (attempts === 1) {
           // A reviewer that destroys its own inputs must not make the next
           // attempt grade against a missing contract.
@@ -2928,6 +2940,23 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
           rmSync(join(reviewSliceDir, "acceptance-manifest.json"), {
             force: true,
           });
+          // A scope amendment lands in the generator worktree between the two
+          // attempts (ADR 0048): the extra attempt has to grade the amended
+          // pair, not the pair the checkpoint captured.
+          writeFileSync(
+            join(absSliceDir, "contract.md"),
+            AMENDED_CONTRACT,
+            "utf-8",
+          );
+          const manifest = JSON.parse(
+            readFileSync(join(absSliceDir, "acceptance-manifest.json"), "utf-8"),
+          );
+          manifest.fileScope.paths = [...GENERATOR_FIXTURE_SCOPE, "amended.txt"];
+          writeFileSync(
+            join(absSliceDir, "acceptance-manifest.json"),
+            JSON.stringify(manifest),
+            "utf-8",
+          );
           throw new Error("provider disconnected");
         }
         writeFileSync(
@@ -2954,11 +2983,27 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
     // Built from the candidate checkpoint, so the evaluator read the tree the
     // verdict is tied to.
     expect(treeIds[0]).toBe(treeIds[1]);
-    // Seeded before every attempt, with the generator worktree's bytes.
-    expect(seenContract).toEqual([
-      GENERATOR_FIXTURE_CONTRACT,
-      GENERATOR_FIXTURE_CONTRACT,
+    // Seeded before every attempt, with the generator worktree's bytes as
+    // they stand at that attempt — so the amended pair is what the extra
+    // attempt graded, not the checkpoint tree's copy.
+    expect(seenContract).toEqual([GENERATOR_FIXTURE_CONTRACT, AMENDED_CONTRACT]);
+    expect(seenManifestScope).toEqual([
+      GENERATOR_FIXTURE_SCOPE,
+      [...GENERATOR_FIXTURE_SCOPE, "amended.txt"],
     ]);
+    // And the seed manifest is what keeps those orchestrator writes out of the
+    // reviewer-write scan: attempt 1's deletions and attempt 2's differing
+    // bytes both show up in the review worktree's `git status`.
+    const seededPaths = [
+      `${REVIEW_SLICE_REL}/contract.md`,
+      `${REVIEW_SLICE_REL}/acceptance-manifest.json`,
+    ];
+    const violated = runEvents(ctx)
+      .filter((event) => event.type === "reviewer-write-violation")
+      .map((event) => event.path);
+    for (const path of seededPaths) {
+      expect(violated).not.toContain(path);
+    }
     // And gone on the way out, along with its throwaway branch.
     expect(existsSync(reviewCwd)).toBe(false);
     expect(
@@ -2997,6 +3042,12 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
 
   it("[behavior:B-03] [behavior:B-04] copies back only allowlisted artifacts and journals every other reviewer write", async () => {
     const repo = makeRepo();
+    // A tracked source file, so the reviewer can *edit* one rather than only
+    // add untracked files.
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "app.ts"), "export const app = 1;\n", "utf-8");
+    git(repo, ["add", "src/app.ts"]);
+    git(repo, ["commit", "-m", "source"]);
     let reviewCwd = "";
     const provider: AgentProvider = {
       name: "stub",
@@ -3010,8 +3061,15 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
         );
         writeQAReview(sliceDir, "deterministic");
         // Everything below is discarded: an unmatched name in the slice
-        // directory, a nested match, an edit to a source file, and a probe.
+        // directory, a self-authored baseline, a nested match, an edit to a
+        // source file, a probe, and a write under the gitignored `.afk/` root
+        // that only the second `--ignored` status read can see.
         writeFileSync(join(sliceDir, "notes.md"), "scratch\n", "utf-8");
+        writeFileSync(
+          join(sliceDir, "approved-baseline.json"),
+          '{"self":"certified"}\n',
+          "utf-8",
+        );
         mkdirSync(join(sliceDir, "nested"), { recursive: true });
         writeFileSync(
           join(sliceDir, "nested", "qa-report.md"),
@@ -3020,6 +3078,19 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
         );
         writeFileSync(join(reviewCwd, "README.md"), "reviewer edit\n", "utf-8");
         writeFileSync(join(reviewCwd, "probe.txt"), "probe\n", "utf-8");
+        writeFileSync(
+          join(reviewCwd, "src", "app.ts"),
+          "export const app = 2;\n",
+          "utf-8",
+        );
+        mkdirSync(join(reviewCwd, ".afk", "artifacts", "deep"), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(reviewCwd, ".afk", "artifacts", "deep", "approved-baseline.json"),
+          '{"ignored":"root"}\n',
+          "utf-8",
+        );
         return { exitCode: 0, stdout: "", stats: {} };
       },
     };
@@ -3036,21 +3107,42 @@ describe("candidate evaluator isolation", { timeout: 60_000 }, () => {
     expect(
       readFileSync(join(ctx.absSliceDir, "qa-review.json"), "utf-8"),
     ).toContain('"verdict"');
-    // Nothing else did.
+    // Nothing else did — including the baseline the evaluator wrote for
+    // itself, which only the orchestrator may author.
     expect(existsSync(join(ctx.absSliceDir, "notes.md"))).toBe(false);
+    expect(existsSync(join(ctx.absSliceDir, "approved-baseline.json"))).toBe(
+      false,
+    );
     expect(existsSync(join(ctx.absSliceDir, "nested"))).toBe(false);
     expect(readFileSync(join(repo, "README.md"), "utf-8")).toBe("fixture\n");
     expect(existsSync(join(repo, "probe.txt"))).toBe(false);
+    // The source edit reached neither the generator worktree nor its commit.
+    expect(readFileSync(join(repo, "src", "app.ts"), "utf-8")).toBe(
+      "export const app = 1;\n",
+    );
+    expect(
+      execFileSync("git", ["show", "HEAD:src/app.ts"], {
+        cwd: repo,
+        encoding: "utf-8",
+      }),
+    ).toBe("export const app = 1;\n");
 
     const violations = runEvents(ctx).filter(
       (event) => event.type === "reviewer-write-violation",
     );
-    expect(violations.map((event) => event.path).sort()).toEqual([
-      "README.md",
-      "probe.txt",
-      `${REVIEW_SLICE_REL}/nested/qa-report.md`,
-      `${REVIEW_SLICE_REL}/notes.md`,
-    ]);
+    expect(violations.map((event) => event.path).sort()).toEqual(
+      [
+        "README.md",
+        "probe.txt",
+        "src/app.ts",
+        // Invisible to a plain `git status`: the second, `--ignored` read is
+        // the only reason this one is named.
+        ".afk/artifacts/deep/approved-baseline.json",
+        `${REVIEW_SLICE_REL}/approved-baseline.json`,
+        `${REVIEW_SLICE_REL}/nested/qa-report.md`,
+        `${REVIEW_SLICE_REL}/notes.md`,
+      ].sort(),
+    );
     // Identity, and non-fatal: the stage still returned PASS above.
     expect(violations[0]).toMatchObject({
       ghIssue: "70",
