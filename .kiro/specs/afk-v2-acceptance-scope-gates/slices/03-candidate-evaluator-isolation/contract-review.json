@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-08",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-04", "B-05"],
+      "evidence": "B-04: \"the enumeration is a new exported function in `src/qa-review.ts` ... and it issues its own `git` reads with `execFileSync` rather than calling into `src/git.ts`\"; B-01: \"**Decision recorded here:** `src/git.ts` stays outside this slice's scope ... are therefore implemented inside files this slice already owns, not by widening `src/git.ts`\"; B-05: \"it is a deterministic function of its `(cwd, fromRef, toRef)` arguments alone, holding no orchestrator, run-state or run-slug state\"",
+      "expected": "With an exhaustive file-scope map and a file-scope gate shipping in the same PRD, every git operation these two behaviors newly perform must either be reachable from an already-exported src/git.ts function on declared evidence, or src/git.ts must appear in fileScope with the addition named as an in-scope behavior.",
+      "observed": "The revision names both seams unambiguously and takes a third route the clear-condition's concern permits: neither read touches src/git.ts at all. B-04's status read is a new exported function in src/qa-review.ts (in fileScope) called once from runQAStage, issuing `status --porcelain=v1 --untracked-files=all` plus an `--ignored` status with `-c core.quotePath=false`; B-05's read is performed in src/change-summary.ts (in fileScope). The reasons the existing exports cannot serve are verified against the tree: git.statusPorcelain (src/git.ts:489) does issue exactly `[\"status\", \"--porcelain\"]` and its own docstring records that the ship gate parses its output; git.logCommitsWithStat (src/git.ts:726) is hard-wired to `${base}..HEAD`; git.listChangedFiles (src/git.ts:1272) returns a union path set; the core.quotePath rationale is at src/git.ts:1296-1305. B-01's \"four helpers\" claim is narrowed to the worktree lifecycle and each helper is named with a line cite; a new non-goal forbids adding, amending or widening any src/git.ts export; a Definition-of-done item requires src/git.ts to be unmodified and names both hosting files; B-04's acceptance behavior asserts \"src/git.ts is unmodified\" and B-05's asserts the same. B-05's purity claim is restated as argument-determinism with its git reads located, and its test-plan scenario now runs in a temp repo and asserts repeat-call stability.",
+      "clearCondition": "For B-04's status read and B-05's two-ref read, the contract names the seam unambiguously and either cites the existing exported src/git.ts function each one calls (including one whose output covers ignored paths under .afk/), or adds src/git.ts to fileScope and the file list with the new primitive named as an in-scope behavior and the exhaustive-map departure stated; B-05's \"pure\" claim is restated to say where its git reads are performed.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-09",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-08"],
+      "evidence": "B-08 observable: \"src/prompt-template.test.ts asserts the prompt text contains the four questions, both halves of the probe rule, and the discard instruction; no spawned suite asserts the prompt text\"",
+      "expected": "A static prompt-text obligation should be observed by the cheapest test that can see it, and the observable should cover every clause its `then` promises.",
+      "observed": "The observable now names all three obligations its `then` promises and lands the assertion in src/prompt-template.test.ts, which is verified to be a non-spawned suite that already readFileSyncs prompt and persona text over `new URL(\"../...\", import.meta.url)` in the cited region. The hosting file is added both to fileScope and to \"Files expected to change\", the test-plan scenario says the same, and the Definition-of-done item spells out \"not in a spawned suite\".",
+      "clearCondition": "B-08's observable names the discard clause as well as the four questions and both probe-rule halves, and places the assertion in a non-spawned suite (adding the hosting test file to fileScope if none is listed) or says why the rendering path is only reachable from a spawned run.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-10",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "evidence": "B-02 observable: \"...and observes the seed manifest only through its declared consequence: no reviewer-write-violation event names contract.md or acceptance-manifest.json for that attempt\"",
+      "expected": "Each clause of an observable result should read a surface a test can actually reach.",
+      "observed": "The observable no longer asserts the contents of an in-memory set with no declared surface. It keeps the amended-bytes clause and restates the second clause as the run-event consequence B-04's observable already reads, and B-02's `then` now states that consequence (\"so the seeded pair is invisible to B-04's scan\") so the observable covers every clause the `then` promises.",
+      "clearCondition": "B-02's observable either names the surface that exposes the seed manifest (an event payload, a written artifact, or an exported helper's return value) or is restated as the no-violation consequence B-04 already observes.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}
