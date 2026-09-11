@@ -135,8 +135,11 @@ import {
   reviewArtifactViolations,
   runPostQAGates,
 } from "./post-qa-gates.js";
-import { writeCandidateChangeSummary } from "./change-summary.js";
-import { scopeGateDeclaration } from "./scope-gate.js";
+import {
+  writeCandidateChangeSummary,
+  writeFinalChangeSummary,
+} from "./change-summary.js";
+import { SCOPE_GATE_ID, scopeGateDeclaration } from "./scope-gate.js";
 import { skipGateDeclaration } from "./skip-gate.js";
 import {
   appliedWaiversFrom,
@@ -157,8 +160,18 @@ import {
   recordRetryDecision,
   chargeResumeAttempt,
   recordApprovedBaseline,
+  approvedBaselineFor,
+  finalEvaluationFor,
+  recordFinalEvaluation,
   type RunState,
 } from "./run-state.js";
+import {
+  decideFinalReuse,
+  decideFinalVerdict,
+  FINAL_REVIEW_FILENAME,
+  parseFinalReview,
+  POST_APPROVAL_WRITING_STAGE_ID,
+} from "./final-evaluation.js";
 import {
   resolveRunScope,
   type ResolvedRunScope,
@@ -426,6 +439,21 @@ function formatBaseGateCatalog(catalog: readonly BindableGate[]): string {
     })
     .join("\n");
 }
+/**
+ * The internal shape of a post-approval writing stage (#96 B-03). Not
+ * exported: the stage is an implementation detail of this module's accepted-
+ * candidate path, and a stage id plus a function is the whole of it.
+ */
+type PostApprovalWritingStage = (input: {
+  /** The slice worktree, checked out at the approved candidate. */
+  worktreeDir: string;
+  /** The stage's own id, so a write can be attributed without guessing. */
+  stageId: string;
+}) => void;
+
+/** Production behavior: nothing, until PRD 5 (#96 B-03). */
+const noopPostApprovalWritingStage: PostApprovalWritingStage = () => {};
+
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
   verifyMigrationCommand: string;
@@ -536,6 +564,22 @@ export interface PipelineConfig {
   guardianRoundCap?: number;
   /** Enables remote UAT after deterministic QA. */
   sharedPreview?: SharedPreviewConfig;
+  /**
+   * The post-approval writing stage (#96 B-03).
+   *
+   * One stage runs between the candidate checkpoint and the merge, and in
+   * production it does nothing at all: PRD 5 gives it a cleaner and a hardener,
+   * and until then the honest stub is a no-op. It is injectable so a test can
+   * make it write, because the interesting property is what happens when it
+   * does — a stub write changes the tree, and a changed tree makes the reuse
+   * decision return `evaluate` (B-01, PRD D20).
+   *
+   * Deliberately not a new exported cross-module interface: the stage is named
+   * by a single id ({@link POST_APPROVAL_WRITING_STAGE_ID}) and is a function
+   * this module calls, so PRD 5 adds a second stage by extending that list
+   * rather than by negotiating a new contract between modules.
+   */
+  postApprovalWritingStage?: PostApprovalWritingStage;
 
   /**
    * Free-space floor the launch preflight refuses below, in GB. Defaults
@@ -6536,6 +6580,225 @@ export async function runSliceExecute(
               ctx.worktreeDir,
               `feat(#${slice.ghIssue}): ${slice.title}`,
             );
+          }
+          /**
+           * The post-approval writing stage, and the reuse decision it decides
+           * (#96 B-03/B-01/B-02).
+           *
+           * Here and only here: after the candidate checkpoint the gates
+           * authorized and the QA verdict is tied to, and before the merge —
+           * which happens later, in `src/wave.ts`, under the one merge mutex
+           * this slice does not touch (#96 P-01).
+           *
+           * The stage is a no-op in production until PRD 5. The decision is
+           * `reuse` exactly when the final tree is the approved baseline's tree
+           * — string-equal, with no cosmetic-change exception, because "only
+           * formatting moved" is a claim a preservation review exists to check
+           * rather than a reason to skip checking. A stub write changes the
+           * tree, so it can only ever move the decision to `evaluate`.
+           */
+          const writingStage =
+            config.postApprovalWritingStage ?? noopPostApprovalWritingStage;
+          writingStage({
+            worktreeDir: ctx.worktreeDir,
+            stageId: POST_APPROVAL_WRITING_STAGE_ID,
+          });
+          if (git.hasUncommittedChanges(ctx.worktreeDir)) {
+            git.commitAll(
+              ctx.worktreeDir,
+              `chore(#${slice.ghIssue}): ${POST_APPROVAL_WRITING_STAGE_ID}`,
+            );
+          }
+          const finalTreeId = resolveCandidateTreeId(ctx.worktreeDir);
+          /**
+           * Did the writing stage actually write? The accepted candidate
+           * checkpoint is the tree the gates authorized and the QA verdict is
+           * tied to, so a final tree equal to it carries no post-approval byte
+           * — whatever it does or does not have in common with the graded
+           * baseline tree, which the accepted checkpoint's own QA-window
+           * artifacts already differ from.
+           */
+          const postApprovalWriteChangedTree = finalTreeId !== acceptedTreeId;
+          const finalRunSlug = pipelineRunSlug(
+            config.prdSlug,
+            config.provider ?? kiroProvider,
+          );
+          const stateBeforeFinal = loadRunState(
+            config.repoRoot,
+            finalRunSlug,
+          );
+          const persistedBaseline = approvedBaselineFor(
+            stateBeforeFinal,
+            slice.ghIssue,
+          );
+          const priorFinalEvaluation = finalEvaluationFor(
+            stateBeforeFinal,
+            slice.ghIssue,
+          );
+          const invalidatedCandidateTreeIds = [
+            ...(priorFinalEvaluation?.invalidatedCandidateTreeIds ?? []),
+          ];
+          const reuse = decideFinalReuse({
+            finalTreeId,
+            baseline: persistedBaseline
+              ? { treeId: persistedBaseline.treeId }
+              : null,
+            invalidatedCandidateTreeIds,
+          });
+          // The citation is dropped exactly when this run must not stand on it:
+          // an invalidated tree (#96 B-09). The `approved-baseline.json`
+          // artifact and every gate-evidence ID it names are untouched — this
+          // record cites, and withdrawing a citation is not erasing what was
+          // cited (#96 P-03).
+          const citesBaseline =
+            persistedBaseline !== undefined &&
+            !invalidatedCandidateTreeIds.includes(persistedBaseline.treeId);
+          recordFinalEvaluation(config.repoRoot, finalRunSlug, slice.ghIssue, {
+            decision: reuse.decision,
+            finalTreeId,
+            ...(citesBaseline
+              ? {
+                  baselineTreeId: persistedBaseline!.treeId,
+                  baselineArtifactPath: persistedBaseline!.artifactPath,
+                }
+              : {}),
+            attempts: priorFinalEvaluation?.attempts ?? 0,
+            invalidatedCandidateTreeIds,
+          });
+          logger.phase(`${ctx.tag}: ${reuse.reason}`);
+          if (reuse.decision === "reuse") {
+            // The second of the three stores the reuse is recorded in, with the
+            // run-state decision above and the `run-summary.md` section the
+            // logger renders from this event. Not a `GateEvidence` field and not
+            // D17's gate-cache `reused` flag: those say a gate did not re-run,
+            // which is a different claim about a different subject.
+            logger.event({
+              type: "final-evaluation-reuse",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              round,
+              finalTreeId,
+              baselineTreeId: persistedBaseline!.treeId,
+            });
+          } else if (!postApprovalWriteChangedTree) {
+            /**
+             * `evaluate`, but nothing written after the approval: the only
+             * difference from the baseline tree is the QA-window artifacts the
+             * accepted checkpoint already carries, which the QA verdict itself
+             * authorized (ADR 0012). There is no post-approval write to review,
+             * so this run proceeds exactly as it did before this slice — the
+             * bounded evaluator dispatch arrives with PRD 5's writing stages,
+             * which are what give it a subject.
+             */
+            logger.phase(
+              `${ctx.tag}: no post-approval writing stage changed the tree, ` +
+                `so no final evaluation is required for ${finalTreeId}`,
+            );
+          } else {
+            /**
+             * The final verdict (#96 B-11), and it fails closed.
+             *
+             * A post-approval stage wrote, so the tree about to merge is not
+             * the tree that was approved and PASS now requires all four
+             * conditions independently: every required gate green, both
+             * artifact sets keyed to their exact checkpoint trees, canonical
+             * validation of `final-review.json`, and a green `scope` gate *on
+             * the final candidate*. An unevaluated post-approval write stops
+             * here with the conditions it failed named, rather than merging.
+             */
+            // The evaluator's leading input (#96 B-04/B-06): baseline → final,
+            // with the range attributed to the one post-approval writing stage
+            // that produced it. Written before the verdict, because a verdict
+            // reached without it would be a verdict on an unattributed diff.
+            if (citesBaseline) {
+              writeFinalChangeSummary({
+                cwd: ctx.worktreeDir,
+                artifactDir: artifacts.negotiationArchiveDir(
+                  config.repoRoot,
+                  finalRunSlug,
+                  slice.number,
+                ),
+                baselineRef: persistedBaseline!.treeId,
+                finalRef: finalTreeId,
+                stages: [
+                  {
+                    stageId: POST_APPROVAL_WRITING_STAGE_ID,
+                    fromRef: persistedBaseline!.treeId,
+                    toRef: finalTreeId,
+                  },
+                ],
+              });
+            }
+            const finalEvidence = (() => {
+              const artifact =
+                postQaGates.artifacts[postQaGates.artifacts.length - 1];
+              if (!artifact) return null;
+              try {
+                return readGateEvidence(artifact.evidencePath);
+              } catch {
+                return null;
+              }
+            })();
+            const gateStatusOf = (gateId: string): string | null =>
+              finalEvidence?.results.find(
+                (result) => result.gateId === gateId,
+              )?.status ?? null;
+            const finalReviewPath = join(
+              ctx.absSliceDir,
+              FINAL_REVIEW_FILENAME,
+            );
+            const reviewValidation: { ok: true } | { ok: false; error: string } =
+              (() => {
+                if (!existsSync(finalReviewPath)) {
+                  return {
+                    ok: false as const,
+                    error: `${FINAL_REVIEW_FILENAME} was not written`,
+                  };
+                }
+                try {
+                  parseFinalReview(readFileSync(finalReviewPath, "utf-8"));
+                  return { ok: true as const };
+                } catch (error) {
+                  return {
+                    ok: false as const,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  };
+                }
+              })();
+            const finalVerdict = decideFinalVerdict({
+              gates: postQaDeclarations.map((declaration) => ({
+                gateId: declaration.id,
+                required: declaration.required,
+                status: gateStatusOf(declaration.id) ?? "ABSENT",
+              })),
+              candidateTreeId: acceptedTreeId,
+              candidateArtifactTreeId: finalEvidence?.treeId ?? null,
+              finalTreeId,
+              // The final artifacts are keyed by the tree the review names, and
+              // a review of another tree is not evidence about this one.
+              finalArtifactTreeId: reviewValidation.ok
+                ? parseFinalReview(readFileSync(finalReviewPath, "utf-8"))
+                    .finalTreeId
+                : null,
+              reviewValidation,
+              // Only the gate evidence captured on the final tree can say
+              // anything about the final candidate's scope.
+              scopeGateStatus:
+                finalEvidence?.treeId === finalTreeId
+                  ? gateStatusOf(SCOPE_GATE_ID)
+                  : null,
+            });
+            if (finalVerdict.verdict !== "PASS") {
+              return {
+                phase: "ERROR",
+                error:
+                  `Final evaluation cannot pass the tree ${finalTreeId}: ` +
+                  `${finalVerdict.blockers.join("; ")}. The approved baseline ` +
+                  `authorizes ${persistedBaseline?.treeId ?? "no tree"} ` +
+                  `(#96 B-11).`,
+              };
+            }
           }
           return dispatchAcceptedCandidate(candidateLifecycle.accept({
             round,

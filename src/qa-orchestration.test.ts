@@ -30,7 +30,19 @@ import {
 } from "./orchestrator.js";
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
-import { loadRunState, saveRunState } from "./run-state.js";
+import {
+  finalEvaluationFor,
+  invalidateFinalEvaluationBaseline,
+  loadRunState,
+  recordFinalEvaluation,
+  saveRunState,
+  updateRunState,
+} from "./run-state.js";
+import {
+  POST_APPROVAL_WRITING_STAGE_ID,
+  decideFinalReuse,
+} from "./final-evaluation.js";
+import { fileURLToPath } from "node:url";
 import { resolveCandidateTreeId } from "./gate-runner.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
 import { saveQAConvergenceState } from "./qa-convergence.js";
@@ -1238,7 +1250,9 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     }
     // Run state is a locator; the artifact is canonical.
     const state = loadRunState(repo, "prd-070");
-    expect(state.version).toBe(4);
+    // #96 P-06: the additive finalEvaluations record bumps the version; the
+    // #91 baseline locator below still loads unchanged.
+    expect(state.version).toBe(5);
     expect(state.approvedBaselines?.["70"]).toEqual({
       treeId: baseline.treeId,
       commit: baseline.commit,
@@ -3265,5 +3279,269 @@ describe("dependency-relevant sibling handoffs", () => {
     );
     expect(ctx.siblingHandoffsBlock).toContain("01-dependency/handoff.md");
     expect(ctx.siblingHandoffsBlock).not.toContain("02-unrelated");
+  });
+});
+
+/**
+ * Final evaluation and reuse (#96). Three of these are unit tests over the
+ * stores and one is a spawned scenario, because injecting a post-approval
+ * writing stage and proving the tree it dirties cannot merge unreviewed is the
+ * one claim no unit test reaches (`CLAUDE.md`, "Where a new assertion goes").
+ */
+describe("final evaluation and reuse", () => {
+  it("[behavior:B-02] records a reuse in run state, run events, and the run summary, dispatching no evaluator", () => {
+    const repo = makeRepo();
+    const finalTreeId = "f".repeat(40);
+    const baselineTreeId = finalTreeId;
+
+    // Store 1: run state, read back through the new reader.
+    recordFinalEvaluation(repo, "prd-070-stub", "70", {
+      decision: "reuse",
+      finalTreeId,
+      baselineTreeId,
+      baselineArtifactPath:
+        ".afk/artifacts/prd-070-stub/slice-01/approved-baseline.json",
+      attempts: 0,
+      invalidatedCandidateTreeIds: [],
+    });
+    const state = loadRunState(repo, "prd-070-stub");
+    expect(finalEvaluationFor(state, "70")?.decision).toBe("reuse");
+
+    // Stores 2 and 3: one additive event, and the slice's own summary section.
+    const logger = new Logger(repo, "final-reuse");
+    const slice = { ghIssue: "70", title: "PRD 070 regression", branch: "main" };
+    logger.trackSlice(lifecycle.running(slice, { genRounds: 1, evalRounds: 1 }));
+    logger.recordTerminal(slice, { phase: "PASS" });
+    logger.event({
+      type: "final-evaluation-reuse",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 1,
+      finalTreeId,
+      baselineTreeId,
+    });
+    const events = readFileSync(join(logger.runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "final-evaluation-reuse");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 1,
+      finalTreeId,
+      baselineTreeId,
+    });
+    // Not a GateEvidence field and not D17's gate-cache reused flag: the schema
+    // version is unchanged and the event carries no gate id.
+    expect(Object.keys(events[0]!)).not.toContain("gateId");
+
+    const md = logger.writeSummary();
+    const section = md.indexOf("## Final Evaluation Reuse");
+    expect(section).toBeGreaterThan(-1);
+    expect(md.slice(section)).toContain(finalTreeId);
+    // The invocation count the reuse is worth, stated: zero.
+    expect(md.slice(section)).toMatch(/\|\s*0\s*\|/);
+  });
+
+  it("[behavior:B-02] leaves a run without a reuse byte-identical", () => {
+    const repo = makeRepo();
+    const logger = new Logger(repo, "no-final-reuse");
+    const slice = { ghIssue: "70", title: "PRD 070 regression", branch: "main" };
+    logger.trackSlice(lifecycle.running(slice, { genRounds: 1, evalRounds: 1 }));
+    logger.recordTerminal(slice, { phase: "PASS" });
+
+    expect(logger.writeSummary()).not.toContain("Final Evaluation Reuse");
+  });
+
+  it("[behavior:B-09] appends the rejected tree, drops the baseline citation, and refuses reuse", () => {
+    const repo = makeRepo();
+    const candidateTreeId = "a".repeat(40);
+    const artifactPath =
+      ".afk/artifacts/prd-070-stub/slice-01/approved-baseline.json";
+    updateRunState(repo, "prd-070-stub", (state) => {
+      state.approvedBaselines = {
+        "70": {
+          treeId: candidateTreeId,
+          commit: "c".repeat(40),
+          artifactPath,
+        },
+      };
+    });
+    recordFinalEvaluation(repo, "prd-070-stub", "70", {
+      decision: "evaluate",
+      finalTreeId: candidateTreeId,
+      baselineTreeId: candidateTreeId,
+      baselineArtifactPath: artifactPath,
+      attempts: 1,
+      invalidatedCandidateTreeIds: [],
+    });
+
+    const record = invalidateFinalEvaluationBaseline(
+      repo,
+      "prd-070-stub",
+      "70",
+      candidateTreeId,
+    );
+
+    expect(record.invalidatedCandidateTreeIds).toEqual([candidateTreeId]);
+    expect(record.baselineTreeId).toBeUndefined();
+    expect(record.baselineArtifactPath).toBeUndefined();
+    // Even on exact equality, the approval this tree earned is the approval the
+    // finding disputed.
+    expect(
+      decideFinalReuse({
+        finalTreeId: candidateTreeId,
+        baseline: { treeId: candidateTreeId },
+        invalidatedCandidateTreeIds: record.invalidatedCandidateTreeIds,
+      }).decision,
+    ).toBe("evaluate");
+    // P-03: the baseline locator and the artifact it names are untouched — a
+    // withdrawn citation is not an erased citation.
+    const after = loadRunState(repo, "prd-070-stub");
+    expect(after.approvedBaselines?.["70"]).toEqual({
+      treeId: candidateTreeId,
+      commit: "c".repeat(40),
+      artifactPath,
+    });
+  });
+
+  it("[behavior:P-06] reads a v4 state, keeping the #91 locator and #193 waivers, and adds finalEvaluations", () => {
+    const repo = makeRepo();
+    const v4 = {
+      version: 4,
+      slices: {
+        "70": {
+          phase: "PASS",
+          rounds: 1,
+          updatedAt: "2026-09-11T00:00:00.000Z",
+        },
+      },
+      approvedBaselines: {
+        "70": {
+          treeId: "a".repeat(40),
+          commit: "c".repeat(40),
+          artifactPath:
+            ".afk/artifacts/prd-070-stub/slice-01/approved-baseline.json",
+        },
+      },
+      appliedWaivers: {
+        "70": [
+          {
+            riskClass: "migration",
+            path: "db/001.sql",
+            author: "operator",
+            reason: "The migration is intentional",
+          },
+        ],
+      },
+    };
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    writeFileSync(
+      join(repo, ".afk", "state", "prd-070-stub.json"),
+      JSON.stringify(v4),
+      "utf-8",
+    );
+
+    const loaded = loadRunState(repo, "prd-070-stub");
+    expect(loaded.approvedBaselines?.["70"]?.treeId).toBe("a".repeat(40));
+    expect(finalEvaluationFor(loaded, "70")).toBeUndefined();
+
+    recordFinalEvaluation(repo, "prd-070-stub", "70", {
+      decision: "evaluate",
+      finalTreeId: "b".repeat(40),
+      attempts: 0,
+      invalidatedCandidateTreeIds: [],
+    });
+    const bumped = loadRunState(repo, "prd-070-stub");
+    expect(bumped.version).toBe(5);
+    expect(bumped.approvedBaselines?.["70"]?.commit).toBe("c".repeat(40));
+    expect(bumped.appliedWaivers?.["70"]).toEqual([
+      {
+        riskClass: "migration",
+        path: "db/001.sql",
+        author: "operator",
+        reason: "The migration is intentional",
+      },
+    ]);
+    expect(finalEvaluationFor(bumped, "70")?.decision).toBe("evaluate");
+  });
+
+  it("[behavior:P-01] adds no second lock: the merge mutex in src/wave.ts is untouched", () => {
+    const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+    const wave = readFileSync(join(repoRoot, "src", "wave.ts"), "utf-8");
+    // One mutex, acquired in one place, and this slice is not a caller.
+    expect(wave).toContain("mergeMutex");
+    for (const file of [
+      "src/final-evaluation.ts",
+      "src/change-summary.ts",
+      "src/run-state.ts",
+    ]) {
+      const source = readFileSync(join(repoRoot, file), "utf-8");
+      expect(source, file).not.toMatch(/mergeMutex|makeAsyncMutex/);
+    }
+  });
+
+  it("[behavior:B-03] runs an injected post-approval writing stage and refuses to merge the tree it dirtied", async () => {
+    const repo = makeRepo();
+    writeFileSync(
+      join(repo, "package.json"),
+      JSON.stringify({
+        name: "gate-fixture",
+        scripts: { typecheck: "node -e \"0\"", test: "node -e \"0\"" },
+      }),
+      "utf-8",
+    );
+    git(repo, ["add", "package.json"]);
+    git(repo, ["commit", "-m", "add gate scripts"]);
+
+    let artifactDir = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "evaluator-qa") {
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic");
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const stageCalls: { worktreeDir: string; stageId: string }[] = [];
+    const ctx = makeContext(repo, provider, {
+      commandTimeoutMs: 5_000,
+      heartbeatIntervalMs: 20,
+      postApprovalWritingStage: (input) => {
+        stageCalls.push(input);
+        // A stub write, which is all it takes: the tree is no longer the tree
+        // that was approved.
+        writeFileSync(
+          join(input.worktreeDir, "README.md"),
+          "fixture, tidied\n",
+          "utf-8",
+        );
+      },
+    });
+    artifactDir = ctx.absSliceDir;
+
+    const result = await runSliceExecute(ctx);
+
+    // One stage, named by one stage id, running in the slice worktree.
+    expect(stageCalls).toEqual([
+      { worktreeDir: repo, stageId: POST_APPROVAL_WRITING_STAGE_ID },
+    ]);
+    // B-11 fails closed: no final review exists for the tree it produced, so
+    // the candidate stops here instead of merging, with the conditions named.
+    expect(result.phase).toBe("ERROR");
+    const error = "error" in result ? result.error : "";
+    expect(error).toContain("final-review.json");
+    expect(error).toContain("#96 B-11");
+    // The decision is recorded whichever way it went (#96 B-01/B-02 store 1).
+    const state = loadRunState(repo, "prd-070-stub");
+    expect(finalEvaluationFor(state, "70")?.decision).toBe("evaluate");
   });
 });

@@ -2372,6 +2372,26 @@ describe("role contract manifests", () => {
     expect(prompt).toContain("BASELINE_IS_WRONG");
   });
 
+  it("[behavior:B-12] documents the final-evaluation module and prompt in ARCHITECTURE.md, with every named path present", () => {
+    // The explorer and planner read this file, so a row naming a path that
+    // does not exist is a lie the whole pipeline inherits.
+    const architecture = readFileSync(
+      join(repoRootWithDocs, "ARCHITECTURE.md"),
+      "utf-8",
+    );
+
+    expect(architecture).toContain("src/final-evaluation.ts");
+    expect(architecture).toContain("prompts/evaluator-final.md");
+    for (const path of ["src/final-evaluation.ts", "prompts/evaluator-final.md"]) {
+      expect(
+        readFileSync(join(repoRootWithDocs, path), "utf-8").length,
+        path,
+      ).toBeGreaterThan(0);
+    }
+    // Cap stated in the file's own header.
+    expect(architecture.trimEnd().split("\n").length).toBeLessThanOrEqual(150);
+  });
+
   it("clamps a budget override larger than the manifest budget and applies a smaller one", () => {
     const oversizedPrompt = "x".repeat(
       PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes + 1,
