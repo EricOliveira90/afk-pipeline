@@ -572,6 +572,43 @@ ${waiverRows
   )
   .join("\n")}
 `;
+    /**
+     * Final evaluations that reused an existing approval (#96 B-02).
+     *
+     * Its own section, not a row folded into Candidate Review Isolation above:
+     * that table answers what candidate review *established*, and this one
+     * answers where a review deliberately did not run. An operator reading
+     * "zero final evaluator invocations" has to be able to see why, and the
+     * only honest answer is the two tree IDs that turned out to be the same
+     * one.
+     *
+     * Rendered from the `final-evaluation-reuse` events alone, so the summary
+     * and `events.jsonl` cannot disagree, and present only when a reuse
+     * happened — every other run's summary is unchanged byte for byte.
+     */
+    const reuseEvents = runEvents.filter(
+      (event) => event.type === "final-evaluation-reuse",
+    );
+    const finalReuseSection =
+      reuseEvents.length === 0
+        ? ""
+        : `
+## Final Evaluation Reuse
+
+The final checkpoint was byte-identical to the approved baseline, so no final
+evaluator was dispatched (#96, PRD D20 — exact tree equality, no cosmetic
+exception).
+
+| Slice | Round | Final tree | Baseline tree | Evaluator invocations |
+|-------|-------|------------|---------------|-----------------------|
+${reuseEvents
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${event.round} | ${event.finalTreeId} | ` +
+      `${event.baselineTreeId} | 0 |`,
+  )
+  .join("\n")}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -625,7 +662,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${resolutionSection}${waiverSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

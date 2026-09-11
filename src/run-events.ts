@@ -239,6 +239,30 @@ export type RunEventPayload =
     }
   | {
       /**
+       * A final evaluation that did not happen because it did not need to
+       * (#96 B-02, PRD D20): the final checkpoint tree was byte-identical to
+       * the approved baseline's, so zero final-evaluator invocations were
+       * dispatched. Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same
+       * way `behavior-coverage` and `approved-baseline` arrived.
+       *
+       * One of exactly three places the reuse is recorded, with the run-state
+       * `finalEvaluations` decision and the slice's `run-summary.md` section.
+       * Deliberately *not* a `GateEvidence` field: D17's gate-cache `reused`
+       * flag says a gate did not re-run for a tree, which is a different
+       * subject and a different claim, and a reader who conflated them would
+       * think a gate was skipped.
+       */
+      type: "final-evaluation-reuse";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      /** The final checkpoint tree object ID — not a commit. */
+      finalTreeId: string;
+      /** The approved baseline tree it equalled, byte for byte. */
+      baselineTreeId: string;
+    }
+  | {
+      /**
        * One path the evaluator changed in its disposable review worktree
        * that neither the copy-back allowlist nor the attempt's seed manifest
        * explains (#91 AC2/AC6). Descriptive: the write was already discarded
