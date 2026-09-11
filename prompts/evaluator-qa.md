@@ -113,6 +113,28 @@ When Pass 1 is clean, evaluate conventions, naming, abstraction, error handling,
 and meaningful test assertions. Minor notes may PASS; material maintainability
 problems FAIL as IMPLEMENTATION.
 
+Check the changed lines against the generator's self-audit list (the
+`# Self-audit before commit` section of `prompts/generator.md`; keep the two
+in step when either changes):
+
+- helper, wrapper, or abstraction with one call site or one implementation
+- comment that restates the next line; section banners
+- `catch` that logs and continues or returns a default without a contract-named
+  recovery
+- null/undefined check on a value just constructed or already guaranteed by
+  its type
+- `as any`, `as unknown as`, or `!` used to silence the compiler
+- parameter, option, or flag read from exactly one place
+- `V2`/`New`/`Impl` sibling of an existing function
+- leftover imports and variables
+
+Before writing a finding for one of these, read `## Decisions made during
+implementation` in the handoff. A keep recorded there with a reason that holds
+(a real trust boundary, a recovery the contract names) is not a finding. A
+keep with no record, or a reason that does not hold, is an ADVISORY finding;
+it becomes BLOCKING only when it hides a failure path or duplicates a helper
+the explorer's evidence map already named.
+
 # Output
 
 Write the canonical artifact first, using this exact version-1 shape and no

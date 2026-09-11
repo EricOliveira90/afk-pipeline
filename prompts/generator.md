@@ -45,8 +45,33 @@ silence, or a declared risk class. Decide and record otherwise.
 Implement each manifest behavior and preserve the listed existing behavior.
 Name at least one test with each behavior ID; the acceptance gate runs per ID,
 and an ID with no matching test fails. Verify locally with
-`{{TEST_COMMAND}}`. Commit per behavior with a conventional commit that
-references the contract's GitHub issue.
+`{{TEST_COMMAND}}`. Before committing, run the self-audit below over your own
+diff. Commit per behavior with a conventional commit that references the
+contract's GitHub issue.
+
+# Self-audit before commit
+
+Read `git diff` for the lines you added and remove each of these. QA reads the
+same list in its quality pass; anything left here costs a review round.
+
+- A helper, wrapper, or abstraction with one call site or one implementation.
+  Inline it.
+- A comment that restates the next line, or a section banner. Delete it.
+- A `catch` that logs and continues or returns a default. Propagate, unless
+  the contract names that recovery.
+- A null or undefined check on a value this function just constructed or the
+  type already guarantees. Delete it. Validate at boundaries only.
+- `as any`, `as unknown as`, or a non-null `!` added to silence the compiler.
+  Fix the type.
+- A new parameter, option, or flag read from exactly one place. Hard-code it.
+- A `V2`/`New`/`Impl` sibling of an existing function. Change the original.
+- Imports and variables left over from an earlier attempt.
+
+If you keep something on this list on purpose (a check at a real trust
+boundary, a documented recovery), record the reason under `## Decisions made
+during implementation` in the handoff. An undocumented keep reads as slop.
+Audit only lines you changed; the write boundary already forbids cleaning
+anything else.
 
 # Patterns and harness
 
