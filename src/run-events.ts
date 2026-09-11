@@ -234,6 +234,34 @@ export type RunEventPayload =
     }
   | {
       /**
+       * One scoped merge-resolution round (#132 AC8). Recorded distinctly from
+       * the generator repair rounds it borrows its prompt from, because an
+       * operator reading "the generator ran again" needs to know this run was
+       * a merge conflict being resolved under a held merge mutex, not a red
+       * gate being repaired. Additive, so `EVENTS_SCHEMA_VERSION` stays 1 —
+       * the same way `behavior-coverage` and `approved-baseline` arrived.
+       *
+       * `verdict` and `durationMs` are the two fields the round owes. There is
+       * deliberately no cost field: the round's provider cost is already
+       * carried by the invocation events its generator dispatch emits, and a
+       * second number derived from the same dispatch would be a figure two
+       * readers could disagree about.
+       */
+      type: "merge-resolution-round";
+      ghIssue: string;
+      sliceNumber: string;
+      /** How the round ended (`MergeResolutionVerdict`). */
+      verdict: string;
+      durationMs: number;
+      /** Paths the re-resolved base conflicted on. */
+      conflictedPaths?: string[];
+      /** The resolved tree the gate re-run proved, when the round got that far. */
+      treeId?: string;
+      /** Human-readable one-liner, the same text the run log carries. */
+      detail?: string;
+    }
+  | {
+      /**
        * The budgets one slice dispatch is running under (plan §3.9,
        * wave item 14): resume attempts, implementation rounds, contract
        * rounds, infrastructure retries. One per dispatch, emitted beside
