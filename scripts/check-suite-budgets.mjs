@@ -22,6 +22,12 @@
  * measurement in the commit message, not because the number went red.
  * AGENTS.md has the ladder to try first.
  *
+ * An overrun does not fail on its own: the check attributes it first. An
+ * overrun spread uniformly across the whole chain is the host and warns; one
+ * concentrated in a suite while its siblings sit at baseline is the ratchet
+ * and fails. See `attributeOverruns` for the thresholds and why they are
+ * those numbers.
+ *
  * It also reads the recorded measurement blocks in that file and says which
  * one this run was compared against — and which it refused to compare. That
  * half is advisory: it warns, it never changes the exit code.
@@ -79,6 +85,126 @@ export function chooseBaseline(blockNames, currentBranch) {
     refused: blocks
       .filter((name) => name !== baseline)
       .map((name) => ({ name, branch: measurementBranch(name) })),
+  };
+}
+
+/**
+ * How the check tells host contention from a regression.
+ *
+ * A budget is a measurement of the host, so anything else running on that
+ * host can push a suite over it with no failing test and nothing in the
+ * diff to explain it. That happened twice — the #195 pre-merge chain and
+ * the #144 chain of 2026-09-10, which passed 1698 tests with every suite
+ * 1.2-1.8x over on a machine at 100% CPU with 13 concurrent node/git
+ * processes. Both times an agent re-derived the attribution argument by
+ * hand, and the only advice the output gave was to raise the number,
+ * which is how a budget measured on a saturated machine becomes the floor.
+ *
+ * So the shape of the overrun decides the exit code:
+ *
+ *   - `load` — effectively every budgeted suite is over, none of them
+ *     disproportionately. Nothing a diff does slows down suites it never
+ *     touched, so this is the host. Warns, exits 0.
+ *   - `concentrated` — one suite (or a few) over while the rest of the
+ *     chain sits at baseline, or one suite far over the chain's general
+ *     inflation. That is the ratchet this file exists to defend. Fails.
+ *
+ * The three thresholds are calibrated against the numbers
+ * `suite-budgets.json`'s own `_comment` records:
+ *
+ *   - `UNIFORM_SHARE` — how much of the chain has to be over before
+ *     "everything is over" is a fair description. Three quarters, not
+ *     all of it: `clean-failed` is 46s against `orchestrator`'s 842s and
+ *     can absorb a load spike inside its own headroom while the long
+ *     suites cannot.
+ *   - `UNIFORM_MINIMUM_SUITES` — below three budgeted suites there is no
+ *     population to compare against, so an overrun cannot be attributed
+ *     and stays a failure. (`pnpm test` runs six.)
+ *   - `CONCENTRATION_RATIO` — how far above the chain's general inflation
+ *     one suite may sit and still be part of it. 1.45x, because the file
+ *     already records that the same suite lands up to 45% higher in-chain
+ *     than alone purely from scheduling: a suite may legitimately be that
+ *     much worse off than its siblings, and more than that is the suite.
+ *     The #144 shape sits at 1.29x of its median and warns; a suite 1.5x
+ *     over while its siblings scrape 1.01x is 1.49x and fails.
+ */
+export const UNIFORM_SHARE = 0.75;
+export const UNIFORM_MINIMUM_SUITES = 3;
+export const CONCENTRATION_RATIO = 1.45;
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Attributes a set of measured-vs-budget suite times.
+ *
+ * Takes `{ suite, seconds, budget }` records — suites with no budget are
+ * not attributable and are handled by the caller, which still fails on
+ * them. Returns the shape, the suites over budget worst-first, the
+ * `culprits` a failure should name, the chain's general inflation
+ * (`level`, the median factor), and a `reason` fit to print.
+ */
+export function attributeOverruns(records) {
+  const rated = records
+    .filter(({ budget }) => typeof budget === "number" && budget > 0)
+    .map(({ suite, seconds, budget }) => ({
+      suite,
+      factor: seconds / budget,
+    }))
+    .sort((a, b) => b.factor - a.factor);
+  const over = rated.filter(({ factor }) => factor > 1);
+  const level = rated.length === 0 ? 1 : median(rated.map((r) => r.factor));
+  const x = (factor) => `${factor.toFixed(2)}x`;
+
+  if (over.length === 0) {
+    return { shape: "within", over, culprits: [], level, reason: "" };
+  }
+  const concentrated = (reason, culprits) => ({
+    shape: "concentrated",
+    over,
+    culprits,
+    level,
+    reason,
+  });
+  if (rated.length < UNIFORM_MINIMUM_SUITES) {
+    return concentrated(
+      `only ${rated.length} budgeted suite(s) ran, which is too few to tell ` +
+        `host load from a regression — run the whole chain to attribute it`,
+      over,
+    );
+  }
+  if (over.length / rated.length < UNIFORM_SHARE) {
+    return concentrated(
+      `${over.length} of ${rated.length} budgeted suites are over budget, so ` +
+        `the rest of the chain is at baseline and the host was not the cause`,
+      over,
+    );
+  }
+  const outliers = over.filter(
+    ({ factor }) => factor > level * CONCENTRATION_RATIO,
+  );
+  if (outliers.length > 0) {
+    return concentrated(
+      `${outliers.map(({ suite }) => suite).join(", ")} ran more than ` +
+        `${CONCENTRATION_RATIO}x this chain's ${x(level)} general inflation, ` +
+        `so the overrun is concentrated there and not host-wide`,
+      outliers,
+    );
+  }
+  return {
+    shape: "load",
+    over,
+    culprits: [],
+    level,
+    reason:
+      `all ${over.length} of ${rated.length} budgeted suites are over, by ` +
+      `${x(over[over.length - 1].factor)}-${x(over[0].factor)} around a ` +
+      `${x(level)} median, none of them disproportionately`,
   };
 }
 
@@ -167,13 +293,17 @@ function main() {
 
   const budgets = JSON.parse(readFileSync(BUDGETS_PATH, "utf-8"));
   const measured = new Map();
+  const host = new Map();
   const finishedAt = [];
   for (const entry of readdirSync(reportsDir)) {
     if (!entry.endsWith(".json")) continue;
-    const report = JSON.parse(readFileSync(join(reportsDir, entry), "utf-8"));
-    measured.set(report.suite, report.seconds);
-    if (typeof report.finishedAt === "number")
-      finishedAt.push(report.finishedAt);
+    const timing = JSON.parse(readFileSync(join(reportsDir, entry), "utf-8"));
+    measured.set(timing.suite, timing.seconds);
+    // A coarse host reading, if whatever wrote the timing took one. Records
+    // without it are the norm today and must stay readable.
+    if (typeof timing.host === "string") host.set(timing.suite, timing.host);
+    if (typeof timing.finishedAt === "number")
+      finishedAt.push(timing.finishedAt);
   }
 
   // A total assembled from timings hours apart is not a total. `pnpm test`
@@ -195,12 +325,16 @@ function main() {
   const warnings = [];
   let total = 0;
 
+  const records = [];
   for (const [suite, seconds] of [...measured].sort((a, b) => b[1] - a[1])) {
     total += seconds;
     const budget = budgets.suites[suite];
+    records.push({ suite, seconds, budget });
     console.log(
       `  ${suite.padEnd(20)} ${seconds.toFixed(1).padStart(7)}s` +
-        (budget === undefined ? "  (no budget)" : ` / ${budget}s`),
+        (budget === undefined ? "  (no budget)" : ` / ${budget}s`) +
+        (seconds > budget ? ` (${(seconds / budget).toFixed(2)}x)` : "") +
+        (host.has(suite) ? `  host: ${host.get(suite)}` : ""),
     );
     if (budget === undefined) {
       // A new suite script without a budget is how the ratchet gets
@@ -208,12 +342,23 @@ function main() {
       failures.push(
         `${suite}: ran for ${seconds.toFixed(1)}s with no entry in ${BUDGETS_PATH}.`,
       );
-    } else if (seconds > budget) {
-      failures.push(
-        `${suite}: ${seconds.toFixed(1)}s over its ${budget}s budget ` +
-          `(+${(seconds - budget).toFixed(1)}s).`,
-      );
     }
+  }
+
+  // Which overruns fail is a question about the shape of all of them
+  // together, so it is decided once, after the whole table is in hand.
+  const overrun = attributeOverruns(records);
+  const describeOverrun = ({ suite, factor }) => {
+    const { seconds, budget } = records.find((r) => r.suite === suite);
+    return (
+      `${suite}: ${seconds.toFixed(1)}s over its ${budget}s budget ` +
+      `(+${(seconds - budget).toFixed(1)}s, ${factor.toFixed(2)}x).`
+    );
+  };
+  if (overrun.shape === "concentrated") {
+    for (const suite of overrun.culprits) failures.push(describeOverrun(suite));
+  } else if (overrun.shape === "load") {
+    for (const suite of overrun.over) warnings.push(describeOverrun(suite));
   }
 
   for (const suite of Object.keys(budgets.suites)) {
@@ -227,10 +372,11 @@ function main() {
   );
   if (total > budgets.totalSeconds) {
     // Every suite can sit just inside its own budget while the whole thing
-    // drifts, so the total gets a ceiling of its own.
-    failures.push(
-      `the whole suite: ${total.toFixed(1)}s over the ${budgets.totalSeconds}s total budget.`,
-    );
+    // drifts, so the total gets a ceiling of its own — but a total is a sum
+    // of the same measurements, so load that only warned per-suite cannot
+    // fail here through the back door.
+    const overTotal = `the whole suite: ${total.toFixed(1)}s over the ${budgets.totalSeconds}s total budget.`;
+    (overrun.shape === "load" ? warnings : failures).push(overTotal);
   }
 
   // Everything from here to the failure report is advisory: it names the
@@ -281,6 +427,9 @@ function main() {
   if (failures.length > 0) {
     console.error("\nSuite-time budget exceeded:\n");
     for (const failure of failures) console.error(`  - ${failure}`);
+    if (overrun.shape === "concentrated") {
+      console.error(`\nAttributed to the diff: ${overrun.reason}.`);
+    }
     console.error(
       "\nA new scenario that spawns a pipeline costs this on every run, forever." +
         "\nSee AGENTS.md: attach the assertion to an existing spawned scenario or" +
@@ -289,6 +438,21 @@ function main() {
         "\nmeasurement in the commit message.",
     );
     process.exit(1);
+  }
+
+  if (overrun.shape === "load") {
+    // Warn, exit 0. Nothing in a diff slows down suites it never touched,
+    // and telling the reader to raise a budget for this is how a saturated
+    // host's numbers become permanent.
+    console.log(
+      `\nSuspected host contention, not a regression: ${overrun.reason}.` +
+        "\nNo budget failed. To confirm, re-run an over-budget suite alone" +
+        "\n(`pnpm run test:heavy:<name>` / `pnpm test:fast`) on a quiet host and" +
+        "\ncompare — an alone-run is stable to ~2% and should land BELOW its" +
+        "\nin-chain number. Do not raise a budget for this; a budget measured" +
+        "\nunder load becomes the new floor.",
+    );
+    return;
   }
 
   console.log("\nEvery suite is within its budget.");

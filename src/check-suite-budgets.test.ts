@@ -10,6 +10,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  CONCENTRATION_RATIO,
+  attributeOverruns,
   chooseBaseline,
   describeDivergence,
   measurementBranch,
@@ -71,6 +73,118 @@ describe("chooseBaseline", () => {
       baseline: null,
       refused: [],
     });
+  });
+});
+
+describe("attributeOverruns", () => {
+  /** The governing budgets, so a fixture is written as a factor of one. */
+  const BUDGETS = {
+    fast: 258,
+    orchestrator: 842,
+    wave: 423,
+    "resume-integration": 219,
+    "qa-orchestration": 151,
+    "clean-failed": 46,
+  };
+
+  /** A chain where each suite ran `factor` times its budget. */
+  const chain = (factors: Record<string, number>) =>
+    Object.entries(factors).map(([suite, factor]) => ({
+      suite,
+      seconds: BUDGETS[suite as keyof typeof BUDGETS] * factor,
+      budget: BUDGETS[suite as keyof typeof BUDGETS],
+    }));
+
+  it("warns instead of failing when the whole chain inflated together", () => {
+    // The #144 shape, 2026-09-10: 1698 tests passed, zero failures, every
+    // suite 1.2-1.8x over, host at 100% CPU with 13 node/git processes. The
+    // clinching datapoint was qa-orchestration — a suite that run's diff
+    // never touched — at 241.7s in-chain and 345.0s ALONE minutes later,
+    // which nothing in the repo can explain.
+    const { shape, over, reason } = attributeOverruns(
+      chain({
+        fast: 1.35,
+        orchestrator: 1.5,
+        wave: 1.8,
+        "resume-integration": 1.2,
+        "qa-orchestration": 1.6,
+        "clean-failed": 1.4,
+      }),
+    );
+    expect(shape).toBe("load");
+    expect(over).toHaveLength(6);
+    expect(reason).toContain("all 6 of 6");
+  });
+
+  it("fails when one suite is over and its siblings sit at baseline", () => {
+    // The ratchet's own case: a new spawned scenario in one suite.
+    const { shape, culprits, reason } = attributeOverruns(
+      chain({
+        fast: 0.9,
+        orchestrator: 0.95,
+        wave: 1.4,
+        "resume-integration": 0.8,
+        "qa-orchestration": 0.85,
+        "clean-failed": 0.7,
+      }),
+    );
+    expect(shape).toBe("concentrated");
+    expect(culprits.map((c: { suite: string }) => c.suite)).toEqual(["wave"]);
+    expect(reason).toContain("1 of 6");
+  });
+
+  it("fails a suite far above the chain's inflation, load or not", () => {
+    // Every suite over, so the share test passes — but one of them is over
+    // by much more than the rest, which load does not do.
+    const { shape, culprits } = attributeOverruns(
+      chain({
+        fast: 1.02,
+        orchestrator: 1.01,
+        wave: 1.5,
+        "resume-integration": 1.03,
+        "qa-orchestration": 1.01,
+        "clean-failed": 1.02,
+      }),
+    );
+    expect(shape).toBe("concentrated");
+    expect(culprits.map((c: { suite: string }) => c.suite)).toEqual(["wave"]);
+  });
+
+  it("is within budget, with nothing to attribute, when nothing is over", () => {
+    const { shape, over, reason } = attributeOverruns(
+      chain({ fast: 0.99, orchestrator: 0.5, wave: 0.8 }),
+    );
+    expect(shape).toBe("within");
+    expect(over).toEqual([]);
+    expect(reason).toBe("");
+  });
+
+  it("cannot attribute an overrun to load without a chain to compare", () => {
+    // One suite run on its own is its own whole population; `pnpm test` runs
+    // six. Refuse rather than let `pnpm vitest run one-file` warn its way out.
+    const { shape, reason } = attributeOverruns(
+      chain({ wave: 1.4, "clean-failed": 1.4 }),
+    );
+    expect(shape).toBe("concentrated");
+    expect(reason).toContain("too few");
+  });
+
+  it("ignores suites with no budget, which the caller fails on anyway", () => {
+    const { shape, over } = attributeOverruns([
+      ...chain({ fast: 1.3, orchestrator: 1.3, wave: 1.35 }),
+      { suite: "brand-new", seconds: 90, budget: undefined },
+    ]);
+    expect(shape).toBe("load");
+    expect(over.map((o: { suite: string }) => o.suite)).not.toContain(
+      "brand-new",
+    );
+  });
+
+  it("ties its concentration threshold to the in-chain spread on record", () => {
+    // suite-budgets.json records that the same suite lands up to 45% higher
+    // in-chain than alone from scheduling alone. That is the spread between
+    // siblings the check must tolerate, so it is the threshold.
+    expect(CONCENTRATION_RATIO).toBe(1.45);
   });
 });
 
