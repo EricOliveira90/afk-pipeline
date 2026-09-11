@@ -464,6 +464,36 @@ ${advisoryAttempts
 |-------|-------|----------|------|--------|---------|--------|--------|----------|-----|
 ${coverageRows}
 `;
+    // The disposable review worktree's two records (#91 AC5/AC6): what one
+    // deterministic PASS approved, and what the evaluator wrote that was
+    // discarded. One section, because an operator reading it is asking one
+    // question — what did candidate review establish, and did the reviewer
+    // stay inside its allowlist. Rendered only when such an event exists, so
+    // every other run's summary is unchanged.
+    const isolationEvents = runEvents.filter(
+      (event) =>
+        event.type === "approved-baseline" ||
+        event.type === "reviewer-write-violation",
+    );
+    const isolationRows = isolationEvents
+      .map((event) =>
+        event.type === "approved-baseline"
+          ? `| ${event.ghIssue} | ${event.round} | approved-baseline | ` +
+            `${event.treeId} | ${event.commit} | ${event.artifactId} |`
+          : `| ${event.ghIssue} | ${event.round} | reviewer-write-violation | ` +
+            `— | attempt ${event.attempt} | ${event.path} |`,
+      )
+      .join("\n");
+    const isolationSection =
+      isolationEvents.length === 0
+        ? ""
+        : `
+## Candidate Review Isolation
+
+| Slice | Round | Record | Tree | Commit / Attempt | Artifact / Path |
+|-------|-------|--------|------|------------------|-----------------|
+${isolationRows}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -517,7 +547,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}
