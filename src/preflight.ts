@@ -65,7 +65,41 @@ import { listProcessPaths, type ProcessPathRow } from "./kill-tree.js";
 /** Free space a launch requires by default, in GB. */
 export const DEFAULT_MIN_FREE_DISK_GB = 5;
 
+/** Env override for the floor, read only when no explicit floor is set. */
+export const MIN_FREE_DISK_GB_ENV = "AFK_MIN_FREE_DISK_GB";
+
 const GIB = 1024 ** 3;
+
+/**
+ * The floor a launch actually enforces, in GB.
+ *
+ * Precedence is explicit floor, then {@link MIN_FREE_DISK_GB_ENV}, then
+ * {@link DEFAULT_MIN_FREE_DISK_GB}. The env layer exists because a
+ * *spawned* pipeline inherits the production floor from the host it runs
+ * on, so a suite whose scratch repos are megabytes could refuse to launch
+ * on a fullish disk and report the branch as broken (#233). The suite sets
+ * the override once in `vitest.config.ts`, next to the git settings that
+ * keep fixture results host-independent, so a newly written spawned
+ * scenario is covered without remembering to opt in.
+ *
+ * A malformed override fails *closed* — it falls back to the default
+ * rather than to 0, so a typo can never silently disable the floor on a
+ * real run. Zero is legal and disables the check (`minFreeBytes > 0` in
+ * {@link runLaunchPreflight}); ADR 0042 owns the posture.
+ */
+export function resolveMinFreeDiskGb(
+  configured: number | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (configured !== undefined) return configured;
+  const raw = env[MIN_FREE_DISK_GB_ENV];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MIN_FREE_DISK_GB;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_MIN_FREE_DISK_GB;
+  }
+  return parsed;
+}
 
 /** Guards against a junction loop turning the shell sweep into a walk. */
 const MAX_SWEEP_DEPTH = 64;

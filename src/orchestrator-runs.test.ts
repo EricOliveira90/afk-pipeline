@@ -739,7 +739,7 @@ describe("an impasse parks its slice and holds only DAG dependents", () => {
         '"plannerEvidence": "planner evidence for F-IMPASSE"',
       );
       expect(applyPlanner.prompt).toContain(
-        '"evaluatorEvidence": "\\"the evaluator-held interpretation\\""',
+        '"evaluatorEvidence": "\\"the evaluator-held interpretation of F-IMPASSE\\""',
       );
       expect(applyPlanner.prompt).toContain(
         "Apply every decision below exactly once, and only to the",
@@ -796,6 +796,14 @@ describe("adjudication expiry and next-run pickup", () => {
   it("re-parks without agents, then consumes a pre-existing decision before ordinary negotiation", async () => {
     // No existing scenario carries one parked worktree through expiry,
     // a no-file retry, and a later decision, so this needs its own run.
+    //
+    // The impasse is deliberately multi-finding (issue #144, closing the
+    // first estate-audit gap). ADR 0054 decides one finding per
+    // adjudication, so a two-finding impasse re-parks after the first
+    // decision instead of applying — and that is the only shape in which a
+    // *non-empty* decision log goes through the crash window below. With one
+    // finding the first decision completes the park and the next run applies,
+    // so the log's survival was never observed through a real re-dispatch.
     const repo = makeRepo();
     const slug = "adjudication-next-run";
     const { prdDir, specsDir } = writePrdFixture(repo, slug);
@@ -814,6 +822,7 @@ describe("adjudication expiry and next-run pickup", () => {
         {
           files: ["src/resumed.txt"],
           contractImpasse: true,
+          contractImpasseFindings: ["F-IMPASSE-A", "F-IMPASSE-B"],
           qaPasses: true,
           outputFile: "src/resumed.txt",
           outputContent: "resumed",
@@ -872,6 +881,42 @@ describe("adjudication expiry and next-run pickup", () => {
     expect(readFileSync(decisionPath, "utf-8")).toBe(malformedDecision);
 
     rmSync(decisionPath);
+
+    // Build the decision log the crash window has to carry: one decision for
+    // the first of the two contested findings. The park is incomplete while
+    // `F-IMPASSE-B` is undecided (ADR 0054), so this run records the answer,
+    // consumes the file and parks again without invoking an agent.
+    const decisionLogPath = join(parkedDir, "adjudication-decisions.json");
+    // `EVALUATOR` on purpose: a decision the planner already satisfies locks
+    // with no invocation at all, and then no prompt exists to carry the
+    // surviving decision into the apply.
+    const writeDecision = (findingId: string, author: string) =>
+      writeFileSync(
+        decisionPath,
+        JSON.stringify({
+          version: 1,
+          findingId,
+          winningPosition: "EVALUATOR",
+          author,
+        }),
+        "utf-8",
+      );
+    writeDecision("F-IMPASSE-A", "operator-for-A");
+
+    await runPipeline(config);
+    expect(records).toHaveLength(afterInitialNegotiation);
+    state = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", `${slug}-stub.json`), "utf-8"),
+    );
+    expect(state.slices[slice.ghIssue]?.phase).toBe("AWAITING-ADJUDICATION");
+    expect(existsSync(decisionPath)).toBe(false);
+    expect(JSON.parse(readFileSync(decisionLogPath, "utf-8"))).toMatchObject({
+      applied: false,
+      decisions: [
+        { decision: { findingId: "F-IMPASSE-A", author: "operator-for-A" } },
+      ],
+    });
+
     // Crash after re-dispatch (ADR 0055 Seam 2 §9, plan step 9). `trackSlice`
     // clears the persisted park the moment a run takes the slice back, so a
     // run killed before its next outcome lands leaves no record at all —
@@ -886,6 +931,7 @@ describe("adjudication expiry and next-run pickup", () => {
     writeFileSync(statePath, JSON.stringify(crashed), "utf-8");
     const impasseRecord = join(parkedDir, "contract-negotiation-outcome.json");
     const impasseRecordBefore = readFileSync(impasseRecord, "utf-8");
+    const decisionLogBefore = readFileSync(decisionLogPath, "utf-8");
 
     await runPipeline(config);
     expect(records).toHaveLength(afterInitialNegotiation);
@@ -898,6 +944,23 @@ describe("adjudication expiry and next-run pickup", () => {
     // into adjudication before `prepareSliceWorktree` is ever reached, so
     // `decideResume` never gets an opinion about a parked slice.
     expect(readFileSync(impasseRecord, "utf-8")).toBe(impasseRecordBefore);
+    // ...and the human's recorded decision came through with it. Byte
+    // identity is the strong form; the parsed check below is what makes a
+    // partial survival legible rather than just unequal — a log that kept
+    // the entry but lost its author, or kept a count and dropped the finding
+    // it was about, fails on the field that names it (issue #144).
+    expect(readFileSync(decisionLogPath, "utf-8")).toBe(decisionLogBefore);
+    const carried = JSON.parse(readFileSync(decisionLogPath, "utf-8")) as {
+      applied: boolean;
+      decisions: { decision: { findingId: string; author: string } }[];
+    };
+    expect(carried.applied).toBe(false);
+    expect(
+      carried.decisions.map((recorded) => [
+        recorded.decision.findingId,
+        recorded.decision.author,
+      ]),
+    ).toEqual([["F-IMPASSE-A", "operator-for-A"]]);
     const crashRunParent = join(repo, ".afk", "logs", `${slug}-stub`);
     const crashRunLog = readFileSync(
       join(
@@ -912,32 +975,93 @@ describe("adjudication expiry and next-run pickup", () => {
     );
     expect(crashRunLog).not.toContain("restarting from base");
 
-    writeFileSync(
-      decisionPath,
-      JSON.stringify({
-        version: 1,
-        findingId: "F-IMPASSE",
-        winningPosition: "PLANNER",
-        author: "operator",
-      }),
-      "utf-8",
-    );
-    const ordinaryNegotiationBefore = records.filter((record) =>
-      ["explorer", "planner", "evaluator-contract"].includes(record.role),
-    ).length;
+    // The second and last contested finding. This decision completes the
+    // park, so the same run applies both decisions and generates.
+    writeDecision("F-IMPASSE-B", "operator-for-B");
+    // The adjudication is consumed *instead of* a fresh negotiation round, so
+    // no explorer and no contract evaluator runs again. The planner is counted
+    // separately: applying decisions is one planner invocation (the two
+    // findings were both decided `EVALUATOR`, so there is real work to do),
+    // and pinning it at exactly one is the stronger claim — the old bucket
+    // lumped it in with negotiation and could only assert "nothing ran".
+    const ordinaryNegotiation = () =>
+      records.filter((record) =>
+        ["explorer", "evaluator-contract"].includes(record.role),
+      ).length;
+    const plannerCount = () =>
+      records.filter(
+        (record) =>
+          record.ghIssue === slice.ghIssue && record.role === "planner",
+      ).length;
+    const ordinaryNegotiationBefore = ordinaryNegotiation();
+    const plannerBefore = plannerCount();
 
     await runPipeline(config);
 
-    const ordinaryNegotiationAfter = records.filter((record) =>
-      ["explorer", "planner", "evaluator-contract"].includes(record.role),
-    ).length;
-    expect(ordinaryNegotiationAfter).toBe(ordinaryNegotiationBefore);
+    expect(ordinaryNegotiation()).toBe(ordinaryNegotiationBefore);
+    expect(plannerCount()).toBe(plannerBefore + 1);
     expect(
       records.some(
         (record) =>
           record.ghIssue === slice.ghIssue && record.role === "generator",
       ),
     ).toBe(true);
+    // Both decisions applied exactly once, and both reached the apply planner
+    // distinguishably — the one that survived the crash window and the one
+    // recorded after it, each with the author who made it. A log that
+    // silently dropped the pre-crash decision would apply half an
+    // adjudication and still pass every count-shaped assertion.
+    //
+    // The log is read off the feature branch, not the worktree: the PASS path
+    // merges and then tears the lane's worktree down (ADR 0055 Seam 2, the
+    // slice's own completion), so the committed copy is what outlives it.
+    const featBranch = `feat-stub/${slug}`;
+    const loggedPath = git(repo, ["ls-tree", "-r", "--name-only", featBranch])
+      .split(/\r?\n/)
+      .find(
+        (entry) =>
+          entry.includes(`/slices/${slice.number}-`) &&
+          entry.endsWith("/adjudication-decisions.json"),
+      );
+    if (!loggedPath) {
+      throw new Error(`the decision log is not on ${featBranch}`);
+    }
+    const appliedLog = JSON.parse(
+      git(repo, ["show", `${featBranch}:${loggedPath}`]),
+    ) as {
+      applied: boolean;
+      decisions: { decision: { findingId: string; author: string } }[];
+    };
+    expect(appliedLog.applied).toBe(true);
+    expect(
+      appliedLog.decisions.map((recorded) => [
+        recorded.decision.findingId,
+        recorded.decision.author,
+      ]),
+    ).toEqual([
+      ["F-IMPASSE-A", "operator-for-A"],
+      ["F-IMPASSE-B", "operator-for-B"],
+    ]);
+    const applyPlanner = records
+      .filter(
+        (record) =>
+          record.ghIssue === slice.ghIssue && record.role === "planner",
+      )
+      .at(-1)!;
+    expect(applyPlanner.prompt).toContain(
+      "Apply every decision below exactly once, and only to the",
+    );
+    for (const findingId of ["F-IMPASSE-A", "F-IMPASSE-B"]) {
+      expect(applyPlanner.prompt).toContain(findingId);
+      expect(applyPlanner.prompt).toContain(
+        `"planner evidence for ${findingId}"`,
+      );
+      expect(applyPlanner.prompt).toContain(
+        `the evaluator-held interpretation of ${findingId}`,
+      );
+    }
+    expect(applyPlanner.prompt).toContain("operator-for-A");
+    expect(applyPlanner.prompt).toContain("operator-for-B");
     state = JSON.parse(
       readFileSync(
         join(repo, ".afk", "state", `${slug}-stub.json`),

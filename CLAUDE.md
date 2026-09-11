@@ -63,6 +63,22 @@ because the flag narrows only the generator's iteration loop: the
 pre-ship sanity gate and the QA evaluator still run the full suite, so
 nothing ships verified only on the fast subset.
 
+## Push a commit the moment it exists
+
+A commit in a local worktree is invisible work: unreviewable, uncounted by
+triage, and rebuilt from scratch by the next session. Push the branch as
+soon as the first commit lands — **before** verification, not after.
+Pushing is not merging, so an unverified branch on the remote blocks and
+risks nothing.
+
+On 2026-09-09 three finished issues (#143, #144, #206) were found sitting
+unpushed in `C:\tmp` worktrees, reported as "not started" by two triage
+passes that read the wave checklist instead of the worktrees. So: tick the
+checklist box when you finish, and before removing any worktree run
+`git cherry -v main HEAD` plus `git status -sb` in it — a `+` line or a
+dirty tree means removal would destroy work. The full reasoning is in
+AGENTS.md.
+
 ## Where a new assertion goes
 
 A test that spawns a pipeline costs seconds on every run from now on, so a
@@ -75,3 +91,22 @@ move the assertion up that list rather than raising the number. Run it when
 you add a spawned scenario — it is deliberately not part of `pnpm test`,
 which is what the deterministic gates run (ADR 0063). The full reasoning is
 in AGENTS.md.
+
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Triage rules (repo-specific)
+
+Vision citation against `docs/PRODUCT.md`, stale-issue refresh, batch parallelism note. See `docs/agents/triage-rules.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

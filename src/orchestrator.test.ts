@@ -47,7 +47,7 @@ import {
 import { acceptanceGateDeclaration } from "./acceptance-gate.js";
 import { ACCEPTANCE_GATE_ID } from "./gate-runner.js";
 import type { NegotiateOutcome } from "./orchestrator.js";
-import { CURRENT_RUN_STATE_VERSION, loadRunState } from "./run-state.js";
+import { loadRunState, RUN_STATE_VERSION } from "./run-state.js";
 import { createWorktree } from "./git.js";
 import {
   buildPrCreationPlan,
@@ -5629,9 +5629,10 @@ describe("round-scoped contract feedback", () => {
           ),
         ),
       ).toMatchObject({
-        // The writer's own schema, not a pinned literal: #193 B-13 added
-        // `appliedWaivers` and every write re-stamps the current version.
-        version: CURRENT_RUN_STATE_VERSION,
+        // The writer's own schema, not a pinned literal: #91 added the approved
+        // baseline locator and #193 B-13 added `appliedWaivers`, and every write
+        // re-stamps the current version.
+        version: RUN_STATE_VERSION,
         contractConvergence: {
           "9003": {
             version: 1,

@@ -1,10 +1,12 @@
-import { basename, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   rmSync,
@@ -33,11 +35,19 @@ import { renderPrompt } from "./prompt-template.js";
 import {
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
+  mergeResolutionBlockRoom,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateExplorerEvidenceMap,
+  withMergeResolutionSituation,
+  type GeneratorEnvelopeInput,
   type GeneratorFailureSet,
 } from "./context-envelope.js";
+import {
+  resolveRef,
+  runMergeResolutionRound,
+  type MergeResolutionRoundResult,
+} from "./merge-resolution.js";
 import {
   assembleAdjudicationPlannerPrompt,
   assembleFocusedScopeEvaluatorPrompt,
@@ -82,10 +92,10 @@ import {
   formatSliceBounds,
 } from "./bounds.js";
 import {
-  DEFAULT_MIN_FREE_DISK_GB,
   formatPreflightRefusal,
   formatPreflightReport,
   gbToBytes,
+  resolveMinFreeDiskGb,
   runLaunchPreflight,
   type RunNamespace,
 } from "./preflight.js";
@@ -121,9 +131,11 @@ import {
   runCandidateGatePhase,
 } from "./candidate-gate-phase.js";
 import {
+  QA_WINDOW_ARTIFACT_NAME,
   reviewArtifactViolations,
   runPostQAGates,
 } from "./post-qa-gates.js";
+import { writeCandidateChangeSummary } from "./change-summary.js";
 import { scopeGateDeclaration } from "./scope-gate.js";
 import { skipGateDeclaration } from "./skip-gate.js";
 import {
@@ -144,6 +156,7 @@ import {
   getResumeAttempts,
   recordRetryDecision,
   chargeResumeAttempt,
+  recordApprovedBaseline,
   type RunState,
 } from "./run-state.js";
 import {
@@ -242,6 +255,7 @@ import {
   loadQAReview,
   loadQAReviewResumeState,
   qaReviewFilename,
+  scanReviewWorktreeWrites,
   scopeAmendmentRequests,
   spentImplementationRounds,
   type QAReview,
@@ -525,7 +539,9 @@ export interface PipelineConfig {
 
   /**
    * Free-space floor the launch preflight refuses below, in GB. Defaults
-   * to `DEFAULT_MIN_FREE_DISK_GB`; 0 disables the floor. See ADR 0042.
+   * to `DEFAULT_MIN_FREE_DISK_GB`, or to `AFK_MIN_FREE_DISK_GB` when that
+   * is set; 0 disables the floor. Resolved by `resolveMinFreeDiskGb`.
+   * See ADR 0042.
    */
   minFreeDiskGb?: number;
   /**
@@ -4292,6 +4308,271 @@ function assertAmendedPairIntact(
   }
 }
 
+/** Canonical filename of one slice's approved baseline, beside its change summary. */
+export const APPROVED_BASELINE_FILENAME = "approved-baseline.json";
+
+/**
+ * What one deterministic PASS approved (#91 AC5, PRD D10).
+ *
+ * Written by the orchestrator and never by the evaluator: the evaluator's
+ * writes are discarded outside two artifacts, and a baseline it authored would
+ * be a verdict certifying itself. The artifact is canonical — run state only
+ * records where it is — so a baseline survives a run-state rewrite.
+ */
+export interface ApprovedBaselineRecord {
+  version: 1;
+  ghIssue: string;
+  sliceNumber: string;
+  round: number;
+  /** The candidate checkpoint tree the evaluator graded. */
+  treeId: string;
+  /** The checkpoint commit holding that tree. */
+  commit: string;
+  /**
+   * Repo-relative path → git blob ID of the pair the verdict was taken
+   * against, so a later stage can prove it is reading the same contract.
+   */
+  contractBlobs: Record<string, string>;
+  /** Repo-relative gate evidence artifacts covering this exact tree. */
+  gateEvidenceArtifactIds: string[];
+}
+
+/**
+ * Write the approved baseline artifact, point run state at it, and journal it.
+ * The order matters: the locator is recorded after the artifact exists, so it
+ * never names a missing file.
+ */
+function writeApprovedBaseline(
+  ctx: SliceContext,
+  round: number,
+  input: {
+    treeId: string;
+    commit: string;
+    gateArtifacts: readonly GateEvidenceArtifact[];
+  },
+): ApprovedBaselineRecord {
+  const { config, slice, logger } = ctx;
+  const artifactDir = artifacts.negotiationArchiveDir(
+    config.repoRoot,
+    pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+    slice.number,
+  );
+  const record: ApprovedBaselineRecord = {
+    version: 1,
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    round,
+    treeId: input.treeId,
+    commit: input.commit,
+    contractBlobs: Object.fromEntries(
+      REVIEW_SEED_ARTIFACTS.map((name) => [
+        `${ctx.relSliceDir}/${name}`,
+        git.hashFileAsBlob(ctx.worktreeDir, `${ctx.relSliceDir}/${name}`),
+      ]),
+    ),
+    gateEvidenceArtifactIds: [
+      ...new Set(
+        input.gateArtifacts
+          // Only evidence about this tree: an earlier attempt's gates
+          // authorize a candidate this baseline is not.
+          .filter((artifact) => artifact.treeId === input.treeId)
+          .map((artifact) =>
+            relative(config.repoRoot, artifact.evidencePath).replace(/\\/g, "/"),
+          ),
+      ),
+    ].sort(),
+  };
+  mkdirSync(artifactDir, { recursive: true });
+  const path = join(artifactDir, APPROVED_BASELINE_FILENAME);
+  writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
+  const artifactPath = relative(config.repoRoot, path).replace(/\\/g, "/");
+  recordApprovedBaseline(config.repoRoot, config.prdSlug, slice.ghIssue, {
+    treeId: record.treeId,
+    commit: record.commit,
+    artifactPath,
+  });
+  logger.event({
+    type: "approved-baseline",
+    ghIssue: slice.ghIssue,
+    sliceNumber: slice.number,
+    round,
+    treeId: record.treeId,
+    commit: record.commit,
+    artifactId: artifactPath,
+  });
+  return record;
+}
+
+/**
+ * Options both `runQAStage` and the attempt loop it wraps receive.
+ */
+interface QAStageOptions {
+  candidateTreeId?: string;
+  /**
+   * The candidate checkpoint *commit* whose tree the pre-QA gates graded. The
+   * deterministic review worktree is built from it, so the evaluator reads
+   * exactly the tree the verdict will be tied to (#91 AC1, ADR 0012's
+   * 2026-08-28 amendment).
+   */
+  candidateCommitSha?: string;
+  position?: {
+    implementationAttempt: number;
+    implementationAttemptLimit: number;
+    round: number;
+    normalRoundLimit: number;
+  };
+}
+
+/**
+ * The disposable worktree one deterministic QA stage reads in (#91 AC1–AC3,
+ * PRD D8/D9), and the four things that only make sense together: its
+ * lifecycle, the per-attempt seeding of the inputs the evaluator must have,
+ * the positive copy-back allowlist that is the only way bytes leave it, and
+ * the scan that records what else the reviewer touched.
+ *
+ * The generator's worktree is never handed to the evaluator, so a reviewer
+ * edit cannot become part of the tree its own verdict authorizes. Nothing
+ * enforces that by asking the evaluator nicely: the worktree is deleted when
+ * the stage ends, and only allowlisted basenames in the slice directory are
+ * copied out.
+ */
+interface ReviewIsolation {
+  /** Working directory handed to the evaluator instead of `ctx.worktreeDir`. */
+  cwd: string;
+  /**
+   * Seed one attempt's inputs and return the repo-relative paths written.
+   *
+   * Called per attempt, because an attempt is only reached after an
+   * infrastructure retry or a scope amendment — and an amendment rewrites the
+   * very pair being seeded, so a once-per-stage copy would grade the new
+   * candidate against the old contract.
+   *
+   * The returned list is the attempt's *seed manifest*, distinct from the
+   * copy-back allowlist and used for one purpose: keeping the orchestrator's
+   * own writes out of the reviewer-write scan (#91 AC2).
+   */
+  seed(): string[];
+  /**
+   * Copy the allowlisted artifacts out of the review worktree's slice
+   * directory into the generator worktree, so the rest of the pipeline reads
+   * the verdict where it always did.
+   */
+  copyBack(): void;
+  dispose(): Promise<void>;
+}
+
+/**
+ * The two authority-bearing inputs the evaluator grades against. Seeded
+ * rather than trusted from the checkpoint tree because a scope amendment
+ * rewrites them mid-stage in the generator worktree only.
+ */
+const REVIEW_SEED_ARTIFACTS = ["contract.md", "acceptance-manifest.json"] as const;
+
+function createReviewIsolation(
+  ctx: SliceContext,
+  round: number,
+  commitSha: string,
+): ReviewIsolation {
+  const { config, slice, logger } = ctx;
+  // The slice suffix stays last, matching every other AFK working directory:
+  // a slice's identity is read off the tail of its path (`-s01`), so a review
+  // worktree that buried it mid-name would read as "no slice" to anything
+  // resolving a slice from a cwd.
+  const label = `${config.prdSlug}-qa-review-r${round}-${randomUUID()}-s${slice.number}`;
+  const dir = join(config.repoRoot, ".afk", "checkpoints", label);
+  // A fresh UUID branch every stage: `git.createBranch` reuses an existing
+  // branch name, which would silently pin the review worktree to a stale
+  // round's commit.
+  const branch = `afk/qa-review/${label}`;
+  mkdirSync(dirname(dir), { recursive: true });
+  git.createWorktree(ctx.worktreeDir, branch, dir, commitSha);
+  git.assertWorktreeRegistered(ctx.worktreeDir, branch, dir);
+  const sliceDir = join(dir, ctx.relSliceDir);
+  const artifactNames = (): string[] =>
+    existsSync(sliceDir)
+      ? readdirSync(sliceDir, { withFileTypes: true })
+          .filter(
+            (entry) => entry.isFile() && QA_WINDOW_ARTIFACT_NAME.test(entry.name),
+          )
+          .map((entry) => entry.name)
+      : [];
+  return {
+    cwd: dir,
+    seed() {
+      mkdirSync(sliceDir, { recursive: true });
+      // Start each attempt with no review artifact in the worktree: the
+      // checkpoint tree can carry a previous round's report, and copy-back
+      // would then hand a stale verdict back as this attempt's.
+      for (const name of artifactNames()) {
+        rmSync(join(sliceDir, name), { force: true });
+      }
+      const seeded: string[] = [];
+      for (const name of REVIEW_SEED_ARTIFACTS) {
+        const source = join(ctx.absSliceDir, name);
+        if (!existsSync(source)) continue;
+        copyFileSync(source, join(sliceDir, name));
+        // Recorded at write time, not derived afterwards: the manifest's job
+        // is to prove which paths the orchestrator itself wrote.
+        seeded.push(`${ctx.relSliceDir}/${name}`);
+      }
+      return seeded;
+    },
+    copyBack() {
+      // A positive allowlist by basename over this one directory. Nested
+      // paths never match (`readdirSync` files only), unmatched names are
+      // left behind, and anything outside the slice directory is unreachable
+      // from here — the worktree is about to be deleted, so "not copied" is
+      // "discarded".
+      for (const name of artifactNames()) {
+        copyFileSync(join(sliceDir, name), join(ctx.absSliceDir, name));
+      }
+    },
+    async dispose() {
+      // No signal: a cancelled run still has to take its review worktree
+      // with it, and `removeWorktreeOrWarn` warns rather than throws when
+      // the tree survives, so cleanup cannot mask the cancellation.
+      try {
+        await git.removeWorktreeOrWarn(ctx.worktreeDir, dir, {
+          label: "QA review worktree",
+          warn: (message) => logger.phase(`${ctx.tag}: ${message}`, "error"),
+        });
+      } finally {
+        git.deleteBranch(ctx.worktreeDir, branch);
+      }
+    },
+  };
+}
+
+/**
+ * The checkpoint commit the review worktree is built from. The pre-QA phase
+ * hands its own; a direct caller that has none gets one captured the same way,
+ * without materializing it — falling back to `ctx.worktreeDir` would quietly
+ * undo the isolation instead of failing.
+ */
+function reviewCandidateCommit(
+  ctx: SliceContext,
+  options: QAStageOptions,
+): string {
+  if (options.candidateCommitSha) return options.candidateCommitSha;
+  return createCandidateCheckpoint(
+    ctx.worktreeDir,
+    join(
+      ctx.config.repoRoot,
+      ".afk",
+      "checkpoints",
+      `qa-review-capture-${randomUUID()}`,
+    ),
+    { materialize: false },
+  ).commitSha;
+}
+
+/**
+ * Run one QA stage. The deterministic stage reads a disposable worktree at the
+ * candidate checkpoint and is handed a git-generated change summary before the
+ * evaluator is invoked (#91 AC1/AC7); shared-preview UAT keeps running in
+ * `ctx.worktreeDir` against the live preview, with no review worktree and no
+ * copy-back (PRD D8 non-goal).
+ */
 export async function runQAStage(
   ctx: SliceContext,
   round: number,
@@ -4299,15 +4580,65 @@ export async function runQAStage(
   history: readonly QAReviewLifecycleFinding[],
   previousUnresolved: readonly QAReviewAttemptFinding[] = [],
   baseGate: QABaseGateEvidence | null = null,
-  options: {
-    candidateTreeId?: string;
-    position?: {
-      implementationAttempt: number;
-      implementationAttemptLimit: number;
-      round: number;
-      normalRoundLimit: number;
-    };
-  } = {},
+  options: QAStageOptions = {},
+): Promise<QAStageResult> {
+  if (stage !== "deterministic") {
+    return runQAStageAttempts(
+      ctx,
+      round,
+      stage,
+      history,
+      previousUnresolved,
+      baseGate,
+      options,
+      null,
+      null,
+    );
+  }
+  const commitSha = reviewCandidateCommit(ctx, options);
+  const { path: changeSummaryPath } = writeCandidateChangeSummary({
+    cwd: ctx.worktreeDir,
+    artifactDir: artifacts.negotiationArchiveDir(
+      ctx.config.repoRoot,
+      pipelineRunSlug(
+        ctx.config.prdSlug,
+        ctx.config.provider ?? kiroProvider,
+      ),
+      ctx.slice.number,
+    ),
+    featureBaseRef: ctx.featBranch,
+    candidateRef: commitSha,
+  });
+  const isolation = createReviewIsolation(ctx, round, commitSha);
+  try {
+    return await runQAStageAttempts(
+      ctx,
+      round,
+      stage,
+      history,
+      previousUnresolved,
+      baseGate,
+      options,
+      isolation,
+      changeSummaryPath,
+    );
+  } finally {
+    // Every exit path — PASS, IMPLEMENTATION, a thrown infrastructure
+    // failure, cancellation — leaves no review worktree behind (#91 AC1).
+    await isolation.dispose();
+  }
+}
+
+async function runQAStageAttempts(
+  ctx: SliceContext,
+  round: number,
+  stage: QAReviewStage,
+  history: readonly QAReviewLifecycleFinding[],
+  previousUnresolved: readonly QAReviewAttemptFinding[],
+  baseGate: QABaseGateEvidence | null,
+  options: QAStageOptions,
+  isolation: ReviewIsolation | null,
+  changeSummaryPath: string | null,
 ): Promise<QAStageResult> {
   const { config, slice, logger, invoke, featBranch } = ctx;
   const convergenceTarget = {
@@ -4604,9 +4935,63 @@ export async function runQAStage(
     };
 
     let failedAttemptEvidence: AttemptEvidence | null = null;
+    /**
+     * Copy the allowlisted artifacts back and record every other reviewer
+     * write, once per attempt (#91 AC2/AC3/AC6).
+     *
+     * Runs in a `finally` around the invocation alone, so it happens before
+     * `archiveAttemptEvidence` reads the slice directory on the success path
+     * *and* on the failure path, and cannot replace the evaluator's error with
+     * one of its own.
+     */
+    const collectReviewerWrites = (seeded: readonly string[]): void => {
+      if (!isolation) return;
+      try {
+        collectReviewerWritesOrThrow(seeded);
+      } catch (error) {
+        // Never the failure the attempt reports: an unwritable copy-back
+        // leaves no canonical artifact, and the attempt already fails closed
+        // on that a few lines below. Swallowing here keeps the evaluator's own
+        // error — or the missing-report error — as the cause an operator reads.
+        const message = error instanceof Error ? error.message : String(error);
+        logger.phase(
+          `${ctx.tag}: ${stage} review round ${round} attempt ${attempt} ` +
+            `could not collect the review worktree's artifacts: ${message}`,
+          "error",
+          {
+            type: "warn",
+            reason: "qa-review-archive-failed",
+            ghIssue: slice.ghIssue,
+            message,
+          },
+        );
+      }
+    };
+    const collectReviewerWritesOrThrow = (seeded: readonly string[]): void => {
+      if (!isolation) return;
+      isolation.copyBack();
+      for (const path of scanReviewWorktreeWrites({
+        cwd: isolation.cwd,
+        reviewArtifactDir: ctx.relSliceDir,
+        copyBackAllowlist: QA_WINDOW_ARTIFACT_NAME,
+        seededPaths: seeded,
+      })) {
+        // Non-fatal by construction: the write was already discarded by not
+        // being copied back, so this is the record that it happened.
+        logger.event({
+          type: "reviewer-write-violation",
+          ghIssue: slice.ghIssue,
+          sliceNumber: slice.number,
+          round,
+          attempt,
+          path,
+        });
+      }
+    };
     const invokeEvaluator = async (): Promise<AttemptEvidence> => {
       rmSync(reportPath, { force: true });
       rmSync(reviewPath, { force: true });
+      const seeded = isolation ? isolation.seed() : [];
       if (stage === "shared-preview") {
         const preview = config.sharedPreview!;
         const commandOptions = {
@@ -4662,15 +5047,26 @@ export async function runQAStage(
               formatUnresolvedQAFindings(currentUnresolved),
             COMMAND_TIMEOUT_SECONDS: Math.ceil(commandTimeoutMs / 1_000),
             HEARTBEAT_SECONDS: Math.ceil(heartbeatIntervalMs / 1_000),
+            CHANGE_SUMMARY_PATH: changeSummaryPath
+              ? relative(config.repoRoot, changeSummaryPath).replace(/\\/g, "/")
+              : "not generated for this stage",
           }),
-          cwd: ctx.worktreeDir,
+          // The disposable review worktree for deterministic QA (#91 AC1);
+          // shared-preview UAT still runs where the preview was applied.
+          cwd: isolation?.cwd ?? ctx.worktreeDir,
           logStream: evalLog,
           ...longCommandRoleBounds({
             idleTimeoutMs: commandTimeoutMs,
             idleWarningIntervalMs: heartbeatIntervalMs,
             maxDurationMs: config.maxAgentDurationMs,
           }),
-        }).finally(() => closeAgentLog(evalLog));
+        }).finally(() => {
+          closeAgentLog(evalLog);
+          // Before `archiveAttemptEvidence` on either path, and before the
+          // attempt-level catch can retry: the artifacts have to be out of the
+          // review worktree by the time anything reads the slice directory.
+          collectReviewerWrites(seeded);
+        });
       } catch (error) {
         // `archiveAttemptEvidence` can itself throw (raw canonical
         // archive fails closed, #79). Without chaining, that throw
@@ -5791,6 +6187,7 @@ export async function runSliceExecute(
           qaBaseGate,
           {
             candidateTreeId: checkpoint.treeId,
+            candidateCommitSha: checkpoint.commitSha,
             position: {
               implementationAttempt,
               implementationAttemptLimit,
@@ -5810,6 +6207,16 @@ export async function runSliceExecute(
           round,
           verdict: deterministic.outcome,
         });
+        if (deterministic.outcome === "PASS") {
+          // The orchestrator establishes the baseline, not the evaluator
+          // (#91 AC5): the tree the gates and the verdict both covered, plus
+          // the bytes of the contract it was graded against.
+          writeApprovedBaseline(ctx, round, {
+            treeId: checkpoint.treeId,
+            commit: checkpoint.commitSha,
+            gateArtifacts,
+          });
+        }
         let implementationFailed =
           deterministic.outcome === "IMPLEMENTATION";
         stuckReferences.push(deterministic.report);
@@ -6222,6 +6629,291 @@ export async function runSliceExecute(
   }
 }
 /**
+ * One scoped merge-resolution round for a slice whose merge git refused with a
+ * real textual conflict (#132).
+ *
+ * Wired into `WaveInput.resolveMergeConflict` by `runPipeline`, and called from
+ * the one new call site in `src/wave.ts` — inside the merge mutex the refused
+ * attempt already holds. Everything expensive the round needs is assembled
+ * here, because `src/merge-resolution.ts` owns the git and verdict mechanics
+ * and this function owns the orchestrator's knowledge: the repair envelope, the
+ * slice's own required gate declarations, and the journal.
+ *
+ * Nothing in here re-acquires `mergeMutex`.
+ *
+ * Never throws for a round that merely failed — a failed round's fallback is
+ * the terminal `CONFLICT` the merge path would have recorded anyway, and a
+ * throw would turn that into `ERROR` and hide git's own details. A cancellation
+ * is the one exception: it belongs to the wave's own CANCELLED path.
+ */
+export async function runSliceMergeResolution(args: {
+  slice: Slice;
+  ctx: SliceContext;
+  branch: string;
+  conflictDetails: string;
+}): Promise<MergeResolutionRoundResult> {
+  const { slice, ctx, conflictDetails } = args;
+  const { config, logger, featBranch } = ctx;
+  const signal = config.signal;
+  // Round 0: the implementation rounds are 1..n and this dispatch is none of
+  // them — it happens after the candidate passed its gates and its QA, on the
+  // merge path. The number is event and log identity only.
+  const round = 0;
+  let genLog: WriteStream | undefined;
+  try {
+    // The tip, proven, not the branch label: the scope gate's comparison and
+    // the merge the round performs must name the same commit (B-07), and under
+    // the held mutex this sha cannot move for the rest of the round.
+    const featureTip = resolveRef(ctx.worktreeDir, featBranch);
+    const contract = readFileSync(
+      join(ctx.absSliceDir, "contract.md"),
+      "utf-8",
+    );
+    const acceptanceManifest = loadAcceptanceManifest(ctx.absSliceDir);
+    if (acceptanceManifest.version !== 2) {
+      throw new Error(
+        "Generator envelope requires an acceptance manifest with behavior bindings",
+      );
+    }
+    const contextPath = join(ctx.absSliceDir, "context.md");
+    const hasExplorerContext = existsSync(contextPath);
+    const situationFacts = [
+      "Merge resolution round: 1 of 1.",
+      `This slice's candidate is already committed on \`${ctx.branch}\` and ` +
+        `already passed its gates and review; the only thing left is merging ` +
+        `it into \`${featBranch}\`, and that merge conflicted. This is the ` +
+        `only resolution round the slice gets: if the in-progress merge is ` +
+        `not resolved and committed when you stop, the slice ends in ` +
+        `CONFLICT and a human finishes the merge by hand.`,
+      `Your slice's own required gates — including the file-scope gate and the ` +
+        `acceptance behavior bindings — are re-run on the tree you commit, and ` +
+        `the tree is refused if any conflict marker survives in a conflicted ` +
+        `path.`,
+    ].join("\n\n");
+    const envelopeInput: GeneratorEnvelopeInput & { repairSituation: string } = {
+      mode: "repair",
+      sliceDir: ctx.relSliceDir,
+      contractView: projectGeneratorContractView(contract),
+      acceptanceManifest,
+      patternsAndHarness: projectGeneratorPatternsAndHarness(
+        hasExplorerContext
+          ? readFileSync(contextPath, "utf-8")
+          : "(no explorer context artifact is available for this slice)",
+      ),
+      ...(!hasExplorerContext ? { patternsAndHarnessArtifactId: null } : {}),
+      testCommand: ctx.testCommand,
+      migrationReservation: migrationReservationBlock(config, slice.ghIssue),
+      failureSet: { findings: [], gates: [] },
+      ...(config.generatorInlineSizeBudgetBytes !== undefined
+        ? { inlineSizeBudgetBytes: config.generatorInlineSizeBudgetBytes }
+        : {}),
+      repairSituation: situationFacts,
+    };
+
+    // --- The slice's own required declarations, built here and passed in.
+    const acceptanceCoverage: BehaviorCoverageRecord[] = [];
+    const acceptanceDeclaration = acceptanceGateDeclaration({
+      absSliceDir: ctx.absSliceDir,
+      plan: resolveAcceptancePlan(ctx.worktreeDir),
+      bounds: {
+        inactivityTimeoutMs:
+          config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        heartbeatIntervalMs:
+          config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+        wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+      },
+      onBehaviorResult: (record) => acceptanceCoverage.push(record),
+    });
+    /**
+     * Mutable on purpose: `scopeGateDeclaration` reads this object inside its
+     * `run` closure, so the attestation the gate sees is the one proven after
+     * the generator returned — never the literal `true` the gate refuses to
+     * default (B-07). It starts `false`, which is the failing-closed answer if
+     * the round never gets as far as proving anything.
+     */
+    const scopeGateInput = {
+      source: {
+        kind: "candidate" as const,
+        worktreeDir: ctx.worktreeDir,
+        featureRef: featureTip,
+      },
+      absSliceDir: ctx.absSliceDir,
+      sliceArtifactDir: ctx.relSliceDir,
+      acceptedPairIntact: false,
+      options: { migrationPathPattern: config.migrationPathPattern },
+    };
+    const declarations: GateDeclaration[] = [
+      scopeGateDeclaration(scopeGateInput),
+      ...resolvePreQAGateDeclarations(ctx.worktreeDir),
+      ...(acceptanceDeclaration ? [acceptanceDeclaration] : []),
+      ...resolveFullSuiteGateDeclarations(ctx.worktreeDir),
+    ];
+    const costPlan = resolveTestCostPlan(ctx.worktreeDir);
+    const gateCache = {
+      path: join(
+        config.repoRoot,
+        ".afk",
+        "artifacts",
+        pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+        "gate-cache.json",
+      ),
+      enabled: costPlan.cacheEnabled,
+    };
+    // No `prepare`: the gates run in the slice's own worktree — the one the
+    // generator has been verifying in all along — so its install already
+    // happened, and re-running one under the held merge mutex would stall every
+    // other lane's merge for nothing.
+    const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
+    // Captured before the dispatch, so the attestation below is a comparison
+    // and not a hope (ADR 0055 Seam 1; the implementation loop does the same).
+    const acceptedPair = captureAcceptedContractPair(ctx.absSliceDir);
+    genLog = logger.agentLog(slice.number, "generator-merge-resolution");
+    const dispatchLog = genLog;
+
+    const result = await runMergeResolutionRound({
+      worktreeDir: ctx.worktreeDir,
+      featureRef: featureTip,
+      conflictDetails,
+      blockBudgetBytes: mergeResolutionBlockRoom(envelopeInput),
+      dispatchGenerator: async (block) => {
+        const assembled = assembleGeneratorEnvelope({
+          ...envelopeInput,
+          repairSituation: withMergeResolutionSituation(
+            situationFacts,
+            block,
+          ),
+        });
+        await ctx.invoke({
+          role: "generator",
+          prompt: assembled.prompt,
+          contextEnvelope: {
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            ...assembled.evidence,
+          },
+          cwd: ctx.worktreeDir,
+          logStream: dispatchLog,
+          ...longCommandRoleBounds({
+            idleTimeoutMs: config.commandTimeoutMs ?? SLOW_AGENT_IDLE_TIMEOUT_MS,
+            idleWarningIntervalMs:
+              config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+            maxDurationMs: config.maxAgentDurationMs,
+          }),
+        });
+        // Earned here and nowhere else: the pair on disk is byte-for-byte the
+        // accepted pair, so the scope gate may exempt it. A round that widened
+        // its own lock leaves this `false` and gets both files named.
+        const mutated = mutatedAcceptedContractFiles(
+          ctx.absSliceDir,
+          acceptedPair,
+        );
+        scopeGateInput.acceptedPairIntact = mutated.length === 0;
+        if (mutated.length > 0) {
+          logger.phase(
+            `${ctx.tag}: merge resolution round changed ` +
+              `orchestrator-owned contract file(s) (${mutated.join(", ")}) — ` +
+              `the file-scope gate will name them and refuse the tree`,
+            "error",
+          );
+        }
+      },
+      gatePhase: {
+        repoRoot: config.repoRoot,
+        ghIssue: slice.ghIssue,
+        sliceNumber: slice.number,
+        tag: ctx.tag,
+        round,
+        evidenceDir,
+        declarations,
+        cache: gateCache,
+        label: "merge resolution gates",
+        ...(signal ? { signal } : {}),
+        infrastructureRetries:
+          config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
+        inactivityTimeoutMs:
+          config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+        heartbeatIntervalMs:
+          config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+        onGateOutcome: (outcome) => {
+          logger.event({
+            type: "gate-outcome",
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            ...outcome,
+          });
+          if (outcome.gateId !== ACCEPTANCE_GATE_ID) return;
+          for (const record of acceptanceCoverage.splice(0)) {
+            logger.event({
+              type: "behavior-coverage",
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              round,
+              attemptId: outcome.attemptId,
+              behaviorId: record.behaviorId,
+              gateId: outcome.gateId,
+              status: record.status,
+              matched: record.matched,
+              passed: record.passed,
+              failed: record.failed,
+              treeId: outcome.treeId,
+              evidenceArtifactId: outcome.evidenceArtifactId,
+              logArtifactId: outcome.logArtifactId,
+            });
+          }
+        },
+        onInfrastructureRetry: (message) => {
+          logger.phase(message, "error", {
+            type: "warn",
+            reason: "infrastructure-retry",
+            ghIssue: slice.ghIssue,
+            message,
+          });
+        },
+      },
+      log: (message) => logger.phase(`${ctx.tag}: ${message}`),
+    });
+    logger.event({
+      type: "merge-resolution-round",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      verdict: result.verdict,
+      durationMs: result.durationMs,
+      conflictedPaths: [...result.conflictedPaths],
+      ...(result.treeId ? { treeId: result.treeId } : {}),
+      detail: result.detail,
+    });
+    return result;
+  } catch (err) {
+    if (isCancelled(err, signal)) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    // The slice falls back to terminal CONFLICT, which is where it was before
+    // this round existed. The worktree is left exactly as the failure found it
+    // — including an in-progress merge, if the throw landed mid-merge — because
+    // nothing here may destroy work (ADR 0039); the operator gets the tree.
+    const failed: MergeResolutionRoundResult = {
+      verdict: "UNRESOLVED",
+      durationMs: 0,
+      conflictedPaths: [],
+      detail: `The merge resolution round could not run: ${message}`,
+    };
+    logger.event({
+      type: "merge-resolution-round",
+      ghIssue: slice.ghIssue,
+      sliceNumber: slice.number,
+      verdict: failed.verdict,
+      durationMs: failed.durationMs,
+      detail: failed.detail,
+    });
+    return failed;
+  } finally {
+    if (genLog) await closeAgentLog(genLog);
+  }
+}
+
+/**
  * Legacy single-call wrapper: negotiate → execute. Kept for callers
  * (and tests) that don't need the lane-aware split. The new wave loop
  * uses `runSliceNegotiate` + `runSliceExecute` directly so the
@@ -6601,7 +7293,7 @@ export async function runPipeline(
           : [];
       }),
     }),
-    minFreeBytes: gbToBytes(config.minFreeDiskGb ?? DEFAULT_MIN_FREE_DISK_GB),
+    minFreeBytes: gbToBytes(resolveMinFreeDiskGb(config.minFreeDiskGb)),
     reportOnly: config.preflightReportOnly,
   });
   const preflightBlock = formatPreflightReport(preflight);
@@ -7211,6 +7903,11 @@ export async function runPipeline(
       relevantFilesBlock,
       testCommand,
       mergeMutex,
+      // One scoped resolution round per conflicted merge (#132 B-01). Supplied
+      // here and only here: the pre-wave MERGE-PENDING recovery path is
+      // explicitly out of its scope, and a caller that leaves this unset keeps
+      // today's terminal CONFLICT exactly as it was.
+      resolveMergeConflict: runSliceMergeResolution,
       onOutcome: persistOutcome,
     });
 

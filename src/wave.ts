@@ -31,6 +31,7 @@ import {
   loadAcceptanceManifest,
 } from "./acceptance-manifest.js";
 import { ADJUDICATION_DECISIONS_FILENAME } from "./adjudication.js";
+import type { MergeResolutionRoundResult } from "./merge-resolution.js";
 
 export type WaveOutcomePhase =
   | "PASS"
@@ -56,6 +57,24 @@ export interface WaveInput {
   relevantFilesBlock: string;
   testCommand: string;
   mergeMutex: <T>(fn: () => Promise<T>) => Promise<T>;
+  /**
+   * One scoped merge-resolution round for a slice whose merge hit a real
+   * textual conflict (#132). Supplied by `src/orchestrator.ts`, which owns the
+   * generator machinery and builds the slice's own required gate declarations;
+   * the body of the round is `src/merge-resolution.ts`. Called from inside the
+   * merge mutex the refused attempt already holds, so the tree the round's
+   * gates prove is still the tree the retry ships (ADR 0029).
+   *
+   * Left unset — as every direct `runWave` caller outside the orchestrator
+   * does — a conflict records terminal `CONFLICT` exactly as before.
+   */
+  resolveMergeConflict?: (args: {
+    slice: Slice;
+    ctx: SliceContext;
+    branch: string;
+    /** git's own output from the refused attempt. */
+    conflictDetails: string;
+  }) => Promise<MergeResolutionRoundResult>;
   /**
    * Called the moment a slice's outcome becomes terminal — PASS right
    * after its merge + worktree removal, failures as soon as they are
@@ -178,6 +197,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     relevantFilesBlock,
     testCommand,
     mergeMutex,
+    resolveMergeConflict,
     onOutcome,
   } = input;
   const { repoRoot, prdSlug, signal } = config;
@@ -573,9 +593,79 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
           // or a sibling lane could merge a colliding prefix in between.
           // See ADR 0029 — the check stays here; only the refusal changed
           // from terminal to deferred.
-          const attempt = await mergeMutex(() =>
-            git.attemptMerge(repoRoot, branch, featBranch, scratchMergeDir),
-          );
+          //
+          // Since #132 the section is wider: a real textual conflict spends one
+          // scoped resolution round, re-runs the slice's own required gates on
+          // the resolved tree, scans it for surviving conflict markers and
+          // retries the merge — all without releasing the mutex, because the
+          // tree the gates proved must still be the tree that merges, and only
+          // an unmoved feature tip keeps the retry the fast-forward the
+          // resolution merge commit was built to be. Nothing reached from in
+          // here re-acquires `mergeMutex`: it is not documented as reentrant
+          // and is shared with the pre-wave MERGE-PENDING recovery, so a
+          // reentrant acquisition would deadlock the run instead of failing a
+          // gate.
+          const { attempt, round } = await mergeMutex(async (): Promise<{
+            attempt: git.MergeAttempt;
+            round?: MergeResolutionRoundResult;
+          }> => {
+            const first = await git.attemptMerge(
+              repoRoot,
+              branch,
+              featBranch,
+              scratchMergeDir,
+            );
+            if (
+              first.kind === "collision" ||
+              first.result.status !== "conflict" ||
+              !resolveMergeConflict
+            ) {
+              return { attempt: first };
+            }
+            const resolution = await resolveMergeConflict({
+              slice,
+              ctx,
+              branch,
+              conflictDetails: first.result.details,
+            });
+            if (resolution.verdict !== "RESOLVED") {
+              // Today's terminal CONFLICT, with git's own details: the failed
+              // round leaves the feature tip unmoved and both refs alive, and
+              // any resolution commit the generator made stays on the slice
+              // branch (ADR 0039).
+              return { attempt: first, round: resolution };
+            }
+            const retry = await git.attemptMerge(
+              repoRoot,
+              branch,
+              featBranch,
+              scratchMergeDir,
+            );
+            // A collision on the retry is CONFLICT, not MERGE-PENDING: the
+            // round has been spent, and MERGE-PENDING is reserved for the
+            // untouched first-attempt path (ADR 0029).
+            return {
+              attempt:
+                retry.kind === "collision"
+                  ? {
+                      kind: "merge" as const,
+                      result: {
+                        status: "conflict" as const,
+                        details:
+                          `The resolved tree could not be merged: ` +
+                          git.mergePendingReason(retry.prefixes, featBranch),
+                      },
+                    }
+                  : retry,
+              round: resolution,
+            };
+          });
+          if (round) {
+            logger.phase(
+              `${ctx.tag}: merge resolution round ${round.verdict} in ` +
+                `${round.durationMs}ms — ${round.detail}`,
+            );
+          }
           if (attempt.kind === "collision") {
             // Deferred merge, not a conflict: the work is committed on the
             // slice branch and QA passed. The next run retries the merge.

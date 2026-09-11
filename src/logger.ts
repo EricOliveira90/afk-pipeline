@@ -464,6 +464,70 @@ ${advisoryAttempts
 |-------|-------|----------|------|--------|---------|--------|--------|----------|-----|
 ${coverageRows}
 `;
+    // The disposable review worktree's two records (#91 AC5/AC6): what one
+    // deterministic PASS approved, and what the evaluator wrote that was
+    // discarded. One section, because an operator reading it is asking one
+    // question — what did candidate review establish, and did the reviewer
+    // stay inside its allowlist. Rendered only when such an event exists, so
+    // every other run's summary is unchanged.
+    const isolationEvents = runEvents.filter(
+      (event) =>
+        event.type === "approved-baseline" ||
+        event.type === "reviewer-write-violation",
+    );
+    const isolationRows = isolationEvents
+      .map((event) =>
+        event.type === "approved-baseline"
+          ? `| ${event.ghIssue} | ${event.round} | approved-baseline | ` +
+            `${event.treeId} | ${event.commit} | ${event.artifactId} |`
+          : `| ${event.ghIssue} | ${event.round} | reviewer-write-violation | ` +
+            `— | attempt ${event.attempt} | ${event.path} |`,
+      )
+      .join("\n");
+    const isolationSection =
+      isolationEvents.length === 0
+        ? ""
+        : `
+## Candidate Review Isolation
+
+| Slice | Round | Record | Tree | Commit / Attempt | Artifact / Path |
+|-------|-------|--------|------|------------------|-----------------|
+${isolationRows}
+`;
+    // The scoped merge-resolution rounds (#132 AC8), in their own section
+    // rather than folded into the round counts above: a round spent resolving
+    // a merge conflict under the held merge mutex is not a repair round, and an
+    // operator reading "3 rounds" must not be left to guess which. Rendered
+    // only when such a round ran, so every other run's summary is unchanged.
+    const resolutionRounds = runEvents.filter(
+      (event) => event.type === "merge-resolution-round",
+    );
+    const resolutionSection =
+      resolutionRounds.length === 0
+        ? ""
+        : `
+## Merge Resolution Rounds
+
+One scoped round per conflicting merge, inside the merge mutex the refused
+attempt held (#132, ADR 0029). Distinct from the generator repair rounds in
+the Rounds column above.
+
+| Slice | Verdict | Elapsed | Conflicted paths | Tree | Detail |
+|-------|---------|---------|------------------|------|--------|
+${resolutionRounds
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${event.verdict} | ${event.durationMs}ms | ` +
+      `${
+        event.conflictedPaths && event.conflictedPaths.length > 0
+          ? event.conflictedPaths.map((path) => `\`${path}\``).join(", ")
+          : "—"
+      } | ${event.treeId ?? "—"} | ${
+        event.detail ? inlineMarkdown(event.detail) : "—"
+      } |`,
+  )
+  .join("\n")}
+`;
     /**
      * Human authorizations a gate actually applied (#193 D5/D24). Rendered from
      * the `waiver-applied` events alone, so the summary and `events.jsonl`
@@ -561,7 +625,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${waiverSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${resolutionSection}${waiverSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

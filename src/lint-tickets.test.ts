@@ -10,20 +10,31 @@
  * review attempt is archived" (archived where? — the ambiguity that became
  * #123) and #78's HELD state that no schema had.
  */
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   applyWaivers,
   checkAbsentNames,
+  checkMixedImpasseOutcome,
   checkRecordingChannel,
   checkSummarisedLists,
   checkUnknownNames,
   identifiersIn,
   lintTicket,
   looksLikePath,
+  outcomeFilesUnder,
   parseArgv,
   parseTicket,
+  relevantUnusedWaivers,
   waiverCovers,
 } from "../scripts/lint-tickets.mjs";
 
@@ -334,6 +345,122 @@ describe("check 4 — summarised field lists", () => {
   });
 });
 
+describe("check 5 — a mixed IMPASSE outcome file", () => {
+  const finding = (
+    id: string,
+    state: string,
+    over: Record<string, unknown> = {},
+  ) => ({
+    id,
+    severity: "BLOCKING",
+    state,
+    unresolved: true,
+    plannerPosition: null,
+    plannerEvidence: null,
+    evaluatorEvidence: "…",
+    ...over,
+  });
+
+  const outcome = (
+    classification: string,
+    findings: ReturnType<typeof finding>[],
+  ) => ({ version: 1, classification, round: 2, attempt: 3, findings });
+
+  it("gates on CONTESTED beside an unresolved OPEN blocker, naming both sets", () => {
+    const findings = checkMixedImpasseOutcome(
+      outcome("IMPASSE", [
+        finding("F1", "CONTESTED"),
+        finding("F2", "OPEN"),
+        finding("F3", "CONTESTED"),
+      ]),
+      ".afk/slice-04/contract-negotiation-outcome.json",
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      check: "5",
+      severity: "gate",
+      issue: null,
+      source: ".afk/slice-04/contract-negotiation-outcome.json",
+    });
+    // Both sets, named — the operator has to see which findings are which.
+    expect(findings[0]?.message).toContain("CONTESTED [F1], [F3]");
+    expect(findings[0]?.message).toContain("OPEN blocker [F2]");
+    // And the consequence, stated rather than implied.
+    expect(findings[0]?.message).toContain("parks permanently");
+  });
+
+  it("is silent on an outcome with only contested findings", () => {
+    // The adjudicable case the park exists for.
+    expect(
+      checkMixedImpasseOutcome(
+        outcome("IMPASSE", [finding("F1", "CONTESTED"), finding("F2", "CONTESTED")]),
+        "x.json",
+      ),
+    ).toEqual([]);
+  });
+
+  it("is silent on an outcome with only open blockers", () => {
+    expect(
+      checkMixedImpasseOutcome(
+        outcome("IMPASSE", [finding("F1", "OPEN"), finding("F2", "OPEN")]),
+        "x.json",
+      ),
+    ).toEqual([]);
+  });
+
+  it("is silent on NON_CONVERGENCE, which is what the runtime writes for a mix", () => {
+    // ADR 0055 §1 routes a mixed exhaustion here on purpose; that file is
+    // correct and must not be flagged.
+    expect(
+      checkMixedImpasseOutcome(
+        outcome("NON_CONVERGENCE", [
+          finding("F1", "CONTESTED"),
+          finding("F2", "OPEN"),
+        ]),
+        "x.json",
+      ),
+    ).toEqual([]);
+  });
+
+  it("ignores an OPEN finding that never held the lock open", () => {
+    // Matches the runtime completion predicate: only an unresolved BLOCKING
+    // finding sits in `unresolvedBlockingFindingIds`.
+    const advisory = checkMixedImpasseOutcome(
+      outcome("IMPASSE", [
+        finding("F1", "CONTESTED"),
+        finding("F2", "OPEN", { severity: "ADVISORY" }),
+      ]),
+      "x.json",
+    );
+    const resolved = checkMixedImpasseOutcome(
+      outcome("IMPASSE", [
+        finding("F1", "CONTESTED"),
+        finding("F2", "OPEN", { unresolved: false }),
+      ]),
+      "x.json",
+    );
+    expect(advisory).toEqual([]);
+    expect(resolved).toEqual([]);
+  });
+
+  it("names where in the file the defect is, not just that it exists", () => {
+    const findings = checkMixedImpasseOutcome(
+      outcome("IMPASSE", [finding("F1", "CONTESTED"), finding("F2", "OPEN")]),
+      "x.json",
+    );
+    expect(findings[0]?.where).toBe(
+      "classification IMPASSE, round 2, attempt 3",
+    );
+  });
+
+  it("survives a file with no findings array at all", () => {
+    expect(
+      checkMixedImpasseOutcome({ classification: "IMPASSE" }, "x.json"),
+    ).toEqual([]);
+    expect(checkMixedImpasseOutcome(undefined, "x.json")).toEqual([]);
+  });
+});
+
 describe("lintTicket", () => {
   it("reports gating findings before warnings", () => {
     const findings = lintTicket(
@@ -421,15 +548,119 @@ describe("waivers", () => {
     });
     expect(result.unusedWaivers).toHaveLength(1);
   });
+
+  it("only reports an unused waiver whose subject this run actually read", () => {
+    // `--outcome` alone reads no tickets, and every committed ticket waiver
+    // would otherwise be announced as rotten on such a run.
+    const ticketWaiver = { issue: 80, check: "3", reason: "…" };
+    const outcomeWaiver = { outcome: ".afk", check: "5", reason: "…" };
+    const unused = [ticketWaiver, outcomeWaiver];
+    expect(
+      relevantUnusedWaivers(unused, { ticketsRead: 0, outcomesRead: 2 }),
+    ).toEqual([outcomeWaiver]);
+    expect(
+      relevantUnusedWaivers(unused, { ticketsRead: 3, outcomesRead: 0 }),
+    ).toEqual([ticketWaiver]);
+    expect(
+      relevantUnusedWaivers(unused, { ticketsRead: 3, outcomesRead: 2 }),
+    ).toEqual(unused);
+  });
+
+  describe("a check-5 finding, which has a path instead of an issue number", () => {
+    const outcomeFinding = {
+      issue: null,
+      source: ".afk/run-x/slice-04/contract-negotiation-outcome.json",
+      check: "5",
+      severity: "gate",
+      where: "classification IMPASSE, round 2, attempt 3",
+      token: "IMPASSE",
+      text: "CONTESTED [F1] beside unresolved OPEN blocker [F2]",
+      message: "…",
+    };
+
+    it("is waived by a path substring", () => {
+      expect(
+        waiverCovers(
+          { check: "5", outcome: "run-x/slice-04", reason: "Migrated by hand." },
+          outcomeFinding,
+        ),
+      ).toBe(true);
+      expect(
+        waiverCovers(
+          { check: "5", outcome: "run-x/slice-09", reason: "…" },
+          outcomeFinding,
+        ),
+      ).toBe(false);
+    });
+
+    it("does not cross with the issue-number form in either direction", () => {
+      // A `#88 check 3` waiver must not excuse an artifact defect, and an
+      // outcome waiver must not excuse a ticket one.
+      expect(
+        waiverCovers({ issue: 88, check: "5", reason: "…" }, outcomeFinding),
+      ).toBe(false);
+      expect(
+        waiverCovers({ check: "3", outcome: ".afk", reason: "…" }, finding),
+      ).toBe(false);
+    });
+
+    it("keeps the anti-rubber-stamp match on the flagged text", () => {
+      expect(
+        waiverCovers(
+          { check: "5", outcome: ".afk", match: "OPEN blocker [F2]", reason: "…" },
+          outcomeFinding,
+        ),
+      ).toBe(true);
+      expect(
+        waiverCovers(
+          { check: "5", outcome: ".afk", match: "OPEN blocker [F7]", reason: "…" },
+          outcomeFinding,
+        ),
+      ).toBe(false);
+    });
+  });
 });
 
 describe("parseArgv", () => {
-  it("reads issue numbers, with or without a hash, and the two flags", () => {
+  it("reads issue numbers, with or without a hash, and the flags", () => {
     expect(parseArgv(["--dir", ".tickets", "--repo", "o/n", "80", "#81"])).toEqual({
       dir: ".tickets",
       repo: "o/n",
       numbers: [80, 81],
+      outcomes: [],
     });
+  });
+
+  it("collects every --outcome target, and needs no issue number", () => {
+    expect(parseArgv(["--outcome", ".afk", "--outcome", "x.json"])).toEqual({
+      dir: null,
+      repo: null,
+      numbers: [],
+      outcomes: [".afk", "x.json"],
+    });
+  });
+});
+
+describe("outcomeFilesUnder", () => {
+  const write = (path: string, body: unknown) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(body), "utf-8");
+  };
+
+  it("takes a file as itself and a directory as every outcome file beneath it", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-lint-outcome-"));
+    try {
+      const first = join(root, "slice-01", "contract-negotiation-outcome.json");
+      const second = join(root, "slice-02", "contract-negotiation-outcome.json");
+      write(first, { classification: "IMPASSE" });
+      write(second, { classification: "NON_CONVERGENCE" });
+      write(join(root, "slice-01", "contract-review.json"), {});
+
+      expect(outcomeFilesUnder(first)).toEqual([first]);
+      expect(outcomeFilesUnder(root)).toEqual([first, second]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -447,13 +678,19 @@ describe("the committed vocabulary and waiver files", () => {
     expect(() => new RegExp(VOCABULARY.placeholderPattern)).not.toThrow();
   });
 
-  it("gives every recorded waiver a reason and a known check", () => {
+  it("gives every recorded waiver a reason, a known check and a subject", () => {
     // The lint enforces this at run time too; here it fails in the suite, so a
     // reasonless waiver cannot sit in the file waiting for the next lint run.
     for (const waiver of WAIVERS.waivers) {
       expect(String(waiver.reason ?? "").trim(), JSON.stringify(waiver)).not.toBe("");
-      expect(["2a", "2b", "3"], JSON.stringify(waiver)).toContain(waiver.check);
-      expect(typeof waiver.issue, JSON.stringify(waiver)).toBe("number");
+      expect(["2a", "2b", "3", "5"], JSON.stringify(waiver)).toContain(waiver.check);
+      // A check-5 waiver is about an artifact, so it carries a path instead of
+      // an issue number. Every other check is about a ticket.
+      if (waiver.check === "5") {
+        expect(typeof waiver.outcome, JSON.stringify(waiver)).toBe("string");
+      } else {
+        expect(typeof waiver.issue, JSON.stringify(waiver)).toBe("number");
+      }
     }
   });
 });

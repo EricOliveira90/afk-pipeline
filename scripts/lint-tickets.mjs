@@ -18,6 +18,17 @@
  *            for it.                                            GATES
  *   Check 4  summarised field lists ("etc.", "such as", "and so on") anywhere
  *            in the ticket.                            WARNS, never gates
+ *   Check 5  an IMPASSE outcome file that mixes CONTESTED findings with
+ *            unresolved OPEN blockers — the shape that parks forever.
+ *                                                                    GATES
+ *
+ * Check 5 lints an artifact rather than a ticket, so it takes its input from
+ * `--outcome <path>` instead of an issue number. It lives here anyway because
+ * this is the entry point an operator already runs before a launch, and the
+ * finding is item 6's own kind: a structural defect visible in a hand-written
+ * input, caught by a deterministic check rather than discovered by a run that
+ * parks. A ticket's input model (`gh issue view --json number,title,body`)
+ * cannot carry an outcome file, so the flag is the seam, not a second script.
  *
  * Check 1 of the original four — compound predicates in one criterion ("X and
  * Y and Z" that can half-pass) — is deliberately **not** implemented. Detecting
@@ -35,17 +46,19 @@
  *   node scripts/lint-tickets.mjs 80 81 82 89 94        # fetch with `gh`
  *   node scripts/lint-tickets.mjs --dir .tickets 80 81  # read <dir>/<n>.json
  *   node scripts/lint-tickets.mjs --repo owner/name 80
+ *   node scripts/lint-tickets.mjs --outcome .afk        # check 5, file or dir
  *
  * `<dir>/<n>.json` is whatever `gh issue view <n> --json number,title,body`
  * writes, so a fetched corpus can be linted offline and in tests.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const VOCABULARY_PATH = "ticket-lint-vocabulary.json";
 const WAIVERS_PATH = "ticket-lint-waivers.json";
+const OUTCOME_FILENAME = "contract-negotiation-outcome.json";
 
 const CRITERIA_HEADING = /^##\s+acceptance criteria\s*$/i;
 
@@ -334,6 +347,69 @@ export function checkSummarisedLists(ticket, vocabulary) {
   return findings;
 }
 
+/**
+ * Check 5 — an IMPASSE outcome file that parks forever.
+ *
+ * An `IMPASSE` parks the slice for a human decision, and a decision can only
+ * be recorded against a `CONTESTED` finding (`adjudication.ts` refuses any
+ * other state). So an unresolved `OPEN` blocker in the same file never leaves
+ * the lock's completion predicate: the human decides every contest, the
+ * predicate stays non-empty, `LOCKED` is refused, and the slice parks again on
+ * the same finding. Forever.
+ *
+ * The runtime is already honest about this — the classifier routes a mixed
+ * exhaustion to `NON_CONVERGENCE` (ADR 0055 §1) and the refusal names the
+ * inadjudicable findings. What was missing is the warning *before* the run: an
+ * operator hand-writing or migrating an outcome file can produce the mixed
+ * shape and only learn what it means from a park.
+ *
+ * This gates rather than warns. Unlike the ticket checks it reads no prose —
+ * the defect is two enum values in a JSON file, so there is no false-positive
+ * class to be careful about.
+ *
+ * Deliberate scope (issue #143): only the *mixed* shape. An outcome file with
+ * only contested findings is the adjudicable case the park exists for, and one
+ * with only open blockers is flagged by nothing here — that file is what the
+ * classifier writes as `NON_CONVERGENCE`, and an `IMPASSE` spelling of it is a
+ * different defect from the one this check was filed for.
+ */
+export function checkMixedImpasseOutcome(outcome, source) {
+  if (outcome?.classification !== "IMPASSE") return [];
+  const findings = Array.isArray(outcome.findings) ? outcome.findings : [];
+  const contested = findings.filter((finding) => finding.state === "CONTESTED");
+  // Matches the runtime's completion predicate (`unresolvedBlockingFindingIds`):
+  // an ADVISORY or already-resolved finding never held a lock open.
+  const openBlockers = findings.filter(
+    (finding) =>
+      finding.state === "OPEN" &&
+      finding.severity === "BLOCKING" &&
+      finding.unresolved === true,
+  );
+  if (contested.length === 0 || openBlockers.length === 0) return [];
+  const ids = (set) => set.map((finding) => `[${finding.id}]`).join(", ");
+  return [
+    {
+      issue: null,
+      source,
+      check: "5",
+      severity: "gate",
+      where: `classification IMPASSE, round ${outcome.round}, attempt ${outcome.attempt}`,
+      token: "IMPASSE",
+      text: `CONTESTED ${ids(contested)} beside unresolved OPEN blocker${openBlockers.length === 1 ? "" : "s"} ${ids(openBlockers)}`,
+      message:
+        `is an IMPASSE mixing CONTESTED ${ids(contested)} with unresolved OPEN ` +
+        `blocker${openBlockers.length === 1 ? "" : "s"} ${ids(openBlockers)} — ` +
+        `this shape parks permanently. A human decision is only recordable ` +
+        `against a CONTESTED finding, so ${ids(openBlockers)} can never leave ` +
+        `the lock's completion predicate: every contest gets decided, the lock ` +
+        `is still refused, and the slice parks again on the same finding. ` +
+        `Either close the OPEN blocker${openBlockers.length === 1 ? "" : "s"} ` +
+        `and rerun the slice, or classify this exhaustion NON_CONVERGENCE, ` +
+        `which is what the runtime writes for a mixed exhaustion (ADR 0055 §1)`,
+    },
+  ];
+}
+
 /** Every finding for one ticket, gating ones first. */
 export function lintTicket(ticket, vocabulary) {
   const findings = [
@@ -355,10 +431,21 @@ export function lintTicket(ticket, vocabulary) {
  * the anti-rubber-stamp property: rewrite the criterion and the waiver stops
  * applying, so the finding comes back and someone looks at it again with the
  * new words in front of them.
+ *
+ * A check-5 finding has no issue number — it is about an artifact, not a
+ * ticket — so its waiver identifies it by `outcome`, a substring of the file's
+ * path. The two forms do not cross: an `issue` waiver never covers an artifact
+ * finding and an `outcome` waiver never covers a ticket one.
  */
 export function waiverCovers(waiver, finding) {
-  if (Number(waiver.issue) !== Number(finding.issue)) return false;
   if (String(waiver.check) !== finding.check) return false;
+  if (finding.source !== undefined) {
+    if (waiver.outcome === undefined) return false;
+    if (!String(finding.source).includes(String(waiver.outcome))) return false;
+  } else {
+    if (waiver.outcome !== undefined) return false;
+    if (Number(waiver.issue) !== Number(finding.issue)) return false;
+  }
   if (waiver.token !== undefined && waiver.token !== finding.token) return false;
   if (waiver.match !== undefined && waiver.match !== "") {
     if (!finding.text.toLowerCase().includes(String(waiver.match).toLowerCase()))
@@ -406,6 +493,20 @@ export function applyWaivers(findings, waivers) {
   return { gating, waived, warnings, unusedWaivers: unused, invalidWaivers: invalid };
 }
 
+/**
+ * The unused waivers worth reporting, given what this run actually read.
+ *
+ * "This waiver matched nothing" is only a rot signal if its subject was
+ * linted. Once `--outcome` made it possible to run the lint over artifacts
+ * alone, every committed ticket waiver matched nothing on such a run — which
+ * would have taught operators to ignore the notice.
+ */
+export function relevantUnusedWaivers(unused, { ticketsRead, outcomesRead }) {
+  return unused.filter((waiver) =>
+    waiver.outcome !== undefined ? outcomesRead > 0 : ticketsRead > 0,
+  );
+}
+
 function readTicket(number, options) {
   if (options.dir !== null) {
     return JSON.parse(readFileSync(join(options.dir, `${number}.json`), "utf-8"));
@@ -415,12 +516,28 @@ function readTicket(number, options) {
   return JSON.parse(execFileSync("gh", argv, { encoding: "utf-8" }));
 }
 
+/**
+ * Every outcome file a `--outcome` argument names: the file itself, or every
+ * `contract-negotiation-outcome.json` under it when it is a directory.
+ *
+ * A directory is the useful form for an operator: `--outcome .afk` covers a
+ * whole run's slice directories without knowing their numbers.
+ */
+export function outcomeFilesUnder(path) {
+  if (!statSync(path).isDirectory()) return [path];
+  return readdirSync(path, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name === OUTCOME_FILENAME)
+    .map((entry) => join(entry.parentPath, entry.name))
+    .sort();
+}
+
 export function parseArgv(argv) {
-  const options = { dir: null, repo: null, numbers: [] };
+  const options = { dir: null, repo: null, numbers: [], outcomes: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dir") options.dir = argv[(index += 1)];
     else if (arg === "--repo") options.repo = argv[(index += 1)];
+    else if (arg === "--outcome") options.outcomes.push(argv[(index += 1)]);
     else options.numbers.push(Number(arg.replace(/^#/, "")));
   }
   return options;
@@ -428,12 +545,16 @@ export function parseArgv(argv) {
 
 function main() {
   const options = parseArgv(process.argv.slice(2));
-  if (options.numbers.length === 0 || options.numbers.some(Number.isNaN)) {
+  const noInput =
+    options.numbers.length === 0 && options.outcomes.length === 0;
+  if (noInput || options.numbers.some(Number.isNaN)) {
     console.error(
-      "Usage: node scripts/lint-tickets.mjs [--dir <dir>] [--repo <owner/name>] <issue>...\n" +
-        "\nChecks 2 and 3 gate (waivable in " +
+      "Usage: node scripts/lint-tickets.mjs [--dir <dir>] [--repo <owner/name>]\n" +
+        "                                   [--outcome <file-or-dir>]... <issue>...\n" +
+        "\nChecks 2, 3 and 5 gate (waivable in " +
         WAIVERS_PATH +
         "); check 4 warns.\n" +
+        "Check 5 lints IMPASSE outcome files named by --outcome, not tickets.\n" +
         "Check 1 (compound predicates that can half-pass) is an authoring-\n" +
         "checklist item, not a lint: split such a criterion by hand.",
     );
@@ -448,6 +569,18 @@ function main() {
     const ticket = readTicket(number, options);
     findings.push(...lintTicket(ticket, vocabulary));
   }
+  let outcomesRead = 0;
+  for (const target of options.outcomes) {
+    for (const file of outcomeFilesUnder(target)) {
+      outcomesRead += 1;
+      findings.push(
+        ...checkMixedImpasseOutcome(
+          JSON.parse(readFileSync(file, "utf-8")),
+          file,
+        ),
+      );
+    }
+  }
 
   const { gating, waived, warnings, unusedWaivers, invalidWaivers } =
     applyWaivers(findings, waivers);
@@ -461,8 +594,11 @@ function main() {
     const from = Math.max(0, at - 70);
     return `…${flat.slice(from, from + 170)}…`;
   };
+  // A check-5 finding is about a file, so it is addressed by path; every
+  // other finding is about a ticket.
+  const subject = (finding) => finding.source ?? `#${finding.issue}`;
   const show = (finding) =>
-    `  #${finding.issue} ${finding.where} [check ${finding.check}] ${finding.message}\n` +
+    `  ${subject(finding)} ${finding.where} [check ${finding.check}] ${finding.message}\n` +
     `      "${quote(finding)}"`;
 
   if (gating.length > 0) {
@@ -477,29 +613,38 @@ function main() {
     console.log(`\nWAIVED (${waived.length}):\n`);
     for (const finding of waived)
       console.log(
-        `  #${finding.issue} ${finding.where} [check ${finding.check}] ${finding.token} — ${finding.waiver.reason}`,
+        `  ${subject(finding)} ${finding.where} [check ${finding.check}] ${finding.token} — ${finding.waiver.reason}`,
       );
   }
+  const waiverSubject = (waiver) =>
+    waiver.outcome !== undefined ? waiver.outcome : `#${waiver.issue}`;
   for (const { waiver, why } of invalidWaivers)
-    console.error(`  waiver error: #${waiver.issue} check ${waiver.check} ${why}`);
-  for (const waiver of unusedWaivers)
+    console.error(
+      `  waiver error: ${waiverSubject(waiver)} check ${waiver.check} ${why}`,
+    );
+  for (const waiver of relevantUnusedWaivers(unusedWaivers, {
+    ticketsRead: options.numbers.length,
+    outcomesRead,
+  }))
     console.log(
-      `  note: waiver for #${waiver.issue} check ${waiver.check} ` +
+      `  note: waiver for ${waiverSubject(waiver)} check ${waiver.check} ` +
         `(${waiver.token ?? waiver.match ?? "any"}) matched nothing — delete it or fix its match`,
     );
 
   console.log(
-    `\n${options.numbers.length} ticket(s): ${gating.length} gating, ` +
-      `${waived.length} waived, ${warnings.length} warning(s).`,
+    `\n${options.numbers.length} ticket(s), ${outcomesRead} outcome file(s): ` +
+      `${gating.length} gating, ${waived.length} waived, ` +
+      `${warnings.length} warning(s).`,
   );
 
   if (gating.length > 0 || invalidWaivers.length > 0) {
     console.error(
-      `\nFix the ticket text, or record a waiver with a reason in ${WAIVERS_PATH}.`,
+      `\nFix the ticket text or the outcome file, or record a waiver with a ` +
+        `reason in ${WAIVERS_PATH}.`,
     );
     process.exit(1);
   }
-  console.log("Every ticket is lint-clean.");
+  console.log("Every ticket and outcome file is lint-clean.");
 }
 
 // Importable for its unit test; only the CLI invocation runs the lint.

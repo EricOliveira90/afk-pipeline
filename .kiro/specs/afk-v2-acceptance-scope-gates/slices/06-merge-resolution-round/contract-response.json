@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "round": 3,
+  "responses": [
+    {
+      "findingId": "F-06",
+      "position": "CONDITION_MET",
+      "evidence": "Tree model step 3 now states the resolution commit is a merge commit whose first parent is the pre-round slice-branch tip and whose second parent is the merged feature-branch tip, and records why the discard-the-merge-state alternative was rejected. New step 6 states what the retry means under that choice: the retry is a fast-forward of the feature branch to that merge commit, run through the unmodified git.attemptMerge, so a prefix collision is still possible on the retry but a textual conflict is not reachable while the mutex is held. New step 7 adds the check the finding asked for: after the gate re-run and before the retry, src/merge-resolution.ts scans the resolution merge commit's blobs for the paths conflicted in step 2 for line-start conflict markers, and any hit refuses the retry and fails the round per step 5 (no reset, ADR 0039). B-03 now pins the treeId to that merge commit's tree, B-04 and step 5 name the merge commit, B-05 and the Changes-to-existing-behavior bullet put the marker scan inside the widened critical section, and B-06 is restated for a retry that cannot conflict textually. Test plan adds parent-shape, marker-scan unit, and collision-on-retry scenarios; Definition of done adds the no-markers-reach-the-feature-branch item."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "B-06's outcome is restated for a retry that cannot conflict on content: under step 3's merge commit and B-05's held mutex the retry is a fast-forward, the contract says so explicitly and no longer claims a fixture for a textual retry conflict. The reachable levers are now named and each has a test-plan scenario: (a) a stubbed gate phase forced to PASS over a generator that commits the merge with conflict markers left in a file no gate reads, which the pre-retry marker scan (step 7) refuses so the retry never runs and terminal CONFLICT is persisted; (b) a retry whose git.attemptMerge returns a prefix collision or any non-fast-forward result, which persists terminal CONFLICT rather than MERGE-PENDING; plus a pure unit test of the marker scan over path/content pairs. The manifest's B-06 given/when/then/observableResult carry the same lever and outcomes."
+    }
+  ]
+}

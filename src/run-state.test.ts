@@ -17,7 +17,6 @@ import {
   saveAppliedWaivers,
   saveFiledFindings,
   saveReviewPhase,
-  CURRENT_RUN_STATE_VERSION,
   sanitizeReviewPhase,
   isSliceComplete,
   adaptLoadedState,
@@ -26,6 +25,9 @@ import {
   chargeResumeAttempt,
   clearSliceStateForDispatch,
   saveSliceStateIfUnchanged,
+  approvedBaselineFor,
+  recordApprovedBaseline,
+  RUN_STATE_VERSION,
   type PersistedGuardianReviewRound,
 } from "./run-state.js";
 
@@ -153,7 +155,7 @@ describe("adaptLoadedState", () => {
     expect(adapted.slices["300"]!.phase).toBe("ESCALATE");
   });
 
-  it("upgrades v1 files to v4", () => {
+  it("upgrades v1 files to the current version", () => {
     const v1 = {
       version: 1,
       prdSlug: "demo",
@@ -215,6 +217,117 @@ describe("adaptLoadedState", () => {
     );
     expect(adapted.slices["100"]!.phase).toBe("MERGE-PENDING");
     expect(adapted.slices["100"]!.collidingPrefixes).toBeUndefined();
+  });
+});
+
+/**
+ * v4 is purely additive: a per-slice locator for the approved-baseline
+ * artifact (#91 AC5). The artifact file stays canonical, so the locator's job
+ * is only to let a resumed run *find* it without re-deriving the checkpoint —
+ * which is why a malformed entry degrades to absent instead of throwing.
+ */
+describe("[behavior:B-06] approved-baseline locator", () => {
+  it("[behavior:B-06] loads a v3 file as v4 with no baseline recorded", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 3,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: { "70": { phase: "PASS", branch: "afk/demo-01" } },
+      },
+      "demo",
+    );
+    expect(adapted.version).toBe(RUN_STATE_VERSION);
+    expect(adapted.approvedBaselines).toBeUndefined();
+    expect(approvedBaselineFor(adapted, "70")).toBeUndefined();
+    // The slice state a v3 file carried is untouched by the addition.
+    expect(adapted.slices["70"]!.phase).toBe("PASS");
+  });
+
+  it("[behavior:B-06] round-trips a recorded locator through a v4 file", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 4,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {},
+        approvedBaselines: {
+          "70": {
+            treeId: "a".repeat(40),
+            commit: "b".repeat(40),
+            artifactPath: ".afk/artifacts/demo/slice-01/approved-baseline.json",
+          },
+        },
+      },
+      "demo",
+    );
+    expect(approvedBaselineFor(adapted, "70")).toEqual({
+      treeId: "a".repeat(40),
+      commit: "b".repeat(40),
+      artifactPath: ".afk/artifacts/demo/slice-01/approved-baseline.json",
+    });
+    expect(approvedBaselineFor(adapted, "71")).toBeUndefined();
+  });
+
+  it("[behavior:B-06] drops malformed locators rather than wedging the load", () => {
+    const adapted = adaptLoadedState(
+      {
+        version: 4,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: {},
+        approvedBaselines: {
+          // Missing commit, blank tree, and a non-object entry: each degrades
+          // to "no baseline recorded" for that slice alone.
+          "70": { treeId: "a".repeat(40), artifactPath: "x.json" },
+          "71": { treeId: "  ", commit: "b", artifactPath: "x.json" },
+          "72": "not-an-object",
+          "73": {
+            treeId: "c".repeat(40),
+            commit: "d".repeat(40),
+            artifactPath: "keep.json",
+          },
+        },
+      },
+      "demo",
+    );
+    expect(Object.keys(adapted.approvedBaselines ?? {})).toEqual(["73"]);
+  });
+
+  it("[behavior:B-06] records a locator on disk and reads it back", () => {
+    const repo = makeRepo();
+    saveSliceState(repo, "demo", "70", {
+      phase: "STUCK",
+      branch: "afk/demo-01",
+    });
+
+    recordApprovedBaseline(repo, "demo", "70", {
+      treeId: "e".repeat(40),
+      commit: "f".repeat(40),
+      artifactPath: ".afk/artifacts/demo/slice-01/approved-baseline.json",
+    });
+
+    const loaded = loadRunState(repo, "demo");
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
+    expect(approvedBaselineFor(loaded, "70")).toEqual({
+      treeId: "e".repeat(40),
+      commit: "f".repeat(40),
+      artifactPath: ".afk/artifacts/demo/slice-01/approved-baseline.json",
+    });
+    // Additive: the slice record the run already had is still there.
+    expect(loaded.slices["70"]!.phase).toBe("STUCK");
+
+    // A second slice's baseline joins the map instead of replacing it.
+    recordApprovedBaseline(repo, "demo", "71", {
+      treeId: "1".repeat(40),
+      commit: "2".repeat(40),
+      artifactPath: ".afk/artifacts/demo/slice-02/approved-baseline.json",
+    });
+    const reloaded = loadRunState(repo, "demo");
+    expect(Object.keys(reloaded.approvedBaselines ?? {}).sort()).toEqual([
+      "70",
+      "71",
+    ]);
   });
 });
 
@@ -280,11 +393,11 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     expect(isSliceComplete(loadRunState(repo, "parked"), "8181")).toBe(false);
   });
 
-  it("returns a fresh v4 state when no file exists", () => {
+  it("returns a fresh current-version state when no file exists", () => {
     const repo = makeRepo();
     const loaded = loadRunState(repo, "fresh");
     expect(loaded).toEqual({
-      version: 4,
+      version: RUN_STATE_VERSION,
       prdSlug: "fresh",
       featureBranch: "feat/fresh",
       slices: {},
@@ -1376,7 +1489,7 @@ describe("RunState.appliedWaivers", () => {
   };
 
   it("[behavior:B-13] upgrades every earlier version to 4 with the field absent", () => {
-    expect(CURRENT_RUN_STATE_VERSION).toBe(4);
+    expect(RUN_STATE_VERSION).toBe(4);
     for (const version of [undefined, 1, 2, 3, 4]) {
       const adapted = adaptLoadedState(
         {

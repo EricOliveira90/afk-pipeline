@@ -47,25 +47,43 @@ export interface PersistedSliceState {
 }
 
 /**
- * The schema version every write stamps on the file (#193 raised it to 4 for
- * `appliedWaivers`). Exported because it is the one number a reader has to
- * compare against, and a duplicated literal is how two modules disagree about
- * what "current" means.
+ * The schema version every writer emits. v4 carries two independent additions,
+ * both keyed by GitHub issue and both optional: the per-slice approved baseline
+ * locator below (#91) and `appliedWaivers` (#193). `adaptLoadedState` normalizes
+ * a v3 file to it in memory, so a resumed run reads one shape, and `writeRunState`
+ * stamps it on every write so a stale caller literal can never reach disk.
+ *
+ * Exported because it is the one number a reader has to compare against, and a
+ * duplicated literal is how two modules disagree about what "current" means.
  */
-export const CURRENT_RUN_STATE_VERSION = 4;
+export const RUN_STATE_VERSION = 4;
 
 /**
- * Versions an in-memory `RunState` may carry. `adaptLoadedState` normalizes
- * every loaded file to {@link CURRENT_RUN_STATE_VERSION}, and `writeRunState`
- * stamps it on every write, so a stale literal on a caller-built object can
- * never reach disk. The union exists so that raising the version is genuinely
- * additive: objects hand-built against version 3 stay assignable, exactly as
- * `appliedWaivers` being absent stays readable.
+ * Where one slice's approved baseline artifact is, and which candidate it
+ * describes (#91 AC5, PRD D10).
+ *
+ * A locator, not an authority: `approved-baseline.json` itself is canonical,
+ * because D20 compares the final tree against that file. This record exists
+ * so a resumed run can *find* it without re-deriving the checkpoint, and
+ * nothing has two authorities for the same fact.
  */
-export type RunStateVersion = 3 | 4;
+export interface PersistedApprovedBaseline {
+  /** Candidate checkpoint tree object ID — not a commit. */
+  treeId: string;
+  /** Candidate checkpoint commit. */
+  commit: string;
+  /** Repo-relative path of the canonical `approved-baseline.json`. */
+  artifactPath: string;
+}
 
 export interface RunState {
-  version: RunStateVersion;
+  /**
+   * Schema version. Writers emit {@link RUN_STATE_VERSION} and
+   * `adaptLoadedState` returns it for every accepted file; the literal `3`
+   * stays assignable so callers and fixtures holding a v3 record keep
+   * compiling, and nothing reads a `3` back out of a loaded state.
+   */
+  version: 3 | 4;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -124,11 +142,18 @@ export interface RunState {
   /** Manifest-owned pool and issue-owned allocations, persisted across retries. */
   migrations?: MigrationClaimState;
   /**
-   * Protected-change waivers a gate actually applied, keyed by GH issue
-   * (#193). Kept beside `slices` rather than inside `PersistedSliceState` for
-   * the same reason `resume` is: a RUNNING slice has no persisted record at
-   * all (ADR 0018), and the waiver is written at gate time, mid-slice. Absent
-   * entries read as none, so state files predating the field stay loadable.
+   * Per-slice approved-baseline locators, keyed by GitHub issue — one of v4's
+   * two additions (#91). Absent entries read as "no baseline recorded", so a v3
+   * file loads unchanged.
+   */
+  approvedBaselines?: Record<string, PersistedApprovedBaseline>;
+  /**
+   * Protected-change waivers a gate actually applied, keyed by GH issue — v4's
+   * other addition (#193). Kept beside `slices` rather than inside
+   * `PersistedSliceState` for the same reason `resume` is: a RUNNING slice has
+   * no persisted record at all (ADR 0018), and the waiver is written at gate
+   * time, mid-slice. Absent entries read as none, so state files predating the
+   * field stay loadable.
    */
   appliedWaivers?: Record<string, PersistedAppliedWaiver[]>;
 }
@@ -692,7 +717,7 @@ function writeRunState(path: string, state: RunState): void {
   writeFileSync(
     path,
     JSON.stringify(
-      { ...state, version: CURRENT_RUN_STATE_VERSION },
+      { ...state, version: RUN_STATE_VERSION },
       null,
       2,
     ),
@@ -750,20 +775,84 @@ export function listRunStateSlugs(repoRoot: string): string[] {
 }
 
 /**
+ * Keep only well-formed baseline locators. A malformed entry degrades to
+ * absent rather than throwing: the artifact file is canonical, so a broken
+ * locator costs a re-derivation, never the run.
+ */
+function sanitizeApprovedBaselines(
+  value: unknown,
+): Record<string, PersistedApprovedBaseline> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const out: Record<string, PersistedApprovedBaseline> = {};
+  for (const [ghIssue, raw] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as Partial<
+      Record<keyof PersistedApprovedBaseline, unknown>
+    >;
+    const nonblank = (field: unknown): field is string =>
+      typeof field === "string" && field.trim() !== "";
+    if (
+      !nonblank(record.treeId) ||
+      !nonblank(record.commit) ||
+      !nonblank(record.artifactPath)
+    ) {
+      continue;
+    }
+    out[ghIssue] = {
+      treeId: record.treeId,
+      commit: record.commit,
+      artifactPath: record.artifactPath,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The recorded baseline locator for one slice, or `undefined`. */
+export function approvedBaselineFor(
+  state: RunState,
+  ghIssue: string,
+): PersistedApprovedBaseline | undefined {
+  return state.approvedBaselines?.[ghIssue];
+}
+
+/**
+ * Record where one slice's approved baseline artifact is. Called by the
+ * orchestrator on a deterministic PASS, immediately after the artifact is
+ * written, so the locator never points at a file that does not exist.
+ */
+export function recordApprovedBaseline(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  record: PersistedApprovedBaseline,
+): void {
+  updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    state.approvedBaselines = {
+      ...(state.approvedBaselines ?? {}),
+      [ghIssue]: record,
+    };
+  });
+}
+
+/**
  * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
  * checkpoint storage whose focused reader owns validation. v3 adds adoption
- * provenance to terminal slice records. v4 adds applied protected-change
- * waivers (#193), a purely additive field that reads as none when absent.
- * Throws on unknown status strings rather than silently producing an invalid
- * record.
+ * provenance to terminal slice records. v4 adds two purely additive fields: the
+ * per-slice approved baseline locator (#91) and applied protected-change waivers
+ * (#193). A v3 file simply has neither — it adapts to v4 in memory with no
+ * locator, no waivers and no write. Throws on unknown status strings rather than
+ * silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
   if (!existsSync(p)) {
     return {
-      version: CURRENT_RUN_STATE_VERSION,
+      version: RUN_STATE_VERSION,
       prdSlug,
       featureBranch: `feat/${prdSlug}`,
       slices: {},
@@ -788,6 +877,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     qaConvergence?: unknown;
     nonProgress?: unknown;
     migrations?: unknown;
+    approvedBaselines?: unknown;
     appliedWaivers?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
@@ -813,9 +903,13 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const reviewPhase = sanitizeReviewPhase(r.reviewPhase);
     const resume = sanitizeResumeMap(r.resume);
     const migrations = sanitizeMigrationClaims(r.migrations);
+    // A v3 file has neither field at all, which is exactly "no baseline
+    // recorded" and "no waiver applied" — the adapter adds nothing and
+    // writes nothing.
+    const approvedBaselines = sanitizeApprovedBaselines(r.approvedBaselines);
     const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
     return {
-      version: CURRENT_RUN_STATE_VERSION,
+      version: RUN_STATE_VERSION,
       prdSlug,
       featureBranch,
       ...(specsDir !== undefined ? { specsDir } : {}),
@@ -836,6 +930,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
         ? { nonProgress: r.nonProgress }
         : {}),
       ...(migrations !== undefined ? { migrations } : {}),
+      ...(approvedBaselines !== undefined ? { approvedBaselines } : {}),
       // v1–v3 files have no such field at all, so the upgrade leaves it
       // absent: "no waiver was applied" and "this file predates waivers"
       // are the same fact to every reader.
@@ -871,7 +966,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     };
   }
   return {
-    version: CURRENT_RUN_STATE_VERSION,
+    version: RUN_STATE_VERSION,
     prdSlug,
     featureBranch,
     ...(specsDir !== undefined ? { specsDir } : {}),

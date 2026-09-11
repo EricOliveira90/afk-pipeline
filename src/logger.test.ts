@@ -243,6 +243,68 @@ PM review: N/A
     expect(md).toContain("Pre-ship sanity gate: N/A");
   });
 
+  /**
+   * Candidate review isolation is invisible in the log otherwise: the approved
+   * baseline is a file an operator has to know exists, and a reviewer write
+   * that fell outside the allowlist was silently discarded (#91 AC5/AC3). One
+   * section answers both questions, and it renders only when such an event
+   * exists so every other run's summary keeps its bytes.
+   */
+  it("[behavior:B-09] renders the approved baseline and reviewer-write violations", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "isolation");
+    recordTerminal(log, id("70", "Isolated review", "afk/70"), {
+      phase: "PASS",
+    });
+    log.event({
+      type: "approved-baseline",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 2,
+      treeId: "tree-abc",
+      commit: "commit-def",
+      artifactId: "baseline-1",
+    });
+    log.event({
+      type: "reviewer-write-violation",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 2,
+      attempt: 1,
+      path: "src/orchestrator.ts",
+    });
+    log.event({
+      type: "reviewer-write-violation",
+      ghIssue: "70",
+      sliceNumber: "01",
+      round: 2,
+      attempt: 2,
+      path: "probe.txt",
+    });
+
+    const md = log.writeSummary();
+    const section = md.slice(md.indexOf("## Candidate Review Isolation"));
+    expect(md).toContain("## Candidate Review Isolation");
+    expect(section).toContain(
+      "| 70 | 2 | approved-baseline | tree-abc | commit-def | baseline-1 |",
+    );
+    expect(section).toContain(
+      "| 70 | 2 | reviewer-write-violation | — | attempt 1 | src/orchestrator.ts |",
+    );
+    expect(section).toContain(
+      "| 70 | 2 | reviewer-write-violation | — | attempt 2 | probe.txt |",
+    );
+    expect(md).toContain("Pre-ship sanity gate: N/A");
+  });
+
+  it("[behavior:B-09] renders no isolation section for a run without those events", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "no-isolation");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+
+    expect(log.writeSummary()).not.toContain("## Candidate Review Isolation");
+  });
+
   it("P-03 renders no empty coverage section when no coverage event exists", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "no-coverage");

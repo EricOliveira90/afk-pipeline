@@ -587,6 +587,17 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
  * contract; it is validated by the same completeness checks as every other
  * registered manifest.
  *
+ * Reshaped in place by slice 03 (#91 AC4/AC9) rather than replaced. The role
+ * now reads a disposable worktree at the candidate checkpoint instead of the
+ * generator's worktree, and `allowedWriteScope` below is the *instruction* it
+ * is given there — the enforcement surface is the copy-back allowlist
+ * (`QA_WINDOW_ARTIFACT_NAME`), which discards everything else. Four
+ * properties are load-bearing and stay put: the role ID, `outputArtifact`
+ * (D9 introduces no second candidate verdict artifact name),
+ * `allowedWriteScope`'s two canonical artifacts, and `change-summary` first
+ * in `inputOrder` — the orchestrator now generates that summary from git
+ * before the invocation, so leading with it is a promise the pipeline keeps.
+ *
  * Include/exclude contract (guardian round 2, architect A3):
  * - `docs/specs/afk-v2-agent-roles.md` M7 excludes `handoff.md` from every
  *   reviewer input ("judge the tree, not the author's story"), so no
@@ -1635,6 +1646,271 @@ export function projectContractEvaluatorEvidence(context: string): string {
     .join("");
 }
 
+/**
+ * Sections of the assembled repair situation whose body is a verbatim fenced
+ * copy of a file the round already carries by reference as `repair-context`,
+ * and the filename each duplicates.
+ *
+ * #230: on PRD 4 slice #193 (`run-20260910-131250`, `--resume-stuck 07`) the
+ * repair round refused to dispatch at 73,607 bytes against a 65,536-byte
+ * budget, with `repair-situation` the dominant 33,745-byte term. 23,093 of
+ * those bytes were fenced copies of `stuck.md` (16,327) and `handoff.md`
+ * (6,766) — both simultaneously registered by reference, so the generator was
+ * handed two copies of each file it could already open. That is #196's defect
+ * on the repair path.
+ *
+ * The framing prose stays: it is instruction, not duplication, and it tells the
+ * generator what the document is and why it matters. Only the fenced copy is
+ * replaced, by a pointer to the path the artifact reference already names.
+ */
+const REPAIR_SITUATION_BY_REFERENCE_SECTIONS = [
+  { title: "Preserved STUCK evidence", filename: "stuck.md" },
+  { title: "Prior handoff", filename: "handoff.md" },
+] as const;
+
+/** Heading of the repair situation section that grows with round count. */
+const REPAIR_SITUATION_COMMIT_LOG_SECTION = "Commit log";
+
+/**
+ * Heading of the merge-resolution data block (#132 B-02, PRD D15 mechanism M5).
+ *
+ * A merge-resolution round is a repair round with a different situation, not a
+ * new role: the conflict hunks and the already-merged sibling diffs travel in
+ * the existing `{{REPAIR_SITUATION}}` slot under this heading, so there is no
+ * second generator template to keep in sync. Its membership in
+ * {@link REPAIR_SITUATION_SECTION_TITLES} is what keeps the situation's other
+ * section extents correct once the block's own fenced diffs are inside it.
+ */
+export const MERGE_RESOLUTION_SITUATION_SECTION = "Merge conflict to resolve";
+
+/**
+ * Every heading the orchestrator emits for the repair situation itself
+ * (`orchestrator.ts`, the `repairSituation` assembly).
+ *
+ * A quoted document carries its own level-1 headings — `stuck.md`'s block opens
+ * with "Why you were declared STUCK" — so a section's extent cannot be taken as
+ * "up to the next level-1 heading": that would end the wrapper section
+ * immediately and leave the quote outside it. The situation's own headings are
+ * a closed set, so the extent runs to the next heading in that set.
+ */
+const REPAIR_SITUATION_SECTION_TITLES = new Set([
+  REPAIR_SITUATION_COMMIT_LOG_SECTION,
+  "Worktree state",
+  "Base refresh",
+  "Preserved STUCK evidence",
+  "Prior handoff",
+  MERGE_RESOLUTION_SITUATION_SECTION,
+]);
+
+/**
+ * Locates a section of the assembled repair situation by title, with its body
+ * running to the next section of the situation itself. Fence-aware via
+ * markdownSections, so a `#` line inside a fenced quote is not read as a
+ * heading at all.
+ */
+function repairSituationSection(
+  situation: string,
+  title: string,
+): MarkdownSection | undefined {
+  const own = markdownSections(situation).filter(
+    (section) =>
+      section.level === 1 && REPAIR_SITUATION_SECTION_TITLES.has(section.title),
+  );
+  const index = own.findIndex((section) => section.title === title);
+  if (index === -1) return undefined;
+  return {
+    ...own[index]!,
+    bodyEnd: own[index + 1]?.headingStart ?? situation.length,
+  };
+}
+
+/**
+ * Replaces the quoted document in `body` — the span from its first fence line
+ * to its last — with a single `replacement` line, keeping the framing prose on
+ * either side.
+ *
+ * Deliberately *not* fence pairing. The quoted documents carry fences of their
+ * own: `stuck.md` embeds JSON and diff blocks, and the note builders in
+ * `resume.ts` wrap the whole file in a plain ``` fence, so an inner ``` is
+ * indistinguishable from the outer close. Pairing therefore mis-terminates the
+ * quote at the document's first inner fence and reads the rest as alternating
+ * quote and prose — which leaked fragments of the document back inline,
+ * interleaved with a repeated pointer, instead of removing it (three pointers
+ * and two leaked passages on a `stuck.md` with two inner fences).
+ *
+ * A span has no pairing to get wrong: everything between the outer fences is
+ * the document, whatever it contains. The cost is that prose *between* two
+ * genuinely separate quotes in one section would go too — neither section in
+ * REPAIR_SITUATION_BY_REFERENCE_SECTIONS has that shape, since each wraps one
+ * file in one fence.
+ */
+function replaceQuotedDocument(body: string, replacement: string): string {
+  const lines = body.split("\n");
+  const isFence = (line: string): boolean => {
+    const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    // A backtick fence whose info string contains a backtick is not a fence,
+    // matching markdownSections.
+    return (
+      match !== null &&
+      !(match[1]![0] === "`" && match[2]!.includes("`"))
+    );
+  };
+  const first = lines.findIndex(isFence);
+  if (first === -1) return body;
+  let last = lines.length - 1;
+  while (!isFence(lines[last]!)) last--;
+  // An unterminated fence — the whole tail is document.
+  return [...lines.slice(0, first), replacement, ...lines.slice(last + 1)].join(
+    "\n",
+  );
+}
+
+/**
+ * Replaces the quoted document in the repair situation's document-quoting
+ * sections with a pointer to the path the round already carries by reference.
+ *
+ * A section is only rewritten when its file is actually in
+ * `byReferenceArtifactIds`: the situation may only stop carrying text the
+ * generator can still reach, so an unreferenced quote is left inline.
+ */
+export function projectGeneratorRepairSituation(
+  situation: string,
+  sliceDir: string,
+  byReferenceArtifactIds: readonly string[],
+): string {
+  const referenced = new Set(byReferenceArtifactIds);
+  let projected = situation;
+  for (const { title, filename } of REPAIR_SITUATION_BY_REFERENCE_SECTIONS) {
+    const artifactId = `${sliceDir}/${filename}`;
+    if (!referenced.has(artifactId)) continue;
+    const section = repairSituationSection(projected, title);
+    if (section === undefined) continue;
+    const body = projected.slice(section.bodyStart, section.bodyEnd);
+    const pointed = replaceQuotedDocument(
+      body,
+      `Read it at \`${artifactId}\` in your worktree.`,
+    );
+    if (pointed === body) continue;
+    projected =
+      projected.slice(0, section.bodyStart) +
+      pointed +
+      projected.slice(section.bodyEnd);
+  }
+  return projected;
+}
+
+/**
+ * Rewrites the repair situation's commit-log section body.
+ *
+ * Used both to measure the room the rest of the round leaves the log (body
+ * `""`) and to install the bounded log.
+ */
+function withRepairSituationCommitLog(
+  situation: string,
+  commitLog: string,
+): string {
+  const section = repairSituationSection(
+    situation,
+    REPAIR_SITUATION_COMMIT_LOG_SECTION,
+  );
+  if (section === undefined) return situation;
+  return (
+    situation.slice(0, section.bodyStart) +
+    (commitLog === "" ? "\n" : `\n\n${commitLog}\n`) +
+    situation.slice(section.bodyEnd)
+  );
+}
+
+/**
+ * Truncates the commit log to `budgetBytes`, dropping whole commits from the
+ * oldest end and naming the drop.
+ *
+ * #230: de-duplicating the fenced copies takes the #193-shaped round from
+ * 73,607 to ~50,500 bytes, but headroom is a number, not a property. The
+ * commit log is `git log <base>..HEAD --stat`, so it grows with every round the
+ * slice survives — #193 reached ten. Bounding it is what makes "a repair round
+ * fits" independent of round count: the block that would overflow is the one
+ * that yields, and every other block in the situation is fixed-size round
+ * facts. `git log` is newest-first, so the newest commits are kept.
+ */
+export function boundRepairSituationCommitLog(
+  commitLog: string,
+  budgetBytes: number,
+): string {
+  if (Buffer.byteLength(commitLog, "utf-8") <= budgetBytes) return commitLog;
+  // A commit entry starts at a `commit <sha>` line; anything before the first
+  // one is not a recognizable log and is truncated as a single unit.
+  const entries = commitLog
+    .split(/^(?=commit [0-9a-f]{7,40}\b)/m)
+    .filter((entry) => entry !== "");
+  // The note is reserved at its widest (every entry dropped) so the reservation
+  // cannot grow as entries are kept and push the result back over budget.
+  const reserved = Buffer.byteLength(
+    repairSituationCommitLogDropNote(entries.length),
+    "utf-8",
+  );
+  const kept: string[] = [];
+  let used = 0;
+  for (const entry of entries) {
+    const size = Buffer.byteLength(entry, "utf-8");
+    if (used + size + reserved > budgetBytes) break;
+    kept.push(entry);
+    used += size;
+  }
+  const dropped = entries.length - kept.length;
+  return kept.length === 0
+    ? repairSituationCommitLogDropNote(dropped).trimStart()
+    : kept.join("").trimEnd() + repairSituationCommitLogDropNote(dropped);
+}
+
+function repairSituationCommitLogDropNote(dropped: number): string {
+  return `\n\n(${dropped} older commit${dropped === 1 ? "" : "s"} omitted to fit the inline-size budget; run \`git log\` in your worktree for the full history.)`;
+}
+
+/**
+ * Appends the merge-resolution data block to a repair situation as one level-1
+ * section (#132 B-02).
+ *
+ * The block is data the caller has already bounded — `src/merge-resolution.ts`
+ * owns that, because only it knows which files it read the hunks from. This
+ * function owns where the block goes and what it is called, so exactly one
+ * module decides the situation's section vocabulary.
+ */
+export function withMergeResolutionSituation(
+  situation: string,
+  block: string,
+): string {
+  const facts = situation.trim();
+  return (
+    (facts === "" ? "" : `${facts}\n\n`) +
+    `# ${MERGE_RESOLUTION_SITUATION_SECTION}\n\n${block.trim()}\n`
+  );
+}
+
+/**
+ * Bytes the rest of a repair round leaves the merge-resolution data block.
+ *
+ * Measured the way the commit log is measured (#230): render the round with an
+ * empty block and subtract. Newlines are normalised before measuring for the
+ * same reason `assembleGeneratorEnvelope` normalises them — a CRLF checkout
+ * must not spend budget the budget check will not count.
+ */
+export function mergeResolutionBlockRoom(
+  input: GeneratorEnvelopeInput & { repairSituation: string },
+): number {
+  const budget = Math.min(
+    input.inlineSizeBudgetBytes ??
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+  );
+  const empty = assembleGeneratorEnvelope({
+    ...input,
+    mode: "repair",
+    repairSituation: withMergeResolutionSituation(input.repairSituation, ""),
+  }).prompt;
+  return budget - Buffer.byteLength(empty.replace(/\r\n?/g, "\n"), "utf-8");
+}
+
 export function assembleGeneratorEnvelope(
   input: GeneratorEnvelopeInput,
 ): GeneratorEnvelopeResult {
@@ -1664,12 +1940,58 @@ export function assembleGeneratorEnvelope(
     PATTERNS_AND_HARNESS: input.patternsAndHarness,
     FAILURE_SET: failureSet,
   };
+  const additionalArtifactIds = input.additionalArtifactIds ?? [];
+  /**
+   * The repair situation is sized to the room the round's other blocks leave it
+   * (#230), so a repair round can never be refused for carrying too much of its
+   * own history: the only block that grows with round count is the one that
+   * yields. Rendering with an empty commit log measures exactly what is left
+   * for it.
+   */
+  const renderRepair = (situation: string): string =>
+    renderPrompt("generator-repair", {
+      ...commonArgs,
+      REPAIR_SITUATION: situation,
+    });
+  const repairSituation =
+    input.repairSituation === undefined
+      ? undefined
+      : (() => {
+          const projected = projectGeneratorRepairSituation(
+            input.repairSituation,
+            input.sliceDir,
+            additionalArtifactIds,
+          );
+          const commitLogSection = repairSituationSection(
+            projected,
+            REPAIR_SITUATION_COMMIT_LOG_SECTION,
+          );
+          if (commitLogSection === undefined) return projected;
+          const commitLog = projected
+            .slice(commitLogSection.bodyStart, commitLogSection.bodyEnd)
+            .trim();
+          const budget = Math.min(
+            input.inlineSizeBudgetBytes ??
+              GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+            GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+          );
+          const withoutCommitLog = renderRepair(
+            withRepairSituationCommitLog(projected, ""),
+          );
+          const room =
+            budget -
+            Buffer.byteLength(
+              withoutCommitLog.replace(/\r\n?/g, "\n"),
+              "utf-8",
+            );
+          return withRepairSituationCommitLog(
+            projected,
+            boundRepairSituationCommitLog(commitLog, room),
+          );
+        })();
   const prompt =
     input.mode === "repair"
-      ? renderPrompt("generator-repair", {
-          ...commonArgs,
-          REPAIR_SITUATION: input.repairSituation!,
-        })
+      ? renderRepair(repairSituation!)
       : renderPrompt("generator", commonArgs);
   const includedArtifacts: ContextArtifactReference[] = [
     {
@@ -1682,18 +2004,18 @@ export function assembleGeneratorEnvelope(
       artifactId: "migration-reservation",
       ...contentLocator(input.migrationReservation),
     },
-    ...(input.repairSituation === undefined
+    ...(repairSituation === undefined
       ? []
       : [{
           artifactClass: "repair-situation",
           artifactId: "generator:repair-situation",
-          ...contentLocator(input.repairSituation),
+          ...contentLocator(repairSituation),
         }]),
-    ...(input.additionalArtifactIds ?? []).map((artifactId) => ({
+    ...additionalArtifactIds.map((artifactId) => ({
       artifactClass: "repair-context",
       artifactId,
       locatorExemption:
-        "repair-context artifacts travel by reference; only the repair situation inlines content",
+        "repair-context artifacts travel by reference; the repair situation points at them rather than quoting them (#230)",
     })),
     {
       artifactClass: "contract-view",
