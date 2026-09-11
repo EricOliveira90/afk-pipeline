@@ -264,6 +264,45 @@ describe("non-progress policy", () => {
     });
   });
 
+  it("#240 does not call OSCILLATION across a break in the ID space", () => {
+    // A-B-A states are only evidence of oscillation when the three observations
+    // describe one obligation. After a restart-from-base the reviewer renumbers
+    // from the low IDs, so a stable ID in the older observations can name a
+    // different finding than the same ID now — and the lineage's own fold
+    // counter is what says so: `occurrences` only grows while an identity is
+    // carried forward, so a drop is proof of a renumber. #132's negotiation died
+    // at round 1 of 2 on exactly this comparison.
+    const carried = (
+      revision: number,
+      state: string,
+      occurrences: number,
+    ): NonProgressObservation =>
+      observation(revision, ["QA-01"], {
+        findings: [
+          {
+            ...observation(revision, ["QA-01"]).findings[0]!,
+            state,
+            disposition: state,
+            occurrences,
+          },
+        ],
+      });
+
+    const first = decideNonProgress(emptyNonProgressHistory(), carried(1, "OPEN", 2));
+    const second = decideNonProgress(first.history, carried(2, "RESOLVED", 3));
+    // The pass restarted from base: this OPEN QA-01 is a first occurrence.
+    const renumbered = decideNonProgress(second.history, carried(3, "OPEN", 1));
+    expect(renumbered.action).toBe("continue");
+
+    // The same A-B-A, with the fold counter showing one carried identity, still
+    // reports OSCILLATION.
+    const continued = decideNonProgress(second.history, carried(3, "OPEN", 4));
+    expect(continued).toMatchObject({
+      action: "intervene",
+      request: { reasonCodes: ["OSCILLATION"] },
+    });
+  });
+
   it("preserves the best recoverable candidate and emits an actionable typed request", () => {
     const first = decideNonProgress(
       emptyNonProgressHistory(),

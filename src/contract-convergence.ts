@@ -6,6 +6,7 @@ import {
   ACTIVE_CONTRACT_FINDING_STATES,
   parseContractReview,
 } from "./contract-review.js";
+import { idMatchIsCorroborated } from "./guardian-convergence.js";
 import {
   loadRunState,
   updateRunState,
@@ -143,9 +144,21 @@ function cloneLineage(
 
 /**
  * Fold one validated evaluator review into the compact per-slice lineage.
- * IDs are authoritative; the deterministic fingerprint catches a provider
- * that renames the same obligation and classifies it as repetition or
- * regression instead of rewarding it as fresh.
+ * The deterministic fingerprint catches a provider that renames the same
+ * obligation and classifies it as repetition or regression instead of rewarding
+ * it as fresh.
+ *
+ * An ID match is authoritative only while it is corroborated
+ * ({@link idMatchIsCorroborated}): the fingerprint agrees, or the prior entry
+ * is still live. Within one negotiation the evaluator numbers consistently and
+ * restates a live finding's `expected` and `clearCondition` freely as the round
+ * moves — measured on the recorded PRD 4 reviews, 32 of 43 same-ID
+ * continuations rewrote one or the other — so a live prior keeps ID precedence.
+ * A *terminal* entry's ID carries no such warrant. Across a restart-from-base
+ * the evaluator renumbers from `F-01` while durable lineage keeps the previous
+ * pass's IDs, so a fresh finding lands on a spent, already-RESOLVED number and
+ * used to be folded onto it as REOPENED — two of those trip OSCILLATION and
+ * kill negotiation at round 1 (#240).
  */
 export function advanceContractFindingLineage(
   prior: ContractFindingLineage,
@@ -169,11 +182,30 @@ export function advanceContractFindingLineage(
   const reopenedBlockingIds: string[] = [];
   const regressedBlockingIds: string[] = [];
 
+  // A fresh finding whose ID is spent may not take the spent identity's key:
+  // that would overwrite the terminal entry and erase the history the reopen
+  // and regression rules read.
+  const mintStableId = (id: string): string => {
+    if (lineage.findings[id] === undefined) return id;
+    for (let n = 2; ; n++) {
+      const candidate = `${id}-${n}`;
+      if (lineage.findings[candidate] === undefined) return candidate;
+    }
+  };
+
   for (const finding of review.findings) {
-    const priorEntry =
-      byCurrentId.get(finding.id) ??
-      byFingerprint.get(findingFingerprint(finding));
-    const stableId = priorEntry?.stableId ?? finding.id;
+    const fingerprint = findingFingerprint(finding);
+    const idMatch = byCurrentId.get(finding.id);
+    const corroboratedIdMatch =
+      idMatch !== undefined &&
+      idMatchIsCorroborated({
+        fingerprintAgrees: findingFingerprint(idMatch.finding) === fingerprint,
+        priorIsLive: !isTerminal(idMatch),
+      });
+    const priorEntry = corroboratedIdMatch
+      ? idMatch
+      : byFingerprint.get(fingerprint);
+    const stableId = priorEntry?.stableId ?? mintStableId(finding.id);
     const disposition =
       priorEntry && isActive(finding)
         ? activeDisposition(priorEntry, finding)
@@ -195,7 +227,7 @@ export function advanceContractFindingLineage(
     };
     lineage.findings[stableId] = entry;
     byCurrentId.set(finding.id, entry);
-    byFingerprint.set(findingFingerprint(finding), entry);
+    byFingerprint.set(fingerprint, entry);
 
     if (finding.severity !== "BLOCKING" || !isActive(finding)) continue;
     if (!priorEntry) freshBlockingIds.push(finding.id);

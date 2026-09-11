@@ -75,6 +75,90 @@ describe("contract finding lineage", () => {
     expect(regressed.lineage.findings["F-01"]?.stableId).toBe("F-01");
   });
 
+  it("#240 treats a fresh finding that reuses a resolved ID as fresh, not REOPENED", () => {
+    // Slice 06 (#132), run-20260910-224601. The slice escalated with F-01…F-05,
+    // of which F-01/F-03/F-04/F-05 ended RESOLVED. A decision was recorded and
+    // the slice reran restarting from base, so the evaluator renumbered from
+    // F-01 while durable lineage kept the previous pass's IDs. Round 1 returned
+    // two entirely new blockers on the spent numbers F-03 and F-04: the lineage
+    // folded them onto the terminal entries as REOPENED with occurrences 3, and
+    // the non-progress detector called OSCILLATION and killed negotiation at
+    // round 1 of 2 — forfeiting the round that existed to fix exactly those two.
+    const escalated = advanceContractFindingLineage(
+      emptyContractFindingLineage(),
+      review(
+        [
+          finding("F-03", "RESOLVED", {
+            behaviorIds: ["B-11"],
+            expected: "The observable covers the rejection set the behavior enumerates",
+            clearCondition: "B-11's given covers the full enumerated set",
+          }),
+          finding("F-04", "RESOLVED", {
+            behaviorIds: ["B-03"],
+            expected: "Both halves of the protectedPaths clause have a declared case",
+            clearCondition: "B-03's given adds a fifth policy",
+          }),
+        ],
+        "ACCEPT",
+      ),
+    ).lineage;
+
+    const rerun = advanceContractFindingLineage(
+      escalated,
+      review([
+        finding("F-03", "OPEN", {
+          behaviorIds: ["B-03"],
+          expected: "The contract must lock a derivation mechanism for the conflict hunks",
+          clearCondition: "contract.md B-03 states the actual derivation",
+        }),
+        finding("F-04", "OPEN", {
+          behaviorIds: ["B-07"],
+          expected: "B-07's observable must be satisfiable by the mandated implementation",
+          clearCondition: "manifest B-07's then is rewritten to the decided property",
+        }),
+      ]),
+    );
+
+    expect(rerun.reopenedBlockingIds).toEqual([]);
+    expect(rerun.freshBlockingIds).toEqual(["F-03", "F-04"]);
+    // Fresh identities, so the resolved history they landed on survives intact
+    // rather than being overwritten with occurrences 3.
+    expect(
+      Object.values(rerun.lineage.findings)
+        .map((entry) => [entry.stableId, entry.disposition, entry.occurrences])
+        .sort(),
+    ).toEqual([
+      ["F-03", "RESOLVED", 1],
+      ["F-03-2", "OPEN", 1],
+      ["F-04", "RESOLVED", 1],
+      ["F-04-2", "OPEN", 1],
+    ]);
+  });
+
+  it("#240 keeps ID precedence while the prior finding is still live", () => {
+    // The guard may not cost repetition detection. Within one negotiation the
+    // evaluator restates a live finding's expected and clear condition freely as
+    // the round moves — measured on the recorded PRD 4 reviews, 32 of 43 same-ID
+    // continuations rewrote one or the other — and those must still fold.
+    const first = advanceContractFindingLineage(
+      emptyContractFindingLineage(),
+      review([finding("F-01", "OPEN")]),
+    ).lineage;
+    const restated = advanceContractFindingLineage(
+      first,
+      review([
+        finding("F-01", "OPEN", {
+          expected: "the same obligation, put another way",
+          clearCondition: "a narrower remedy than the round opened with",
+        }),
+      ]),
+    );
+
+    expect(restated.repeatedBlockingIds).toEqual(["F-01"]);
+    expect(restated.lineage.findings["F-01"]?.occurrences).toBe(2);
+    expect(Object.keys(restated.lineage.findings)).toEqual(["F-01"]);
+  });
+
   it("routes open findings plus only overlapping resolved history", () => {
     let lineage = advanceContractFindingLineage(
       emptyContractFindingLineage(),
