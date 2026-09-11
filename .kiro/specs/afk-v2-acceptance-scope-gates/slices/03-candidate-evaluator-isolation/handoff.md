@@ -90,6 +90,11 @@
   the reviewer-write scan needs a second `--ignored` status scoped to that
   path; both reads pass `-c core.quotePath=false` so non-ASCII paths are not
   escaped.
+- A working directory's slice identity is read off the *tail* of its path
+  (`-s01`): `sliceFromCwd` in `src/orchestrator.fixtures.ts` matches
+  `-s<number>` only at the end or before a `/`. The review worktree name must
+  therefore keep the slice suffix last, or every pipeline fixture's stub
+  evaluator resolves no slice and writes no verdict artifact.
 - The resumed-final-round scenario used for P-01 restores prior progress
   counters from seeded lineage, so "no eval round" has to be asserted on the
   per-run evaluator dispatch count, not on `getSliceProgress`.
