@@ -20,6 +20,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Agent providers | One interface, three backends (ADR 0002, 0013, 0016) | `src/agent-provider.ts` | `src/claude.ts`, `src/codex.ts`, `src/kiro.ts` |
 | Invocation runtime | Bounded process execution, liveness, retries (ADR 0030, 0021, 0022) | `src/invocation-runtime.ts` | `src/command-runtime.ts`, `src/busy-probe.ts`, `src/idle-watcher.ts`, `src/kill-tree.ts`, `src/liveness.ts`, `src/transient-retry.ts` |
 | Git operations | Worktrees, branches, atomic merge attempts (ADR 0010) | `src/git.ts` | `src/worktree-processes.ts` |
+| Merge resolution | One scoped resolution round for a conflicted wave merge (#132, ADR 0029, 0039) | `src/merge-resolution.ts` | — |
 | Run identity | Provider-qualified state, branch, and worktree names (ADR 0002, 0053) | `src/run-identity.ts` | — |
 | Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031, 0056) | `src/run-state.ts`, `src/run-journal.ts` | `src/file-lock.ts`, `src/adoption-provenance.ts`, `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
 | Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
@@ -69,6 +70,14 @@ entry in `afk.config.json`. Cap: 150 lines.
 - Change summary (`src/change-summary.ts`) — one builder over
   `(cwd, fromRef, toRef)`; a new evaluator's input is a variant binding those
   two refs, never a second producer.
+- Merge resolution (`resolveMergeConflict` in `src/wave.ts`, body in
+  `src/merge-resolution.ts`) — a real textual conflict spends one scoped round
+  in the slice's own worktree, inside the merge mutex the refused attempt
+  already holds: the round re-runs the slice's own required declarations on the
+  resolution commit's tree and refuses the retry if a conflicted path still
+  carries a marker. Unset — every caller outside the orchestrator — a conflict
+  is terminal as before; a failed round keeps the resolution commit (ADR 0039),
+  leaves the feature tip unmoved and records the same terminal `CONFLICT`.
 - Review lifecycle (`src/convergence-coordinator.ts`,
   `src/accepted-candidate.ts`) — the orchestrator sequences typed outcomes;
   these modules own validation, continuation, cap, resume, and terminal policy.
