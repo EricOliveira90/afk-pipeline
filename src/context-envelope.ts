@@ -587,6 +587,17 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
  * contract; it is validated by the same completeness checks as every other
  * registered manifest.
  *
+ * Reshaped in place by slice 03 (#91 AC4/AC9) rather than replaced. The role
+ * now reads a disposable worktree at the candidate checkpoint instead of the
+ * generator's worktree, and `allowedWriteScope` below is the *instruction* it
+ * is given there — the enforcement surface is the copy-back allowlist
+ * (`QA_WINDOW_ARTIFACT_NAME`), which discards everything else. Four
+ * properties are load-bearing and stay put: the role ID, `outputArtifact`
+ * (D9 introduces no second candidate verdict artifact name),
+ * `allowedWriteScope`'s two canonical artifacts, and `change-summary` first
+ * in `inputOrder` — the orchestrator now generates that summary from git
+ * before the invocation, so leading with it is a promise the pipeline keeps.
+ *
  * Include/exclude contract (guardian round 2, architect A3):
  * - `docs/specs/afk-v2-agent-roles.md` M7 excludes `handoff.md` from every
  *   reviewer input ("judge the tree, not the author's story"), so no

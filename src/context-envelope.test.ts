@@ -1980,6 +1980,42 @@ describe("role contract manifests", () => {
     ]);
   });
 
+  /**
+   * Slice 03 reshapes the deferred manifest in place instead of replacing it
+   * (#91 AC4). Four properties are load-bearing once deterministic QA reads a
+   * disposable worktree: the role ID that names the prompt, the single output
+   * artifact pair, the write scope the reviewer is instructed to stay inside,
+   * and `change-summary` leading the envelope now that the orchestrator
+   * actually produces one before the invocation.
+   */
+  it("[behavior:B-07] keeps the candidate evaluator's reshaped manifest load-bearing", () => {
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.role).toBe("evaluator-qa");
+    // D9 introduces no second candidate verdict artifact name.
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.outputArtifact).toBe(
+      "qa-review-pair",
+    );
+    // The two canonical artifacts, and nothing else, are what the reviewer is
+    // told it may write — the copy-back allowlist is what enforces it.
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.allowedWriteScope).toEqual([
+      "slice/qa-review.json",
+      "slice/qa-report.md",
+    ]);
+    // The change summary is read first because it is generated first.
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.inputOrder[0]).toBe(
+      "change-summary",
+    );
+    // No handoff class reaches this role, in either list's spelling.
+    const accepted: readonly string[] =
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses;
+    expect(accepted.filter((entry) => entry.includes("handoff"))).toEqual([]);
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+    ).toContain("candidate-handoff");
+    expect(() =>
+      validateContextEnvelopeManifest(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST),
+    ).not.toThrow();
+  });
+
   it("clamps a budget override larger than the manifest budget and applies a smaller one", () => {
     const oversizedPrompt = "x".repeat(
       PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes + 1,
