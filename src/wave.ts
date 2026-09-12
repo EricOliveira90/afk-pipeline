@@ -143,6 +143,7 @@ function migrationPrefixGate(
   config: PipelineConfig,
   featBranch: string,
   ghIssue: string,
+  logger: RunJournal,
 ): (contractPath: string) => string | null {
   const laneOptions = { migrationPathPattern: config.migrationPathPattern };
   // `migrationPathsIn` normalises to forward slashes, so the POSIX
@@ -160,6 +161,21 @@ function migrationPrefixGate(
         contractPath,
         expectedPool: config.manifest.migrationPrefixes,
         options: laneOptions,
+        onSubstitution: (substitutions) => {
+          const message =
+            `#${ghIssue}: the contract-lock gate substituted this slice's ` +
+            `reserved migration prefix${substitutions.length === 1 ? "" : "es"} ` +
+            `into the placeholder path${substitutions.length === 1 ? "" : "s"} ` +
+            `it told the planner to write — ` +
+            substitutions.map((s) => `${s.from} -> ${s.to}`).join(", ") +
+            `; the contract locks in this round, no planner round spent (#267)`;
+          logger.phase(`[afk] ${message}`, "log", {
+            type: "warn",
+            reason: "migration-prefix-substituted",
+            ghIssue,
+            message,
+          });
+        },
       });
     }
 
@@ -247,7 +263,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
   const ctxById = new Map<string, SliceContext>();
   for (const id of readyIds) {
     const slice = dag.slices.get(id)!;
-    const migrationGate = migrationPrefixGate(config, featBranch, id);
+    const migrationGate = migrationPrefixGate(config, featBranch, id, logger);
     ctxById.set(id, {
       ...makeSliceContext(
         config,
