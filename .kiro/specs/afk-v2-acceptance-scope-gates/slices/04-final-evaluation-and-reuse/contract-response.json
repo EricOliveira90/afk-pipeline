@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-02 no longer writes the reuse fact into gate evidence. It now names three in-scope stores: RunState.finalEvaluations[ghIssue].decision === \"reuse\" in src/run-state.ts (beside approvedBaselines at src/run-state.ts:149, read back through a new finalEvaluationFor reader in the style of approvedBaselineFor at src/run-state.ts:813), one additive final-evaluation-reuse event in src/run-events.ts (admitted the same way approved-baseline was at src/run-events.ts:223-239, EVENTS_SCHEMA_VERSION stays 1), and the run-summary.md section in src/logger.ts. B-02 states explicitly that this marker is distinct from the D17 gate-cache reused flag on GateResult (src/gate-runner.ts:161-162) and that no GateEvidence field (src/gate-runner.ts:171-176) is added; the authorized-changes list and the DoD line now assert src/gate-runner.ts unmodified. fileScope is unchanged — all three stores were already in it."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "B-09 now binds \"downstream evidence\" to one named store and one observable form: the rejected candidate tree ID is appended to finalEvaluations[ghIssue].invalidatedCandidateTreeIds in src/run-state.ts (in fileScope), the record drops its baselineTreeId/baselineArtifactPath citation of it, every persisted final-evaluation attempt entry keyed to that tree ID reads as invalidated through finalEvaluationFor, and decideFinalReuse refuses reuse against an invalidated tree ID even on exact equality. No approved-baseline record, artifact, or gateEvidenceArtifactIds value is rewritten or deleted and src/gate-runner.ts stays unmodified, so P-03 is preserved and updated to say so."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "B-09's observableResult and the matching test-plan scenario now assert the generator round counter incremented by exactly one across the return, alongside the unchanged final-evaluation attempt count — so a return that skipped the round charge fails the assertion, which is the load-bearing half of prd.md D19 line 383."
+    },
+    {
+      "findingId": "F-04",
+      "position": "CONDITION_MET",
+      "evidence": "B-04 now names the observable partition key: the baseline-to-final variant's own result type carries byStage, a stage-id-keyed record whose keys are exactly the post-approval writing stage ids that ran — with only B-03's stub present, exactly one key equal to that stub's stage id constant — and whose per-stage files and diff stats sum to the summary totals. The test plan and manifest assert the exact key set plus the sum, so a flat unpartitioned summary fails on the missing key instead of passing vacuously. ChangeSummary version 1 stays untouched (P-04); byStage lives only on the new variant's result."
+    },
+    {
+      "findingId": "F-05",
+      "position": "CONDITION_MET",
+      "evidence": "No scope change was requested or made — fileScope and migrationCount are byte-identical to round 1. The test plan now opens with an explicit delivery order: the pure module and schema first (B-01, B-04, B-08, B-09, B-10, B-11 with src/final-evaluation.test.ts, src/change-summary.test.ts, src/bounds.test.ts), then the cross-cutting constants (B-05, B-07, B-06), then the orchestration wiring and records (B-02, B-03, B-12), so a session that stops after the first group leaves a coherent green half."
+    }
+  ]
+}

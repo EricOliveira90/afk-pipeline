@@ -76,7 +76,16 @@ entry in `afk.config.json`. Cap: 150 lines.
 - Final evaluation (`src/final-evaluation.ts`, `prompts/evaluator-final.md`) —
   reuse is exact tree equality against `approved-baseline.json` with no
   cosmetic exception; a `reuse` dispatches zero evaluator invocations and is
-  recorded in run state, run events, and the run summary.
+  recorded in run state, run events, and the run summary. An `evaluate` runs a
+  bounded `evaluator-final` loop in the orchestrator: each attempt captures the
+  post-approval tree, re-runs the scope gate **on that tree** (evidence keyed to
+  the accepted candidate authorizes nothing about the tree that replaced it),
+  dispatches into a disposable review worktree, and validates the copied-back
+  `final-review.json` exactly once — the parsed value is what keys the verdict,
+  so validation and verdict cannot describe different documents. Attempts are
+  persisted per candidate tree, and only a graded attempt spends the
+  `MAX_FINAL_EVALUATION_ATTEMPTS` budget: a `RETURN_TO_GENERATOR` finding
+  re-enters the implementation loop and spends a generator round instead (D19).
 - Merge resolution (`resolveMergeConflict` in `src/wave.ts`, body in
   `src/merge-resolution.ts`) — a real textual conflict spends one scoped round
   in the slice's own worktree, inside the merge mutex the refused attempt

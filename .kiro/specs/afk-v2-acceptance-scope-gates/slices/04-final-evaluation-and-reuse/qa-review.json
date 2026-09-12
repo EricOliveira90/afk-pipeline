@@ -1,0 +1,86 @@
+{
+  "version": 2,
+  "verdict": "FAIL",
+  "failureClass": "IMPLEMENTATION",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03", "B-06", "B-10"],
+      "summary": "No evaluator-final role is ever dispatched: a tree-changing post-approval write terminates the slice with ERROR instead of dispatching one fresh final review.",
+      "evidence": "`Select-String -Path src/*.ts -Pattern 'evaluator-final'` returns only src/context-envelope.ts (the manifest literal and the ContextEnvelopeRole union), src/context-envelope.test.ts, and two doc comments. src/orchestrator.ts contains no occurrence of the string, no invoke() with role \"evaluator-final\", and no review-worktree creation for a final stage; the only new orchestrator branch (src/orchestrator.ts:6700-6800) reads `final-review.json` off disk and returns `{phase: \"ERROR\"}` when it is absent. Probe: `pnpm vitest run src/qa-orchestration.test.ts -t \"refuses to merge the tree it dirtied\"` with `console.log(error)` added printed `Final evaluation cannot pass the tree 9ae666c0...: the final artifacts are keyed to no tree ...; final-review.json did not validate: final-review.json was not written; the scope gate on the final candidate is absent, not PASS.` — i.e. the slice aborted because nobody wrote the artifact, not because a reviewer judged it.",
+      "expected": "contract.md scope lock: \"Different means one fresh final-evaluation attempt: a new `final` review stage dispatches a new `evaluator-final` role in a disposable worktree with a code-generated baseline→final change summary partitioned per post-approval writing stage, and that evaluator may return only `final-review.json` and `final-report.md`.\" acceptance-manifest.json B-03 observableResult: \"an it on an existing spawned scenario shows one evaluator-final invocation after the stub write\".",
+      "observed": "Zero evaluator-final invocations are possible. The delivered spawned scenario (src/qa-orchestration.test.ts, \"[behavior:B-03] runs an injected post-approval writing stage and refuses to merge the tree it dirtied\") asserts `result.phase === \"ERROR\"` and does not assert any evaluator invocation. FINAL_EVALUATOR_CONTEXT_MANIFEST and prompts/evaluator-final.md exist but have no dispatch site, and the doc comment at src/context-envelope.ts:751-757 claims evaluator-final's \"prompt is still rendered directly by the orchestrator\", which is not true of this tree.",
+      "clearCondition": "A post-approval writing stage that changes the tree causes exactly one evaluator-final invocation in a disposable worktree, and a spawned scenario in src/qa-orchestration.test.ts asserts that one invocation (role and count) after the stub write rather than asserting a slice ERROR.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-11"],
+      "summary": "The wired final verdict can never return PASS: scopeGateStatus is read from gate evidence captured on the pre-write accepted tree and is therefore forced to null in the only branch that evaluates the verdict.",
+      "evidence": "src/orchestrator.ts computes `finalEvidence` from `postQaGates.artifacts[postQaGates.artifacts.length - 1]` — evidence produced before the post-approval writing stage runs — and then passes `scopeGateStatus: finalEvidence?.treeId === finalTreeId ? gateStatusOf(SCOPE_GATE_ID) : null`. The verdict branch is entered only when `postApprovalWriteChangedTree` is true, i.e. only when `finalTreeId !== acceptedTreeId`, and `finalEvidence.treeId` is `acceptedTreeId`. No gate is re-run on the final tree anywhere in the diff (`git diff main...HEAD -- src/orchestrator.ts` adds no runGates/runPostQAGates call after the writing stage). Probe output above shows the permanent blocker: \"the scope gate on the final candidate is absent, not PASS\".",
+      "expected": "acceptance-manifest.json B-11: \"PASS requires all required gates green, candidate and final artifacts keyed to their exact checkpoint tree IDs, canonical validation of final-review.json, and a green scope gate; any missing condition fails closed\" — with observableResult \"a unit test asserting PASS once and a closed failure for each individually missing condition\". contract.md B-11 requires the scope gate to be green \"on the final candidate\".",
+      "observed": "`decideFinalVerdict` itself is correct and its unit tests pass, but the orchestrator call site supplies `scopeGateStatus: null` unconditionally in the only reachable branch, so the wired verdict is a permanent FAIL. Even a valid `final-review.json` keyed to the exact final tree cannot produce PASS. The PASS branch is proven only against hand-built inputs in src/final-evaluation.test.ts, never against the wiring.",
+      "clearCondition": "With a tree-changing post-approval write and a valid final-review.json keyed to the final tree, the orchestrator's final verdict returns PASS — because the scope gate is actually evaluated on the final candidate tree — and a test exercises that PASS through the orchestrator path, not only through decideFinalVerdict's arguments.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-09"],
+      "summary": "PersistedFinalEvaluation carries an `attempts` count instead of the per-attempt entries the contract declares, so B-09's observable — every attempt entry keyed to the rejected tree reading as invalidated — cannot be satisfied.",
+      "evidence": "src/run-state.ts:104-113 defines `PersistedFinalEvaluation` with `attempts: number` and no per-attempt collection. `invalidateFinalEvaluationBaseline` (src/run-state.ts:972) copies `attempts: existing?.attempts ?? 0` and marks nothing per attempt. No test asserts an attempt entry reading as invalidated; the closest, src/qa-orchestration.test.ts \"[behavior:B-09] appends the rejected tree, drops the baseline citation, and refuses reuse\", asserts only `invalidatedCandidateTreeIds` and the dropped citation. `attempts` is also never incremented anywhere in src/ outside tests.",
+      "expected": "contract.md B-02 item 1: the record \"carries `decision`, `finalTreeId`, `baselineTreeId`, the `baselineArtifactPath` it read, and per-attempt entries\"; contract.md \"New patterns\" repeats \"attempt entries\". acceptance-manifest.json B-09 observableResult: \"a unit test asserting the invalidated tree ID **and attempt entries** read back through finalEvaluationFor\".",
+      "observed": "There are no attempt entries in the persisted record, so `finalEvaluationFor` cannot report any attempt as invalidated. A reader can learn how many attempts were spent but not which attempt was keyed to the rejected tree — the exact distinction contract.md B-09 says the invalidation must make observable.",
+      "clearCondition": "`PersistedFinalEvaluation` carries per-attempt entries keyed to the candidate tree each attempt graded, and a test reads back through `finalEvaluationFor` that every entry keyed to an invalidated tree reports as invalidated.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-04",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09"],
+      "summary": "B-09's \"generator round counter incremented by exactly one\" is asserted as a hard-coded literal on a returned object, and no production code performs the return to the generator loop.",
+      "evidence": "`routeFinalReviewFinding` (src/final-evaluation.ts:343) returns `{generatorRoundsConsumed: 1, finalEvaluationAttemptsConsumed: 0}` as literals typed `1` and `0`; src/final-evaluation.test.ts:218 asserts that object with `toEqual`. The assertion cannot fail for any input — the values are compile-time constants of the type. `Select-String -Path src/*.ts -Pattern 'routeFinalReviewFinding|invalidateFinalEvaluationBaseline'` shows both functions are called only from src/final-evaluation.test.ts and src/qa-orchestration.test.ts; src/orchestrator.ts never reads a final review's findings, never routes one, and never invalidates a baseline, so no round counter is ever incremented and no return to the generator loop occurs.",
+      "expected": "acceptance-manifest.json B-09 observableResult: \"... the refused reuse on that tree ID, **the generator round counter incremented by exactly one across the return**, an unchanged final-evaluation attempt count ...\". contract.md B-09: \"a baseline-is-wrong finding invalidates the downstream evidence keyed to the rejected candidate tree and returns control to the generator loop, consuming a generator round\".",
+      "observed": "No round counter is read before or after anything. The test observes two literals in a returned object, which would still pass if the orchestrator consumed zero or five generator rounds — and today it consumes none, because the return path does not exist.",
+      "clearCondition": "A baseline-is-wrong finding drives the orchestrator back into the generator loop, and a test reads the slice's generator round counter before and after that return and asserts a delta of exactly one alongside an unchanged final-evaluation attempt count.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-10"],
+      "summary": "MAX_FINAL_EVALUATION_ATTEMPTS and finalEvaluationAttemptsRemaining have no production call site, so the three-attempt bound refuses nothing.",
+      "evidence": "`Select-String -Path src/*.ts -Pattern 'MAX_FINAL_EVALUATION_ATTEMPTS|finalEvaluationAttemptsRemaining'` matches only src/bounds.ts (the definitions), src/bounds.test.ts, src/qa-review.test.ts, and a doc-comment reference in src/run-state.ts:107. No orchestrator code reads the bound or increments `attempts`.",
+      "expected": "contract.md test plan: \"Given three consumed final-evaluation attempts, when a fourth is requested, then the bound refuses it\". The manifest's stated observableResult for B-10 (a unit test on the bound plus attempt-stamped archives) is met, which is why this is advisory rather than blocking.",
+      "observed": "The bound is a constant plus a clamped subtraction, both unit-tested, with nothing in the dispatch path spending or checking attempts. It becomes load-bearing only once QA-01's dispatch exists; noting it here so the wiring round does not leave it dead.",
+      "clearCondition": "The dispatch path spends a final-evaluation attempt against MAX_FINAL_EVALUATION_ATTEMPTS and refuses a fourth, asserted end to end.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-06",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-11"],
+      "summary": "final-review.json is parsed twice over the same bytes in the orchestrator's verdict block.",
+      "evidence": "src/orchestrator.ts:6759 parses the file inside the `reviewValidation` IIFE, then src/orchestrator.ts:6781 re-reads and re-parses it to obtain `finalTreeId`.",
+      "expected": "One canonical parse per artifact, in the style of the existing review-loading call sites.",
+      "observed": "Two reads and two parses of the same path; the second could observe different bytes than the verdict validated, and the duplication invites the two to drift.",
+      "clearCondition": "The verdict block parses final-review.json once and carries the parsed value into both the validation result and the finalArtifactTreeId argument.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
