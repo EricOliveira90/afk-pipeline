@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "unknown-member",
+  "role": "evaluator-contract",
+  "source": "#262 B-28 — the committed refusal pack",
+  "prompt": "Review the locked contract in this directory and write contract-review.json.",
+  "files": {
+    "contract.md": "# Slice Contract — fixture\n\n**Status:** LOCKED\n"
+  },
+  "expected": { "verdict": "ACCEPT" },
+  "notes": "An unknown top-level member. readEvalPack refuses the whole pack naming it, and this file is the only member of eval-packs/fixtures/refused/."
+}

@@ -33,6 +33,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Guardian round persistence | The complete persistence invariant for guardian round evidence: persisted shape, normalization, ledger writes (ADR 0057, #221) | `src/guardian-round-persistence.ts`, `src/guardian-round-records.ts` | — |
 | Control surface | Status, stop, preflight, cleanup (ADR 0023, 0042, 0043) | `src/status.ts`, `src/stop-command.ts`, `src/preflight.ts`, `src/clean-failed.ts` | `src/status-*.ts`, `src/stop-sentinel.ts`, `src/cancellation.ts`, `src/crash-records.ts` |
 | Prompts | Role prompt templates, assembled into per-invocation context envelopes (PRD 3, shipped) | `prompts/*.md` (e.g. `prompts/evaluator-final.md`), `src/prompt-template.ts` | — |
+| Agent eval | `afk eval`: replay a scenario pack against a live model, report only — never gates (PRD 7, #262) | `src/eval-command.ts` | `src/eval-pack.ts`, `src/eval-compare.ts`, `src/eval-report.ts` |
 
 ## Hubs — do not grow these; extract instead
 

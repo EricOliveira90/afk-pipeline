@@ -26,6 +26,7 @@ import { installCancellationSignals } from "./cancellation.js";
 import { installCrashRecorder } from "./crash-records.js";
 import { runStopCli } from "./stop-command.js";
 import { runAdoptCli } from "./adopt-command.js";
+import { runEvalCli } from "./eval-command.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -35,7 +36,8 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk adopt <prd-slug> <slice> --branch <branch> --reason <reason> [--adopter <name>] [--provider <name>]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk adopt <prd-slug> <slice> --branch <branch> --reason <reason> [--adopter <name>] [--provider <name>]
+       afk eval --pack <dir> [--max-calls <n>] [--out <dir>] [--dry-run]`,
   );
   process.exit(2);
 }
@@ -82,6 +84,18 @@ async function main() {
   }
   if (args[0] === "adopt") {
     const { output, exitCode } = await runAdoptCli(args.slice(1), resolve("."));
+    (exitCode === 0 ? console.log : console.error)(output);
+    process.exit(exitCode);
+  }
+  // `eval` is a report-only measurement runner, not a pipeline run: no git, no
+  // worktree, no RunState. Its exit code is non-zero only when no report was
+  // written, so a shell script cannot turn eval results into a merge gate.
+  if (args[0] === "eval") {
+    const { output, exitCode } = await runEvalCli(
+      args.slice(1),
+      resolve("."),
+      kiroProvider,
+    );
     (exitCode === 0 ? console.log : console.error)(output);
     process.exit(exitCode);
   }

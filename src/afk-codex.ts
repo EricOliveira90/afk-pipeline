@@ -23,6 +23,7 @@ import { loadAfkManifest } from "./afk-manifest.js";
 import { installCancellationSignals } from "./cancellation.js";
 import { installCrashRecorder } from "./crash-records.js";
 import { runStopCli } from "./stop-command.js";
+import { runEvalCli } from "./eval-command.js";
 
 const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
   "skip",
@@ -32,7 +33,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-codex stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk-codex clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-codex stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk-codex clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk-codex eval --pack <dir> [--max-calls <n>] [--out <dir>] [--dry-run]`,
   );
   process.exit(2);
 }
@@ -53,6 +54,18 @@ async function main() {
   // runs — see issue #19.
   if (args[0] === "clean-failed") {
     process.exit(await runCleanFailedCli(args.slice(1), codexProvider));
+  }
+  // `eval` is a report-only measurement runner, not a pipeline run: no git, no
+  // worktree, no RunState. Its exit code is non-zero only when no report was
+  // written, so a shell script cannot turn eval results into a merge gate.
+  if (args[0] === "eval") {
+    const { output, exitCode } = await runEvalCli(
+      args.slice(1),
+      resolve("."),
+      codexProvider,
+    );
+    (exitCode === 0 ? console.log : console.error)(output);
+    process.exit(exitCode);
   }
   let runtimeOptions;
   try {
