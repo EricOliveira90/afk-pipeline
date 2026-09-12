@@ -16,7 +16,7 @@ import { parseJsonWithUniqueKeys } from "./json-scan.js";
  * reproduces the defect this PRD exists to remove — `parseAfkManifest`
  * accepted and silently discarded `protectedChangeWaivers` — so an unknown
  * member is malformed, not forward compatibility. `cost` joined the known set
- * in #86; every other member is still refused.
+ * in #86 and `clean` in #87; every other member is still refused.
  */
 
 /**
@@ -35,6 +35,7 @@ const POLICY_KEYS = [
   "riskClasses",
   "acceptance",
   "cost",
+  "clean",
 ] as const;
 const PROTECTED_PATHS_KEYS = ["gatePolicyPaths", "testGlobs"] as const;
 const ACCEPTANCE_KEYS = ["command", "args", "matcher"] as const;
@@ -47,6 +48,45 @@ const COST_KEYS = [
 ] as const;
 const RELATED_TESTS_KEYS = ["command", "args"] as const;
 const SKIP_DETECTOR_KEYS = ["id", "testGlobs", "patterns"] as const;
+const CLEAN_KEYS = [
+  "gates",
+  "additionalWriteScope",
+  "suppressionDetectors",
+] as const;
+const CLEAN_GATE_KEYS = [
+  "id",
+  "command",
+  "args",
+  "required",
+  "expectedCostMs",
+] as const;
+/** `expectedCostMs` defaults, so it is the one member a gate may omit. */
+const CLEAN_GATE_REQUIRED_KEYS = CLEAN_GATE_KEYS.filter(
+  (key) => key !== "expectedCostMs",
+);
+const SUPPRESSION_DETECTOR_KEYS = ["id", "globs", "patterns"] as const;
+
+/**
+ * Gate ids the catalog owns, which a project's `clean.gates` may therefore not
+ * claim. Spelled here rather than imported for the reason
+ * {@link BEHAVIOR_ID_TOKEN} is spelled twice: this module is the config reader
+ * every gate module imports, so it must not import one of them back. A
+ * collision would have one id name two different commands, and the gate runner
+ * keys evidence, caching and prerequisites by id.
+ */
+const RESERVED_GATE_IDS: readonly string[] = [
+  // src/base-gates.ts BASE_GATE_IDS
+  "typecheck",
+  "lint",
+  "tests",
+  // The content-derived and acceptance gates
+  "scope",
+  "feedback-integrity",
+  "tests:skipped",
+  "acceptance:behaviors",
+  "test:budgets",
+  "suppressions",
+];
 
 /** Every runner-output matcher this version of AFK implements (D8). */
 const ACCEPTANCE_MATCHERS = ["vitest-json"] as const;
@@ -63,6 +103,18 @@ const ACCEPTANCE_MATCHERS = ["vitest-json"] as const;
  * matched as a glob.
  */
 const BEHAVIOR_ID_TOKEN = "{behaviorId}";
+
+/**
+ * The literal token a clean gate's `args` entry may carry, expanded to one
+ * repo-relative path per changed file when that round's declarations are built
+ * (`src/cleaner-stage.ts`). Exported because the expander lives in another
+ * module and one spelling of the token is the whole point.
+ *
+ * Like {@link BEHAVIOR_ID_TOKEN} this is literal string substitution and has
+ * nothing to do with {@link REJECTED_GLOB_CHARACTERS}: `{` and `}` are refused
+ * in a glob, never in an `args` entry.
+ */
+export const CHANGED_FILES_TOKEN = "{changedFiles}";
 
 /**
  * Characters the D6 dialect refuses, in the order they are reported. The
@@ -196,6 +248,77 @@ export interface GatePolicyCost {
   skipDetectors: GatePolicySkipDetector[];
 }
 
+/**
+ * One project-declared quality gate the cleaner stage runs (PRD D1). The shape
+ * is the declarable half of a `GateDeclaration`: AFK's own gate metadata —
+ * stage, prerequisites, wall-clock timeouts — stays in code, because a
+ * consuming project does not author AFK's gate catalog.
+ *
+ * `expectedCostMs` is budgeting and reporting only, never a pass/fail
+ * condition: ADR 0063 rules that a wall-clock budget cannot fail a gate.
+ */
+export interface GatePolicyCleanGate {
+  id: string;
+  command: string;
+  /** An entry may be exactly {@link CHANGED_FILES_TOKEN} and nothing else. */
+  args: string[];
+  required: boolean;
+  expectedCostMs: number;
+}
+
+/**
+ * One project-declared way of spotting a suppression: a comment or pragma that
+ * removes a file, line or rule from a gate's sight rather than satisfying it.
+ *
+ * `globs` rather than `testGlobs` because a suppression is a *source* fact —
+ * the files this looks at are the files the slice changed, not its test files.
+ * `patterns` are regular-expression sources, compiled with `g` and counted, and
+ * they are counted over raw file content: unlike a disabled test, a suppression
+ * *is* a comment, so stripping comments would read every file as clean.
+ */
+export interface GatePolicySuppressionDetector {
+  id: string;
+  globs: string[];
+  patterns: string[];
+}
+
+/**
+ * The detector AFK ships when a project declares none: the TypeScript and
+ * ESLint pragmas, which are the suppressions available in the toolchain this
+ * repo and its consumers use.
+ */
+export const DEFAULT_SUPPRESSION_DETECTORS: readonly GatePolicySuppressionDetector[] =
+  [
+    {
+      id: "ts-eslint",
+      globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"],
+      patterns: [
+        "@ts-ignore",
+        "@ts-expect-error",
+        "@ts-nocheck",
+        "eslint-disable",
+        "istanbul ignore",
+        "c8 ignore",
+      ],
+    },
+  ];
+
+/**
+ * The clean-stage half of the policy (PRD D1). Its presence is the only switch
+ * the cleaner stage has: no `clean` member means the stage does not exist, so
+ * this member is optional and — unlike its own sub-members — has no default.
+ */
+export interface GatePolicyClean {
+  /** At least one gate: a stage with no gate could never release a tree. */
+  gates: GatePolicyCleanGate[];
+  /**
+   * Globs the cleaner may write beyond the locked `fileScope` (PRD D3) — the
+   * only widening of a slice's write scope this stage gets.
+   */
+  additionalWriteScope: string[];
+  suppressionDetectors: GatePolicySuppressionDetector[];
+}
+
 export interface GatePolicy {
   version: 1;
   protectedPaths: GatePolicyProtectedPaths;
@@ -212,6 +335,13 @@ export interface GatePolicy {
    * reads, and only it knows the project's gate catalog.
    */
   cost?: GatePolicyCost;
+  /**
+   * Absent means the cleaner stage does not exist for this project (#87 AC1).
+   * Not defaulted, for a stronger reason than the two members above: a default
+   * here would turn a post-approval writing stage on for every consumer that
+   * never asked for one.
+   */
+  clean?: GatePolicyClean;
 }
 
 /**
@@ -287,11 +417,17 @@ function parseStringArray(
  * config in the first place, and both entry points refuse it for the same
  * stated reason.
  */
-function assertGlobDialect(glob: string, source: string): string {
+function assertGlobDialect(
+  glob: string,
+  source: string,
+  // Named so a refusal points at the member that carried the glob; every
+  // pre-existing caller passes a `testGlobs` member, hence the default.
+  field = "testGlobs",
+): string {
   for (const character of REJECTED_GLOB_CHARACTERS) {
     if (glob.includes(character)) {
       throw new Error(
-        `${source} testGlobs glob "${glob}" contains the metacharacter ` +
+        `${source} ${field} glob "${glob}" contains the metacharacter ` +
           `"${character}", which AFK's glob dialect — literal segments, "*" ` +
           `within one segment, "**" across segments — does not support`,
       );
@@ -300,7 +436,7 @@ function assertGlobDialect(glob: string, source: string): string {
   for (const segment of glob.split("/")) {
     if (segment.includes("**") && segment !== "**") {
       throw new Error(
-        `${source} testGlobs glob "${glob}" has the segment "${segment}", ` +
+        `${source} ${field} glob "${glob}" has the segment "${segment}", ` +
           `where "**" is not the whole segment; "**" spans whole segments and ` +
           `must stand alone between slashes`,
       );
@@ -700,6 +836,219 @@ function parseCost(value: unknown, source: string): GatePolicyCost {
 }
 
 /**
+ * One clean gate, refused naming its own index so an operator can find it in a
+ * list. Every member is mandatory except `expectedCostMs`: a gate with no
+ * `required` flag has no answer to "may this block the merge", and a gate with
+ * no command is a name.
+ */
+function parseCleanGate(
+  value: unknown,
+  field: string,
+  source: string,
+): GatePolicyCleanGate {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} ${field} must be a JSON object holding ` +
+        `${CLEAN_GATE_KEYS.join(", ")}`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireExactKeys(
+    input,
+    "expectedCostMs" in input ? CLEAN_GATE_KEYS : CLEAN_GATE_REQUIRED_KEYS,
+    field,
+    source,
+  );
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    throw new Error(
+      `${source} ${field}.id must be a non-blank string; got ` +
+        `${JSON.stringify(input.id)}`,
+    );
+  }
+  if (RESERVED_GATE_IDS.includes(input.id)) {
+    throw new Error(
+      `${source} ${field}.id "${input.id}" is a gate AFK declares itself; a ` +
+        `clean gate must carry its own id, because gate evidence, caching and ` +
+        `prerequisites are keyed by it. AFK's ids are ` +
+        `${RESERVED_GATE_IDS.join(", ")}`,
+    );
+  }
+  if (typeof input.command !== "string" || input.command.trim() === "") {
+    throw new Error(
+      `${source} ${field}.command must be a non-blank string; got ` +
+        `${JSON.stringify(input.command)}`,
+    );
+  }
+  if (typeof input.required !== "boolean") {
+    throw new Error(
+      `${source} ${field}.required must be a boolean; got ` +
+        `${JSON.stringify(input.required)}`,
+    );
+  }
+  return {
+    id: input.id,
+    command: input.command,
+    args: parseStringArray(input.args, `${field}.args`, source),
+    required: input.required,
+    expectedCostMs:
+      input.expectedCostMs === undefined
+        ? DEFAULT_CHEAP_THRESHOLD_MS
+        : parsePositiveInteger(
+            input.expectedCostMs,
+            `${field}.expectedCostMs`,
+            source,
+          ),
+  };
+}
+
+/** One suppression detector, on the same terms as {@link parseSkipDetector}. */
+function parseSuppressionDetector(
+  value: unknown,
+  field: string,
+  source: string,
+): GatePolicySuppressionDetector {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} ${field} must be a JSON object holding id, globs and patterns`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireExactKeys(input, SUPPRESSION_DETECTOR_KEYS, field, source);
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    throw new Error(
+      `${source} ${field}.id must be a non-blank string; got ` +
+        `${JSON.stringify(input.id)}`,
+    );
+  }
+  const globs = parseStringArray(input.globs, `${field}.globs`, source).map(
+    (glob) => assertGlobDialect(glob, source, `${field}.globs`),
+  );
+  if (globs.length === 0) {
+    throw new Error(
+      `${source} ${field}.globs must name at least one glob, or the detector ` +
+        `can never read a file`,
+    );
+  }
+  const patterns = parseStringArray(
+    input.patterns,
+    `${field}.patterns`,
+    source,
+  );
+  if (patterns.length === 0) {
+    throw new Error(
+      `${source} ${field}.patterns must be a non-empty array of regular ` +
+        `expressions; a detector with no pattern reports every tree clean`,
+    );
+  }
+  for (const pattern of patterns) {
+    try {
+      new RegExp(pattern, "g");
+    } catch (error) {
+      throw new Error(
+        `${source} ${field}.patterns entry ${JSON.stringify(pattern)} is not ` +
+          `a valid regular expression: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return { id: input.id, globs, patterns };
+}
+
+/**
+ * The clean-stage member (#87 B-01), modelled on {@link parseCost}: every
+ * unknown sub-key and every wrong type fatal and named. Unlike `cost`, `gates`
+ * has no default — `clean: {}` is refused, because the member's whole meaning
+ * is "run these gates after approval" and an empty stage would dispatch a
+ * cleaner that nothing could ever release.
+ */
+function parseClean(value: unknown, source: string): GatePolicyClean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${source} gatePolicy.clean must be a JSON object holding ` +
+        `${CLEAN_KEYS.join(", ")}`,
+    );
+  }
+  const input = value as Record<string, unknown>;
+  requireKnownKeys(input, CLEAN_KEYS, "gatePolicy.clean", source);
+
+  if (!Array.isArray(input.gates)) {
+    throw new Error(
+      `${source} gatePolicy.clean.gates must be an array of ` +
+        `{ ${CLEAN_GATE_KEYS.join(", ")} } objects`,
+    );
+  }
+  const gates = input.gates.map((entry, index) =>
+    parseCleanGate(entry, `gatePolicy.clean.gates[${index}]`, source),
+  );
+  if (gates.length === 0) {
+    throw new Error(
+      `${source} gatePolicy.clean.gates must declare at least one gate; a ` +
+        `clean stage with no gate can never release a tree`,
+    );
+  }
+  const gateIds = gates.map((gate) => gate.id);
+  const duplicateGate = gateIds.find((id, index) => gateIds.indexOf(id) !== index);
+  if (duplicateGate !== undefined) {
+    throw new Error(
+      `${source} gatePolicy.clean.gates declares the id "${duplicateGate}" ` +
+        `twice; a gate id names one command`,
+    );
+  }
+
+  const suppressionDetectors =
+    input.suppressionDetectors === undefined
+      ? DEFAULT_SUPPRESSION_DETECTORS.map((detector) => ({
+          id: detector.id,
+          globs: [...detector.globs],
+          patterns: [...detector.patterns],
+        }))
+      : (() => {
+          if (!Array.isArray(input.suppressionDetectors)) {
+            throw new Error(
+              `${source} gatePolicy.clean.suppressionDetectors must be an ` +
+                `array of { id, globs, patterns } objects`,
+            );
+          }
+          return input.suppressionDetectors.map((entry, index) =>
+            parseSuppressionDetector(
+              entry,
+              `gatePolicy.clean.suppressionDetectors[${index}]`,
+              source,
+            ),
+          );
+        })();
+  const detectorIds = suppressionDetectors.map((detector) => detector.id);
+  const duplicateDetector = detectorIds.find(
+    (id, index) => detectorIds.indexOf(id) !== index,
+  );
+  if (duplicateDetector !== undefined) {
+    throw new Error(
+      `${source} gatePolicy.clean.suppressionDetectors declares the id ` +
+        `"${duplicateDetector}" twice; a detector id names one rule`,
+    );
+  }
+
+  return {
+    gates,
+    additionalWriteScope:
+      input.additionalWriteScope === undefined
+        ? []
+        : parseStringArray(
+            input.additionalWriteScope,
+            "gatePolicy.clean.additionalWriteScope",
+            source,
+          ).map((glob) =>
+            assertGlobDialect(
+              glob,
+              source,
+              "gatePolicy.clean.additionalWriteScope",
+            ),
+          ),
+    suppressionDetectors,
+  };
+}
+
+/**
  * Validate an already-parsed `gatePolicy` value. Pure: no filesystem access,
  * and the returned arrays are copies, so a caller mutating one cannot reach
  * the baseline constants.
@@ -740,6 +1089,11 @@ export function parseGatePolicy(
     // Same rule as `acceptance`: omitted stays omitted, because the absence is
     // what `resolveTestCostPlan` reads as "every default applies".
     ...(input.cost === undefined ? {} : { cost: parseCost(input.cost, source) }),
+    // Same rule again, and here the absence is the whole switch: no `clean`
+    // member means the cleaner stage does not exist (#87 AC1).
+    ...(input.clean === undefined
+      ? {}
+      : { clean: parseClean(input.clean, source) }),
   };
 }
 

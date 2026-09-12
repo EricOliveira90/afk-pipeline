@@ -10,10 +10,12 @@ import {
 } from "./base-gates.js";
 import * as gatePolicyModule from "./gate-policy.js";
 import {
+  CHANGED_FILES_TOKEN,
   DEFAULT_CACHE_ENABLED,
   DEFAULT_CHEAP_THRESHOLD_MS,
   DEFAULT_GATE_POLICY_PATHS,
   DEFAULT_SKIP_DETECTORS,
+  DEFAULT_SUPPRESSION_DETECTORS,
   DEFAULT_TEST_GLOBS,
   GATE_RISK_CLASSES,
   loadGatePolicy,
@@ -73,10 +75,15 @@ describe("gate-policy module surface", () => {
     // omitted block, and the tests that assert a default read the constant
     // rather than restating the number.
     expect(Object.keys(gatePolicyModule).sort()).toEqual([
+      // `CHANGED_FILES_TOKEN` joined the surface with #87's `clean` member: the
+      // expansion happens in `src/cleaner-stage.ts`, and one spelling of the
+      // token is the point of exporting it.
+      "CHANGED_FILES_TOKEN",
       "DEFAULT_CACHE_ENABLED",
       "DEFAULT_CHEAP_THRESHOLD_MS",
       "DEFAULT_GATE_POLICY_PATHS",
       "DEFAULT_SKIP_DETECTORS",
+      "DEFAULT_SUPPRESSION_DETECTORS",
       "DEFAULT_TEST_GLOBS",
       // `GATE_POLICY_CONFIG_FILENAME` joined the surface with #251: the
       // feedback-integrity gate names the candidate's own copy of the policy
@@ -522,6 +529,226 @@ describe("parseGatePolicy's cost member", () => {
         }),
       ),
     ).toContain("dup");
+  });
+});
+
+describe("[behavior:B-01] parseGatePolicy's clean member", () => {
+  const CLEAN_GATE = {
+    id: "format",
+    command: "pnpm",
+    args: ["run", "format:check", "{changedFiles}"],
+    required: true,
+  } as const;
+
+  function withClean(clean: unknown): unknown {
+    return { ...structuredClone(EXAMPLE_POLICY), clean };
+  }
+
+  it("[behavior:B-01] parses a declared clean stage and fills its defaults", () => {
+    const policy = parseGatePolicy(withClean({ gates: [CLEAN_GATE] }));
+    expect(policy.clean).toEqual({
+      gates: [
+        {
+          id: "format",
+          command: "pnpm",
+          args: ["run", "format:check", "{changedFiles}"],
+          required: true,
+          expectedCostMs: DEFAULT_CHEAP_THRESHOLD_MS,
+        },
+      ],
+      additionalWriteScope: [],
+      suppressionDetectors: DEFAULT_SUPPRESSION_DETECTORS.map((detector) => ({
+        id: detector.id,
+        globs: [...detector.globs],
+        patterns: [...detector.patterns],
+      })),
+    });
+  });
+
+  it("[behavior:B-01] leaves clean omitted rather than defaulted, so the stage does not exist", () => {
+    const policy = parseGatePolicy(structuredClone(EXAMPLE_POLICY));
+    expect("clean" in policy).toBe(false);
+    expect(policy.clean).toBeUndefined();
+  });
+
+  it("[behavior:B-01] keeps a declared expectedCostMs, additionalWriteScope and detectors", () => {
+    const policy = parseGatePolicy(
+      withClean({
+        gates: [{ ...CLEAN_GATE, expectedCostMs: 5_000 }],
+        additionalWriteScope: ["docs/**", "src/*.snap"],
+        suppressionDetectors: [
+          { id: "ts-only", globs: ["src/**"], patterns: ["@ts-ignore"] },
+        ],
+      }),
+    );
+    expect(policy.clean?.gates[0]?.expectedCostMs).toBe(5_000);
+    expect(policy.clean?.additionalWriteScope).toEqual([
+      "docs/**",
+      "src/*.snap",
+    ]);
+    expect(policy.clean?.suppressionDetectors).toEqual([
+      { id: "ts-only", globs: ["src/**"], patterns: ["@ts-ignore"] },
+    ]);
+  });
+
+  it("[behavior:B-01] refuses an unknown member of clean, naming it", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy(withClean({ gates: [CLEAN_GATE], _note: "why" })),
+      ),
+    ).toBe(
+      `afk.config.json gatePolicy.clean has unknown member "_note"; this ` +
+        `version of AFK knows only gates, additionalWriteScope, ` +
+        `suppressionDetectors`,
+    );
+  });
+
+  it("[behavior:B-01] refuses an unknown member of one gate, naming its index", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, retries: 2 }] })),
+      ),
+    ).toContain(
+      `gatePolicy.clean.gates[0] has unknown member "retries"`,
+    );
+  });
+
+  it("[behavior:B-01] refuses a gate missing required, because a gate must say whether it may block", () => {
+    const { required: _required, ...withoutRequired } = CLEAN_GATE;
+    expect(
+      messageOf(() => parseGatePolicy(withClean({ gates: [withoutRequired] }))),
+    ).toContain(
+      `gatePolicy.clean.gates[0] is missing required member "required"`,
+    );
+  });
+
+  it("[behavior:B-01] refuses an empty gates list", () => {
+    expect(messageOf(() => parseGatePolicy(withClean({ gates: [] })))).toContain(
+      `gatePolicy.clean.gates must declare at least one gate`,
+    );
+  });
+
+  it("[behavior:B-01] refuses clean with no gates member at all", () => {
+    expect(messageOf(() => parseGatePolicy(withClean({})))).toContain(
+      `gatePolicy.clean.gates must be an array of`,
+    );
+  });
+
+  for (const reserved of [
+    "typecheck",
+    "lint",
+    "tests",
+    "scope",
+    "feedback-integrity",
+    "tests:skipped",
+    "acceptance:behaviors",
+    "test:budgets",
+    "suppressions",
+  ]) {
+    it(`[behavior:B-01] refuses the catalog gate id "${reserved}"`, () => {
+      expect(
+        messageOf(() =>
+          parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, id: reserved }] })),
+        ),
+      ).toContain(
+        `gatePolicy.clean.gates[0].id "${reserved}" is a gate AFK declares itself`,
+      );
+    });
+  }
+
+  it("[behavior:B-01] refuses two gates with one id", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy(withClean({ gates: [CLEAN_GATE, { ...CLEAN_GATE }] })),
+      ),
+    ).toContain(`gatePolicy.clean.gates declares the id "format" twice`);
+  });
+
+  it("[behavior:B-01] refuses a non-boolean required and a blank command", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, required: "yes" }] })),
+      ),
+    ).toContain(`gatePolicy.clean.gates[0].required must be a boolean`);
+    expect(
+      messageOf(() =>
+        parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, command: "  " }] })),
+      ),
+    ).toContain(`gatePolicy.clean.gates[0].command must be a non-blank string`);
+  });
+
+  it("[behavior:B-01] refuses an additionalWriteScope glob outside the D6 dialect, naming the member", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy(
+          withClean({
+            gates: [CLEAN_GATE],
+            additionalWriteScope: ["src/**/*.{ts,tsx}"],
+          }),
+        ),
+      ),
+    ).toContain(
+      `gatePolicy.clean.additionalWriteScope glob "src/**/*.{ts,tsx}" contains the metacharacter "{"`,
+    );
+  });
+
+  it("[behavior:B-01] refuses a suppression detector with no pattern and one that cannot compile", () => {
+    expect(
+      messageOf(() =>
+        parseGatePolicy(
+          withClean({
+            gates: [CLEAN_GATE],
+            suppressionDetectors: [
+              { id: "empty", globs: ["src/**"], patterns: [] },
+            ],
+          }),
+        ),
+      ),
+    ).toContain(
+      `gatePolicy.clean.suppressionDetectors[0].patterns must be a non-empty array`,
+    );
+    expect(
+      messageOf(() =>
+        parseGatePolicy(
+          withClean({
+            gates: [CLEAN_GATE],
+            suppressionDetectors: [
+              { id: "bad", globs: ["src/**"], patterns: ["("] },
+            ],
+          }),
+        ),
+      ),
+    ).toContain(
+      `gatePolicy.clean.suppressionDetectors[0].patterns entry "(" is not a valid regular expression`,
+    );
+  });
+
+  it("[behavior:B-01] expectedCostMs is budgeting only: a gate over the threshold still parses", () => {
+    const policy = parseGatePolicy(
+      withClean({ gates: [{ ...CLEAN_GATE, expectedCostMs: 600_000 }] }),
+    );
+    expect(policy.clean?.gates[0]?.expectedCostMs).toBe(600_000);
+    expect(policy.clean?.gates[0]?.required).toBe(true);
+  });
+
+  it("[behavior:B-01] the default suppression detector set is the ts-eslint one", () => {
+    expect(DEFAULT_SUPPRESSION_DETECTORS.map((d) => d.id)).toEqual([
+      "ts-eslint",
+    ]);
+    expect(DEFAULT_SUPPRESSION_DETECTORS[0]?.patterns).toContain(
+      "@ts-expect-error",
+    );
+  });
+
+  it("[behavior:B-02] an args entry may be exactly the changed-files token", () => {
+    const policy = parseGatePolicy(
+      withClean({
+        gates: [{ ...CLEAN_GATE, args: [CHANGED_FILES_TOKEN] }],
+      }),
+    );
+    expect(policy.clean?.gates[0]?.args).toEqual([CHANGED_FILES_TOKEN]);
+    // Same literal-substitution family as `{behaviorId}`, and one spelling.
+    expect(CHANGED_FILES_TOKEN).toBe("{changedFiles}");
   });
 });
 
