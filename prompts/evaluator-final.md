@@ -27,6 +27,19 @@ the final checkpoint on the other, with the changed files attributed to the
 post-approval writing stage that produced them. It is generated from git, not
 from any agent's account of its own work.
 
+# The two trees
+
+These are the two Git **tree** object IDs your verdict is about. They are given
+to you because they are facts about the checkpoints, not something to re-derive
+from the worktree you are standing in:
+
+- Approved baseline tree ID: `{{BASELINE_TREE_ID}}`
+- Final checkpoint tree ID: `{{FINAL_TREE_ID}}`
+
+Copy both into `final-review.json` verbatim. A review keyed to any other tree
+is refused by the final verdict, because it does not describe the tree about to
+merge.
+
 # The two questions
 
 Exactly two, and every finding answers one of them.
@@ -91,8 +104,8 @@ keys:
 
 - `PASS` requires an empty `findings` array; `FAIL` requires at least one
   finding.
-- Both tree IDs are Git tree objects, not commits. Copy them from the inputs
-  you were given; do not derive them from `git rev-parse HEAD`.
+- Both tree IDs are Git tree objects, not commits. Copy them from **The two
+  trees** above; do not derive them from `git rev-parse HEAD`.
 - Then write the human-readable companion to `{{SLICE_DIR}}/final-report.md`
   with exactly one `**Verdict:** PASS | FAIL` line. The Markdown does not
   control the verdict.

@@ -121,7 +121,14 @@ export type RunEventPayload =
       ghIssue: string;
       sliceNumber: string;
       round: number;
-      role: PromptAssemblyRole | "evaluator-qa" | "evaluator-uat";
+      role:
+        | PromptAssemblyRole
+        | "evaluator-qa"
+        | "evaluator-uat"
+        // The final evaluator (#96 B-06) is journaled the same way and for the
+        // same reason: it has a manifest-only role contract today, so its
+        // reading time has no `prompt-assembly` event to pair with.
+        | "evaluator-final";
       /** Evaluator attempt within the round, when the role retries. */
       attempt?: number;
       /** Provider-exposed token names and counts, never renamed. */

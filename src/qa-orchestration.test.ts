@@ -31,6 +31,7 @@ import {
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
 import {
+  finalEvaluationAttemptsSpent,
   finalEvaluationFor,
   invalidateFinalEvaluationBaseline,
   loadRunState,
@@ -42,6 +43,7 @@ import {
   POST_APPROVAL_WRITING_STAGE_ID,
   decideFinalReuse,
 } from "./final-evaluation.js";
+import { MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
 import { fileURLToPath } from "node:url";
 import { resolveCandidateTreeId } from "./gate-runner.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
@@ -3301,7 +3303,7 @@ describe("final evaluation and reuse", () => {
       baselineTreeId,
       baselineArtifactPath:
         ".afk/artifacts/prd-070-stub/slice-01/approved-baseline.json",
-      attempts: 0,
+      attempts: [],
       invalidatedCandidateTreeIds: [],
     });
     const state = loadRunState(repo, "prd-070-stub");
@@ -3374,7 +3376,22 @@ describe("final evaluation and reuse", () => {
       finalTreeId: candidateTreeId,
       baselineTreeId: candidateTreeId,
       baselineArtifactPath: artifactPath,
-      attempts: 1,
+      attempts: [
+        // Two attempts on two different trees, so "every entry keyed to the
+        // rejected tree" is a claim the read can get wrong.
+        {
+          attempt: 1,
+          candidateTreeId: "e".repeat(40),
+          verdict: "FAIL",
+          outcome: "GRADED",
+        },
+        {
+          attempt: 2,
+          candidateTreeId,
+          verdict: "FAIL",
+          outcome: "GRADED",
+        },
+      ],
       invalidatedCandidateTreeIds: [],
     });
 
@@ -3388,6 +3405,41 @@ describe("final evaluation and reuse", () => {
     expect(record.invalidatedCandidateTreeIds).toEqual([candidateTreeId]);
     expect(record.baselineTreeId).toBeUndefined();
     expect(record.baselineArtifactPath).toBeUndefined();
+    // The per-attempt entries survive the invalidation, and every entry keyed
+    // to the rejected tree reads back as invalidated — the distinction a bare
+    // attempt count cannot make.
+    const invalidatedView = finalEvaluationFor(
+      loadRunState(repo, "prd-070-stub"),
+      "70",
+    );
+    expect(invalidatedView?.attempts).toEqual([
+      {
+        attempt: 1,
+        candidateTreeId: "e".repeat(40),
+        verdict: "FAIL",
+        outcome: "GRADED",
+        invalidated: false,
+      },
+      {
+        attempt: 2,
+        candidateTreeId,
+        verdict: "FAIL",
+        outcome: "GRADED",
+        invalidated: true,
+      },
+    ]);
+    expect(
+      invalidatedView!.attempts
+        .filter((entry) => entry.candidateTreeId === candidateTreeId)
+        .every((entry) => entry.invalidated),
+    ).toBe(true);
+    // A return to the generator is not a spent evaluator attempt (D19).
+    expect(finalEvaluationAttemptsSpent(invalidatedView)).toBe(2);
+    expect(
+      finalEvaluationAttemptsSpent({
+        attempts: [{ outcome: "RETURNED_TO_GENERATOR" }],
+      }),
+    ).toBe(0);
     // Even on exact equality, the approval this tree earned is the approval the
     // finding disputed.
     expect(
@@ -3451,7 +3503,7 @@ describe("final evaluation and reuse", () => {
     recordFinalEvaluation(repo, "prd-070-stub", "70", {
       decision: "evaluate",
       finalTreeId: "b".repeat(40),
-      attempts: 0,
+      attempts: [],
       invalidatedCandidateTreeIds: [],
     });
     const bumped = loadRunState(repo, "prd-070-stub");
@@ -3483,7 +3535,24 @@ describe("final evaluation and reuse", () => {
     }
   });
 
-  it("[behavior:B-03] runs an injected post-approval writing stage and refuses to merge the tree it dirtied", async () => {
+  /**
+   * The three spawned scenarios below share this fixture: a repo with the gate
+   * scripts committed, a QA evaluator that passes, and an injected
+   * post-approval writing stage whose stub write changes the tree — which is
+   * what gives the final evaluator a subject at all.
+   */
+  function finalEvaluationFixture(options: {
+    /** Answers one `evaluator-final` dispatch; returns the review to write. */
+    review: (
+      call: { attempt: number; baselineTreeId: string; finalTreeId: string },
+    ) => unknown;
+    onFinalCall?: (call: { cwd: string; attempt: number }) => void;
+  }): {
+    repo: string;
+    ctx: SliceContext;
+    finalCalls: { cwd: string; finalTreeId: string }[];
+    stageCalls: { worktreeDir: string; stageId: string; repair?: string }[];
+  } {
     const repo = makeRepo();
     writeFileSync(
       join(repo, "package.json"),
@@ -3497,10 +3566,19 @@ describe("final evaluation and reuse", () => {
     git(repo, ["commit", "-m", "add gate scripts"]);
 
     let artifactDir = "";
+    let relSliceDir = "";
+    const finalCalls: { cwd: string; finalTreeId: string }[] = [];
+    const treeIdFrom = (prompt: string, label: string): string => {
+      const match = new RegExp(`${label} tree ID: \`([^\`]+)\``).exec(prompt);
+      expect(match, `${label} tree ID in the evaluator-final prompt`).not.toBe(
+        null,
+      );
+      return match![1]!;
+    };
     const provider: AgentProvider = {
       name: "stub",
-      async invoke(options: InvokeOptions): Promise<InvokeResult> {
-        if (options.role === "evaluator-qa") {
+      async invoke(invokeOptions: InvokeOptions): Promise<InvokeResult> {
+        if (invokeOptions.role === "evaluator-qa") {
           writeFileSync(
             join(artifactDir, "qa-report.md"),
             "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
@@ -3508,10 +3586,39 @@ describe("final evaluation and reuse", () => {
           );
           writeQAReview(artifactDir, "deterministic");
         }
+        if (invokeOptions.role === "evaluator-final") {
+          const prompt = invokeOptions.prompt ?? "";
+          const baselineTreeId = treeIdFrom(prompt, "Approved baseline");
+          const finalTreeId = treeIdFrom(prompt, "Final checkpoint");
+          const attempt = finalCalls.length + 1;
+          finalCalls.push({ cwd: invokeOptions.cwd ?? "", finalTreeId });
+          options.onFinalCall?.({ cwd: invokeOptions.cwd ?? "", attempt });
+          // The review is written where the evaluator actually stands — the
+          // disposable worktree — and reaches the slice directory only through
+          // the orchestrator's copy-back allowlist.
+          const reviewDir = join(invokeOptions.cwd ?? repo, relSliceDir);
+          mkdirSync(reviewDir, { recursive: true });
+          writeFileSync(
+            join(reviewDir, "final-review.json"),
+            JSON.stringify(
+              options.review({ attempt, baselineTreeId, finalTreeId }),
+            ),
+            "utf-8",
+          );
+          writeFileSync(
+            join(reviewDir, "final-report.md"),
+            "# Final Report\n\n**Verdict:** PASS\n",
+            "utf-8",
+          );
+        }
         return { exitCode: 0, stdout: "", stats: {} };
       },
     };
-    const stageCalls: { worktreeDir: string; stageId: string }[] = [];
+    const stageCalls: {
+      worktreeDir: string;
+      stageId: string;
+      repair?: string;
+    }[] = [];
     const ctx = makeContext(repo, provider, {
       commandTimeoutMs: 5_000,
       heartbeatIntervalMs: 20,
@@ -3521,12 +3628,32 @@ describe("final evaluation and reuse", () => {
         // that was approved.
         writeFileSync(
           join(input.worktreeDir, "README.md"),
-          "fixture, tidied\n",
+          `fixture, tidied ${stageCalls.length}\n`,
           "utf-8",
         );
       },
     });
     artifactDir = ctx.absSliceDir;
+    relSliceDir = ctx.relSliceDir;
+    return { repo, ctx, finalCalls, stageCalls };
+  }
+
+  /** A PASS review keyed to the exact trees the prompt named. */
+  const passingReview = (call: {
+    baselineTreeId: string;
+    finalTreeId: string;
+  }): unknown => ({
+    version: 1,
+    verdict: "PASS",
+    baselineTreeId: call.baselineTreeId,
+    finalTreeId: call.finalTreeId,
+    findings: [],
+  });
+
+  it("[behavior:B-03] runs an injected post-approval writing stage and evaluates the tree it dirtied exactly once", async () => {
+    const { repo, ctx, finalCalls, stageCalls } = finalEvaluationFixture({
+      review: passingReview,
+    });
 
     const result = await runSliceExecute(ctx);
 
@@ -3534,14 +3661,128 @@ describe("final evaluation and reuse", () => {
     expect(stageCalls).toEqual([
       { worktreeDir: repo, stageId: POST_APPROVAL_WRITING_STAGE_ID },
     ]);
-    // B-11 fails closed: no final review exists for the tree it produced, so
-    // the candidate stops here instead of merging, with the conditions named.
+    // B-06/B-11: the changed tree is graded by exactly one evaluator-final
+    // invocation, in a disposable worktree that is not the slice worktree.
+    expect(finalCalls).toHaveLength(1);
+    expect(finalCalls[0]!.cwd).not.toBe(repo);
+    expect(finalCalls[0]!.cwd).toContain("qa-review");
+    expect(existsSync(finalCalls[0]!.cwd)).toBe(false);
+    // B-11: the verdict passes on the final candidate, which means the scope
+    // gate was evaluated on the final tree — the accepted candidate's evidence
+    // is keyed to a different tree and authorizes nothing about this one.
+    expect(result.phase).toBe("PASS");
+    const view = finalEvaluationFor(loadRunState(repo, "prd-070-stub"), "70");
+    expect(view?.decision).toBe("evaluate");
+    expect(view?.attempts).toEqual([
+      {
+        attempt: 1,
+        candidateTreeId: finalCalls[0]!.finalTreeId,
+        verdict: "PASS",
+        outcome: "GRADED",
+      },
+    ].map((entry) => ({ ...entry, invalidated: false })));
+    // The graded artifacts are archived per attempt, keyed to round and attempt.
+    expect(
+      existsSync(
+        join(
+          repo,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "reviews",
+          "final-review-r1-a1.json",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("[behavior:B-09] returns a baseline-is-wrong finding to the generator loop for exactly one round and no evaluator attempt", async () => {
+    const progress: { genRounds: number; spent: number }[] = [];
+    let repoRef = "";
+    const fixture = finalEvaluationFixture({
+      review: (call) =>
+        call.attempt === 1
+          ? {
+              version: 1,
+              verdict: "FAIL",
+              baselineTreeId: call.baselineTreeId,
+              finalTreeId: call.finalTreeId,
+              findings: [
+                {
+                  id: "FE-01",
+                  class: "BASELINE_IS_WRONG",
+                  summary: "The approved candidate itself must not merge",
+                  evidence: "The fixture evaluator read the final tree",
+                  expected: "The generator revisits the approved candidate",
+                  observed: "The approved candidate ships a defect",
+                  repair: "RETURN_TO_GENERATOR",
+                },
+              ],
+            }
+          : passingReview(call),
+      onFinalCall: () => {
+        // Read at the dispatch itself, so the counters are the ones the return
+        // moved rather than whatever the run ended on.
+        progress.push({
+          genRounds:
+            fixture.ctx.logger.getSliceProgress("70")?.genRounds ?? -1,
+          spent: finalEvaluationAttemptsSpent(
+            finalEvaluationFor(loadRunState(repoRef, "prd-070-stub"), "70"),
+          ),
+        });
+      },
+    });
+    repoRef = fixture.repo;
+
+    const result = await runSliceExecute(fixture.ctx);
+
+    expect(result.phase).toBe("PASS");
+    // Exactly one generator round across the return (D19), and no evaluator
+    // attempt spent by it.
+    expect(progress).toEqual([
+      { genRounds: 1, spent: 0 },
+      { genRounds: 2, spent: 0 },
+    ]);
+    const view = finalEvaluationFor(
+      loadRunState(fixture.repo, "prd-070-stub"),
+      "70",
+    );
+    expect(view?.attempts.map((entry) => entry.outcome)).toEqual([
+      "RETURNED_TO_GENERATOR",
+      "GRADED",
+    ]);
+    // The rejected tree is invalidated, and its own attempt entry says so.
+    expect(view?.attempts[0]?.invalidated).toBe(true);
+  });
+
+  it("[behavior:B-10] refuses a fourth final-evaluation attempt against the three-attempt bound", async () => {
+    const fixture = finalEvaluationFixture({ review: passingReview });
+    // Three graded attempts already on the record, so this run's dispatch is
+    // the fourth — and the bound, not the evaluator, answers it.
+    updateRunState(fixture.repo, "prd-070-stub", (state) => {
+      state.finalEvaluations = {
+        "70": {
+          decision: "evaluate",
+          finalTreeId: "b".repeat(40),
+          attempts: [1, 2, 3].map((attempt) => ({
+            attempt,
+            candidateTreeId: `${attempt}`.repeat(40),
+            verdict: "FAIL" as const,
+            outcome: "GRADED" as const,
+          })),
+          invalidatedCandidateTreeIds: [],
+        },
+      };
+    });
+
+    const result = await runSliceExecute(fixture.ctx);
+
     expect(result.phase).toBe("ERROR");
     const error = "error" in result ? result.error : "";
-    expect(error).toContain("final-review.json");
+    expect(error).toContain(`all ${MAX_FINAL_EVALUATION_ATTEMPTS}`);
     expect(error).toContain("#96 B-11");
-    // The decision is recorded whichever way it went (#96 B-01/B-02 store 1).
-    const state = loadRunState(repo, "prd-070-stub");
-    expect(finalEvaluationFor(state, "70")?.decision).toBe("evaluate");
+    // Refused before any dispatch: the bound costs no evaluator read.
+    expect(fixture.finalCalls).toHaveLength(0);
   });
 });
