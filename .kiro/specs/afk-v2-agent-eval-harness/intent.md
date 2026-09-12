@@ -184,5 +184,5 @@ the source intent use both freely, and rumo-app's shipped findings ledger
 already uses "disposition" for something else entirely — a ledger entry's
 routing outcome (`none | proposal opened | eval-candidate`). This file
 therefore says **verdict** for an agent's structured output and flags the
-naming as a decision (`decisions.md`, D14). PRD 7 must not ship a third
+naming as a decision (`decisions.md`, D36). PRD 7 must not ship a third
 meaning of the word.
