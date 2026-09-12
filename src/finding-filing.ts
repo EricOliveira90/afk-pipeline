@@ -1,6 +1,6 @@
 import { idMatchIsCorroborated } from "./guardian-convergence.js";
 import type { LedgerFinding } from "./guardian-finding-ledger.js";
-import type { PersistedFiledFinding } from "./run-state.js";
+import type { PersistedFiledFinding } from "./guardian-round-records.js";
 
 /** What a filed issue is: an unresolved blocker at the cap, or a note. */
 export type FiledFindingKind = "BLOCKER" | "NOTE";

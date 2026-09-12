@@ -29,6 +29,28 @@
  * Glob matching is `matchesGlob` from `src/gate-policy.ts` and nothing else; a
  * waiver's `path` is matched by string equality, because a waiver names one
  * exact file somebody read (D5).
+ *
+ * ## The rulebook is run-scoped (#251)
+ *
+ * {@link FeedbackIntegrityGateInput.runPolicy} is the **run's** policy — the
+ * snapshot the launch path took from the host checkout before any agent ran —
+ * and never `loadGatePolicy(worktreeDir)`. The distinction is the whole gate:
+ * the candidate's generator holds write access to its worktree for the entire
+ * round, so a policy read from there is a policy the thing being judged can
+ * author. It could strike `gate-policy` from `riskClasses`, or narrow
+ * `gatePolicyPaths` away from the file it just edited, and this gate would
+ * enforce that edit against the very candidate that made it. A gate whose
+ * rulebook comes from the artifact under inspection cannot fail closed
+ * (`docs/PRODUCT.md` operating principle 6).
+ *
+ * `worktreeDir` still points at the candidate: inspecting the candidate tree is
+ * this gate's job. Only the policy's *source* is run-scoped. Do not "simplify"
+ * `runPolicy` back to a read of `worktreeDir`.
+ *
+ * The candidate's own copy is not ignored, only demoted: when the candidate
+ * changed it and what it now declares differs from the run's policy, that is a
+ * `gate-policy` detection like any other — evidence about the candidate, routed
+ * through the same launch-waiver machinery.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -39,7 +61,9 @@ import {
 import {
   DEFAULT_GATE_POLICY_PATHS,
   DEFAULT_TEST_GLOBS,
+  GATE_POLICY_CONFIG_FILENAME,
   GATE_RISK_CLASSES,
+  loadGatePolicy,
   matchesGlob,
   type GatePolicy,
   type GateRiskClass,
@@ -84,11 +108,12 @@ export interface FeedbackIntegrityGateInput {
    */
   waivers: readonly ProtectedChangeWaiver[];
   /**
-   * The project's gate policy, resolved by the caller with `loadGatePolicy`,
-   * `null` when the project declares none — in which case every documented
-   * default applies.
+   * The **run's** gate policy: the launch-time snapshot, taken from the host
+   * checkout before any agent ran, and never a read of {@link worktreeDir}
+   * (#251 — see this module's header for why). `null` when the run declares
+   * none, in which case every documented default applies.
    */
-  policy: GatePolicy | null;
+  runPolicy: GatePolicy | null;
   /**
    * The caller's *proven* attestation that `contract.md` and
    * `acceptance-manifest.json` still hold the bytes the orchestrator accepted
@@ -161,6 +186,53 @@ function enforcedClassesOf(policy: GatePolicy | null): Set<GateRiskClass> {
 }
 
 /**
+ * The candidate's own copy of the gate policy, read as *evidence* and never as
+ * the rulebook (#251). Returns the config path to report when the candidate
+ * changed that file and what it now declares is not what the run declares;
+ * `null` when there is nothing to report.
+ *
+ * Gated on the changed set on purpose. A run whose host checkout has since
+ * moved on, or a wave whose feature branch already carries a human-waived
+ * policy change, is not a candidate mutating anything — and the detection this
+ * function exists for is exactly "this candidate rewrote the rulebook".
+ *
+ * Deliberately outside `gatePolicy.riskClasses` and outside
+ * `protectedPaths.gatePolicyPaths`, for the reason the accepted pair is: those
+ * are a project's declarations about its *own* files, while this file is the
+ * declaration itself. A policy that narrowed either one away from
+ * `afk.config.json` would otherwise let the edit go unmentioned. It stays
+ * waivable, because a human may legitimately authorize a policy change and the
+ * launch manifest is where they say so.
+ *
+ * An unparseable candidate copy is divergent by definition. Before #251 it
+ * threw out of declaration assembly, taking the round down over a file the
+ * candidate wrote; now the gate names it instead.
+ */
+function divergentPolicyPath(
+  input: FeedbackIntegrityGateInput,
+  changedPaths: readonly string[],
+): string | null {
+  const configPath = normalizeWaiverPath(GATE_POLICY_CONFIG_FILENAME);
+  if (!changedPaths.some((path) => normalizeWaiverPath(path) === configPath)) {
+    return null;
+  }
+  let candidate: GatePolicy | null;
+  try {
+    candidate = loadGatePolicy(input.worktreeDir);
+  } catch {
+    return configPath;
+  }
+  // Structural equality by serialization: every policy on both sides came out
+  // of `parseGatePolicy`, which builds its keys in one fixed order, so the
+  // strings differ exactly when the declarations do. A candidate edit that only
+  // reorders a member's array compares as divergent, which is correct enough —
+  // it is still the candidate editing the rulebook, and it is still waivable.
+  return JSON.stringify(candidate) === JSON.stringify(input.runPolicy)
+    ? null
+    : configPath;
+}
+
+/**
  * Run the comparison. Exported for direct unit coverage; the pipeline reaches
  * it through {@link feedbackIntegrityGateDeclaration}.
  */
@@ -180,8 +252,8 @@ export function runFeedbackIntegrityGate(
     };
   }
 
-  const { gatePolicyPaths, testGlobs } = protectedPathsOf(input.policy);
-  const enforced = enforcedClassesOf(input.policy);
+  const { gatePolicyPaths, testGlobs } = protectedPathsOf(input.runPolicy);
+  const enforced = enforcedClassesOf(input.runPolicy);
   const omitted = GATE_RISK_CLASSES.filter(
     (riskClass) => !enforced.has(riskClass),
   );
@@ -194,6 +266,10 @@ export function runFeedbackIntegrityGate(
         detections.push({ riskClass: "gate-policy", path: normalized });
       }
     }
+  }
+  const divergent = divergentPolicyPath(input, probe.paths);
+  if (divergent !== null) {
+    detections.push({ riskClass: "gate-policy", path: divergent });
   }
   if (enforced.has("deleted-test")) {
     for (const path of probe.paths) {
@@ -218,9 +294,24 @@ export function runFeedbackIntegrityGate(
     }
   }
 
+  // One offender is one detection. Two branches can now name the same file —
+  // an edited `afk.config.json` is both a changed gate-policy path and, if it
+  // diverges from the run's policy, a rewritten rulebook — and reporting it
+  // twice would only make the repair round read the same path twice.
+  const distinct: Detection[] = [];
+  for (const detection of detections) {
+    const seen = distinct.find(
+      (other) =>
+        other.riskClass === detection.riskClass &&
+        other.path === detection.path,
+    );
+    if (!seen) distinct.push(detection);
+    else if (detection.unwaivable) seen.unwaivable = true;
+  }
+
   const applied: ProtectedChangeWaiver[] = [];
   const unwaived: Detection[] = [];
-  for (const detection of detections) {
+  for (const detection of distinct) {
     const waiver = detection.unwaivable
       ? undefined
       : input.waivers.find(

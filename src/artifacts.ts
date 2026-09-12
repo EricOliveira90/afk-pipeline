@@ -581,24 +581,77 @@ export function archiveContractReviewAttempt(details: {
   return archived;
 }
 
+/**
+ * Copy one piece of round-and-attempt-keyed evidence into a slice's review
+ * archive, spilling into `<archiveDir>/<runId>/` when the flat name is
+ * already taken (#258).
+ *
+ * The archive dir is keyed by slice while these names are keyed by round and
+ * attempt, and the round counter that produces them cannot always see them:
+ * `spentImplementationRounds` scans *QA* evidence filenames, so a slice whose
+ * previous life died before QA re-derives round 1 and asks for a name the
+ * prior run already wrote. Refusing to overwrite it is right — that file is
+ * the only record of the earlier attempt — but losing the new evidence is
+ * not, so it goes to a sibling location under the writing run's own id.
+ *
+ * Why the flat directory stays flat, rather than every run writing under its
+ * own id: `reviews/` is not only a write target, it is the cross-run memory
+ * resume reads. `nextContractReviewRound`, `spentImplementationRounds` and
+ * `loadQAReviewResumeState` all derive round arithmetic from these flat
+ * filenames, and a run-scoped directory would hand a resumed slice an empty
+ * archive to recompute from — replaying rounds it had already paid for. So
+ * the first writer keeps the flat name, every reader's answers are unchanged
+ * (each matches filenames, and a directory entry matches none of their
+ * patterns), and the spill is preservation for a human rather than input to
+ * anything. Deliberately not a union read: two runs may each legitimately
+ * write round 1 attempt 1, and a reader merging them would see two records
+ * for one key.
+ *
+ * Returns the archived name, relative to `archiveDir`, so a spill is visible
+ * in the log line that names it.
+ */
+function archiveEvidenceCopy(details: {
+  source: string;
+  archiveDir: string;
+  name: string;
+  runId: string;
+}): string {
+  const { source, archiveDir, name, runId } = details;
+  const taken = existsSync(join(archiveDir, name));
+  const targetDir = taken ? join(archiveDir, runId) : archiveDir;
+  mkdirSync(targetDir, { recursive: true });
+  // The one invariant: the first writer's bytes are never overwritten. Which
+  // run wrote the flat name is not recorded anywhere, so the spill cannot ask
+  // — a repeated stamp inside one run therefore spills too, and that is the
+  // better answer than throwing, because the evidence survives either way.
+  // `errorOnExist` stays on the write so a name taken in *both* places still
+  // refuses rather than clobbering, and the caller's warning covers it.
+  cpSync(source, join(targetDir, name), {
+    errorOnExist: true,
+    force: false,
+  });
+  return taken ? join(runId, name) : name;
+}
+
 /** Preserve one generator scope-escalation artifact under its attempt stamp. */
 export function archiveScopeEscalationAttempt(details: {
   sliceDir: string;
   archiveDir: string;
   round: number;
   attempt: number;
+  /** The writing run's id, for the spill location. */
+  runId: string;
 }): string | null {
-  const { sliceDir, archiveDir, round, attempt } = details;
+  const { sliceDir, archiveDir, round, attempt, runId } = details;
   const source = join(sliceDir, "escalation.md");
   if (!existsSync(source)) return null;
 
-  const name = `escalation-r${round}-a${attempt}.md`;
-  mkdirSync(archiveDir, { recursive: true });
-  cpSync(source, join(archiveDir, name), {
-    errorOnExist: true,
-    force: false,
+  return archiveEvidenceCopy({
+    source,
+    archiveDir,
+    name: `escalation-r${round}-a${attempt}.md`,
+    runId,
   });
-  return name;
 }
 
 /**
@@ -612,8 +665,9 @@ export function archiveScopeEscalationAttempt(details: {
  * Same reasoning as the escalation archive above: mechanical refusal, but
  * the evidence outlives it.
  *
- * Copies are written with `wx`, so a second attempt at the same stamp
- * fails loudly rather than overwriting the first attempt's evidence.
+ * A second attempt at the same stamp never overwrites the first attempt's
+ * evidence: within one run it fails loudly, and across runs it spills into
+ * the writing run's own subdirectory (`archiveEvidenceCopy`, #258).
  */
 export function archiveRejectedContractMutation(details: {
   sliceDir: string;
@@ -622,19 +676,23 @@ export function archiveRejectedContractMutation(details: {
   attempt: number;
   /** Slice-root filenames to preserve; missing ones are skipped. */
   files: readonly string[];
+  /** The writing run's id, for the spill location. */
+  runId: string;
 }): string[] {
-  const { sliceDir, archiveDir, round, attempt, files } = details;
+  const { sliceDir, archiveDir, round, attempt, files, runId } = details;
   const archived: string[] = [];
   for (const fileName of files) {
     const source = join(sliceDir, fileName);
     if (!existsSync(source)) continue;
-    const name = `rejected-contract-mutation-r${round}-a${attempt}-${fileName}`;
-    mkdirSync(archiveDir, { recursive: true });
-    writeFileSync(join(archiveDir, name), readFileSync(source, "utf-8"), {
-      encoding: "utf-8",
-      flag: "wx",
-    });
-    archived.push(name);
+    archived.push(
+      archiveEvidenceCopy({
+        source,
+        archiveDir,
+        name:
+          `rejected-contract-mutation-r${round}-a${attempt}-${fileName}`,
+        runId,
+      }),
+    );
   }
   return archived;
 }
@@ -1164,9 +1222,18 @@ function moveDirectory(from: string, to: string): void {
  * - The `reviews/` archive dir is **moved**, because the next life's
  *   round-1 evidence writes target the same `r1-a1` names and fail closed
  *   on a collision (#79/#123). Copying would not free the slots. The
- *   whole directory travels together, so the prior life's records and the
- *   raw artifacts they reference stay side by side — only their prefix
+ *   whole directory travels together — including any `run-<id>/` spill
+ *   subdirectories (#258) — so the prior life's records and the raw
+ *   artifacts they reference stay side by side, and only their prefix
  *   changes.
+ *
+ *   Still the reason after #258, and note *which* writes it is about: the
+ *   contract-review and QA evidence writes, which fail closed exactly as
+ *   before. Two lives inside one run share a run id, so a spill would not
+ *   free a flat slot for them either. The two spilling families
+ *   (`archiveEvidenceCopy`'s callers) would land in a run subdirectory
+ *   rather than fail closed, which is why they are not what this move is
+ *   for.
  *
  * Archives land in a numbered `pre-restart-<n>` subdirectory of the
  * slice's usual archive dir, so a second restart cannot overwrite the

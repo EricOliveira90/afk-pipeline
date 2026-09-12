@@ -8,7 +8,7 @@ import {
 import type {
   PersistedGuardianReviewRecord,
   PersistedGuardianReviewRound,
-} from "./run-state.js";
+} from "./guardian-round-records.js";
 
 function record(
   outcome: ReviewOutcome,

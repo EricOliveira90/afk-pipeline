@@ -445,6 +445,12 @@ export type RunEventPayload =
         | "orphaned-contract-lineage"
         | "contract-review-archive-failed"
         | "qa-review-archive-failed"
+        /**
+         * An evidence archive write failed and the slice carried on (#258).
+         * An archive is a record *about* a run and must never be able to end
+         * one, so the warning is the whole consequence.
+         */
+        | "evidence-archive-failed"
         | "feature-branch-fast-forward"
         | "restart-refused"
         | "preflight"

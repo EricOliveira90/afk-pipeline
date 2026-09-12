@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { advanceGuardianFindingLineage } from "./guardian-convergence.js";
 import {
-  sanitizeReviewPhase,
+  sanitizeGuardianReviewFields,
   type PersistedGuardianFinding,
   type PersistedGuardianReviewRound,
-} from "./run-state.js";
+} from "./guardian-round-records.js";
 
 function roundWithArchitectFindings(
   findings: Array<
@@ -313,7 +313,7 @@ describe("advanceGuardianFindingLineage", () => {
         },
       ],
     };
-    expect(sanitizeReviewPhase(phase)?.rounds).toHaveLength(2);
+    expect(sanitizeGuardianReviewFields(phase).rounds).toHaveLength(2);
   });
 
   it("B-03 QA-05 lets an ID match claim the identity a fingerprint twin also wants", () => {
@@ -438,7 +438,7 @@ describe("advanceGuardianFindingLineage", () => {
         },
       ],
     };
-    expect(sanitizeReviewPhase(phase)?.rounds).toHaveLength(2);
+    expect(sanitizeGuardianReviewFields(phase).rounds).toHaveLength(2);
   });
 
   it("B-03 QA-01 gives a contested identity to the fingerprint-matching claimant", () => {

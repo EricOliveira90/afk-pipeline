@@ -19,7 +19,15 @@ import { parseJsonWithUniqueKeys } from "./json-scan.js";
  * in #86; every other member is still refused.
  */
 
-const CONFIG_FILENAME = "afk.config.json";
+/**
+ * The one file {@link loadGatePolicy} reads, relative to the root it is given.
+ * Exported because a gate whose rulebook is run-scoped has to be able to *name*
+ * the candidate's own copy when the two disagree (#251), and naming it by
+ * literal in a second module would be two spellings of one fact.
+ */
+export const GATE_POLICY_CONFIG_FILENAME = "afk.config.json";
+
+const CONFIG_FILENAME = GATE_POLICY_CONFIG_FILENAME;
 
 const POLICY_KEYS = [
   "version",

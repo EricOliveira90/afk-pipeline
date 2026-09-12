@@ -61,19 +61,19 @@ export const REVISION_PLANNER_FAILURE =
 export const REVISION_REJECTION_FINDING = "F-REVISION";
 
 /**
- * Whether a planner or contract-evaluator prompt is the focused
- * scope-revision one. Read off the notes `runFocusedScopeRevision`
- * interpolates rather than an invocation counter: a lane successor
- * re-negotiates from scratch, which bumps every counter without a
- * revision having happened.
+ * Whether a *planner* prompt is the focused scope-revision one. Read off the
+ * control-plane note `runFocusedScopeRevision` interpolates rather than an
+ * invocation counter: a lane successor re-negotiates from scratch, which
+ * bumps every counter without a revision having happened.
+ *
+ * There is no such marker for the revision's contract evaluator, and there
+ * used to be a second clause here claiming one — a sentence no prompt has
+ * ever contained, which is why `revisionRejected` silently never fired. The
+ * evaluator half is identified by sequence instead: see
+ * `pendingRevisionEvaluation` (#257).
  */
 function isFocusedRevision(prompt: string): boolean {
-  return (
-    prompt.includes("This is a focused revision of the already accepted") ||
-    prompt.includes(
-      "This is a fresh evaluation of one focused generator scope revision",
-    )
-  );
+  return prompt.includes("This is a focused revision of the already accepted");
 }
 
 /**
@@ -190,6 +190,16 @@ export interface SliceFixture {
    * ordinary negotiation before any revision exists.
    */
   revisionRejected?: boolean;
+  /**
+   * Reject only the first N focused revisions, then accept. The shape #257
+   * fixed: a rejected revision retries within its round, and the retry —
+   * which now carries the rejecting findings — converges to a LOCKED
+   * contract instead of ending the slice.
+   *
+   * Counted over focused-revision *evaluator* invocations, not planner
+   * rounds, because that is what a rejection is.
+   */
+  revisionRejectedAttempts?: number;
   /** Exhaust contract negotiation in round two with a contested finding. */
   contractImpasse?: boolean;
   /**
@@ -406,6 +416,17 @@ export function buildStubProvider(opts: {
   const plannerRounds = new Map<string, number>();
   // Per-slice count of evaluator-qa invocations, for qaInfraAttempts.
   const qaAttempts = new Map<string, number>();
+  // Per-slice count of focused-revision contract evaluations, for
+  // `revisionRejectedAttempts` (#257).
+  const revisionEvaluationCounts = new Map<string, number>();
+  /**
+   * Slices whose next contract evaluation is a focused revision's. The
+   * orchestrator drives one slice's contract agents in sequence — the
+   * revision planner, then the evaluator judging exactly what it wrote — so
+   * the planner marking its own dispatch is what identifies the evaluation
+   * that follows. The evaluator's own prompt carries no marker to read.
+   */
+  const pendingRevisionEvaluation = new Set<string>();
 
   return {
     name: "stub",
@@ -479,6 +500,9 @@ export function buildStubProvider(opts: {
           });
           return { exitCode: 0, stdout: "", stats: {} };
         }
+        if (isFocusedRevision(options.prompt)) {
+          pendingRevisionEvaluation.add(ghIssue);
+        }
         const declared =
           plannerRound > 1
             ? (fixture.revisionFileScopes?.[plannerRound - 2] ??
@@ -528,9 +552,17 @@ export function buildStubProvider(opts: {
       ) {
         const feedbackRound =
           /feedback-r(\d+)\.md/.exec(options.prompt)?.[1] ?? "1";
+        const revisionEvaluation = pendingRevisionEvaluation.delete(ghIssue);
+        const revisionEvaluations = revisionEvaluation
+          ? (revisionEvaluationCounts.get(ghIssue) ?? 0) + 1
+          : 0;
+        if (revisionEvaluation) {
+          revisionEvaluationCounts.set(ghIssue, revisionEvaluations);
+        }
         const rejectRevision =
-          fixture.revisionRejected === true &&
-          isFocusedRevision(options.prompt);
+          revisionEvaluation &&
+          (fixture.revisionRejected === true ||
+            revisionEvaluations <= (fixture.revisionRejectedAttempts ?? 0));
         const impasse = fixture.contractImpasse === true;
         writeFileSync(
           join(sliceArtifactDir, `feedback-r${feedbackRound}.md`),

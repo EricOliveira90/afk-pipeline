@@ -21,6 +21,7 @@ import {
   isFavorableReviewOutcome,
   isReviewInfrastructureFailure,
   lockContract,
+  nextContractReviewRound,
   reopenContract,
   readContractFiles,
   readContractLockProvenance,
@@ -35,6 +36,7 @@ import type {
   ContractReviewAttemptRecord,
 } from "./contract-review.js";
 import type { QAReviewAttemptRecord } from "./qa-review.js";
+import { spentImplementationRounds } from "./qa-review.js";
 import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
@@ -352,6 +354,7 @@ describe("archiveScopeEscalationAttempt", () => {
           archiveDir,
           round: 1,
           attempt: 1,
+          runId: "run-20260912-090000",
         }),
       ).toBe("escalation-r1-a1.md");
 
@@ -362,6 +365,7 @@ describe("archiveScopeEscalationAttempt", () => {
           archiveDir,
           round: 1,
           attempt: 2,
+          runId: "run-20260912-090000",
         }),
       ).toBe("escalation-r1-a2.md");
 
@@ -376,7 +380,11 @@ describe("archiveScopeEscalationAttempt", () => {
     }
   });
 
-  it("refuses a duplicate stamp without changing the archived bytes", () => {
+  // #258. The stamp is keyed by round and attempt while the directory is
+  // keyed by slice, so a second run of the same slice asks for a name the
+  // first already wrote. Neither copy may be lost: the first writer keeps the
+  // flat name, the second spills under its own run id.
+  it("spills a duplicate stamp under the writing run's id, keeping the first bytes", () => {
     const root = mkdtempSync(join(tmpdir(), "afk-escalation-archive-"));
     const sliceDir = join(root, "slice");
     const archiveDir = join(root, "reviews");
@@ -386,25 +394,107 @@ describe("archiveScopeEscalationAttempt", () => {
     writeFileSync(source, original);
 
     try {
-      archiveScopeEscalationAttempt({
-        sliceDir,
-        archiveDir,
-        round: 2,
-        attempt: 3,
-      });
+      expect(
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 2,
+          attempt: 3,
+          runId: "run-20260911-173426",
+        }),
+      ).toBe("escalation-r2-a3.md");
       writeFileSync(source, "replacement", "utf-8");
 
+      expect(
+        archiveScopeEscalationAttempt({
+          sliceDir,
+          archiveDir,
+          round: 2,
+          attempt: 3,
+          runId: "run-20260912-090000",
+        }),
+      ).toBe(join("run-20260912-090000", "escalation-r2-a3.md"));
+      // The first writer's file is neither overwritten nor moved.
+      expect(readFileSync(join(archiveDir, "escalation-r2-a3.md"))).toEqual(
+        original,
+      );
+      expect(
+        readFileSync(
+          join(archiveDir, "run-20260912-090000", "escalation-r2-a3.md"),
+          "utf-8",
+        ),
+      ).toBe("replacement");
+
+      // A name taken in both places still refuses rather than clobbering
+      // either copy. The caller's warning is the answer to that (#258).
+      writeFileSync(source, "third", "utf-8");
       expect(() =>
         archiveScopeEscalationAttempt({
           sliceDir,
           archiveDir,
           round: 2,
           attempt: 3,
+          runId: "run-20260912-090000",
         }),
       ).toThrow();
       expect(
-        readFileSync(join(archiveDir, "escalation-r2-a3.md")),
-      ).toEqual(original);
+        readFileSync(
+          join(archiveDir, "run-20260912-090000", "escalation-r2-a3.md"),
+          "utf-8",
+        ),
+      ).toBe("replacement");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The spill must be invisible to every reader that derives round
+   * arithmetic from this directory's filenames (#258). That is the whole
+   * reason the flat layout is kept: `reviews/` is the cross-run memory
+   * resume reads, and a run-scoped directory would hand a resumed slice an
+   * empty archive to recompute from. A `run-*` entry is a directory, so it
+   * matches none of their filename patterns — asserted here rather than
+   * assumed, including against a spill dir stuffed with names that would
+   * otherwise count.
+   */
+  it("leaves the round arithmetic every reader derives from the flat dir untouched", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-escalation-readers-"));
+    const sliceDir = join(root, "slice");
+    const archiveDir = join(root, "reviews");
+    mkdirSync(sliceDir, { recursive: true });
+    mkdirSync(archiveDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(archiveDir, "contract-review-r2-a1.json"),
+        "{}",
+        "utf-8",
+      );
+      writeFileSync(
+        join(archiveDir, "qa-review-r3-a1.json"),
+        "{}",
+        "utf-8",
+      );
+      const roundBefore = nextContractReviewRound(archiveDir);
+      const spentBefore = spentImplementationRounds(archiveDir, sliceDir);
+      expect(roundBefore).toBe(3);
+      expect(spentBefore).toBe(3);
+
+      // A whole prior run's evidence, spilled — including rounds far beyond
+      // the flat dir's. None of it may move either counter.
+      const spill = join(archiveDir, "run-20260911-173426");
+      mkdirSync(spill, { recursive: true });
+      for (const name of [
+        "escalation-r1-a1.md",
+        "contract-review-r9-a1.json",
+        "qa-review-r9-a1.json",
+      ]) {
+        writeFileSync(join(spill, name), "{}", "utf-8");
+      }
+
+      expect(nextContractReviewRound(archiveDir)).toBe(roundBefore);
+      expect(spentImplementationRounds(archiveDir, sliceDir)).toBe(spentBefore);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
