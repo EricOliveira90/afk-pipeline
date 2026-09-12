@@ -96,6 +96,29 @@ export interface PersistedApprovedBaseline {
  * rewrites or deletes the `approved-baseline.json` artifact itself, which
  * remains the only record of what was once approved (#96 P-03).
  */
+/**
+ * One final-evaluation attempt, keyed to the tree it graded (#96 B-09/B-10).
+ *
+ * The entries are per attempt rather than a count because the two questions a
+ * reader has are different questions: "how many attempts are left" is answered
+ * by counting `GRADED` entries, while "which attempt looked at the tree a
+ * finding later rejected" needs the tree ID the attempt read. A count can only
+ * answer the first, which is why the invalidation of a baseline used to be
+ * invisible at the attempt level.
+ *
+ * `RETURNED_TO_GENERATOR` entries exist and spend nothing: D19 charges a return
+ * to the generator budget, so the entry records that the attempt happened
+ * without letting it count against {@link MAX_FINAL_EVALUATION_ATTEMPTS}.
+ */
+export interface PersistedFinalEvaluationAttempt {
+  /** 1-based attempt number within the slice's final evaluation. */
+  attempt: number;
+  /** The candidate tree this attempt graded (D10: artifacts keyed by tree). */
+  candidateTreeId: string;
+  verdict: "PASS" | "FAIL";
+  outcome: "GRADED" | "RETURNED_TO_GENERATOR";
+}
+
 export interface PersistedFinalEvaluation {
   decision: "reuse" | "evaluate";
   /** Final checkpoint tree object ID the decision was made about. */
@@ -104,13 +127,50 @@ export interface PersistedFinalEvaluation {
   baselineTreeId?: string;
   /** Repo-relative path of the cited `approved-baseline.json`, dropped with it. */
   baselineArtifactPath?: string;
-  /** Evaluator attempts spent, against {@link MAX_FINAL_EVALUATION_ATTEMPTS}. */
-  attempts: number;
+  /**
+   * Per-attempt entries, in attempt order. Attempts spent against
+   * {@link MAX_FINAL_EVALUATION_ATTEMPTS} are the `GRADED` ones —
+   * {@link finalEvaluationAttemptsSpent} is the one reader of that rule.
+   */
+  attempts: PersistedFinalEvaluationAttempt[];
   /**
    * Candidate trees a baseline-is-wrong finding rejected. `decideFinalReuse`
    * refuses `reuse` against one of these even on exact tree equality.
    */
   invalidatedCandidateTreeIds: string[];
+}
+
+/**
+ * An attempt entry with the invalidation of its tree resolved (#96 B-09).
+ *
+ * Derived on read rather than stored: `invalidatedCandidateTreeIds` is the one
+ * authority for which trees a finding rejected, and a second stored copy per
+ * attempt could disagree with it.
+ */
+export interface FinalEvaluationAttemptView
+  extends PersistedFinalEvaluationAttempt {
+  /** True when this attempt graded a tree a later finding invalidated. */
+  invalidated: boolean;
+}
+
+export interface FinalEvaluationView
+  extends Omit<PersistedFinalEvaluation, "attempts"> {
+  attempts: FinalEvaluationAttemptView[];
+}
+
+/**
+ * How many final-evaluation attempts a slice has spent, for
+ * {@link finalEvaluationAttemptsRemaining}. A return to the generator is not a
+ * spent attempt (D19), so only `GRADED` entries count.
+ */
+export function finalEvaluationAttemptsSpent(
+  record:
+    | { attempts: readonly Pick<PersistedFinalEvaluationAttempt, "outcome">[] }
+    | undefined,
+): number {
+  return (record?.attempts ?? []).filter(
+    (entry) => entry.outcome === "GRADED",
+  ).length;
 }
 
 export interface RunState {
@@ -903,9 +963,24 @@ function sanitizeFinalEvaluations(
       typeof field === "string" && field.trim() !== "";
     if (record.decision !== "reuse" && record.decision !== "evaluate") continue;
     if (!nonblank(record.finalTreeId)) continue;
-    if (!Number.isSafeInteger(record.attempts) || (record.attempts as number) < 0) {
-      continue;
-    }
+    if (!Array.isArray(record.attempts)) continue;
+    const attempts = record.attempts.filter(
+      (entry): entry is PersistedFinalEvaluationAttempt =>
+        typeof entry === "object" &&
+        entry !== null &&
+        Number.isSafeInteger((entry as PersistedFinalEvaluationAttempt).attempt) &&
+        (entry as PersistedFinalEvaluationAttempt).attempt > 0 &&
+        nonblank((entry as PersistedFinalEvaluationAttempt).candidateTreeId) &&
+        ((entry as PersistedFinalEvaluationAttempt).verdict === "PASS" ||
+          (entry as PersistedFinalEvaluationAttempt).verdict === "FAIL") &&
+        ((entry as PersistedFinalEvaluationAttempt).outcome === "GRADED" ||
+          (entry as PersistedFinalEvaluationAttempt).outcome ===
+            "RETURNED_TO_GENERATOR"),
+    );
+    // A dropped attempt entry would understate the spent budget and buy a free
+    // extra dispatch, so a malformed entry degrades the whole record to absent
+    // rather than only itself.
+    if (attempts.length !== record.attempts.length) continue;
     if (!Array.isArray(record.invalidatedCandidateTreeIds)) continue;
     const invalidated = record.invalidatedCandidateTreeIds.filter(nonblank);
     // The citation travels as a pair or not at all: half a citation names a
@@ -921,7 +996,12 @@ function sanitizeFinalEvaluations(
             baselineArtifactPath: record.baselineArtifactPath as string,
           }
         : {}),
-      attempts: record.attempts as number,
+      attempts: attempts.map((entry) => ({
+        attempt: entry.attempt,
+        candidateTreeId: entry.candidateTreeId,
+        verdict: entry.verdict,
+        outcome: entry.outcome,
+      })),
       invalidatedCandidateTreeIds: invalidated,
     };
   }
@@ -932,12 +1012,27 @@ function sanitizeFinalEvaluations(
  * The recorded final evaluation for one slice, or `undefined` — the reader
  * `decideFinalReuse`'s call site goes through, in the style of
  * {@link approvedBaselineFor} (#96 B-02).
+ *
+ * Each attempt entry comes back with `invalidated` resolved against the
+ * record's own `invalidatedCandidateTreeIds`, so "which attempts graded a tree
+ * a baseline-is-wrong finding rejected" is a read, not a join the caller has to
+ * remember to perform (#96 B-09).
  */
 export function finalEvaluationFor(
   state: RunState,
   ghIssue: string,
-): PersistedFinalEvaluation | undefined {
-  return state.finalEvaluations?.[ghIssue];
+): FinalEvaluationView | undefined {
+  const record = state.finalEvaluations?.[ghIssue];
+  if (record === undefined) return undefined;
+  return {
+    ...record,
+    attempts: record.attempts.map((entry) => ({
+      ...entry,
+      invalidated: record.invalidatedCandidateTreeIds.includes(
+        entry.candidateTreeId,
+      ),
+    })),
+  };
 }
 
 /**
@@ -982,7 +1077,10 @@ export function invalidateFinalEvaluationBaseline(
     const record: PersistedFinalEvaluation = {
       decision: "evaluate",
       finalTreeId: existing?.finalTreeId ?? candidateTreeId,
-      attempts: existing?.attempts ?? 0,
+      // The entries survive the invalidation: they are the record of what was
+      // graded, and a return to the generator changes what the trees mean, not
+      // whether the attempts happened.
+      attempts: [...(existing?.attempts ?? [])],
       invalidatedCandidateTreeIds: invalidated.includes(candidateTreeId)
         ? [...invalidated]
         : [...invalidated, candidateTreeId],
