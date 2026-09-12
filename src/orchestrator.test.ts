@@ -2512,7 +2512,7 @@ describe("generator scope escalation", () => {
     // #258, on the same slice, because it is the same claim from the other
     // side: the slice reaches its real outcome. #96 lost a slice holding
     // seven commits to exactly this write, and paid a resume attempt for it.
-    it("#258 warns and carries on when an evidence archive write collides", () => {
+    it("#258 spills a colliding evidence archive instead of ending the slice", () => {
       const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
       const runDir = readdirSync(runRoot)
         .map((name) => join(runRoot, name))
@@ -2528,25 +2528,31 @@ describe("generator scope escalation", () => {
             event.ghIssue === slices[6]!.ghIssue,
         );
 
-      expect(warnings).toHaveLength(1);
+      // A spill is a better outcome than a warning, so there is no warning:
+      // both runs' evidence is on disk.
+      expect(warnings).toEqual([]);
       // The slice's real outcome, not the archive's.
       expect(state.slices[slices[6]!.ghIssue]!.phase).toBe("PASS");
-      // The prior name was not overwritten — the refusal the archiver makes
-      // is still the right one; it just is not the slice's business.
+      const reviews = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-07",
+        "reviews",
+      );
+      // The first writer keeps the flat name, unmoved and unoverwritten.
+      expect(
+        readFileSync(join(reviews, "escalation-r1-a1.md"), "utf-8"),
+      ).toContain("a previous run's escalation");
+      // This run's copy landed beside it, under this run's own id — the same
+      // id its logs live under, so the two are correlatable by name.
       expect(
         readFileSync(
-          join(
-            repo,
-            ".afk",
-            "artifacts",
-            `${slug}-stub`,
-            "slice-07",
-            "reviews",
-            "escalation-r1-a1.md",
-          ),
+          join(reviews, basename(runDir), "escalation-r1-a1.md"),
           "utf-8",
         ),
-      ).toContain("a previous run's escalation");
+      ).toContain("F-40");
       // And nothing was charged for it. An ERROR that never reached an agent
       // must not consume a resume attempt (#188's charge-at-dispatch stands;
       // the failure simply never reaches the charge).

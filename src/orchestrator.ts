@@ -2211,10 +2211,12 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
    * worktree, so recreating it deletes the only copy — they are copied to
    * the same `.afk/artifacts/` path the ESCALATE/STUCK preserve path
    * writes to (#113). The `reviews/` archive dir is moved aside, because
-   * the next round-1 evidence write targets the same `r1-a1` names and
-   * fails closed on a collision — burning infrastructure retries and
-   * possibly ending the run ERROR before the next re-launch's resume
-   * self-heals past the occupied rounds (#123).
+   * the next round-1 contract-review and QA evidence writes target the same
+   * `r1-a1` names and fail closed on a collision — burning infrastructure
+   * retries and possibly ending the run ERROR before the next re-launch's
+   * resume self-heals past the occupied rounds (#123). Two lives inside one
+   * run share a run id, so #258's spill does not free those slots for them;
+   * moving the directory is still what does.
    *
    * Best-effort: a failure warns and the run proceeds, because the
    * operator asked for the restart and a half-copied archive must not
@@ -5919,6 +5921,7 @@ export async function runSliceExecute(
                   round,
                   attempt: generatorAttempt,
                   files: mutatedOwned,
+                  runId: runIdFor(logger.runDir),
                 }),
             ) ?? [];
           restoreAcceptedContractPair(ctx.absSliceDir, acceptedPair);
@@ -5949,11 +5952,12 @@ export async function runSliceExecute(
         // #258, and the write that killed #96: the archive dir is keyed by
         // slice while this name is keyed by round and attempt, so a resumed
         // slice whose prior life died before QA re-derives round 1 and asks
-        // for a name the prior run already wrote. The refusal to overwrite is
-        // right — that file is the only record of the earlier escalation —
-        // but it is not the slice's business. Warn and carry on: the
+        // for a name the prior run already wrote. The prior file is kept —
+        // it is the only record of the earlier escalation — and this run's
+        // copy spills into its own subdirectory instead, so neither run's
+        // evidence is lost. And if even the spill fails, the seam warns: the
         // escalation the loop is about to act on is still on disk in the
-        // slice dir, and the grant that follows is unaffected.
+        // slice dir, and the grant that follows is unaffected either way.
         archiveForTheRecord(
           ctx,
           `the scope escalation of round ${round} attempt ${generatorAttempt}`,
@@ -5964,6 +5968,7 @@ export async function runSliceExecute(
               archiveDir: reviewArchiveDir,
               round,
               attempt: generatorAttempt,
+              runId: runIdFor(logger.runDir),
             }),
         );
         const lockedManifest = loadAcceptanceManifest(ctx.absSliceDir);
