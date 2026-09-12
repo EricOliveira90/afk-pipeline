@@ -12,6 +12,10 @@
     "./afk-manifest": {
       "types": "./dist/afk-manifest.d.ts",
       "import": "./dist/afk-manifest.js"
+    },
+    "./learning-proposal": {
+      "types": "./dist/learning-proposal.d.ts",
+      "import": "./dist/learning-proposal.js"
     }
   },
   "scripts": {
