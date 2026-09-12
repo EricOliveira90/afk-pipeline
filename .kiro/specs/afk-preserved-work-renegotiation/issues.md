@@ -1,6 +1,6 @@
-# Preserve-work contract renegotiation - Slice Index
+# PRD 9 preserve-work contract renegotiation - Slice Index
 
-**Parent PRD:** #276. Settled behavior and interface:
+**Parent PRD:** #276 (PRD 9). Settled behavior and interface:
 `.kiro/specs/afk-preserved-work-renegotiation/prd.md`.
 
 | Slice | GH Issue | Title | Type | Blocked by | User stories covered |

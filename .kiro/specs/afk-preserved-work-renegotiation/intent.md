@@ -1,4 +1,4 @@
-# Intent: Preserve-work contract renegotiation
+# Intent: PRD 9 preserve-work contract renegotiation
 
 **Status:** approved for specification.
 **Written:** 2026-09-12.
@@ -36,11 +36,15 @@ declared by current `issues.md` and allowed by current `afk.json`. It never
 removes or rewrites an existing scope identity. Every added slice's blockers
 must already be in the scope of record or be added by the same action.
 
-The run state keeps append-only lineage for the operator action, reason,
-target and added identities, branch/head/base facts, prior and replacement
-lock fingerprints, and pending/completed/refused outcome. A crash or failed
-negotiation leaves the transition pending, so the next launch retries
-renegotiation instead of consuming the stale lock.
+The run state keeps append-only lineage for an admitted operator action,
+reason, target and added identities, branch/head/base facts, prior and
+replacement lock fingerprints, and pending/completed/refused outcome.
+Preflight refusals happen before mutation and create no lineage entry. Once an
+action is admitted, its record is pending while work can safely resume; a
+crash or failed negotiation leaves it pending. It becomes completed only after
+the replacement lock is accepted, or refused only when a deterministic
+post-admission guard terminates the action after rollback and retrying the same
+request cannot make progress.
 
 ## Constraints
 

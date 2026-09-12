@@ -1,10 +1,10 @@
-# PRD: Preserve-work contract renegotiation
+# PRD 9: Preserve-work contract renegotiation
 
 **GH issue:** #276.
 **Slice issues:** #277 (preserve-work renegotiation), #278 (additive
 split-scope extension, blocked by #277).
 **Parent design:** `intent.md` in this directory and
-`docs/specs/afk-v2-plan.md` PRD 8.
+`docs/specs/afk-v2-plan.md` PRD 9.
 **Binding decisions:** ADR 0018 (run state), ADR 0039 (never destroy unmerged
 commits), ADRs 0050–0051 (focused scope revision bounds and rollback), ADR
 0055 (accepted-pair transaction and lock provenance), ADR 0056 (run-state
@@ -70,9 +70,14 @@ rewriting the existing scope of record.
 - Renegotiation always reruns the explorer and ordinary planner/evaluator
   protocol against the refreshed worktree. Exact-stage resume may not skip it.
   Implementation-round and resume-attempt history remains attached to the tree.
-- A pending recovery record prevents the stale lock from reaching a generator.
-  Acceptance completes the record with the replacement lock fingerprint and
-  provenance; refusal or process death leaves it pending and safely retryable.
+- Preflight eligibility and request validation happen before mutation; a
+  refusal there creates no lineage entry. After admission, a pending recovery
+  record prevents the stale lock from reaching a generator. Process death or
+  a failed negotiation with byte-for-byte rollback leaves it pending and
+  safely retryable. Acceptance completes it with the replacement lock
+  fingerprint and provenance. `refused` is terminal and is written only when a
+  deterministic post-admission guard rejects an already-recorded transition
+  after rollback, so replaying the identical request cannot make progress.
 - The lineage record is append-only and versioned. It records the reason,
   target and added slice identities, provider, branch, pre-refresh head,
   refreshed head, feature-base head, prior lock fingerprint, replacement lock
@@ -82,6 +87,12 @@ rewriting the existing scope of record.
   absent from the current scope, and whose blockers are already scoped or are
   added in the same action. Existing scope entries, PASS records, migration
   claims and review history are preserved.
+- The absent-from-scope rule applies to a new extension. Repeating a completed
+  action is an idempotent no-op only when the renegotiation targets, recovery
+  reason and complete extension identity set exactly match its completed
+  lineage entry, and every requested addition is already scoped by that entry.
+  Partial overlap or any different target, reason or identity set is refused
+  and names the existing lineage entry.
 - Scope extension is additive even when the product change is described as a
   split. The original identity remains historical lineage; the operator edits
   `issues.md`, `afk.json` and issue dependencies before invoking the transition.
