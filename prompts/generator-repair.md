@@ -81,13 +81,19 @@ a sibling's work, and the same write boundary and scope escalation above still
 apply. A conflict marker left anywhere in the tree fails the round even if the
 tests pass.
 
-# Locked contract view
+# Locked contract pair
 
-{{CONTRACT_VIEW}}
+The pair you implement is in your working tree. Open and read both files in
+full before you write anything — a repair round resumes work, so the contract
+you remember from an earlier round may have been revised since:
 
-# Acceptance manifest
+- `{{SLICE_DIR}}/contract.md`
+- `{{SLICE_DIR}}/{{ACCEPTANCE_MANIFEST_FILE}}`
 
-{{ACCEPTANCE_MANIFEST}}
+They are not inlined below. The manifest is the machine source for the
+behaviors and the file scope; the write boundary above is a projection of it,
+not a substitute for reading it. If either file cannot be opened, write
+`{{SLICE_DIR}}/escalation.md` naming the unreadable path and stop.
 
 # Task
 

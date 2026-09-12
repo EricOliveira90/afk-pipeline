@@ -1405,7 +1405,7 @@ export function assemblePlannerInitialEnvelope(
  */
 const CONTRACT_PAIR_BY_REFERENCE =
   "the contract pair travels by reference to its worktree path; the round " +
-  "must open both files before acting (#196, #265)";
+  "must open both files before acting (#196, #265, #269)";
 
 export function assemblePlannerRevisionEnvelope(
   input: PlannerRevisionEnvelopeInput,
@@ -2017,17 +2017,18 @@ export function assembleGeneratorEnvelope(
           .join("\n")
       : "(no repository changes)";
   const failureSet = formatGeneratorFailureSet(input.failureSet);
-  const renderedAcceptanceManifest = JSON.stringify(
-    input.acceptanceManifest,
-    null,
-    2,
-  );
+  /**
+   * `contractView` and `acceptanceManifest` are deliberately absent: the pair
+   * travels by reference to its worktree path (#269, ADR 0068), the way it
+   * already does for the contract evaluator (#196) and the planner revision
+   * round (#265). `FILE_SCOPE` stays — it is a projection of the manifest the
+   * generator is held to, not a copy of a file.
+   */
   const commonArgs = {
     SLICE_DIR: input.sliceDir,
+    ACCEPTANCE_MANIFEST_FILE: ACCEPTANCE_MANIFEST_FILENAME,
     FILE_SCOPE: fileScope,
     MIGRATION_RESERVATION: input.migrationReservation,
-    CONTRACT_VIEW: input.contractView,
-    ACCEPTANCE_MANIFEST: renderedAcceptanceManifest,
     TEST_COMMAND: input.testCommand,
     PATTERNS_AND_HARNESS: input.patternsAndHarness,
     FAILURE_SET: failureSet,
@@ -2112,12 +2113,12 @@ export function assembleGeneratorEnvelope(
     {
       artifactClass: "contract-view",
       artifactId: `${input.sliceDir}/contract.md`,
-      ...contentLocator(input.contractView),
+      locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
     },
     {
       artifactClass: "acceptance-manifest",
-      artifactId: `${input.sliceDir}/acceptance-manifest.json`,
-      ...contentLocator(renderedAcceptanceManifest),
+      artifactId: `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`,
+      locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
     },
     {
       artifactClass: "verification-command",

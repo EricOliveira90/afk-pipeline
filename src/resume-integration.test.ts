@@ -395,7 +395,10 @@ describe("retried slice resume (spec #33)", () => {
 
     it("hands slice 01 the repair prompt over its own commit log (#33)", () => {
       const prompt = generatorRecord("01").prompt;
-      expect(prompt).toContain("# Locked contract view");
+      // The pair is named, not copied (#269): a repair round resumes over a
+      // contract that may have been revised, so it reads it from the worktree.
+      expect(prompt).toContain("# Locked contract pair");
+      expect(prompt).toMatch(/read both files in\s+full before you write/);
       // Its own commit log with stats.
       expect(prompt).toContain("feat(#4001): committed before death");
       expect(prompt).toContain("src/work-01.ts");
