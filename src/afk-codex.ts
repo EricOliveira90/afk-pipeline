@@ -18,6 +18,7 @@ import { parsePipelineRuntimeOptions } from "./cli-options.js";
 import { assertPrdNotOnHold } from "./prd-hold.js";
 import { runCleanFailedCli } from "./clean-failed.js";
 import { codexProvider } from "./codex.js";
+import { providerForRun } from "./prompt-recorder.js";
 import { loadAfkManifest } from "./afk-manifest.js";
 import { installCancellationSignals } from "./cancellation.js";
 import { installCrashRecorder } from "./crash-records.js";
@@ -31,7 +32,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-codex stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk-codex clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
+    `Usage: afk-codex --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--serial-lanes] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk-codex stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk-codex clean-failed --prd-dir <path-to-prd-folder> [--dry-run]`,
   );
   process.exit(2);
 }
@@ -254,7 +255,7 @@ async function main() {
       maxContractRounds,
       selectedSliceNumbers: requestedSliceNumbers,
       manifest: afkManifest,
-      provider: codexProvider,
+      provider: providerForRun(codexProvider, runtimeOptions.recordPrompts),
       migrationValidation,
       signal: cancellation.signal,
       requestCancellation: () => cancellation.requestStop("stop sentinel"),

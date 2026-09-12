@@ -9,6 +9,7 @@ import {
 } from "./orchestrator.js";
 import type { MigrationValidation } from "./migration-gate.js";
 import { kiroProvider } from "./kiro.js";
+import { providerForRun } from "./prompt-recorder.js";
 import {
   DEFAULT_MAX_CONTRACT_ROUNDS,
   parseMaxContractRounds,
@@ -34,7 +35,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk adopt <prd-slug> <slice> --branch <branch> --reason <reason> [--adopter <name>] [--provider <name>]`,
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk adopt <prd-slug> <slice> --branch <branch> --reason <reason> [--adopter <name>] [--provider <name>]`,
   );
   process.exit(2);
 }
@@ -287,6 +288,11 @@ async function main() {
       maxContractRounds,
       selectedSliceNumbers: requestedSliceNumbers,
       manifest: afkManifest,
+      // Passed explicitly now that it can be wrapped. With the flag absent
+      // this is the identical `kiroProvider` object the `config.provider ??
+      // kiroProvider` default already supplies, so an unflagged run is
+      // behaviorally unchanged.
+      provider: providerForRun(kiroProvider, runtimeOptions.recordPrompts),
       migrationValidation,
       signal: cancellation.signal,
       requestCancellation: () => cancellation.requestStop("stop sentinel"),
