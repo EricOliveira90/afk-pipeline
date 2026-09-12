@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "verdict": "REVISE",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["P-06"],
+      "evidence": "\"the bump is `RUN_STATE_VERSION` 4 -> 5, and `src/run-state.test.ts` is in scope solely to carry the five existing assertions that stamp the version as the literal `4` (`src/run-state.test.ts:250`, `:275`, `:1492`, `:1564`, `:1575` ...) from `4` to `5`. Nothing else in that file changes: no behavior, no data format, and no assertion beyond the version literal\"",
+      "expected": "The declared edit set for src/run-state.test.ts must match the file, so a generator can bump RUN_STATE_VERSION and leave the suite green without exceeding the declared scope.",
+      "observed": "Read of src/run-state.test.ts contradicts the claim in both directions. Four of the five cited lines are input fixtures, not assertions: :250 and :275 are `version: 4` on objects passed into adaptLoadedState for the [behavior:B-06] baseline-locator round-trip and malformed-locator tests, and :1564 and :1575 are the same for the [behavior:B-13] malformed-waiver tests. Rewriting those inputs to 5 deletes the v4-file coverage P-06 itself claims to prove, and none of the four would fail on a bump. Meanwhile seven assertions that DO stamp the current version as the literal 4 are not cited and would fail on the bump: :151 (`expect(adapted.version).toBe(4)`, v0 load), :168 (v1 upgrade), :359 and :371 (loadRunState / on-disk after saveSliceState), :1506 (`expect(adapted.version).toBe(4)` inside the B-13 upgrade loop), :1528 and :1531 (v3 re-stamp through saveRunState / loadRunState). The test title at :1491 also reads \"upgrades every earlier version to 4\". Following the contract verbatim therefore leaves seven red assertions while \"Nothing else in that file changes\" forbids fixing them, and the matching Definition-of-done box (\"the only edit to `src/run-state.test.ts` is the five version literals moving from `4` to `5`\") is unsatisfiable.",
+      "clearCondition": "P-06, the \"Changes to existing behavior\" bullet, and the Definition-of-done box are restated against the file as it is: the current-version assertions that must move to 5 are enumerated by line (:151, :168, :359, :371, :1492, :1506, :1528, :1531, plus the :1491 title text if it is retitled), and the `version: 4` input fixtures at :250, :275, :1564, :1575 are named as fixtures that stay 4 because they are the backward-read evidence. Any line whose literal changes is listed; the \"nothing else changes\" clause is scoped to that enumerated list.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-12"],
+      "evidence": "acceptance-manifest.json fileScope.paths: \"architecture.md\" (against contract.md's \"- ARCHITECTURE.md\" and behavior B-12's \"the updated ARCHITECTURE.md\")",
+      "expected": "Every path in the manifest's fileScope must be the repository path a file-scope gate will see in the diff, so the file B-12 requires editing is authorized.",
+      "observed": "The tracked file is `ARCHITECTURE.md` (confirmed by `git ls-files` and a directory listing in the worktree); the manifest declares the lowercase `architecture.md`. B-12 obliges the slice to add rows to that file, so the one edit the behavior mandates is declared under a path that does not exist in the tree. On a case-sensitive comparison the real edit reads as out-of-scope; the contract's own file list uses the correct casing, so the pair disagrees with itself about the same file.",
+      "clearCondition": "acceptance-manifest.json fileScope.paths lists `ARCHITECTURE.md` with the tree's casing, matching contract.md's `## Files expected to change` entry.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09"],
+      "evidence": "\"observableResult\": \"a unit test asserting the invalidated tree ID and attempt entries read back through finalEvaluationFor, the refused reuse on that tree ID, the generator round counter incremented by exactly one across the return, an unchanged final-evaluation attempt count, and no baseline write site in the diff\"",
+      "expected": "Each clause of an observable result must be producible by the surface the behavior declares, within the declared file scope, so the acceptance:behaviors gate can yield real evidence for the whole obligation.",
+      "observed": "The generator-round clause has no declared seam. The explorer's evidence puts implementation-round accounting in `src/accepted-candidate.ts` (`ImplementationAttemptPlan { firstRound, attemptLimit, finalRound }` at :53-57, computed via `implementationRoundsRemaining` at :107-126), and that file is in neither the contract's file list nor the manifest's fileScope. The only in-scope file that could host the return-to-generator transition is `src/orchestrator.ts`, which the contract itself treats as a hub with a single call site and which no declared test exercises as a unit; B-09's gateIds carry `acceptance:behaviors`/`tests`/`typecheck` but the behavior is bound to no spawned scenario, unlike B-03 and P-01 which explicitly declare \"an it on an existing spawned scenario\". As written, \"the generator round counter incremented by exactly one\" is assertable only by a test the contract does not authorize, so a green acceptance:behaviors run for B-09 can be reached while that clause goes unproven.",
+      "clearCondition": "B-09 either names the in-scope pure seam that decides and reports round consumption (for example a function in `src/final-evaluation.ts` returning the routing decision plus which budget it consumes, asserted in `src/final-evaluation.test.ts`), or binds the round-counter clause to a named existing spawned scenario in `src/qa-orchestration.test.ts` the way B-03 and P-01 do; if the transition needs `src/accepted-candidate.ts`, that path is added to both the contract's file list and the manifest fileScope.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "evidence": "\"A session that stops after the first group leaves a coherent, green half rather than a half-wired dispatch path.\"",
+      "expected": "A single-session contract should describe an order of delivery, not a landing zone for a partial slice.",
+      "observed": "Twenty-one declared paths cover a new module and its suite, a new prompt, a new persisted record with a schema-version bump, a new run event, a third QAReviewStage member with its archive prefix, an extended copy-back allowlist, a new context-envelope entry, a new bound, a change-summary variant, orchestrator dispatch wiring and ARCHITECTURE.md rows. That is a lot for one generator session, and the test plan's own fallback sentence reads as planning for incompletion. The scope is evidence-backed and each piece is small, so this is not a blocker, but the sentence invites a half-delivered slice; the ordering (pure module and schema first, then constants, then wiring) is the useful part and stands on its own.",
+      "clearCondition": "The delivery-order paragraph states the order without offering a stopping point, or the slice is split so that the stated first group is the whole contract.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}

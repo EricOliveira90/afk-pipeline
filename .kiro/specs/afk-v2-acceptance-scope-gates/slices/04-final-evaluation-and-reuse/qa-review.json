@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-07",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01", "B-02"],
+      "summary": "The reuse decision is now reachable in production and is the single comparison that decides the dispatch; the reuse stores are asserted by a spawned run rather than a hand-written record.",
+      "evidence": "`src/final-evaluation.ts:45-125` adds `FinalReuseBaseline.approvedTreeId`, and `src/orchestrator.ts:6688-6715` computes `baselineAuthorizedTreeId` by running `reviewArtifactViolations({fromTree: persistedBaseline.treeId, toTree: acceptedTreeId, ...orchestratorAuthorizedBlobs: amendedPairBlobsThisAttempt})` and offering the accepted tree only when that returns zero violations; absent, `decideFinalReuse` compares against the graded tree and answers `evaluate` (fail-closed). `git show 07c4851 -- src/orchestrator.ts` shows `postApprovalWriteChangedTree` and the `else if (!postApprovalWriteChangedTree)` branch deleted, so `decideFinalReuse` is the only comparison left. The new spawned scenario `src/qa-orchestration.test.ts:3698` (`[behavior:B-02] records a reuse in all three stores and dispatches no evaluator when the writing stage writes nothing`) uses `finalEvaluationFixture({ stageWrites: false })` — production's no-op stage — calls `runSliceExecute(ctx)` and reads all three stores out of the run: `finalEvaluationFor(loadRunState(repo,\"prd-070-stub\"),\"70\")?.decision === \"reuse\"`, exactly one `final-evaluation-reuse` line filtered out of `events.jsonl`, the `## Final Evaluation Reuse` section from `ctx.logger.writeSummary()`, and `expect(finalCalls).toEqual([])`. The tree-changing half still holds: `[behavior:B-03] runs an injected post-approval writing stage and evaluates the tree it dirtied exactly once`. `pnpm vitest run src/final-evaluation.test.ts src/qa-orchestration.test.ts` → `Test Files 2 passed (2) / Tests 98 passed (98)`, exit 0, with `[behavior:B-02] ... 7572ms` and `[behavior:B-03] ... 10056ms` both listed as passing.",
+      "expected": "A run whose post-approval writing stage writes nothing records `decision === \"reuse\"`, journals exactly one `final-evaluation-reuse` event, renders the run-summary reuse section, and dispatches zero `evaluator-final` invocations — read back out of the run the orchestrator performed — while the tree-changing case still dispatches exactly one evaluator.",
+      "observed": "Exactly that, in one spawned scenario with the injected stage set to production's no-op, plus the surviving B-03 scenario for the tree-changing case. Both pass. The undeclared second comparison is gone.",
+      "clearCondition": "In a spawned scenario whose post-approval writing stage writes nothing, the orchestrator records `finalEvaluationFor(state, ghIssue)?.decision === \"reuse\"`, journals exactly one `final-evaluation-reuse` event, renders the slice's `run-summary.md` reuse section, and dispatches zero `evaluator-final` invocations — all read back out of the run the orchestrator performed rather than from a hand-written record or a hand-emitted event; and the tree-changing case still dispatches exactly one evaluator.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-08",
+      "severity": "ADVISORY",
+      "behaviorIds": ["P-01"],
+      "summary": "P-01's merge-serialization half is now carried by an executing, instrumented merge in the wave suite cited by id, and the in-slice source-text check is retitled to the claim it actually makes.",
+      "evidence": "The cited assertion exists and observes a real merge: `src/wave-migrations.test.ts:1452` `it(\"B-05: holds the merge mutex across the refused attempt, the round and the retry\")`, inside `describe(\"a real conflict spends one scoped resolution round\")`, whose `runWave(...)` at `:1376` passes the instrumented `mergeMutex`, queues a competitor inside the critical section at `:1394`, performs a real `git merge --no-commit` and commit at `:1406-1417`, and then asserts `acquisitionsAtRoundExit === acquisitionsAtRoundEntry`, `probeSettledInsideRound === false`, and `probeSawTheRetryMerged === true`. The in-slice test is retitled `[behavior:P-01] introduces no second lock primitive anywhere in this slice's modules` (`src/qa-orchestration.test.ts:3529`) and now scans all ten of this slice's modules for `mergeMutex|makeAsyncMutex|AsyncMutex|acquireLock|lockFile` rather than grepping for the word. `handoff.md` records the split and names the carrying assertion by id.",
+      "expected": "P-01 is asserted by an executing merge that is observably serialized through the existing `src/wave.ts` mutex, or the assertion is stated as what it actually checks with the behavior claim carried by an existing wave-suite assertion cited by id.",
+      "observed": "The second remedy, taken in full: the in-slice test now claims only \"no second lock primitive\" (which is a property of the diff and is what it checks), and the mutex-serialized-merge claim is cited by exact id to a wave-suite assertion that instruments the mutex across an executing merge.",
+      "clearCondition": "P-01 is asserted by an executing merge that is observably serialized through the existing `src/wave.ts` mutex, or the assertion is stated as what it actually checks (that this slice adds no lock primitive) with the behavior claim carried by an existing wave-suite assertion cited by id.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-09",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "summary": "The operator-facing reuse section and the `final-evaluation-reuse` event doc still claim the final checkpoint was \"byte-identical to the approved baseline\" and cite \"exact tree equality\", but after the QA-07 fix every real reuse row prints two different tree IDs and no field carries the tree the approval actually authorizes.",
+      "evidence": "Probe in this disposable worktree: I added two `console.log` lines to the `[behavior:B-02]` spawned scenario and ran `pnpm vitest run src/qa-orchestration.test.ts -t \"records a reuse in all three stores\"`. Output:\n\n```\nQA-PROBE finalTreeId=ca73af39ebc5d6ea3843adf34caadd09d8d3fb0a baselineTreeId=6e874143d63a38bcf223f1529f0945c5b9732e3e equal=false\nQA-PROBE SECTION>>>\n## Final Evaluation Reuse\n\nThe final checkpoint was byte-identical to the approved baseline, so no final\nevaluator was dispatched (#96, PRD D20 — exact tree equality, no cosmetic\nexception).\n\n| Slice | Round | Final tree | Baseline tree | Evaluator invocations |\n|-------|-------|------------|---------------|-----------------------|\n| 70 | 1 | ca73af39ebc5d6ea3843adf34caadd09d8d3fb0a | 6e874143d63a38bcf223f1529f0945c5b9732e3e | 0 |\n<<<\n```\n\nThe probe was reverted with `git checkout -- src/qa-orchestration.test.ts` and `pnpm run typecheck` re-run green afterwards. This is structural, not fixture-specific: `src/orchestrator.ts:6272` records the baseline at `checkpoint.treeId` — the pre-QA-artifact tree — and the reuse event at `:6743-6750` carries `baselineTreeId: persistedBaseline!.treeId`, so the two IDs the section renders side by side differ in every production reuse by construction. `src/final-evaluation.ts` and `handoff.md` were both updated to the authorized-tree wording; `src/logger.ts:590-604` and the `final-evaluation-reuse` doc comment in `src/run-events.ts:248-252` were not.",
+      "expected": "The three reuse stores explain the reuse honestly: the run-summary section and the event's documentation describe the comparison the code performs (the final tree equals the tree the approval authorizes, which differs from the graded baseline tree only by QA-window artifacts).",
+      "observed": "The summary prose asserts byte-identity and \"exact tree equality\" directly above a row whose two tree columns are different strings, and neither the section nor the event carries the authorized tree ID that would let a reader reconcile them. An operator auditing \"zero final evaluator invocations\" is told the wrong reason.",
+      "clearCondition": "For a reuse produced by a run (not a hand-seeded record), the rendered `run-summary.md` reuse section states the comparison the code actually makes and is reconcilable with the tree IDs it prints, the `final-evaluation-reuse` event's documentation says the same, and an assertion covers that wording or the authorized tree ID it names.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

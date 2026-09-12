@@ -233,3 +233,140 @@ export function writeCandidateChangeSummary(
   writeFileSync(path, `${JSON.stringify(summary, null, 2)}\n`, "utf-8");
   return { path, summary };
 }
+
+/** Canonical filename for the baseline → final variant (#96 B-04). */
+export const FINAL_CHANGE_SUMMARY_FILENAME = "final-change-summary.json";
+
+/**
+ * One post-approval writing stage's slice of the baseline → final range.
+ *
+ * The boundaries are checkpoint refs, not stage outputs described in prose:
+ * the final evaluator's first question is which stage wrote a given byte, and
+ * only a per-stage ref pair can answer it.
+ */
+export interface PostApprovalStageBoundary {
+  /** The stage's id — the same constant the orchestrator dispatched it under. */
+  stageId: string;
+  fromRef: string;
+  toRef: string;
+}
+
+/**
+ * The baseline → final summary: the same two-ref facts as the candidate
+ * variant, plus a per-stage attribution of the range.
+ *
+ * `byStage` is keyed by exactly the stage ids that ran, in dispatch order. With
+ * only PRD 4's no-op stub that is a single key, and its entry's `files` and
+ * diff stats are therefore literally the summary's own — the stub tiles the
+ * whole range by itself.
+ */
+export interface FinalChangeSummary extends ChangeSummary {
+  byStage: Record<string, ChangeSummary>;
+  /** Stage ids in the order they ran, since object key order is not a contract. */
+  stageOrder: string[];
+}
+
+export interface FinalChangeSummaryInput {
+  /** Any directory inside the repository holding every ref below. */
+  cwd: string;
+  /** The approved baseline's tree (or its checkpoint commit). */
+  baselineRef: string;
+  /** The final checkpoint, after every post-approval writing stage has run. */
+  finalRef: string;
+  /**
+   * The stages that ran, in order. Their boundaries must tile
+   * `baselineRef → finalRef` exactly: the first begins at the baseline, the
+   * last ends at the final checkpoint, and each stage begins where the
+   * previous one ended. A gap would be a byte no stage is accountable for,
+   * which is the one thing this variant exists to make impossible.
+   */
+  stages: readonly PostApprovalStageBoundary[];
+}
+
+/**
+ * Build the baseline → final variant. Every read goes through
+ * {@link buildChangeSummary} — once for the whole range and once per stage —
+ * so there is still exactly one producer of change-summary facts (PRD D11).
+ */
+export function buildFinalChangeSummary(
+  input: FinalChangeSummaryInput,
+): FinalChangeSummary {
+  if (input.stages.length === 0) {
+    throw new Error(
+      "final change summary requires at least one post-approval writing stage; " +
+        "an empty stage list attributes the range to nobody",
+    );
+  }
+  const seen = new Set<string>();
+  for (const stage of input.stages) {
+    if (stage.stageId.trim() === "") {
+      throw new Error("final change summary stage ids must be non-blank");
+    }
+    if (seen.has(stage.stageId)) {
+      throw new Error(
+        `final change summary stage id "${stage.stageId}" appears twice; ` +
+          "byStage would lose one of them",
+      );
+    }
+    seen.add(stage.stageId);
+  }
+  const first = input.stages[0]!;
+  const last = input.stages[input.stages.length - 1]!;
+  if (first.fromRef !== input.baselineRef) {
+    throw new Error(
+      `final change summary stage "${first.stageId}" begins at ` +
+        `${first.fromRef}, not at the approved baseline ${input.baselineRef}`,
+    );
+  }
+  if (last.toRef !== input.finalRef) {
+    throw new Error(
+      `final change summary stage "${last.stageId}" ends at ${last.toRef}, ` +
+        `not at the final checkpoint ${input.finalRef}`,
+    );
+  }
+  for (let index = 1; index < input.stages.length; index += 1) {
+    const previous = input.stages[index - 1]!;
+    const stage = input.stages[index]!;
+    if (stage.fromRef !== previous.toRef) {
+      throw new Error(
+        `final change summary stage "${stage.stageId}" begins at ` +
+          `${stage.fromRef}, but "${previous.stageId}" ended at ` +
+          `${previous.toRef}; the stages must tile the range`,
+      );
+    }
+  }
+
+  const summary = buildChangeSummary(
+    input.cwd,
+    input.baselineRef,
+    input.finalRef,
+  );
+  const byStage: Record<string, ChangeSummary> = {};
+  for (const stage of input.stages) {
+    byStage[stage.stageId] = buildChangeSummary(
+      input.cwd,
+      stage.fromRef,
+      stage.toRef,
+    );
+  }
+  return {
+    ...summary,
+    byStage,
+    stageOrder: input.stages.map((stage) => stage.stageId),
+  };
+}
+
+/**
+ * Write the baseline → final variant into the slice's artifact directory. The
+ * candidate variant's file is untouched: the two summaries answer different
+ * questions and a reader must be able to hold both (PRD D11).
+ */
+export function writeFinalChangeSummary(
+  input: FinalChangeSummaryInput & { artifactDir: string },
+): { path: string; summary: FinalChangeSummary } {
+  const summary = buildFinalChangeSummary(input);
+  mkdirSync(input.artifactDir, { recursive: true });
+  const path = join(input.artifactDir, FINAL_CHANGE_SUMMARY_FILENAME);
+  writeFileSync(path, `${JSON.stringify(summary, null, 2)}\n`, "utf-8");
+  return { path, summary };
+}

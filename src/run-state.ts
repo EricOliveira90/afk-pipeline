@@ -49,14 +49,16 @@ export interface PersistedSliceState {
 /**
  * The schema version every writer emits. v4 carries two independent additions,
  * both keyed by GitHub issue and both optional: the per-slice approved baseline
- * locator below (#91) and `appliedWaivers` (#193). `adaptLoadedState` normalizes
- * a v3 file to it in memory, so a resumed run reads one shape, and `writeRunState`
- * stamps it on every write so a stale caller literal can never reach disk.
+ * locator below (#91) and `appliedWaivers` (#193). v5 adds a third of the same
+ * shape, `finalEvaluations` (#96 B-02/B-09). `adaptLoadedState` normalizes a
+ * v3 or v4 file to it in memory, so a resumed run reads one shape, and
+ * `writeRunState` stamps it on every write so a stale caller literal can never
+ * reach disk.
  *
  * Exported because it is the one number a reader has to compare against, and a
  * duplicated literal is how two modules disagree about what "current" means.
  */
-export const RUN_STATE_VERSION = 4;
+export const RUN_STATE_VERSION = 5;
 
 /**
  * Where one slice's approved baseline artifact is, and which candidate it
@@ -76,14 +78,109 @@ export interface PersistedApprovedBaseline {
   artifactPath: string;
 }
 
+/**
+ * What one slice's final evaluation decided, and what it invalidated (#96
+ * B-02/B-09).
+ *
+ * A marker and a memory, not an authority. The `decision` is the fact that a
+ * final evaluator either ran or did not: `reuse` is one of the three places
+ * (with the `final-evaluation-reuse` run event and the slice's own
+ * `run-summary.md` section) that record a zero-invocation final stage, and it
+ * is deliberately *not* a `GateEvidence` field — D17's gate-cache `reused` flag
+ * answers a different question about a different subject and the two must not
+ * be read as one.
+ *
+ * `baselineTreeId`/`baselineArtifactPath` are a citation of the baseline this
+ * evaluation compared against. A baseline-is-wrong finding drops that citation
+ * and appends the rejected tree to `invalidatedCandidateTreeIds`; it never
+ * rewrites or deletes the `approved-baseline.json` artifact itself, which
+ * remains the only record of what was once approved (#96 P-03).
+ */
+/**
+ * One final-evaluation attempt, keyed to the tree it graded (#96 B-09/B-10).
+ *
+ * The entries are per attempt rather than a count because the two questions a
+ * reader has are different questions: "how many attempts are left" is answered
+ * by counting `GRADED` entries, while "which attempt looked at the tree a
+ * finding later rejected" needs the tree ID the attempt read. A count can only
+ * answer the first, which is why the invalidation of a baseline used to be
+ * invisible at the attempt level.
+ *
+ * `RETURNED_TO_GENERATOR` entries exist and spend nothing: D19 charges a return
+ * to the generator budget, so the entry records that the attempt happened
+ * without letting it count against {@link MAX_FINAL_EVALUATION_ATTEMPTS}.
+ */
+export interface PersistedFinalEvaluationAttempt {
+  /** 1-based attempt number within the slice's final evaluation. */
+  attempt: number;
+  /** The candidate tree this attempt graded (D10: artifacts keyed by tree). */
+  candidateTreeId: string;
+  verdict: "PASS" | "FAIL";
+  outcome: "GRADED" | "RETURNED_TO_GENERATOR";
+}
+
+export interface PersistedFinalEvaluation {
+  decision: "reuse" | "evaluate";
+  /** Final checkpoint tree object ID the decision was made about. */
+  finalTreeId: string;
+  /** The baseline tree cited, absent once a finding invalidated it. */
+  baselineTreeId?: string;
+  /** Repo-relative path of the cited `approved-baseline.json`, dropped with it. */
+  baselineArtifactPath?: string;
+  /**
+   * Per-attempt entries, in attempt order. Attempts spent against
+   * {@link MAX_FINAL_EVALUATION_ATTEMPTS} are the `GRADED` ones —
+   * {@link finalEvaluationAttemptsSpent} is the one reader of that rule.
+   */
+  attempts: PersistedFinalEvaluationAttempt[];
+  /**
+   * Candidate trees a baseline-is-wrong finding rejected. `decideFinalReuse`
+   * refuses `reuse` against one of these even on exact tree equality.
+   */
+  invalidatedCandidateTreeIds: string[];
+}
+
+/**
+ * An attempt entry with the invalidation of its tree resolved (#96 B-09).
+ *
+ * Derived on read rather than stored: `invalidatedCandidateTreeIds` is the one
+ * authority for which trees a finding rejected, and a second stored copy per
+ * attempt could disagree with it.
+ */
+export interface FinalEvaluationAttemptView
+  extends PersistedFinalEvaluationAttempt {
+  /** True when this attempt graded a tree a later finding invalidated. */
+  invalidated: boolean;
+}
+
+export interface FinalEvaluationView
+  extends Omit<PersistedFinalEvaluation, "attempts"> {
+  attempts: FinalEvaluationAttemptView[];
+}
+
+/**
+ * How many final-evaluation attempts a slice has spent, for
+ * {@link finalEvaluationAttemptsRemaining}. A return to the generator is not a
+ * spent attempt (D19), so only `GRADED` entries count.
+ */
+export function finalEvaluationAttemptsSpent(
+  record:
+    | { attempts: readonly Pick<PersistedFinalEvaluationAttempt, "outcome">[] }
+    | undefined,
+): number {
+  return (record?.attempts ?? []).filter(
+    (entry) => entry.outcome === "GRADED",
+  ).length;
+}
+
 export interface RunState {
   /**
    * Schema version. Writers emit {@link RUN_STATE_VERSION} and
-   * `adaptLoadedState` returns it for every accepted file; the literal `3`
-   * stays assignable so callers and fixtures holding a v3 record keep
-   * compiling, and nothing reads a `3` back out of a loaded state.
+   * `adaptLoadedState` returns it for every accepted file; the literals `3`
+   * and `4` stay assignable so callers and fixtures holding an older record
+   * keep compiling, and nothing reads a `3` or `4` back out of a loaded state.
    */
-  version: 3 | 4;
+  version: 3 | 4 | 5;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -156,6 +253,12 @@ export interface RunState {
    * field stay loadable.
    */
   appliedWaivers?: Record<string, PersistedAppliedWaiver[]>;
+  /**
+   * Per-slice final-evaluation records, keyed by GitHub issue — v5's single
+   * addition (#96). Absent entries read as "no final evaluation happened", so a
+   * v3 or v4 file loads unchanged.
+   */
+  finalEvaluations?: Record<string, PersistedFinalEvaluation>;
 }
 
 /**
@@ -838,6 +941,159 @@ export function recordApprovedBaseline(
 }
 
 /**
+ * Keep only well-formed final-evaluation records, in the same style as
+ * {@link sanitizeApprovedBaselines}: a malformed entry degrades to absent
+ * rather than throwing. The archived attempts and the `approved-baseline.json`
+ * artifact are canonical, so a broken record costs a re-derivation, never the
+ * run.
+ */
+function sanitizeFinalEvaluations(
+  value: unknown,
+): Record<string, PersistedFinalEvaluation> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const out: Record<string, PersistedFinalEvaluation> = {};
+  for (const [ghIssue, raw] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as Partial<
+      Record<keyof PersistedFinalEvaluation, unknown>
+    >;
+    const nonblank = (field: unknown): field is string =>
+      typeof field === "string" && field.trim() !== "";
+    if (record.decision !== "reuse" && record.decision !== "evaluate") continue;
+    if (!nonblank(record.finalTreeId)) continue;
+    if (!Array.isArray(record.attempts)) continue;
+    const attempts = record.attempts.filter(
+      (entry): entry is PersistedFinalEvaluationAttempt =>
+        typeof entry === "object" &&
+        entry !== null &&
+        Number.isSafeInteger((entry as PersistedFinalEvaluationAttempt).attempt) &&
+        (entry as PersistedFinalEvaluationAttempt).attempt > 0 &&
+        nonblank((entry as PersistedFinalEvaluationAttempt).candidateTreeId) &&
+        ((entry as PersistedFinalEvaluationAttempt).verdict === "PASS" ||
+          (entry as PersistedFinalEvaluationAttempt).verdict === "FAIL") &&
+        ((entry as PersistedFinalEvaluationAttempt).outcome === "GRADED" ||
+          (entry as PersistedFinalEvaluationAttempt).outcome ===
+            "RETURNED_TO_GENERATOR"),
+    );
+    // A dropped attempt entry would understate the spent budget and buy a free
+    // extra dispatch, so a malformed entry degrades the whole record to absent
+    // rather than only itself.
+    if (attempts.length !== record.attempts.length) continue;
+    if (!Array.isArray(record.invalidatedCandidateTreeIds)) continue;
+    const invalidated = record.invalidatedCandidateTreeIds.filter(nonblank);
+    // The citation travels as a pair or not at all: half a citation names a
+    // baseline nobody can open, which is worse than naming none.
+    const cited =
+      nonblank(record.baselineTreeId) && nonblank(record.baselineArtifactPath);
+    out[ghIssue] = {
+      decision: record.decision,
+      finalTreeId: record.finalTreeId,
+      ...(cited
+        ? {
+            baselineTreeId: record.baselineTreeId as string,
+            baselineArtifactPath: record.baselineArtifactPath as string,
+          }
+        : {}),
+      attempts: attempts.map((entry) => ({
+        attempt: entry.attempt,
+        candidateTreeId: entry.candidateTreeId,
+        verdict: entry.verdict,
+        outcome: entry.outcome,
+      })),
+      invalidatedCandidateTreeIds: invalidated,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * The recorded final evaluation for one slice, or `undefined` — the reader
+ * `decideFinalReuse`'s call site goes through, in the style of
+ * {@link approvedBaselineFor} (#96 B-02).
+ *
+ * Each attempt entry comes back with `invalidated` resolved against the
+ * record's own `invalidatedCandidateTreeIds`, so "which attempts graded a tree
+ * a baseline-is-wrong finding rejected" is a read, not a join the caller has to
+ * remember to perform (#96 B-09).
+ */
+export function finalEvaluationFor(
+  state: RunState,
+  ghIssue: string,
+): FinalEvaluationView | undefined {
+  const record = state.finalEvaluations?.[ghIssue];
+  if (record === undefined) return undefined;
+  return {
+    ...record,
+    attempts: record.attempts.map((entry) => ({
+      ...entry,
+      invalidated: record.invalidatedCandidateTreeIds.includes(
+        entry.candidateTreeId,
+      ),
+    })),
+  };
+}
+
+/**
+ * Record one slice's final-evaluation decision. Called by the orchestrator
+ * immediately after the decision is made, so the marker and the decision
+ * cannot disagree.
+ */
+export function recordFinalEvaluation(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  record: PersistedFinalEvaluation,
+): void {
+  updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    state.finalEvaluations = {
+      ...(state.finalEvaluations ?? {}),
+      [ghIssue]: record,
+    };
+  });
+}
+
+/**
+ * Append a rejected candidate tree to one slice's invalidation list and drop
+ * the baseline citation that tree stood behind (#96 B-09).
+ *
+ * The `approved-baseline.json` artifact and every
+ * `gateEvidenceArtifactIds` value it names are left exactly as written: this
+ * run-state record is a citation, and withdrawing a citation is not the same
+ * act as erasing what was cited (#96 P-03).
+ */
+export function invalidateFinalEvaluationBaseline(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  candidateTreeId: string,
+): PersistedFinalEvaluation {
+  return updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    const existing = state.finalEvaluations?.[ghIssue];
+    const invalidated = existing?.invalidatedCandidateTreeIds ?? [];
+    const record: PersistedFinalEvaluation = {
+      decision: "evaluate",
+      finalTreeId: existing?.finalTreeId ?? candidateTreeId,
+      // The entries survive the invalidation: they are the record of what was
+      // graded, and a return to the generator changes what the trees mean, not
+      // whether the attempts happened.
+      attempts: [...(existing?.attempts ?? [])],
+      invalidatedCandidateTreeIds: invalidated.includes(candidateTreeId)
+        ? [...invalidated]
+        : [...invalidated, candidateTreeId],
+    };
+    state.finalEvaluations = {
+      ...(state.finalEvaluations ?? {}),
+      [ghIssue]: record,
+    };
+    return record;
+  });
+}
+
+/**
  * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
@@ -845,7 +1101,9 @@ export function recordApprovedBaseline(
  * provenance to terminal slice records. v4 adds two purely additive fields: the
  * per-slice approved baseline locator (#91) and applied protected-change waivers
  * (#193). A v3 file simply has neither — it adapts to v4 in memory with no
- * locator, no waivers and no write. Throws on unknown status strings rather than
+ * locator, no waivers and no write. v5 adds `finalEvaluations` (#96) the same
+ * way: a v4 file keeps its locator and its waivers and gains no final
+ * evaluation, because it had none. Throws on unknown status strings rather than
  * silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
@@ -879,6 +1137,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     migrations?: unknown;
     approvedBaselines?: unknown;
     appliedWaivers?: unknown;
+    finalEvaluations?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -894,7 +1153,8 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     r.version === 1 ||
     r.version === 2 ||
     r.version === 3 ||
-    r.version === 4
+    r.version === 4 ||
+    r.version === 5
   ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
@@ -908,6 +1168,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     // writes nothing.
     const approvedBaselines = sanitizeApprovedBaselines(r.approvedBaselines);
     const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
+    const finalEvaluations = sanitizeFinalEvaluations(r.finalEvaluations);
     return {
       version: RUN_STATE_VERSION,
       prdSlug,
@@ -935,6 +1196,10 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       // absent: "no waiver was applied" and "this file predates waivers"
       // are the same fact to every reader.
       ...(appliedWaivers !== undefined ? { appliedWaivers } : {}),
+      // v1–v4 files have no such field, so the upgrade leaves it absent: "no
+      // final evaluation happened" and "this file predates final evaluation"
+      // are the same fact to every reader.
+      ...(finalEvaluations !== undefined ? { finalEvaluations } : {}),
     };
   }
 

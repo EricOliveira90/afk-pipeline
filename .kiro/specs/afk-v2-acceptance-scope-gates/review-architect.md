@@ -1,88 +1,78 @@
-# Architecture review — round 6 (verification)
+# Architecture review — round 7 (verification)
 
-Scope: `git diff e84068df..HEAD` (the fix diff for slice 07, "Feedback
-integrity and gate-scope revisions") dispositioned against the five open
-findings. No resampling of the rest of the branch.
+Scope: `git diff d0ab4fc..HEAD` (slice 04 "Final evaluation and reuse":
+`src/final-evaluation.ts`, `prompts/evaluator-final.md`, orchestrator wiring,
+run-state v5, change-summary baseline→final variant, ARCHITECTURE.md, ADR 0065).
+Round 1 read the branch; this round only dispositions the five open findings.
+
+## Disposition of open findings
+
+**[A-01] TYPE_SAFETY — REPEATED.** `src/gate-runner.ts` is not in the fix diff
+(`git diff --stat d0ab4fc..HEAD` lists no `gate-runner.ts`). The evidence reader
+still admits `appliedWaivers[].riskClass` on `typeof entry.riskClass === "string"`
+alone (`src/gate-runner.ts:1170-1190`, comment "checked as a string only"), while
+the in-memory type is `GateRiskClass` (line 102). No consumer re-validation was
+added. Note only: reading back an unvalidated risk-class token cannot be reached
+by a normal-operation path that the reviewed diff introduced, and evidence is
+advisory rather than authorizing.
+
+**[A-02] DEAD_SEAM — REPEATED.** `ScopeComparisonSource`'s `{ kind: "role" }`
+member (`src/scope-gate.ts:56-61`) still has no production caller. `grep -n
+'kind: "role"' src/*.ts` matches only `src/scope-gate.test.ts:333`. Notably the
+fix diff *adds* a new scope-gate call site — the final-candidate re-run at
+`src/orchestrator.ts:~6920` — and it uses `kind: "candidate"`, which is correct
+for that question but confirms the role branch remains test-only. Note.
+
+**[A-03] NAMING — REPEATED.** `SCOPE_GATE_STAGE = "deterministic"`
+(`src/scope-gate.ts:29`) still collides with the QA-side stage vocabulary
+(`src/artifacts.ts:678` maps `stage === "deterministic"` into the review-stage
+space; `src/accepted-candidate.ts:62-77` uses `deterministic-qa` /
+`post-qa-deterministic`). The ARCHITECTURE.md hunk in this diff documents only
+the final-evaluation module and the baseline→final change-summary variant; it adds
+no gate-stage-vocabulary section, and nothing was renamed. Note.
+
+**[A-04] ABSTRACTION — REPEATED.** `GateDeclaration.run` and `runGates` are
+unchanged (`gate-runner.ts` absent from the fix diff), so the advertised
+cancellation signal is still neither documented as callee-owned nor enforced
+around the call. The new final-evaluation gate run threads `signal` into
+`runPostQAGates` in the usual way, which does not change the seam's contract.
+Note; a declaration that overruns cancellation is bounded by the surrounding
+wall-clock timeout rather than corrupting durable state.
+
+**[A-06] OBSERVABILITY — REPEATED.** `RoleEnvelopeEvidence`
+(`src/context-envelope.ts:764-771`) still carries only
+`role/assembledByteSize/includedArtifactClasses/includedArtifactIds/omittedArtifactClasses/contextManifestVersion`
+— no by-reference pair record and no count of omitted revision regions. The
+context-envelope change in this diff is additive and manifest-only: it declares
+`FINAL_EVALUATOR_CONTEXT_MANIFEST` and widens `ContextEnvelopeRole` with
+`"evaluator-final"`, explicitly "manifest-only … no assembly path consumes it
+yet". Note.
+
+## Notes on the fix diff itself (no new blocking findings)
+
+The new slice keeps to the branch's established seams rather than opening new
+ones, and the structural decisions I would have flagged are the ones it already
+took: reuse is exact tree equality with no cosmetic exception; the final scope
+gate re-runs on the post-approval tree instead of inheriting the accepted
+candidate's evidence (ADR 0010-style tree-keyed evidence, ARCHITECTURE.md "a new
+check is a declared gate with evidence"); the final evaluator's copy-back is
+admitted through the single existing `QA_WINDOW_ARTIFACT_NAME` allowlist
+(`src/post-qa-gates.ts`) rather than a second dialect of the same list; and
+`buildFinalChangeSummary` is a variant of the one `(cwd, fromRef, toRef)` builder
+rather than a second producer, as ARCHITECTURE.md's "Single-owner seams" requires.
+`src/final-evaluation.ts` is a new module in its own ARCHITECTURE.md row instead of
+growing the orchestrator hub, though the orchestrator hunk (+769) is the largest
+single addition on the branch and is the place a future extraction should start.
+
+## Verdict rationale
+
+All five open findings are REPEATED and all five carry `reachableTrigger: null`
+from prior rounds; re-reading the current tree gave me no concrete
+normal-operation trigger for any of them. Under the round-2-or-later prior-lineage
+branch, continuing authority requires a non-blank reachable trigger, so each is a
+note. No later-new INTEGRITY or DATA_LOSS finding arose from the fix diff.
 
 **Verdict:** ACCEPT-WITH-NOTES
-
-The fix diff is a substantial, coherent slice: `src/afk-manifest.ts` (waiver
-reader), `src/feedback-integrity-gate.ts` (new deterministic gate),
-`src/skip-gate.ts` (launch waivers honored on both trees), `src/run-state.ts`
-(v4 `appliedWaivers`), `src/escalation.ts` (schema 2 with gate evidence),
-`src/artifacts.ts` (STUCK diagnosis reads both schema versions), plus the
-orchestrator wiring at `src/orchestrator.ts:6363-6480`. Nothing in it addresses
-the five open findings, and every one of them remains a note under the round-6
-rubric: none names a normal-operation reachable trigger and none was introduced
-by the reviewed diff. So: ACCEPT-WITH-NOTES, no blockers.
-
-## Dispositions
-
-### A-01 TYPE_SAFETY — REPEATED
-`src/gate-runner.ts` is untouched by the fix diff (`git diff --stat` lists no
-`gate-runner.ts`). Its evidence validator still reads
-`typeof entry.riskClass === "string"` (`gate-runner.ts:1190`), and the TSDoc
-above it (`:1170-1171`) still justifies that with "this slice populates no
-waivers" — which the fix diff has now falsified: both `runSkipGate`
-(`skip-gate.ts`, `appliedWaivers` in `findings`) and
-`runFeedbackIntegrityGate` (`feedback-integrity-gate.ts:241`) populate it.
-
-The clear condition's alternative branch — consumer re-validates — is not met
-either. `appliedWaiversFrom` (`feedback-integrity-gate.ts:126-146`) copies
-`waiver.riskClass` straight into a `ProtectedChangeWaiver`, whose `riskClass`
-is `GateRiskClass`, with no membership check; and the new persistence
-(`run-state.ts`, `PersistedAppliedWaiver.riskClass: string`) widens it back to
-a bare string. So a hand-edited or future-written evidence file can put an
-unknown class into `run-state.json` and the summary's Applied Waivers rows.
-Note, not blocker: the reader that decides *authorization* is
-`parseAfkManifest`, which does validate against `GATE_RISK_CLASSES`
-(`afk-manifest.ts:120`), so no normal-operation path grants a waiver from an
-unvalidated class — the leak is confined to reporting.
-
-### A-02 DEAD_SEAM — REPEATED
-`scope-gate.ts:56-60` still declares the `kind: "role"` comparison source, and
-`Select-String 'kind: "role"' src\*.ts` finds exactly two hits: the
-declaration and `scope-gate.test.ts:333`. Still no production caller; the fix
-diff added none.
-
-### A-03 NAMING — REPEATED
-The fix diff touches no documentation that could distinguish the vocabularies
-(`--stat` shows only `agents/generator.md` and four `prompts/*.md`, none of
-which is CONTEXT.md or ARCHITECTURE.md). The `deterministic` gate stage token
-and the QA review stage union remain undocumented against each other; the only
-doc mention found is `docs/adr/0037` line 37, which uses the phrase for the
-review stage.
-
-### A-04 ABSTRACTION — REPEATED
-`GateDeclaration.run` still advertises `signal?: AbortSignal`
-(`gate-runner.ts:123`), and `runGates` still only checks
-`options.signal?.aborted` *before* dispatch (`:667`) and forwards the signal
-(`:675`) without enforcing anything around the awaited call. Unchanged by the
-fix diff; the new `feedbackIntegrityGateDeclaration` is one more synchronous
-`run` implementation that ignores the signal, which is consistent with the
-existing gates but confirms the seam's promise is still callee-owned and
-undocumented.
-
-### A-06 OBSERVABILITY — REPEATED
-`run-events.ts`'s `prompt-assembly` payload still carries only
-`includedArtifactClasses` / `includedArtifactIds` / `omittedArtifactClasses`
-(`:97-107`); the fix diff's only `run-events.ts` change is the new
-`waiver-applied` payload. There is still no field recording the by-reference
-contract pair (`context-envelope.ts:1048-1076` computes `byReference` for the
-human-readable line only) nor a count of omitted revision regions.
-
-## Notes on the fix diff itself (not findings)
-
-- The waiver-journalling loop (`orchestrator.ts:6439-6480`) re-reads the
-  written evidence rather than trusting the in-memory outcome, and swallows an
-  unreadable artifact with `continue` while `verifyGateEvidence` owns the
-  refusal. That is the right layering.
-- `skip-gate.ts` applies waivers to the base scan as well as the candidate,
-  with the reason recorded inline. Applying them to only one side would have
-  been the classic asymmetry bug; good that the comment says so.
-- `run-state.ts` keeps `appliedWaivers` beside `slices` with the ADR 0018
-  reason spelled out, and `sanitizeAppliedWaivers` degrades to absent rather
-  than throwing. Consistent with `sanitizeMigrationClaims`.
 
 ## Structured findings (v2)
 

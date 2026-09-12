@@ -69,6 +69,35 @@ describe("[behavior:B-03] QA_WINDOW_ARTIFACT_NAME", () => {
       expect(admits(name), name).toBe(false);
     }
   });
+
+  it("[behavior:B-07] admits the final evaluator's two artifacts, report form included", () => {
+    for (const name of [
+      "final-review.json",
+      "final-report.md",
+      "final-report-r1-a1.md",
+      "final-report-r2-a3.md",
+    ]) {
+      expect(admits(name), name).toBe(true);
+    }
+  });
+
+  it("[behavior:B-07] admits no other final-evaluator write", () => {
+    // Everything else the role could write — a restored source byte, a scratch
+    // note, a near-miss spelling — is discarded and journaled as a
+    // reviewer-write violation rather than copied back.
+    for (const name of [
+      "final-review.json.tmp",
+      "my-final-report.md",
+      "final-report.md.bak",
+      "final-summary.md",
+      "final-change-summary.json",
+      "final-report-r0-a1.md",
+      "final-report-r1.md",
+      "nested/final-review.json",
+    ]) {
+      expect(admits(name), name).toBe(false);
+    }
+  });
 });
 
 /**
@@ -232,6 +261,39 @@ describe("reviewArtifactViolations (architect A1 tree authority)", () => {
         reviewArtifactDir: sliceDir,
       }),
     ).toEqual(["src/evil.ts", "src/work.ts"]);
+  });
+
+  it("[behavior:P-05] still fails closed on anything outside the widened allowlist", () => {
+    // Admitting the two final artifacts widens the allowlist by exactly two
+    // names; the guard's disposition of everything else is unchanged.
+    const approved = resolveCandidateTreeId(repo);
+    writeFileSync(join(repo, sliceDir, "final-review.json"), "{}\n");
+    writeFileSync(join(repo, sliceDir, "final-report.md"), "PASS\n");
+    writeFileSync(join(repo, sliceDir, "final-report-r1-a1.md"), "PASS\n");
+    const admitted = resolveCandidateTreeId(repo);
+    expect(admitted).not.toBe(approved);
+    expect(
+      reviewArtifactViolations({
+        cwd: repo,
+        fromTree: approved,
+        toTree: admitted,
+        reviewArtifactDir: sliceDir,
+      }),
+    ).toEqual([]);
+
+    // A reviewer that restores a byte itself, or leaves a note behind, is
+    // still a violation — named, not tolerated.
+    writeFileSync(join(repo, "src", "work.ts"), "export const v = 3;\n");
+    writeFileSync(join(repo, sliceDir, "final-notes.md"), "scratch\n");
+    const violating = resolveCandidateTreeId(repo);
+    expect(
+      reviewArtifactViolations({
+        cwd: repo,
+        fromTree: approved,
+        toTree: violating,
+        reviewArtifactDir: sliceDir,
+      }),
+    ).toEqual([`${sliceDir}/final-notes.md`, "src/work.ts"]);
   });
 
   it("does not let a sibling directory sharing the prefix string pass", () => {

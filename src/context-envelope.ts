@@ -667,6 +667,82 @@ export const CANDIDATE_EVALUATOR_CONTEXT_MANIFEST = {
   ],
 } as const satisfies ContextEnvelopeManifest;
 
+/**
+ * Final-evaluator role contract (#96 B-06, PRD D9).
+ *
+ * The third reviewer, and the only one that runs *after* an approval: its
+ * subject is not "is this candidate good" — that verdict already exists — but
+ * "is the tree about to merge still the tree that was approved". So it is
+ * given exactly two questions (`prompts/evaluator-final.md`) and exactly two
+ * artifacts to write. `allowedWriteScope` is the instruction; the enforcement
+ * surface is the same copy-back allowlist as the other two stages
+ * (`QA_WINDOW_ARTIFACT_NAME`, #96 B-07), which discards everything else.
+ *
+ * `change-summary` leads `inputOrder` for the same reason it does on the
+ * candidate evaluator, and here it is load-bearing rather than merely
+ * conventional: the baseline → final variant with its per-stage attribution
+ * (#96 B-04) *is* the question, so anything read before it would be read
+ * without knowing what changed.
+ *
+ * Manifest-only, like the candidate evaluator: no assembly path consumes it
+ * yet, and the completeness checks validate it all the same.
+ */
+export const FINAL_EVALUATOR_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "evaluator-final",
+  objective:
+    "Judge whether the final tree still preserves the approved candidate's behavior, and name any drift no required gate can see.",
+  nonGoals: [
+    "Re-reviewing the approved candidate's implementation choices",
+    "Repairing the tree, restoring bytes, or reverting a post-approval writing stage",
+    "Re-running the project's gates or reconstructing their verdicts",
+    "Attributing a finding to a particular post-approval role",
+  ],
+  allowedWriteScope: [
+    "slice/final-review.json",
+    "slice/final-report.md",
+  ],
+  stopConditions: [
+    "The canonical review artifact and the human-readable report are written with exactly one verdict",
+    "Both questions are answered against the baseline → final change summary, and a finding names the repair it admits",
+  ],
+  escalationConditions: [
+    "The approved baseline itself should not merge; it is reported as a BASELINE_IS_WRONG finding that returns the slice to the generator",
+    "The change summary and the tree disagree, so no comparison can be made at all",
+  ],
+  acceptedInputArtifactClasses: [
+    "change-summary",
+    "approved-baseline",
+    "acceptance-manifest",
+    "locked-contract",
+    "explorer-preservation-evidence",
+    "gate-evidence",
+    "cited-adr",
+  ],
+  outputArtifact: "final-review-pair",
+  inputOrder: [
+    "change-summary",
+    "approved-baseline",
+    "acceptance-manifest",
+    "locked-contract",
+    "explorer-preservation-evidence",
+    "gate-evidence",
+    "cited-adr",
+  ],
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    ...ROLE_ENVELOPE_OMISSIONS,
+    "candidate-handoff",
+    "dependency-sibling-handoffs",
+    "planner-conversation",
+    "generator-conversation",
+    // The other stages' findings are withheld for the reason M7 withholds the
+    // handoff: this role judges the tree, and a prior stage's disposition of
+    // its own findings is the author's story about it.
+    "other-qa-stage-findings",
+  ],
+} as const satisfies ContextEnvelopeManifest;
+
 export type PromptAssemblyRole =
   | "explorer"
   | "planner"
@@ -675,11 +751,15 @@ export type PromptAssemblyRole =
 
 /**
  * Roles that carry a versioned context-envelope manifest. A superset of
- * PromptAssemblyRole: "evaluator-qa" (candidate evaluator) has a
- * manifest-only role contract today — its prompt is still rendered directly
- * by the orchestrator, so no assembly path consumes it yet.
+ * PromptAssemblyRole: "evaluator-qa" (candidate evaluator) and
+ * "evaluator-final" (#96) have manifest-only role contracts today — their
+ * prompts are still rendered directly by the orchestrator, so no assembly path
+ * consumes them yet.
  */
-export type ContextEnvelopeRole = PromptAssemblyRole | "evaluator-qa";
+export type ContextEnvelopeRole =
+  | PromptAssemblyRole
+  | "evaluator-qa"
+  | "evaluator-final";
 
 export interface RoleEnvelopeEvidence {
   role: PromptAssemblyRole;
