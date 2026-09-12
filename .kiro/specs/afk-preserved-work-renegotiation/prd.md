@@ -56,22 +56,42 @@ AFK performs these steps before ordinary resume and before any agent dispatch.
    snapshot. A snapshot not referenced by admitted lineage grants no authority
    and is safe for later collection.
 4. Recheck the target pair, branch heads, clean worktree, scope fingerprint and
-   request identity against the facts used to build the snapshot. A mismatch
-   is a pre-admission refusal; the unreferenced snapshot remains inert.
-5. Acquire the ADR 0056 run-state lock and atomically append the recovery
-   attempt as `PENDING`. This is the first admitted mutation. The record
-   contains a unique attempt ID; target, canonical reason and complete proposed
-   extension set; provider and branch; slice head and feature head; scope
-   fingerprint; immutable snapshot locator; and original pair fingerprints.
-   Only after this write commits may AFK reopen or modify either contract file
-   or negotiation state.
+   request identity against the facts used to build the snapshot.
+5. Acquire the ADR 0056 run-state lock. While holding it, reload run state and
+   repeat the pair, branch-head, clean-worktree, active-attempt, request and
+   scope-fingerprint comparisons. A mismatch is a pre-admission refusal; the
+   unreferenced snapshot remains inert. Otherwise atomically append a
+   `PENDING` event. This is the first admitted mutation. The event contains a
+   unique attempt ID; target, canonical reason and complete proposed extension
+   set; provider and branch; slice head and feature head; scope fingerprint;
+   immutable snapshot locator; and original pair fingerprints. Only after this
+   write commits may AFK reopen or modify either contract file or negotiation
+   state.
 
 Pre-admission refusal writes no lineage, changes no branch or accepted-pair
 byte, and admits no scope. Snapshot creation failure is also pre-admission.
 
+### Canonical request and scope identity
+
+- The canonical recovery reason is the CLI value after ECMAScript
+  `String.prototype.trim()`. AFK preserves every remaining code point exactly:
+  no case folding, whitespace collapse or Unicode normalization.
+- A target or extension identity is the resolved pair `{number, ghIssue}`;
+  `number` uses `canonicalSliceNumber`. The extension set is sorted by
+  canonical slice number, then GitHub issue number, before storage or equality
+  comparison.
+- The scope fingerprint is SHA-256 over UTF-8 JSON with no insignificant
+  whitespace and this exact shape:
+  `{"mode":<mode>,"slices":[{"number":<canonical>,"ghIssue":<id>}]}`.
+  Slice order is the persisted scope order. Object keys appear in the shown
+  order. Admission and completion use the same encoder.
+
 ## Recovery State Machine
 
-The append-only lineage has four outcomes:
+Recovery lineage is an append-only event list. A `PENDING` event carries the
+full admitted request; each later event references its `attemptId`. Events are
+never edited or deleted. The current outcome of an attempt is its last event,
+which has one of four states:
 
 ```text
 PENDING -> COMPLETED
@@ -84,27 +104,44 @@ PENDING -> ROLLBACK_FAILED -> ROLLED_BACK
   until launch-time reconciliation terminates it. While it exists, AFK blocks
   ordinary resume, generator dispatch and another admission for that target.
 - `COMPLETED` means the replacement pair locked successfully and the atomic
-  completion transaction committed. It records the replacement pair
-  fingerprints and lock provenance.
+  completion transaction committed. Its terminal event records the replacement
+  pair fingerprints and lock provenance.
 - `ROLLED_BACK` may be written only after both accepted-pair files have been
   restored from the referenced immutable snapshot and reread to prove exact
   byte equality and original fingerprints.
 - `ROLLBACK_FAILED` records the restore or verification error and observed
   fingerprints. It never claims rollback. Every launch blocks dispatch and
   retries restoration from the same snapshot before doing anything else. A
-  successful later verification advances that attempt to `ROLLED_BACK`.
+  successful later verification appends `ROLLED_BACK` for the same attempt.
 
 No attempt changes from `ROLLED_BACK` or `ROLLBACK_FAILED` back to `PENDING`.
 After rollback, an operator retry creates a new snapshot and a new attempt ID.
 
 ## Attempt Execution and Failure Semantics
 
-After admission, AFK reopens the accepted pair through the shared contract
-mutation rules, clears only current negotiation state that ordinary full
-renegotiation owns, reruns explorer fact collection, and runs the ordinary
+After admission, AFK first preserves and clears the exact current negotiation
+state below, then reopens the accepted pair through the shared contract
+mutation rules, reruns explorer fact collection, and runs the ordinary
 planner/evaluator protocol. Exact-stage resume cannot skip either role. The
 replacement candidate must pass normal accepted-pair validation, mechanical
 lock gates and lock provenance before it is locked.
+
+- Copy the current bytes, when present, of `context.md`,
+  `contract-review.json`, `contract-response.json`,
+  `contract-negotiation-outcome.json`, `planner-escalation.md`, and
+  `feedback-r*.md` into the immutable attempt history, then delete only those
+  live copies. Existing `reviews/` contents and every implementation or QA
+  artifact remain untouched.
+- Through the owning focused run-state APIs, remove only the target's
+  contract-stage checkpoint and contract-convergence entry. Preserve resume
+  counters, slice outcomes, implementation/QA state, migrations, guardian
+  history and every other slice's fields.
+
+These live negotiation controls are deliberately not restored on rollback:
+their immutable history copy preserves the evidence, while leaving them live
+would let a stale outcome or exact-stage checkpoint bypass the required fresh
+explorer and negotiation on the next attempt. The accepted pair is the only
+authoritative state restored in place.
 
 The preserved worktree, slice branch, commits, implementation-round count,
 resume-attempt count and historical archives are not changed by admission or
@@ -114,12 +151,12 @@ resolution and DAG construction ignore them.
 Every unsuccessful admitted exit—including provider failure, evaluator
 non-acceptance, deterministic validation or lock-gate refusal, cancellation,
 and a lost completion compare-and-swap—restores from the immutable snapshot.
-If byte verification succeeds, AFK writes `ROLLED_BACK` and returns the
-original failure. If restore or verification fails, AFK writes
+If byte verification succeeds, AFK appends `ROLLED_BACK` and returns the
+original failure. If restore or verification fails, AFK appends
 `ROLLBACK_FAILED`, returns a fail-closed recovery error and blocks dispatch.
 
 On process death, the next launch examines recovery lineage before ordinary
-resume. For `PENDING` it restores and verifies the prior pair, then records
+resume. For `PENDING` it restores and verifies the prior pair, then appends
 `ROLLED_BACK`; for `ROLLBACK_FAILED` it repeats the same restoration. A launch
 without an exact recovery request exits after reconciliation and tells the
 operator to retry. A launch carrying the exact request may admit a new attempt
@@ -133,15 +170,18 @@ run-state transaction. It rechecks that the same attempt is `PENDING`, that the
 persisted scope still has the admitted fingerprint, and that every proposed
 addition is still valid and absent. That one write:
 
-1. changes the attempt to `COMPLETED` and stores replacement fingerprints and
+1. appends a `COMPLETED` terminal event carrying replacement fingerprints and
    provenance; and
 2. adds the entire proposed extension set to persisted scope.
 
-The transaction preserves every unrelated run-state field. It writes all
-additions or none. A crash or failure before this commit leaves the attempt
-`PENDING`; launch-time reconciliation restores the old pair and no slice was
-added. A crash after it leaves completed lineage and the whole set in scope.
-Only after the commit may AFK rebuild the DAG or dispatch a generator.
+The transaction preserves every unrelated run-state field. Atomic here means
+one locked read-modify-write publishes one JSON document containing both the
+terminal event and the whole extension set; there is no valid intermediate
+run-state document with only one of them. It writes all additions or none. A
+crash or failure before this commit leaves the attempt `PENDING`;
+launch-time reconciliation restores the old pair and no slice was added. A
+crash after it leaves completed lineage and the whole set in scope. Only after
+the commit may AFK rebuild the DAG or dispatch a generator.
 
 Before dispatch, AFK rereads the current pair and requires it to match the
 replacement fingerprints in `COMPLETED` lineage and to remain locked. A
