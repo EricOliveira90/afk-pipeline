@@ -7,7 +7,35 @@ decisions D1-D13, the file-scope map and the deferral of #92.
 |-------|----------|-------|------|------------|----------------------|
 | 01 | #87 | Cleaner loop | AFK | — | US-1, US-2, US-3, US-4, US-5, US-6, US-7, US-8, US-16, US-20 |
 | 02 | #92 | Hardener loop | AFK | #87 | US-9, US-10, US-11, US-12, US-13, US-14, US-15, US-19 (deferred) |
-| 03 | #97 | Changed trees face final evaluation; ROI evidence | AFK | #87 | US-17, US-18, US-20 |
+| 03 | #97 | Changed trees face final evaluation; ROI evidence | AFK | #87, #274 | US-17, US-18, US-20 |
+| 04 | #274 | Quality policy starter and stage record | AFK | #87 | US-8, US-16 |
+
+## Slice 04 — split out of #87 on 2026-09-12
+
+#87's contract declared all sixteen behaviors and nine preservation
+behaviors as one mandatory session, having withdrawn its own descope valve.
+Its contract evaluator refused that claim twice — BLOCKING F-02 of
+`run-20260912-170501`, whose counter-evidence was #87's own branch: one
+session delivered three behaviors (`5b77dd1`, `526260c`) and then stopped on
+a scope escalation (`48dec26`). The evaluator named the seam, and slice 04
+is exactly that seam:
+
+- **B-15** — `templates/quality-policy/afk.config.json`, `package.json`
+  `files` gaining `"templates"`, and the README's "Quality policy starter"
+  section (D6).
+- **B-16** — the one-per-run `quality-stage-policy` event and the
+  `## Quality Stages` header line (D10 items 1 and the header line of 2).
+
+Neither is reachable from the cleaner's round loop: the loop does not read
+the template (a project copies it by hand) and does not read the event it
+emits. So 04 blocks on #87 only for the files they share, not for a
+behaviour dependency.
+
+**#97 now blocks on #274 as well as #87**, because D10 assigns #97 "the
+per-slice rows of 2 and all of 3": its rows render *under* 04's header line,
+and `readQualityStageOutcomes` reads the section 04 creates. Without that
+edge #97 could be dispatched into a `run-summary.md` with no `## Quality
+Stages` section to add rows to.
 
 **Slice 02 (#92) is listed for numbering and is not selected.** Plan §2
 defers #73 stories 9–15 and 19 (all hardener/mutation machinery) and plan
@@ -29,20 +57,22 @@ the GH issue titles and bodies, which the pipeline reads.
 ## Expected wave structure — and why it is serial
 
 - **Wave 1:** #87 alone.
-- **Wave 2:** #97, blocked by #87.
+- **Wave 2:** #274, blocked by #87.
+- **Wave 3:** #97, blocked by #87 and #274.
 
-Both slices declare `src/orchestrator.ts` (the one call site each, per
+All three slices declare `src/orchestrator.ts` (the one call site each, per
 ARCHITECTURE.md "Hubs"), so `partitionLanes` (`src/lanes.ts`) would union
 them into one lane even inside a wave; the DAG already serialises them.
-The shared files stack rather than conflict because #97's worktree is cut
-from the feature tip after #87 merged:
+The shared files stack rather than conflict because each worktree is cut
+from the feature tip after its predecessor merged:
 
 - `src/cleaner-stage.ts` — 01 creates it (D2, D4, D8); 03 adds the
   `quality-stage-attempt` emission and the `repair` input (D11, D12).
-- `src/run-events.ts` — 01 adds `quality-stage-policy` and widens
-  `invocation-completed.role`; 03 adds `quality-stage-attempt`.
-- `src/logger.ts` — 01 adds the `## Quality Stages` header line; 03 adds
+- `src/run-events.ts` — 01 widens `invocation-completed.role`; 04 adds
+  `quality-stage-policy`; 03 adds `quality-stage-attempt`.
+- `src/logger.ts` — 04 adds the `## Quality Stages` header line; 03 adds
   the per-slice rows and `readQualityStageOutcomes`.
+- `package.json`, `README.md`, `templates/` — 04 only.
 - `src/final-evaluation.ts` — 01 adds `CLEANER_STAGE_ID`; 03 changes
   `routeFinalReviewFinding`'s input.
 - `prompts/cleaner.md` — 01 creates it; 03 adds the restore variant text.
@@ -58,6 +88,11 @@ self-run keeps the cleaner off (plan item 8).
   persisted record and the enable/disable event — everything 03 measures.
   It also stands alone: a cleaner that is off by default, correctly
   recorded as off, is a shippable increment even if 03 never lands.
+- **04 after 01, before 03.** Its two records are the deliverable's edges:
+  a file a project copies, and a line a reader looks for. Neither is
+  reachable from the round loop, which is why they were the tail #87's
+  evaluator could point at without breaking anything — and why they are a
+  shippable increment on their own.
 - **03 after 01** because its two claims need a real writer: that a cleaner
   checkpoint forces a fresh final evaluation (D12) cannot be shown with the
   #96 stub without restating #96, and per-stage ROI rows (D11) need a stage
@@ -83,7 +118,7 @@ self-run keeps the cleaner off (plan item 8).
 - PRD 4 is merged (#223 CLOSED); `POST_APPROVAL_WRITING_STAGE_ID`,
   `decideFinalReuse` and the `scope` gate's `role` source are on
   `origin/main` at `46f6c38`.
-- `afk.json` here selects slices 01 and 03. No slice adds a migration
+- `afk.json` here selects slices 01, 03 and 04. No slice adds a migration
   (AFK has no SQL migrations), so `migrationPrefixes` stays empty; #73 is
   protected as OPEN so the run cannot close the parent while #92 is
   deferred. No `protectedChangeWaivers`: neither slice touches a protected
