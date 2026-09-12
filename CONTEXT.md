@@ -260,6 +260,26 @@ The pipeline parses and preserves the field; enforcement belongs to the
 preparation/babysit tooling that owns issue state. See ADR 0034.
 _Avoid_: "pinned issue", "locked issue"
 
+**Learning proposal**:
+One entry in a committed `learning-proposals.json`: a stable kebab-case
+`findingClass` that has recurred, its `occurrenceCount` (an integer of at
+least 2, equal to the number of `occurrences` links that evidence it),
+the `targetAsset` the proposer wants changed (a repo-relative path, or a
+token such as `skill:<name>`, `gate:<id>`, `eval-scenario`), and the
+`proposedChange` (a unified diff when the target is a file). Written by
+PRD 6's recurring-finding loop on the second exact occurrence of a class
+and by rumo-app's Close learning pass when its findings ledger reaches
+count 2; rendered in the run summary and draft PR, never applied. AFK
+holds the canonical schema (`LEARNING_PROPOSAL_VERSION`, parsed by
+`parseLearningProposals`, exported as `./learning-proposal` like the
+**AFK manifest**); a consumer refuses a version it does not know. See
+ADR 0066.
+_Avoid_: "finding" (the proposal is about a class that recurred, not one
+occurrence), "ledger entry" (rumo-app's findings ledger is the occurrence
+record the proposal cites, not the proposal), "disposition" (that word is
+a guardian finding's lifecycle state here and a ledger routing outcome in
+rumo-app)
+
 **DAG**:
 Directed acyclic graph built from the `issues.md` dependency table.
 Determines which slices can run in parallel.

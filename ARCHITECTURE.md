@@ -27,7 +27,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
 | Review rails | Contract/QA lifecycle, candidate review isolation, accepted-candidate policy (PRD 1, PRD 3, PRD 4) | `src/contract-review.ts`, `src/qa-review.ts`, `src/change-summary.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
 | Final evaluation | Exact-tree reuse decision, final review schema, finding routing, final verdict (PRD 4 D9, D19, D20) | `src/final-evaluation.ts` | — |
-| Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
+| Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034); the cross-repo `learning-proposals.json` schema (ADR 0066) | `src/afk-manifest.ts`, `src/learning-proposal.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
 | Guardian round persistence | The complete persistence invariant for guardian round evidence: persisted shape, normalization, ledger writes (ADR 0057, #221) | `src/guardian-round-persistence.ts`, `src/guardian-round-records.ts` | — |
