@@ -77,8 +77,11 @@ not a substitute for reading it. If either file cannot be opened, write
 # Task
 
 Implement each manifest behavior and preserve the listed existing behavior.
-Name at least one test with each behavior ID; the acceptance gate runs per ID,
-and an ID with no matching test fails. Verify locally with
+Name at least one test with each issue-qualified behavior tag:
+`[behavior:#<GitHub issue>:<behavior ID>]`. A bare tag such as
+`[behavior:B-01]` is ambiguous across PRDs and does not count. The acceptance
+gate reads all required tags from one test report, and a tag with no passing
+test fails. Verify locally with
 `{{TEST_COMMAND}}`. Commit per behavior with a conventional commit that
 references the contract's GitHub issue.
 
