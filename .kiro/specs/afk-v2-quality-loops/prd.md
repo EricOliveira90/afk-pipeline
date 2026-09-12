@@ -214,6 +214,35 @@ the stage outcome is `PASS` with **zero cleaner invocations** (story 20),
 and D2's stage list still records the cleaner as having run with
 `inputTreeId === outputTreeId`. Any required clean gate `FAIL` ⇒ round 1.
 
+**`SKIPPED` on an empty `{changedFiles}` expansion releases the tree
+exactly as `PASS` does.** D1 has a required clean gate record `SKIPPED`
+with detail "no changed files" — never `PASS` — when the token expands to
+nothing, so this decision's tables must say what that status does, in both
+places they are keyed on `PASS`/`FAIL`: read every "all required clean
+gates `PASS`" antecedent above and in step 4 as **`PASS` or `SKIPPED`**,
+and no `SKIPPED` is ever a `FAIL`. A gate that had nothing to look at found
+nothing wrong; a tree that changed no file cannot be unclean, and the
+alternative — a required gate that can neither pass nor fail — either
+throws on the empty-diff round or dispatches a cleaner against a tree with
+no changed paths, both of which are worse than either honest answer.
+
+This is deliberately *narrow*. It rules on the one status D1's own
+`{changedFiles}` rule creates, and it does not touch
+`assertGateEvidenceReleasesEvaluation`
+(`src/candidate-gate-phase.ts:181-203`), whose `!declaration.required ||
+result.status === "PASS"` governs releasing *evaluation* on the pre-QA gate
+set and is unchanged. The cleaner stage reads its own results.
+
+One declared observable must bind it: a `clean` declaration whose `args`
+are exactly `{changedFiles}`, gated on an input tree that differs from the
+feature base by no path, records `SKIPPED` and the stage returns `PASS`
+with `roundsSpent: 0` and no cleaner dispatch.
+
+*Ruled by the operator on 2026-09-12, answering the contract evaluator's
+BLOCKING finding F-10 of the 2026-09-12 run (load-bearing silence: the
+status the contract itself creates had no defined effect on the stage
+decision).*
+
 **Round n (1..3):**
 
 1. **Dispatch** the cleaner (D7) in the **slice worktree** `ctx.worktreeDir`
