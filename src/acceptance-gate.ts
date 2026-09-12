@@ -43,7 +43,7 @@ export type BehaviorCoverageStatus =
 export interface BehaviorCoverageRecord {
   behaviorId: string;
   status: BehaviorCoverageStatus;
-  /** Tests the filter actually selected: passed + failed. */
+  /** Qualified assertions that provide evidence: passed + failed. */
   matched: number;
   passed: number;
   failed: number;
@@ -52,8 +52,11 @@ export interface BehaviorCoverageRecord {
 /**
  * The issue-qualified tag is the proof identity. A bare legacy tag such as
  * `[behavior:B-01]` is deliberately not evidence: unrelated PRDs reuse those
- * local IDs. The matcher records legacy-only sightings so the failure can tell
- * the generator how to migrate the tag instead of silently accepting it.
+ * local IDs. Coverage requires at least one qualified pass and rejects any
+ * qualified failure. Skipped/todo qualified assertions and bare legacy tags
+ * provide no evidence, but neither invalidates separate qualified passing
+ * evidence. The matcher records legacy-only sightings so an untested failure
+ * can tell the generator how to migrate the tag.
  */
 export interface VitestBehaviorCoverage {
   records: BehaviorCoverageRecord[];

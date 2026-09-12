@@ -298,11 +298,14 @@ describe("resolveBindableGateCatalog", () => {
 });
 
 describe("matchVitestJson", () => {
-  it("[behavior:#85:B-03] attributes assertions only to the exact issue-qualified tag", () => {
+  it("[behavior:#85:B-03] applies the qualified assertion evidence policy", () => {
     expect(
       matchVitestJson(
         report(
           qualified("B-01"),
+          qualified("B-01", "pending"),
+          qualified("B-01", "todo"),
+          legacy("B-01"),
           qualified("B-02"),
           qualified("B-02", "failed"),
           assertion("[behavior:#777:B-01] unrelated PRD", "passed"),
@@ -539,7 +542,15 @@ describe("runAcceptanceGate verdicts", () => {
         absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
         issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor(report(qualified("B-01"), qualified("B-02"))),
+        runner: runnerFor(
+          report(
+            qualified("B-01"),
+            qualified("B-01", "pending"),
+            qualified("B-01", "todo"),
+            legacy("B-01"),
+            qualified("B-02"),
+          ),
+        ),
       },
       ctx,
     );

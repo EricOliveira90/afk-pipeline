@@ -57,9 +57,11 @@ One issue-qualified string joins obligation, proof, and evidence:
    `[behavior:#<GitHub issue>:<behavior ID>]`. The former
    `[behavior:<behavior ID>]` form is ambiguous across PRDs and is not proof.
 4. AFK code runs one test report for the required set, attributes assertions
-   by the exact qualified tags, and checks two facts per behavior: at least
-   one test matched (zero matches = FAIL, behavior untested) and every matched
-   test passed.
+   by the exact qualified tags, and applies four rules per behavior: at least
+   one qualified assertion must pass; any qualified failed assertion fails
+   coverage; skipped/todo qualified assertions provide no evidence but do not
+   invalidate another pass; bare legacy tags provide no evidence but do not
+   invalidate valid qualified evidence.
 
 The planner defines deterministic obligations. It never writes commands
 (agent-generated shell text stays banned). An untested behavior is a
@@ -356,7 +358,9 @@ artifacts.
    ADRs the contract cites.
 2. Implement each manifest behavior. Name at least one test
    `[behavior:#<GitHub issue>:<behavior ID>]` — the acceptance gate reads the
-   required set from one report, and an unqualified or missing tag fails.
+   required set from one report. Each behavior needs a qualified passing
+   assertion and no qualified failures. Skipped/todo assertions and bare legacy
+   tags provide no evidence but do not invalidate a separate qualified pass.
 3. Behaviors in touched files keep working unless the contract
    authorizes the change.
 4. Verify locally with `{{TEST_COMMAND}}`. Commit per behavior
