@@ -360,8 +360,12 @@ cleaner on.
 
 `package.json` `files` (`:38-42`) gains `"templates"`. Today `templates/`
 is not shipped although `README.md:24, 427-433` tells consumers to copy
-from it; #87 fixes that omission because "shipped with AFK" (#87 AC7) is
-not satisfiable otherwise. `templates/agents/*` ride along unchanged.
+from it; this PRD fixes that omission because "shipped with AFK" (#87 AC7)
+is not satisfiable otherwise. `templates/agents/*` ride along unchanged.
+
+**Owned by slice 04 (#274), not #87** — see D14. The cleaner's round loop
+never reads this file: a project copies it by hand, so nothing in D4
+depends on it existing.
 
 *Test fired: load-bearing silence* on where the template lives and whether
 it ships.
@@ -514,9 +518,12 @@ PR." Three stores, one source:
    `gatePolicy.clean`)" — because a PR that says nothing cannot be read as
    evidence of either state.
 
-**#87 owns 1 and the header line of 2; #97 owns the per-slice rows of 2
-and all of 3** (see the file-scope map). *Test fired: load-bearing silence
-about a run-evidence record.*
+**Slice 04 (#274) owns 1 and the header line of 2; #97 owns the per-slice
+rows of 2 and all of 3** (see the file-scope map). Items 1 and 2's header
+line moved off #87 in the D14 split, which is why **#97 blocks on #274 as
+well as #87**: its rows render under 04's header line and
+`readQualityStageOutcomes` reads the section 04 creates. *Test fired:
+load-bearing silence about a run-evidence record.*
 
 ### D11 — ROI evidence is events, keyed to the same identities the rest of the journal uses
 
@@ -605,6 +612,60 @@ window allowlist `QA_WINDOW_ARTIFACT_NAME` (`src/post-qa-gates.ts:52-53`),
 key (`src/gate-cache.ts:37-42, 66-68`) are unchanged. In-process gates are
 never cached (`src/gate-runner.ts:205-212`); that holds for `suppressions`.
 
+### D14 — #87's tail is slice 04, and #87's branch already holds three behaviors
+
+Both halves of this decision come from `run-20260912-170501`, the third
+launch of #87. Recorded here because the next planner round must not
+re-derive either, and the run before it mis-derived both.
+
+**1. The separable tail moves to slice 04 (#274).** #87's contract declared
+all sixteen behaviors and nine preservation behaviors as one mandatory
+session, and withdrew the shed order that had authorized dropping the tail
+if the session ran long. Its evaluator refused that single-session claim
+twice (BLOCKING F-02), and its counter-evidence was the branch: one session
+delivered three behaviors and then stopped on a scope escalation. The
+evaluator named the seam, and the operator took it — B-15 (D6's template,
+`package.json` `files`, the README section) and B-16 (D10 item 1 and the
+header line of item 2) are slice 04's, and **#87's mandatory set is the
+remaining fourteen behaviors plus its preservation set**.
+
+The valve is *not* restored. A shed order lets an agent decide at the end of
+a session what the slice was; a slice boundary decides it before the session
+starts, and only the boundary survives a rerun. So the tail is a slice, not
+a permission.
+
+**2. #87's branch is not greenfield, and its contract must say so.** B-01,
+B-05 and B-10 are **already landed and tagged** on
+`afk-claude-code/afk-v2-quality-loops-slice-01-cleaner-loop`:
+
+- `5b77dd1 feat(#87): gatePolicy.clean parsing and the cleaner round bound`
+  — `src/gate-policy.ts` (`POLICY_KEYS` already carries `"clean"`),
+  `src/bounds.ts` (`MAX_CLEANER_ROUNDS = 3`), plus both test files.
+- `526260c feat(#87): the suppressions gate and gate evidence version 4`
+  — `src/suppression-gate.ts`, `src/gate-runner.ts`. On disk today
+  `GATE_EVIDENCE_VERSION` **is already 4** and
+  `SUPPORTED_GATE_EVIDENCE_VERSIONS` **is already `[1, 2, 3, 4]`**.
+- `src/gate-policy.test.ts`, `src/bounds.test.ts` and
+  `src/suppression-gate.test.ts` already carry the `[behavior:B-01]`,
+  `[behavior:B-05]` and `[behavior:B-10]` tags.
+
+The explorer FACT "No cleaner-related symbol exists anywhere in `src/`
+today" is **stale** and must not be restated: a contract carrying it asks
+for a 3 → 4 bump that has already happened, and a generator executing it can
+only bump 4 → 5 and re-widen an already-widened list. D5's `3 → 4` wording
+above describes the change this PRD makes overall, not work still
+outstanding.
+
+**B-10's only outstanding obligation is `src/acceptance-gate.test.ts:329`**,
+which still reads `expect(GATE_EVIDENCE_VERSION).toBe(3)` against a shipped
+4 — so the suite is red at session start, which is what `48dec26`'s
+`escalation.md` asked for. That pin moves 3 → 4 and its comment gains the
+#87 paragraph; the shipped `GATE_EVIDENCE_VERSION = 4` and `[1, 2, 3, 4]`
+stay untouched.
+
+*Test fired: load-bearing silence* — a contract's premise about the branch it
+will be generated against.
+
 ## Deferred — #92 and the hardener/mutation stories
 
 Plan §2 defers #73 stories 9–15 and 19; plan §4 runs "PRD 5 (cleaner only)".
@@ -623,35 +684,43 @@ A planner declares its slice's paths plus the test files it edits; a path
 the map does not name is a scope discovery (ADR 0052 / 0060), not an
 assumption.
 
-| Path | 01 #87 | 03 #97 |
-|---|---|---|
-| `src/orchestrator.ts` (hub) | one call site at `:6765-6795`; `completionEvidence.role`; `quality-stage-policy` at run start | `routeFinalReviewFinding` call site; RESTORE re-dispatch; stage tiling for `writeFinalChangeSummary`; `quality-stage-attempt` for `final-evaluation` |
-| `src/cleaner-stage.ts` *(new)* | creates (D2, D4, D8) | `quality-stage-attempt` emission; `repair` input (D12) |
-| `src/suppression-gate.ts` *(new)* | creates (D5) | — |
-| `src/gate-policy.ts` | `clean` member; `GateRiskClass` `suppression` (D1, D5) | — |
-| `src/gate-runner.ts` | `GateFindings.suppressions`; evidence version 3 → 4 (D5) | — |
-| `src/scope-gate.ts` | `role` source: slice dir out of scope (D3) | — |
-| `src/final-evaluation.ts` | `CLEANER_STAGE_ID` (D2) | `routeFinalReviewFinding` input (D12) |
-| `src/bounds.ts` | `MAX_CLEANER_ROUNDS`, `cleanerRoundsRemaining` (D4) | — |
-| `src/run-state.ts` | version 5 → 6, `qualityStages` (D9) | — |
-| `src/run-events.ts` | `quality-stage-policy`; `invocation-completed.role` (D7, D10) | `quality-stage-attempt` (D11) |
-| `src/context-envelope.ts` | `CLEANER_CONTEXT_MANIFEST`; `ContextEnvelopeRole` (D7) | — |
-| `src/qa-review.ts` | `QAReviewStage` `"cleaner"` (D4) | — |
-| `src/logger.ts` | `## Quality Stages` header line (D10) | per-slice rows; `readQualityStageOutcomes` (D10, D11) |
-| `src/ship-gate.ts` | — | `buildPrCreationPlan.qualityStages` + section (D10) |
-| `prompts/cleaner.md` *(new)* | creates (D7) | restore variant text (D12) |
-| `templates/quality-policy/afk.config.json` *(new)* | creates (D6) | — |
-| `package.json` | `files` gains `templates` (D6) | — |
-| `README.md` | "Quality policy starter" section (D6) | — |
-| `ARCHITECTURE.md` | own rows: module, seam ("Post-approval writing stages"), `suppressions` under `GateDeclaration` | own rows |
-| `afk.config.json` | **not edited** (protected path; cleaner stays off) | **not edited** |
+Slice 04 (#274) is D14's split of #87's tail; its two columns' worth of
+rows moved off 01 and are marked in the `04 #274` column.
+
+| Path | 01 #87 | 04 #274 | 03 #97 |
+|---|---|---|---|
+| `src/orchestrator.ts` (hub) | one call site at `:6765-6795`; `completionEvidence.role` | `quality-stage-policy` at run start (D10) | `routeFinalReviewFinding` call site; RESTORE re-dispatch; stage tiling for `writeFinalChangeSummary`; `quality-stage-attempt` for `final-evaluation` |
+| `src/cleaner-stage.ts` *(new)* | creates (D2, D4, D8) | — | `quality-stage-attempt` emission; `repair` input (D12) |
+| `src/suppression-gate.ts` *(new)* | creates (D5) | — | — |
+| `src/gate-policy.ts` | `clean` member; `GateRiskClass` `suppression` (D1, D5) — **landed, `5b77dd1`** | — | — |
+| `src/gate-runner.ts` | `GateFindings.suppressions`; evidence version 3 → 4 (D5) — **landed, `526260c`** | — | — |
+| `src/scope-gate.ts` | `role` source: slice dir out of scope (D3) | — | — |
+| `src/final-evaluation.ts` | `CLEANER_STAGE_ID` (D2) | — | `routeFinalReviewFinding` input (D12) |
+| `src/bounds.ts` | `MAX_CLEANER_ROUNDS`, `cleanerRoundsRemaining` (D4) — **landed, `5b77dd1`** | — | — |
+| `src/run-state.ts` | version 5 → 6, `qualityStages` (D9) | — | — |
+| `src/run-events.ts` | `invocation-completed.role` (D7) | `quality-stage-policy` (D10) | `quality-stage-attempt` (D11) |
+| `src/context-envelope.ts` | `CLEANER_CONTEXT_MANIFEST`; `ContextEnvelopeRole` (D7) | — | — |
+| `src/qa-review.ts` | `QAReviewStage` `"cleaner"` (D4) | — | — |
+| `src/acceptance-gate.test.ts` | the `GATE_EVIDENCE_VERSION` pin 3 → 4 at `:329` (D5, D14) | — | — |
+| `src/logger.ts` | — | `## Quality Stages` header line (D10) | per-slice rows; `readQualityStageOutcomes` (D10, D11) |
+| `src/ship-gate.ts` | — | — | `buildPrCreationPlan.qualityStages` + section (D10) |
+| `prompts/cleaner.md` *(new)* | creates (D7) | — | restore variant text (D12) |
+| `templates/quality-policy/afk.config.json` *(new)* | — | creates (D6) | — |
+| `package.json` | — | `files` gains `templates` (D6) | — |
+| `README.md` | — | "Quality policy starter" section (D6) | — |
+| `ARCHITECTURE.md` | own rows: module, seam ("Post-approval writing stages"), `suppressions` under `GateDeclaration` | — | own rows |
+| `afk.config.json` | **not edited** (protected path; cleaner stays off) | **not edited** | **not edited** |
+
+`src/acceptance-gate.test.ts` is the one test file the map names, because
+D14 makes it an *obligation* rather than a consequence: it is the only part
+of B-10 still outstanding, and the suite is red until it moves.
 
 Both slices declare `src/orchestrator.ts`, so `partitionLanes`
 (`src/lanes.ts`) puts them in one lane; the DAG already serialises them.
 The shared files (`src/orchestrator.ts`, `src/run-events.ts`,
 `src/logger.ts`, `src/cleaner-stage.ts`, `src/final-evaluation.ts`,
-`prompts/cleaner.md`, `ARCHITECTURE.md`) stack: #97's worktree is cut from
-the feature tip after #87 merged.
+`prompts/cleaner.md`, `ARCHITECTURE.md`) stack: each worktree is cut from
+the feature tip after its predecessor merged, in the order 01 → 04 → 03.
 
 **Concurrency with PRD 7** (plan §4, §6): allowed under §3c policy 5 —
 one clone per run, tickets linted, no migration prefixes (neither PRD
