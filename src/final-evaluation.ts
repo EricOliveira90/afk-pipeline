@@ -324,6 +324,42 @@ export function parseFinalReview(
 }
 
 /**
+ * A single canonical validation of `final-review.json` whose parsed value the
+ * caller can keep.
+ *
+ * The verdict needs two facts from the same bytes: whether they validate, and
+ * the `finalTreeId` they claim. Parsing twice — once for the validation result
+ * and once for the tree ID — can hand the verdict a tree ID from a document its
+ * own validation result never described (the file can be rewritten between the
+ * two reads, and a second read of a missing file throws where the first
+ * produced a blocker). So validation returns the review it validated, and
+ * `decideFinalVerdict` is given a `finalArtifactTreeId` taken from that value.
+ *
+ * `null` text means the artifact is absent, which is a validation failure with
+ * a named reason rather than a throw: the final verdict fails closed on it.
+ */
+export type FinalReviewValidation =
+  | { ok: true; review: FinalReview }
+  | { ok: false; error: string };
+
+export function validateFinalReview(
+  text: string | null,
+  source = FINAL_REVIEW_FILENAME,
+): FinalReviewValidation {
+  if (text === null) {
+    return { ok: false, error: `${source} was not written` };
+  }
+  try {
+    return { ok: true, review: parseFinalReview(text, source) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
  * Where one finding goes.
  *
  * `writing-stage` names the single post-approval writing stage by its id.

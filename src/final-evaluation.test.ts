@@ -7,6 +7,7 @@ import {
   POST_APPROVAL_WRITING_STAGE_ID,
   parseFinalReview,
   routeFinalReviewFinding,
+  validateFinalReview,
   type FinalReviewFinding,
 } from "./final-evaluation.js";
 
@@ -113,6 +114,41 @@ function review(overrides: Record<string, unknown> = {}): string {
     ...overrides,
   });
 }
+
+describe("validateFinalReview", () => {
+  it("[behavior:B-08] carries the parsed review out of the one validation", () => {
+    const result = validateFinalReview(review({ verdict: "PASS", findings: [] }));
+
+    // The point of the return shape: the caller that validated is the caller
+    // that holds the tree IDs, so nothing has to parse the file a second time
+    // to key a verdict on it.
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.review.finalTreeId).toBe(OTHER_TREE);
+    expect(result.ok && result.review.baselineTreeId).toBe(BASELINE_TREE);
+  });
+
+  it("[behavior:B-08] reports an absent artifact by name rather than throwing", () => {
+    const result = validateFinalReview(null);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "final-review.json was not written",
+    });
+  });
+
+  it("[behavior:B-08] reports the parse failure as a message on the same shape", () => {
+    const result = validateFinalReview(review({ verdict: "MAYBE" }));
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toContain("verdict");
+  });
+
+  it("[behavior:B-08] names the source it was given in its errors", () => {
+    const result = validateFinalReview(null, "final-review-r1-a2.json");
+
+    expect(!result.ok && result.error).toContain("final-review-r1-a2.json");
+  });
+});
 
 describe("parseFinalReview", () => {
   it("[behavior:B-08] parses a canonical final review with its typed repair vocabulary", () => {
