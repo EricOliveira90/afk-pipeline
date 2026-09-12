@@ -14,7 +14,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 
 | Module | Purpose (one line) | Public seam (import this) | Internals (do not import) |
 |---|---|---|---|
-| CLI entries | Parse options, pick provider, call the orchestrator | `src/afk.ts`, `src/afk-claude.ts`, `src/afk-codex.ts` | `src/cli-options.ts`, `src/cli-run-scope.ts` |
+| CLI entries | Parse options, pick provider, call the orchestrator | `src/afk.ts`, `src/afk-claude.ts`, `src/afk-codex.ts` | `src/cli-options.ts`, `src/cli-run-scope.ts`, `src/prompt-recorder.ts` |
 | Orchestrator core | Run lifecycle: waves, dispatch, merges, resume | `src/orchestrator.ts` (`runPipeline`) | `src/wave.ts`, `src/resume.ts` |
 | Lane partitioner | Pure function: wave → serial lanes by file overlap + resource keys (ADR 0005, 0027) | `src/lanes.ts` | — |
 | Agent providers | One interface, three backends (ADR 0002, 0013, 0016) | `src/agent-provider.ts` | `src/claude.ts`, `src/codex.ts`, `src/kiro.ts` |

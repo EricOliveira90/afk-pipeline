@@ -386,6 +386,13 @@ generator roles (ADR 0038).
 _Avoid_: "test command" bare (ambiguous with the sanity set), "QA
 command" (the evaluator runs the sanity set, not this)
 
+**Prompt record**:
+The `slice-<NN>-<role>[-r<N>].prompt.md` file `--record-prompts` writes beside
+the invocation's `.log` in the run directory: the envelope's bytes, unchanged,
+one file per invocation. Default off; the `run-started` event records whether
+it was on. The raw material for an eval case's `prompt`.
+_Avoid_: "prompt log", "transcript", "envelope dump"
+
 **Sanity command set**:
 What `resolveSanityPlan` says the **pre-ship sanity gate** executes and
 what the QA evaluator is told to run — one source, so QA cannot be told a
