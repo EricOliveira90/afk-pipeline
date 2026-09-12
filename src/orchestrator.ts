@@ -1217,7 +1217,8 @@ function migrationReservationBlock(
       "AFK has not assigned this slice a prefix yet. Declare the exact count under " +
       '`## Migration requirements` as `- New migration files: N`. Use ' +
       "`RESERVED_PREFIX_<name>.sql` placeholders for new migration paths. " +
-      "Never inspect the tree or calculate a prefix; AFK will assign it after this draft."
+      "Never inspect the tree or calculate a prefix; AFK will assign it after this draft " +
+      "and substitute it into those paths itself, so the placeholder costs you nothing."
     );
   }
   if (claim.length === 0) {

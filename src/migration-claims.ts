@@ -1,8 +1,10 @@
-import { dirname, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { AfkManifest } from "./afk-manifest.js";
 import * as git from "./git.js";
 import { migrationPathsIn, type LaneResourceOptions } from "./lanes.js";
 import {
+  ACCEPTANCE_MANIFEST_FILENAME,
   acceptanceManifestPaths,
   loadAcceptanceManifest,
 } from "./acceptance-manifest.js";
@@ -179,6 +181,134 @@ export function validateContractMigrationClaim(args: {
   return null;
 }
 
+/**
+ * The token `migrationReservationBlock` tells a planner with no claim yet
+ * to write where a prefix would go (`RESERVED_PREFIX_<name>.sql`), because
+ * the prefix is not knowable to it. Anchored: only a basename that *opens*
+ * with the token is a placeholder, and the `_` lookahead keeps the
+ * descriptive tail intact when the claim replaces it.
+ */
+const RESERVED_PREFIX_TOKEN = /^RESERVED_PREFIX(?=_)/i;
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export interface MigrationPrefixSubstitution {
+  /** The declared placeholder path, as the manifest normalised it. */
+  from: string;
+  /** The same path with its placeholder token replaced by the claim. */
+  to: string;
+}
+
+/**
+ * Substitute a slice's claimed prefixes into the placeholder migration
+ * paths of its contract pair, in claim order (#267, ADR 0067).
+ *
+ * AFK tells the planner to write `RESERVED_PREFIX_<name>.sql` and then
+ * allocates the prefix in the same gate call that reads the result, so the
+ * first draft of every migration-bearing contract is refused for obeying
+ * the instruction it was given. The correction is a string substitution
+ * with exactly one right answer, so the gate makes it rather than spending
+ * a planner round asking for it — the same shape as ADR 0061's repair
+ * pass, minus the dispatch.
+ *
+ * Returns the substitutions performed, or an empty list when this contract
+ * pair is not the mechanical case: then nothing is written and the caller's
+ * objection stands. Deliberately narrow, because an objection that is
+ * *about* something — a count that disagrees with the claim, or a prefix
+ * the planner calculated for itself — is a decision the planner made, and
+ * still owes a round.
+ */
+export function substituteClaimedMigrationPrefixes(args: {
+  contractPath: string;
+  claim: readonly string[];
+  options?: LaneResourceOptions;
+}): MigrationPrefixSubstitution[] {
+  if (args.claim.length === 0) return [];
+  const sliceDir = dirname(args.contractPath);
+  const manifest = loadAcceptanceManifest(sliceDir);
+  if (manifest.migrationCount !== args.claim.length) return [];
+
+  const declared = migrationPathsIn(
+    acceptanceManifestPaths(manifest),
+    args.options,
+  );
+  if (declared.length !== args.claim.length) return [];
+
+  const basenames = declared.map((path) => posix.basename(path));
+  if (basenames.some((name) => !RESERVED_PREFIX_TOKEN.test(name))) return [];
+  // One placeholder basename contained in another would make the rewrite
+  // below order-dependent, and a repeated one would make the claim order
+  // ambiguous. Neither is reachable from a valid manifest; both are
+  // cheaper to refuse than to reason about.
+  if (
+    basenames.some((name, index) =>
+      basenames.some((other, otherIndex) => {
+        return index !== otherIndex && name.includes(other);
+      }),
+    )
+  ) {
+    return [];
+  }
+
+  const substitutions = declared.map((path, index) => ({
+    from: path,
+    to:
+      posix.dirname(path) === "."
+        ? basenames[index]!.replace(RESERVED_PREFIX_TOKEN, args.claim[index]!)
+        : `${posix.dirname(path)}/${basenames[index]!.replace(
+            RESERVED_PREFIX_TOKEN,
+            args.claim[index]!,
+          )}`,
+  }));
+  if (
+    substitutions.some(
+      (substitution, index) =>
+        migrationPrefixOf(substitution.to) !== args.claim[index],
+    )
+  ) {
+    return [];
+  }
+
+  /**
+   * Replace every mention of each placeholder basename — the machine path
+   * in `fileScope`, the contract's human-readable file list, and any prose
+   * that names the file — with the claimed one. Matched case-insensitively
+   * because the manifest parser lowercases the paths it returns, and the
+   * replacement is derived from the *matched* text so the planner's casing
+   * of the descriptive tail survives.
+   */
+  const rewrite = (text: string): string =>
+    basenames.reduce(
+      (acc, name, index) =>
+        acc.replace(new RegExp(escapeRegExp(name), "gi"), (match) =>
+          match.replace(RESERVED_PREFIX_TOKEN, args.claim[index]!),
+        ),
+      text,
+    );
+
+  const manifestPath = join(sliceDir, ACCEPTANCE_MANIFEST_FILENAME);
+  const manifestText = readFileSync(manifestPath, "utf-8");
+  const nextManifest = rewrite(manifestText);
+  // The path came out of this file, so it is in this file; a manifest the
+  // rewrite does not touch means the assumption is wrong somewhere, and
+  // writing nothing leaves the caller's objection to say so.
+  if (nextManifest === manifestText) return [];
+
+  const contractText = readFileSync(args.contractPath, "utf-8");
+  const nextContract = rewrite(contractText);
+  // Contract first, manifest last. The manifest is what the gate re-reads
+  // and what the lock attests to, so a crash between the two writes leaves
+  // the placeholder in the machine file and the gate objects on the next
+  // pass exactly as it does today — the recoverable order.
+  if (nextContract !== contractText) {
+    writeFileSync(args.contractPath, nextContract, "utf-8");
+  }
+  writeFileSync(manifestPath, nextManifest, "utf-8");
+  return substitutions;
+}
+
 export function validateGeneratedMigrations(args: {
   worktreeDir: string;
   featBranch: string;
@@ -264,6 +394,14 @@ export function releaseUnmergedMigrationClaims(
  * the reserved pool, and validate its paths against the claim.
  * Returns the planner-facing objection, or `null` when the contract
  * satisfies its claim.
+ *
+ * A claim allocated here is new information: the planner wrote the pair
+ * before AFK had a prefix to give it, and was told to leave a placeholder.
+ * So a first objection is re-asked once with that placeholder substituted
+ * (`substituteClaimedMigrationPrefixes`, #267). `onSubstitution` reports a
+ * substitution that happened, because the locked pair then differs from
+ * what the planner wrote and the operator must be able to see that in the
+ * journal.
  */
 export function claimContractMigrations(args: {
   repoRoot: string;
@@ -272,6 +410,9 @@ export function claimContractMigrations(args: {
   contractPath: string;
   expectedPool: readonly string[];
   options?: LaneResourceOptions;
+  onSubstitution?: (
+    substitutions: readonly MigrationPrefixSubstitution[],
+  ) => void;
 }): string | null {
   const manifest = loadAcceptanceManifest(dirname(args.contractPath));
   const existingClaim = migrationClaimFor(
@@ -297,6 +438,20 @@ export function claimContractMigrations(args: {
     count: manifest.migrationCount,
     expectedPool: args.expectedPool,
   });
+  const objection = validateContractMigrationClaim({
+    contractPath: args.contractPath,
+    claim,
+    options: args.options,
+  });
+  if (objection === null) return null;
+
+  const substitutions = substituteClaimedMigrationPrefixes({
+    contractPath: args.contractPath,
+    claim,
+    options: args.options,
+  });
+  if (substitutions.length === 0) return objection;
+  args.onSubstitution?.(substitutions);
   return validateContractMigrationClaim({
     contractPath: args.contractPath,
     claim,

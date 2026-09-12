@@ -253,6 +253,17 @@ _Avoid_: "lock" (nothing is held against other processes), "assignment
 from the manifest" (the manifest owns the pool; the pipeline owns
 claims)
 
+**Reserved-prefix placeholder**:
+`RESERVED_PREFIX_<name>.sql`, what a planner writes for a new migration
+path on a round before AFK has allocated the slice a **migration
+claim** — the prefix is not knowable to it. The contract-lock gate
+substitutes the claim into the placeholder in `contract.md` and
+`acceptance-manifest.json` and re-validates, so the contract locks in
+the round it was accepted in. See ADR 0067.
+_Avoid_: "template prefix", "temporary prefix" (it is never a prefix);
+"renumbering" for the substitution (ADR 0028's rejected alternative is
+about a real prefix)
+
 **Protected issue**:
 A source GH issue listed in the **AFK manifest** whose GitHub state the
 run must not disturb (e.g. a parent spec issue that must stay open).
@@ -316,8 +327,9 @@ declared migration whose numeric prefix already exists on the **feature
 branch** under a different filename is refused with the colliding prefix
 and the next free one, seconds after the planner named the file rather
 than hours later at the merge. A refusal costs one contract round and no
-generation; exhausting the rounds triggers ordinary **escalation**. See
-ADR 0028.
+generation; exhausting the rounds triggers ordinary **escalation**. One
+objection it does *not* raise: a **reserved-prefix placeholder**, which
+it substitutes and re-validates in place. See ADR 0028 and ADR 0067.
 _Avoid_: "pre-flight check" (it is not before the pipeline, it is inside
 negotiation), "validation" (too generic), "merge check" (the merge-mutex
 collision check is a different, and still authoritative, thing)
