@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "summary": "recordPrompt's writeFileSync is unguarded, so a filesystem error while writing the record propagates out of the wrapper's invoke and aborts the agent invocation an opt-in debug flag was only meant to observe.",
+      "evidence": "src/prompt-recorder.ts:68 — `writeFileSync(recordPath, options.prompt, { encoding: \"utf-8\", flag: \"wx\" });` sits in `recordPrompt`, called synchronously from the wrapper's `invoke` at src/prompt-recorder.ts:83 before `inner.invoke(options)`. No try/catch anywhere in the module. The three declared skip paths (absent stream, absent `path`, non-`.log` path) all return before this line, so nothing else shields it. Probe: the contract's own guarantees are visible as the only guards — reverting `flag: \"wx\"` to a default write is what B-03 catches, but no test in src/prompt-recorder.test.ts exercises a write that fails, and none is required by the manifest.",
+      "expected": "The contract frames the recorder as evidence-only and makes every other write-nothing case silent and non-fatal (B-05, B-10: \"writes no file, does not throw, and still resolves to the inner provider's result\"). The record is described in CONTEXT.md as raw material for an eval case, never as a run precondition.",
+      "observed": "A write that throws takes the invocation with it. The concrete reachable case on this repo's target platform is path length: the log path is `<repoRoot>/.afk/logs/<slug>/run-YYYYMMDD-HHMMSS/slice-<NN>-<role>-r<N>.log` and the record swaps a 4-character `.log` for a 10-character `.prompt.md`, so a log path already close to the Windows 260-character limit yields a record path past it and `writeFileSync` throws where the log stream succeeded. Every affected invocation then fails before the provider is ever called, and the failure is attributed to the agent rather than to the flag.",
+      "clearCondition": "A record-write failure leaves the invocation intact: with `--record-prompts` on and the record path unwritable, `invoke` still resolves to the inner provider's result and does not throw, matching B-05 and B-10.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-09"],
+      "summary": "The B-09 section-placement assertion compares two indexOf results, so it passes vacuously if the \"Pipeline concepts\" heading is ever renamed or removed.",
+      "evidence": "src/prompt-recorder.test.ts:290-292 — `expect(context.indexOf(\"**Prompt record**:\")).toBeGreaterThan(context.indexOf(\"### Pipeline concepts\"))`. A missing heading makes the right-hand side `-1`, which any found entry index exceeds. Verified the placement itself is correct today: CONTEXT.md's headings are at lines 7, 188, 207, 217 (`### Pipeline concepts`), 494, 513, 523, and the entry sits at line 386 — inside the section. The assertion is what is weak, not the docs.",
+      "expected": "B-09: \"CONTEXT.md gains the **Prompt record** entry ... under 'Pipeline concepts' (CONTEXT.md:217)\", asserted in src/prompt-recorder.test.ts.",
+      "observed": "The assertion holds the entry above nothing more than the start of the file when the heading is absent, and it never bounds the section's end, so an entry that drifted into \"## Relationships\" (line 494) would also pass. The other B-09 assertions (heading text, body text, `_Avoid_` line, the ARCHITECTURE.md internals column) are exact and do fail when broken.",
+      "clearCondition": "The placement assertion fails when the entry is not inside the \"Pipeline concepts\" section — for example by locating the heading, asserting it was found, and bounding the entry between it and the next top- or second-level heading.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
