@@ -1269,6 +1269,63 @@ function preserveContractNegotiationFailure(
 }
 
 /**
+ * The context an archive warning needs, and nothing more. Structural so a
+ * unit test can prove the non-fatality without standing up a slice.
+ */
+export interface ArchiveWarningContext {
+  tag: string;
+  slice: { ghIssue: string };
+  logger: Pick<RunJournal, "phase">;
+}
+
+/**
+ * Run one evidence archive write for the record, never for the slice's
+ * outcome (#258).
+ *
+ * An archive describes a run; it must not be able to end one. On #96 a
+ * `cpSync(..., { errorOnExist: true })` refusing to overwrite a name a
+ * *previous* run had already written threw out of the generator loop, ERRORed
+ * a slice holding seven good commits, and was charged as a resume attempt —
+ * half the slice's resume budget spent on a filesystem collision. Nothing
+ * about the implementation was wrong, and nothing the archive protects was
+ * lost: the refusal exists so an earlier attempt's evidence is never
+ * overwritten, and warning satisfies that just as well as throwing.
+ *
+ * The warning names the archive path, because a gap in the archive has to be
+ * traceable rather than invisible. Returns `null` when the write failed, so
+ * a caller that reads the archived names can tell.
+ *
+ * Deliberately not applied to the QA raw-canonical artifact, which fails
+ * closed on purpose (#79): that one is the evidence a PASS rests on, and an
+ * attempt whose evidence could not be preserved must not count. Every caller
+ * here archives a record of something that has *already* been decided.
+ */
+export function archiveForTheRecord<T>(
+  ctx: ArchiveWarningContext,
+  description: string,
+  archiveDir: string,
+  write: () => T,
+): T | null {
+  try {
+    return write();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.phase(
+      `${ctx.tag}: Warning: failed to archive ${description} to ` +
+        `${archiveDir}: ${message}`,
+      "error",
+      {
+        type: "warn",
+        reason: "evidence-archive-failed",
+        ghIssue: ctx.slice.ghIssue,
+        message,
+      },
+    );
+    return null;
+  }
+}
+
+/**
  * Keep one contract review attempt's artifacts. Best-effort: an audit
  * copy that cannot be written is a warning, never the thing that fails a
  * negotiation. The warning names the attempt so a gap in the archive is
@@ -1370,31 +1427,41 @@ function archiveContractReviewAttempt(
  * (see `runSliceExecute`), so the evidence for a hand-declaration
  * survives the rollback either way.
  */
+/**
+ * Outcomes of one attempt at a focused scope revision.
+ *
+ * `REJECTED` is separated from `ERROR` because the two are recoverable in
+ * different ways (#257): a rejection is the contract evaluator doing its job
+ * and naming a clear condition, so the caller may spend another of the
+ * round's revision grants on a retry that carries those findings. Every
+ * `ERROR` here is terminal for the slice.
+ */
+type FocusedScopeRevisionResult =
+  | { phase: "LOCKED"; manifest: AcceptanceManifest }
+  | { phase: "REJECTED"; findings: readonly ContractReviewFinding[] }
+  | { phase: "ERROR"; error: string };
+
 async function runFocusedScopeRevision(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
-): Promise<
-  | { phase: "LOCKED"; manifest: AcceptanceManifest }
-  | { phase: "ERROR"; error: string }
-> {
+  rejectionFindings: readonly ContractReviewFinding[] = [],
+): Promise<FocusedScopeRevisionResult> {
   return await withContractTransaction(
     ctx,
     {
       reason: "focused scope revision did not complete",
       qualifier: "the previously accepted",
     },
-    (tx) => reviseAcceptedContract(ctx, escalation, tx),
+    (tx) => reviseAcceptedContract(ctx, escalation, rejectionFindings, tx),
   );
 }
 
 async function reviseAcceptedContract(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
+  rejectionFindings: readonly ContractReviewFinding[],
   tx: ContractTransaction,
-): Promise<
-  | { phase: "LOCKED"; manifest: AcceptanceManifest }
-  | { phase: "ERROR"; error: string }
-> {
+): Promise<FocusedScopeRevisionResult> {
   const { config, slice, logger, invoke } = ctx;
   const { contractPath, manifestPath, previousContract } = tx;
   const previousManifest = loadAcceptanceManifest(ctx.absSliceDir);
@@ -1445,6 +1512,7 @@ async function reviseAcceptedContract(
     currentContract: readFileSync(contractPath, "utf-8"),
     currentAcceptanceManifest: previousManifestText,
     scopeEvidence: evidence,
+    rejectionFindings,
     contractResponseFilename: CONTRACT_RESPONSE_FILENAME,
     migrationReservation: migrationReservationBlock(config, slice.ghIssue),
     baseGateCatalog: formatBaseGateCatalog(
@@ -1618,13 +1686,11 @@ async function reviseAcceptedContract(
     round: revisionRound,
     verdict: review.verdict,
   });
+  // Not terminal by itself (#257). The transaction rolls the accepted pair
+  // back on this exit, so the caller's retry starts from the same baseline
+  // the first attempt did, plus these findings.
   if (review.verdict !== "ACCEPT") {
-    return {
-      phase: "ERROR",
-      error:
-        `Focused scope revision was not accepted: ` +
-        formatContractReviewFindings(review.findings),
-    };
+    return { phase: "REJECTED", findings: review.findings };
   }
 
   const locked = tx.lock({
@@ -2165,10 +2231,12 @@ export async function prepareSliceWorktree(ctx: SliceContext): Promise<void> {
    * worktree, so recreating it deletes the only copy — they are copied to
    * the same `.afk/artifacts/` path the ESCALATE/STUCK preserve path
    * writes to (#113). The `reviews/` archive dir is moved aside, because
-   * the next round-1 evidence write targets the same `r1-a1` names and
-   * fails closed on a collision — burning infrastructure retries and
-   * possibly ending the run ERROR before the next re-launch's resume
-   * self-heals past the occupied rounds (#123).
+   * the next round-1 contract-review and QA evidence writes target the same
+   * `r1-a1` names and fail closed on a collision — burning infrastructure
+   * retries and possibly ending the run ERROR before the next re-launch's
+   * resume self-heals past the occupied rounds (#123). Two lives inside one
+   * run share a run id, so #258's spill does not free those slots for them;
+   * moving the directory is still what does.
    *
    * Best-effort: a failure warns and the run proceeds, because the
    * operator asked for the restart and a half-copied archive must not
@@ -5857,13 +5925,25 @@ export async function runSliceExecute(
           acceptedPair,
         );
         if (mutatedOwned.length > 0) {
-          const archived = artifacts.archiveRejectedContractMutation({
-            sliceDir: ctx.absSliceDir,
-            archiveDir: reviewArchiveDir,
-            round,
-            attempt: generatorAttempt,
-            files: mutatedOwned,
-          });
+          // For the record only (#258): the refusal below is the outcome, and
+          // an archive that cannot be written must not replace it with a
+          // filesystem error naming a different problem.
+          const archived =
+            archiveForTheRecord(
+              ctx,
+              `the rejected contract mutation of round ${round} attempt ` +
+                `${generatorAttempt}`,
+              reviewArchiveDir,
+              () =>
+                artifacts.archiveRejectedContractMutation({
+                  sliceDir: ctx.absSliceDir,
+                  archiveDir: reviewArchiveDir,
+                  round,
+                  attempt: generatorAttempt,
+                  files: mutatedOwned,
+                  runId: runIdFor(logger.runDir),
+                }),
+            ) ?? [];
           restoreAcceptedContractPair(ctx.absSliceDir, acceptedPair);
           throw new Error(
             `Generator round ${round} attempt ${generatorAttempt} changed ` +
@@ -5889,12 +5969,28 @@ export async function runSliceExecute(
 
         if (!existsSync(escalationPath)) break;
 
-        artifacts.archiveScopeEscalationAttempt({
-          sliceDir: ctx.absSliceDir,
-          archiveDir: reviewArchiveDir,
-          round,
-          attempt: generatorAttempt,
-        });
+        // #258, and the write that killed #96: the archive dir is keyed by
+        // slice while this name is keyed by round and attempt, so a resumed
+        // slice whose prior life died before QA re-derives round 1 and asks
+        // for a name the prior run already wrote. The prior file is kept —
+        // it is the only record of the earlier escalation — and this run's
+        // copy spills into its own subdirectory instead, so neither run's
+        // evidence is lost. And if even the spill fails, the seam warns: the
+        // escalation the loop is about to act on is still on disk in the
+        // slice dir, and the grant that follows is unaffected either way.
+        archiveForTheRecord(
+          ctx,
+          `the scope escalation of round ${round} attempt ${generatorAttempt}`,
+          reviewArchiveDir,
+          () =>
+            artifacts.archiveScopeEscalationAttempt({
+              sliceDir: ctx.absSliceDir,
+              archiveDir: reviewArchiveDir,
+              round,
+              attempt: generatorAttempt,
+              runId: runIdFor(logger.runDir),
+            }),
+        );
         const lockedManifest = loadAcceptanceManifest(ctx.absSliceDir);
         const escalation = parseScopeEscalation(
           readFileSync(escalationPath, "utf-8"),
@@ -5968,15 +6064,59 @@ export async function runSliceExecute(
               `slice so the next round earns a fresh grant.`,
           );
         }
-        const revision = await runFocusedScopeRevision(ctx, escalation);
-        if (revision.phase === "ERROR") return revision;
-        scopeRevisions++;
+        // A REJECTED revision is not terminal while the round still holds a
+        // grant (#257). The rejecting findings ride the next attempt's
+        // planner prompt, so a revision blocked on a precise clear condition
+        // can converge here — the carry-forward property ADR 0061 gave the
+        // normal negotiation loop, which this focused path was built as an
+        // optimization of and had lost.
+        //
+        // A rejection-driven retry is charged a *revision grant*, never a
+        // resume attempt: the grant is the round's own budget, and the run
+        // must not pay a resume for the pipeline failing to pass feedback
+        // along. So the count below is of revision *attempts*, not of
+        // accepted revisions — two distinct discoveries still spend the two
+        // grants and a third is still refused, and a rejection plus its retry
+        // spends them the same way.
+        let rejectionFindings: readonly ContractReviewFinding[] = [];
+        let revisedManifest: AcceptanceManifest | null = null;
+        while (revisedManifest === null) {
+          const revision = await runFocusedScopeRevision(
+            ctx,
+            escalation,
+            rejectionFindings,
+          );
+          scopeRevisions++;
+          if (revision.phase === "ERROR") return revision;
+          if (revision.phase === "REJECTED") {
+            if (scopeRevisions >= MAX_SCOPE_REVISIONS_PER_ROUND) {
+              return {
+                phase: "ERROR",
+                error:
+                  `Focused scope revision was not accepted, and round ` +
+                  `${round} has spent its ` +
+                  `${MAX_SCOPE_REVISIONS_PER_ROUND} revision(s): ` +
+                  formatContractReviewFindings(revision.findings),
+              };
+            }
+            rejectionFindings = revision.findings;
+            logger.phase(
+              `${ctx.tag}: focused scope revision REJECTED; retrying with ` +
+                `the rejecting finding(s) ` +
+                `(revision ${scopeRevisions + 1}/` +
+                `${MAX_SCOPE_REVISIONS_PER_ROUND} of round ${round})...`,
+              "error",
+            );
+            continue;
+          }
+          revisedManifest = revision.manifest;
+        }
         scopeRevisionNote =
           "# Focused scope revision accepted\n\n" +
           "The contract was revised and re-locked without spending this " +
           "implementation round. Continue under this complete accepted " +
           "file scope:\n\n" +
-          JSON.stringify({ fileScope: revision.manifest.fileScope }, null, 2);
+          JSON.stringify({ fileScope: revisedManifest.fileScope }, null, 2);
       }
 
       if (config.manifest) {

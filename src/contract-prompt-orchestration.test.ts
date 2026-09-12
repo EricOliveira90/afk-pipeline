@@ -3,9 +3,11 @@ import { fileURLToPath } from "node:url";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import {
   assembleContractEvaluatorPrompt,
+  assembleFocusedScopePlannerPrompt,
   assembleNegotiationPlannerPrompt,
   assemblePlannerPrompt,
 } from "./contract-prompt-orchestration.js";
+import type { ContractReviewFinding } from "./contract-review.js";
 import type { RunEventPayload } from "./run-events.js";
 
 const acceptanceManifest: AcceptanceManifestV2 = {
@@ -153,6 +155,67 @@ describe("contract prompt orchestration", () => {
     });
     expect(neither.prompt).not.toContain(objection);
     expect(neither.prompt).not.toContain(repair);
+  });
+
+  // #257: a focused revision the contract evaluator rejected retries within
+  // its round, and the retry must be able to act on the rejection. Asserted
+  // on the assembled prompt — the defect was invisible in the assembler's
+  // arguments, which named a `findings` field that was hard-coded empty.
+  it("#257 routes a rejecting revision's findings into the retry's focused prompt", () => {
+    const { context } = captureEvents();
+    const focusedInput = {
+      context,
+      repoRoot: fileURLToPath(new URL(".", import.meta.url)),
+      currentContract: "contract",
+      currentAcceptanceManifest: JSON.stringify(acceptanceManifest),
+      scopeEvidence: JSON.stringify({
+        findingIds: ["F-40"],
+        paths: ["src/extra.ts"],
+        reason: "the declared module delegates to an undeclared one",
+      }),
+      contractResponseFilename: "contract-response.json",
+      migrationReservation: "none",
+      baseGateCatalog: "- tests: pnpm test:fast",
+    };
+    const rejection: ContractReviewFinding = {
+      id: "F-REVISION",
+      severity: "BLOCKING",
+      behaviorIds: ["B-01"],
+      evidence: '"the revised file scope"',
+      expected: "every line of src/extra.ts enumerated",
+      observed: "the revision enumerated one line too few",
+      clearCondition: "the planner enumerates every line",
+      state: "OPEN",
+      revisionCitation: null,
+    };
+
+    const first = assembleFocusedScopePlannerPrompt(focusedInput);
+    const retry = assembleFocusedScopePlannerPrompt({
+      ...focusedInput,
+      rejectionFindings: [rejection],
+    });
+
+    // The first attempt has nothing to carry, and must not imply it does.
+    expect(first.prompt).not.toContain(rejection.id);
+    expect(first.prompt).not.toContain("was\nREJECTED");
+    expect(first.contextEnvelope.includedArtifactClasses).not.toContain(
+      "open-contract-findings",
+    );
+
+    // The retry carries the rejection through the same channel a normal
+    // negotiation round uses, and says what it is.
+    expect(retry.prompt).toContain(rejection.id);
+    expect(retry.prompt).toContain(rejection.clearCondition);
+    expect(retry.prompt).toContain(rejection.observed);
+    expect(retry.prompt).toMatch(/previous attempt at this same focused/);
+    expect(retry.contextEnvelope.includedArtifactClasses).toContain(
+      "open-contract-findings",
+    );
+    // The retry's prompt differs from the first attempt's — the property
+    // whose absence made #96's revision unable to converge.
+    expect(retry.prompt).not.toBe(first.prompt);
+    // ...while still asking for the same request the escalation named.
+    expect(retry.prompt).toContain("src/extra.ts");
   });
 
   it("B-05 prepares evaluator evidence for completion-time journaling", () => {

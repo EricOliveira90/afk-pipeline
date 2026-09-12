@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  archiveForTheRecord,
   collectRequiredGateFailures,
   isCancelled,
   makeAsyncMutex,
@@ -65,6 +66,7 @@ import {
 } from "./preship.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
+import type { RunEventPayload } from "./run-events.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -2225,6 +2227,21 @@ describe("generator scope escalation", () => {
         blockedBy: [],
         userStories: "",
       },
+      // #257, and the one slice here that does *not* end ERROR: a rejected
+      // revision retries inside the same round, carrying the rejecting
+      // findings, and converges. It rides this wave rather than a seventh
+      // spawn (AGENTS.md level 3) because the wave already drives generator
+      // -> revision planner -> revision evaluator, which is the only place
+      // the retry exists; the rollback claims the other slices assert are
+      // simply not this one's.
+      {
+        number: "07",
+        ghIssue: "1146",
+        title: "Rejected revision converges on retry",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const escalation = (slice: Slice): string =>
       JSON.stringify({
@@ -2235,6 +2252,7 @@ describe("generator scope escalation", () => {
       });
     let state: {
       slices: Record<string, { phase: string; error?: string }>;
+      resume?: Record<string, { attempts: number }>;
     };
     /** The slice artifact dir inside the preserved slice worktree. */
     const sliceDir = (slice: Slice): string =>
@@ -2300,6 +2318,11 @@ describe("generator scope escalation", () => {
           slices[5]!.ghIssue,
           { ...fixture(slices[5]!), revisionPlannerEscalates: true },
         ],
+        // Rejected once, accepted on the retry (#257).
+        [
+          slices[6]!.ghIssue,
+          { ...fixture(slices[6]!), revisionRejectedAttempts: 1 },
+        ],
       ]);
       const baseProvider = buildStubProvider({
         slices,
@@ -2323,10 +2346,41 @@ describe("generator scope escalation", () => {
                 record.role === "evaluator-contract" &&
                 record.ghIssue === slice?.ghIssue,
             ).length;
+            // #258: make slice 07's escalation archive collide with a name
+            // already on disk, the way a resumed slice's round 1 collides
+            // with the round 1 its previous run archived. Injected from the
+            // generator invocation rather than written before the run,
+            // because slice preparation moves a pre-existing `reviews/` dir
+            // aside (#123) and would free the slot again — only a name that
+            // appears inside the round reproduces the collision.
+            if (
+              options.role === "generator" &&
+              slice?.ghIssue === slices[6]!.ghIssue
+            ) {
+              const reviews = join(
+                repo,
+                ".afk",
+                "artifacts",
+                `${slug}-stub`,
+                "slice-07",
+                "reviews",
+              );
+              mkdirSync(reviews, { recursive: true });
+              writeFileSync(
+                join(reviews, "escalation-r1-a1.md"),
+                "# a previous run's escalation, which must not be overwritten\n",
+                "utf-8",
+              );
+            }
+            // Every focused revision, not just the first (#257). A single
+            // rejection is no longer terminal — the round retries with the
+            // rejecting findings — so a slice that must end ERROR has to
+            // reject until the round's revision grants run out. Invocation 1
+            // is negotiation's; 2 and 3 are the two revision attempts'.
             if (
               options.role === "evaluator-contract" &&
               slice?.ghIssue === slices[1]!.ghIssue &&
-              evaluatorInvocations === 2
+              evaluatorInvocations >= 2
             ) {
               const artifactDir = findSliceArtifactDir(
                 options.cwd,
@@ -2391,6 +2445,118 @@ describe("generator scope escalation", () => {
       expect(state.slices[slices[1]!.ghIssue]!.error).toContain(
         REVISION_REJECTION_FINDING,
       );
+    });
+
+    // #257. Read off this scenario's shared result rather than a spawn of
+    // its own: the run above already rejects slice 02's revision twice, so
+    // the retry and its prompt are already on the record.
+    it("#257 retries a rejected revision with the rejecting findings, inside its round", () => {
+      const forSlice = (role: string) =>
+        records.filter(
+          (record) =>
+            record.role === role && record.ghIssue === slices[1]!.ghIssue,
+        );
+      // Negotiation's planner, then two revision attempts. Before the fix the
+      // first rejection was terminal and there was no second attempt.
+      const planners = forSlice("planner");
+      expect(planners).toHaveLength(3);
+      expect(planners[1]!.prompt).toContain("This is a focused revision");
+      expect(planners[2]!.prompt).toContain("This is a focused revision");
+      // #96's shape: the first attempt cannot know it will be rejected, the
+      // retry is told exactly why it was.
+      expect(planners[1]!.prompt).not.toContain(REVISION_REJECTION_FINDING);
+      expect(planners[2]!.prompt).toContain(REVISION_REJECTION_FINDING);
+      expect(planners[2]!.prompt).toContain(
+        "the planner re-revises the contract",
+      );
+      expect(planners[2]!.prompt).not.toBe(planners[1]!.prompt);
+      // The retry was charged a revision grant, not a fresh implementation
+      // round: the only generator dispatch is the one that escalated. Its
+      // exhaustion message names the grant it spent, so a rejection-driven
+      // retry is visibly on the round's budget and not on the run's.
+      expect(forSlice("generator")).toHaveLength(1);
+      expect(state.slices[slices[1]!.ghIssue]!.error).toMatch(
+        /has spent its 2 revision\(s\)/,
+      );
+    });
+
+    it("#257 converges a rejected revision on retry instead of ending the slice", () => {
+      const forSlice = (role: string) =>
+        records.filter(
+          (record) =>
+            record.role === role && record.ghIssue === slices[6]!.ghIssue,
+        );
+      expect(state.slices[slices[6]!.ghIssue]!.phase).toBe("PASS");
+      expect(state.slices[slices[6]!.ghIssue]!.error).toBeUndefined();
+      // Rejected once, then accepted: two revision evaluations, and the
+      // generator re-dispatched under the re-locked scope.
+      expect(forSlice("planner")).toHaveLength(3);
+      expect(forSlice("evaluator-contract")).toHaveLength(3);
+      expect(forSlice("generator")).toHaveLength(2);
+      // The retry's revision is the one that locked, so the scope the fresh
+      // generator receives is the widened one the escalation asked for. Read
+      // off the generator's prompt rather than the slice worktree: a PASSing
+      // slice's worktree is removed, and this is the thing that would have
+      // been lost — the round continued under the revised lock.
+      const rebuild = forSlice("generator")[1]!.prompt;
+      expect(rebuild).toContain("Focused scope revision accepted");
+      expect(rebuild).toContain(`src/extra-${slices[6]!.number}.ts`);
+      expect(rebuild).toContain(declared(slices[6]!));
+      // The rejection is only in the retry's planner prompt, never the
+      // first attempt's.
+      const planners = forSlice("planner");
+      expect(planners[1]!.prompt).not.toContain(REVISION_REJECTION_FINDING);
+      expect(planners[2]!.prompt).toContain(REVISION_REJECTION_FINDING);
+    });
+
+    // #258, on the same slice, because it is the same claim from the other
+    // side: the slice reaches its real outcome. #96 lost a slice holding
+    // seven commits to exactly this write, and paid a resume attempt for it.
+    it("#258 spills a colliding evidence archive instead of ending the slice", () => {
+      const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+      const runDir = readdirSync(runRoot)
+        .map((name) => join(runRoot, name))
+        .find((path) => statSync(path).isDirectory())!;
+      const warnings = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter(
+          (event) =>
+            event.type === "warn" &&
+            event.reason === "evidence-archive-failed" &&
+            event.ghIssue === slices[6]!.ghIssue,
+        );
+
+      // A spill is a better outcome than a warning, so there is no warning:
+      // both runs' evidence is on disk.
+      expect(warnings).toEqual([]);
+      // The slice's real outcome, not the archive's.
+      expect(state.slices[slices[6]!.ghIssue]!.phase).toBe("PASS");
+      const reviews = join(
+        repo,
+        ".afk",
+        "artifacts",
+        `${slug}-stub`,
+        "slice-07",
+        "reviews",
+      );
+      // The first writer keeps the flat name, unmoved and unoverwritten.
+      expect(
+        readFileSync(join(reviews, "escalation-r1-a1.md"), "utf-8"),
+      ).toContain("a previous run's escalation");
+      // This run's copy landed beside it, under this run's own id — the same
+      // id its logs live under, so the two are correlatable by name.
+      expect(
+        readFileSync(
+          join(reviews, basename(runDir), "escalation-r1-a1.md"),
+          "utf-8",
+        ),
+      ).toContain("F-40");
+      // And nothing was charged for it. An ERROR that never reached an agent
+      // must not consume a resume attempt (#188's charge-at-dispatch stands;
+      // the failure simply never reaches the charge).
+      expect(state.resume?.[slices[6]!.ghIssue]).toBeUndefined();
     });
 
     it("ends the slice ERROR naming a focused-revision lock-gate refusal", () => {
@@ -7982,4 +8148,76 @@ describe("run.log observability (ADR 0017)", () => {
     expect(secondRunLog).toContain("Pipeline run started");
     expect(secondRunLog).toContain("(already completed)");
   }, 240_000);
+});
+
+/**
+ * #258. An archive is a record *about* a run and must never be able to end
+ * one. A unit test rather than a spawned scenario: the whole claim is what
+ * this seam does with a throwing write.
+ */
+describe("archiveForTheRecord", () => {
+  const context = () => {
+    const messages: string[] = [];
+    const events: RunEventPayload[] = [];
+    return {
+      messages,
+      events,
+      ctx: {
+        tag: "#1146 s07",
+        slice: { ghIssue: "1146" },
+        logger: {
+          phase: (
+            message: string,
+            _via?: "error" | "log" | "warn",
+            event?: RunEventPayload,
+          ) => {
+            messages.push(message);
+            if (event) events.push(event);
+          },
+        },
+      } as Parameters<typeof archiveForTheRecord>[0],
+    };
+  };
+
+  it("returns the write's value and says nothing when it succeeds", () => {
+    const { ctx, messages } = context();
+    expect(
+      archiveForTheRecord(ctx, "the scope escalation", "/archive", () => [
+        "escalation-r1-a1.md",
+      ]),
+    ).toEqual(["escalation-r1-a1.md"]);
+    expect(messages).toEqual([]);
+  });
+
+  it("warns naming the archive path and the cause, and does not throw", () => {
+    const { ctx, messages, events } = context();
+    expect(
+      archiveForTheRecord(ctx, "the scope escalation", "/archive", () => {
+        throw new Error("EEXIST: file already exists");
+      }),
+    ).toBeNull();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("Warning: failed to archive");
+    expect(messages[0]).toContain("the scope escalation");
+    expect(messages[0]).toContain("/archive");
+    expect(messages[0]).toContain("EEXIST");
+    expect(events).toEqual([
+      {
+        type: "warn",
+        reason: "evidence-archive-failed",
+        ghIssue: "1146",
+        message: "EEXIST: file already exists",
+      },
+    ]);
+  });
+
+  it("carries a non-Error throw through as a warning too", () => {
+    const { ctx, events } = context();
+    expect(
+      archiveForTheRecord(ctx, "the rejected mutation", "/archive", () => {
+        throw "ENOSPC";
+      }),
+    ).toBeNull();
+    expect(events[0]).toMatchObject({ message: "ENOSPC" });
+  });
 });
