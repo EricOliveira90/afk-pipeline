@@ -542,6 +542,13 @@ export interface PipelineConfig {
    * whole-suite guarantee moves per-checkpoint, not away. See ADR 0038.
    */
   testCommand?: string;
+  /**
+   * Whether this run's provider was wrapped to record every invocation's
+   * prompt beside its log (`--record-prompts`, #264). Evidence only: the
+   * recorder is a provider decorator the CLI entry applies, so the
+   * orchestrator reads this for the `run-started` event and nothing else.
+   */
+  recordPrompts?: boolean;
   /** Effective inline byte limit for each assembled generator prompt. */
   generatorInlineSizeBudgetBytes?: number;
   /** Effective inline byte limit for each assembled explorer prompt. */
@@ -7903,6 +7910,7 @@ export async function runPipeline(
       contractRoundLimit:
         config.maxContractRounds ?? DEFAULT_MAX_CONTRACT_ROUNDS,
       implementationRoundLimit: MAX_GENERATOR_ROUNDS,
+      recordPrompts: config.recordPrompts ?? false,
     },
   );
   // --- The cancellation record, written when the signal fires (#114).
