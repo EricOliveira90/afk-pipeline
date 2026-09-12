@@ -33,6 +33,12 @@ quoting `stuck.md` and `handoff.md` it already carried by reference. The
 planner revision round was the remaining envelope that copied a worktree file
 into the prompt.
 
+> **Corrected by ADR 0068 (#269), the same day:** it was not. The generator
+> envelope inlined the same pair in both modes, and PRD 5 slice #87 died on it
+> eleven hours after this ADR was written. ADR 0068 states the general rule
+> this ADR should have stated: an envelope must not inline a file the role can
+> open in its own worktree.
+
 ## Decision
 
 **ADR 0062 decision 2 extends to the planner revision round: the current

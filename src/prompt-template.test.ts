@@ -600,12 +600,14 @@ describe("renderPrompt", () => {
         EXPLORER_CONTEXT: "context",
       }),
     ).toContain("# Prior OPEN findings");
+    // No CONTRACT_VIEW / ACCEPTANCE_MANIFEST: the generator's pair travels by
+    // reference (#269), and `renderPrompt` refuses an arg the template does
+    // not reference, so this call is what keeps the two in step.
     expect(renderPrompt("generator", {
       SLICE_DIR: "d",
+      ACCEPTANCE_MANIFEST_FILE: "acceptance-manifest.json",
       FILE_SCOPE: "- `src/example.ts`",
       MIGRATION_RESERVATION: "none",
-      CONTRACT_VIEW: "contract",
-      ACCEPTANCE_MANIFEST: '{"version":2}',
       TEST_COMMAND: "pnpm test",
       PATTERNS_AND_HARNESS: "patterns",
       FAILURE_SET: "(none)",
@@ -613,10 +615,9 @@ describe("renderPrompt", () => {
     expect(renderPrompt("evaluator-qa", { SLICE_DIR: "d", RELEVANT_FILES: "", SIBLING_HANDOFFS: "(none)", SANITY_COMMANDS: "", BASE_GATE_AUTHORIZATION: "", QA_SCOPE: "deterministic", REPORT_PATH: "d/qa-report.md", UNRESOLVED_FINDINGS: "(none)", COMMAND_TIMEOUT_SECONDS: 600, HEARTBEAT_SECONDS: 30, CHANGE_SUMMARY_PATH: "s/change-summary.json" })).toBeTruthy();
     expect(renderPrompt("generator-repair", {
       SLICE_DIR: "d",
+      ACCEPTANCE_MANIFEST_FILE: "acceptance-manifest.json",
       FILE_SCOPE: "- `src/example.ts`",
       MIGRATION_RESERVATION: "none",
-      CONTRACT_VIEW: "contract",
-      ACCEPTANCE_MANIFEST: '{"version":2}',
       TEST_COMMAND: "pnpm test",
       PATTERNS_AND_HARNESS: "patterns",
       REPAIR_SITUATION: "resume facts",
