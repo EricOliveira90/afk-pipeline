@@ -6,11 +6,18 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ProtectedChangeWaiver } from "./afk-manifest.js";
-import type { GatePolicy } from "./gate-policy.js";
+import { loadGatePolicy, type GatePolicy } from "./gate-policy.js";
 import type { GateEvidence } from "./gate-runner.js";
 import {
   appliedWaiversFrom,
@@ -19,6 +26,8 @@ import {
   FEEDBACK_INTEGRITY_GATE_ID,
   FEEDBACK_INTEGRITY_GATE_STAGE,
 } from "./feedback-integrity-gate.js";
+
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const tempDirs: string[] = [];
 afterAll(() => {
@@ -58,7 +67,7 @@ function runOn(
   repo: string,
   overrides: {
     waivers?: readonly ProtectedChangeWaiver[];
-    policy?: GatePolicy | null;
+    runPolicy?: GatePolicy | null;
     acceptedPairIntact?: boolean;
     featureRef?: string;
   } = {},
@@ -67,7 +76,7 @@ function runOn(
     worktreeDir: repo,
     featureRef: overrides.featureRef ?? "main",
     waivers: overrides.waivers ?? [],
-    policy: overrides.policy ?? null,
+    runPolicy: overrides.runPolicy ?? null,
     acceptedPairIntact: overrides.acceptedPairIntact ?? true,
   });
 }
@@ -90,7 +99,7 @@ describe("feedback-integrity gate", () => {
       worktreeDir: repo,
       featureRef: "main",
       waivers: [],
-      policy: null,
+      runPolicy: null,
       acceptedPairIntact: true,
     });
     expect(declaration.id).toBe(FEEDBACK_INTEGRITY_GATE_ID);
@@ -243,13 +252,13 @@ describe("feedback-integrity gate", () => {
     const repo = makeRepo();
     rmSync(join(repo, "src/foo.test.ts"));
 
-    const omitted = runOn(repo, { policy: policyWith(["gate-policy"]) });
+    const omitted = runOn(repo, { runPolicy: policyWith(["gate-policy"]) });
     expect(omitted).toMatchObject({ status: "PASS", failureKind: null });
     expect(omitted.detail).toContain("Not enforced by policy");
     expect(omitted.detail).toContain("deleted-test");
 
     const declared = runOn(repo, {
-      policy: policyWith(["gate-policy", "deleted-test", "skipped-test"]),
+      runPolicy: policyWith(["gate-policy", "deleted-test", "skipped-test"]),
     });
     expect(declared.status).toBe("FAIL");
     expect(declared.findings?.deletedTests).toEqual(["src/foo.test.ts"]);
@@ -291,6 +300,127 @@ describe("feedback-integrity gate", () => {
     ]);
     expect(waived.findings?.appliedWaivers).toBeUndefined();
     expect(waived.detail).toContain("no waiver may exempt it");
+  });
+
+  it("[#251] enforces the run's policy, never the candidate's own copy", () => {
+    // The candidate holds write access to its worktree for the whole round, so
+    // it can rewrite `afk.config.json` to declare that nothing is enforced —
+    // and then delete a test. The run's policy is the only rulebook that can
+    // answer that, because it is the one the candidate cannot reach.
+    const repo = makeRepo();
+    write(
+      repo,
+      "afk.config.json",
+      `${JSON.stringify({ gatePolicy: { version: 1, riskClasses: [] } })}\n`,
+    );
+    rmSync(join(repo, "src/foo.test.ts"));
+
+    const enforced = runOn(repo, {
+      runPolicy: policyWith(["gate-policy", "deleted-test", "skipped-test"]),
+    });
+
+    expect(enforced).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
+    expect(enforced.findings?.deletedTests).toEqual(["src/foo.test.ts"]);
+    // Once, not twice: the same file is both a changed gate-policy path and a
+    // rewritten rulebook, and it is one offender either way.
+    expect(enforced.findings?.protectedChanges).toEqual(["afk.config.json"]);
+
+    // The counterfactual, which is what this gate did before #251: handed the
+    // policy the candidate wrote, it enforces the candidate's suppression
+    // against the candidate and reports a clean tree.
+    const failOpen = runOn(repo, { runPolicy: loadGatePolicy(repo) });
+    expect(failOpen).toMatchObject({ status: "PASS", failureKind: null });
+  });
+
+  it("[#251] reports a rewritten rulebook the run's own policy does not protect", () => {
+    // A run policy may narrow `gatePolicyPaths` away from `afk.config.json` and
+    // drop `gate-policy` from `riskClasses` — those are declarations about the
+    // project's files. The config file *is* the declaration, so a candidate
+    // rewriting it is reported regardless, like the accepted pair.
+    const repo = makeRepo();
+    write(
+      repo,
+      "afk.config.json",
+      `${JSON.stringify({ gatePolicy: { version: 1, riskClasses: [] } })}\n`,
+    );
+    const runPolicy: GatePolicy = {
+      version: 1,
+      protectedPaths: {
+        gatePolicyPaths: ["suite-budgets.json"],
+        testGlobs: ["**/*.test.ts"],
+      },
+      riskClasses: ["deleted-test"],
+    };
+
+    const reported = runOn(repo, { runPolicy });
+
+    expect(reported.status).toBe("FAIL");
+    expect(reported.findings?.protectedChanges).toEqual(["afk.config.json"]);
+
+    // Reported, not unwaivable: a human may authorize a policy change, and the
+    // launch manifest is the only place they can say so.
+    const waiver: ProtectedChangeWaiver = {
+      riskClass: "gate-policy",
+      path: "afk.config.json",
+      author: "eric",
+      reason: "the policy change is the point of this slice",
+    };
+    const waived = runOn(repo, { runPolicy, waivers: [waiver] });
+    expect(waived).toMatchObject({ status: "PASS", failureKind: null });
+    expect(waived.findings?.appliedWaivers).toEqual([waiver]);
+  });
+
+  it("[#251] names an unparseable candidate policy instead of throwing", () => {
+    const repo = makeRepo();
+    write(
+      repo,
+      "afk.config.json",
+      `${JSON.stringify({ gatePolicy: { version: 2 } })}\n`,
+    );
+
+    const outcome = runOn(repo, { runPolicy: null });
+
+    expect(outcome.status).toBe("FAIL");
+    expect(outcome.findings?.protectedChanges).toEqual(["afk.config.json"]);
+  });
+
+  it("[#251] says nothing extra when the candidate left the policy alone", () => {
+    // The no-divergence path, which is every ordinary round: same declarations,
+    // same outcome as before the rulebook moved to the run.
+    const repo = makeRepo();
+    rmSync(join(repo, "src/foo.test.ts"));
+
+    const outcome = runOn(repo, {
+      runPolicy: policyWith(["gate-policy", "deleted-test", "skipped-test"]),
+    });
+
+    expect(outcome.status).toBe("FAIL");
+    expect(outcome.findings?.deletedTests).toEqual(["src/foo.test.ts"]);
+    expect(outcome.findings?.protectedChanges).toBeUndefined();
+  });
+
+  it("[#251] is declared from the run's policy at the orchestrator's only call site", () => {
+    // Read rather than spawned: the defect was one argument at one assembly
+    // site, and a pipeline run costs seconds on every suite from here on
+    // (`CLAUDE.md`, "Where a new assertion goes"). This is the assertion that
+    // catches a future reader "simplifying" the policy source back to the tree
+    // under inspection.
+    const orchestrator = readFileSync(
+      join(REPO_ROOT, "src/orchestrator.ts"),
+      "utf-8",
+    );
+    expect(orchestrator).toContain("runPolicy: ctx.runGatePolicy");
+    // Asserted as a boolean, not with `not.toContain`: a failure there prints
+    // the whole file into the report.
+    for (const source of ["src/orchestrator.ts", "src/wave.ts"]) {
+      const text = readFileSync(join(REPO_ROOT, source), "utf-8");
+      expect({
+        source,
+        readsThePolicyFromTheCandidate: text.includes(
+          "loadGatePolicy(ctx.worktreeDir)",
+        ),
+      }).toEqual({ source, readsThePolicyFromTheCandidate: false });
+    }
   });
 
   it("[behavior:B-12] collects every applied waiver from written gate evidence once", () => {

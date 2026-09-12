@@ -306,6 +306,9 @@ function makeContext(
     tag: "[afk] Slice #70",
     testCommand: "pnpm test",
     sanityCommandsBlock: "(none)",
+    // The run's policy, which this fixture declares none of (#251). Never a
+    // read of `worktreeDir`: that is the tree the gates judge.
+    runGatePolicy: null,
     invoke: (options) => provider.invoke(options),
   };
 }

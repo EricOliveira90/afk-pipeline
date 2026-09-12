@@ -147,7 +147,7 @@ import {
   appliedWaiversFrom,
   feedbackIntegrityGateDeclaration,
 } from "./feedback-integrity-gate.js";
-import { loadGatePolicy } from "./gate-policy.js";
+import { loadGatePolicy, type GatePolicy } from "./gate-policy.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -909,6 +909,16 @@ export interface SliceContext {
   sanityCommandsBlock: string;
   siblingHandoffsBlock: string;
   /**
+   * The **run's** gate policy — read from the host checkout, never from
+   * {@link worktreeDir} (#251). Any gate whose rulebook this is takes it from
+   * here: a policy read out of the candidate's own worktree is a policy the
+   * candidate's generator can author, and a gate that enforces the rules of the
+   * thing it judges cannot fail closed (`docs/PRODUCT.md` operating principle
+   * 6). The candidate's own copy stays evidence — see
+   * `src/feedback-integrity-gate.ts`.
+   */
+  runGatePolicy: GatePolicy | null;
+  /**
    * Set by `runSliceNegotiate` when the slice resumed from its
    * surviving branch tip instead of restarting from base (spec #33).
    * Drives the round-1 generator repair envelope with the surviving
@@ -1007,6 +1017,14 @@ export function makeSliceContext(
   featBranch: string,
   relevantFilesBlock: string,
   testCommand: string,
+  /**
+   * The run's gate-policy snapshot, taken by the launch path before any agent
+   * ran (#251). Omitted, it is read from `config.repoRoot` here — still the
+   * host checkout and still never the candidate worktree, just a read that a
+   * concurrent edit to the base checkout could see. Callers that own a run
+   * pass their snapshot.
+   */
+  runGatePolicy?: GatePolicy | null,
 ): SliceContext {
   const { repoRoot, prdSlug, specsDir, signal } = config;
   const provider = config.provider ?? kiroProvider;
@@ -1170,6 +1188,8 @@ export function makeSliceContext(
     testCommand,
     sanityCommandsBlock,
     siblingHandoffsBlock,
+    runGatePolicy:
+      runGatePolicy === undefined ? loadGatePolicy(repoRoot) : runGatePolicy,
     invoke,
   };
 }
@@ -6434,7 +6454,15 @@ export async function runSliceExecute(
               worktreeDir: ctx.worktreeDir,
               featureRef: featBranch,
               waivers: launchWaivers,
-              policy: loadGatePolicy(ctx.worktreeDir),
+              // The run's policy, never a `loadGatePolicy` read of the
+              // candidate's own worktree (#251, and a test in
+              // `src/feedback-integrity-gate.test.ts` pins that this line does
+              // not become one): the generator owns that tree for the whole
+              // round, so a rulebook read from it is a rulebook the candidate
+              // can author — it could strike `gate-policy` from `riskClasses`
+              // and walk past this gate. The candidate's copy is still
+              // inspected, as evidence, inside the gate.
+              runPolicy: ctx.runGatePolicy,
               acceptedPairIntact,
             }),
             ...fullSuiteDeclarations,
@@ -7684,6 +7712,7 @@ async function runSlice(
   featBranch: string,
   relevantFilesBlock: string,
   testCommand: string,
+  runGatePolicy: GatePolicy | null,
 ): Promise<
   | "PASS"
   | "STUCK"
@@ -7700,6 +7729,7 @@ async function runSlice(
     featBranch,
     relevantFilesBlock,
     testCommand,
+    runGatePolicy,
   );
   const negotiate = await runSliceNegotiate(ctx);
   if (negotiate.phase !== "LOCKED") return negotiate.phase;
@@ -7923,6 +7953,13 @@ export async function runPipeline(
     resolveCheapGateCatalog(repoRoot),
     config.testCommand,
   );
+  // The run's gate policy, snapshotted here — beside the cheap-gate catalog,
+  // which already resolves this same policy once per run — and before any agent
+  // has run. Every gate whose rulebook it is reads it from the snapshot, so no
+  // gate can be handed the policy the candidate it is judging now presents
+  // (#251), and a mid-run edit to the base checkout cannot move the rules
+  // either.
+  const runGatePolicy = loadGatePolicy(repoRoot);
   let scope: ResolvedRunScope | undefined;
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;
@@ -8364,6 +8401,7 @@ export async function runPipeline(
         featBranch,
         relevantFilesBlock,
         testCommand,
+        runGatePolicy,
       );
       const waitMs =
         config.adjudicationWaitMs ?? DEFAULT_ADJUDICATION_WAIT_MS;
@@ -8659,6 +8697,7 @@ export async function runPipeline(
       featBranch,
       relevantFilesBlock,
       testCommand,
+      runGatePolicy,
       mergeMutex,
       // One scoped resolution round per conflicted merge (#132 B-01). Supplied
       // here and only here: the pre-wave MERGE-PENDING recovery path is

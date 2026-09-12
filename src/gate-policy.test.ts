@@ -78,6 +78,10 @@ describe("gate-policy module surface", () => {
       "DEFAULT_GATE_POLICY_PATHS",
       "DEFAULT_SKIP_DETECTORS",
       "DEFAULT_TEST_GLOBS",
+      // `GATE_POLICY_CONFIG_FILENAME` joined the surface with #251: the
+      // feedback-integrity gate names the candidate's own copy of the policy
+      // when it diverges from the run's, and the filename is this module's fact.
+      "GATE_POLICY_CONFIG_FILENAME",
       "GATE_RISK_CLASSES",
       "loadGatePolicy",
       "matchesGlob",
