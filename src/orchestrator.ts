@@ -1350,31 +1350,41 @@ function archiveContractReviewAttempt(
  * (see `runSliceExecute`), so the evidence for a hand-declaration
  * survives the rollback either way.
  */
+/**
+ * Outcomes of one attempt at a focused scope revision.
+ *
+ * `REJECTED` is separated from `ERROR` because the two are recoverable in
+ * different ways (#257): a rejection is the contract evaluator doing its job
+ * and naming a clear condition, so the caller may spend another of the
+ * round's revision grants on a retry that carries those findings. Every
+ * `ERROR` here is terminal for the slice.
+ */
+type FocusedScopeRevisionResult =
+  | { phase: "LOCKED"; manifest: AcceptanceManifest }
+  | { phase: "REJECTED"; findings: readonly ContractReviewFinding[] }
+  | { phase: "ERROR"; error: string };
+
 async function runFocusedScopeRevision(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
-): Promise<
-  | { phase: "LOCKED"; manifest: AcceptanceManifest }
-  | { phase: "ERROR"; error: string }
-> {
+  rejectionFindings: readonly ContractReviewFinding[] = [],
+): Promise<FocusedScopeRevisionResult> {
   return await withContractTransaction(
     ctx,
     {
       reason: "focused scope revision did not complete",
       qualifier: "the previously accepted",
     },
-    (tx) => reviseAcceptedContract(ctx, escalation, tx),
+    (tx) => reviseAcceptedContract(ctx, escalation, rejectionFindings, tx),
   );
 }
 
 async function reviseAcceptedContract(
   ctx: SliceContext,
   escalation: import("./escalation.js").ScopeEscalation,
+  rejectionFindings: readonly ContractReviewFinding[],
   tx: ContractTransaction,
-): Promise<
-  | { phase: "LOCKED"; manifest: AcceptanceManifest }
-  | { phase: "ERROR"; error: string }
-> {
+): Promise<FocusedScopeRevisionResult> {
   const { config, slice, logger, invoke } = ctx;
   const { contractPath, manifestPath, previousContract } = tx;
   const previousManifest = loadAcceptanceManifest(ctx.absSliceDir);
@@ -1425,6 +1435,7 @@ async function reviseAcceptedContract(
     currentContract: readFileSync(contractPath, "utf-8"),
     currentAcceptanceManifest: previousManifestText,
     scopeEvidence: evidence,
+    rejectionFindings,
     contractResponseFilename: CONTRACT_RESPONSE_FILENAME,
     migrationReservation: migrationReservationBlock(config, slice.ghIssue),
     baseGateCatalog: formatBaseGateCatalog(
@@ -1598,13 +1609,11 @@ async function reviseAcceptedContract(
     round: revisionRound,
     verdict: review.verdict,
   });
+  // Not terminal by itself (#257). The transaction rolls the accepted pair
+  // back on this exit, so the caller's retry starts from the same baseline
+  // the first attempt did, plus these findings.
   if (review.verdict !== "ACCEPT") {
-    return {
-      phase: "ERROR",
-      error:
-        `Focused scope revision was not accepted: ` +
-        formatContractReviewFindings(review.findings),
-    };
+    return { phase: "REJECTED", findings: review.findings };
   }
 
   const locked = tx.lock({
@@ -5948,15 +5957,59 @@ export async function runSliceExecute(
               `slice so the next round earns a fresh grant.`,
           );
         }
-        const revision = await runFocusedScopeRevision(ctx, escalation);
-        if (revision.phase === "ERROR") return revision;
-        scopeRevisions++;
+        // A REJECTED revision is not terminal while the round still holds a
+        // grant (#257). The rejecting findings ride the next attempt's
+        // planner prompt, so a revision blocked on a precise clear condition
+        // can converge here — the carry-forward property ADR 0061 gave the
+        // normal negotiation loop, which this focused path was built as an
+        // optimization of and had lost.
+        //
+        // A rejection-driven retry is charged a *revision grant*, never a
+        // resume attempt: the grant is the round's own budget, and the run
+        // must not pay a resume for the pipeline failing to pass feedback
+        // along. So the count below is of revision *attempts*, not of
+        // accepted revisions — two distinct discoveries still spend the two
+        // grants and a third is still refused, and a rejection plus its retry
+        // spends them the same way.
+        let rejectionFindings: readonly ContractReviewFinding[] = [];
+        let revisedManifest: AcceptanceManifest | null = null;
+        while (revisedManifest === null) {
+          const revision = await runFocusedScopeRevision(
+            ctx,
+            escalation,
+            rejectionFindings,
+          );
+          scopeRevisions++;
+          if (revision.phase === "ERROR") return revision;
+          if (revision.phase === "REJECTED") {
+            if (scopeRevisions >= MAX_SCOPE_REVISIONS_PER_ROUND) {
+              return {
+                phase: "ERROR",
+                error:
+                  `Focused scope revision was not accepted, and round ` +
+                  `${round} has spent its ` +
+                  `${MAX_SCOPE_REVISIONS_PER_ROUND} revision(s): ` +
+                  formatContractReviewFindings(revision.findings),
+              };
+            }
+            rejectionFindings = revision.findings;
+            logger.phase(
+              `${ctx.tag}: focused scope revision REJECTED; retrying with ` +
+                `the rejecting finding(s) ` +
+                `(revision ${scopeRevisions + 1}/` +
+                `${MAX_SCOPE_REVISIONS_PER_ROUND} of round ${round})...`,
+              "error",
+            );
+            continue;
+          }
+          revisedManifest = revision.manifest;
+        }
         scopeRevisionNote =
           "# Focused scope revision accepted\n\n" +
           "The contract was revised and re-locked without spending this " +
           "implementation round. Continue under this complete accepted " +
           "file scope:\n\n" +
-          JSON.stringify({ fileScope: revision.manifest.fileScope }, null, 2);
+          JSON.stringify({ fileScope: revisedManifest.fileScope }, null, 2);
       }
 
       if (config.manifest) {

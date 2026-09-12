@@ -2225,6 +2225,21 @@ describe("generator scope escalation", () => {
         blockedBy: [],
         userStories: "",
       },
+      // #257, and the one slice here that does *not* end ERROR: a rejected
+      // revision retries inside the same round, carrying the rejecting
+      // findings, and converges. It rides this wave rather than a seventh
+      // spawn (AGENTS.md level 3) because the wave already drives generator
+      // -> revision planner -> revision evaluator, which is the only place
+      // the retry exists; the rollback claims the other slices assert are
+      // simply not this one's.
+      {
+        number: "07",
+        ghIssue: "1146",
+        title: "Rejected revision converges on retry",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
     ];
     const escalation = (slice: Slice): string =>
       JSON.stringify({
@@ -2300,6 +2315,11 @@ describe("generator scope escalation", () => {
           slices[5]!.ghIssue,
           { ...fixture(slices[5]!), revisionPlannerEscalates: true },
         ],
+        // Rejected once, accepted on the retry (#257).
+        [
+          slices[6]!.ghIssue,
+          { ...fixture(slices[6]!), revisionRejectedAttempts: 1 },
+        ],
       ]);
       const baseProvider = buildStubProvider({
         slices,
@@ -2323,10 +2343,15 @@ describe("generator scope escalation", () => {
                 record.role === "evaluator-contract" &&
                 record.ghIssue === slice?.ghIssue,
             ).length;
+            // Every focused revision, not just the first (#257). A single
+            // rejection is no longer terminal — the round retries with the
+            // rejecting findings — so a slice that must end ERROR has to
+            // reject until the round's revision grants run out. Invocation 1
+            // is negotiation's; 2 and 3 are the two revision attempts'.
             if (
               options.role === "evaluator-contract" &&
               slice?.ghIssue === slices[1]!.ghIssue &&
-              evaluatorInvocations === 2
+              evaluatorInvocations >= 2
             ) {
               const artifactDir = findSliceArtifactDir(
                 options.cwd,
@@ -2391,6 +2416,68 @@ describe("generator scope escalation", () => {
       expect(state.slices[slices[1]!.ghIssue]!.error).toContain(
         REVISION_REJECTION_FINDING,
       );
+    });
+
+    // #257. Read off this scenario's shared result rather than a spawn of
+    // its own: the run above already rejects slice 02's revision twice, so
+    // the retry and its prompt are already on the record.
+    it("#257 retries a rejected revision with the rejecting findings, inside its round", () => {
+      const forSlice = (role: string) =>
+        records.filter(
+          (record) =>
+            record.role === role && record.ghIssue === slices[1]!.ghIssue,
+        );
+      // Negotiation's planner, then two revision attempts. Before the fix the
+      // first rejection was terminal and there was no second attempt.
+      const planners = forSlice("planner");
+      expect(planners).toHaveLength(3);
+      expect(planners[1]!.prompt).toContain("This is a focused revision");
+      expect(planners[2]!.prompt).toContain("This is a focused revision");
+      // #96's shape: the first attempt cannot know it will be rejected, the
+      // retry is told exactly why it was.
+      expect(planners[1]!.prompt).not.toContain(REVISION_REJECTION_FINDING);
+      expect(planners[2]!.prompt).toContain(REVISION_REJECTION_FINDING);
+      expect(planners[2]!.prompt).toContain(
+        "the planner re-revises the contract",
+      );
+      expect(planners[2]!.prompt).not.toBe(planners[1]!.prompt);
+      // The retry was charged a revision grant, not a fresh implementation
+      // round: the only generator dispatch is the one that escalated. Its
+      // exhaustion message names the grant it spent, so a rejection-driven
+      // retry is visibly on the round's budget and not on the run's.
+      expect(forSlice("generator")).toHaveLength(1);
+      expect(state.slices[slices[1]!.ghIssue]!.error).toMatch(
+        /has spent its 2 revision\(s\)/,
+      );
+    });
+
+    it("#257 converges a rejected revision on retry instead of ending the slice", () => {
+      const forSlice = (role: string) =>
+        records.filter(
+          (record) =>
+            record.role === role && record.ghIssue === slices[6]!.ghIssue,
+        );
+      expect(state.slices[slices[6]!.ghIssue]!.phase).toBe("PASS");
+      expect(state.slices[slices[6]!.ghIssue]!.error).toBeUndefined();
+      // Rejected once, then accepted: two revision evaluations, and the
+      // generator re-dispatched under the re-locked scope.
+      expect(forSlice("planner")).toHaveLength(3);
+      expect(forSlice("evaluator-contract")).toHaveLength(3);
+      expect(forSlice("generator")).toHaveLength(2);
+      // The retry's revision is the one that locked, so the scope the fresh
+      // generator receives is the widened one the escalation asked for. Read
+      // off the generator's prompt rather than the slice worktree: a PASSing
+      // slice's worktree is removed, and this is the thing that would have
+      // been lost — the round continued under the revised lock.
+      const rebuild = forSlice("generator")[1]!.prompt;
+      expect(rebuild).toContain("Focused scope revision accepted");
+      expect(rebuild).toContain(`src/extra-${slices[6]!.number}.ts`);
+      expect(rebuild).toContain(declared(slices[6]!));
+      // The rejection is only in the retry's planner prompt, never the
+      // first attempt's.
+      const planners = forSlice("planner");
+      expect(planners[1]!.prompt).not.toContain(REVISION_REJECTION_FINDING);
+      expect(planners[2]!.prompt).toContain(REVISION_REJECTION_FINDING);
     });
 
     it("ends the slice ERROR naming a focused-revision lock-gate refusal", () => {

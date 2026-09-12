@@ -126,9 +126,23 @@ export function assembleFocusedScopePlannerPrompt(input: {
   contractResponseFilename: string;
   migrationReservation: string;
   baseGateCatalog: string;
+  /**
+   * Findings the contract evaluator REJECTED a previous attempt at *this*
+   * focused revision with. Empty on the first attempt (#257).
+   *
+   * They are routed as ordinary open findings, the same channel a normal
+   * negotiation round's revision uses, because the evaluator already writes
+   * findings with clear conditions and a second feedback channel would only
+   * be a second thing to keep true. Without them a retry saw a prompt
+   * identical to the first attempt's and re-emitted the same error, so the
+   * focused path — an optimization of the negotiation loop — had lost that
+   * loop's convergence property (ADR 0061).
+   */
+  rejectionFindings?: readonly ContractReviewFinding[];
   inlineSizeBudgetBytes?: number;
 }): PreparedEnvelopePrompt {
   const { context } = input;
+  const rejectionFindings = input.rejectionFindings ?? [];
   return assemblePlannerPrompt(
     {
       mode: "revision",
@@ -140,12 +154,19 @@ export function assembleFocusedScopePlannerPrompt(input: {
         repoRoot: input.repoRoot,
         currentContract: input.currentContract,
         currentAcceptanceManifest: input.currentAcceptanceManifest,
-        findings: [],
+        findings: rejectionFindings,
         controlSituation:
           `This is a focused revision of the already accepted contract. ` +
           `The generator stopped before an undeclared edit. Revise only the ` +
           `contract and acceptance manifest needed to declare this request:\n` +
-          `${input.scopeEvidence}\n\nPreserve every other locked term.`,
+          `${input.scopeEvidence}\n\nPreserve every other locked term.` +
+          (rejectionFindings.length === 0
+            ? ``
+            : `\n\nYour previous attempt at this same focused revision was ` +
+              `REJECTED by the contract evaluator. The routed OPEN findings ` +
+              `above are that rejection. Clear every one of them in this ` +
+              `attempt while still declaring the request, and do not repeat ` +
+              `the revision they name.`),
         contractResponseInstructions:
           `Do not write ${input.contractResponseFilename} for this focused scope revision.`,
         migrationReservation: input.migrationReservation,
@@ -208,6 +229,16 @@ export function assembleAdjudicationPlannerPrompt(input: {
         repoRoot: input.repoRoot,
         currentContract: input.currentContract,
         currentAcceptanceManifest: input.currentAcceptanceManifest,
+        // Deliberately empty, and *not* the same defect as the focused
+        // revision's former empty list (#257). The contested findings do
+        // reach this planner — verbatim, inside `impasseRecord`, which is the
+        // IMPASSE `ContractNegotiationOutcome` and carries every unresolved
+        // blocking finding — so nothing is withheld. Routing them again as
+        // OPEN findings would contradict the instruction below it: an OPEN
+        // finding asks the planner to decide how to clear it, and here every
+        // one of them has already been decided by a human. The single
+        // authority for this pass is the adjudication, so the findings appear
+        // only as the context those decisions cite.
         findings: [],
         controlSituation: [
           "A human has adjudicated the current contract impasse.",
