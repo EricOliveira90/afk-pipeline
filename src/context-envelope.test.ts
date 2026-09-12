@@ -1591,8 +1591,12 @@ describe("generator context envelope", () => {
     expect(codex.evidence).toEqual(kiro.evidence);
     for (const capture of [kiro, claude, codex]) {
       expect(capture.prompt).not.toContain("\r");
-      expect(capture.prompt).toContain('"id": "B-01"');
-      expect(capture.prompt).toContain('"tests"');
+      // The pair travels by reference on every provider (#269): the same
+      // paths, and no copy of either file, whichever adapter assembles it.
+      expect(capture.prompt).toContain(
+        `- \`${input.sliceDir}/acceptance-manifest.json\``,
+      );
+      expect(capture.prompt).not.toContain('"id": "B-01"');
       expect(capture.prompt).toContain("FINDING-09");
       expect(capture.prompt).toContain("CHECKPOINT-07");
     }
@@ -1644,8 +1648,9 @@ describe("generator context envelope", () => {
       "# Write boundary",
       "src/feature.ts",
       "`.kiro/specs/demo/slices/01-focused/escalation.md`",
-      "LOCKED-CONTRACT-VIEW",
-      '"id": "B-01"',
+      // The pair in prompt order, named rather than copied (#269).
+      "- `.kiro/specs/demo/slices/01-focused/contract.md`",
+      "- `.kiro/specs/demo/slices/01-focused/acceptance-manifest.json`",
       "PATTERNS-AND-HARNESS",
       "# Current failure set",
     ];
@@ -1684,6 +1689,15 @@ describe("generator context envelope", () => {
       ".kiro/specs/demo/slices/01-focused/context.md",
       "generator:failure-set",
     ]);
+    // #269: reference, not omission. The pair's classes stay declared and both
+    // files stay in the evidence above; what changes is that neither is copied
+    // into the prompt, and the prompt says so.
+    expect(result.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
+    expect(result.prompt).not.toContain('"id": "B-01"');
+    expect(result.prompt).toMatch(/read both files in\s+full before you write/);
+    // The derived file-scope projection is still inlined: the generator is held
+    // to it, and it is not a copy of a file.
+    expect(result.prompt).toContain("- `src/feature.ts`");
   });
 
   it("B-02 projects the six complete contract section bodies byte-for-byte", () => {
@@ -1958,6 +1972,124 @@ describe("generator context envelope", () => {
  * registered by reference as `repair-context`, and a `git log --stat` that grows
  * with every round the slice survives.
  */
+/**
+ * #269. The generator envelope inlined the locked pair, so PRD 5 slice #87's
+ * relaunch (`run-20260912-134807`, this repo's own self-run) locked its
+ * contract — `ACCEPT`, zero blocking findings — dispatched the generator, and
+ * died at `CONFIGURATION` before writing a line:
+ *
+ *   actual 72,040 / allowed 65,536, of which contract-view 34,593 and
+ *   acceptance-manifest 29,377 = 63,970 bytes were the pair.
+ *
+ * The fixture is that pair, at those weights. The fourth instance of one
+ * defect: #196 (contract evaluator), #230 (repair context), #265 (planner
+ * revision round), this.
+ */
+describe("generator locked pair size (#269)", () => {
+  const sliceDir = ".kiro/specs/afk-v2-quality-loops/slices/01-cleaner-loop";
+  // 34,593 bytes of contract view, the measured weight of #87's.
+  const contractView = `LOCKED-CONTRACT-VIEW\n${"cleaner-loop contract detail line\n".repeat(
+    1_016,
+  )}`;
+  // A manifest whose rendered JSON is ~29,377 bytes, from behaviors rather
+  // than filler: #87 declared twelve, each with a full evidence quartet.
+  const fatManifest: AcceptanceManifestV2 = {
+    ...acceptanceManifest,
+    behaviors: Array.from({ length: 12 }, (_unused, index) => ({
+      id: `B-${String(index + 1).padStart(2, "0")}`,
+      source: `GH #87 AC${index + 1}`,
+      given: `MANIFEST-BEHAVIOR-BODY given clause ${index}: ${"g".repeat(530)}`,
+      when: `when clause ${index}: ${"w".repeat(530)}`,
+      then: `then clause ${index}: ${"t".repeat(530)}`,
+      observableResult: `observable ${index}: ${"o".repeat(530)}`,
+      preservation: false,
+      gateIds: ["tests"],
+    })),
+  };
+
+  const assembleInitial = (): ReturnType<typeof assembleGeneratorEnvelope> =>
+    assembleGeneratorEnvelope({
+      mode: "initial",
+      sliceDir,
+      contractView,
+      acceptanceManifest: fatManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm run typecheck && pnpm test:fast",
+      migrationReservation: "NO-MIGRATIONS",
+      failureSet: { findings: [], gates: [] },
+    });
+
+  it("is a pair the old envelope could not carry", () => {
+    const pairBytes =
+      Buffer.byteLength(contractView, "utf-8") +
+      Buffer.byteLength(JSON.stringify(fatManifest, null, 2), "utf-8");
+    // The measured pair: 63,970 of #87's 72,040-byte prompt. Under the budget
+    // by itself — which is why inlining it looks affordable right up to the
+    // round that adds the other 8,070 bytes and dies.
+    expect(pairBytes).toBeGreaterThanOrEqual(63_000);
+    const result = assembleInitial();
+    const otherBlockBytes = result.evidence.assembledByteSize;
+    expect(pairBytes + otherBlockBytes).toBeGreaterThan(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+  });
+
+  it("fits under the 65,536-byte budget with the pair by reference", () => {
+    const result = assembleInitial();
+
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+    // The pair is named, not copied.
+    expect(result.prompt).toContain(`- \`${sliceDir}/contract.md\``);
+    expect(result.prompt).toContain(
+      `- \`${sliceDir}/acceptance-manifest.json\``,
+    );
+    expect(result.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
+    expect(result.prompt).not.toContain("MANIFEST-BEHAVIOR-BODY");
+    expect(result.prompt).toMatch(/read both files in\s+full before you write/);
+    // Reference, not omission: both classes stay declared and both files stay
+    // in the evidence, in manifest order.
+    expect(result.evidence.includedArtifactClasses).toContain("contract-view");
+    expect(result.evidence.includedArtifactClasses).toContain(
+      "acceptance-manifest",
+    );
+    expect(result.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/contract.md`,
+    );
+    expect(result.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/acceptance-manifest.json`,
+    );
+    // Every other block is still whole, including the derived write boundary
+    // the generator is held to.
+    expect(result.prompt).toContain("- `src/feature.ts`");
+    expect(result.prompt).toContain("PATTERNS-AND-HARNESS");
+    expect(result.prompt).toContain("pnpm run typecheck && pnpm test:fast");
+    expect(result.prompt).not.toContain("undefined");
+  });
+
+  it("records the pair by reference in the overflow breakdown when something else overruns", () => {
+    // The byte breakdown (ADR 0062 decision 4) keeps its shape: the pair is no
+    // longer among the inlined weights, and says where it went, so the next
+    // babysitter reading an overflow is not sent looking for bytes that are not
+    // there — which is exactly the hour #269's diagnosis cost.
+    expect(() =>
+      assembleGeneratorEnvelope({
+        mode: "initial",
+        sliceDir,
+        contractView,
+        acceptanceManifest: fatManifest,
+        patternsAndHarness: "P".repeat(70_000),
+        testCommand: "pnpm test:fast",
+        migrationReservation: "NO-MIGRATIONS",
+        failureSet: { findings: [], gates: [] },
+      }),
+    ).toThrow(
+      /inlined bytes by artifact class: patterns-and-harness 70000.*; by reference: acceptance-manifest, contract-view/,
+    );
+  });
+});
+
 describe("generator repair situation size (#230)", () => {
   const sliceDir = ".kiro/specs/demo/slices/07-focused";
   // #193's measured byte weights, so the fixture is refused for the same reason
@@ -2062,7 +2194,7 @@ describe("generator repair situation size (#230)", () => {
       },
     });
 
-  it("the #193-shaped repair round would have overflowed while quoting files it carries by reference", () => {
+  it("the #193-shaped repair round drops the files it already carries by reference", () => {
     const raw = repairSituationOf(10);
     const projected = projectGeneratorRepairSituation(raw, sliceDir, [
       `${sliceDir}/stuck.md`,
@@ -2070,19 +2202,33 @@ describe("generator repair situation size (#230)", () => {
     ]);
     const result = assembleRepair(10);
 
-    // The arithmetic the issue reported, as an assertion: the round's other
-    // blocks plus the *unprojected* situation do not fit, so a #193-shaped
-    // repair round could not be dispatched at all. This is what was missing.
-    const otherBlockBytes =
-      result.evidence.assembledByteSize -
-      Buffer.byteLength(projected, "utf-8");
-    expect(otherBlockBytes + Buffer.byteLength(raw, "utf-8")).toBeGreaterThan(
-      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
-    );
+    // The saving the issue reported, as an assertion: projecting the situation
+    // drops at least the two files it quoted while already carrying them by
+    // reference — #193's measured stuck.md 16,327 + handoff.md 6,766.
+    //
+    // This was the overflow arithmetic (other blocks + the *unprojected*
+    // situation > budget) until #269 moved the contract pair by reference. Two
+    // thirds of #193's other blocks were that pair — a contract view of 14,297
+    // and a manifest of 18,492 — so the same round is no longer near the budget
+    // from those bytes, and asserting that it is would be asserting something
+    // false. The de-duplication this test covers is unchanged and still the
+    // reason the situation fits.
+    // 22,900 rather than the 23,093 the two bodies weigh: each quote is
+    // replaced by a pointer line, not deleted.
+    const situationSaving =
+      Buffer.byteLength(raw, "utf-8") - Buffer.byteLength(projected, "utf-8");
+    expect(situationSaving).toBeGreaterThanOrEqual(22_900);
     // De-duplication, not truncation, is what makes it fit: a ten-round slice
     // keeps its whole commit log.
     expect(result.prompt).not.toContain("omitted to fit the inline-size budget");
     expect(result.prompt).toContain(`commit ${"0".repeat(39)}9`);
+    // #269 inside repair mode: the locked pair is named, never copied, so a
+    // 37 KB contract view cannot spend the repair round's budget.
+    expect(result.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
+    expect(result.prompt).toContain(`- \`${sliceDir}/contract.md\``);
+    expect(result.prompt).toContain(
+      `- \`${sliceDir}/acceptance-manifest.json\``,
+    );
 
     expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
       GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
