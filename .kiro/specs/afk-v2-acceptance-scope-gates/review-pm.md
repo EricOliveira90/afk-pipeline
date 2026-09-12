@@ -1,120 +1,132 @@
-# PM / product review — PRD 4, slice 07 (#193) only
+# PM / product review — PRD 4, slice 04 (#96) only
 
 **Verdict:** ACCEPT-WITH-NOTES
 
-Scope judged: slice 07 "Feedback integrity and gate-scope revisions" (#193).
-Slices 01–06 and 08 were not run by this invocation and are not judged here.
+Scope judged: slice 04 "Final evaluation and reuse" (#96). Slices 01–03 and
+05–08 were not run by this invocation and are not judged here.
 
 ## What the PRD promised for this slice, and what a user gets
 
-Slice 07 owns D5 (protected-change waivers as an operator launch input), D6's
-deletion rule, D12 (`GATE-SCOPE` gate-evidenced revisions), D13 (parser-regression
-rubric), D23 (waiver observability) and D24 (a gate finding blocks the merge
-instead of parking). Each promised outcome is present:
+Slice 04 owns D20 (exact-tree reuse), D19's final-evaluation bound, D9's new
+`evaluator-final` role, D11's baseline→final change-summary variant, and D10's
+tree-keyed evidence as read (not written) by this slice. Each promised outcome is
+present, and — unlike the seam-shaped findings earlier rounds raised against
+#195 — every new export has a production call site I could follow.
 
-- **An operator can authorize a protected change, and only an operator can.**
-  `src/afk-manifest.ts:206-224` parses `protectedChangeWaivers` from the PRD
-  directory's `afk.json`, refusing an unknown `riskClass` (`:120-125`), a glob
-  `path` (`:128-133`), a blank field (`:99-104`) and a duplicate
-  `riskClass` + `path` pair (`:215-222`). `src/orchestrator.ts:6003` reads them
-  from `config.manifest` — the launch input — and passes that same array into the
-  gate (`:6378`) and the skip gate (`:6367`). Nothing re-reads `afk.json` from the
-  candidate worktree, so a waiver an agent writes for itself buys nothing (D5's
-  security posture). I confirmed this PRD's own pre-recorded waiver
-  (`.kiro/specs/afk-v2-acceptance-scope-gates/afk.json`) satisfies every rule
-  above, so the live launch input is not refused by the new validator.
-- **A self-edit of the pipeline's quality config, or a deleted test, does not
-  merge unwaived.** `src/feedback-integrity-gate.ts:303-314` declares
-  `feedback-integrity` at stage `deterministic`, `required: true`, in-process; a
-  changed `gatePolicyPaths` entry (`:190-197`) or a base-present /
-  candidate-absent `testGlobs` match (`:198-210`) FAILs with `failureKind:
-  "COMMAND"` and names the exact path in `findings.protectedChanges` /
-  `findings.deletedTests` (`:261-294`). Deletion matching calls #84's exported
-  `matchesGlob`; no second matcher was written.
-- **The operator can act from the failure text alone** (D24). The FAIL `detail`
-  (`:274-289`) names the risk class and path, states that declaring the path in
-  `fileScope` is not authorization, and spells out the four `afk.json` fields to
-  add. The accepted contract pair is unwaivable (`:211-219, 224-230`), which is
-  the one case where no authorization is admitted at all.
-- **A gate that cannot see the tree does not pass it.** An unanswerable
-  changed-set probe returns `INFRASTRUCTURE` rather than an empty violation list
-  (`:170-181`).
-- **An applied waiver is visible at all three points a human looks.** The gate
-  records it (`:240-241, 257`), `src/orchestrator.ts:6448-6481` re-reads the
-  written evidence with `readGateEvidence`, funnels it through
-  `appliedWaiversFrom`, emits one `waiver-applied` event per waiver and persists
-  it with `saveAppliedWaivers` (`src/run-state.ts:1283-1303`, version 4 with the
-  v3 reader defaulting the field empty). `src/logger.ts:548-573` renders
-  `## Applied Waivers` with slice, round, risk class, path, author and reason, and
-  omits the section entirely when there are none — so a run that spent no
-  authorization has an unchanged summary.
-- **A failing gate can warrant a focused revision honestly.** `src/escalation.ts`
-  admits schema version 2 with `gateEvidence` only at version 2 (`:349-361`),
-  requires `findingIds` to be exactly `["GATE-SCOPE"]` when it is present
-  (`:392-407`), and the orchestrator reads it through the one existing
-  focused-revision door (`:5821`) behind the unchanged laundered-scope refusal
-  (`:5854-5880`) and the per-round revision bound (`:5827-5837`). The archive keeps
-  the citation: `src/artifacts.ts:237-278, 963-976` accepts a version-2 record and
-  renders its `gateId` and `evidenceArtifactId` into the stuck diagnosis, so a
-  human reading the diagnosis can cross-reference the gate run.
-- **The generator is taught the third branch** — `prompts/generator.md:41-54`,
-  `prompts/generator-repair.md:41-54` and `agents/generator.md:45-72` all carry the
-  version-2 literal, `gateEvidence` required-and-only-with-`GATE-SCOPE`, and the
-  escalate-for-a-human-decision rule.
-- **D13 lands additively.** `prompts/evaluator-contract.md:75` and
-  `prompts/evaluator-contract-revision.md:110` gain `# Parser regression surface`
-  while `# Durable finding lineage`, `# Control-plane situation` and the
-  `severity` / `state` bullets (ADR 0061) are still present in both — the
-  preservation P-04 asked for.
+- **An unchanged tree costs zero final-evaluator invocations** (D20). The reuse
+  decision is a pure function (`src/final-evaluation.ts:89-137`), and its single
+  production call site is `src/orchestrator.ts:6704-6715`, reached after the
+  candidate checkpoint and before `dispatchAcceptedCandidate` (`:7297`) — i.e.
+  before the merge, which stays in `src/wave.ts` under the one existing mutex
+  this slice does not touch. On `reuse` the block records the decision in run
+  state (`recordFinalEvaluation`, `:6724-6735`), journals exactly one
+  `final-evaluation-reuse` event (`:6743-6750`) and renders a
+  `## Final Evaluation Reuse` section from those events
+  (`src/logger.ts:589-611`) — the three stores B-02 promised, and no
+  `GateEvidence` field or D17 gate-cache `reused` flag is written (no
+  `src/gate-runner.ts` change appears in `git diff --stat main...HEAD`).
+- **A changed tree is evaluated, with no cosmetic exception.** Equality is plain
+  string comparison; there is exactly one comparison deciding the dispatch (the
+  earlier `postApprovalWriteChangedTree` second test is gone from the tree — I
+  grepped, no occurrence remains). A `null` baseline and an invalidated tree both
+  answer `evaluate`, so the fail-closed reading is the default. `pnpm vitest run
+  src/final-evaluation.test.ts` → 47 passed, 349ms (my own run).
+- **A fresh final evaluation is a real, bounded review.** `MAX_FINAL_EVALUATION_ATTEMPTS
+  = 3` in `src/bounds.ts:59` with a remaining-budget helper; the loop at
+  `src/orchestrator.ts:6826-7266` re-resolves the tree per attempt, re-runs the
+  `scope` gate *on that tree* (`:6910-6966`), dispatches exactly one
+  `evaluator-final` in a disposable worktree at the final checkpoint
+  (`:7000-7077`), archives each attempt under a per-attempt name
+  (`final-review-rN-aM.json` / `final-report-rN-aM.md`, `:7086-7111`), and
+  persists the attempt entry after every attempt so a killed run cannot get the
+  attempt back (`persistAttempts`, `:6804-6822`). A crashed evaluator still
+  spends its attempt (`:7062-7073`).
+- **The merge is blocked when the final verdict cannot be reached.**
+  `decideFinalVerdict` (`src/final-evaluation.ts:455-509`) names each unmet
+  condition independently and treats an absent artifact key, an unparsed review
+  and an absent final scope-gate status as blockers rather than defaults; the
+  orchestrator turns a non-PASS into `phase: "ERROR"` before the accept dispatch
+  (`:7277-7286`). A review keyed to another tree is not accepted as evidence
+  about this one (`:7228-7237`).
+- **A finding names its own remedy** (D9/ADR 0048). `REPAIRS_BY_CLASS`
+  (`src/final-evaluation.ts:223-229`) refuses a `PRESERVATION` finding with
+  anything but `RESTORE` and a `BASELINE_IS_WRONG` finding with anything but
+  `RETURN_TO_GENERATOR` *at parse time*, so an inadmissible pairing never gets
+  routed. `RESTORE` goes to the single post-approval stage (`:7209-7213`) and
+  costs an attempt; a baseline-is-wrong return invalidates the rejected tree
+  (`invalidateFinalEvaluationBaseline`, `:7157-7162`), records the attempt as
+  `RETURNED_TO_GENERATOR` with zero graded outcome, and re-enters the generator
+  loop, spending exactly one generator round (`:7267-7275`) — D19's "never
+  consumes an evaluator round" as promised. Afterwards `decideFinalReuse` refuses
+  `reuse` against that tree even on exact equality (`:118-129`).
+- **The evaluator can only return its own two artifacts.**
+  `QA_WINDOW_ARTIFACT_NAME` (`src/post-qa-gates.ts:52-53`) admits
+  `final-review.json` and `final-report(-rN-aM).md` and nothing else, and the
+  same constant is passed to `scanReviewWorktreeWrites`, which journals every
+  other write as a `reviewer-write-violation` (`src/orchestrator.ts:7046-7060`).
+- **Nothing archives a final artifact under the wrong prefix.**
+  `qaArchivePrefix` is a three-way map (`src/artifacts.ts:677-681`) and
+  `final-evaluation` is a first-class `QAReviewStage` with its own filename,
+  record and resume replay (`src/qa-review.ts:69-86, 145-146, 771`); the QA
+  parser explicitly refuses to read `final-review.json`, so the two schemas
+  cannot be confused (`src/qa-review.ts:447-451`).
+- **The evaluator reads a code-generated, per-stage-attributed diff.**
+  `buildFinalChangeSummary` / `writeFinalChangeSummary`
+  (`src/change-summary.ts:291-370`) reuse the one existing two-ref builder and
+  add `byStage` plus `stageOrder`; the prompt names it as the first thing to read
+  (`prompts/evaluator-final.md:24-28`). `prompts/evaluator-final.md` asks exactly
+  the two promised questions (preservation, gate-invisible drift, `:43-59`) and
+  tells the reviewer its worktree is disposable and probes are free (D14, `:20-22`).
 
 ## Notes (not blocking)
 
-### P-01 — the gate reads its own enforcement catalog out of the tree it is judging
+### P-01 — the reuse section tells the operator a reason its own table contradicts
 
-`src/orchestrator.ts:6379` builds the declaration with
-`policy: loadGatePolicy(ctx.worktreeDir)`, i.e. the candidate worktree's
-`afk.config.json`. Inside the gate both the enforced risk classes
-(`src/feedback-integrity-gate.ts:159-161, 184`) and the protected path list
-(`:147-157, 183`) come from that value. So a candidate whose contract legitimately
-declares `afk.config.json` (slice 01, 02 and 05 all do) can, in the same edit,
-set `"riskClasses": []` or drop `afk.config.json` from `gatePolicyPaths`, and the
-gate then reports no protected change for the edit that disabled it. That is the
-one shape of D5's "the actor being constrained cannot author its own exemption"
-that the waiver channel closes and the policy channel does not.
+`src/logger.ts:598-600` states "The final checkpoint was byte-identical to the
+approved baseline", directly above a table whose `Final tree` and `Baseline tree`
+columns are, in every production reuse, different strings. My own reading of the
+producers: the baseline is recorded at `checkpoint.treeId`
+(`src/orchestrator.ts:6272-6276`), captured *before* the QA evaluator writes
+`qa-report.md` / `qa-review.json`, while `finalTreeId` is the accepted tree with
+those artifacts committed (`:6574`, `:6592-6626`); the event carries the
+baseline's own `treeId` (`:6749`). So the two columns differ by construction, and
+neither the event nor the section carries the authorized tree ID
+(`baselineAuthorizedTreeId`, `:6688-6703`) that would reconcile them. The
+behavior is right and the reuse is honestly recorded; only the explanation an
+operator reads is wrong. Clear condition: the section (and the
+`final-evaluation-reuse` doc comment in `src/run-events.ts`) either states
+equality against the *authorized* tree or carries that tree ID in the row.
 
-Why this is a note and not a blocker: the contract's B-07 explicitly makes the
-catalog decide what is enforced without fixing which tree it is read from; reading
-project config from the worktree is the established convention this slice
-followed (`resolveTestCostPlan(ctx.worktreeDir)`, `resolveAcceptancePlan(ctx.worktreeDir)`
-at `src/orchestrator.ts:5954, 5995`, i.e. a pre-existing pattern rather than a
-slice-07 invention); the suppression is not silent — the PASS `detail` carries
-`Not enforced by policy: <classes>` (`src/feedback-integrity-gate.ts:235-239, 256`)
-into gate evidence and the gate log; and the required `scope` gate independently
-fails any candidate that touches `afk.config.json` without declaring it. Clear
-condition: either the policy is loaded from the run's base tree (or the operator's
-launch snapshot) rather than the candidate worktree, or the PRD records that
-catalog suppression is deliberately candidate-authorable and visible-by-detail.
+### P-02 — D20's comparison is against the authorized tree, and prd.md does not say so
 
-### P-02 — one waiver row, and the round data behind it
-
-`## Applied Waivers` de-duplicates on slice + risk class + path and keeps the
-round of first application (`src/logger.ts:548-560`), while `events.jsonl` keeps
-one event per round. That reads correctly for a human (one human decision, one
-row) and matches QA-01's disposition; the note is only that the summary no longer
-shows that an authorization was honored on every subsequent round. No PRD line
-requires it. Clear condition: none needed — recorded so a later reader does not
-mistake the single row for a single gate run.
+D20 reads "Compare the final checkpoint's tree ID against
+`approved-baseline.json`". As shipped, the comparison is against the accepted
+tree, offered as `approvedTreeId` only after `reviewArtifactViolations` proves the
+QA window (plus any orchestrator-audited scope-amendment blobs) explains every
+differing path (`src/orchestrator.ts:6688-6703`;
+`src/final-evaluation.ts:41-64`). I agree this is the only reading that delivers
+D20's promised outcome — a literal comparison against the graded tree can never
+be equal, so every production run would dispatch a final evaluator — and the
+excepted paths are review artifacts the accept seam already authorizes, so no
+code change escapes review. The note is that the PRD's D20 sentence and the
+shipped rule differ in a way a later reader cannot reconstruct. Clear condition:
+prd.md D20 records the QA-window/authorized-tree qualification, or the comparison
+is moved onto a baseline record keyed to the accepted tree.
 
 ## Out-of-scope PRD gaps (for the operator, not driving the verdict)
 
-- Role write-scope enforcement (D4) still ships as a seam with no production call
-  site. The PRD already re-homes it to #226, so no slice here owes it.
-- The `feedback-integrity` gate is declared at the post-QA site only. Whether the
-  merge-resolution re-run (D15 / slice 06) re-runs it is slice 06's concern; not
-  judged here.
-- D18's `--test-command` narrowing and the `AGENTS.md` / `CLAUDE.md` launch
-  correction belong to slice 05, not run by this invocation.
+- The post-approval writing stage is a production no-op (`B-03`, PRD 5 owns the
+  cleaner/hardener), so in a production run the reuse branch is the only branch
+  reached and the whole final-evaluation dispatch path is exercised through the
+  injected stage in tests. That is what the contract and prd.md's Out of Scope
+  authorize; recorded so the operator knows the evaluator is not yet load-bearing
+  in production.
+- Role write-scope enforcement (D4) is still a seam owned by #226, explicitly not
+  #96's.
+- D18's derived verification command, the `feedback-integrity`/`acceptance` gates
+  and the merge-resolution re-run belong to slices 05, 02/07 and 06 — not run by
+  this invocation.
 
 ## Structured findings (v1)
 
-{"version":1,"findings":[{"id":"P-01","title":"feedback-integrity reads its enforcement catalog from the candidate worktree it is judging","class":"PRODUCT","clearCondition":"The gate's gatePolicy is loaded from the run's base tree or the launch snapshot rather than ctx.worktreeDir, or prd.md records candidate-authorable catalog suppression as accepted and detail-visible.","disposition":"OPEN"},{"id":"P-02","title":"Applied Waivers shows one row per authorization, not per round honored","class":"PRODUCT","clearCondition":"No change required; recorded so a reader does not read the single row as a single gate run. Clears when acknowledged in the run record or prd.md.","disposition":"OPEN"}]}
+{"version":1,"findings":[{"id":"P-01","title":"Final Evaluation Reuse section claims byte-identity while its own two tree columns differ","class":"PRODUCT","clearCondition":"The run-summary section and the final-evaluation-reuse event state equality against the authorized tree, or carry that authorized tree ID in the row, so the prose and the table agree.","disposition":"OPEN"},{"id":"P-02","title":"Reuse compares against the QA-window-authorized tree, a qualification prd.md D20 does not record","class":"PRODUCT","clearCondition":"prd.md D20 records that the comparison is against the accepted tree proven to differ from the graded baseline only by QA-window and orchestrator-audited paths, or the baseline record is keyed to the accepted tree so the literal comparison holds.","disposition":"OPEN"}]}
