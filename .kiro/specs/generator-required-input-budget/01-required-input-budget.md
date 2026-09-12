@@ -37,12 +37,12 @@ by-reference decisions.
   prompt preparation as `CONFIGURATION` and does not contribute zero bytes.
 - [ ] One logical artifact contributes at most once, including when duplicate
   evidence metadata or inline content refers to it.
-- [ ] The prompt-assembly evidence artifact records inline, referenced,
-  required-input, and allowed byte totals plus each required referenced
-  artifact's identifier and byte weight.
-- [ ] The prompt-preparation `CONFIGURATION` error reports those same totals
-  and per-artifact weights; it does not silently omit, truncate, or summarize
-  required content.
+- [ ] The prompt-assembly run event records inline, referenced, required-input,
+  and allowed byte totals plus each required referenced artifact's identifier
+  and byte weight.
+- [ ] The prompt-preparation `CONFIGURATION` error in `run.log` and
+  `run-summary.md` reports those same totals and per-artifact weights; it does
+  not silently omit, truncate, or summarize required content.
 - [ ] A project override below 98,304 becomes the effective limit; an override
   above 98,304 does not raise the limit.
 - [ ] Planner, explorer, evaluator, cleaner, hardener, remediator, and guardian
