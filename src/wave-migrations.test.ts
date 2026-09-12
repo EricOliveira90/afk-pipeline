@@ -452,12 +452,21 @@ describe("runWave — contract-lock migration prefix gate", () => {
     };
   }
 
+  /**
+   * Provider for the reserved-pool flow: the planner writes the
+   * `RESERVED_PREFIX_` placeholder it is told to write, and the generator
+   * reads the *locked* manifest for the path it must create — which is
+   * where the gate's substitution lands (#267, ADR 0067). It deliberately
+   * does not remember what the planner declared: a fixture that carried the
+   * planner's own path forward could not tell a substituted lock from an
+   * unsubstituted one.
+   */
   function buildManifestProvider(
     slices: Slice[],
     observedPrompts: string[],
+    plannerPrompts: string[] = [],
   ): AgentProvider {
     const plannerRounds = new Map<string, number>();
-    const assignedPaths = new Map<string, string>();
 
     return {
       name: "stub",
@@ -487,13 +496,13 @@ describe("runWave — contract-lock migration prefix gate", () => {
           );
         } else if (role === "planner" && dir) {
           observedPrompts.push(prompt);
+          plannerPrompts.push(prompt);
           const round = (plannerRounds.get(ghIssue) ?? 0) + 1;
           plannerRounds.set(ghIssue, round);
           const assigned = /owns exactly:\s*(\d+)/i.exec(prompt)?.[1];
           const path = assigned
             ? `supabase/migrations/${assigned}_issue_${ghIssue}.sql`
             : `supabase/migrations/RESERVED_PREFIX_issue_${ghIssue}.sql`;
-          if (assigned) assignedPaths.set(ghIssue, path);
           writeFileSync(
             join(dir, "contract.md"),
             [
@@ -524,8 +533,11 @@ describe("runWave — contract-lock migration prefix gate", () => {
           writeContractReview(dir, "ACCEPT");
         } else if (role === "generator" && dir) {
           observedPrompts.push(prompt);
-          const path = assignedPaths.get(ghIssue);
-          if (!path) throw new Error(`Generator for #${ghIssue} received no assigned migration`);
+          const locked = JSON.parse(
+            readFileSync(join(dir, "acceptance-manifest.json"), "utf-8"),
+          ) as { fileScope: { paths: string[] } };
+          const path = locked.fileScope.paths.find((p) => p.endsWith(".sql"));
+          if (!path) throw new Error(`Generator for #${ghIssue} found no locked migration`);
           const abs = join(cwd, path);
           mkdirSync(join(abs, ".."), { recursive: true });
           writeFileSync(abs, `-- ${ghIssue}\n`, "utf-8");
@@ -553,7 +565,8 @@ describe("runWave — contract-lock migration prefix gate", () => {
       ];
       const setup = setupWave(repo, slug, slices, new Map<string, SliceFixture>());
       const prompts: string[] = [];
-      setup.config.provider = buildManifestProvider(slices, prompts);
+      const plannerPrompts: string[] = [];
+      setup.config.provider = buildManifestProvider(slices, prompts, plannerPrompts);
       setup.config.manifest = {
         version: 1,
         selectedSlices: ["01"],
@@ -573,7 +586,7 @@ describe("runWave — contract-lock migration prefix gate", () => {
         mergeMutex: makeAsyncMutex(),
       });
 
-      return { ...setup, outcomes, prompts, repo };
+      return { ...setup, outcomes, prompts, plannerPrompts, repo };
     }
 
     const [first, second] = await Promise.all([
@@ -583,8 +596,11 @@ describe("runWave — contract-lock migration prefix gate", () => {
 
     expect(first.outcomes.get("2101")?.phase).toBe("PASS");
     expect(second.outcomes.get("2201")?.phase).toBe("PASS");
-    expect(first.prompts[0]).toContain("RESERVED_PREFIX");
-    expect(second.prompts[0]).toContain("RESERVED_PREFIX");
+    // The placeholder instruction is intact: the planner is still told to
+    // write `RESERVED_PREFIX_` on the round before AFK has a prefix to give.
+    expect(first.plannerPrompts[0]).toContain("RESERVED_PREFIX");
+    expect(second.plannerPrompts[0]).toContain("RESERVED_PREFIX");
+    // And the generator is still told what it owns, from the persisted claim.
     expect(first.prompts.some((prompt) => prompt.includes("owns exactly: 144"))).toBe(true);
     expect(second.prompts.some((prompt) => prompt.includes("owns exactly: 200"))).toBe(true);
 
@@ -594,6 +610,34 @@ describe("runWave — contract-lock migration prefix gate", () => {
     expect(existsSync(join(first.repo, "supabase", "migrations", "200_issue_2101.sql"))).toBe(false);
     expect(existsSync(join(second.repo, "supabase", "migrations", "200_issue_2201.sql"))).toBe(true);
     expect(existsSync(join(second.repo, "supabase", "migrations", "144_issue_2201.sql"))).toBe(false);
+
+    /**
+     * #267: the placeholder round is gone. The gate substituted the claim
+     * into the pair it had told the planner to leave blank, so the contract
+     * locked in the round the evaluator accepted — one planner invocation,
+     * no `contract-lock-refused`, and a `migration-prefix-substituted` line
+     * naming both paths so the operator can see the locked pair differs from
+     * what the planner wrote.
+     */
+    for (const [run, ghIssue, prefix] of [
+      [first, "2101", "144"],
+      [second, "2201", "200"],
+    ] as const) {
+      expect(run.plannerPrompts).toHaveLength(1);
+      const warns = readEvents(run.logger.runDir).filter(
+        (event) => event.type === "warn",
+      );
+      expect(warns.filter((event) => event.reason === "contract-lock-refused")).toEqual([]);
+      const substituted = warns.filter(
+        (event) => event.reason === "migration-prefix-substituted",
+      );
+      expect(substituted).toHaveLength(1);
+      expect(substituted[0]).toMatchObject({ ghIssue });
+      expect(substituted[0]!.message).toContain(
+        `supabase/migrations/reserved_prefix_issue_${ghIssue}.sql -> ` +
+          `supabase/migrations/${prefix}_issue_${ghIssue}.sql`,
+      );
+    }
   }, 90_000);
 
   it("B-05 sends a migration refusal through a fresh planner revision envelope", async () => {
