@@ -1,24 +1,3 @@
-<!--
-Hand-reconstructed fixture for eval-packs/afk case 01-192-pre-restart-1-planner.
-
-Provenance: the explorer evidence map the PRD 4 slice-01 planner read on
-launch `run-20260907-223720`, archived by the operator at
-`.afk/artifacts/afk-v2-acceptance-scope-gates-codex/slice-01/pre-restart-1/context.md`
-(#192 "Evidence"). That tree is gitignored and absent from this checkout, so
-this map is reconstructed from material this repository does carry: the shape
-and the still-true FACTs of the committed
-`.kiro/specs/afk-v2-acceptance-scope-gates/slices/01-gate-policy-reader/context.md`
-(the later Claude-backend run's map), GH #84 as of 2026-09-07, and PRD 4's
-`prd.md` at `93bf6bd`.
-
-Reconstructed to the state of knowledge at this launch, which means two
-deliberate differences from the committed map: the `#194` casing FACT and the
-`src/gate-policy.ts` naming inferences are absent (both post-date 2026-09-08),
-and D1's `gatePolicy` member shapes are recorded as an UNKNOWN, because
-`fe2628a` ("fix D1's version-1 gatePolicy member shapes") had not been written
-when this launch ran. That UNKNOWN is what the planner escalated.
--->
-
 # Context — Slice 01 (#84): Gate policy reader
 
 ## Files and current behavior

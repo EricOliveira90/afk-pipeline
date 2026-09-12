@@ -1,25 +1,3 @@
-<!--
-Hand-reconstructed fixture for eval-packs/afk case 08-prd4-qa-a.
-
-Provenance: the `change-summary.json` the QA evaluator was handed for PRD 4
-slice 03 (`03-candidate-evaluator-isolation`, #91). The production artifact is
-JSON written by `writeCandidateChangeSummary` (`src/change-summary.ts:223`) into
-the slice's `.afk/artifacts/**` directory, which is gitignored and absent from
-this checkout; this fixture is the same facts rendered as the Markdown the
-evaluator-qa prompt points at with `{{CHANGE_SUMMARY_PATH}}`
-(`prompts/evaluator-qa.md:27-29`), because the locked fixture name ends in `.md`.
-
-Every number below was recomputed from this repository with
-`git log --format='%h %s' 3b9c78f..3eab903`, `git diff --name-status` and
-`git diff --numstat` over the same range: `3b9c78f` is `78c56bb^`, the commit
-the slice's first commit was written on, and `3eab903` is the slice's final
-commit. The four artifacts the QA stage itself produces — `qa-report-r1-a1.md`,
-`qa-report-r2-a1.md`, `qa-report.md` and `qa-review.json` — are excluded,
-because they did not exist in the candidate tree the evaluator graded; the
-totals are the totals of the rows listed. Nothing else is filtered, and no row's
-counts are adjusted.
--->
-
 # Change summary — PRD 4 slice 03 (#91), candidate evaluator isolation
 
 - **version:** 1

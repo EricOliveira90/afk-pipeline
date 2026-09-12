@@ -1,24 +1,3 @@
-<!--
-Hand-reconstructed fixture for eval-packs/afk cases 01-, 02- and 03- (#192).
-
-Provenance: an excerpt of `.kiro/specs/afk-v2-acceptance-scope-gates/prd.md`
-(PRD 4) as committed at `93bf6bd` (2026-09-07 17:14 -0300), which is the PRD
-text the three PRD 4 slice-01 planner launches
-(`run-20260907-223720`, `run-20260907-225023`, `run-20260907-231823`) read.
-PRD 7's `prd.md` D2 names the base commit `de7b0ec` for this excerpt; PRD 4's
-`prd.md` is untracked at `de7b0ec` (`git ls-tree de7b0ec` lists no
-`.kiro/specs/afk-v2-acceptance-scope-gates/` path) and was added one commit
-later at `93bf6bd` on the same day, so `93bf6bd` is the reachable state of the
-same document and `de7b0ec` is the code base commit whose `package.json`
-carries the "no runtime dependencies" fact case 03- turns on.
-
-Only D1, D5 and D6 are excerpted: they are the three decisions the three
-escalations named. Nothing here is edited; the amendments that later settled
-D1's member shapes (`fe2628a`), D5's remaining silences (`3cbf09c`) and the
-last three decisions (`7b2dcea`) are deliberately absent, because none of them
-existed when these launches ran.
--->
-
 # PRD 4 excerpt — `afk-v2-acceptance-scope-gates/prd.md` @ `93bf6bd`
 
 ### D1 — the gate policy lives in `afk.config.json`, and slice 01 builds its reader

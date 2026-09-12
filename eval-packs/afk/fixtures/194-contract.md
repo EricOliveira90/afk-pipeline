@@ -1,28 +1,3 @@
-<!--
-Hand-reconstructed fixture for eval-packs/afk case 04-194-f03-evaluator-contract.
-
-Provenance: the round-1 `contract.md` the contract evaluator reviewed on
-`run-20260908-014522` for PRD 4 slice 01 (#84), archived by the operator at
-`.afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-01/` (#194
-"Evidence"). That tree is gitignored and absent from this checkout, and the
-`contract.md` committed at
-`.kiro/specs/afk-v2-acceptance-scope-gates/slices/01-gate-policy-reader/contract.md`
-is the *later* successful run's pair: slice 01 was split on 2026-09-08
-(`9e888b8`, `71eb394`) so the committed contract carries twelve behaviors, no
-`B-16`, and no casing defect. This file is therefore hand-authored to
-reproduce the one condition #194 records about the round it lost: the contract
-and `B-16` say `ARCHITECTURE.md`, while the acceptance manifest's `fileScope`
-declares `architecture.md`.
-
-Reconstructed from: #194's quotation of F-03 and of the manifest/contract
-disagreement; #84 as of 2026-09-08 (pre-split, so this slice still carries the
-feedback channel and the file-scope gate that became #193 and #195); the
-committed slice-01 pair for section order, heading set and citation style; and
-PRD 4's `prd.md` D1–D6. Nothing else about the pair is asserted as archived
-fact — the casing mismatch is the load-bearing detail, and it is quoted
-verbatim from the issue.
--->
-
 # Slice Contract — Gate policy reader
 
 **Parent PRD:** .kiro/specs/afk-v2-acceptance-scope-gates/prd.md

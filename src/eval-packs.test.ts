@@ -12,6 +12,13 @@
  * read checks completely. Only the consumer pack is dispatched, and only to
  * `buildEvalStubProvider`, because B-09 is about the runner's `MATCH` /
  * `MISMATCH` bookkeeping rather than about any case's content.
+ *
+ * A seeded `fromFile` payload is copied byte-for-byte into the case's scratch
+ * directory and the prompt orders the role to read it, so anything the fixture
+ * says about the case reaches the role under test. The fixture-byte assertions
+ * below are what keeps that channel clean: provenance belongs in the case's
+ * `source` member or in `eval-packs/afk/README.md`, both of which the role never
+ * reads.
  */
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,6 +106,61 @@ const expectedOf = (value: EvalCase): Record<string, string> =>
 const collapse = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 const afkPack = (): EvalPack => readEvalPack(AFK_PACK_DIR);
+
+/**
+ * Statements a seeded fixture must not carry, whichever case seeds it: the
+ * pack's own bookkeeping, a claim about the file's part in an eval, or a
+ * prescription of what the graded role should do. Each pattern is written to
+ * match the disclosure without matching the reconstructed document's own
+ * vocabulary — a committed PRD 4 contract says "the exact tree the gates graded"
+ * and carries a `**Lock-Provenance:**` line, so these anchor on the noun and on
+ * the line start.
+ */
+const FIXTURE_DISCLOSURES: readonly { why: string; pattern: RegExp }[] = [
+  { why: "an HTML comment", pattern: /<!--/ },
+  { why: "a path inside the eval pack", pattern: /eval-packs\//i },
+  { why: "the words eval case, eval fixture or eval pack", pattern: /eval (?:case|fixture|pack)/i },
+  { why: "the word hand-reconstructed or hand-authored", pattern: /hand-(?:reconstructed|authored)/i },
+  { why: "a claim that the file is a reconstruction", pattern: /reconstruct/i },
+  { why: "a \"fixture for\" attribution", pattern: /fixture for/i },
+  { why: "a Provenance: block", pattern: /^provenance:/im },
+  {
+    why: "a statement of the expected or graded answer",
+    pattern: /(?:expected|graded) (?:artifact|verdict|outcome|answer)/i,
+  },
+  {
+    why: "a prescription of what the graded role should do",
+    pattern: /\b(?:planner|reviewer|evaluator|role|agent|model) should(?: not)?\b/i,
+  },
+];
+
+/**
+ * `expected` values whose bare token is itself the disclosure. `ESCALATION`,
+ * `CONTRACT` and `ACCEPT` are words the seeded documents never use; `PASS`,
+ * `FAIL` and `NONE` are gate-outcome vocabulary a real PRD 4 contract uses on
+ * nearly every page, so for those the check is the verdict-declaration shapes
+ * below and not the token.
+ */
+const BARE_TOKEN_VALUES = new Set(["ESCALATION", "CONTRACT", "ACCEPT", "REVISE"]);
+
+/** The shapes that would state `value` as this case's graded answer. */
+const verdictDeclarations = (value: string): RegExp[] => [
+  new RegExp(`\\*\\*(?:Verdict|Failure class)[:*\\s]*\\W{0,3}${value}\\b`, "i"),
+  new RegExp(`"(?:verdict|failureClass|artifact|outcome)"\\s*:\\s*"${value}"`, "i"),
+  new RegExp(
+    `(?:verdict|outcome|artifact|answer)\\W{1,4}(?:is|was|should be)\\W{1,4}${value}\\b`,
+    "i",
+  ),
+];
+
+/** The `fromFile` payloads a case seeds, read as the bytes the role receives. */
+const seededFixtures = (one: EvalCase): { target: string; text: string }[] =>
+  Object.values(one.files)
+    .filter((content): content is { fromFile: string } => typeof content !== "string")
+    .map((content) => ({
+      target: content.fromFile,
+      text: readFileSync(join(AFK_PACK_DIR, ...content.fromFile.split("/")), "utf-8"),
+    }));
 
 const afkCaseDocuments = (): { name: string; value: unknown }[] =>
   AFK_CASE_FILES.map((name) => ({
@@ -318,6 +380,76 @@ describe("the committed eval packs", () => {
       "evaluator-qa",
       "evaluator-qa",
     ]);
+  });
+
+  it("B-02 B-03 B-05 seed no fixture that names its eval case or states that case's answer", () => {
+    const scanned = new Set<string>();
+
+    for (const one of afkPack().cases) {
+      for (const { target, text } of seededFixtures(one)) {
+        scanned.add(target);
+        for (const { why, pattern } of FIXTURE_DISCLOSURES) {
+          expect(pattern.test(text), `${target} (seeded by ${one.id}) carries ${why}`).toBe(
+            false,
+          );
+        }
+        for (const value of Object.values(expectedOf(one))) {
+          const patterns = BARE_TOKEN_VALUES.has(value)
+            ? [new RegExp(`\\b${value}\\b`), ...verdictDeclarations(value)]
+            : verdictDeclarations(value);
+          for (const pattern of patterns) {
+            expect(
+              pattern.test(text),
+              `${target} states ${one.id}'s expected ${value}`,
+            ).toBe(false);
+          }
+        }
+      }
+    }
+    // Every committed fixture is seeded by some case, so the scan above covered
+    // the whole directory rather than a subset of it.
+    expect([...scanned].sort()).toEqual(
+      readdirSync(join(AFK_PACK_DIR, "fixtures"))
+        .map((name) => `fixtures/${name}`)
+        .sort(),
+    );
+  });
+
+  it("B-02 B-03 B-05 give each seeded fixture bytes that open as the reconstructed document itself", () => {
+    for (const one of afkPack().cases) {
+      for (const { target, text } of seededFixtures(one)) {
+        // The first line, whichever line ending the checkout gave the file.
+        const first = text.split("\n")[0]!.trimEnd();
+        expect(first, `${target} opens as its own document`).toMatch(
+          target.endsWith(".json") ? /^\{$/ : /^# \S/,
+        );
+      }
+    }
+  });
+
+  it("B-06 records fixture provenance in the source member and the README, where the role never reads it", () => {
+    const readme = readFileSync(join(AFK_PACK_DIR, "README.md"), "utf-8");
+
+    for (const one of afkPack().cases) {
+      for (const { target } of seededFixtures(one)) {
+        const name = target.slice("fixtures/".length);
+        expect(readme, `README.md records ${name}'s provenance`).toContain(name);
+      }
+      expect(one.source).toContain("hand-reconstructed");
+    }
+
+    // The scan is discriminating: the header this pack used to carry inside the
+    // fixture bytes trips it on every count that mattered.
+    const planted = [
+      "<!--",
+      "Hand-reconstructed fixture for eval-packs/afk case 03-192-final-planner.",
+      "The expected artifact for this case is therefore a CONTRACT: the",
+      "planner should decide the dialect and record it, not escalate.",
+      "-->",
+    ].join("\n");
+    const tripped = FIXTURE_DISCLOSURES.filter(({ pattern }) => pattern.test(planted));
+    expect(tripped.length).toBeGreaterThanOrEqual(6);
+    expect(new RegExp("\\bCONTRACT\\b").test(planted)).toBe(true);
   });
 
   it("B-07 indexes every case in eval-packs/afk/README.md in declared order with its role, source, expected and the operator command", () => {

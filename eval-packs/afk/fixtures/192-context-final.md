@@ -1,25 +1,3 @@
-<!--
-Hand-reconstructed fixture for eval-packs/afk case 03-192-final-planner.
-
-Provenance: the explorer evidence map the PRD 4 slice-01 planner read on
-launch `run-20260907-231823`, archived by the operator at
-`.afk/artifacts/afk-v2-acceptance-scope-gates-codex/slice-01/context.md`
-(#192 "Evidence"). That tree is gitignored and absent from this checkout, so
-this map is reconstructed from material this repository does carry: the shape
-and the still-true FACTs of the committed
-`.kiro/specs/afk-v2-acceptance-scope-gates/slices/01-gate-policy-reader/context.md`,
-GH #84 as of 2026-09-07, and PRD 4's `prd.md` at `93bf6bd`.
-
-Reconstructed to the state of knowledge at this launch: D1's member shapes
-(`fe2628a`) and D5's remaining silences (`3cbf09c`) are settled, and the only
-question left open is D6's `testGlobs` matcher dialect. This map carries the
-repository fact that decides it — AFK has no runtime dependencies and `src/`
-holds no glob matcher — which is the fact #192 records an operator finding "in
-one grep". The expected artifact for this case is therefore a CONTRACT: the
-planner should decide the dialect and record it, not escalate. The `#194`
-casing FACT is absent, because it post-dates 2026-09-08.
--->
-
 # Context — Slice 01 (#84): Gate policy reader
 
 ## Files and current behavior

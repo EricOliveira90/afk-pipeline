@@ -1,22 +1,3 @@
-<!--
-Hand-reconstructed fixture for eval-packs/afk case 02-192-pre-restart-2-planner.
-
-Provenance: the explorer evidence map the PRD 4 slice-01 planner read on
-launch `run-20260907-225023`, archived by the operator at
-`.afk/artifacts/afk-v2-acceptance-scope-gates-codex/slice-01/pre-restart-2/context.md`
-(#192 "Evidence"). That tree is gitignored and absent from this checkout, so
-this map is reconstructed from material this repository does carry: the shape
-and the still-true FACTs of the committed
-`.kiro/specs/afk-v2-acceptance-scope-gates/slices/01-gate-policy-reader/context.md`,
-GH #84 as of 2026-09-07, and PRD 4's `prd.md` at `93bf6bd`.
-
-Reconstructed to the state of knowledge at this launch: D1's member shapes are
-now settled (`fe2628a`, 22:50, is the amendment that restarted the run), and the
-open question has moved to D5 — how a waiver's `path` is matched against a
-changed path. That UNKNOWN is what the planner escalated. The `#194` casing FACT
-is absent, because it post-dates 2026-09-08.
--->
-
 # Context — Slice 01 (#84): Gate policy reader
 
 ## Files and current behavior
