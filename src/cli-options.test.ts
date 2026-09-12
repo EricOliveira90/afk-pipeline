@@ -136,6 +136,26 @@ describe("parsePipelineRuntimeOptions", () => {
     expect(parsePipelineRuntimeOptions([]).openPrOnOverride).toBe(false);
   });
 
+  it("B-01 records prompts only for the exact --record-prompts token", () => {
+    expect(
+      parsePipelineRuntimeOptions(["--record-prompts"]).recordPrompts,
+    ).toBe(true);
+    // Absent leaves the field unset rather than false: only a run that asked
+    // for the recorder carries the field at all.
+    expect(parsePipelineRuntimeOptions([]).recordPrompts).toBeUndefined();
+    // Near misses are silently not the flag — exact membership, no value
+    // form, and no boolean flag here rejects anything either.
+    expect(
+      parsePipelineRuntimeOptions(["--record-prompt"]).recordPrompts,
+    ).toBeUndefined();
+    expect(
+      parsePipelineRuntimeOptions(["--record-prompts=false"]).recordPrompts,
+    ).toBeUndefined();
+    expect(
+      parsePipelineRuntimeOptions(["--record-prompts=true"]).recordPrompts,
+    ).toBeUndefined();
+  });
+
   it("reads the guardian round cap, allowing 0 to disable it and leaving it absent by default", () => {
     expect(
       parsePipelineRuntimeOptions(["--guardian-round-cap", "5"])
