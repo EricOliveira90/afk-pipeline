@@ -1,7 +1,7 @@
 # AFK v2 Quality Loops - Slice Index
 
 **Parent PRD:** #73 - see `prd.md` in this directory for the settled
-decisions D1-D13, the file-scope map and the deferral of #92.
+decisions D1-D14, the file-scope map and the deferral of #92.
 
 | Slice | GH Issue | Title | Type | Blocked by | User stories covered |
 |-------|----------|-------|------|------------|----------------------|
@@ -40,7 +40,7 @@ Stages` section to add rows to.
 **Slice 02 (#92) is listed for numbering and is not selected.** Plan §2
 defers #73 stories 9–15 and 19 (all hardener/mutation machinery) and plan
 §4 runs "PRD 5 (cleaner only, default-off, story 17 ROI experiment)".
-`afk.json` selects `01` and `03` only; `assertWithinManifestScope`
+`afk.json` selects `01`, `03` and `04`; `assertWithinManifestScope`
 (`src/afk-manifest.ts`) refuses any dispatch outside that set. #92 stays
 OPEN with its labels unchanged; see `prd.md` "Deferred".
 
@@ -108,13 +108,14 @@ self-run keeps the cleaner off (plan item 8).
 
 ## Launch checklist
 
-- `pnpm lint:tickets 87 97` — exits 0 with zero warnings, run 2026-09-12 on
-  `docs/prd5-prep` after the #97 body edit. It prints three "waiver matched
-  nothing" notes for #92, #93 and #95 — stale waivers from earlier PRDs.
+- `pnpm lint:tickets 87 97 274` — exits 0 with zero warnings, re-run
+  2026-09-12 on `docs/prd5-prep` after the D14 split's body edits. It
+  prints three "waiver matched nothing" notes for #92, #93 and #95 — stale
+  waivers from earlier PRDs.
   They are not these tickets' and they do not gate.
 - `Blocked by` uses issue numbers, the DAG parser's key
-  (`src/issues-parser.ts`), not slice numbers. The two waves above were
-  derived from that parser against this table.
+  (`src/issues-parser.ts`), not slice numbers. The three waves above were
+  derived from that parser against this table, re-run after the D14 split.
 - PRD 4 is merged (#223 CLOSED); `POST_APPROVAL_WRITING_STAGE_ID`,
   `decideFinalReuse` and the `scope` gate's `role` source are on
   `origin/main` at `46f6c38`.
