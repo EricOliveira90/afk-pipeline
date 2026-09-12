@@ -6,8 +6,8 @@ user stories are authoritative for *intent*; where its body still says
 learning-proposal schema", `docs/specs/afk-v2-plan-debate.md` §7 (rulings
 R1–R3, cited below as plan-debate §7) has amended it and this document
 controls.
-**Slice issues:** see `issues.md` in this directory (S1 runner, S2 seed pack,
-S3 prompt recorder).
+**Slice issues:** #262 (S1, Eval runner), #263 (S2, Eval seed pack, blocked by
+#262), #264 (S3, Prompt recorder) — see `issues.md` in this directory.
 **Parent design:** `docs/specs/afk-v2-plan.md` §2 (PRD 7 row), §3c policies 1
 and 5, §3d item 18 (amended 2026-09-12), §4 ("PRD 5 and PRD 7 may run
 concurrently"), §6; `docs/intent/agent-eval-harness.intent.md` (founder,
@@ -817,8 +817,8 @@ Intent.md's list stands in full. Added here:
 
 ## Launch preconditions
 
-1. `pnpm lint:tickets <S1> <S2> <S3>` exits 0 — recorded in `issues.md` with
-   the run date and any waiver.
+1. `pnpm lint:tickets 262 263 264` exits 0 — run 2026-09-12 on `docs/prd7-spec`:
+   0 gating, 0 waived, 0 warnings, no new waiver. Recorded in `issues.md`.
 2. PRD 4 is merged (#223 CLOSED); `parseFinalReview`,
    `POST_APPROVAL_WRITING_STAGE_ID` and the `evaluator-final` role are on
    `main` @ `46f6c38`. Verified by the "Verified facts" reads.
