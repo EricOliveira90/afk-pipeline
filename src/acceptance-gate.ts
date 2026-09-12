@@ -62,7 +62,7 @@ export interface VitestBehaviorCoverage {
 
 export function matchVitestJson(
   document: unknown,
-  issueNumber: number,
+  issueNumber: string | number,
   behaviorIds: readonly string[],
 ): VitestBehaviorCoverage | null {
   if (!document || typeof document !== "object" || Array.isArray(document)) {
@@ -226,7 +226,7 @@ export interface AcceptanceGateInput {
    */
   absSliceDir: string;
   /** GitHub issue owning this slice; behavior tags are qualified by it. */
-  issueNumber?: number;
+  issueNumber?: string | number;
   /** From `resolveAcceptancePlan`; `null` when the project resolved none. */
   plan: AcceptancePlan | null;
   runner?: AcceptanceRunner;
@@ -240,7 +240,10 @@ export interface AcceptanceGateInput {
 }
 
 /** The exact tag a test must carry to prove one slice behavior. */
-export function behaviorTag(issueNumber: number, behaviorId: string): string {
+export function behaviorTag(
+  issueNumber: string | number,
+  behaviorId: string,
+): string {
   return `[behavior:#${issueNumber}:${behaviorId}]`;
 }
 
@@ -254,7 +257,7 @@ function escapeRegExp(value: string): string {
  * never counts them as coverage.
  */
 function behaviorSelector(
-  issueNumber: number,
+  issueNumber: string,
   behaviorIds: readonly string[],
 ): string {
   return `(?:${behaviorIds
@@ -334,12 +337,9 @@ export async function runAcceptanceGate(
         `${behaviorIds.join(", ")} could not be decided.`,
     };
   }
-  const issueNumber = input.issueNumber;
-  if (
-    issueNumber === undefined ||
-    !Number.isSafeInteger(issueNumber) ||
-    issueNumber <= 0
-  ) {
+  const issueNumber =
+    input.issueNumber === undefined ? "" : String(input.issueNumber);
+  if (!/^[1-9]\d*$/.test(issueNumber)) {
     return {
       status: "FAIL",
       failureKind: "CONFIGURATION",
