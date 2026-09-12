@@ -1,0 +1,206 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "eval-packs/afk/01-192-pre-restart-1-planner.json",
+      "eval-packs/afk/02-192-pre-restart-2-planner.json",
+      "eval-packs/afk/03-192-final-planner.json",
+      "eval-packs/afk/04-194-f03-evaluator-contract.json",
+      "eval-packs/afk/05-120-candidate-typecheck-evaluator-qa.json",
+      "eval-packs/afk/06-prd4-contract-a.json",
+      "eval-packs/afk/07-prd4-contract-b.json",
+      "eval-packs/afk/08-prd4-qa-a.json",
+      "eval-packs/afk/09-prd4-qa-b.json",
+      "eval-packs/afk/readme.md",
+      "eval-packs/afk/fixtures/192-context-pre-restart-1.md",
+      "eval-packs/afk/fixtures/192-context-pre-restart-2.md",
+      "eval-packs/afk/fixtures/192-context-final.md",
+      "eval-packs/afk/fixtures/192-prd4-excerpt.md",
+      "eval-packs/afk/fixtures/192-issue-84.md",
+      "eval-packs/afk/fixtures/194-contract.md",
+      "eval-packs/afk/fixtures/194-acceptance-manifest.json",
+      "eval-packs/afk/fixtures/194-feedback-r1-a1.md",
+      "eval-packs/afk/fixtures/prd4-contract-a-contract.md",
+      "eval-packs/afk/fixtures/prd4-contract-a-acceptance-manifest.json",
+      "eval-packs/afk/fixtures/prd4-contract-b-contract.md",
+      "eval-packs/afk/fixtures/prd4-contract-b-acceptance-manifest.json",
+      "eval-packs/afk/fixtures/prd4-qa-a-change-summary.md",
+      "eval-packs/afk/fixtures/prd4-qa-a-contract.md",
+      "eval-packs/afk/fixtures/prd4-qa-b-change-summary.md",
+      "eval-packs/afk/fixtures/prd4-qa-b-contract.md",
+      "eval-packs/fixtures/consumer-governance/01-pm-governance.json",
+      "src/eval-packs.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #263 AC7, AC8 and \"What to build\" (case shape, prd.md D7/D9)",
+      "given": "the committed eval-packs/afk/ directory with nine case files named 01- through 09-",
+      "when": "readEvalPack reads eval-packs/afk in src/eval-packs.test.ts",
+      "then": "it resolves with exactly nine cases in byte-wise filename order, each object carrying exactly the seven CASE_KEYS members version, id, role, source, prompt, files, expected",
+      "observableResult": "the resolved pack's case count is nine, its case ids appear in 01- through 09- filename order, and no refusal is thrown",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #263 AC2 and prd.md D2 source 1 (#192, three planner escalations on PRD 4 slice 01)",
+      "given": "the three planner cases 01-192-pre-restart-1-planner.json, 02-192-pre-restart-2-planner.json and 03-192-final-planner.json",
+      "when": "each case's role, expected and source are read from the pack",
+      "then": "all three have role planner, the two pre-restart cases have expected {\"artifact\":\"ESCALATION\"} and the final case has expected {\"artifact\":\"CONTRACT\"}, and each source names the planner-escalation.md under .afk/artifacts/afk-v2-acceptance-scope-gates-codex/slice-01/ it was reconstructed from",
+      "observableResult": "a test asserts the three expected.artifact values in declared order and that each source string contains the escalation artifact path",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #263 AC3 and prd.md D2 source 2 (#194, false-premise F-03 on fileScope casing)",
+      "given": "the single evaluator-contract case 04-194-f03-evaluator-contract.json reconstructing round 1 of run-20260908-014522",
+      "when": "its role, expected and source are read from the pack",
+      "then": "role is evaluator-contract, expected is {\"verdict\":\"ACCEPT\"}, and source names the archived contract-review-r1-a1.json it was reconstructed from",
+      "observableResult": "a test asserts expected.verdict equals ACCEPT and that source contains contract-review-r1-a1.json",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #263 AC4 and prd.md D2 source 3 (#120, ADR 0041, AGENTS.md:74-77)",
+      "given": "the evaluator-qa case 05-120-candidate-typecheck-evaluator-qa.json whose inline files hold a minimal project with a candidate-introduced type error",
+      "when": "its role, expected, files and source are read from the pack",
+      "then": "role is evaluator-qa, expected is {\"verdict\":\"FAIL\",\"failureClass\":\"IMPLEMENTATION\"}, files contain the failing project's package.json, tsconfig.json and source file, and source names #120 and ADR 0041",
+      "observableResult": "a test asserts expected.verdict FAIL with failureClass IMPLEMENTATION, that the files map includes the typecheck project's entries, and that source cites #120 and ADR 0041",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #263 AC5 (prd.md D2 source 4; .kiro/specs/afk-v2-acceptance-scope-gates/slices/{02,03,05,08}/{contract-review.json,qa-review.json}; PR #256 merge commit dbd6fdc)",
+      "given": "the four PRD 4 cases 06-prd4-contract-a.json (slice 02-behavior-coverage-gate), 07-prd4-contract-b.json (slice 05-test-cost-split-and-caching), 08-prd4-qa-a.json (slice 03-candidate-evaluator-isolation) and 09-prd4-qa-b.json (slice 08-file-scope-gate), one role per slice and at most one case of either role per slice",
+      "when": "the pack is read, each of the four cases is inspected, and each case's expected is compared against the committed verdict artifact its source names",
+      "then": "06- and 07- have role evaluator-contract and expected {\"verdict\":\"ACCEPT\"} equal to the verdict member of their slice's committed contract-review.json; 08- and 09- have role evaluator-qa and expected {\"verdict\":\"PASS\",\"failureClass\":\"NONE\"} equal to the verdict and failureClass members of their slice's committed qa-review.json; and each of the four source strings names that artifact's repo-relative path under .kiro/specs/afk-v2-acceptance-scope-gates/slices/ and contains the literal substring \"confirmed-by: dbd6fdc\", the reachable record that the slice merged to main on that verdict in PR #256",
+      "observableResult": "a unit test named for B-05 asserts the two-and-two role split; for each of the four cases it reads the repo-relative verdict artifact path out of the case's source, loads that committed JSON file from the repository, and asserts the case's expected deep-equals the projection of that file's verdict (plus failureClass for the two qa cases); and it asserts each of the four source strings contains the literal \"confirmed-by: dbd6fdc\"",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #263 AC1, AC6, AC7 (prd.md D2 \"every seed prompt is hand-reconstructed\"; src/eval-pack.ts:94, :102-118, :138-147)",
+      "given": "all nine cases in eval-packs/afk/",
+      "when": "each case's source, id and expected are inspected and the pack is read through readEvalPack",
+      "then": "every source is non-blank and contains the word hand-reconstructed; every source cites only one of the four prd.md D2 source names (#192, #194, #120/ADR 0041, or a path under .kiro/specs/afk-v2-acceptance-scope-gates/slices/); B-05's four sources name no .afk/artifacts/**/reviews/ path; no two cases share an id; and every expected validates against its role under EXPECTED_SHAPE",
+      "observableResult": "a unit test named for B-06 asserts each source contains \"hand-reconstructed\", asserts each source matches one of the four permitted source-name patterns, asserts the four PRD 4 sources contain no \".afk/artifacts\" substring, asserts the set of nine ids has size nine, and relies on the successful readEvalPack call for the role/expected validation",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #263 AC8 and AC9 (README lists id, role, source, expected in declared order, plus the operator command)",
+      "given": "eval-packs/afk/README.md alongside the nine-case pack",
+      "when": "the README text is read in src/eval-packs.test.ts",
+      "then": "it names every case's id in the pack's declared order together with that case's role, source and expected, and contains the operator command afk-claude eval --pack eval-packs/afk",
+      "observableResult": "a test asserts that the index of each case id in eval-packs/afk/README.md increases with declared order, that each id's row mentions its role and expected value, and that the operator command string is present",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #263 AC10 (fixture consumer pack: one pm case, FIX-BEFORE-SHIP, PRODUCT.md in files)",
+      "given": "the committed eval-packs/fixtures/consumer-governance/01-pm-governance.json",
+      "when": "readEvalPack reads eval-packs/fixtures/consumer-governance in src/eval-packs.test.ts",
+      "then": "it resolves with exactly one case whose role is pm, whose expected is {\"outcome\":\"FIX-BEFORE-SHIP\"}, and whose files include a PRODUCT.md and a small diff",
+      "observableResult": "a test asserts a one-case pack, role pm, expected.outcome FIX-BEFORE-SHIP, and a PRODUCT.md key in the files map",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #263 AC11 and prd.md Testing decision 3 (stub dispatch asserted through report.json)",
+      "given": "the consumer-governance pack and buildEvalStubProvider from src/eval.fixtures.ts",
+      "when": "the pack is dispatched twice — once with a stub that writes review-pm.md carrying FIX-BEFORE-SHIP, once with a stub that writes SHIP",
+      "then": "the run's report.json read back through readEvalReport records outcome MATCH for the first dispatch and MISMATCH for the second",
+      "observableResult": "two assertions on readEvalReport's case results: outcome MATCH and outcome MISMATCH respectively",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #263 AC12 and prd.md Testing decision 3 (pnpm test spends no model call)",
+      "given": "src/eval-packs.test.ts and every other test file under src/",
+      "when": "the pack directory argument of every eval dispatch under src/ is inspected",
+      "then": "no test dispatches eval-packs/afk/ to any provider, stub included; the AFK pack is only read and asserted",
+      "observableResult": "a test asserts that eval-packs/afk appears in src/eval-packs.test.ts only in read paths, and no dispatch call under src/ names it",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #263 \"Files expected to change\" and AC13; prd.md file-scope map S2 column",
+      "given": "slice 01's runner modules src/eval-pack.ts, src/eval-compare.ts, src/eval-report.ts, src/eval-command.ts and src/eval.fixtures.ts",
+      "when": "the slice's diff against the base branch is inspected",
+      "then": "src/eval-packs.test.ts is the only changed file under src/, and readEvalPack and validateEvalCase keep their current acceptance and refusal behavior",
+      "observableResult": "the diff lists no src/ path other than src/eval-packs.test.ts, and the existing eval suites (src/eval-pack.test.ts, src/eval-command.test.ts, src/eval-compare.test.ts, src/eval-report.test.ts, src/eval-boundary.test.ts) still pass unmodified",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "eval-packs/fixtures/refused/01-unknown-member.json:1-12 (slice 01 refusal fixture, B-28)",
+      "given": "the committed refusal fixture eval-packs/fixtures/refused/01-unknown-member.json with its unknown notes member",
+      "when": "the slice's diff is inspected and slice 01's refusal test runs",
+      "then": "the fixture file is unchanged and readEvalPack still refuses that pack for the unknown member",
+      "observableResult": "the diff contains no entry for eval-packs/fixtures/refused/01-unknown-member.json and slice 01's refusal assertion still passes",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #263 AC13 and prd.md file-scope map (no CONTEXT.md or ARCHITECTURE.md change in S2)",
+      "given": "CONTEXT.md and ARCHITECTURE.md as slice 01 left them, including the Agent eval row and the D36 vocabulary entries",
+      "when": "the slice's diff against the base branch is inspected",
+      "then": "neither CONTEXT.md nor ARCHITECTURE.md appears in it",
+      "observableResult": "the diff lists no entry for CONTEXT.md or ARCHITECTURE.md",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

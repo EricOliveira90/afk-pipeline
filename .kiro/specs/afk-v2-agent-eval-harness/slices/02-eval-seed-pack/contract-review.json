@@ -1,0 +1,58 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-07",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-05", "B-06"],
+      "evidence": "\"drawn only from verdicts a human later bore out; each `source` names the `reviews/` artifact path and the confirming fact (the slice merged on that verdict, or the planner accepted the `REVISE` finding in the next round)\"",
+      "expected": "Every case the contract locks must be authorable from material this slice's generator can reach: a named in-repo source for each of the four verdicts' content and for the human confirmation, or a recorded decision replacing the unreachable confirmation criterion.",
+      "observed": "Cleared by route (a). B-05 now names, per case, in-repo material for both halves of prd.md D2's criterion, and each half checks out in this worktree: `.kiro/specs/afk-v2-acceptance-scope-gates/slices/02-behavior-coverage-gate/contract-review.json` and `05-test-cost-split-and-caching/contract-review.json` both carry `\"verdict\": \"ACCEPT\"`, and `03-candidate-evaluator-isolation/qa-review.json` and `08-file-scope-gate/qa-review.json` both carry `\"verdict\": \"PASS\"` with `\"failureClass\": \"NONE\"`. The prompt-reconstruction inputs the contract names (each slice's committed `contract.md`, `acceptance-manifest.json` and `qa-report-r*-a1.md`) are all present in those directories. The human confirmation is a reachable commit: `dbd6fdc266ce48253a81e051bf724c4d9a92e664` is the merge of PR #256 (2026-09-12) and `git merge-base --is-ancestor dbd6fdc HEAD` exits 0 on this branch. The contract records the consequence honestly rather than papering over it — only final-round verdicts are used, because a round-1 `REVISE` would need the round-1 contract pair, which no commit carries. B-06's source-name list and fallback clause were restated to match and now explicitly bar citing the absent `.afk/artifacts/**/reviews/` tree as the origin of an `expected` value, which closes the reviewer's inability to tell a reconstruction from an invention. The nine-case count, `fileScope.paths` and B-01/B-07 needed no restatement because route (a) preserved them.",
+      "clearCondition": "Met: B-05 names, per case, the reachable verdict artifact and the reachable record of the human confirmation (merge commit dbd6fdc, PR #256), all four verified present and matching in this checkout.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-08",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "evidence": "\"a test asserts the two-and-two role split and that each of the four `source` strings contains a `reviews/` artifact path and a confirming-fact clause\"",
+      "expected": "B-05 fixes the literal substring or structural marker the confirming fact must carry in each `source`, and the manifest's B-05 `observableResult` states the assertion in terms of that marker.",
+      "observed": "B-05 now fixes the literal substring `confirmed-by: dbd6fdc` as the confirming fact's marker, naming it explicitly as the counterpart of B-06's `hand-reconstructed`, and requires each of the four `source` strings to name the repo-relative verdict artifact path under `.kiro/specs/afk-v2-acceptance-scope-gates/slices/`. The manifest's B-05 `observableResult` states the assertion in those terms — the literal-substring check plus reading the artifact path out of the `source`, loading that committed JSON and deep-equalling the case's `expected` against its verdict projection — so the `acceptance:behaviors` gate decides a textual property and an in-repo cross-check rather than judging prose. The test plan's third bullet was restated to the same marker and path shapes, ending in `contract-review.json` for `06-`/`07-` and `qa-review.json` for `08-`/`09-`.",
+      "clearCondition": "Met: the confirming fact is the decidable literal `confirmed-by: dbd6fdc` in B-05, the manifest `observableResult` and the test plan.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-09",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "evidence": "\"the `05-` `evaluator-qa` case reads `FAIL` / `IMPLEMENTATION`; the `04-`, `06-` and `07-` `evaluator-contract` cases each read `ACCEPT`; and the `08-` and `09-` `evaluator-qa` cases each read `PASS` / `NONE`.\"",
+      "expected": "A seed pack whose purpose is to score candidate evaluators should let a role's cases discriminate — for a role with more than one case, at least one case whose expectation a degenerate always-same-answer evaluator would get wrong, or a recorded decision that this pack's sources cannot supply one and where the counter-case will come from.",
+      "observed": "After the revision every `evaluator-contract` case in the pack expects `ACCEPT` (`04-`, `06-`, `07-`) and both `evaluator-qa` PRD 4 cases expect `PASS`/`NONE`, so a candidate that answers `ACCEPT` to every contract prompt scores 3/3 on that role, and the two PRD 4 QA cases add no signal a stuck-at-`PASS` candidate would fail. The prior text left `06-`/`07-` open (\"a `verdict` in `ACCEPT`/`REVISE`\"), so this uniformity is revision-caused. B-05 does record why: only final-round verdicts are reachable, and a round-1 `REVISE` would need the uncommitted round-1 contract pair. That recorded reason is sound and evidence-backed, and `05-`'s `FAIL`/`IMPLEMENTATION` and `04-`'s false-premise `ACCEPT` still carry real discrimination, so this is advisory: the pack is honest about its own limits, but a reader should not read a high score on the contract role as evidence of evaluator quality.",
+      "clearCondition": "B-05 or the non-goals note in one sentence that the pack contains no `REVISE` contract expectation and no `FAIL` QA expectation drawn from PRD 4, so a per-role score on those cases cannot separate a correct evaluator from a stuck-at-`ACCEPT`/`PASS` one, and name the later source (or slice) that would supply the counter-case; alternatively the README requirement in B-07 carries that caveat alongside the per-case table.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "contract.md",
+        "before": "  the `05-` `evaluator-qa` case reads `FAIL` / `IMPLEMENTATION`; and the\n  `04-`, `06-`, `07-` `evaluator-contract` cases read a `verdict` in\n  `ACCEPT`/`REVISE` with `04-` reading `ACCEPT`.",
+        "after": "  the `05-` `evaluator-qa` case reads `FAIL` / `IMPLEMENTATION`; the `04-`,\n  `06-` and `07-` `evaluator-contract` cases each read `ACCEPT`; and the `08-`\n  and `09-` `evaluator-qa` cases each read `PASS` / `NONE`."
+      }
+    },
+    {
+      "id": "F-10",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "evidence": "\"eval-packs/afk/readme.md\"",
+      "expected": "The manifest's `fileScope.paths` should name the files the slice actually creates, since it is the scope of record a human and the file-scope gate both read.",
+      "observed": "The revision lowercased this one entry to `eval-packs/afk/readme.md` while the contract's scope lock, B-07, the \"Files expected to change\" list, the test plan and the manifest's own B-07 `given`/`observableResult` all name `eval-packs/afk/README.md`. No gate fails on it — `normalizePath` lowercases every declared and changed path before comparing (`src/acceptance-manifest.ts:71`) — so this is cosmetic rather than blocking, but the declared scope now disagrees with itself about the filename, and a reader reconciling the two has to know about that lowercasing to conclude the slice is in scope.",
+      "clearCondition": "The `fileScope.paths` entry reads `eval-packs/afk/README.md`, matching every other mention of the file in the pair.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"eval-packs/afk/README.md\",",
+        "after": "      \"eval-packs/afk/readme.md\","
+      }
+    }
+  ]
+}
