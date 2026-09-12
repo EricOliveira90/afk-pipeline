@@ -138,13 +138,24 @@ const REJECTED_GLOB_CHARACTERS = [
   "\\",
 ] as const;
 
-export type GateRiskClass = "gate-policy" | "deleted-test" | "skipped-test";
+export type GateRiskClass =
+  | "gate-policy"
+  | "deleted-test"
+  | "skipped-test"
+  /**
+   * Waiver vocabulary for a suppression a human signed off on (#87 B-10). The
+   * `suppressions` gate runs whenever the cleaner stage runs and never consults
+   * `riskClasses` to decide that: this class exists so a waiver can *name* a
+   * suppression, not so a project can switch the gate off.
+   */
+  | "suppression";
 
-/** The escalation risk classes the catalog declares (D1, D5). */
+/** The escalation risk classes the catalog declares (D1, D5; #87 B-10). */
 export const GATE_RISK_CLASSES: readonly GateRiskClass[] = [
   "gate-policy",
   "deleted-test",
   "skipped-test",
+  "suppression",
 ];
 
 /** Baseline `protectedPaths.gatePolicyPaths` when the member is omitted. */

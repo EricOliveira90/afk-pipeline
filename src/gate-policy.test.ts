@@ -116,14 +116,17 @@ describe("parseGatePolicy", () => {
         gatePolicyPaths: ["afk.config.json", "suite-budgets.json"],
         testGlobs: ["**/*.test.ts"],
       },
-      riskClasses: ["gate-policy", "deleted-test", "skipped-test"],
+      riskClasses: [...GATE_RISK_CLASSES],
     };
 
     expect(parseGatePolicy({ version: 1 })).toEqual(baseline);
     expect(
       parseGatePolicy({
         version: 1,
-        riskClasses: ["gate-policy", "deleted-test", "skipped-test"],
+        // Declared explicitly rather than spelled out, so this stays a
+        // "declared value survives" case as the class list grows (#87 added
+        // "suppression").
+        riskClasses: [...GATE_RISK_CLASSES],
       }),
     ).toEqual(baseline);
     expect(
@@ -160,6 +163,9 @@ describe("parseGatePolicy", () => {
       "gate-policy",
       "deleted-test",
       "skipped-test",
+      // #87 B-10: waiver vocabulary for a suppression, added with the
+      // `suppressions` gate. It never decides whether that gate runs.
+      "suppression",
     ]);
   });
 
@@ -361,6 +367,9 @@ describe("parseGatePolicy", () => {
       "gate-policy",
       "deleted-test",
       "skipped-test",
+      // #87 B-10: waiver vocabulary for a suppression, added with the
+      // `suppressions` gate. It never decides whether that gate runs.
+      "suppression",
     ]);
   });
 });
