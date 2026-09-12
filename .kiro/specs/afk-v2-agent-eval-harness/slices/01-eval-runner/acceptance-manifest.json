@@ -1,0 +1,501 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/eval-pack.ts",
+      "src/eval-compare.ts",
+      "src/eval-report.ts",
+      "src/eval-command.ts",
+      "src/eval.fixtures.ts",
+      "src/afk.ts",
+      "src/afk-claude.ts",
+      "src/afk-codex.ts",
+      "src/eval-pack.test.ts",
+      "src/eval-compare.test.ts",
+      "src/eval-report.test.ts",
+      "src/eval-command.test.ts",
+      "src/eval-boundary.test.ts",
+      "eval-packs/fixtures/refused/01-unknown-member.json",
+      "context.md",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #262 AC1 (prd.md D7, D8, D13, D32)",
+      "given": "a directory holding three case files named 03-c.json, 01-a.json and 02-b.json directly inside it plus a subdirectory containing a fourth JSON file, each case carrying exactly version, id, role, source, prompt, files and expected",
+      "when": "readEvalPack(dir) reads it",
+      "then": "it returns an EvalPack whose cases are the three top-level files in byte-wise ascending file-name order (01-a, 02-b, 03-c), ignoring the subdirectory, and src/eval-pack.ts exports EVAL_PACK_VERSION, SUPPORTED_EVAL_PACK_VERSIONS, EVAL_ROLES, EvalRole, EvalCase, EvalExpected, EvalPack, readEvalPack and the pure validateEvalCase",
+      "observableResult": "a unit test asserts the returned cases' ids in order, that the subdirectory file is absent, and that each exported name is importable and typechecks",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #262 AC2",
+      "given": "two packs, each built in its own per-test temporary directory and neither committed: one case file with an extra top-level member and one case file missing a required member",
+      "when": "readEvalPack reads each",
+      "then": "each call throws, the whole pack is refused rather than the defective case skipped, and the message names the case file and the offending member",
+      "observableResult": "a unit test in src/eval-pack.test.ts named for B-02 asserts the throw and that the message contains both the file name and the member name, for both packs",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #262 AC3 (prd.md D13; src/gate-runner.ts:43-46)",
+      "given": "one pack whose single case carries version 2, and a second pack whose two cases carry version 1 and version 2",
+      "when": "readEvalPack reads each",
+      "then": "both are refused, the first for a version outside SUPPORTED_EVAL_PACK_VERSIONS ([1]) and the second for files that disagree on version",
+      "observableResult": "a unit test asserts each thrown message names the offending file and that EVAL_PACK_VERSION === 1 and SUPPORTED_EVAL_PACK_VERSIONS deep-equals [1]",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #262 AC4 (prd.md D12)",
+      "given": "a pack whose single case sets role to \"generator\"",
+      "when": "readEvalPack reads it",
+      "then": "the whole pack is refused",
+      "observableResult": "a unit test asserts the thrown message names the file and the value \"generator\", and that EVAL_ROLES deep-equals [\"evaluator-contract\", \"evaluator-qa\", \"evaluator-final\", \"planner\", \"pm\", \"architect\"]",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #262 AC5 (prd.md D9)",
+      "given": "three packs: an evaluator-qa case whose expected omits failureClass, an evaluator-contract case whose expected adds failureClass, and an evaluator-final case whose expected verdict is \"ACCEPT\"",
+      "when": "readEvalPack reads each",
+      "then": "each is refused at read time before any dispatch, because expected is validated against the case's role",
+      "observableResult": "a unit test asserts each thrown message names the file and the offending key (failureClass / verdict), and that validateEvalCase rejects the same three values",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #262 AC6 (prd.md D7)",
+      "given": "packs whose files keys are respectively \"C:/x.md\", \"/x.md\", \"a/../b.md\" and \"./x.md\", plus a pack whose files value is { \"fromFile\": \"fixtures/missing.json\" } with no such file on disk",
+      "when": "readEvalPack reads each",
+      "then": "each is refused, and the fromFile refusal happens at read time before any dispatch",
+      "observableResult": "a unit test asserts each thrown message names the file and the offending key, and that the stub provider recorded zero invocations for the fromFile pack",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #262 AC7 (prd.md D7)",
+      "given": "packs with, respectively, two cases sharing an id, an id \"Bad_Id\", a blank source, a blank prompt, and an empty directory",
+      "when": "readEvalPack reads each",
+      "then": "each of the five is refused",
+      "observableResult": "a unit test asserts each thrown message names the file (or the directory, for zero case files) and the offending member, and that the id pattern ^[a-z0-9][a-z0-9-]{0,79}$ rejects \"Bad_Id\"",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #262 AC8 (prd.md D34)",
+      "given": "a one-case pack whose files declare an inline UTF-8 file with no trailing newline and a fromFile-copied binary-ish fixture, and a stub provider that writes an artifact contradicting the case's expected so the outcome is MISMATCH and B-17 keeps the scratch directory",
+      "when": "runEvalCli dispatches the pack with the real mkScratchDir dep",
+      "then": "InvokeOptions.cwd is a fresh directory under the OS temp directory whose basename starts with afk-eval-<id>-, containing exactly the declared files with byte-identical content and nothing else",
+      "observableResult": "a unit test reads the recorded options.cwd after the run (it survives because the case is a MISMATCH), asserts the basename prefix, asserts the recursive listing equals the declared key set, and compares both files' bytes with the source bytes",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #262 AC9 (prd.md D9; src/ship-gate.ts:707,754)",
+      "given": "a six-case pack, one case per EVAL_ROLES member, dispatched to the stub provider",
+      "when": "the run completes and the recorded InvokeOptions are read",
+      "then": "the pm case carries role \"pm-review\", agent \"pm-review\" and bare true, the architect case role \"architect-review\", agent \"architect-review\" and bare true, the planner and three evaluator cases carry their production role with no agent and no bare, and every case carries the case's prompt, its scratch cwd and a logStream opened on <out>/eval-<timestamp>/<case-id>.log",
+      "observableResult": "a unit test asserts the recorded options per role and that roleDispatch(role) returns the matching invokeOptions template, artifactFile, parse and project members; the per-case log files exist in the run's output directory",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #262 AC10 (prd.md D9; src/contract-review.ts:369, src/qa-review.ts:346, src/final-evaluation.ts:305)",
+      "given": "scratch directories holding a contract-review.json written by writeContractReview, a qa-review.json written by writeQAReview, and a hand-authored schema-valid final-review.json, each nested one directory deep",
+      "when": "projectOutput(role, scratchDir) runs for evaluator-contract, evaluator-qa and evaluator-final",
+      "then": "each artifact is found recursively, parsed with the unmodified production parser, and projected to { verdict } — plus failureClass for evaluator-qa — with no findings, ids, prose or tree ids",
+      "observableResult": "a unit test asserts each returned projection deep-equals the expected object exactly (own keys included) and that src/eval-compare.ts exports projectOutput and compareProjection",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #262 AC11 (prd.md D9; src/planner-escalation.ts:125, src/acceptance-manifest.ts:201)",
+      "given": "three planner scratch directories: one holding a planner-escalation.md whose content is JSON.stringify(REVISION_PLANNER_ESCALATION), one holding no sentinel plus one acceptance-manifest.json from writeAcceptanceManifest with a contract.md beside it, and one holding a planner-escalation.md containing \"{ not json\"",
+      "when": "projectOutput(\"planner\", scratchDir) runs for each",
+      "then": "the first projects to { artifact: \"ESCALATION\" }, the second to { artifact: \"CONTRACT\" }, and the third throws so the case becomes ERROR carrying the malformed record's defect",
+      "observableResult": "a unit test asserts the two projections deep-equal their objects and that the third case's report.json error field contains the defect text readPlannerEscalation returned",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #262 AC12 (prd.md D9; src/artifacts.ts:308)",
+      "given": "scratch directories holding a review-pm.md that parseGuardianReview resolves to FIX-BEFORE-SHIP and a review-architect.md whose content parseGuardianReview resolves to UNPARSEABLE, the latter in a case whose expected outcome is SHIP",
+      "when": "the run completes",
+      "then": "the pm case's projection is { outcome: \"FIX-BEFORE-SHIP\" } and the architect case is a MISMATCH carrying actual { outcome: \"UNPARSEABLE\" }, never an ERROR",
+      "observableResult": "a unit test asserts the pm projection, and asserts the architect case entry in report.json has outcome MISMATCH with actual.outcome \"UNPARSEABLE\" and no error key",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-13",
+      "source": "GH #262 AC13 (prd.md D9, D21, D23)",
+      "given": "a four-case pack with stubs that write no artifact, write two copies of the role's artifact in different subdirectories, write content whose production parser throws, and return InvokeResult.exitCode 3",
+      "when": "the run completes",
+      "then": "each case's outcome is ERROR — naming the searched filename, listing both matches, carrying the parser's message, and naming code 3 respectively — and the run still writes report.json and exits 0",
+      "observableResult": "a unit test asserts the four error strings and that exitCode is 0 with report.json present and counts.ERROR === 4",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-14",
+      "source": "GH #262 AC14 (prd.md D9, D14)",
+      "given": "a one-case pack and a stub whose invoke rejects with a transient provider error",
+      "when": "the run completes",
+      "then": "the case outcome is ERROR carrying the rejection message, invoke was called exactly once with no retry, and callsUsed is 1",
+      "observableResult": "a unit test asserts the stub's recorded call count is 1, the case's error contains the rejection message, and report.json callsUsed === 1",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-15",
+      "source": "GH #262 AC15 (prd.md D15, D16, D19)",
+      "given": "a three-case pack dispatched once with --max-calls 2 and once with no --max-calls flag",
+      "when": "each run completes",
+      "then": "the capped run dispatches cases one and two, marks case three NOT-RUN, reports callsUsed 2 and status INCOMPLETE; the uncapped run reports maxCalls 50 and status COMPLETE",
+      "observableResult": "a unit test asserts the stub recorded two invocations for the capped run, the third case entry's outcome is NOT-RUN with callsUsed 0, and report.json maxCalls is 2 then 50",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-16",
+      "source": "GH #262 AC16 (prd.md D15, D21)",
+      "given": "argument vectors --pack <dir> --max-calls 0, --pack <dir> --max-calls two, and one with no --pack at all",
+      "when": "runEvalCli is called with each",
+      "then": "each returns exitCode 2, dispatches nothing, writes no report.json, and returns the usage text in output",
+      "observableResult": "a unit test asserts exitCode 2 for all three, that output contains \"eval --pack <dir>\", that the stub recorded zero invocations, and that no eval-<timestamp> directory was created",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-17",
+      "source": "GH #262 AC17 (prd.md D9, D34)",
+      "given": "a three-case pack whose stub produces one MATCH, one MISMATCH and one ERROR",
+      "when": "the run completes",
+      "then": "compareProjection returned MATCH only for the first, the MATCH case's scratch directory no longer exists, and the MISMATCH and ERROR cases' scratch directories still exist with their paths recorded as scratchDir on exactly those two entries",
+      "observableResult": "a unit test asserts existsSync is false for the MATCH scratch path and true for the other two, that report.json records scratchDir only for the kept ones, and that compareProjection is a pure function returning MATCH/MISMATCH by field-by-field string equality",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-18",
+      "source": "GH #262 AC18 (prd.md D13, D20)",
+      "given": "a completed run over a mixed-outcome pack and, separately, a report.json edited to version 2",
+      "when": "readEvalReport reads each file",
+      "then": "the first reads back an EvalReport carrying version 1, status, provider, pack, packVersion, startedAt, finishedAt, maxCalls, callsUsed, counts with exactly the keys MATCH, MISMATCH, NOT-RUN and ERROR, and cases in declared order; the second is refused for its unsupported version",
+      "observableResult": "a unit test asserts the top-level key set, that Object.keys(counts) equals the four names, that case ids appear in declared order, that EVAL_REPORT_VERSION === 1, and that reading the version-2 file throws naming the version",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-19",
+      "source": "GH #262 AC19 (prd.md D20)",
+      "given": "a completed run producing one case of each outcome (MATCH, MISMATCH, ERROR, NOT-RUN) where the provider reports no cost or tool-call stats",
+      "when": "report.json is read back",
+      "then": "every cases entry carries exactly id, role, source, outcome, expected and callsUsed (0 or 1); actual only on the MATCH and MISMATCH entries; error only on the ERROR entry; scratchDir only on the MISMATCH and ERROR entries; durationMs only on the three dispatched entries; and no key outside that exhaustive list plus B-20's costUsd and toolCallCount",
+      "observableResult": "a unit test asserts each entry's exact own-key set for all four outcomes, so an added or missing key fails",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-20",
+      "source": "GH #262 AC20 (prd.md D14, D20)",
+      "given": "three runs: one where every dispatched case's InvocationStats reports costUsd and toolCallCount, one where only the first of two does, and one where none does",
+      "when": "each report.json is read back",
+      "then": "the first carries per-case costUsd and toolCallCount and a top-level costUsd equal to their sum; the second carries them on the first case only and omits the top-level costUsd; the third omits all of them rather than writing 0",
+      "observableResult": "a unit test asserts the top-level costUsd value and its absence by key, and asserts absence (not zero) of the per-case keys where unreported",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-21",
+      "source": "GH #262 AC21 (prd.md D20, D24)",
+      "given": "a completed run over a mixed-outcome pack with deps.stdout capturing every streamed line",
+      "when": "runEvalCli returns",
+      "then": "formatEvalSummary produced exactly \"afk eval <status>: MATCH <n> / MISMATCH <n> / NOT-RUN <n> / ERROR <n> — calls <used>/<max> — <path>\", that line is the whole of the returned output, it was never passed to deps.stdout, and neither report.json nor any emitted line contains a rate, ratio or percentage",
+      "observableResult": "a unit test asserts output equals the expected summary string, asserts the captured stdout lines contain only per-case lines (no line appears in both), and asserts no \"%\", \"rate\", \"ratio\" or \"/ of\" text in output, in the streamed lines, or in report.json's bytes",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-22",
+      "source": "GH #262 AC22 (prd.md D20)",
+      "given": "a three-case pack and an injected deps.stdout that appends each line to an array",
+      "when": "the run completes",
+      "then": "the captured array holds exactly three lines, in declared order, of the shape \"[<k>/<n>] <id> (<role>) <outcome>\" with k running 1..3 and n === 3",
+      "observableResult": "a unit test asserts the captured array deep-equals the three expected strings and that formatCaseLine(k, n, result) returns the same string for each",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-23",
+      "source": "GH #262 AC23, AC24 (prd.md D21)",
+      "given": "a two-case pack whose stub mismatches both cases, and a three-case pack run with --max-calls 1",
+      "when": "runEvalCli returns for each",
+      "then": "both return exitCode 0 with report.json written; the second's report status is INCOMPLETE",
+      "observableResult": "a unit test asserts exitCode === 0 and existsSync(reportPath) for both runs and status \"INCOMPLETE\" for the capped one",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-24",
+      "source": "GH #262 AC25 (prd.md D21)",
+      "given": "four invocations: a refused pack (unknown top-level member), a missing --pack, an --out path that cannot be created (a path whose parent is an existing file), and a valid two-case pack whose injected deps.stdout throws on the first per-case line after that case was dispatched",
+      "when": "runEvalCli returns for each",
+      "then": "the first three return exitCode 2 with no report.json — the refusal naming the file and the member in output — and the fourth returns exitCode 1 with no report.json written, because a throw from the runner's own seams after dispatch began is not absorbed the way a provider-side failure is (B-13, B-14)",
+      "observableResult": "a unit test asserts exitCode 2, 2, 2 then 1, asserts no report.json exists for any of the four, asserts the refusal message names the file and the member, and asserts the stub recorded exactly one invocation in the exit-1 run",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-25",
+      "source": "GH #262 AC26 (prd.md D21)",
+      "given": "a valid three-case pack and a refused pack, each run with --dry-run",
+      "when": "runEvalCli returns",
+      "then": "the valid run exits 0 with output holding one \"<id> (<role>) — <source>\" line per case in declared order, and the refused run exits 2 with the refusal message; neither dispatches anything nor creates the output directory",
+      "observableResult": "a unit test asserts the three output lines, exitCode 0 then 2, that the stub recorded zero invocations, and that no eval-<timestamp> directory exists under --out",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-26",
+      "source": "GH #262 AC27 (prd.md D32, D33; src/afk.ts:72-86)",
+      "given": "the exported runEvalCli(args, repoRoot, provider, deps = DEFAULT_EVAL_DEPS): Promise<{ output: string; exitCode: 0 | 1 | 2 }> with EvalCliDeps carrying now(), mkScratchDir(id) and stdout(line), and the three CLI entry sources",
+      "when": "a run uses an injected now() and a test reads each entry's source",
+      "then": "the output directory is <out>/eval-<YYYYMMDD-HHmmss>/ derived from now() with --out defaulting to <repoRoot>/.afk/eval, and each of src/afk.ts, src/afk-claude.ts and src/afk-codex.ts contains an args[0] === \"eval\" branch before its parsePipelineRuntimeOptions call that delegates to runEvalCli with that entry's provider (kiroProvider, Claude, Codex), prints output on exit 0 and to stderr otherwise, and one usage() line containing \"eval --pack <dir> [--max-calls <n>] [--out <dir>] [--dry-run]\"",
+      "observableResult": "a unit test asserts the created directory name for a fixed injected clock and the default --out path, and a source-reading test asserts the branch, its position before parsePipelineRuntimeOptions, the bound provider name and the usage line in all three entries",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-27",
+      "source": "GH #262 AC28",
+      "given": "the scanned set declared by this behavior — every src/*.ts file whose name matches neither *.test.ts nor *.fixtures.ts, minus src/eval-pack.ts, src/eval-compare.ts, src/eval-report.ts, src/eval-command.ts and the three CLI entries — a set that therefore excludes the test-support module src/eval.fixtures.ts, which imports ./eval-pack.js by design",
+      "when": "src/eval-boundary.test.ts reads each file in that set and collects every file whose import specifiers match /\\.\\/eval-(pack|compare|report|command)\\.js/",
+      "then": "the collected offender list is empty, and the set is demonstrably non-empty and contains src/orchestrator.ts, src/wave.ts, src/ship-gate.ts, src/preship.ts, src/gate-runner.ts, src/base-gates.ts, src/candidate-gate-phase.ts and src/post-qa-gates.ts",
+      "observableResult": "a unit test in src/eval-boundary.test.ts named for B-27 asserts the offender list deep-equals [] over that stated set, asserts the set contains the eight named production modules, and asserts src/eval.fixtures.ts is not a member of the set — so the gate's evidence is evidence for the declared rule",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-28",
+      "source": "GH #262 AC29 (prd.md D2)",
+      "given": "the committed pack eval-packs/fixtures/refused/01-unknown-member.json carrying one otherwise valid case with one unknown top-level member",
+      "when": "readEvalPack is called on eval-packs/fixtures/refused and that directory is listed recursively",
+      "then": "the pack is refused with an error naming that unknown member, and eval-packs/fixtures/refused/ contains no other file, since every other refusing pack of B-02–B-07 lives in a per-test temporary directory; the listing is bounded to the directory this slice owns rather than to all of eval-packs/, so the sibling packs #263 adds under eval-packs/afk/ and eval-packs/fixtures/consumer-governance/ on the same feature branch cannot falsify it at the pre-ship gate",
+      "observableResult": "a unit test in src/eval-pack.test.ts named for B-28 asserts the refusal message contains the file name and the unknown member, and asserts a recursive listing of eval-packs/fixtures/refused/ equals exactly [\"01-unknown-member.json\"]",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-29",
+      "source": "GH #262 AC30 (prd.md D35, Testing decisions 1)",
+      "given": "the slice's own test files under src/",
+      "when": "a source-level test reads them",
+      "then": "every runEvalCli call site passes the stub provider exported by src/eval.fixtures.ts and no test imports a real provider module (./claude.js, ./codex.js, ./kiro.js)",
+      "observableResult": "a unit test asserts no src/*.test.ts file that mentions runEvalCli imports a real provider module, and that the stub is the only provider constructor used",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-30",
+      "source": "GH #262 AC31 (prd.md D36; CONTEXT.md:217, :389)",
+      "given": "CONTEXT.md with its existing ### Pipeline concepts section and the already-merged **Prompt record** entry",
+      "when": "a test reads CONTEXT.md and every src/eval-*.ts file",
+      "then": "CONTEXT.md contains the four entries **Envelope**, **Scenario pack**, **Eval case** and **Eval outcome** with the D36 text under Pipeline concepts, each with a prose body and an _Avoid_ line, the **Prompt record** entry is still present and unedited, and the word \"disposition\" appears in none of the four new entries nor in any src/eval-*.ts file",
+      "observableResult": "a unit test asserts the four **Term**: headings exist after the Pipeline concepts heading with their _Avoid_ lines, asserts **Prompt record** still present, and asserts a case-insensitive search for \"disposition\" finds nothing in the new entries or the eval modules",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-31",
+      "source": "GH #262 AC32 (prd.md D32; ARCHITECTURE.md module table)",
+      "given": "ARCHITECTURE.md's existing module table and its 150-line cap",
+      "when": "a test reads the file",
+      "then": "exactly one row's Module cell is \"Agent eval\", its public-seam cell names src/eval-command.ts, its internals cell names src/eval-pack.ts, src/eval-compare.ts and src/eval-report.ts, and the file is at most 150 lines",
+      "observableResult": "a unit test asserts one matching row, its two cells' contents, and the line count",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "prd.md D33 (src/afk.ts:50,73,80,83; src/afk-claude.ts:47,54,248; src/afk-codex.ts:47,54,248)",
+      "given": "the three CLI entry sources after the eval branch is added",
+      "when": "a test reads each file",
+      "then": "src/afk.ts still dispatches status, stop, clean-failed and adopt in that order, src/afk-claude.ts and src/afk-codex.ts still dispatch stop and clean-failed, every entry still calls parsePipelineRuntimeOptions after the bare-token branches, and each entry's runPipeline call site is intact",
+      "observableResult": "a unit test asserts the presence and relative source order of each existing branch, the parsePipelineRuntimeOptions call after them, and one runPipeline call per entry",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "prd.md \"Verified facts\" (src/contract-review.ts:369, src/qa-review.ts:346, src/final-evaluation.ts:305, src/artifacts.ts:308, src/planner-escalation.ts:125, src/acceptance-manifest.ts:201)",
+      "given": "the six production parsers and readers the projection depends on",
+      "when": "the eval modules and this slice's diff are inspected",
+      "then": "each parser is imported from its production module and called with its existing signature, no eval module re-implements or copies one, and none of the six modules is modified by this slice",
+      "observableResult": "a unit test asserts src/eval-compare.ts's import specifiers include the six production modules, that no eval module declares a function named like one of the parsers, and that the six files are absent from this slice's declared file scope",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "prd.md D35, Testing decisions 1 (vitest.config.ts:5)",
+      "given": "vitest.config.ts and the repository layout after this slice",
+      "when": "a test reads the config and the eval pack location",
+      "then": "the include array is still exactly [\"src/**/*.test.ts\"] and every committed pack lives outside src/, so pnpm test runs no eval scenario against a live model",
+      "observableResult": "a unit test asserts the include array's contents and that no file under src/ is a pack case file",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "prd.md D20 (.gitignore:3)",
+      "given": ".gitignore's .afk/ entry and runEvalCli with no --out flag",
+      "when": "the parsed options are inspected",
+      "then": ".gitignore still ignores .afk/ and the default output directory resolves to <repoRoot>/.afk/eval, so a report is never a committed diffable artifact",
+      "observableResult": "a unit test asserts .gitignore still contains the .afk/ line and that a default-out run wrote its report under <repoRoot>/.afk/eval/eval-<timestamp>/report.json",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "prd.md D20, D34 (src/run-events.ts:26, src/run-state.ts:61)",
+      "given": "the four eval modules and the pipeline's run-evidence machinery",
+      "when": "a source-level test reads the eval modules' import specifiers and the two version constants",
+      "then": "no eval module imports ./run-events.js, ./run-journal.js, ./run-state.js, ./run-identity.js, ./git.js or ./logger.js, and EVENTS_SCHEMA_VERSION is still 1 and RUN_STATE_VERSION still 5",
+      "observableResult": "a unit test asserts the offender list of forbidden imports is empty and asserts both constants' values",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}
