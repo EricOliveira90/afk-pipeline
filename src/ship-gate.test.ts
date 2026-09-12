@@ -14,7 +14,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvokeOptions, InvokeResult } from "./agent-provider.js";
 import type { SanityCommandRunner } from "./preship.js";
 import type { RunEventPayload } from "./run-events.js";
-import { loadRunState, saveReviewPhase } from "./run-state.js";
+import { loadRunState } from "./run-state.js";
+import {
+  appendCompletedGuardianRound,
+} from "./guardian-round-persistence.js";
 import {
   buildPrCreationPlan,
   detectReviewWorktreeDrift,
@@ -452,7 +455,7 @@ describe("runShipGate", () => {
         },
       ],
     };
-    saveReviewPhase(repo, slug, cachedReviewPhase);
+    appendCompletedGuardianRound(repo, slug, cachedReviewPhase);
 
     await runShipGate({
       ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
@@ -1157,12 +1160,14 @@ describe("runShipGate", () => {
       runCommand,
     );
     let writeAttempts = 0;
-    args.saveReviewPhase = (repoRoot, runSlug, reviewPhase) => {
-      writeAttempts++;
-      if (writeAttempts === 1) {
-        throw new Error("injected round-state write failure");
-      }
-      saveReviewPhase(repoRoot, runSlug, reviewPhase);
+    args.guardianPersistence = {
+      appendCompletedGuardianRound: (repoRoot, runSlug, reviewPhase) => {
+        writeAttempts++;
+        if (writeAttempts === 1) {
+          throw new Error("injected round-state write failure");
+        }
+        appendCompletedGuardianRound(repoRoot, runSlug, reviewPhase);
+      },
     };
 
     await expect(runShipGate(args)).rejects.toThrow(
@@ -1210,12 +1215,14 @@ describe("runShipGate", () => {
     const runCommand = vi.fn<ShipCommandRunner>(() => "");
     const args = makeArgs(repo, slug, fixture.journal, invoke, runCommand);
     let writeAttempts = 0;
-    args.saveReviewPhase = (repoRoot, runSlug, reviewPhase) => {
-      writeAttempts++;
-      if (writeAttempts === 1) {
-        throw new Error("injected round-state write failure");
-      }
-      saveReviewPhase(repoRoot, runSlug, reviewPhase);
+    args.guardianPersistence = {
+      appendCompletedGuardianRound: (repoRoot, runSlug, reviewPhase) => {
+        writeAttempts++;
+        if (writeAttempts === 1) {
+          throw new Error("injected round-state write failure");
+        }
+        appendCompletedGuardianRound(repoRoot, runSlug, reviewPhase);
+      },
     };
 
     await expect(runShipGate(args)).rejects.toThrow(
@@ -1322,7 +1329,7 @@ describe("runShipGate", () => {
         },
       ],
     };
-    saveReviewPhase(repo, slug, cachedReviewPhase);
+    appendCompletedGuardianRound(repo, slug, cachedReviewPhase);
 
     await runShipGate({
       ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
@@ -1501,7 +1508,7 @@ describe("runShipGate", () => {
         },
       })),
     };
-    saveReviewPhase(repo, slug, cachedReviewPhase);
+    appendCompletedGuardianRound(repo, slug, cachedReviewPhase);
 
     const capped = await runShipGate({
       ...makeArgs(repo, slug, fixture.journal, invoke, runCommand),
@@ -1737,8 +1744,10 @@ describe("runShipGate", () => {
     const result = await runShipGate({
       ...base,
       options: { ...base.options, guardianRoundCap: 1 },
-      saveFiledFindings: () => {
-        throw new Error("EPERM: state file is locked");
+      guardianPersistence: {
+        recordFiledGuardianFindings: () => {
+          throw new Error("EPERM: state file is locked");
+        },
       },
     });
 
@@ -1807,7 +1816,7 @@ describe("runShipGate", () => {
       sanity: { treeSha, ok: true as const },
       architect: { headSha, verdict: "SHIP" as const },
     };
-    saveReviewPhase(repo, slug, cachedReviewPhase);
+    appendCompletedGuardianRound(repo, slug, cachedReviewPhase);
 
     await expect(
       runShipGate({

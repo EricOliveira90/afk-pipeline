@@ -30,6 +30,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
+| Guardian round persistence | The complete persistence invariant for guardian round evidence: persisted shape, normalization, ledger writes (ADR 0057, #221) | `src/guardian-round-persistence.ts`, `src/guardian-round-records.ts` | — |
 | Control surface | Status, stop, preflight, cleanup (ADR 0023, 0042, 0043) | `src/status.ts`, `src/stop-command.ts`, `src/preflight.ts`, `src/clean-failed.ts` | `src/status-*.ts`, `src/stop-sentinel.ts`, `src/cancellation.ts`, `src/crash-records.ts` |
 | Prompts | Role prompt templates, interpolated per invocation | `prompts/*.md` (e.g. `prompts/evaluator-final.md`), `src/prompt-template.ts` | PRD 3 replaces raw templates with assembled envelopes |
 
@@ -94,6 +95,13 @@ entry in `afk.config.json`. Cap: 150 lines.
   carries a marker. Unset — every caller outside the orchestrator — a conflict
   is terminal as before; a failed round keeps the resolution commit (ADR 0039),
   leaves the feature tip unmoved and records the same terminal `CONFLICT`.
+- Guardian round persistence (`GuardianRoundPersistence` in
+  `src/guardian-round-persistence.ts`) — the ship gate decides *when* a round
+  reaches disk, including on every failure exit; the adapter decides *how*
+  (normalization, append-only rounds against replace-wholesale caches,
+  filed-findings carry-forward, filed-finding identity dedup). A new guardian
+  persistence rule extends the adapter, never the sequencer or `run-state.ts`;
+  ADR 0057's guardian-round lifecycle consumes the adapter as a collaborator.
 - Review lifecycle (`src/convergence-coordinator.ts`,
   `src/accepted-candidate.ts`) — the orchestrator sequences typed outcomes;
   these modules own validation, continuation, cap, resume, and terminal policy.

@@ -2,7 +2,7 @@ import { isOperationalReviewOutcome, type GuardianKind } from "./artifacts.js";
 import type {
   PersistedGuardianFinding,
   PersistedGuardianReviewRound,
-} from "./run-state.js";
+} from "./guardian-round-records.js";
 
 export type { GuardianKind } from "./artifacts.js";
 

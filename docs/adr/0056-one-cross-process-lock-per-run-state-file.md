@@ -20,7 +20,10 @@ whole-file commit:
 - `saveSliceState`
 - `saveRunState` (creation only; it refuses to replace an existing file from
   a potentially stale whole-file snapshot)
-- `saveReviewPhase`
+- the guardian round persistence adapter's writes
+  (`appendCompletedGuardianRound`, `recordFiledGuardianFindings`; named
+  `saveReviewPhase` / `saveFiledFindings` in `src/run-state.ts` until #221 moved
+  them to `src/guardian-round-persistence.ts`)
 - `recordRetryDecision`
 - `clearSliceStateForDispatch`
 - the convergence, checkpoint, migration-claim, and non-progress updates that

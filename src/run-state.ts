@@ -14,12 +14,12 @@ import {
 } from "./slice-lifecycle.js";
 import type { PersistedRunScope } from "./slice-scope.js";
 import { withFileLock } from "./file-lock.js";
-import type {
-  GuardianFindingDisposition,
-  GuardianKind,
-  ReviewOutcome,
-} from "./artifacts.js";
-import { guardianFindingMayBlock } from "./guardian-blocking-authority.js";
+import {
+  sanitizeGuardianReviewFields,
+  type PersistedFiledFinding,
+  type PersistedGuardianReviewRound,
+  type PersistedReviewResult,
+} from "./guardian-round-records.js";
 
 /** Phases that get persisted. RUNNING / PENDING never touch disk. */
 export type PersistedPhase = Exclude<SlicePhase, "RUNNING" | "PENDING">;
@@ -295,57 +295,6 @@ export interface PersistedSanityResult {
   ok: true;
 }
 
-/** A favorable guardian verdict recorded against the reviewed HEAD. */
-export interface PersistedReviewResult {
-  headSha: string;
-  verdict: "SHIP" | "ACCEPT-WITH-NOTES";
-}
-
-export interface PersistedGuardianFinding {
-  stableId: string;
-  currentId: string;
-  title: string;
-  class: string;
-  clearCondition: string;
-  disposition: GuardianFindingDisposition;
-  reachableTrigger: string | null;
-  introducedByReviewedDiff: boolean | null;
-}
-
-export interface PersistedGuardianReviewRecord {
-  source: "INVOKED" | "CACHE";
-  outcome: ReviewOutcome;
-  findings: PersistedGuardianFinding[];
-  findingsOriginRound: number | null;
-}
-
-export interface PersistedGuardianReviewRound {
-  round: number;
-  reviewedHeadSha: string;
-  headSha: string;
-  architect: PersistedGuardianReviewRecord;
-  pm: PersistedGuardianReviewRecord;
-}
-
-/**
- * One guardian finding this run has opened an issue for.
- *
- * The durable half of "filed exactly once" (ADR 0057 decision 4, last
- * sentence): a note that rides two consecutive rounds is filed on the first and
- * skipped on the second because its ledger identity is already in here.
- */
-export interface PersistedFiledFinding {
-  guardian: GuardianKind;
-  stableId: string;
-  /** Normalized class + clear condition — the content half of the identity. */
-  fingerprint: string;
-  kind: "BLOCKER" | "NOTE";
-  /** The round whose entry was filed. */
-  round: number;
-  /** Whatever the tracker returned to name the issue, usually a URL. */
-  issue: string;
-}
-
 export interface PersistedReviewPhase {
   sanity?: PersistedSanityResult;
   architect?: PersistedReviewResult;
@@ -354,347 +303,29 @@ export interface PersistedReviewPhase {
   filedFindings?: PersistedFiledFinding[];
 }
 
-const FAVORABLE_VERDICTS = new Set(["SHIP", "ACCEPT-WITH-NOTES"]);
-const REVIEW_OUTCOMES = new Set<ReviewOutcome>([
-  "SHIP",
-  "ACCEPT-WITH-NOTES",
-  "FIX-BEFORE-SHIP",
-  "UNPARSEABLE",
-  "NEVER_RAN",
-  "DIED_MID_RUN",
-]);
-const FINDING_DISPOSITIONS = new Set<GuardianFindingDisposition>([
-  "OPEN",
-  "RESOLVED",
-  "REPEATED",
-  "REOPENED",
-  "REGRESSED",
-]);
-
-function sanitizeReviewResult(value: unknown): PersistedReviewResult | undefined {
-  const v = (value ?? {}) as { headSha?: unknown; verdict?: unknown };
-  if (
-    typeof v.headSha === "string" &&
-    v.headSha.length > 0 &&
-    typeof v.verdict === "string" &&
-    FAVORABLE_VERDICTS.has(v.verdict)
-  ) {
-    return { headSha: v.headSha, verdict: v.verdict as "SHIP" | "ACCEPT-WITH-NOTES" };
-  }
-  return undefined;
-}
-
-function nonBlank(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "";
-}
-
-function sanitizeGuardianFinding(
-  value: unknown,
-): PersistedGuardianFinding | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const finding = value as Record<string, unknown>;
-  if (
-    !nonBlank(finding.stableId) ||
-    !nonBlank(finding.currentId) ||
-    !nonBlank(finding.title) ||
-    !nonBlank(finding.class) ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(finding.class.trim()) ||
-    !nonBlank(finding.clearCondition) ||
-    typeof finding.disposition !== "string" ||
-    !FINDING_DISPOSITIONS.has(
-      finding.disposition as GuardianFindingDisposition,
-    )
-  ) {
-    return undefined;
-  }
-  const reachableTrigger =
-    finding.reachableTrigger === undefined ||
-    finding.reachableTrigger === null
-      ? null
-      : nonBlank(finding.reachableTrigger)
-        ? finding.reachableTrigger.trim()
-        : undefined;
-  const introducedByReviewedDiff =
-    finding.introducedByReviewedDiff === undefined ||
-    finding.introducedByReviewedDiff === null
-      ? null
-      : typeof finding.introducedByReviewedDiff === "boolean"
-        ? finding.introducedByReviewedDiff
-        : undefined;
-  if (
-    reachableTrigger === undefined ||
-    introducedByReviewedDiff === undefined
-  ) {
-    return undefined;
-  }
-  return {
-    stableId: finding.stableId.trim(),
-    currentId: finding.currentId.trim(),
-    title: finding.title.trim(),
-    class: finding.class.trim(),
-    clearCondition: finding.clearCondition.trim(),
-    disposition: finding.disposition as GuardianFindingDisposition,
-    reachableTrigger,
-    introducedByReviewedDiff,
-  };
-}
-
-function sanitizeGuardianRecord(
-  value: unknown,
-  round: number,
-): PersistedGuardianReviewRecord | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  if (
-    (record.source !== "INVOKED" && record.source !== "CACHE") ||
-    typeof record.outcome !== "string" ||
-    !REVIEW_OUTCOMES.has(record.outcome as ReviewOutcome) ||
-    !Array.isArray(record.findings) ||
-    !(
-      record.findingsOriginRound === null ||
-      (Number.isSafeInteger(record.findingsOriginRound) &&
-        (record.findingsOriginRound as number) > 0)
-    )
-  ) {
-    return undefined;
-  }
-  if (
-    record.source === "CACHE" &&
-    !FAVORABLE_VERDICTS.has(record.outcome)
-  ) {
-    return undefined;
-  }
-  const findings = record.findings.map(sanitizeGuardianFinding);
-  if (findings.some((finding) => finding === undefined)) return undefined;
-  const validFindings = findings as PersistedGuardianFinding[];
-  // Both IDs stay unique within a record: current IDs because the block
-  // parsed distinct rows, stable IDs because identity resolution is
-  // one-to-one within a round (ADR 0057 decision 1, amendment 2026-09-06) —
-  // `stableId` names one lineage, keeping cross-round matching
-  // order-independent.
-  if (
-    new Set(validFindings.map((finding) => finding.currentId)).size !==
-      validFindings.length ||
-    new Set(validFindings.map((finding) => finding.stableId)).size !==
-      validFindings.length
-  ) {
-    return undefined;
-  }
-  const findingsOriginRound = record.findingsOriginRound as number | null;
-  if (record.source === "INVOKED" && findingsOriginRound !== round) {
-    return undefined;
-  }
-  if (
-    record.source === "INVOKED" &&
-    (
-      (record.outcome === "SHIP" && validFindings.length !== 0) ||
-      (
-        (record.outcome === "ACCEPT-WITH-NOTES" ||
-          record.outcome === "FIX-BEFORE-SHIP") &&
-        validFindings.length === 0
-      ) ||
-      (
-        (record.outcome === "UNPARSEABLE" ||
-          record.outcome === "NEVER_RAN" ||
-          record.outcome === "DIED_MID_RUN") &&
-        validFindings.length !== 0
-      )
-    )
-  ) {
-    return undefined;
-  }
-  return {
-    source: record.source,
-    outcome: record.outcome as ReviewOutcome,
-    findings: validFindings,
-    findingsOriginRound,
-  };
-}
-
-function sameFindings(
-  left: readonly PersistedGuardianFinding[],
-  right: readonly PersistedGuardianFinding[],
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function sanitizeGuardianRounds(
-  value: unknown,
-): PersistedGuardianReviewRound[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const rounds: PersistedGuardianReviewRound[] = [];
-  for (let index = 0; index < value.length; index++) {
-    const expectedRound = index + 1;
-    const input = value[index];
-    if (typeof input !== "object" || input === null || Array.isArray(input)) {
-      return undefined;
-    }
-    const round = input as Record<string, unknown>;
-    const architect = sanitizeGuardianRecord(round.architect, expectedRound);
-    const pm = sanitizeGuardianRecord(round.pm, expectedRound);
-    if (
-      round.round !== expectedRound ||
-      !nonBlank(round.reviewedHeadSha) ||
-      !nonBlank(round.headSha) ||
-      architect === undefined ||
-      pm === undefined
-    ) {
-      return undefined;
-    }
-    rounds.push({
-      round: expectedRound,
-      reviewedHeadSha: round.reviewedHeadSha.trim(),
-      headSha: round.headSha.trim(),
-      architect,
-      pm,
-    });
-  }
-
-  for (let index = 0; index < rounds.length; index++) {
-    const round = rounds[index]!;
-    for (const guardian of ["architect", "pm"] as const) {
-      const record = round[guardian];
-      if (record.findingsOriginRound !== null) {
-        const origin = rounds[record.findingsOriginRound - 1]?.[guardian];
-        if (
-          origin?.source !== "INVOKED" ||
-          !sameFindings(record.findings, origin.findings)
-        ) {
-          return undefined;
-        }
-      }
-      if (record.source !== "CACHE") continue;
-      const sourceRound = rounds
-        .slice(0, index)
-        .reverse()
-        .find((prior) => prior.headSha === round.reviewedHeadSha);
-      const sourceRecord = sourceRound?.[guardian];
-      if (sourceRecord?.findingsOriginRound != null) {
-        if (
-          record.findingsOriginRound !==
-            sourceRecord.findingsOriginRound ||
-          !sameFindings(record.findings, sourceRecord.findings)
-        ) {
-          return undefined;
-        }
-      } else if (
-        record.findingsOriginRound !== null ||
-        record.findings.length !== 0
-      ) {
-        return undefined;
-      }
-    }
-    if (
-      round.architect.source === "INVOKED" &&
-      round.architect.outcome === "FIX-BEFORE-SHIP"
-    ) {
-      const priorStableIds = new Set(
-        rounds
-          .slice(0, index)
-          .flatMap((prior) =>
-            prior.architect.findings.map((finding) => finding.stableId),
-          ),
-      );
-      if (
-        !round.architect.findings.some((finding) =>
-          guardianFindingMayBlock({
-            guardian: "architect",
-            round: round.round,
-            hasPriorLineage: priorStableIds.has(finding.stableId),
-            class: finding.class,
-            disposition: finding.disposition,
-            reachableTrigger: finding.reachableTrigger,
-            introducedByReviewedDiff: finding.introducedByReviewedDiff,
-          }),
-        )
-      ) {
-        return undefined;
-      }
-    }
-  }
-  return rounds;
-}
-
-/**
- * Validate the filed-issue record, entry by entry.
- *
- * Unlike the ledger this is *not* all-or-nothing. Every record dropped is one
- * finding the next round may file a second issue for, so keeping the valid
- * majority minimizes duplicates instead of discarding the whole memory over one
- * bad row. A missing or unreadable record degrades to "nothing filed yet",
- * never blocks resumption — the same tolerance the verdict cache gets.
- */
-function sanitizeFiledFindings(
-  value: unknown,
-): PersistedFiledFinding[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const records: PersistedFiledFinding[] = [];
-  const seen = new Set<string>();
-  for (const entry of value) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      continue;
-    }
-    const record = entry as Record<string, unknown>;
-    if (
-      (record.guardian !== "architect" && record.guardian !== "pm") ||
-      !nonBlank(record.stableId) ||
-      !nonBlank(record.fingerprint) ||
-      (record.kind !== "BLOCKER" && record.kind !== "NOTE") ||
-      !Number.isSafeInteger(record.round) ||
-      (record.round as number) < 1 ||
-      !nonBlank(record.issue)
-    ) {
-      continue;
-    }
-    const key = `${record.guardian} ${record.stableId.trim()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    records.push({
-      guardian: record.guardian as GuardianKind,
-      stableId: record.stableId.trim(),
-      fingerprint: record.fingerprint,
-      kind: record.kind,
-      round: record.round as number,
-      issue: record.issue.trim(),
-    });
-  }
-  return records.length > 0 ? records : undefined;
-}
-
 /**
  * Validate a loaded `reviewPhase`, dropping malformed or unfavorable
  * cache entries independently from the all-or-nothing guardian ledger.
+ *
+ * The pre-ship sanity cache is the one entry this hub still owns. Every
+ * guardian field beside it — the two verdict caches, the round ledger, the
+ * filed-issue memory — is normalized by the guardian round persistence module,
+ * which owns what a round record is allowed to claim (#221). Key order follows
+ * the on-disk order, so a file re-written after a load keeps the byte layout it
+ * was read with.
  */
 export function sanitizeReviewPhase(value: unknown): PersistedReviewPhase | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const v = value as {
-    sanity?: unknown;
-    architect?: unknown;
-    pm?: unknown;
-    rounds?: unknown;
-    filedFindings?: unknown;
-  };
-  const out: PersistedReviewPhase = {};
+  const v = value as { sanity?: unknown };
   const sanity = (v.sanity ?? {}) as { treeSha?: unknown; ok?: unknown };
-  if (typeof sanity.treeSha === "string" && sanity.treeSha.length > 0 && sanity.ok === true) {
-    out.sanity = { treeSha: sanity.treeSha, ok: true };
-  }
-  const architect = sanitizeReviewResult(v.architect);
-  if (architect) out.architect = architect;
-  const pm = sanitizeReviewResult(v.pm);
-  if (pm) out.pm = pm;
-  if (v.rounds !== undefined) {
-    const rounds = sanitizeGuardianRounds(v.rounds);
-    if (rounds && rounds.length > 0) out.rounds = rounds;
-  }
-  if (v.filedFindings !== undefined) {
-    const filed = sanitizeFiledFindings(v.filedFindings);
-    if (filed) out.filedFindings = filed;
-  }
+  const out: PersistedReviewPhase = {
+    ...(typeof sanity.treeSha === "string" &&
+    sanity.treeSha.length > 0 &&
+    sanity.ok === true
+      ? { sanity: { treeSha: sanity.treeSha, ok: true as const } }
+      : {}),
+    ...sanitizeGuardianReviewFields(value),
+  };
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -1466,78 +1097,11 @@ export function saveRunState(repoRoot: string, state: RunState) {
 }
 
 /**
- * Atomically replace cache fields and append completed guardian rounds.
- * Re-reads the file first so parallel slice updates and earlier valid rounds
- * are never clobbered. Pass `undefined` to clear the complete review phase.
- *
- * `filedFindings` is carried forward like `rounds` rather than replaced like the
- * caches. It is an append-only memory of issues that exist in the tracker, so
- * dropping it would make the next round file every note a second time — and the
- * round write that would drop it happens on every pass, before the filing
- * decision has even run.
- */
-export function saveReviewPhase(
-  repoRoot: string,
-  prdSlug: string,
-  reviewPhase: PersistedReviewPhase | undefined,
-) {
-  updateRunState(repoRoot, prdSlug, (current) => {
-    if (reviewPhase === undefined) {
-      delete current.reviewPhase;
-    } else {
-      const earlierRounds = current.reviewPhase?.rounds ?? [];
-      const appendedRounds = reviewPhase.rounds ?? [];
-      const filedFindings =
-        reviewPhase.filedFindings ?? current.reviewPhase?.filedFindings;
-      current.reviewPhase = {
-        ...reviewPhase,
-        ...(
-          earlierRounds.length + appendedRounds.length > 0
-            ? { rounds: [...earlierRounds, ...appendedRounds] }
-            : {}
-        ),
-        ...(filedFindings ? { filedFindings } : {}),
-      };
-    }
-  });
-}
-
-/**
- * Append filed-issue records, ignoring identities already recorded.
- *
- * A dedicated writer rather than a `saveReviewPhase` field, because filing
- * happens *after* the round has been persisted and the caches recomputed:
- * routing it through `saveReviewPhase` would re-enter the round-append path for
- * a write that has no round to add. Re-reads the file first, so a record
- * survives whatever else the ship gate wrote in between.
- */
-export function saveFiledFindings(
-  repoRoot: string,
-  prdSlug: string,
-  filed: readonly PersistedFiledFinding[],
-) {
-  if (filed.length === 0) return;
-  updateRunState(repoRoot, prdSlug, (current) => {
-    const reviewPhase = current.reviewPhase ?? {};
-    const records = [...(reviewPhase.filedFindings ?? [])];
-    for (const record of filed) {
-      const duplicate = records.some(
-        (existing) =>
-          existing.guardian === record.guardian &&
-          existing.stableId === record.stableId,
-      );
-      if (duplicate) continue;
-      records.push(record);
-    }
-    current.reviewPhase = { ...reviewPhase, filedFindings: records };
-  });
-}
-
-/**
  * Append the protected-change waivers a gate actually applied for one slice,
  * ignoring a `riskClass` + `path` pair already recorded (#193).
  *
- * Modelled on `saveFiledFindings` and for the same reason: the write happens
+ * Modelled on `recordFiledGuardianFindings`
+ * (`src/guardian-round-persistence.ts`) and for the same reason: the write happens
  * mid-slice, at gate time, when the slice has no persisted terminal record to
  * attach to (ADR 0018). Re-reads state inside the lock so a waiver survives
  * whatever a parallel slice wrote in between, and de-duplicates because two

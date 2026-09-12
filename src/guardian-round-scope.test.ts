@@ -9,7 +9,7 @@ import type {
   PersistedGuardianFinding,
   PersistedGuardianReviewRecord,
   PersistedGuardianReviewRound,
-} from "./run-state.js";
+} from "./guardian-round-records.js";
 
 function finding(
   overrides: Partial<PersistedGuardianFinding> & { stableId: string },

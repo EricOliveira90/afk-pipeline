@@ -42,15 +42,17 @@ import {
   type FindingFilingOutcome,
   type FindingIssueDraft,
 } from "./finding-filing.js";
+import type { PersistedReviewPhase } from "./run-state.js";
+import type {
+  PersistedFiledFinding,
+  PersistedGuardianFinding,
+  PersistedGuardianReviewRecord,
+  PersistedGuardianReviewRound,
+} from "./guardian-round-records.js";
 import {
-  saveFiledFindings,
-  saveReviewPhase,
-  type PersistedFiledFinding,
-  type PersistedGuardianFinding,
-  type PersistedGuardianReviewRecord,
-  type PersistedGuardianReviewRound,
-  type PersistedReviewPhase,
-} from "./run-state.js";
+  guardianRoundPersistence,
+  type GuardianRoundPersistence,
+} from "./guardian-round-persistence.js";
 import type { ResolvedRunScope } from "./slice-scope.js";
 import type { SliceAdoption } from "./slice-lifecycle.js";
 
@@ -543,10 +545,12 @@ export interface RunShipGateArgs {
    * subprocesses, so no suite pays a real dependency install.
    */
   sanityRunCommand?: SanityCommandRunner;
-  /** Internal state-write seam used by direct persistence failure tests. */
-  saveReviewPhase?: typeof saveReviewPhase;
-  /** Internal state-write seam for the filed-issue record. */
-  saveFiledFindings?: typeof saveFiledFindings;
+  /**
+   * Internal persistence seam used by direct tests for the guardian round and
+   * filed-issue write-failure paths. Substituting one operation leaves the rest
+   * bound to the real adapter — the gate decides *when* to persist either way.
+   */
+  guardianPersistence?: Partial<GuardianRoundPersistence>;
 }
 
 function blocked(
@@ -613,7 +617,10 @@ export async function runShipGate(
   } = args;
   const runCommand = args.runCommand ?? defaultRunCommand;
   const sanityRunCommand = args.sanityRunCommand;
-  const persistReviewPhase = args.saveReviewPhase ?? saveReviewPhase;
+  const persistence: GuardianRoundPersistence = {
+    ...guardianRoundPersistence,
+    ...args.guardianPersistence,
+  };
 
   if (signal?.aborted) {
     return blocked(
@@ -685,7 +692,8 @@ export async function runShipGate(
 
   // Read before the reviews run: round 1 reads the branch, later rounds verify
   // the fix against what the ledger already recorded (ADR 0057 decision 2).
-  const priorRounds = cachedReviewPhase?.rounds ?? [];
+  const ledger = persistence.loadGuardianRoundLedger(cachedReviewPhase);
+  const priorRounds = ledger.rounds;
   const roundNumber = priorRounds.length + 1;
   const architectScope = buildGuardianRoundScope({
     rounds: priorRounds,
@@ -1003,7 +1011,7 @@ export async function runShipGate(
     if (roundPersistenceAttempted) return;
     attemptedReviewPhase = reviewPhase;
     const round = completedRound(headSha);
-    persistReviewPhase(repoRoot, runSlug, {
+    persistence.appendCompletedGuardianRound(repoRoot, runSlug, {
       ...reviewPhase,
       rounds: [round],
     });
@@ -1139,8 +1147,7 @@ export async function runShipGate(
     ...(persistedRound ? [persistedRound] : []),
   ];
   const foldedLedger = foldGuardianLedger(ledgerRounds);
-  const alreadyFiled = cachedReviewPhase?.filedFindings ?? [];
-  const persistFiledFindings = args.saveFiledFindings ?? saveFiledFindings;
+  const alreadyFiled = ledger.filedFindings;
 
   /**
    * File one batch of drafts and record what was opened.
@@ -1174,7 +1181,7 @@ export async function runShipGate(
     });
     if (outcome.filed.length === 0) return outcome;
     try {
-      persistFiledFindings(repoRoot, runSlug, outcome.filed);
+      persistence.recordFiledGuardianFindings(repoRoot, runSlug, outcome.filed);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       const byStableId = new Map(

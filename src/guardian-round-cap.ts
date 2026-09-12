@@ -1,6 +1,6 @@
 import type { ReviewOutcome } from "./artifacts.js";
 import { isOperationalReviewOutcome } from "./artifacts.js";
-import type { PersistedGuardianReviewRound } from "./run-state.js";
+import type { PersistedGuardianReviewRound } from "./guardian-round-records.js";
 
 /**
  * Unfavorable guardian rounds the gate spends before it stops fixing.
