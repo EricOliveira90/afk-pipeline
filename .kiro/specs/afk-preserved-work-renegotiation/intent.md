@@ -8,9 +8,9 @@ valuable commits.
 
 ## Problem
 
-AFK can resume a preserved slice branch, but resume trusts the existing locked
-slice contract. It can also revise a locked contract after narrow gate evidence,
-but that path is not an operator recovery transition and cannot extend the
+AFK can resume a preserved slice branch, but resume trusts its existing locked
+slice contract. It can revise a locked contract after narrow gate evidence, but
+that path is not an operator recovery transition and cannot extend the
 persisted scope of record. A stale lock therefore leaves maintainers choosing
 between destructive restart and unsupported artifact/state surgery.
 
@@ -18,51 +18,58 @@ between destructive restart and unsupported artifact/state surgery.
 
 Add one explicit preserve-work renegotiation transition:
 
-- `--renegotiate-stale <slice|ghIssue>[,...]` names existing scoped slices.
+- `--renegotiate-stale <slice|ghIssue>` names exactly one existing scoped
+  slice.
 - `--recovery-reason <text>` is required and recorded.
 - `--extend-scope <slice|ghIssue>[,...]` is optional, additive-only, and valid
   only with `--renegotiate-stale`.
 
-The transition preserves the slice branch, registered worktree, commits,
-resume counters and historical artifacts. Before reopening the lock it must
-refresh the slice branch from the current feature branch, refuse without
-mutation on conflict, capture branch-aware planning facts, and archive the
-accepted contract pair. It then reruns exploration and full contract
-negotiation; no generator may run until a replacement lock is accepted and
-mechanically gated.
+The transition never merges, resets, rebases or otherwise changes a branch.
+Admission requires a clean registered preserved worktree whose slice branch
+already contains the current feature-branch head and still has commits ahead
+of it.
 
-If a stale slice was split, `--extend-scope` may add AFK slices already
-declared by current `issues.md` and allowed by current `afk.json`. It never
-removes or rewrites an existing scope identity. Every added slice's blockers
-must already be in the scope of record or be added by the same action.
+AFK performs eligibility checks read-only, then creates and validates an
+immutable snapshot of the accepted contract pair. The first admitted mutation
+is a write-ahead `PENDING` recovery record that references that snapshot and
+the original fingerprints. Only then may AFK reopen the pair and rerun explorer
+plus full contract negotiation. No generator may run while an attempt is
+pending or while the current pair differs from the pair certified by completed
+lineage.
 
-The run state keeps append-only lineage for an admitted operator action,
-reason, target and added identities, branch/head/base facts, prior and
-replacement lock fingerprints, and pending/completed/refused outcome.
-Preflight refusals happen before mutation and create no lineage entry. Once an
-action is admitted, its record is pending while work can safely resume; a
-crash or failed negotiation leaves it pending. It becomes completed only after
-the replacement lock is accepted, or refused only when a deterministic
-post-admission guard terminates the action after rollback and retrying the same
-request cannot make progress.
+An admitted attempt ends in one of three ways:
+
+- `COMPLETED` after a replacement lock succeeds and one atomic run-state write
+  both completes the attempt and admits the entire optional scope-extension
+  set;
+- `ROLLED_BACK` only after the prior pair has been restored and verified
+  byte-for-byte; or
+- `ROLLBACK_FAILED`, a fail-closed state that blocks all dispatch until a later
+  launch restores and verifies the pair.
+
+A retry is a new attempt. A launch that finds an unresolved attempt reconciles
+it before ordinary resume. Proposed scope additions live only in the pending
+record until completion, so a crash cannot make them executable scope.
 
 ## Constraints
 
 - Preserve ADR 0039's rule: only `--force-restart` may discard unmerged
   commits.
-- Reuse ADR 0055's accepted-pair transaction and lock gate.
-- Do not broaden focused scope revision; this is a separate, explicit
-  operator transition.
-- Persisted scope extension is additive and compare-and-swapped under the
-  run-state lock.
-- Historical PASS identities and prior artifacts remain lineage; they are not
-  deleted or reassigned.
+- Reuse ADR 0055's validation, lock gate and provenance, but do not rely on its
+  process-local rollback snapshot for crash recovery.
+- Do not broaden focused scope revision; this is a separate explicit operator
+  transition.
+- Persisted scope extension is additive and committed with recovery completion
+  under the ADR 0056 run-state lock.
+- Historical PASS identities, resume counters and prior artifacts remain
+  lineage; they are not deleted or reassigned.
 - No AFK launch is part of this PRD authoring work.
 
 ## Out of scope
 
 - Automatic stale-contract detection.
+- Multiple renegotiation targets in one invocation.
+- Automatic feature-branch merging or merge-conflict resolution.
 - Removing, renumbering or replacing identities in the scope of record.
-- Resolving feature-branch merge conflicts.
 - Editing a slice contract by hand, destructive restart, adoption, or
   `clean-failed`.

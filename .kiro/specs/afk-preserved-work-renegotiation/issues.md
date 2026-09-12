@@ -5,8 +5,8 @@
 
 | Slice | GH Issue | Title | Type | Blocked by | User stories covered |
 |-------|----------|-------|------|------------|----------------------|
-| 01 | #277 | Preserve-work renegotiation | AFK | — | US-1, US-2, US-3, US-4 |
-| 02 | #278 | Additive split-scope extension | AFK | #277 | US-5, US-6 |
+| 01 | #277 | Crash-recoverable preserve-work renegotiation | AFK | — | Recovery admission, rollback and completion |
+| 02 | #278 | Atomic additive split-scope extension | AFK | #277 | Scope validation, holding and completion commit |
 
 ## Expected wave structure
 
@@ -16,11 +16,11 @@
 
 ## Why the cut falls here
 
-- #277 is complete without a re-slice: an operator can refresh planning and
-  replace a stale lock while keeping the existing worktree and commits.
-- #278 extends that same action to admit newly split slices. It depends on
-  #277's command, transaction and lineage instead of creating a second scope
-  mutation path.
+- #277 establishes the single-target write-ahead state machine, immutable
+  snapshot, crash reconciliation and fail-closed rollback semantics.
+- #278 carries an atomic set of additions inside that same pending attempt and
+  commits it only with successful recovery completion. It creates no second
+  scope-mutation path.
 - Both slices prefer pure state/decision tests and additions to existing
   spawned fixtures, following `AGENTS.md`.
 
