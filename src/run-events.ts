@@ -121,7 +121,14 @@ export type RunEventPayload =
       ghIssue: string;
       sliceNumber: string;
       round: number;
-      role: PromptAssemblyRole | "evaluator-qa" | "evaluator-uat";
+      role:
+        | PromptAssemblyRole
+        | "evaluator-qa"
+        | "evaluator-uat"
+        // The final evaluator (#96 B-06) is journaled the same way and for the
+        // same reason: it has a manifest-only role contract today, so its
+        // reading time has no `prompt-assembly` event to pair with.
+        | "evaluator-final";
       /** Evaluator attempt within the round, when the role retries. */
       attempt?: number;
       /** Provider-exposed token names and counts, never renamed. */
@@ -175,6 +182,27 @@ export type RunEventPayload =
     }
   | {
       /**
+       * One human-authored protected-change waiver a gate actually applied
+       * (#193 D5/D23). Emitted per waiver rather than per gate phase, because
+       * the operator-meaningful unit is the authorization: this is the event
+       * that turns "the gate passed" into "the gate passed because a named
+       * human signed off on this exact path, for this reason".
+       *
+       * All four of D5's fields travel with it. `run-summary.md`'s
+       * `## Applied Waivers` section is rendered from this event alone, so a
+       * reader of `events.jsonl` and a reader of the summary see one record.
+       */
+      type: "waiver-applied";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      riskClass: string;
+      path: string;
+      author: string;
+      reason: string;
+    }
+  | {
+      /**
        * One behavior id's coverage verdict from one acceptance-gate attempt
        * (#85 AC6). The aggregate gate reports a single `gate-outcome`, so
        * without this event the per-behavior detail exists only as prose inside
@@ -198,6 +226,91 @@ export type RunEventPayload =
       treeId: string;
       evidenceArtifactId: string;
       logArtifactId: string;
+    }
+  | {
+      /**
+       * The approved baseline one deterministic PASS established (#91 AC5,
+       * PRD D10): the candidate checkpoint the evaluator graded, and where
+       * the orchestrator wrote the artifact that is its canonical record.
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same way
+       * `behavior-coverage` arrived.
+       */
+      type: "approved-baseline";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      treeId: string;
+      commit: string;
+      /** Repo-relative path of `approved-baseline.json`. */
+      artifactId: string;
+    }
+  | {
+      /**
+       * A final evaluation that did not happen because it did not need to
+       * (#96 B-02, PRD D20): the final checkpoint tree was byte-identical to
+       * the approved baseline's, so zero final-evaluator invocations were
+       * dispatched. Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same
+       * way `behavior-coverage` and `approved-baseline` arrived.
+       *
+       * One of exactly three places the reuse is recorded, with the run-state
+       * `finalEvaluations` decision and the slice's `run-summary.md` section.
+       * Deliberately *not* a `GateEvidence` field: D17's gate-cache `reused`
+       * flag says a gate did not re-run for a tree, which is a different
+       * subject and a different claim, and a reader who conflated them would
+       * think a gate was skipped.
+       */
+      type: "final-evaluation-reuse";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      /** The final checkpoint tree object ID — not a commit. */
+      finalTreeId: string;
+      /** The approved baseline tree it equalled, byte for byte. */
+      baselineTreeId: string;
+    }
+  | {
+      /**
+       * One path the evaluator changed in its disposable review worktree
+       * that neither the copy-back allowlist nor the attempt's seed manifest
+       * explains (#91 AC2/AC6). Descriptive: the write was already discarded
+       * by not being copied back, so nothing acts on this event — it is the
+       * record that it happened.
+       */
+      type: "reviewer-write-violation";
+      ghIssue: string;
+      sliceNumber: string;
+      round: number;
+      attempt: number;
+      /** Repo-relative path inside the review worktree. */
+      path: string;
+    }
+  | {
+      /**
+       * One scoped merge-resolution round (#132 AC8). Recorded distinctly from
+       * the generator repair rounds it borrows its prompt from, because an
+       * operator reading "the generator ran again" needs to know this run was
+       * a merge conflict being resolved under a held merge mutex, not a red
+       * gate being repaired. Additive, so `EVENTS_SCHEMA_VERSION` stays 1 —
+       * the same way `behavior-coverage` and `approved-baseline` arrived.
+       *
+       * `verdict` and `durationMs` are the two fields the round owes. There is
+       * deliberately no cost field: the round's provider cost is already
+       * carried by the invocation events its generator dispatch emits, and a
+       * second number derived from the same dispatch would be a figure two
+       * readers could disagree about.
+       */
+      type: "merge-resolution-round";
+      ghIssue: string;
+      sliceNumber: string;
+      /** How the round ended (`MergeResolutionVerdict`). */
+      verdict: string;
+      durationMs: number;
+      /** Paths the re-resolved base conflicted on. */
+      conflictedPaths?: string[];
+      /** The resolved tree the gate re-run proved, when the round got that far. */
+      treeId?: string;
+      /** Human-readable one-liner, the same text the run log carries. */
+      detail?: string;
     }
   | {
       /**

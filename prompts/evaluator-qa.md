@@ -7,6 +7,56 @@ locked slice contract. Functional correctness remains a hard gate.
 
 {{QA_SCOPE}}
 
+# Where you are working
+
+Deterministic candidate QA runs in a **disposable worktree** checked out at the
+candidate snapshot the gates graded. It is not the generator's worktree, and it
+is deleted when this stage ends.
+
+Two consequences, and they are mechanical, not advisory:
+
+- **Only `{{SLICE_DIR}}/qa-review.json` and `{{REPORT_PATH}}` leave this
+  worktree.** Every other write you make here — a fixed source file, a scratch
+  script, a note, an edited contract — is discarded when the worktree is
+  removed. Nothing carries it back. A defect you "fix" is a defect nobody sees
+  and nobody ships; report it instead.
+- **You may probe freely.** Because the tree is disposable, running the code,
+  adding a temporary test, or patching a file to test a hypothesis costs the
+  candidate nothing. Do it whenever it turns a suspicion into evidence.
+
+The change summary for this candidate — commits, changed files, and per-file
+diff stats, generated from git — is at `{{CHANGE_SUMMARY_PATH}}` relative to
+the repository root. Read it first: it is what the slice actually changed.
+
+# What you are judging
+
+Four questions, in this order. A finding always answers one of them.
+
+1. **Intent** — does the observable behavior match what the locked contract
+   said this slice would do?
+2. **Boundaries** — did the change stay inside the contract's declared file
+   list, and where it did not, which remedy applies (see Pass 1 below)?
+3. **Preservation** — does everything the contract listed as preserved still
+   work? Check it, do not assume it.
+4. **Test honesty and sufficiency** — do the tests assert the behavior they
+   claim, and would they fail if the behavior broke? A test that cannot fail,
+   asserts a mock, or covers a behavior ID in name only is a finding.
+
+# Probes
+
+A probe is any temporary change you make in this disposable worktree to answer
+a question: a print statement, an extra test, a reverted line, a one-off
+script.
+
+- Probes are allowed here, and only here.
+- Report a probe's *result* by quoting it in the finding's `evidence` field —
+  the command you ran, the output you saw, the line you changed to make the
+  behavior appear.
+- Never hand a probe to the generator. No field of the canonical artifact
+  carries probe code, no probe file survives this stage, and there is no
+  mechanism by which one reaches the next writer. A finding's
+  `clearCondition` is an observable condition, never a patch.
+
 # Invariants
 
 - Write the final report to `{{REPORT_PATH}}`.
@@ -28,7 +78,7 @@ locked slice contract. Functional correctness remains a hard gate.
 
 Also read:
 - `{{SLICE_DIR}}/contract.md` (must be `Status: LOCKED`)
-- `{{SLICE_DIR}}/handoff.md`
+- `{{SLICE_DIR}}/acceptance-manifest.json`
 - Every ADR cited by the contract
 - Only these dependency-relevant sibling handoffs:
 {{SIBLING_HANDOFFS}}

@@ -6,7 +6,9 @@ import {
   CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
   CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
   EXPLORER_CONTEXT_MANIFEST,
+  FINAL_EVALUATOR_CONTEXT_MANIFEST,
   GENERATOR_CONTEXT_MANIFEST,
+  MERGE_RESOLUTION_SITUATION_SECTION,
   PLANNER_CONTEXT_MANIFEST,
   assembleContractEvaluatorInitialEnvelope,
   assembleContractEvaluatorRevisionEnvelope,
@@ -21,10 +23,13 @@ import {
   projectGeneratorRepairSituation,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
+  mergeResolutionBlockRoom,
+  withMergeResolutionSituation,
   validateContextEnvelopeManifest,
   validateExplorerEvidenceMap,
   type ContextEnvelopeManifest,
 } from "./context-envelope.js";
+import { boundMergeResolutionBlock } from "./merge-resolution.js";
 import type { ContractReviewFinding } from "./contract-review.js";
 import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import { readFileSync, readdirSync } from "node:fs";
@@ -2124,6 +2129,7 @@ describe("role contract manifests", () => {
     PLANNER_CONTEXT_MANIFEST,
     CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
     CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
+    FINAL_EVALUATOR_CONTEXT_MANIFEST,
     GENERATOR_CONTEXT_MANIFEST,
   ];
 
@@ -2282,6 +2288,108 @@ describe("role contract manifests", () => {
       "sanity-command-set",
       "base-gate-authorization",
     ]);
+  });
+
+  /**
+   * Slice 03 reshapes the deferred manifest in place instead of replacing it
+   * (#91 AC4). Four properties are load-bearing once deterministic QA reads a
+   * disposable worktree: the role ID that names the prompt, the single output
+   * artifact pair, the write scope the reviewer is instructed to stay inside,
+   * and `change-summary` leading the envelope now that the orchestrator
+   * actually produces one before the invocation.
+   */
+  it("[behavior:B-07] keeps the candidate evaluator's reshaped manifest load-bearing", () => {
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.role).toBe("evaluator-qa");
+    // D9 introduces no second candidate verdict artifact name.
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.outputArtifact).toBe(
+      "qa-review-pair",
+    );
+    // The two canonical artifacts, and nothing else, are what the reviewer is
+    // told it may write — the copy-back allowlist is what enforces it.
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.allowedWriteScope).toEqual([
+      "slice/qa-review.json",
+      "slice/qa-report.md",
+    ]);
+    // The change summary is read first because it is generated first.
+    expect(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.inputOrder[0]).toBe(
+      "change-summary",
+    );
+    // No handoff class reaches this role, in either list's spelling.
+    const accepted: readonly string[] =
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses;
+    expect(accepted.filter((entry) => entry.includes("handoff"))).toEqual([]);
+    expect(
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses,
+    ).toContain("candidate-handoff");
+    expect(() =>
+      validateContextEnvelopeManifest(CANDIDATE_EVALUATOR_CONTEXT_MANIFEST),
+    ).not.toThrow();
+  });
+
+  it("[behavior:B-06] declares the evaluator-final role contract on the existing schema", () => {
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "evaluator-final",
+      outputArtifact: "final-review-pair",
+      inlineSizeBudgetBytes: 65_536,
+    });
+    // The same completeness check every other role contract passes — a new
+    // entry on the existing schema, not a parallel one.
+    expect(() =>
+      validateContextEnvelopeManifest(FINAL_EVALUATOR_CONTEXT_MANIFEST),
+    ).not.toThrow();
+    // Exactly the two artifacts the copy-back allowlist admits (#96 B-07).
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST.allowedWriteScope).toEqual([
+      "slice/final-review.json",
+      "slice/final-report.md",
+    ]);
+    // The baseline → final change summary is the input the review starts from.
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST.inputOrder[0]).toBe(
+      "change-summary",
+    );
+    // No handoff and no prior stage's findings reach this role.
+    const accepted: readonly string[] =
+      FINAL_EVALUATOR_CONTEXT_MANIFEST.acceptedInputArtifactClasses;
+    expect(accepted.filter((entry) => entry.includes("handoff"))).toEqual([]);
+    expect(FINAL_EVALUATOR_CONTEXT_MANIFEST.omittedArtifactClasses).toContain(
+      "other-qa-stage-findings",
+    );
+  });
+
+  it("[behavior:B-06] ships an evaluator-final prompt asking exactly the two questions", () => {
+    const prompt = readFileSync(join(PROMPTS_DIR, "evaluator-final.md"), "utf-8");
+
+    expect(prompt).toContain("# The two questions");
+    expect(prompt).toContain("**Preservation**");
+    expect(prompt).toContain("**Gate-invisible drift**");
+    // Both canonical artifacts are named, and the change summary is read first.
+    expect(prompt).toContain("final-review.json");
+    expect(prompt).toContain("final-report.md");
+    expect(prompt).toContain("{{CHANGE_SUMMARY_PATH}}");
+    // Every repair the schema admits is stated for the class that admits it.
+    expect(prompt).toContain("PRESERVATION");
+    expect(prompt).toContain("GATE_INVISIBLE_DRIFT");
+    expect(prompt).toContain("BASELINE_IS_WRONG");
+  });
+
+  it("[behavior:B-12] documents the final-evaluation module and prompt in ARCHITECTURE.md, with every named path present", () => {
+    // The explorer and planner read this file, so a row naming a path that
+    // does not exist is a lie the whole pipeline inherits.
+    const architecture = readFileSync(
+      join(repoRootWithDocs, "ARCHITECTURE.md"),
+      "utf-8",
+    );
+
+    expect(architecture).toContain("src/final-evaluation.ts");
+    expect(architecture).toContain("prompts/evaluator-final.md");
+    for (const path of ["src/final-evaluation.ts", "prompts/evaluator-final.md"]) {
+      expect(
+        readFileSync(join(repoRootWithDocs, path), "utf-8").length,
+        path,
+      ).toBeGreaterThan(0);
+    }
+    // Cap stated in the file's own header.
+    expect(architecture.trimEnd().split("\n").length).toBeLessThanOrEqual(150);
   });
 
   it("clamps a budget override larger than the manifest budget and applies a smaller one", () => {
@@ -2601,5 +2709,190 @@ describe("rendered block order validation", () => {
         roleLabel: "Generator",
       }),
     ).toThrow(/violating the manifest's declared input order/);
+  });
+});
+
+describe("the merge-resolution data block in the repair situation (#132)", () => {
+  const sliceDir = ".kiro/specs/demo/slices/06-merge-resolution-round";
+  const stuckBody = `STUCK-DIAGNOSIS-BODY\n${"diagnosis line\n".repeat(525)}`;
+  const commitLog = Array.from(
+    { length: 40 },
+    (_unused, index) =>
+      [
+        `commit ${String(index).padStart(40, "0")}`,
+        "Author: Generator <generator@example.com>",
+        "",
+        `    feat(demo): behavior B-${index} (#132)`,
+        "",
+      ].join("\n"),
+  ).join("");
+
+  const situationFacts = [
+    "Merge resolution round: 1 of 1.",
+    "# Commit log",
+    commitLog,
+    "# Preserved STUCK evidence",
+    ["# Why you were declared STUCK", "", "```", stuckBody.trim(), "```"].join(
+      "\n",
+    ),
+  ].join("\n\n");
+
+  const block = boundMergeResolutionBlock({
+    worktreeDir: "C:/tmp/afk-slice-06",
+    featureRef: "feat/demo",
+    conflictDetails: "CONFLICT (content): Merge conflict in src/shared.ts",
+    hunks: [
+      {
+        path: "src/shared.ts",
+        // A diff whose own body contains what looks like a level-1 heading and
+        // a fence: the situation's section extents are computed fence-aware,
+        // and this is the payload that would break them if they were not.
+        diff: "@@ -1,3 +1,7 @@\n+# not a heading\n+```\n+MERGE-BLOCK-HUNK\n",
+      },
+    ],
+    siblingDiffs: [
+      { path: "src/sibling.ts", diff: "@@ -1 +1 @@\n+MERGE-BLOCK-SIBLING\n" },
+    ],
+    budgetBytes: 8_000,
+  });
+
+  const assemble = (
+    repairSituation: string,
+    additionalArtifactIds: readonly string[] = [`${sliceDir}/stuck.md`],
+  ) =>
+    assembleGeneratorEnvelope({
+      mode: "repair",
+      sliceDir,
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm typecheck && pnpm test:fast",
+      migrationReservation: "NO-MIGRATIONS",
+      additionalArtifactIds,
+      failureSet: { findings: [], gates: [] },
+      repairSituation,
+    });
+
+  it("B-02: arrives inside the existing {{REPAIR_SITUATION}} slot under a known level-1 heading, with no new prompt file", () => {
+    const situation = withMergeResolutionSituation(situationFacts, block);
+    const result = assemble(situation);
+
+    // One slot, one template: the block is part of the repair situation the
+    // existing prompt already interpolates.
+    const template = readFileSync(
+      join(PROMPTS_DIR, "generator-repair.md"),
+      "utf-8",
+    );
+    expect(template).toContain("{{REPAIR_SITUATION}}");
+    expect(
+      readdirSync(PROMPTS_DIR).filter((name) => /merge|conflict|resol/i.test(name)),
+    ).toEqual([]);
+
+    expect(result.prompt).toContain(`# ${MERGE_RESOLUTION_SITUATION_SECTION}`);
+    expect(result.prompt).toContain("MERGE-BLOCK-HUNK");
+    expect(result.prompt).toContain("MERGE-BLOCK-SIBLING");
+    expect(result.prompt).toContain("### src/shared.ts");
+    // The heading is part of the situation's own vocabulary, so the section
+    // whose extents matter — the quoted STUCK evidence — is still recognised
+    // and still replaced by a pointer even with the block's fences present.
+    expect(result.prompt).not.toContain("STUCK-DIAGNOSIS-BODY");
+    expect(result.prompt).toContain(
+      `Read it at \`${sliceDir}/stuck.md\` in your worktree.`,
+    );
+    // And the commit-log section is still the one that yields to the budget.
+    expect(result.prompt).toContain(`commit ${"0".repeat(39)}0`);
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+  });
+
+  it("B-02: the block ends where its own section ends, so a following section keeps its extent", () => {
+    expect(withMergeResolutionSituation("FACTS", "BLOCK")).toBe(
+      `FACTS\n\n# ${MERGE_RESOLUTION_SITUATION_SECTION}\n\nBLOCK\n`,
+    );
+    // A situation whose block is followed by another known section: if the
+    // block's own fenced diffs bled past its heading, the handoff section would
+    // not be recognised and its quoted body would stay inline.
+    const handoffBody = `HANDOFF-BODY\n${"handoff line\n".repeat(400)}`;
+    const result = assemble(
+      withMergeResolutionSituation(situationFacts, block) +
+        `\n# Prior handoff\n\n` +
+        ["# Your prior handoff", "", "```", handoffBody.trim(), "```"].join(
+          "\n",
+        ) +
+        "\n",
+      [`${sliceDir}/stuck.md`, `${sliceDir}/handoff.md`],
+    );
+
+    expect(result.prompt).toContain("MERGE-BLOCK-HUNK");
+    expect(result.prompt).not.toContain("HANDOFF-BODY");
+    expect(result.prompt).toContain(
+      `Read it at \`${sliceDir}/handoff.md\` in your worktree.`,
+    );
+  });
+
+  it("B-10: a block sized to mergeResolutionBlockRoom leaves the assembled repair prompt inside the inline-size budget", () => {
+    const room = mergeResolutionBlockRoom({
+      mode: "repair",
+      sliceDir,
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm typecheck && pnpm test:fast",
+      migrationReservation: "NO-MIGRATIONS",
+      additionalArtifactIds: [`${sliceDir}/stuck.md`],
+      failureSet: { findings: [], gates: [] },
+      repairSituation: situationFacts,
+    });
+    expect(room).toBeGreaterThan(0);
+
+    const oversized = boundMergeResolutionBlock({
+      worktreeDir: "C:/tmp/afk-slice-06",
+      featureRef: "feat/demo",
+      conflictDetails: "CONFLICT (content): Merge conflict in src/shared.ts",
+      hunks: [
+        { path: "src/shared.ts", diff: `@@ -1 +1 @@\n+${"x".repeat(400)}` },
+      ],
+      siblingDiffs: Array.from({ length: 40 }, (_unused, index) => ({
+        path: `src/sibling-${index}.ts`,
+        diff: `@@ -1 +1 @@\n+${"y".repeat(4_000)}`,
+      })),
+      budgetBytes: room,
+    });
+
+    expect(Buffer.byteLength(oversized, "utf-8")).toBeLessThanOrEqual(room);
+    expect(oversized).toContain("omitted to fit the inline-size budget");
+    const result = assemble(
+      withMergeResolutionSituation(situationFacts, oversized),
+    );
+    expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    );
+  });
+
+  it("B-10: a stricter budget override narrows the room rather than being ignored", () => {
+    const input = {
+      mode: "repair" as const,
+      sliceDir,
+      contractView: "LOCKED-CONTRACT-VIEW",
+      acceptanceManifest,
+      patternsAndHarness: "PATTERNS-AND-HARNESS",
+      testCommand: "pnpm typecheck && pnpm test:fast",
+      migrationReservation: "NO-MIGRATIONS",
+      failureSet: { findings: [], gates: [] },
+      repairSituation: situationFacts,
+    };
+    const wide = mergeResolutionBlockRoom(input);
+    const narrow = mergeResolutionBlockRoom({
+      ...input,
+      inlineSizeBudgetBytes: 32_768,
+    });
+
+    expect(narrow).toBeLessThan(wide);
+    // A wider override is not room the round may spend: the manifest's budget
+    // is the ceiling either way.
+    expect(
+      mergeResolutionBlockRoom({ ...input, inlineSizeBudgetBytes: 1_000_000 }),
+    ).toBe(wide);
   });
 });

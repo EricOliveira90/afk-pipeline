@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06"],
+      "summary": "A prefix collision on the merge retry records terminal CONFLICT carrying git.mergePendingReason's text, so the operator-facing detail promises a deferral the recorded phase does not give.",
+      "evidence": "src/wave.ts:645-660 maps `retry.kind === \"collision\"` to a synthetic conflict attempt whose details are `The resolved tree could not be merged: ` + `git.mergePendingReason(...)` (src/git.ts:795-803). That reason string ends with \"merge deferred; the next run retries the merge (no agent, no regeneration)\", while the outcome the wave then records for this attempt is terminal CONFLICT, which no next run retries. No consumer parses the string (only src/orchestrator.ts:7636 and src/wave.ts:674 reuse it, both on genuine MERGE-PENDING paths), so the impact is operator-facing text only.",
+      "expected": "Contract B-06: a collision on the retry \"records terminal `CONFLICT` — the collision case included, since a round has already been spent and `MERGE-PENDING` is reserved for the untouched first-attempt path\".",
+      "observed": "The phase is correct — terminal CONFLICT, no second round — but the detail an operator reads says the merge was deferred and the next run will retry it.",
+      "clearCondition": "The retry-collision detail names the colliding prefixes without asserting a deferral or a next-run retry (for example, its own reason text rather than mergePendingReason's).",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06", "B-07"],
+      "summary": "Two scenarios the locked test plan names have no test: the retry-collision mapping in src/wave.ts and the orchestrator seam runSliceMergeResolution, including its prove-after-dispatch acceptedPairIntact mechanism.",
+      "evidence": "The test plan lists \"Given a retry whose `git.attemptMerge` returns a prefix collision rather than a fast-forward … terminal `CONFLICT` is persisted — not `MERGE-PENDING`\". Grepping the suite for that path finds only the production lines: `retry.kind` and \"The resolved tree could not be merged\" occur solely at src/wave.ts:649 and :655, and `runSliceMergeResolution` occurs solely at src/orchestrator.ts:6576 and :7837 — no test file references either. The wave-level fixture (src/wave-migrations.test.ts:1443, 1452) supplies its own stub resolver and always returns RESOLVED, so neither the retry-collision branch nor the orchestrator's envelope/declaration/event assembly is executed by any test. The acceptedPairIntact attestation is covered only by a hand-built declaration (src/merge-resolution.test.ts:337), not by the orchestrator code that mutates scopeGateInput after the generator returns (src/orchestrator.ts:6700-6720).",
+      "expected": "The contract's Test plan enumerates the retry prefix-collision scenario as an assertion this slice ships.",
+      "observed": "Every behavior ID B-01…B-10 does have a named test (DoD met) and the marker-refusal half of B-06 is covered by src/merge-resolution.test.ts:282, but the retry-collision branch and the whole orchestrator seam are unexercised.",
+      "clearCondition": "A test drives the merge path (or the wave seam directly) with a retry whose attemptMerge returns a collision and asserts terminal CONFLICT with no second round; ideally one assertion also reaches runSliceMergeResolution so the acceptedPairIntact mutation is proven through the caller that performs it.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

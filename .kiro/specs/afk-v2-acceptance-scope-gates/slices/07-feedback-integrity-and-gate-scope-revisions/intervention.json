@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "cause": {
+    "kind": "DETERMINISTIC_GATE_EXHAUSTION",
+    "interventionClass": "IMPLEMENTATION_INTERVENTION"
+  },
+  "interventionClass": "IMPLEMENTATION_INTERVENTION",
+  "phase": "deterministic-qa",
+  "reasonCodes": [
+    "DETERMINISTIC_GATE_EXHAUSTED"
+  ],
+  "blockerIds": [
+    "tests"
+  ],
+  "summary": "AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests.",
+  "findingLineage": [
+    {
+      "stableId": "QA-01",
+      "currentId": "QA-01",
+      "state": "RESOLVED",
+      "disposition": "RESOLVED",
+      "occurrences": 4,
+      "summary": "`## Applied Waivers` repeated one authorization once per implementation round with no column to tell the rows apart.",
+      "evidence": "Repair commit 8270065 `src/logger.ts:476-505`: `writeSummary` now builds a `firstApplications` Map keyed `${event.ghIssue} ${event.riskClass} ${event.path}` that keeps the first `waiver-applied` event, and the table header gained a `Round` column (`| Slice | Round | Risk class | Path | Author | Reason |`). `src/logger.test.ts:302-354` adds `it(\"[behavior:B-14] QA-01: renders one row per authorization, not one per round\")`, which emits two `waiver-applied` events for `deleted-test` + `src/legacy-parser.test.ts` in rounds 1 and 2 plus one for a second path in round 2, then asserts `rows` has length 2 and `toBe`-matches `| 193 | 1 | deleted-test | src/legacy-parser.test.ts | eric | ... |` and `| 193 | 2 | deleted-test | src/other-parser.test.ts | eric | ... |`. `pnpm vitest run src/logger.test.ts` -> `Test Files 1 passed (1) / Tests 33 passed (33)`. `round` is a required `number` on the event variant (`src/run-events.ts:191`) and the orchestrator emits it from the round variable (`src/orchestrator.ts:6058`), so no row can render `undefined`. The P-06 omission case (`src/logger.test.ts:356-380`) still asserts `not.toContain(\"## Applied Waivers\")`.",
+      "clearCondition": "The summary either de-duplicates on slice + risk class + path or carries the round the event already holds, with a logger test covering two `waiver-applied` events for one waiver in different rounds.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r4-a1.json",
+        ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r4-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-02",
+      "currentId": "QA-02",
+      "state": "RESOLVED",
+      "disposition": "RESOLVED",
+      "occurrences": 2,
+      "summary": "The handoff attributed two shipped behaviors to functions and files that did not hold them.",
+      "evidence": "handoff.md:11 now reads `B-02: src/afk-manifest.ts:trimUnclaimedMigrationPrefixes round-trips protectedChangeWaivers unchanged through the rewrite`; handoff.md:36 now reads `B-14/P-06: src/logger.ts:writeSummary renders ## Applied Waivers`. Both named symbols exist: `trimUnclaimedMigrationPrefixes` in src/afk-manifest.ts and `writeSummary` in src/logger.ts.",
+      "clearCondition": "`handoff.md` names `trimUnclaimedMigrationPrefixes` for B-02 and `src/logger.ts` for B-14.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r2-a1.md"
+      ]
+    }
+  ],
+  "attemptedRepairs": [
+    {
+      "phase": "deterministic-qa",
+      "revision": 4,
+      "candidateTreeId": "f0f1b223397f6af2c8d33355da5055d7bd58a033",
+      "activeBlockingIds": [
+        "tests"
+      ]
+    }
+  ],
+  "preservedCandidate": {
+    "branch": "afk-claude-code/afk-v2-acceptance-scope-gates-slice-07-feedback-integrity-and-gate-scope-revisions",
+    "treeId": "f0f1b223397f6af2c8d33355da5055d7bd58a033",
+    "phase": "deterministic-qa",
+    "revision": 4,
+    "recoveryRef": "refs/afk/recovery/afk-v2-acceptance-scope-gates-claude-code/193/deterministic-qa-r4-f0f1b223397f6af2c8d33355da5055d7bd58a033",
+    "recoveryCommit": "090a0504221345c1feb762a05fdaca95c475291e"
+  },
+  "supportingEvidence": [
+    ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r2-a1.json",
+    ".afk/artifacts/afk-v2-acceptance-scope-gates-claude-code/slice-07/reviews/qa-review-r4-a1.json",
+    ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r2-a1.md",
+    ".kiro/specs/afk-v2-acceptance-scope-gates/slices/07-feedback-integrity-and-gate-scope-revisions/qa-report-r4-a1.md",
+    "C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260911-134538/gates/s07/attempt-399094e44381.json",
+    "C:/Code/afk/.afk/logs/afk-v2-acceptance-scope-gates-claude-code/run-20260911-134538/gates/s07/gate-logs/399094e44381-03-tests.log"
+  ],
+  "requiredOperatorAction": "Inspect tests on preserved candidate tree f0f1b223397f6af2c8d33355da5055d7bd58a033, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice."
+}

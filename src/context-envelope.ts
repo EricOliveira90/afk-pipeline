@@ -587,6 +587,17 @@ export const CONTRACT_EVALUATOR_CONTEXT_MANIFEST = {
  * contract; it is validated by the same completeness checks as every other
  * registered manifest.
  *
+ * Reshaped in place by slice 03 (#91 AC4/AC9) rather than replaced. The role
+ * now reads a disposable worktree at the candidate checkpoint instead of the
+ * generator's worktree, and `allowedWriteScope` below is the *instruction* it
+ * is given there — the enforcement surface is the copy-back allowlist
+ * (`QA_WINDOW_ARTIFACT_NAME`), which discards everything else. Four
+ * properties are load-bearing and stay put: the role ID, `outputArtifact`
+ * (D9 introduces no second candidate verdict artifact name),
+ * `allowedWriteScope`'s two canonical artifacts, and `change-summary` first
+ * in `inputOrder` — the orchestrator now generates that summary from git
+ * before the invocation, so leading with it is a promise the pipeline keeps.
+ *
  * Include/exclude contract (guardian round 2, architect A3):
  * - `docs/specs/afk-v2-agent-roles.md` M7 excludes `handoff.md` from every
  *   reviewer input ("judge the tree, not the author's story"), so no
@@ -656,6 +667,82 @@ export const CANDIDATE_EVALUATOR_CONTEXT_MANIFEST = {
   ],
 } as const satisfies ContextEnvelopeManifest;
 
+/**
+ * Final-evaluator role contract (#96 B-06, PRD D9).
+ *
+ * The third reviewer, and the only one that runs *after* an approval: its
+ * subject is not "is this candidate good" — that verdict already exists — but
+ * "is the tree about to merge still the tree that was approved". So it is
+ * given exactly two questions (`prompts/evaluator-final.md`) and exactly two
+ * artifacts to write. `allowedWriteScope` is the instruction; the enforcement
+ * surface is the same copy-back allowlist as the other two stages
+ * (`QA_WINDOW_ARTIFACT_NAME`, #96 B-07), which discards everything else.
+ *
+ * `change-summary` leads `inputOrder` for the same reason it does on the
+ * candidate evaluator, and here it is load-bearing rather than merely
+ * conventional: the baseline → final variant with its per-stage attribution
+ * (#96 B-04) *is* the question, so anything read before it would be read
+ * without knowing what changed.
+ *
+ * Manifest-only, like the candidate evaluator: no assembly path consumes it
+ * yet, and the completeness checks validate it all the same.
+ */
+export const FINAL_EVALUATOR_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "evaluator-final",
+  objective:
+    "Judge whether the final tree still preserves the approved candidate's behavior, and name any drift no required gate can see.",
+  nonGoals: [
+    "Re-reviewing the approved candidate's implementation choices",
+    "Repairing the tree, restoring bytes, or reverting a post-approval writing stage",
+    "Re-running the project's gates or reconstructing their verdicts",
+    "Attributing a finding to a particular post-approval role",
+  ],
+  allowedWriteScope: [
+    "slice/final-review.json",
+    "slice/final-report.md",
+  ],
+  stopConditions: [
+    "The canonical review artifact and the human-readable report are written with exactly one verdict",
+    "Both questions are answered against the baseline → final change summary, and a finding names the repair it admits",
+  ],
+  escalationConditions: [
+    "The approved baseline itself should not merge; it is reported as a BASELINE_IS_WRONG finding that returns the slice to the generator",
+    "The change summary and the tree disagree, so no comparison can be made at all",
+  ],
+  acceptedInputArtifactClasses: [
+    "change-summary",
+    "approved-baseline",
+    "acceptance-manifest",
+    "locked-contract",
+    "explorer-preservation-evidence",
+    "gate-evidence",
+    "cited-adr",
+  ],
+  outputArtifact: "final-review-pair",
+  inputOrder: [
+    "change-summary",
+    "approved-baseline",
+    "acceptance-manifest",
+    "locked-contract",
+    "explorer-preservation-evidence",
+    "gate-evidence",
+    "cited-adr",
+  ],
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    ...ROLE_ENVELOPE_OMISSIONS,
+    "candidate-handoff",
+    "dependency-sibling-handoffs",
+    "planner-conversation",
+    "generator-conversation",
+    // The other stages' findings are withheld for the reason M7 withholds the
+    // handoff: this role judges the tree, and a prior stage's disposition of
+    // its own findings is the author's story about it.
+    "other-qa-stage-findings",
+  ],
+} as const satisfies ContextEnvelopeManifest;
+
 export type PromptAssemblyRole =
   | "explorer"
   | "planner"
@@ -664,11 +751,15 @@ export type PromptAssemblyRole =
 
 /**
  * Roles that carry a versioned context-envelope manifest. A superset of
- * PromptAssemblyRole: "evaluator-qa" (candidate evaluator) has a
- * manifest-only role contract today — its prompt is still rendered directly
- * by the orchestrator, so no assembly path consumes it yet.
+ * PromptAssemblyRole: "evaluator-qa" (candidate evaluator) and
+ * "evaluator-final" (#96) have manifest-only role contracts today — their
+ * prompts are still rendered directly by the orchestrator, so no assembly path
+ * consumes them yet.
  */
-export type ContextEnvelopeRole = PromptAssemblyRole | "evaluator-qa";
+export type ContextEnvelopeRole =
+  | PromptAssemblyRole
+  | "evaluator-qa"
+  | "evaluator-final";
 
 export interface RoleEnvelopeEvidence {
   role: PromptAssemblyRole;
@@ -1661,6 +1752,18 @@ const REPAIR_SITUATION_BY_REFERENCE_SECTIONS = [
 const REPAIR_SITUATION_COMMIT_LOG_SECTION = "Commit log";
 
 /**
+ * Heading of the merge-resolution data block (#132 B-02, PRD D15 mechanism M5).
+ *
+ * A merge-resolution round is a repair round with a different situation, not a
+ * new role: the conflict hunks and the already-merged sibling diffs travel in
+ * the existing `{{REPAIR_SITUATION}}` slot under this heading, so there is no
+ * second generator template to keep in sync. Its membership in
+ * {@link REPAIR_SITUATION_SECTION_TITLES} is what keeps the situation's other
+ * section extents correct once the block's own fenced diffs are inside it.
+ */
+export const MERGE_RESOLUTION_SITUATION_SECTION = "Merge conflict to resolve";
+
+/**
  * Every heading the orchestrator emits for the repair situation itself
  * (`orchestrator.ts`, the `repairSituation` assembly).
  *
@@ -1676,6 +1779,7 @@ const REPAIR_SITUATION_SECTION_TITLES = new Set([
   "Base refresh",
   "Preserved STUCK evidence",
   "Prior handoff",
+  MERGE_RESOLUTION_SITUATION_SECTION,
 ]);
 
 /**
@@ -1841,6 +1945,50 @@ export function boundRepairSituationCommitLog(
 
 function repairSituationCommitLogDropNote(dropped: number): string {
   return `\n\n(${dropped} older commit${dropped === 1 ? "" : "s"} omitted to fit the inline-size budget; run \`git log\` in your worktree for the full history.)`;
+}
+
+/**
+ * Appends the merge-resolution data block to a repair situation as one level-1
+ * section (#132 B-02).
+ *
+ * The block is data the caller has already bounded — `src/merge-resolution.ts`
+ * owns that, because only it knows which files it read the hunks from. This
+ * function owns where the block goes and what it is called, so exactly one
+ * module decides the situation's section vocabulary.
+ */
+export function withMergeResolutionSituation(
+  situation: string,
+  block: string,
+): string {
+  const facts = situation.trim();
+  return (
+    (facts === "" ? "" : `${facts}\n\n`) +
+    `# ${MERGE_RESOLUTION_SITUATION_SECTION}\n\n${block.trim()}\n`
+  );
+}
+
+/**
+ * Bytes the rest of a repair round leaves the merge-resolution data block.
+ *
+ * Measured the way the commit log is measured (#230): render the round with an
+ * empty block and subtract. Newlines are normalised before measuring for the
+ * same reason `assembleGeneratorEnvelope` normalises them — a CRLF checkout
+ * must not spend budget the budget check will not count.
+ */
+export function mergeResolutionBlockRoom(
+  input: GeneratorEnvelopeInput & { repairSituation: string },
+): number {
+  const budget = Math.min(
+    input.inlineSizeBudgetBytes ??
+      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+    GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+  );
+  const empty = assembleGeneratorEnvelope({
+    ...input,
+    mode: "repair",
+    repairSituation: withMergeResolutionSituation(input.repairSituation, ""),
+  }).prompt;
+  return budget - Buffer.byteLength(empty.replace(/\r\n?/g, "\n"), "utf-8");
 }
 
 export function assembleGeneratorEnvelope(

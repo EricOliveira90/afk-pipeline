@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-06",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-06", "B-03", "B-04"],
+      "evidence": "Tree model step 3: \"the resolution commit is a **merge commit whose first parent is the pre-round slice-branch tip and whose second parent is the feature-branch tip that was merged in**\"; step 6: \"the retried `git.attemptMerge` is a **fast-forward** of the feature branch to the resolution merge commit\"; step 7: \"after the gate re-run and **before** the retry, `src/merge-resolution.ts` scans the resolution merge commit's blobs **for the paths that were conflicted in step 2** for conflict-marker lines\"",
+      "expected": "The contract must say what the resolution commit is with respect to the in-progress merge — a merge commit whose second parent is the merged feature tip, or a plain commit made after the merge state is discarded — and what the merge retry then means for it. If the resolution commit is a merge commit, the retry of the slice branch into the feature branch is a fast-forward (the feature tip is an ancestor), so the contract must say that too, and must state what stops a gate-passing tree that still carries conflict markers from fast-forwarding onto the feature branch.",
+      "observed": "The revision picks the merge-commit shape explicitly and records why the discard-the-merge-state alternative was rejected (step 3), states the consequence the finding derived — the retry is a fast-forward and a textual retry conflict is unreachable while the mutex is held (step 6) — and adds the missing guard: a pre-retry scan of the previously conflicted paths' blobs for line-start conflict markers, whose hit refuses the retry and fails the round under step 5's no-reset disposition (step 7). The dependent behaviors now read the same way: B-03 pins `treeId` to that merge commit's tree via `git rev-parse HEAD^{tree}`, B-04 and step 5 name the merge commit as the thing kept on the slice branch, B-05 puts the marker scan inside the widened critical section, and B-06 no longer asserts a retry conflict it cannot cause. The ancestry claim checks out: with the feature tip as a parent of the resolution commit and the mutex held, the merge into the feature branch is a fast-forward, so the generator now owes one unambiguous shape.",
+      "clearCondition": "The tree model states whether the resolution commit is a merge commit carrying the feature tip as a parent, and B-06 states a retry outcome consistent with that choice — either a named path by which the retry can still conflict, or, if the retry is a fast-forward, the check that refuses a resolved tree still containing conflict markers before it reaches the feature branch.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06"],
+      "evidence": "B-06: \"under step 3's merge commit and B-05's held mutex the retry is a fast-forward, so a *textual* conflict on the retry is unreachable and this contract does not claim a fixture for one\"; test plan: \"Given a stubbed gate phase forced to `PASS` over a generator that commits the merge with conflict markers left in a file no gate reads … then the retry never runs, terminal `CONFLICT` is persisted\"",
+      "expected": "A note on how the fixture induces a retry conflict, since B-05 holds the merge mutex across the whole round so no sibling lane can move the feature tip between the proved tree and the retry.",
+      "observed": "B-06's outcome is restated for a retry that cannot conflict on content, which is the alternative the clear-condition allowed: the contract withdraws the unreachable textual-conflict fixture and replaces it with levers a fixture can actually pull — a gate phase forced to `PASS` over a generator that commits the merge with markers left in a file no gate reads (refused by the pre-retry scan, retry never runs), a retry whose `git.attemptMerge` returns a prefix collision or a non-fast-forward result (terminal `CONFLICT`, not `MERGE-PENDING`), and a pure unit test of the scan over path/content pairs. Each has a matching test-plan bullet and the manifest's B-06 given/when/then/observableResult carry the same levers, so the scenario is now honest about its cause.",
+      "clearCondition": "B-06 or the test plan names a fixture lever that produces a gate-passing tree whose retry still conflicts under the contract's own resolution-tree model, or B-06's outcome is restated for a retry that cannot conflict.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-07",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06"],
+      "evidence": "\"a resolved tree can pass `tests` and `typecheck` while still containing conflict markers in a file no gate reads (a Markdown doc, a fixture, a prompt template). So after the gate re-run and **before** the retry, `src/merge-resolution.ts` scans the resolution merge commit's blobs **for the paths that were conflicted in step 2** for conflict-marker lines\"",
+      "expected": "The scan's path set should cover the tree the fast-forward actually ships, or the contract should say why the previously conflicted paths are the whole risk surface — the rationale given (a marker in a file no gate reads) is not itself limited to conflicted paths.",
+      "observed": "The stated risk is any unread file, but the check is scoped to the paths conflicted in step 2, and the Definition-of-done item inherits that narrowing (\"conflict markers in a previously conflicted path\"). A generator that pastes a hunk — markers included — into a neighbouring unread file while resolving still fast-forwards onto the feature branch, which no behavior guards. Scoping to the conflicted paths is a defensible cost choice (the merge commit's full blob set is large), so this is advisory, not blocking; the gap is that the contract does not say the choice was made or why.",
+      "clearCondition": "Tree model step 7 either widens the scan to the paths the resolution round changed (conflicted paths plus anything else the resolution commit touched relative to its first parent), or records in one sentence why the previously conflicted paths are treated as the whole marker risk surface.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "contract.md",
+        "before": "",
+        "after": "6. **What the retry means under this model:** because step 3's merge commit\n   carries the feature-branch tip as a parent and the held `mergeMutex` (B-05)\n   keeps that tip from moving, the retried `git.attemptMerge` is a\n   **fast-forward** of the feature branch to the resolution merge commit. It\n   runs through the same unmodified `git.attemptMerge` (P-02: the\n   migration-prefix check still precedes it), so a prefix collision is still\n   possible on the retry; a *textual* conflict on the retry is not reachable\n   while the mutex is held. The retry therefore ships exactly the tree the gates\n   proved — no third tree exists.\n7. **Conflict-marker refusal (decision recorded here):** because the retry is a\n   fast-forward, the gate re-run is not the last thing standing between a bad\n   resolution and the feature branch — a resolved tree can pass `tests` and\n   `typecheck` while still containing conflict markers in a file no gate reads\n   (a Markdown doc, a fixture, a prompt template). So after the gate re-run and\n   **before** the retry, `src/merge-resolution.ts` scans the resolution merge\n   commit's blobs **for the paths that were conflicted in step 2** for\n   conflict-marker lines (`<<<<<<< `, `======= `, `>>>>>>> ` at line start). Any\n   hit refuses the retry and the round fails per step 5. The scan is a pure\n   function over path/content pairs, not a gate declaration: it guards this\n   slice's own retry, it is not part of any slice's declared gate set, and\n   adding a catalog gate is out of scope here."
+      }
+    }
+  ]
+}

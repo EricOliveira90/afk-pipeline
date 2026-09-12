@@ -46,6 +46,31 @@ export interface SliceBounds {
 }
 
 /**
+ * Final-evaluation attempts one slice may spend (#96 B-10, PRD D19).
+ *
+ * Three, and the number lives here rather than next to the dispatch that
+ * spends it for the same reason the other four budgets do: a bound nobody can
+ * read is a bound nobody can reason about during a recovery. Only *evaluator*
+ * attempts count against it — a baseline-is-wrong finding returns the slice to
+ * the generator loop and spends a generator round instead (D19), so a slice
+ * that keeps disputing its own baseline is bounded by ADR 0014's global cap,
+ * not by this one.
+ */
+export const MAX_FINAL_EVALUATION_ATTEMPTS = 3;
+
+/**
+ * Final-evaluation attempts left, from the attempts already archived for this
+ * slice. Clamped at zero: an archive holding more attempts than the cap allows
+ * is a bug to report elsewhere, not a negative budget to hand a round loop.
+ */
+export function finalEvaluationAttemptsRemaining(input: {
+  spent: number;
+  limit?: number;
+}): number {
+  return Math.max(0, (input.limit ?? MAX_FINAL_EVALUATION_ATTEMPTS) - input.spent);
+}
+
+/**
  * Implementation rounds a dispatch may still spend.
  *
  * The cap is global across a slice's lives (ADR 0014): an ordinary

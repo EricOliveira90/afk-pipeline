@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-08",
+      "position": "CONDITION_MET",
+      "evidence": "Both git reads are now named unambiguously and kept inside files this slice already owns, so src/git.ts stays out of fileScope and the file-scope gate cannot fire. B-04 states the seam: a new exported function in src/qa-review.ts, called once from runQAStage, issuing its own execFileSync reads — `git status --porcelain=v1 --untracked-files=all` over the review worktree plus a second `--ignored` status scoped to the .afk artifact roots — and it states why the exported git.statusPorcelain (src/git.ts:489, argv verified: `status --porcelain` with neither `--untracked-files=all` nor `--ignored`) is neither reused nor amended: it cannot report the .afk/ paths, and its argv is parsed by the ship gate (src/ship-gate.ts:1046, src/git.ts:481-488) in a file outside this slice's scope. B-05 states its git reads are performed in src/change-summary.ts itself, and cites why no exported reader covers a two-ref commits+files+stats read: git.logCommitsWithStat (src/git.ts:726) is hard-wired to `<base>..HEAD` in one worktree, git.listChangedFiles (src/git.ts:1272) unions worktree/index state into bare paths, git.diffTreePaths (src/git.ts:1323) returns names only. B-05's purity claim is restated as a deterministic function of (cwd, fromRef, toRef) holding no orchestrator, run-state or run-slug state, which is the property slice 04 relies on. B-01's 'four helpers' assurance is narrowed to the worktree lifecycle and now names each one (src/git.ts:131, 163, 283, 461), with the in-module-git-read pattern cited to src/gate-runner.ts:271-311 and src/migration-gate.ts:56. A new non-goal forbids adding, amending or widening any src/git.ts export, and a Definition-of-done item requires src/git.ts to be unmodified."
+    },
+    {
+      "findingId": "F-09",
+      "position": "CONDITION_MET",
+      "evidence": "B-08's observable now names all three obligations its `then` promises — the four judgement questions, both halves of the D14 probe rule, and the discard instruction — and moves the assertion out of the spawned suite into src/prompt-template.test.ts, the existing non-spawned home for prompt-text assertions (readFileSync over ../prompts/*.md at src/prompt-template.test.ts:138-244; no test in the repo currently reads prompts/evaluator-qa.md by name). src/prompt-template.test.ts is added to fileScope and to the file list as the hosting file, which is the additive change F-09's clear-when authorizes; the observable also states that no spawned suite asserts the prompt text, and the matching Definition-of-done item and test-plan scenario say the same."
+    },
+    {
+      "findingId": "F-10",
+      "position": "CONDITION_MET",
+      "evidence": "B-02's observable no longer asserts the contents of an in-memory set with no declared surface. It keeps the amended-bytes clause (the stub evaluator read the amended pair in its own worktree) and restates the second clause as the consequence B-04 already observes: no reviewer-write-violation event names contract.md or acceptance-manifest.json for that attempt. B-02's `then` now states that consequence explicitly ('so the seeded pair is invisible to B-04's scan') so the observable covers every clause it promises."
+    }
+  ]
+}

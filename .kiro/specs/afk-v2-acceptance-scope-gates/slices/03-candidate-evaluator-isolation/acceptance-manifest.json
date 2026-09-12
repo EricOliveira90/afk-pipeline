@@ -1,0 +1,217 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/orchestrator.ts",
+      "src/change-summary.ts",
+      "src/candidate-gate-phase.ts",
+      "src/post-qa-gates.ts",
+      "src/qa-review.ts",
+      "src/context-envelope.ts",
+      "src/run-state.ts",
+      "src/run-events.ts",
+      "src/logger.ts",
+      "prompts/evaluator-qa.md",
+      "architecture.md",
+      "src/change-summary.test.ts",
+      "src/prompt-template.test.ts",
+      "src/post-qa-gates.test.ts",
+      "src/context-envelope.test.ts",
+      "src/run-state.test.ts",
+      "src/logger.test.ts",
+      "src/qa-orchestration.test.ts",
+      "src/orchestrator.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #91 \"a fresh evaluator invocation inspects a detached disposable worktree at the exact checkpoint\"",
+      "given": "a slice whose required pre-QA gates passed on a candidate checkpoint",
+      "when": "the deterministic QA stage invokes evaluator-qa",
+      "then": "the invocation cwd is a disposable review worktree created from the candidate checkpoint commit via git.createWorktree, and it is removed via git.removeWorktreeOrWarn on every exit path including throw and cancellation",
+      "observableResult": "src/qa-orchestration.test.ts asserts the stub evaluator observed a cwd other than ctx.worktreeDir whose HEAD tree matches the checkpoint tree ID, and that the directory does not exist after the stage returns on both the PASS path and an evaluator-throws path",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #91 AC10 plus ADR 0048 (an applied amendment buys one extra attempt in the same stage-round)",
+      "given": "a deterministic attempt granted by an applied scope amendment",
+      "when": "the orchestrator seeds the review worktree's slice directory before the attempt",
+      "then": "contract.md and acceptance-manifest.json are written there from ctx.absSliceDir and every seeded repo-relative path is recorded, at write time, into that attempt's seed manifest — a set distinct from the copy-back allowlist — so the seeded pair is invisible to B-04's scan",
+      "observableResult": "src/qa-orchestration.test.ts asserts the stub evaluator read the amended pair bytes in its own worktree, and observes the seed manifest only through its declared consequence: no reviewer-write-violation event names contract.md or acceptance-manifest.json for that attempt",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #91 AC3 and AC6; PRD D9 (prd.md:250-253)",
+      "given": "a stub deterministic evaluator that writes qa-review.json and qa-report.md plus notes.md, approved-baseline.json and nested/qa-review.json in its review worktree",
+      "when": "the attempt ends and copy-back runs",
+      "then": "only basenames matched by the exported QA_WINDOW_ARTIFACT_NAME directly inside the review worktree's slice directory are copied into ctx.absSliceDir — qa-report.md, uat-report.md, qa-report-rN-aM.md, uat-report-rN-aM.md, qa-review.json, uat-review.json, stuck.md — and every other path, nested or outside that directory, is discarded",
+      "observableResult": "src/post-qa-gates.test.ts asserts the constant is exported and admits exactly those seven basename forms; src/qa-orchestration.test.ts asserts qa-review.json and qa-report.md landed in ctx.absSliceDir while notes.md, approved-baseline.json and nested/qa-review.json did not",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #91 AC2 and AC6",
+      "given": "a stub deterministic evaluator that edits a source file under src/ and writes a stray file under the gitignored .afk/ root in its review worktree",
+      "when": "a new exported function in src/qa-review.ts, called once from runQAStage, scans the review worktree after copy-back with its own execFileSync git reads — `status --porcelain=v1 --untracked-files=all` over the whole worktree plus a second `--ignored` status scoped to the .afk artifact roots, never git.statusPorcelain and never a tree diff — subtracting B-03's copy-back allowlist and that attempt's B-02 seed manifest",
+      "then": "one reviewer-write-violation run event is emitted per remaining path, the scan sees ignored paths under .afk/ as well as tracked and untracked ones, src/git.ts is unmodified, and the scan is non-fatal because the discard already happened at copy-back",
+      "observableResult": "src/qa-orchestration.test.ts asserts events.jsonl holds one reviewer-write-violation naming the src/ path and one naming the .afk/ path, that the src/ edit is absent from ctx.worktreeDir and the accepted commit, and that the scope-amendment attempt of B-02 emits no reviewer-write-violation for contract.md or acceptance-manifest.json",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #91 AC7; PRD D11 (prd.md:272-281)",
+      "given": "a repo directory plus a feature base ref and a candidate checkpoint tree",
+      "when": "the new module src/change-summary.ts runs its candidate variant before the evaluator is invoked",
+      "then": "change-summary.json is written into .afk/artifacts/<run-slug>/slice-<n>/ from a builder whose result is a deterministic function of its (cwd, fromRef, toRef) arguments alone, performing its git reads inside src/change-summary.ts with execFileSync rather than through src/git.ts, so slice 04 adds a variant rather than a second producer and src/git.ts stays unmodified",
+      "observableResult": "src/change-summary.test.ts asserts that in a temp repo the builder returns commits, files and diff stats for two arbitrary refs, takes no orchestrator, run-state or run-slug argument, and returns the same result on a second identical call; src/qa-orchestration.test.ts asserts change-summary.json exists in that directory before the stub evaluator is invoked",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #91 AC5 and AC6; PRD D10 (prd.md:263-270)",
+      "given": "a deterministic evaluator attempt that returns PASS",
+      "when": "the QA stage records the verdict",
+      "then": "the orchestrator writes approved-baseline.json beside change-summary.json holding the candidate checkpoint tree ID and commit, the contract.md and acceptance-manifest.json blob IDs and the gate evidence artifact IDs, run-state goes to version 4 with an additive approvedBaseline locator record, a reader and an in-memory v3 adapter, and an additive approved-baseline run event is emitted with EVENTS_SCHEMA_VERSION still 1",
+      "observableResult": "src/qa-orchestration.test.ts asserts the file holds all four facts and that an evaluator FAIL writes none; src/run-state.test.ts asserts a version-3 file adapts to version 4 in memory with no approvedBaseline record and no write",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #91 AC4 and AC9; PRD D9 (prd.md:244-253)",
+      "given": "CANDIDATE_EVALUATOR_CONTEXT_MANIFEST as PRD 3 merged it at src/context-envelope.ts:602-657",
+      "when": "slice 03 reshapes the candidate evaluator role in place",
+      "then": "the role ID stays evaluator-qa, outputArtifact stays qa-review-pair, allowedWriteScope stays the two canonical artifacts, change-summary stays first in inputOrder, handoff.md stays absent via omittedArtifactClasses, and no second candidate verdict artifact name is introduced",
+      "observableResult": "src/context-envelope.test.ts asserts each of those five properties on the reshaped constant and that no input resolves to handoff.md",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #91 AC11; PRD D14 (prd.md:332-340)",
+      "given": "the reshaped prompts/evaluator-qa.md",
+      "when": "the prompt text is read from disk in the non-spawned src/prompt-template.test.ts, the existing home for prompt-text assertions (src/prompt-template.test.ts:138-244)",
+      "then": "it names the four judgement questions — intent, boundaries, preservation, test honesty and sufficiency — states that probes may be run in the disposable worktree and quoted in a finding's evidence field, states that no schema field carries probe code and no mechanism hands a probe file to the generator, and states that any write outside the two canonical artifacts is discarded",
+      "observableResult": "src/prompt-template.test.ts asserts the prompt text contains the four questions, both halves of the probe rule, and the discard instruction; no spawned suite asserts the prompt text",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "PRD file-scope map, src/logger.ts cell for slice 03 (prd.md:523)",
+      "given": "a run that recorded an approved baseline and at least one reviewer-write violation",
+      "when": "src/logger.ts renders run-summary.md",
+      "then": "one new section reports the per-slice approved baseline and the reviewer-write violations, alongside the existing Base Gates, Advisory Gates and Behavior Coverage sections",
+      "observableResult": "src/logger.test.ts asserts the rendered run-summary.md contains the new section with both the baseline row and the violation row",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #91 AC1; PRD D19 (prd.md:383-388)",
+      "given": "a slice whose required pre-QA gate — base or acceptance — is red",
+      "when": "the implementation round finishes and the loop continues",
+      "then": "runQAStage is never reached, no evaluator is dispatched, and RunJournal.bumpEvalRound is not called for that round because the continue at src/orchestrator.ts:5730 returns before the call at src/orchestrator.ts:5731, so the round costs a generator round and no evaluator round",
+      "observableResult": "src/orchestrator.test.ts asserts the slice-outcome event's evalRounds is unchanged for that round while genRounds advances, and that events.jsonl holds no phase-started with agent evaluator-qa for it",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "prd.md:685-691 and anchors/08-file-scope-gate.md; ADR 0048 amendment warrant",
+      "given": "the candidate that passed the pre-QA gates and its deterministic evaluator verdict",
+      "when": "postQaDeclarations is assembled at src/orchestrator.ts:5921-5935",
+      "then": "scopeGateDeclaration keeps its single post-QA call site, a red scope still becomes REPAIR and a fresh generator round rather than a merge, and the candidate still reaches the evaluator",
+      "observableResult": "src/qa-orchestration.test.ts asserts a candidate with an out-of-scope change still produced a deterministic evaluator invocation and did not merge",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #91 AC10; ADR 0048",
+      "given": "a deterministic QA stage-round with an applied scope amendment",
+      "when": "the attempt loop runs",
+      "then": "attemptLimit stays infrastructureRetries + 1 + amendments, the amendment buys one extra attempt and no implementation round, and every attempt is still archived under .afk/artifacts/<run-slug>/slice-<n>/ stamped r<N>-a<M> beside the contract-review archives",
+      "observableResult": "src/qa-orchestration.test.ts asserts the archive directory holds one stamped record per attempt for the round and that the implementation round counter did not advance for the extra attempt",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #91 AC12",
+      "given": "a slice configured for shared-preview UAT",
+      "when": "runQAStage runs with stage shared-preview",
+      "then": "the migration commands and the UAT invocation still use ctx.worktreeDir, no review worktree is created, and uat-report.md and uat-review.json are still written and read in ctx.absSliceDir with no copy-back step",
+      "observableResult": "src/qa-orchestration.test.ts asserts the UAT stub observed cwd equal to ctx.worktreeDir and that no review worktree directory was created during the stage",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #91 AC10 (\"PASS with a blocking finding stays mechanically invalid\")",
+      "given": "a deterministic evaluator attempt returning PASS while carrying an unresolved blocking finding",
+      "when": "QAAttemptLifecycle.recordAttempt grades the attempt at src/orchestrator.ts:4580-4585",
+      "then": "the verdict is still mechanically invalid and the slice does not merge on it, because the disposable worktree changes only where the verdict pair was written and not how it is graded",
+      "observableResult": "src/qa-orchestration.test.ts asserts a stub evaluator writing PASS with a blocking finding does not reach merge and no approved-baseline.json is written",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    }
+  ]
+}

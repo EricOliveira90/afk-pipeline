@@ -20,16 +20,18 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Agent providers | One interface, three backends (ADR 0002, 0013, 0016) | `src/agent-provider.ts` | `src/claude.ts`, `src/codex.ts`, `src/kiro.ts` |
 | Invocation runtime | Bounded process execution, liveness, retries (ADR 0030, 0021, 0022) | `src/invocation-runtime.ts` | `src/command-runtime.ts`, `src/busy-probe.ts`, `src/idle-watcher.ts`, `src/kill-tree.ts`, `src/liveness.ts`, `src/transient-retry.ts` |
 | Git operations | Worktrees, branches, atomic merge attempts (ADR 0010) | `src/git.ts` | `src/worktree-processes.ts` |
+| Merge resolution | One scoped resolution round for a conflicted wave merge (#132, ADR 0029, 0039) | `src/merge-resolution.ts` | — |
 | Run identity | Provider-qualified state, branch, and worktree names (ADR 0002, 0053) | `src/run-identity.ts` | — |
 | Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031, 0056) | `src/run-state.ts`, `src/run-journal.ts` | `src/file-lock.ts`, `src/adoption-provenance.ts`, `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
 | Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
-| Review rails | Contract/QA lifecycle and accepted-candidate policy (PRD 1, PRD 3) | `src/contract-review.ts`, `src/qa-review.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
+| Review rails | Contract/QA lifecycle, candidate review isolation, accepted-candidate policy (PRD 1, PRD 3, PRD 4) | `src/contract-review.ts`, `src/qa-review.ts`, `src/change-summary.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
+| Final evaluation | Exact-tree reuse decision, final review schema, finding routing, final verdict (PRD 4 D9, D19, D20) | `src/final-evaluation.ts` | — |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
 | Control surface | Status, stop, preflight, cleanup (ADR 0023, 0042, 0043) | `src/status.ts`, `src/stop-command.ts`, `src/preflight.ts`, `src/clean-failed.ts` | `src/status-*.ts`, `src/stop-sentinel.ts`, `src/cancellation.ts`, `src/crash-records.ts` |
-| Prompts | Role prompt templates, interpolated per invocation | `prompts/*.md`, `src/prompt-template.ts` | PRD 3 replaces raw templates with assembled envelopes |
+| Prompts | Role prompt templates, interpolated per invocation | `prompts/*.md` (e.g. `prompts/evaluator-final.md`), `src/prompt-template.ts` | PRD 3 replaces raw templates with assembled envelopes |
 
 ## Hubs — do not grow these; extract instead
 
@@ -59,6 +61,39 @@ entry in `afk.config.json`. Cap: 150 lines.
 - Review artifacts (`src/contract-review.ts`, `src/qa-review.ts`) — new
   verdict or finding kinds extend the schema; consumers parse, never regex
   prose.
+- Candidate review isolation (`QA_WINDOW_ARTIFACT_NAME` in
+  `src/post-qa-gates.ts`, `scanReviewWorktreeWrites` in `src/qa-review.ts`) —
+  deterministic QA reads a disposable worktree at the candidate checkpoint, and
+  the one artifact-name allowlist is both the copy-back boundary out of it and
+  the post-QA window check. A new reviewer output extends that constant; a
+  reviewer write it does not admit is discarded and journaled as
+  `reviewer-write-violation`, never enforced by prompt prose.
+- Change summary (`src/change-summary.ts`) — one builder over
+  `(cwd, fromRef, toRef)`; a new evaluator's input is a variant binding those
+  two refs, never a second producer. The baseline → final variant
+  (`buildFinalChangeSummary`) binds them to the approved baseline and the final
+  checkpoint and attributes files per post-approval writing stage.
+- Final evaluation (`src/final-evaluation.ts`, `prompts/evaluator-final.md`) —
+  reuse is exact tree equality against `approved-baseline.json` with no
+  cosmetic exception; a `reuse` dispatches zero evaluator invocations and is
+  recorded in run state, run events, and the run summary. An `evaluate` runs a
+  bounded `evaluator-final` loop in the orchestrator: each attempt captures the
+  post-approval tree, re-runs the scope gate **on that tree** (evidence keyed to
+  the accepted candidate authorizes nothing about the tree that replaced it),
+  dispatches into a disposable review worktree, and validates the copied-back
+  `final-review.json` exactly once — the parsed value is what keys the verdict,
+  so validation and verdict cannot describe different documents. Attempts are
+  persisted per candidate tree, and only a graded attempt spends the
+  `MAX_FINAL_EVALUATION_ATTEMPTS` budget: a `RETURN_TO_GENERATOR` finding
+  re-enters the implementation loop and spends a generator round instead (D19).
+- Merge resolution (`resolveMergeConflict` in `src/wave.ts`, body in
+  `src/merge-resolution.ts`) — a real textual conflict spends one scoped round
+  in the slice's own worktree, inside the merge mutex the refused attempt
+  already holds: the round re-runs the slice's own required declarations on the
+  resolution commit's tree and refuses the retry if a conflicted path still
+  carries a marker. Unset — every caller outside the orchestrator — a conflict
+  is terminal as before; a failed round keeps the resolution commit (ADR 0039),
+  leaves the feature tip unmoved and records the same terminal `CONFLICT`.
 - Review lifecycle (`src/convergence-coordinator.ts`,
   `src/accepted-candidate.ts`) — the orchestrator sequences typed outcomes;
   these modules own validation, continuation, cap, resume, and terminal policy.

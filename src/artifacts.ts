@@ -20,8 +20,7 @@ import {
   type RecordedContractVerdict,
 } from "./contract-review.js";
 import {
-  QA_REVIEW_FILENAME,
-  UAT_REVIEW_FILENAME,
+  qaReviewFilename,
   type QAReviewAttemptFinding,
   type QAReviewAttemptRecord,
   type QAReviewStage,
@@ -666,8 +665,19 @@ export function archiveContractReviewRecord(details: {
   return name;
 }
 
-function qaArchivePrefix(stage: QAReviewStage): "qa" | "uat" {
-  return stage === "deterministic" ? "qa" : "uat";
+/**
+ * The archive prefix every piece of one stage's evidence carries.
+ *
+ * Three-way since #96 B-05: the final evaluator's attempts, validations and
+ * records land in the same slice archive as the other two stages, under
+ * `final-`. Exported so the in-scope tests can assert the mapping directly —
+ * the alternative was a second spelling of the same three prefixes in a test
+ * helper, which is exactly the drift the map exists to prevent.
+ */
+export function qaArchivePrefix(stage: QAReviewStage): "qa" | "uat" | "final" {
+  if (stage === "deterministic") return "qa";
+  if (stage === "shared-preview") return "uat";
+  return "final";
 }
 
 /** Preserve one evaluator's raw canonical artifact when it exists. */
@@ -680,9 +690,7 @@ export function archiveQAReviewAttempt(details: {
 }): string | null {
   const { sliceDir, archiveDir, stage, round, attempt } = details;
   const prefix = qaArchivePrefix(stage);
-  const sourceName =
-    stage === "deterministic" ? QA_REVIEW_FILENAME : UAT_REVIEW_FILENAME;
-  const source = join(sliceDir, sourceName);
+  const source = join(sliceDir, qaReviewFilename(stage));
   if (!existsSync(source)) return null;
 
   const name = `${prefix}-review-r${round}-a${attempt}.json`;
@@ -787,7 +795,7 @@ export interface StuckDiagnosisDetails {
 }
 
 const QA_RECORD_NAME =
-  /^(qa|uat)-review-r(\d+)-a(\d+)-record\.json$/;
+  /^(qa|uat|final)-review-r(\d+)-a(\d+)-record\.json$/;
 const ESCALATION_RECORD_NAME = /^escalation-r(\d+)-a(\d+)\.md$/;
 const ADDITIONAL_ARTIFACT_LINE =
   /^- Additional artifact: `([^`\r\n]+)`$/gm;
@@ -857,7 +865,10 @@ function archivedScopeEscalations(
         if (
           !parsed ||
           typeof parsed !== "object" ||
-          parsed.version !== 1 ||
+          // Both live schema versions, because the archive is evidence: a
+          // gate-evidenced revision request (#193) is a record a later STUCK
+          // diagnosis has to read out, not one to mark unreadable.
+          (parsed.version !== 1 && parsed.version !== 2) ||
           !Array.isArray(parsed.findingIds) ||
           !Array.isArray(parsed.paths) ||
           typeof parsed.reason !== "string"
@@ -954,14 +965,24 @@ export function renderStuckDiagnosis(details: StuckDiagnosisDetails): string {
             if ("invalid" in record) {
               return [
                 `- Round ${record.round} attempt ${record.attempt}`,
-                `  - Invalid artifact: \`${record.name}\` is not a valid version 1 scope escalation`,
+                `  - Invalid artifact: \`${record.name}\` is not a valid scope escalation`,
               ].join("\n");
             }
+            const gateEvidence = record.escalation.gateEvidence;
             return [
               `- Round ${record.round} attempt ${record.attempt}`,
               `  - Finding IDs: ${record.escalation.findingIds.map((id) => `\`${id}\``).join(", ")}`,
               `  - Paths: ${record.escalation.paths.map((path) => `\`${path}\``).join(", ")}`,
               `  - Reason: ${record.escalation.reason}`,
+              // The cited gate, when there is one: a GATE-SCOPE revision's
+              // whole justification is a gate a reader can go and look at, so
+              // a diagnosis that dropped it would name a widening with no
+              // evidence.
+              ...(gateEvidence
+                ? [
+                    `  - Gate evidence: \`${gateEvidence.gateId}\` / \`${gateEvidence.evidenceArtifactId}\``,
+                  ]
+                : []),
             ].join("\n");
           })
           .join("\n");
@@ -1075,7 +1096,7 @@ export function sliceArtifactNames(sliceDir: string): string[] {
   const rounds = existsSync(sliceDir)
     ? readdirSync(sliceDir)
         .filter((name) =>
-          /^(feedback-r\d+|qa-report(-r\d+)?|uat-report(-r\d+)?)\.md$/i.test(
+          /^(feedback-r\d+|qa-report(-r\d+)?|uat-report(-r\d+)?|final-report(-r\d+(-a\d+)?)?)\.md$/i.test(
             name,
           ),
         )

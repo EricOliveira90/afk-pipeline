@@ -1,0 +1,276 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/final-evaluation.ts",
+      "src/final-evaluation.test.ts",
+      "src/orchestrator.ts",
+      "src/change-summary.ts",
+      "src/change-summary.test.ts",
+      "src/qa-review.ts",
+      "src/qa-review.test.ts",
+      "src/artifacts.ts",
+      "src/post-qa-gates.ts",
+      "src/post-qa-gates.test.ts",
+      "src/context-envelope.ts",
+      "src/context-envelope.test.ts",
+      "src/bounds.ts",
+      "src/bounds.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/run-events.ts",
+      "src/logger.ts",
+      "src/qa-orchestration.test.ts",
+      "prompts/evaluator-final.md",
+      "ARCHITECTURE.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #96 AC1; prd.md D20 line 390",
+      "given": "a final checkpoint tree ID and the slice's persisted approved-baseline.json record",
+      "when": "the pure reuse decision in src/final-evaluation.ts runs",
+      "then": "it returns reuse on exact tree-ID string equality and evaluate on any difference, with no cosmetic-change exception",
+      "observableResult": "a unit test asserting both branches without spawning git or an agent",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #96 AC1; prd.md file-scope map lines 503-533; src/gate-runner.ts:161-176",
+      "given": "a reuse decision on an unchanged final tree",
+      "when": "the slice records the decision and proceeds to merge",
+      "then": "zero final-evaluator invocations occur and the reuse fact is written to three in-scope stores only: finalEvaluations[ghIssue].decision === \"reuse\" in src/run-state.ts, one additive final-evaluation-reuse event in src/run-events.ts, and the slice's run-summary.md section in src/logger.ts; no GateEvidence field is added and the D17 gate-cache reused flag is untouched",
+      "observableResult": "a unit test reading decision back through finalEvaluationFor(state, ghIssue), the journaled final-evaluation-reuse event, and the run-summary.md section, with no evaluator-final dispatch recorded and src/gate-runner.ts unmodified in the diff",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #96 AC2",
+      "given": "a stub post-approval writing stage that writes a file after the candidate checkpoint",
+      "when": "the reuse decision runs on the resulting final checkpoint",
+      "then": "the tree differs and a fresh final review is dispatched",
+      "observableResult": "an it on an existing spawned scenario shows one evaluator-final invocation after the stub write",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #96 AC3; prd.md D11 line 272",
+      "given": "the approved baseline ref and the final checkpoint ref",
+      "when": "the baseline-to-final change summary variant is built",
+      "then": "src/change-summary.ts's single two-ref builder returns commits, files, and diff stats plus a byStage record keyed by the post-approval writing stage ids that ran — exactly one key, the stub stage id, whose per-stage files and stats sum to the totals — with commits empty when a ref is a bare tree",
+      "observableResult": "a unit test asserting the exact byStage key set and that its per-stage totals sum to the summary totals, so a flat unpartitioned summary fails; no second change-summary producer exists in the tree and ChangeSummary version 1 is unchanged",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #96 Code anchors recorded decision",
+      "given": "the new final-evaluation member of QAReviewStage",
+      "when": "qaArchivePrefix is asked for its prefix",
+      "then": "it returns final from a three-way map",
+      "observableResult": "a unit test asserting final for the new member and unchanged qa/uat for the existing two",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #96 AC4; prd.md D9 line 244",
+      "given": "the existing context-envelope manifest schema",
+      "when": "the evaluator-final entry is resolved",
+      "then": "its allowedWriteScope is exactly slice/final-review.json and slice/final-report.md, its inputOrder leads with the change summary, and prompts/evaluator-final.md exists asking the preservation and gate-invisible-drift questions",
+      "observableResult": "a unit test on the manifest entry plus the prompt file present on disk",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #96 AC4; ARCHITECTURE.md candidate review isolation seam",
+      "given": "a final evaluator worktree tree containing a write outside its two artifacts",
+      "when": "the artifact-window check runs against the final checkpoint tree",
+      "then": "that path is reported as a violation and only final-review.json and final-report.md copy back",
+      "observableResult": "a unit test over the extended allowlist showing both admitted names and a rejected source path",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #96 AC5; ADR 0048",
+      "given": "a final-review.json carrying a preservation finding",
+      "when": "the review is canonically validated and routed",
+      "then": "the finding routes to the single post-approval writing stage and only the restore repair is accepted; any other repair is refused",
+      "observableResult": "a unit test asserting the routed stage for restore and a refusal for a non-restore repair",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #96 AC6; prd.md D19 line 383",
+      "given": "a final-review.json carrying a baseline-is-wrong finding against a rejected candidate tree",
+      "when": "repair routing runs",
+      "then": "the rejected candidate tree ID is appended to finalEvaluations[ghIssue].invalidatedCandidateTreeIds in src/run-state.ts, the record drops its citation of that baseline, decideFinalReuse refuses reuse against that tree ID even on exact equality, and control returns to the generator loop consuming exactly one generator round and no final-evaluation attempt; no approved-baseline record, artifact, or gate-evidence artifact is rewritten or deleted",
+      "observableResult": "a unit test asserting the invalidated tree ID and attempt entries read back through finalEvaluationFor, the refused reuse on that tree ID, the generator round counter incremented by exactly one across the return, an unchanged final-evaluation attempt count, and no baseline write site in the diff",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #96 AC7; prd.md D19 line 383, D10 line 263",
+      "given": "final evaluation with attempts already consumed",
+      "when": "a further attempt is requested",
+      "then": "the named bound in src/bounds.ts caps it at three attempts, resume flows through the existing per-stage resume state, and each attempt is archived under .afk/artifacts/<run-slug>/slice-<n>/ stamped with its attempt number",
+      "observableResult": "a unit test on the bound plus attempt-stamped archive filenames present for each attempt",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #96 AC8",
+      "given": "a final evaluation reaching a verdict",
+      "when": "the PASS predicate is evaluated",
+      "then": "PASS requires all required gates green, candidate and final artifacts keyed to their exact checkpoint tree IDs, canonical validation of final-review.json, and a green scope gate; any missing condition fails closed",
+      "observableResult": "a unit test asserting PASS once and a closed failure for each individually missing condition",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "prd.md file-scope map lines 503-533",
+      "given": "the updated ARCHITECTURE.md",
+      "when": "its rows for the final-evaluation module and the evaluator-final prompt are read",
+      "then": "both rows exist and every path they name exists in the tree",
+      "observableResult": "a test asserting each ARCHITECTURE.md path resolves on disk",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #96 AC9; src/wave.ts:373,526,600",
+      "given": "a slice that ran final evaluation",
+      "when": "it merges to the feature branch",
+      "then": "the merge is serialized through the existing src/wave.ts merge mutex with no second lock and no change to the critical section's scope",
+      "observableResult": "an it on an existing spawned scenario showing one mutex-serialized merge; no new lock primitive in the diff",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "src/qa-review.ts:65; src/artifacts.ts qaArchivePrefix",
+      "given": "the deterministic and shared-preview QA review stages",
+      "when": "they dispatch and archive after this slice's change",
+      "then": "they keep their existing dispatch behavior and their qa and uat archive prefixes",
+      "observableResult": "the existing qa-review and qa-orchestration assertions still pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #96 Code anchors; prd.md D10 line 263",
+      "given": "the approved-baseline record written by #91",
+      "when": "this slice consumes it",
+      "then": "writeApprovedBaseline and recordApprovedBaseline remain its only writers and this slice cites the existing gateEvidenceArtifactIds values rather than minting a second identity",
+      "observableResult": "a test showing a read-only consumption path and no new baseline write site in the diff",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "prd.md D11 line 272; src/change-summary.ts:45-63",
+      "given": "the existing candidate change-summary variant",
+      "when": "the baseline-to-final variant is added",
+      "then": "the candidate variant's behavior and the ChangeSummary version 1 shape are unchanged and both variants share one builder",
+      "observableResult": "existing src/change-summary.test.ts assertions pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "src/post-qa-gates.ts:57-102",
+      "given": "a tree differing from the approved tree by a locked contract, acceptance manifest, explorer context, handoff, or source path",
+      "when": "reviewArtifactViolations runs",
+      "then": "it still reports the violation and the caller still fails closed",
+      "observableResult": "existing src/post-qa-gates.test.ts assertions pass unchanged alongside the extended allowlist",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-06",
+      "source": "ARCHITECTURE.md placement rules; src/run-state.ts:840-849",
+      "given": "a run-state file written before this slice, carrying the #91 baseline locator and #193 waivers",
+      "when": "the reuse record's additive field and version bump are in place",
+      "then": "the older file still loads with its existing fields intact and the new field has a reader",
+      "observableResult": "a unit test loading a prior-version fixture and asserting both old fields and the new reader",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests",
+        "typecheck"
+      ]
+    }
+  ]
+}

@@ -107,6 +107,26 @@ from the files themselves is refused unless it happens to land on changed text.
 Limit any fresh judgment to gate aptness, scenario honesty, evidence-backed
 scope, blocking UNKNOWNs, single-session feasibility, and explicit non-goals.
 
+# Parser regression surface
+
+When the contract changes a parser's accepted input language, its regression
+surface is part of the judgment above, not a style preference (ADR 0060). The
+pair must bind both halves of the evidence:
+
+- positive evidence: at least one newly accepted input; and
+- rejected-or-boundary evidence: relevant rejected or boundary input that must
+  remain rejected.
+
+When the repository's established harness for that parser is fixture-backed,
+the pair also declares the owning fixture area and either the concrete existing
+fixture paths expected to change or explicit authorization to add fixtures in
+that area. Inline parser tests are valid evidence where they are the
+established harness, so a literal fixture path is not universally mandatory —
+concrete regression evidence is. A parser-language change that binds only one
+half of the evidence, or that leaves the fixture surface its established
+harness implies undeclared, is a BLOCKING finding under scenario honesty and
+evidence-backed scope.
+
 # Canonical review artifacts
 
 Write `{{SLICE_DIR}}/{{CONTRACT_REVIEW_FILE}}` with exactly this version-2

@@ -464,6 +464,151 @@ ${advisoryAttempts
 |-------|-------|----------|------|--------|---------|--------|--------|----------|-----|
 ${coverageRows}
 `;
+    // The disposable review worktree's two records (#91 AC5/AC6): what one
+    // deterministic PASS approved, and what the evaluator wrote that was
+    // discarded. One section, because an operator reading it is asking one
+    // question — what did candidate review establish, and did the reviewer
+    // stay inside its allowlist. Rendered only when such an event exists, so
+    // every other run's summary is unchanged.
+    const isolationEvents = runEvents.filter(
+      (event) =>
+        event.type === "approved-baseline" ||
+        event.type === "reviewer-write-violation",
+    );
+    const isolationRows = isolationEvents
+      .map((event) =>
+        event.type === "approved-baseline"
+          ? `| ${event.ghIssue} | ${event.round} | approved-baseline | ` +
+            `${event.treeId} | ${event.commit} | ${event.artifactId} |`
+          : `| ${event.ghIssue} | ${event.round} | reviewer-write-violation | ` +
+            `— | attempt ${event.attempt} | ${event.path} |`,
+      )
+      .join("\n");
+    const isolationSection =
+      isolationEvents.length === 0
+        ? ""
+        : `
+## Candidate Review Isolation
+
+| Slice | Round | Record | Tree | Commit / Attempt | Artifact / Path |
+|-------|-------|--------|------|------------------|-----------------|
+${isolationRows}
+`;
+    // The scoped merge-resolution rounds (#132 AC8), in their own section
+    // rather than folded into the round counts above: a round spent resolving
+    // a merge conflict under the held merge mutex is not a repair round, and an
+    // operator reading "3 rounds" must not be left to guess which. Rendered
+    // only when such a round ran, so every other run's summary is unchanged.
+    const resolutionRounds = runEvents.filter(
+      (event) => event.type === "merge-resolution-round",
+    );
+    const resolutionSection =
+      resolutionRounds.length === 0
+        ? ""
+        : `
+## Merge Resolution Rounds
+
+One scoped round per conflicting merge, inside the merge mutex the refused
+attempt held (#132, ADR 0029). Distinct from the generator repair rounds in
+the Rounds column above.
+
+| Slice | Verdict | Elapsed | Conflicted paths | Tree | Detail |
+|-------|---------|---------|------------------|------|--------|
+${resolutionRounds
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${event.verdict} | ${event.durationMs}ms | ` +
+      `${
+        event.conflictedPaths && event.conflictedPaths.length > 0
+          ? event.conflictedPaths.map((path) => `\`${path}\``).join(", ")
+          : "—"
+      } | ${event.treeId ?? "—"} | ${
+        event.detail ? inlineMarkdown(event.detail) : "—"
+      } |`,
+  )
+  .join("\n")}
+`;
+    /**
+     * Human authorizations a gate actually applied (#193 D5/D24). Rendered from
+     * the `waiver-applied` events alone, so the summary and `events.jsonl`
+     * cannot disagree, and present only when one was applied — a run nobody
+     * waived anything for keeps today's summary byte-for-byte.
+     *
+     * All four fields are named, the path exactly: a waiver is a record of a
+     * named human accepting a specific risk, and a section that said only "1
+     * waiver applied" would be an audit trail nobody can audit.
+     *
+     * One slice + risk class + path is one human decision, so it is one row no
+     * matter how many times a gate honored it: the post-QA phase re-runs on
+     * every implementation round and emits the event again each time, and a
+     * table repeating an authorization once per round reads as several
+     * authorizations. The surviving row carries the round the waiver was first
+     * applied, which is the fact the repeats were carrying.
+     */
+    const waiverEvents = runEvents.filter(
+      (event) => event.type === "waiver-applied",
+    );
+    const firstApplications = new Map<string, (typeof waiverEvents)[number]>();
+    for (const event of waiverEvents) {
+      const key = `${event.ghIssue} ${event.riskClass} ${event.path}`;
+      if (!firstApplications.has(key)) firstApplications.set(key, event);
+    }
+    const waiverRows = [...firstApplications.values()];
+    const waiverSection =
+      waiverRows.length === 0
+        ? ""
+        : `
+## Applied Waivers
+
+| Slice | Round | Risk class | Path | Author | Reason |
+|-------|-------|------------|------|--------|--------|
+${waiverRows
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${event.round} | ` +
+      `${inlineMarkdown(event.riskClass)} | ` +
+      `${inlineMarkdown(event.path)} | ${inlineMarkdown(event.author)} | ` +
+      `${inlineMarkdown(event.reason)} |`,
+  )
+  .join("\n")}
+`;
+    /**
+     * Final evaluations that reused an existing approval (#96 B-02).
+     *
+     * Its own section, not a row folded into Candidate Review Isolation above:
+     * that table answers what candidate review *established*, and this one
+     * answers where a review deliberately did not run. An operator reading
+     * "zero final evaluator invocations" has to be able to see why, and the
+     * only honest answer is the two tree IDs that turned out to be the same
+     * one.
+     *
+     * Rendered from the `final-evaluation-reuse` events alone, so the summary
+     * and `events.jsonl` cannot disagree, and present only when a reuse
+     * happened — every other run's summary is unchanged byte for byte.
+     */
+    const reuseEvents = runEvents.filter(
+      (event) => event.type === "final-evaluation-reuse",
+    );
+    const finalReuseSection =
+      reuseEvents.length === 0
+        ? ""
+        : `
+## Final Evaluation Reuse
+
+The final checkpoint was byte-identical to the approved baseline, so no final
+evaluator was dispatched (#96, PRD D20 — exact tree equality, no cosmetic
+exception).
+
+| Slice | Round | Final tree | Baseline tree | Evaluator invocations |
+|-------|-------|------------|---------------|-----------------------|
+${reuseEvents
+  .map(
+    (event) =>
+      `| ${event.ghIssue} | ${event.round} | ${event.finalTreeId} | ` +
+      `${event.baselineTreeId} | 0 |`,
+  )
+  .join("\n")}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -517,7 +662,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

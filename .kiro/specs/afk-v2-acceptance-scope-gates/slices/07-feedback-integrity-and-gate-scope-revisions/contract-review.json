@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "verdict": "REVISE",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09", "B-11", "B-16"],
+      "evidence": "\"an optional `gateEvidence: { gateId, evidenceArtifactId }`, both non-blank strings\" (contract B-09); \"the rendered diagnosis names the record's gateId and evidenceArtifactId\" (B-11); \"GATE-SCOPE plus gateEvidence citing a failing orchestrator-run gate\" (B-16)",
+      "expected": "The contract must say what value `evidenceArtifactId` carries, because the declared evidence disagrees with itself: prd.md D22 (lines 446-447) says \"the evidence sha256\", while the slice anchors (item 4, 2026-09-08) correct this to the already-computed repo-relative forward-slashed evidence path at `src/candidate-gate-phase.ts:132-135`, so that a GATE-SCOPE citation cross-references the same `gate-outcome` event. Pick one form, state it as the parsed contract of `gateEvidence`, teach that same form in the three generator-facing sources B-16 rewrites, and bind the cross-reference with a test.",
+      "observed": "Both fields are constrained only to be non-blank strings, no behavior names the form of `evidenceArtifactId`, B-16's prompt obligation does not say what the generator must put there, and no behavior or test plan item binds the cited id to the `gate-outcome` event's `evidenceArtifactId`. A generator reading prd.md D22 would teach and validate a sha256; a generator reading the anchors would teach a repo-relative path. Those are materially different artifacts, prompt bytes and STUCK diagnoses, and the escalation channel's whole point — a citation an operator can follow back to the failing gate's evidence — is unbound either way.",
+      "clearCondition": "B-09 states the concrete form of `evidenceArtifactId` (naming `src/candidate-gate-phase.ts:132-135`'s computed repo-relative forward-slashed evidence path, or explicitly overriding it), B-16 requires the generator-facing sources to teach that same form in the version-2 literal, and a behavior plus a named test asserts a `GATE-SCOPE` escalation's `evidenceArtifactId` equals the `evidenceArtifactId` of the failing gate's `gate-outcome` event.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "evidence": "\"the deletion does not make the gate FAIL and detail states that the class is not enforced by policy\" versus \"observableResult\": \"src/feedback-integrity-gate.test.ts asserts the PASS with the omitted class and the FAIL with it declared\"",
+      "expected": "The observable result should bind every obligation the Then states, and the contract should establish that a non-FAIL outcome may carry `detail` at all — `src/scope-gate.ts` and `src/skip-gate.ts`, the two models the contract names, populate `detail` on their failure paths.",
+      "observed": "The suppression `detail` is required by the Then but asserted by nothing, so a generator can satisfy the declared test while the catalog never says what it stopped enforcing — which is the whole justification B-07 gives for the behavior.",
+      "clearCondition": "B-07's `observableResult` asserts the suppression text in `detail` on the non-failing outcome, or the Then drops the `detail` obligation and states where the suppression is observable instead.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-08"],
+      "evidence": "\"The declaration takes `acceptedPairIntact` from the value `src/orchestrator.ts` already earned at the accepted-pair integrity check and never a fresh one; when it is `false` the gate FAILs closed\"",
+      "expected": "Where a declared branch is unreachable in production, the contract should say so, so the generator does not build orchestrator-side plumbing to reach it.",
+      "observed": "Per `src/orchestrator.ts:5305-5407`, a non-empty `mutatedOwned` archives, restores and throws, and `acceptedPairIntact = true` is set only after that check passes — so the value reaching the post-QA declaration site (`src/orchestrator.ts:5919-5946`) is always `true`. B-08's `false` case is a defensive unit-level property of the gate module, not a reachable run outcome, and the contract presents it as the latter.",
+      "clearCondition": "B-08 states that the `false` branch is a fail-closed property of the gate module unreachable from today's orchestrator path (citing the throw at `src/orchestrator.ts:5305-5407`), and keeps its assertion at the module level.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03"],
+      "evidence": "\"the exact-equality assertions over that list in src/qa-orchestration.test.ts (lines 1075, 2287 and 2436) are updated in lockstep\"",
+      "expected": "A locked contract should identify the assertions by a stable handle (the asserted list literal, or the enclosing `describe`/`it` names) rather than by line number, since any edit above them moves the numbers and the withheld harness evidence cannot confirm the three positions.",
+      "observed": "Three literal line numbers are pinned in both the contract and the acceptance manifest, and the declared evidence in this review contains nothing that confirms them; a stale number reads as a scope violation or a missed assertion at gate time.",
+      "clearCondition": "B-03 and its manifest entry name the assertions by their asserted literal or enclosing test names, keeping line numbers only as a parenthetical hint.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-12", "B-14"],
+      "evidence": "\"emits one `waiver-applied` run event per waiver through `logger.event`, and persists them with `saveAppliedWaivers`\" plus B-13's \"ignores an already-recorded `riskClass` + `path` pair\"",
+      "expected": "The contract should say what happens when the post-QA phase runs more than once in a run (a REPAIR round re-reaching the same seam): the state writer is declared idempotent, the event emission is not, and `## Applied Waivers` renders from the events.",
+      "observed": "Only `saveAppliedWaivers` is de-duplicated. A second post-QA phase re-reads the same evidence and emits the same `waiver-applied` events again, so `run-summary.md` can list one waiver several times while run state holds one record.",
+      "clearCondition": "B-12 states whether repeat emission is suppressed (e.g. by consulting the persisted record) or B-14 states that the section de-duplicates by `riskClass` + `path` when rendering, with the chosen rule asserted.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}

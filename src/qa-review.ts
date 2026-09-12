@@ -4,7 +4,9 @@ import {
   requireNonBlankString,
   type ContractFindingSeverity,
 } from "./contract-review.js";
+import { FINAL_REVIEW_FILENAME } from "./final-evaluation.js";
 import type { BaseGateSkipCitation } from "./qa-gate-authorization.js";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -61,7 +63,27 @@ export interface QAReview {
   findings: QAReviewFinding[];
 }
 
-export type QAReviewStage = "deterministic" | "shared-preview";
+/**
+ * The review stages, in the order a slice reaches them.
+ *
+ * `final-evaluation` is the third (#96 B-05): the same attempt/record/resume
+ * machinery, dispatched after the candidate is approved and a post-approval
+ * writing stage has run. It is a member of this union rather than a parallel
+ * type so that one archive prefix map, one filename map and one resume replay
+ * cover all three — a second dialect of the same three concepts is exactly how
+ * a resumed run loses an attempt.
+ */
+export type QAReviewStage =
+  | "deterministic"
+  | "shared-preview"
+  | "final-evaluation";
+
+/** Every stage, in dispatch order. Ties in resume precedence break this way. */
+export const QA_REVIEW_STAGES: readonly QAReviewStage[] = [
+  "deterministic",
+  "shared-preview",
+  "final-evaluation",
+];
 
 export interface QAReviewAttemptFinding {
   id: string;
@@ -120,6 +142,8 @@ export interface QAReviewResumeState {
   retryStage: QAReviewStage | null;
   deterministic: QAReviewStageResumeState;
   sharedPreview: QAReviewStageResumeState;
+  /** Final-evaluation attempts replayed from the same archive (#96 B-10). */
+  finalEvaluation: QAReviewStageResumeState;
 }
 
 const REVIEW_KEYS = [
@@ -407,15 +431,24 @@ export function parseQAReview(
 }
 
 export function qaReviewFilename(stage: QAReviewStage): string {
-  return stage === "deterministic"
-    ? QA_REVIEW_FILENAME
-    : UAT_REVIEW_FILENAME;
+  if (stage === "deterministic") return QA_REVIEW_FILENAME;
+  if (stage === "shared-preview") return UAT_REVIEW_FILENAME;
+  return FINAL_REVIEW_FILENAME;
 }
 
 export function loadQAReview(
   sliceDir: string,
   stage: QAReviewStage,
 ): QAReview {
+  // The final evaluator writes a different document with a different schema
+  // (`parseFinalReview`, #96 B-08). Refused rather than coerced: a
+  // `final-review.json` read through this parser would fail on its keys and
+  // report the confusing error instead of the real one.
+  if (stage === "final-evaluation") {
+    throw new Error(
+      `${FINAL_REVIEW_FILENAME} is validated by parseFinalReview, not loadQAReview`,
+    );
+  }
   const filename = qaReviewFilename(stage);
   const path = join(sliceDir, filename);
   if (!existsSync(path)) {
@@ -524,11 +557,15 @@ function parseQAReviewAttemptRecord(
     throw new Error(`${source} must declare version 1 or 2`);
   }
   const recordVersion = input.version as 1 | 2;
-  if (input.stage !== "deterministic" && input.stage !== "shared-preview") {
+  if (
+    typeof input.stage !== "string" ||
+    !(QA_REVIEW_STAGES as readonly string[]).includes(input.stage)
+  ) {
     throw new Error(
-      `${source} stage must be deterministic or shared-preview`,
+      `${source} stage must be ${QA_REVIEW_STAGES.join(", ")}`,
     );
   }
+  const stage = input.stage as QAReviewStage;
   for (const field of ["round", "attempt"] as const) {
     if (
       !Number.isSafeInteger(input[field]) ||
@@ -660,7 +697,7 @@ function parseQAReviewAttemptRecord(
 
   return {
     version: 2,
-    stage: input.stage,
+    stage,
     round: input.round as number,
     attempt: input.attempt as number,
     verdict,
@@ -715,10 +752,24 @@ function parseBaseGateCitation(
 }
 
 const RECORD_FILENAME =
-  /^(qa|uat)-review-r(\d+)-a(\d+)-record\.json$/;
+  /^(qa|uat|final)-review-r(\d+)-a(\d+)-record\.json$/;
+/**
+ * Evidence of a spent *implementation* round. Deliberately still `qa|uat`: a
+ * final-evaluation attempt is bounded by
+ * {@link MAX_FINAL_EVALUATION_ATTEMPTS} and must not inflate the global
+ * implementation-round count (ADR 0014, PRD D19), so its archived attempts are
+ * replayed by {@link RECORD_FILENAME} above and ignored here.
+ */
 const REVIEW_EVIDENCE_FILENAME =
   /^(?:qa|uat)-review-r(\d+)-a\d+(?:\.json|-record\.json|-validation\.txt)$/;
 const REPORT_EVIDENCE_FILENAME = /^(?:qa|uat)-report-r(\d+)-a\d+\.md$/;
+
+/** The archive prefix each stage's evidence carries, both directions. */
+const STAGE_BY_ARCHIVE_PREFIX: Readonly<Record<string, QAReviewStage>> = {
+  qa: "deterministic",
+  uat: "shared-preview",
+  final: "final-evaluation",
+};
 
 function restoreQAReviewStage(
   records: readonly QAReviewAttemptRecord[],
@@ -822,8 +873,7 @@ export function loadQAReviewResumeState(
         readFileSync(join(reviewArchiveDir, name), "utf-8"),
         name,
       );
-      const expectedStage =
-        match[1] === "qa" ? "deterministic" : "shared-preview";
+      const expectedStage = STAGE_BY_ARCHIVE_PREFIX[match[1]!];
       if (
         record.stage !== expectedStage ||
         record.round !== Number(match[2]) ||
@@ -839,27 +889,33 @@ export function loadQAReviewResumeState(
       left.round - right.round || left.attempt - right.attempt
     );
 
-  const deterministic = restoreQAReviewStage(
-    records.filter((record) => record.stage === "deterministic"),
+  const byStage = new Map<QAReviewStage, QAReviewStageResumeState>(
+    QA_REVIEW_STAGES.map((stage) => [
+      stage,
+      restoreQAReviewStage(
+        records.filter((record) => record.stage === stage),
+      ),
+    ]),
   );
-  const sharedPreview = restoreQAReviewStage(
-    records.filter((record) => record.stage === "shared-preview"),
-  );
-  const retryStage =
-    (sharedPreview.lastImplementationRound ?? -1) >
-      (deterministic.lastImplementationRound ?? -1)
-      ? "shared-preview"
-      : deterministic.lastImplementationRound !== null
-        ? "deterministic"
-        : sharedPreview.lastImplementationRound !== null
-          ? "shared-preview"
-          : null;
+  // The stage that got furthest wins, and a tie goes to the earlier stage in
+  // dispatch order — the same precedence the two-stage form had, now stated
+  // once instead of nested in a ternary chain.
+  let retryStage: QAReviewStage | null = null;
+  let retryRound = -1;
+  for (const stage of QA_REVIEW_STAGES) {
+    const round = byStage.get(stage)!.lastImplementationRound;
+    if (round !== null && round > retryRound) {
+      retryStage = stage;
+      retryRound = round;
+    }
+  }
 
   return {
     nextRound: maxRound + 1,
     retryStage,
-    deterministic,
-    sharedPreview,
+    deterministic: byStage.get("deterministic")!,
+    sharedPreview: byStage.get("shared-preview")!,
+    finalEvaluation: byStage.get("final-evaluation")!,
   };
 }
 
@@ -891,6 +947,121 @@ export function scopeAmendmentRequests(
       findingId: finding.id,
       paths: [...finding.amendmentPaths],
     }));
+}
+
+/**
+ * Artifact roots inside a review worktree that the repository ignores, and
+ * whose contents a plain `git status` therefore cannot see at all (`.afk/`
+ * is gitignored in every consumer). A reviewer write under one of them is
+ * exactly the kind that would otherwise be invisible, so the scan asks for
+ * them by name.
+ */
+export const IGNORED_REVIEW_ARTIFACT_ROOTS = [".afk"] as const;
+
+export interface ReviewWorktreeWriteScan {
+  /** Review worktree to scan — never the generator's worktree. */
+  cwd: string;
+  /** Repo-relative slice directory (forward slashes). */
+  reviewArtifactDir: string;
+  /**
+   * Basenames the copy-back allowlist admits directly inside
+   * `reviewArtifactDir` — the caller passes `QA_WINDOW_ARTIFACT_NAME`, the
+   * one constant shared with the post-QA window check, so the scan and the
+   * copy-back cannot disagree about the same directory.
+   */
+  copyBackAllowlist: RegExp;
+  /**
+   * Repo-relative paths the orchestrator itself wrote while seeding this
+   * attempt, recorded at write time. Subtracting them is what makes the
+   * seeded contract pair invisible here, so an amendment attempt reports no
+   * violation for `contract.md` or `acceptance-manifest.json`.
+   */
+  seededPaths?: readonly string[];
+  /** Defaults to {@link IGNORED_REVIEW_ARTIFACT_ROOTS}. */
+  ignoredRoots?: readonly string[];
+}
+
+/**
+ * Everything the evaluator changed in its disposable review worktree that
+ * neither the copy-back allowlist nor this attempt's seed manifest explains
+ * (#91 AC2/AC6). Reported, never fatal: the discard already happened — a
+ * path not on the allowlist was never copied back — so this is the record of
+ * what was thrown away, not a decision about it.
+ *
+ * Two `git status` reads of its own, with `execFileSync`, rather than
+ * `git.statusPorcelain`: that export's argv carries neither
+ * `--untracked-files=all` nor `--ignored`, so it cannot report the `.afk/`
+ * paths this scan makes load-bearing, and widening its argv would change what
+ * the ship gate parses out of it. A tree-object diff is ruled out for the
+ * same reason: a tree built through a throwaway index cannot see an ignored
+ * path at all.
+ */
+export function scanReviewWorktreeWrites(
+  input: ReviewWorktreeWriteScan,
+): string[] {
+  const dir = input.reviewArtifactDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const seeded = new Set(
+    (input.seededPaths ?? []).map((path) => path.replace(/\\/g, "/")),
+  );
+  // Only roots that exist: an absent pathspec is not a scan the reviewer
+  // failed, and asking git about one buys nothing.
+  const roots = (input.ignoredRoots ?? IGNORED_REVIEW_ARTIFACT_ROOTS).filter(
+    (root) => existsSync(join(input.cwd, root)),
+  );
+  const paths = new Set<string>([
+    ...readStatusPaths(input.cwd, ["--untracked-files=all"]),
+    ...(roots.length === 0
+      ? []
+      : readStatusPaths(input.cwd, [
+          "--untracked-files=all",
+          "--ignored",
+          "--",
+          ...roots,
+        ])),
+  ]);
+  return [...paths]
+    .filter((path) => !seeded.has(path))
+    .filter((path) => !copiedBack(path, dir, input.copyBackAllowlist))
+    .sort();
+}
+
+/** True for a path the copy-back allowlist already admitted. */
+function copiedBack(path: string, dir: string, allowlist: RegExp): boolean {
+  const prefix = `${dir}/`;
+  if (!path.startsWith(prefix)) return false;
+  const rest = path.slice(prefix.length);
+  // Directly inside, never nested: a nested name is not copied back, so it
+  // is a violation like any other write.
+  if (rest.includes("/")) return false;
+  return allowlist.test(rest);
+}
+
+function readStatusPaths(cwd: string, args: readonly string[]): string[] {
+  const out = execFileSync(
+    "git",
+    [
+      // Paths verbatim rather than git's C-quoted escaping, for the reason
+      // `src/git.ts:1299-1305` records.
+      "-c",
+      "core.quotePath=false",
+      "status",
+      "--porcelain=v1",
+      ...args,
+    ],
+    { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+  ) as string;
+  const paths: string[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    // `XY <path>`, or `XY <old> -> <new>` for a rename: the new path is
+    // what the reviewer wrote.
+    if (line.length < 4) continue;
+    const raw = line.slice(3);
+    const renamed = raw.split(" -> ");
+    const path = (renamed[renamed.length - 1] ?? "").trim();
+    if (path === "") continue;
+    paths.push(path.replace(/\\/g, "/").replace(/\/+$/, ""));
+  }
+  return paths;
 }
 
 export function buildQAReviewAttemptRecord(details: {

@@ -1,7 +1,9 @@
 # Guardian review rounds converge
 
 Status: Accepted — approved by the operator on 2026-09-06; the design's
-implementation slices (#170–#174) are cleared to start.
+implementation slices (#170–#174) are cleared to start. Decision 1's
+identity resolution is amended by ADR 0065 (#240, #247): a bare stable-ID
+match no longer resolves identity on its own.
 
 ## Context
 

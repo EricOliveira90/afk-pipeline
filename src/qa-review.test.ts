@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  QA_REVIEW_STAGES,
   advanceQAReviewHistory,
   buildQAReviewAttemptRecord,
+  loadQAReview,
   loadQAReviewResumeState,
   openQAReviewFindings,
   parseQAReview,
+  qaReviewFilename,
   scopeAmendmentRequests,
   type QAReview,
 } from "./qa-review.js";
+import {
+  archiveQAReviewAttempt,
+  negotiationArchiveDir,
+  qaArchivePrefix,
+} from "./artifacts.js";
+import { FINAL_REVIEW_FILENAME } from "./final-evaluation.js";
+import { MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
 import {
   mkdirSync,
   mkdtempSync,
@@ -823,6 +833,120 @@ describe("loadQAReviewResumeState", () => {
           remedy: "SOURCE_CHANGE",
         },
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("[behavior:B-10] resumes final evaluation through the existing per-stage state and retryStage", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-resume-final-"));
+    const reviewDir = join(root, "reviews");
+    const sliceDir = join(root, "slice");
+    mkdirSync(reviewDir);
+    mkdirSync(sliceDir);
+    try {
+      const record = buildQAReviewAttemptRecord({
+        stage: "final-evaluation",
+        round: 2,
+        attempt: 2,
+        review: parseQAReview(implementationReview({ id: "FE-01" })),
+        canonicalArchivePath: "reviews/final-review-r2-a2.json",
+        markdownArchivePath: "slice/final-report-r2-a2.md",
+      });
+      writeFileSync(
+        join(reviewDir, "final-review-r2-a2-record.json"),
+        JSON.stringify(record),
+        "utf-8",
+      );
+
+      const restored = loadQAReviewResumeState(reviewDir, sliceDir);
+
+      // A third stage's state is another QAReviewStageResumeState, and the
+      // same retryStage selection picks it — no parallel resume mechanism.
+      expect(restored.finalEvaluation.history).toEqual([
+        { id: "FE-01", state: "OPEN" },
+      ]);
+      expect(restored.finalEvaluation.unresolved[0]?.id).toBe("FE-01");
+      expect(restored.retryStage).toBe("final-evaluation");
+      expect(restored.finalEvaluation.lastImplementationRound).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the final-evaluation review stage", () => {
+  it("[behavior:B-05] adds a third QAReviewStage member with its own canonical artifact", () => {
+    expect(QA_REVIEW_STAGES).toEqual([
+      "deterministic",
+      "shared-preview",
+      "final-evaluation",
+    ]);
+    expect(qaReviewFilename("final-evaluation")).toBe(FINAL_REVIEW_FILENAME);
+  });
+
+  it("[behavior:B-05] turns qaArchivePrefix into a three-way map returning final", () => {
+    expect(qaArchivePrefix("final-evaluation")).toBe("final");
+  });
+
+  it("[behavior:P-02] keeps qa and uat as the two existing stages' prefixes and filenames", () => {
+    expect(qaArchivePrefix("deterministic")).toBe("qa");
+    expect(qaArchivePrefix("shared-preview")).toBe("uat");
+    expect(qaReviewFilename("deterministic")).toBe("qa-review.json");
+    expect(qaReviewFilename("shared-preview")).toBe("uat-review.json");
+    // The existing two stages still load through the QAReview schema.
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-prefix-"));
+    try {
+      writeFileSync(join(root, "qa-review.json"), review(), "utf-8");
+      writeFileSync(join(root, "uat-review.json"), review(), "utf-8");
+      expect(loadQAReview(root, "deterministic").verdict).toBe("PASS");
+      expect(loadQAReview(root, "shared-preview").verdict).toBe("PASS");
+      // final-review.json has its own canonical validator, so loading it
+      // through the QA schema is refused rather than silently mis-parsed.
+      expect(() => loadQAReview(root, "final-evaluation")).toThrow(
+        /parseFinalReview/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("[behavior:B-10] archives every final-evaluation attempt stamped with its attempt number", () => {
+    const root = mkdtempSync(join(tmpdir(), "afk-qa-final-archive-"));
+    const sliceDir = join(root, "slice");
+    mkdirSync(sliceDir, { recursive: true });
+    try {
+      const archiveDir = join(
+        negotiationArchiveDir(root, "run-slug", "04"),
+        "reviews",
+      );
+      const names: (string | null)[] = [];
+      for (let attempt = 1; attempt <= MAX_FINAL_EVALUATION_ATTEMPTS; attempt += 1) {
+        writeFileSync(
+          join(sliceDir, FINAL_REVIEW_FILENAME),
+          JSON.stringify({ attempt }),
+          "utf-8",
+        );
+        names.push(
+          archiveQAReviewAttempt({
+            sliceDir,
+            archiveDir,
+            stage: "final-evaluation",
+            round: 1,
+            attempt,
+          }),
+        );
+      }
+
+      expect(names).toEqual([
+        "final-review-r1-a1.json",
+        "final-review-r1-a2.json",
+        "final-review-r1-a3.json",
+      ]);
+      // Under .afk/artifacts/<run-slug>/slice-<n>/, like every other attempt.
+      expect(archiveDir).toBe(
+        join(root, ".afk", "artifacts", "run-slug", "slice-04", "reviews"),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

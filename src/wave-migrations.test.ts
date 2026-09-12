@@ -10,7 +10,7 @@
  * keep the halves balanced by measured block time
  * (`--reporter=./scripts/describe-times.reporter.mjs`), not test count.
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -1142,7 +1142,7 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
     git(repo, ["commit", "-m", `add ${filename}`]);
   }
 
-  it("records MERGE-PENDING with the colliding prefixes and preserves the slice branch", async () => {
+  it("B-09: records MERGE-PENDING with the colliding prefixes, preserves the slice branch and never spends a resolution round", async () => {
     const repo = makeRepo();
     seedMigrationOnMain(repo, "042_users.sql");
     const slices: Slice[] = [
@@ -1165,6 +1165,12 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
       fixtures,
     );
 
+    // A prefix collision is not a textual conflict: the merge was never
+    // attempted, nothing in the tree needs resolving, and the deferral is
+    // recoverable on the next run. Spending the round here would burn a
+    // generator dispatch on a filename (#132 B-09).
+    const dispatches: string[] = [];
+
     const { outcomes } = await runWave({
       waveNumber: 1,
       readyIds: ["601"],
@@ -1173,10 +1179,15 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
       logger,
       featBranch,
       relevantFilesBlock: "- README.md",
-      testCommand: "pnpm test",
       mergeMutex: makeAsyncMutex(),
+      resolveMergeConflict: async ({ slice }) => {
+        dispatches.push(slice.ghIssue);
+        throw new Error("the resolution round must not run for a collision");
+      },
+      testCommand: "pnpm test",
     });
 
+    expect(dispatches).toEqual([]);
     const outcome = outcomes.get("601");
     expect(outcome?.phase).toBe("MERGE-PENDING");
     if (outcome?.phase !== "MERGE-PENDING") throw new Error("expected MERGE-PENDING");
@@ -1195,6 +1206,8 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
     ).toEqual(["042_users.sql"]);
   }, 240_000);
 
+  // No `resolveMergeConflict`, which is every direct `runWave` caller outside
+  // the orchestrator: the conflict is terminal exactly as before (#132).
   it("still records CONFLICT for a real git merge conflict", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
@@ -1262,6 +1275,193 @@ describe("runWave migration prefix collision → MERGE-PENDING", () => {
     const phases = ["611", "612"].map((id) => outcomes.get(id)?.phase).sort();
     expect(phases).toEqual(["CONFLICT", "PASS"]);
   }, 240_000);
+
+  /**
+   * The same conflict shape as the fixture above with a resolver wired in
+   * (#132). One new spawned wave, and every assertion below reads a value
+   * captured while it ran: the round only exists on the merge path of a real
+   * textual conflict, which is the one thing the module's own unit tests
+   * (`merge-resolution.test.ts`) cannot manufacture — they start from a
+   * conflicted worktree instead of arriving at one through a wave. The
+   * resolver here stands in for the real round's body: it resolves and commits
+   * the merge, so the retry has something to fast-forward.
+   */
+  describe("a real conflict spends one scoped resolution round", () => {
+    /** `git merge-base --is-ancestor` as a predicate. */
+    function isAncestor(repo: string, sha: string, ref: string): boolean {
+      try {
+        git(repo, ["merge-base", "--is-ancestor", sha, ref]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    interface Observed {
+      phases: Array<string | undefined>;
+      dispatches: string[];
+      conflictDetails: string[];
+      acquisitionsAtRoundEntry: number;
+      acquisitionsAtRoundExit: number;
+      probeSettledInsideRound: boolean;
+      probeSawTheRetryMerged: boolean;
+    }
+    let observed: Observed;
+
+    beforeAll(async () => {
+      const repo = makeRepo();
+      const slices: Slice[] = [
+        { number: "01", ghIssue: "631", title: "Alpha", type: "AFK", blockedBy: [], userStories: "" },
+        { number: "02", ghIssue: "632", title: "Beta", type: "AFK", blockedBy: [], userStories: "" },
+      ];
+      const fixtures = new Map<string, SliceFixture>([
+        ["631", { files: ["src/alpha.txt"], qaPasses: true, outputFile: "src/alpha.txt", outputContent: "from alpha" }],
+        ["632", { files: ["src/beta.txt"], qaPasses: true, outputFile: "src/beta.txt", outputContent: "from beta" }],
+      ]);
+      const { config, dag, logger, featBranch, provider } = setupWave(
+        repo,
+        "wave-resolution-round",
+        slices,
+        fixtures,
+      );
+      // Advance the feature branch under slice 02 during phase A, as above:
+      // the only way a candidate that passed the file-scope gate can still
+      // reach a merge with a conflict in it.
+      let advanced = false;
+      config.provider = {
+        name: "stub",
+        async invoke(options: InvokeOptions): Promise<InvokeResult> {
+          const result = await provider.invoke(options);
+          if (
+            !advanced &&
+            options.role === "evaluator-contract" &&
+            sliceFromCwd(options.cwd, slices)?.ghIssue === "632"
+          ) {
+            advanced = true;
+            const head = git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+            git(repo, ["checkout", featBranch]);
+            mkdirSync(join(repo, "src"), { recursive: true });
+            writeFileSync(
+              join(repo, "src", "beta.txt"),
+              "from the feature branch\n",
+              "utf-8",
+            );
+            git(repo, ["add", "--", "src/beta.txt"]);
+            git(repo, ["commit", "-m", "feat: beta.txt landed out of band"]);
+            git(repo, ["checkout", head]);
+          }
+          return result;
+        },
+      };
+
+      // An instrumented mutex: the count is the only way to see whether the
+      // critical section was released and re-acquired around the round.
+      const inner = makeAsyncMutex();
+      let acquisitions = 0;
+      const mergeMutex = <T,>(fn: () => Promise<T>): Promise<T> =>
+        inner(async () => {
+          acquisitions++;
+          return await fn();
+        });
+
+      const dispatches: string[] = [];
+      const conflictDetails: string[] = [];
+      let acquisitionsAtRoundEntry = -1;
+      let acquisitionsAtRoundExit = -1;
+      let probeSettledInsideRound = true;
+      let probeSawTheRetryMerged = false;
+      let resolutionCommit = "";
+      let probe: Promise<void> | undefined;
+
+      const { outcomes } = await runWave({
+        waveNumber: 1,
+        readyIds: ["631", "632"],
+        config,
+        dag,
+        logger,
+        featBranch,
+        relevantFilesBlock: "- README.md",
+        mergeMutex,
+        resolveMergeConflict: async ({ slice, ctx, conflictDetails: details }) => {
+          dispatches.push(slice.ghIssue);
+          conflictDetails.push(details);
+          acquisitionsAtRoundEntry = acquisitions;
+          // Queue a competitor. Nothing the round does may wait on this
+          // mutex — it is not reentrant — and the section must stay held
+          // across the round and the retry, so this must not run until the
+          // retry has already landed the resolution commit (B-05).
+          let settled = false;
+          probe = mergeMutex(async () => {
+            settled = true;
+            probeSawTheRetryMerged = isAncestor(
+              repo,
+              resolutionCommit,
+              featBranch,
+            );
+          });
+          // Stand in for `runMergeResolutionRound`: merge the feature tip into
+          // the slice branch in the slice's own worktree, resolve, commit.
+          const worktree = ctx.worktreeDir;
+          try {
+            git(worktree, ["merge", "--no-commit", featBranch]);
+          } catch {
+            // the conflicted index this round exists to resolve
+          }
+          writeFileSync(
+            join(worktree, "src", "beta.txt"),
+            "from beta\nfrom the feature branch\n",
+            "utf-8",
+          );
+          git(worktree, ["add", "-A"]);
+          git(worktree, ["commit", "-m", "merge feature into slice"]);
+          resolutionCommit = git(worktree, ["rev-parse", "HEAD"]);
+          acquisitionsAtRoundExit = acquisitions;
+          probeSettledInsideRound = settled;
+          return {
+            verdict: "RESOLVED",
+            durationMs: 7,
+            detail: "resolved and gates green",
+            conflictedPaths: ["src/beta.txt"],
+            resolutionCommit,
+          };
+        },
+        testCommand: "pnpm test",
+      });
+      await probe;
+
+      observed = {
+        phases: ["631", "632"].map((id) => outcomes.get(id)?.phase),
+        dispatches,
+        conflictDetails,
+        acquisitionsAtRoundEntry,
+        acquisitionsAtRoundExit,
+        probeSettledInsideRound,
+        probeSawTheRetryMerged,
+      };
+    }, 240_000);
+
+    it("B-01: dispatches exactly one round for the conflicted slice and merges the resolved tree", () => {
+      expect(observed.dispatches).toEqual(["632"]);
+      // git's own output from the refused attempt, not a summary of it.
+      expect(observed.conflictDetails[0]).toContain("src/beta.txt");
+      // A resolved round earns the retry, and the retry is the merge: both
+      // slices land, so no operator sees a CONFLICT for work that resolved.
+      expect(observed.phases).toEqual(["PASS", "PASS"]);
+    });
+
+    it("B-05: holds the merge mutex across the refused attempt, the round and the retry", () => {
+      expect(observed.acquisitionsAtRoundEntry).toBeGreaterThan(0);
+      // Released mid-round, the queued competitor would have acquired and
+      // bumped the count; it did not, so the section is one acquisition.
+      expect(observed.acquisitionsAtRoundExit).toBe(
+        observed.acquisitionsAtRoundEntry,
+      );
+      expect(observed.probeSettledInsideRound).toBe(false);
+      // And when it finally ran, the retry had already merged the resolution
+      // commit — the retry, too, is inside the section the round ran in.
+      expect(observed.probeSawTheRetryMerged).toBe(true);
+    });
+  });
 
   it("continues the lane past a MERGE-PENDING member", async () => {
     const repo = makeRepo();

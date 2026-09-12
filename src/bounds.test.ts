@@ -1,10 +1,32 @@
 import { describe, expect, it } from "vitest";
 import {
   computeSliceBounds,
+  finalEvaluationAttemptsRemaining,
   formatSliceBounds,
   implementationRoundsRemaining,
+  MAX_FINAL_EVALUATION_ATTEMPTS,
 } from "./bounds.js";
 import { MAX_RESUME_ATTEMPTS } from "./resume.js";
+
+describe("finalEvaluationAttemptsRemaining", () => {
+  it("[behavior:B-10] bounds final evaluation to three attempts (D19)", () => {
+    expect(MAX_FINAL_EVALUATION_ATTEMPTS).toBe(3);
+    expect(finalEvaluationAttemptsRemaining({ spent: 0 })).toBe(3);
+  });
+
+  it("[behavior:B-10] charges each spent attempt against the cap", () => {
+    expect(finalEvaluationAttemptsRemaining({ spent: 1 })).toBe(2);
+    expect(finalEvaluationAttemptsRemaining({ spent: 3 })).toBe(0);
+  });
+
+  it("[behavior:B-10] reports zero — never a negative budget — past the cap", () => {
+    expect(finalEvaluationAttemptsRemaining({ spent: 9 })).toBe(0);
+  });
+
+  it("[behavior:B-10] honors an explicit limit for a caller that carries its own", () => {
+    expect(finalEvaluationAttemptsRemaining({ spent: 1, limit: 2 })).toBe(1);
+  });
+});
 
 describe("implementationRoundsRemaining", () => {
   it("gives a fresh slice the whole cap", () => {

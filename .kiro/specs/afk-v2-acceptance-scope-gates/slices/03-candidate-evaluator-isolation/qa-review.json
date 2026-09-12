@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-04"],
+      "summary": "The gitignored-.afk half of the reviewer-write scan had no test, so the second --ignored git status read could be deleted with the suite still green.",
+      "evidence": "src/qa-orchestration.test.ts:3043-3163 (commit 169be76): the stub now writes join(reviewCwd, '.afk', 'artifacts', 'deep', 'approved-baseline.json') at :3086-3093 and edits the tracked join(reviewCwd, 'src', 'app.ts') at :3081-3085, and the scan assertion at :3133-3145 is an exact toEqual over the sorted violation paths that includes both '.afk/artifacts/deep/approved-baseline.json' and 'src/app.ts'. scanReviewWorktreeWrites (src/qa-review.ts:944-971) only reaches the .afk path via the second readStatusPaths call with ['--untracked-files=all','--ignored','--',...roots]; removing that call drops the path from the returned array and the exact toEqual fails.",
+      "expected": "An assertion — on the existing scan scenario or in a unit test of scanReviewWorktreeWrites — where the stub writes a file under the review worktree's gitignored `.afk/` root and a file under `src/`, and the test asserts a reviewer-write-violation event names each; the assertion fails if the `--ignored` status read is removed.",
+      "observed": "Both writes are made by the stub in the B-03/B-04 scenario and both paths are named in an exact-set assertion over the reviewer-write-violation events, alongside the pre-existing README.md and probe.txt writes. The src/app.ts edit is a real modification to a tracked, committed file (src/qa-orchestration.test.ts:3047-3050), and the scenario also asserts the edit reached neither the generator worktree nor its commit (:3120-3128).",
+      "clearCondition": "An assertion — on the existing scan scenario or in a unit test of scanReviewWorktreeWrites — where the stub writes a file under the review worktree's gitignored `.afk/` root and a file under `src/`, and the test asserts a reviewer-write-violation event names each; the assertion fails if the `--ignored` status read is removed.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-04"],
+      "summary": "The seed-manifest subtraction was asserted only vacuously: the seeded pair was byte-identical to the checkpoint tree in every fixture.",
+      "evidence": "src/qa-orchestration.test.ts:2894-3018 (commit 169be76): the B-01/B-02 scenario now defines AMENDED_CONTRACT at :2901-2904, has attempt 1 rm both seeded files in the review worktree (:2939-2942) and then rewrite contract.md and acceptance-manifest.json in ctx.absSliceDir with differing bytes (:2946-2959) before throwing, and asserts at :2989-2993 that seenContract equals [GENERATOR_FIXTURE_CONTRACT, AMENDED_CONTRACT] and seenManifestScope's second entry carries the added 'amended.txt' scope path. Attempt 2's seed therefore writes bytes the checkpoint tree does not hold, producing a real status line, and :2997-3006 asserts no reviewer-write-violation names either path. scanReviewWorktreeWrites filters on the seeded set at src/qa-review.ts:948-950/968; drop seededPaths at the src/orchestrator.ts:4962 call site and attempt 1's two deletions plus attempt 2's two modifications are all reported, failing that assertion.",
+      "expected": "A scenario in which the seeded contract.md / acceptance-manifest.json differ from the checkpoint tree's bytes asserts that the evaluator reads the new bytes and that no reviewer-write-violation names either path — and fails when seededPaths is not passed to scanReviewWorktreeWrites.",
+      "observed": "The amendment case is exercised end to end: the amendment lands in ctx.absSliceDir between the two attempts, the extra attempt reads the amended bytes (asserted), and the seed manifest is the only reason the resulting status lines are not journalled as reviewer writes.",
+      "clearCondition": "A scenario in which the seeded contract.md / acceptance-manifest.json differ from the checkpoint tree's bytes (the amendment case, or a stub that rewrites the pair in ctx.absSliceDir between checkpoint and attempt) asserts that the evaluator reads the new bytes and that no reviewer-write-violation names either path — and fails when seededPaths is not passed to scanReviewWorktreeWrites.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03", "B-06", "P-01", "P-05"],
+      "summary": "Three declared observable results were asserted in a weaker form than the locked pair states.",
+      "evidence": "The approved-baseline.json half is now widened rather than deviated: the stub writes join(sliceDir, 'approved-baseline.json') (src/qa-orchestration.test.ts:3068-3072), the scenario asserts it is absent from ctx.absSliceDir (:3113-3115) and that a reviewer-write-violation names `${REVIEW_SLICE_REL}/approved-baseline.json` (:3141). The remaining two deviations are recorded in handoff.md: the P-01 relocation at handoff.md:78-81, and B-06's / P-05's 'a FAIL writes no approved-baseline.json' halves at handoff.md:68-77, which states that writeApprovedBaseline is reachable only from the runSliceExecute pre-QA call site no direct runQAStage scenario enters, so the negative assertion would pass with the writer deleted, and names src/qa-orchestration.test.ts:1199 as the spawned scenario carrying the positive half.",
+      "expected": "Either the assertions are widened to what the manifest declares, or the deviations are recorded in handoff.md as the P-01 one already is.",
+      "observed": "Both halves of the clear condition are satisfied — one deviation widened into a real assertion, the other two recorded in handoff.md with the reason each would be vacuous where the manifest places it.",
+      "clearCondition": "Either the assertions are widened to what the manifest declares (add approved-baseline.json to the discarded set, assert the PASS-path baseline absence where writeApprovedBaseline is reachable), or the deviations are recorded in handoff.md as the P-01 one already is.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
