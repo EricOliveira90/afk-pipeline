@@ -13,7 +13,7 @@
 - B-10: `src/bounds.ts:MAX_FINAL_EVALUATION_ATTEMPTS`, `src/bounds.ts:finalEvaluationAttemptsRemaining`, `src/run-state.ts:finalEvaluationAttemptsSpent`, `src/artifacts.ts:archiveQAReviewAttempt`
 - B-11: `src/final-evaluation.ts:decideFinalVerdict`, called from `src/orchestrator.ts` once per final-evaluation attempt
 - B-12: `ARCHITECTURE.md` module and prompt rows
-- P-01: `src/wave.ts` untouched; asserted in `src/qa-orchestration.test.ts`
+- P-01: `src/wave.ts` untouched; the no-second-lock half asserted in `src/qa-orchestration.test.ts`, the mutex-serialized-merge half carried by `src/wave-migrations.test.ts` → `describe("a real conflict spends one scoped resolution round")` → `it("B-05: holds the merge mutex across the refused attempt, the round and the retry")`
 - P-02: `src/artifacts.ts:qaArchivePrefix` keeps `qa`/`uat`
 - P-03: `src/run-state.ts:recordApprovedBaseline` remains the only baseline writer; invalidation withdraws a citation without rewriting the artifact
 - P-04: `src/change-summary.ts:buildChangeSummary` is still the single builder and `ChangeSummary` v1 is unextended
@@ -22,6 +22,20 @@
 
 # Decisions made during implementation
 
+- The reuse decision compares the final tree against the tree the baseline
+  *authorizes*, not the tree it graded. #91 records the baseline at
+  `checkpoint.treeId` — captured before the QA evaluator writes `qa-report.md`
+  and `qa-review.json` — and those bytes are then committed into the accepted
+  tree, so the two tree IDs are never string-equal and `reuse` would be
+  unreachable in every real run. `FinalReuseBaseline` therefore carries an
+  optional `approvedTreeId`, and `src/orchestrator.ts` offers the accepted tree
+  there only after `reviewArtifactViolations` (the same window check, with the
+  same audited scope-amendment blobs, that the accept seam itself uses) proves
+  the QA window explains every differing path. Absent, the approval covers only
+  the tree it graded and the run fails closed into a full final evaluation.
+  This also removes the earlier `postApprovalWriteChangedTree` comparison:
+  `decideFinalReuse` is now the single comparison that decides whether an
+  evaluator is dispatched, so two tests of the same subject cannot disagree.
 - An `evaluate` decision dispatches the final evaluator rather than grading a review nobody was asked to write. The loop in `src/orchestrator.ts` runs while the verdict has neither passed nor returned to the generator, and each iteration: checks `finalEvaluationAttemptsRemaining` *before* dispatching, deletes the two final artifacts, commits any post-approval dirt, captures the tree with `createCandidateCheckpoint(..., { materialize: false })`, writes the baseline → final change summary, dispatches, and validates. The bound is therefore paid before an evaluator read, and an exhausted bound is an ERROR naming `MAX_FINAL_EVALUATION_ATTEMPTS`, not a silent merge.
 - The scope gate is re-run on the final tree through a second `runPostQAGates` call carrying only the non-executable `scopeGateDeclaration` and `qaApprovedTreeId: currentFinalTreeId`. The evidence from the accepted candidate is keyed to a tree the post-approval stage has already replaced, so reusing it would have made `scopeGateStatus` unreachable as PASS and the verdict permanently fail-closed. `decideFinalVerdict` accepts the status only when `finalScopeEvidence.treeId` equals the tree being graded, so stale evidence still cannot vouch for a new tree.
 - A FAIL review is routed before `decideFinalVerdict` is consulted, because the verdict grades conditions and never reads the review's own verdict field. `RESTORE` re-enters the post-approval writing stage with `repair: "RESTORE"` (the flag is what lets a stage tell its own turn from its own repair) and costs a graded attempt; `RETURN_TO_GENERATOR` invalidates the baseline, records a `RETURNED_TO_GENERATOR` attempt entry, and `continue`s the enclosing implementation loop, which bumps the generator round and spends no evaluator attempt (D19).
@@ -34,6 +48,23 @@
 
 # Gotchas / learnings
 
+- The approved baseline's `treeId` is the QA *checkpoint* tree, not the tree the
+  slice merges. Anything downstream that wants to compare a later tree against
+  the approval has to go through the QA-window check first, exactly as
+  `baselineAuthorizedTreeId` in `src/orchestrator.ts` does; a bare
+  `baseline.treeId === someLaterTree` is always false.
+- `finalEvaluationFixture` in `src/qa-orchestration.test.ts` takes
+  `stageWrites: false` to run production's no-op writing stage. That is the only
+  fixture shape that reaches a recorded `reuse`, and the `[behavior:B-02]`
+  scenario reads all three stores out of the run rather than seeding them.
+- P-01's "mutex-serialized merge" half cannot be asserted from this slice:
+  `runSliceExecute` stops at the accepted candidate and `src/wave.ts` performs
+  the merge. It is cited to the wave suite's `B-05` assertion by name instead,
+  and the in-slice test is titled for what it actually checks — that no lock
+  primitive identifier appears in any of this slice's modules. Prose in
+  `src/run-events.ts` and `src/logger.ts` legitimately names the merge mutex, so
+  that check matches identifiers (`mergeMutex`, `makeAsyncMutex`, …), not the
+  word.
 - `src/run-state.test.ts` asserts the stamped run-state version as the literal `4` in eight places, and P-06's required 4 → 5 bump makes those fail on the expected value alone. The operator widened the scope to that file, so the eight assertions now read `5` and the B-13 title was retitled. The four `version: 4` objects handed to `adaptLoadedState` (the #91 baseline-locator and #193 malformed-waiver fixtures) deliberately stay at `4`: they are the "a v4 file still loads" coverage P-06 exists to protect, and `adaptLoadedState` still accepts `3 | 4 | 5`.
 - The B-13 upgrade loop in that file still iterates `[undefined, 1, 2, 3, 4]`; a future bump should add the new predecessor version to that list rather than only re-stamping the expected value.
 - Run state lives at `.afk/state/<prd-slug>.json`, not `.afk/run-state-<slug>.json`; a hand-written fixture at the wrong path loads as an empty state and silently passes nothing.

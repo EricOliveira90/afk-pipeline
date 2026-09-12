@@ -50,6 +50,48 @@ describe("decideFinalReuse", () => {
     }
   });
 
+  it("[behavior:B-01] compares against the tree the baseline authorizes, not the tree it graded", () => {
+    // #91 records the baseline at the QA checkpoint, before the evaluator's
+    // report and review are committed. The tree the run merges is therefore the
+    // accepted tree, and the caller offers it as `approvedTreeId` only after
+    // proving the QA window explains the difference. Without that, `reuse`
+    // would be unreachable in every real run.
+    const outcome = decideFinalReuse({
+      finalTreeId: OTHER_TREE,
+      baseline: { treeId: BASELINE_TREE, approvedTreeId: OTHER_TREE },
+    });
+
+    expect(outcome.decision).toBe("reuse");
+    // Still exact string equality against that one tree, and nothing else.
+    expect(
+      decideFinalReuse({
+        finalTreeId: `${OTHER_TREE.slice(0, 39)}f`,
+        baseline: { treeId: BASELINE_TREE, approvedTreeId: OTHER_TREE },
+      }).decision,
+    ).toBe("evaluate");
+    // An unproven accepted tree offers nothing, and the graded tree is all the
+    // approval covers: fail closed into an evaluation.
+    expect(
+      decideFinalReuse({
+        finalTreeId: OTHER_TREE,
+        baseline: { treeId: BASELINE_TREE },
+      }).decision,
+    ).toBe("evaluate");
+  });
+
+  it("[behavior:B-09] refuses reuse when the graded baseline tree itself is invalidated", () => {
+    // The authorized tree is a different string from the tree the finding
+    // rejected, so checking only the final tree would reuse the very approval
+    // the finding disputed.
+    expect(
+      decideFinalReuse({
+        finalTreeId: OTHER_TREE,
+        baseline: { treeId: BASELINE_TREE, approvedTreeId: OTHER_TREE },
+        invalidatedCandidateTreeIds: [BASELINE_TREE],
+      }).decision,
+    ).toBe("evaluate");
+  });
+
   it("[behavior:B-01] evaluates when no approved baseline is recorded — fails closed", () => {
     const outcome = decideFinalReuse({
       finalTreeId: BASELINE_TREE,

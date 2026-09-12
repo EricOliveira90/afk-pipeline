@@ -6624,15 +6624,6 @@ export async function runSliceExecute(
             );
           }
           const finalTreeId = resolveCandidateTreeId(ctx.worktreeDir);
-          /**
-           * Did the writing stage actually write? The accepted candidate
-           * checkpoint is the tree the gates authorized and the QA verdict is
-           * tied to, so a final tree equal to it carries no post-approval byte
-           * — whatever it does or does not have in common with the graded
-           * baseline tree, which the accepted checkpoint's own QA-window
-           * artifacts already differ from.
-           */
-          const postApprovalWriteChangedTree = finalTreeId !== acceptedTreeId;
           const finalRunSlug = pipelineRunSlug(
             config.prdSlug,
             config.provider ?? kiroProvider,
@@ -6677,10 +6668,48 @@ export async function runSliceExecute(
             verdict,
             outcome,
           }));
+          /**
+           * The tree the recorded approval authorizes, which is what the reuse
+           * decision compares against (#96 B-01).
+           *
+           * #91 records the baseline at `checkpoint.treeId` — before the QA
+           * evaluator wrote its report and review. Those bytes are committed
+           * into the accepted tree above, so the baseline tree and the accepted
+           * tree are never string-equal, and a run whose post-approval stage
+           * wrote nothing would answer `evaluate` forever.
+           *
+           * So the accepted tree is offered as the baseline's authorized tree,
+           * and only after the same window check the accept seam itself uses
+           * proves the QA-window artifacts (plus any audited scope amendment)
+           * explain every differing path. If they do not, no authorized tree is
+           * offered and the run fails closed into a full final evaluation
+           * rather than reusing an approval that covers a different tree.
+           */
+          const baselineAuthorizedTreeId = ((): string | undefined => {
+            if (persistedBaseline === undefined) return undefined;
+            if (persistedBaseline.treeId === acceptedTreeId) {
+              return acceptedTreeId;
+            }
+            const beyondTheWindow = reviewArtifactViolations({
+              cwd: ctx.worktreeDir,
+              fromTree: persistedBaseline.treeId,
+              toTree: acceptedTreeId,
+              reviewArtifactDir: ctx.relSliceDir,
+              ...(amendedPairBlobsThisAttempt
+                ? { orchestratorAuthorizedBlobs: amendedPairBlobsThisAttempt }
+                : {}),
+            });
+            return beyondTheWindow.length === 0 ? acceptedTreeId : undefined;
+          })();
           const reuse = decideFinalReuse({
             finalTreeId,
             baseline: persistedBaseline
-              ? { treeId: persistedBaseline.treeId }
+              ? {
+                  treeId: persistedBaseline.treeId,
+                  ...(baselineAuthorizedTreeId
+                    ? { approvedTreeId: baselineAuthorizedTreeId }
+                    : {}),
+                }
               : null,
             invalidatedCandidateTreeIds,
           });
@@ -6719,20 +6748,6 @@ export async function runSliceExecute(
               finalTreeId,
               baselineTreeId: persistedBaseline!.treeId,
             });
-          } else if (!postApprovalWriteChangedTree) {
-            /**
-             * `evaluate`, but nothing written after the approval: the only
-             * difference from the baseline tree is the QA-window artifacts the
-             * accepted checkpoint already carries, which the QA verdict itself
-             * authorized (ADR 0012). There is no post-approval write to review,
-             * so this run proceeds exactly as it did before this slice — the
-             * bounded evaluator dispatch arrives with PRD 5's writing stages,
-             * which are what give it a subject.
-             */
-            logger.phase(
-              `${ctx.tag}: no post-approval writing stage changed the tree, ` +
-                `so no final evaluation is required for ${finalTreeId}`,
-            );
           } else {
             /**
              * The bounded final evaluation (#96 B-06/B-08/B-10/B-11).

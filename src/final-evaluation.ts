@@ -42,6 +42,25 @@ export const POST_APPROVAL_WRITING_STAGE_ID = "post-approval-writing";
 export interface FinalReuseBaseline {
   /** The tree ID the approval was graded against (D10: artifacts are keyed by tree). */
   treeId: string;
+  /**
+   * The tree this baseline's approval actually authorizes at the accept seam,
+   * when that is not `treeId` itself.
+   *
+   * #91 records the baseline at the *QA checkpoint* — the tree the evaluator
+   * graded, captured before the evaluator wrote `qa-report.md` and
+   * `qa-review.json`. Those two artifacts are then committed inside the QA
+   * window, and `reviewArtifactViolations` is what decides they are the only
+   * difference. So the tree the run is about to merge is never string-equal to
+   * `treeId`, and comparing against `treeId` alone could only ever answer
+   * `evaluate`.
+   *
+   * The caller therefore supplies the accepted tree here, and only after
+   * proving the QA window explains every path by which it differs from
+   * `treeId`. Absent (`undefined`) is the fail-closed reading: the approval
+   * authorizes no tree beyond the one it graded, so an unproven accepted tree
+   * gets a final evaluation rather than a reuse.
+   */
+  approvedTreeId?: string;
 }
 
 export type FinalReuseDecision = "reuse" | "evaluate";
@@ -55,11 +74,17 @@ export interface FinalReuseOutcome {
 /**
  * Compare the final checkpoint tree against the approved baseline.
  *
- * `reuse` requires all three of: a baseline exists, its `treeId` equals the
- * final tree ID as a string, and that tree ID has not been invalidated by a
+ * `reuse` requires all three of: a baseline exists, the tree it authorizes
+ * (`approvedTreeId` when the caller proved one, otherwise `treeId`) equals the
+ * final tree ID as a string, and neither tree ID has been invalidated by a
  * baseline-is-wrong finding (#96 B-09). Anything else evaluates — including
  * an absent baseline, which is the fail-closed reading: no recorded approval
  * is not the same as an approval to reuse.
+ *
+ * This is the *only* comparison that decides whether a final evaluator is
+ * dispatched. There is deliberately no second "did the writing stage write?"
+ * test beside it: two comparisons of the same subject can disagree, and the one
+ * the contract declares is this one.
  */
 export function decideFinalReuse(input: {
   finalTreeId: string;
@@ -80,28 +105,34 @@ export function decideFinalReuse(input: {
         `${input.finalTreeId} has nothing to be identical to.`,
     };
   }
-  if (input.baseline.treeId !== input.finalTreeId) {
+  const approvedTreeId = input.baseline.approvedTreeId ?? input.baseline.treeId;
+  if (approvedTreeId !== input.finalTreeId) {
     return {
       decision: "evaluate",
       reason:
-        `The final tree ${input.finalTreeId} differs from the approved ` +
-        `baseline tree ${input.baseline.treeId}.`,
+        `The final tree ${input.finalTreeId} differs from the tree the ` +
+        `approved baseline ${input.baseline.treeId} authorizes ` +
+        `(${approvedTreeId}).`,
     };
   }
-  if (invalidated.includes(input.finalTreeId)) {
+  if (
+    invalidated.includes(input.finalTreeId) ||
+    invalidated.includes(input.baseline.treeId)
+  ) {
     return {
       decision: "evaluate",
       reason:
-        `The final tree ${input.finalTreeId} equals the approved baseline ` +
-        `tree, but a final evaluation invalidated that candidate as ` +
-        `baseline-is-wrong, so its approval cannot be reused.`,
+        `The final tree ${input.finalTreeId} is the tree the approved ` +
+        `baseline authorizes, but a final evaluation invalidated that ` +
+        `candidate as baseline-is-wrong, so its approval cannot be reused.`,
     };
   }
   return {
     decision: "reuse",
     reason:
-      `The final tree ${input.finalTreeId} is the approved baseline tree, ` +
-      `so the existing approval stands and no final evaluator runs.`,
+      `The final tree ${input.finalTreeId} is the tree the approved ` +
+      `baseline ${input.baseline.treeId} authorizes, so the existing ` +
+      `approval stands and no final evaluator runs.`,
   };
 }
 

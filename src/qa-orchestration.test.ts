@@ -31,6 +31,7 @@ import {
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
 import {
+  approvedBaselineFor,
   finalEvaluationAttemptsSpent,
   finalEvaluationFor,
   invalidateFinalEvaluationBaseline,
@@ -3291,7 +3292,12 @@ describe("dependency-relevant sibling handoffs", () => {
  * one claim no unit test reaches (`CLAUDE.md`, "Where a new assertion goes").
  */
 describe("final evaluation and reuse", () => {
-  it("[behavior:B-02] records a reuse in run state, run events, and the run summary, dispatching no evaluator", () => {
+  /**
+   * The three stores' own shapes, seeded by hand. This asserts the reader, the
+   * event schema and the summary renderer — *not* that any run reaches a reuse,
+   * which is the spawned `[behavior:B-02]` scenario below.
+   */
+  it("shapes a reuse record, event, and summary section the three stores round-trip", () => {
     const repo = makeRepo();
     const finalTreeId = "f".repeat(40);
     const baselineTreeId = finalTreeId;
@@ -3347,7 +3353,7 @@ describe("final evaluation and reuse", () => {
     expect(md.slice(section)).toMatch(/\|\s*0\s*\|/);
   });
 
-  it("[behavior:B-02] leaves a run without a reuse byte-identical", () => {
+  it("leaves a run without a reuse byte-identical", () => {
     const repo = makeRepo();
     const logger = new Logger(repo, "no-final-reuse");
     const slice = { ghIssue: "70", title: "PRD 070 regression", branch: "main" };
@@ -3520,18 +3526,51 @@ describe("final evaluation and reuse", () => {
     expect(finalEvaluationFor(bumped, "70")?.decision).toBe("evaluate");
   });
 
-  it("[behavior:P-01] adds no second lock: the merge mutex in src/wave.ts is untouched", () => {
+  /**
+   * P-01's two halves, and which test carries which.
+   *
+   * "The merge stays serialized through the existing mutex" is a claim about a
+   * merge, and only an executing merge can carry it. This slice does not run
+   * one: `runSliceExecute` stops at the accepted candidate and `src/wave.ts`
+   * merges. That half is therefore carried, unchanged and by an executing
+   * merge, by `src/wave-migrations.test.ts` →
+   * `describe("a real conflict spends one scoped resolution round")` →
+   * `it("B-05: holds the merge mutex across the refused attempt, the round and
+   * the retry")`, which instruments the mutex, queues a competitor inside the
+   * critical section and asserts the acquisition count never moves. Nothing in
+   * this slice touches the code that assertion covers, so it still passes.
+   *
+   * What *this* test checks is the other half — "no second lock" — and it says
+   * so in its own name rather than claiming the merge behavior it never
+   * observes. It is a source-text check on purpose: the absence of a second
+   * lock primitive is a property of the diff, not of any run.
+   */
+  it("[behavior:P-01] introduces no second lock primitive anywhere in this slice's modules", () => {
     const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-    const wave = readFileSync(join(repoRoot, "src", "wave.ts"), "utf-8");
-    // One mutex, acquired in one place, and this slice is not a caller.
-    expect(wave).toContain("mergeMutex");
+    // The one mutex still exists where it always did, and this slice is not a
+    // caller of it and declares no lock of its own.
+    expect(
+      readFileSync(join(repoRoot, "src", "wave.ts"), "utf-8"),
+    ).toContain("mergeMutex");
     for (const file of [
       "src/final-evaluation.ts",
       "src/change-summary.ts",
       "src/run-state.ts",
+      "src/run-events.ts",
+      "src/post-qa-gates.ts",
+      "src/context-envelope.ts",
+      "src/bounds.ts",
+      "src/artifacts.ts",
+      "src/logger.ts",
+      "src/qa-review.ts",
     ]) {
+      // The identifiers that *are* a lock primitive in this codebase. Prose may
+      // name the mutex and does — `src/run-events.ts` and `src/logger.ts` both
+      // explain what a resolution under it means.
       const source = readFileSync(join(repoRoot, file), "utf-8");
-      expect(source, file).not.toMatch(/mergeMutex|makeAsyncMutex/);
+      expect(source, file).not.toMatch(
+        /mergeMutex|makeAsyncMutex|AsyncMutex|acquireLock|lockFile/,
+      );
     }
   });
 
@@ -3547,6 +3586,11 @@ describe("final evaluation and reuse", () => {
       call: { attempt: number; baselineTreeId: string; finalTreeId: string },
     ) => unknown;
     onFinalCall?: (call: { cwd: string; attempt: number }) => void;
+    /**
+     * `false` makes the injected stage production's no-op — the reuse path.
+     * Defaults to `true`, the stub write that gives an evaluator a subject.
+     */
+    stageWrites?: boolean;
   }): {
     repo: string;
     ctx: SliceContext;
@@ -3624,6 +3668,7 @@ describe("final evaluation and reuse", () => {
       heartbeatIntervalMs: 20,
       postApprovalWritingStage: (input) => {
         stageCalls.push(input);
+        if (options.stageWrites === false) return;
         // A stub write, which is all it takes: the tree is no longer the tree
         // that was approved.
         writeFileSync(
@@ -3648,6 +3693,56 @@ describe("final evaluation and reuse", () => {
     baselineTreeId: call.baselineTreeId,
     finalTreeId: call.finalTreeId,
     findings: [],
+  });
+
+  it("[behavior:B-02] records a reuse in all three stores and dispatches no evaluator when the writing stage writes nothing", async () => {
+    // The reuse path as production runs it: the stage is a no-op, so every
+    // value below is read back out of the run the orchestrator performed. A
+    // hand-written record and a hand-emitted event would pass with the
+    // orchestrator's reuse branch deleted; this cannot.
+    const { repo, ctx, finalCalls, stageCalls } = finalEvaluationFixture({
+      review: passingReview,
+      stageWrites: false,
+    });
+
+    const result = await runSliceExecute(ctx);
+
+    expect(result.phase).toBe("PASS");
+    expect(stageCalls).toEqual([
+      { worktreeDir: repo, stageId: POST_APPROVAL_WRITING_STAGE_ID },
+    ]);
+    // Store 1: run state, through the reader.
+    const view = finalEvaluationFor(loadRunState(repo, "prd-070-stub"), "70");
+    expect(view?.decision).toBe("reuse");
+    expect(view?.attempts).toEqual([]);
+    // The record cites the baseline #91 wrote, and the tree it merged.
+    const baseline = approvedBaselineFor(loadRunState(repo, "prd-070"), "70");
+    expect(view?.baselineTreeId).toBe(baseline?.treeId);
+    expect(view?.baselineArtifactPath).toBe(baseline?.artifactPath);
+    // Zero evaluator-final invocations — the reuse's whole point.
+    expect(finalCalls).toEqual([]);
+    // Store 2: exactly one journaled event, keyed to the tree that merged.
+    const reuseEvents = readFileSync(
+      join(ctx.logger.runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "final-evaluation-reuse");
+    expect(reuseEvents).toHaveLength(1);
+    expect(reuseEvents[0]).toMatchObject({
+      ghIssue: "70",
+      sliceNumber: "01",
+      finalTreeId: view!.finalTreeId,
+      baselineTreeId: baseline!.treeId,
+    });
+    // Store 3: the slice's own run-summary section, rendered from that event.
+    const md = ctx.logger.writeSummary();
+    const section = md.indexOf("## Final Evaluation Reuse");
+    expect(section).toBeGreaterThan(-1);
+    expect(md.slice(section)).toContain(view!.finalTreeId);
+    expect(md.slice(section)).toMatch(/\|\s*0\s*\|/);
   });
 
   it("[behavior:B-03] runs an injected post-approval writing stage and evaluates the tree it dirtied exactly once", async () => {
