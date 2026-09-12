@@ -31,6 +31,7 @@ import {
 } from "./context-envelope.js";
 import { boundMergeResolutionBlock } from "./merge-resolution.js";
 import type { ContractReviewFinding } from "./contract-review.js";
+import { formatContractReviewFindings } from "./contract-review.js";
 import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -1389,6 +1390,131 @@ describe("planner and contract-evaluator context envelopes", () => {
     ).toThrow(
       /inlined bytes by artifact class: explorer-behavior-preservation 70047/,
     );
+  });
+
+  /**
+   * #265. PRD 7 slice #262 (`run-20260912-045140`) drew a REVISE and died at
+   * planner round 2: 87,482 bytes against 65,536, with `current-contract-pair`
+   * the dominant 55,892-byte term (contract.md 26,791 + acceptance-manifest.json
+   * 29,101). PRD 5 slice #87 died the same way twice the same day (83,744 and
+   * 75,247 bytes; pairs of 47,777 and 45,872). The fixture below is #262's
+   * shape: the measured pair, three ~850-byte-field blocking findings
+   * (~11 KB rendered), a control-plane objection, and the real repository's
+   * ADR index and ARCHITECTURE.md blocks.
+   */
+  describe("#265 a #262-sized planner revision round", () => {
+    const sliceDir = ".kiro/specs/rumo-prd7/slices/04-planner-pair";
+    const padTo = (seed: string, bytes: number): string => {
+      const lines: string[] = [];
+      let used = 0;
+      for (let index = 0; used < bytes; index += 1) {
+        const line = `${seed} clause ${index}: the contract records its own evidence path.`;
+        lines.push(line);
+        used += Buffer.byteLength(line, "utf-8") + 1;
+      }
+      return lines.join("\n");
+    };
+    const currentContract = padTo("current-contract", 26_791);
+    const currentAcceptanceManifest = JSON.stringify(
+      {
+        ...acceptanceManifest,
+        behaviors: Array.from({ length: 30 }, (_, index) => ({
+          id: `B-${String(index + 1).padStart(2, "0")}`,
+          source: `GH #262 D${index + 1}`,
+          given: padTo(`given-${index}`, 180),
+          when: padTo(`when-${index}`, 200),
+          then: padTo(`then-${index}`, 260),
+          observableResult: padTo(`observable-${index}`, 200),
+          preservation: false,
+          gateIds: ["typecheck", "tests"],
+        })),
+      },
+      null,
+      2,
+    );
+    const findings: ContractReviewFinding[] = [1, 2, 3].map((index) => ({
+      id: `F-0${index}`,
+      severity: "BLOCKING",
+      behaviorIds: [`B-0${index}`],
+      evidence: padTo(`evidence-${index}`, 850),
+      expected: padTo(`expected-${index}`, 850),
+      observed: padTo(`observed-${index}`, 850),
+      clearCondition: padTo(`clear-${index}`, 850),
+      state: "OPEN",
+      revisionCitation: null,
+    }));
+    const assemble = (controlSituation: string) =>
+      assemblePlannerRevisionEnvelope({
+        ghIssue: "262",
+        specsDir: ".kiro/specs/rumo-prd7",
+        sliceDir,
+        round: 2,
+        repoRoot: repoRootWithDocs,
+        currentContract,
+        currentAcceptanceManifest,
+        findings,
+        controlSituation,
+        contractResponseInstructions: [
+          "Write contract-response.json after revising the contract.",
+          "Include one response for each routed ID and no others: F-01, F-02, F-03.",
+        ].join("\n"),
+        baseGateCatalog: padTo("gate", 1_520),
+        migrationReservation: "No migration reservation is active.",
+      });
+
+    it("is a pair the old envelope could not carry", () => {
+      // The measured pair alone is more than half the budget; with the round's
+      // required blocks it overran by ~22 KB on the live run.
+      const pairBytes =
+        Buffer.byteLength(currentContract, "utf-8") +
+        Buffer.byteLength(currentAcceptanceManifest, "utf-8");
+      expect(pairBytes).toBeGreaterThanOrEqual(55_000);
+      expect(
+        Buffer.byteLength(formatContractReviewFindings(findings), "utf-8"),
+      ).toBeGreaterThanOrEqual(10_000);
+    });
+
+    it("fits under the 65,536-byte budget with the pair by reference and every other block whole", () => {
+      const result = assemble("The evaluator REJECTED the previous contract.");
+      expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
+        PLANNER_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
+      );
+      // The pair is named, not copied.
+      expect(result.prompt).toContain(`- \`${sliceDir}/contract.md\``);
+      expect(result.prompt).toContain(
+        `- \`${sliceDir}/acceptance-manifest.json\``,
+      );
+      expect(result.prompt).not.toContain("current-contract clause 0");
+      expect(result.prompt).not.toContain('"id": "B-30"');
+      expect(result.prompt).toMatch(/read both files in\s+full before you revise/);
+      // Reference, not omission: the class stays declared and both files are
+      // still recorded in the envelope evidence, in manifest order.
+      expect(result.evidence.includedArtifactClasses.slice(0, 2)).toEqual([
+        "current-contract-pair",
+        "current-contract-pair",
+      ]);
+      expect(result.evidence.includedArtifactIds.slice(0, 2)).toEqual([
+        `${sliceDir}/contract.md`,
+        `${sliceDir}/acceptance-manifest.json`,
+      ]);
+      // Every required block is still whole.
+      for (const finding of findings) {
+        expect(result.prompt).toContain(finding.clearCondition);
+      }
+      expect(result.prompt).toContain("## ADR index");
+      expect(result.prompt).toContain("## ARCHITECTURE.md");
+      expect(result.prompt).toContain("gate clause 0");
+      expect(result.prompt).not.toContain("undefined");
+    });
+
+    it("records the pair by reference in the overflow breakdown when something else overruns", () => {
+      // The byte breakdown (ADR 0062 decision 4) is unchanged: the pair no
+      // longer appears among the inlined weights, and is listed as travelling
+      // by reference so the next babysitter is not sent looking for it.
+      expect(() => assemble("S".repeat(70_000))).toThrow(
+        /inlined bytes by artifact class: control-plane-situation 70000.*; by reference: current-contract-pair/,
+      );
+    });
   });
 });
 

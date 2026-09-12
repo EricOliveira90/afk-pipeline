@@ -87,17 +87,15 @@ for requires a decision that fires test 1, 2, or 3.
 
 Parent PRD: `{{SPECS_DIR}}/prd.md`
 
-## contract.md
+The pair you are revising is in your working tree. Open and read both files in
+full before you revise anything:
 
-```markdown
-{{CURRENT_CONTRACT}}
-```
+- `{{SLICE_DIR}}/contract.md`
+- `{{SLICE_DIR}}/acceptance-manifest.json`
 
-## acceptance-manifest.json
-
-```json
-{{CURRENT_ACCEPTANCE_MANIFEST}}
-```
+They are not inlined below. Do not revise until you have read both files: a
+revision written from memory of an earlier round, or from the findings alone,
+rewrites terms the findings never touched.
 
 # Routed OPEN findings
 
