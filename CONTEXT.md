@@ -465,6 +465,9 @@ ship: the recorded override note is the operator's acknowledgement, and
 the run stays successful. Neither is a **cap exit**. Distinct from
 **escalation** (a single slice's agent gave up) and **cancellation**
 (user-initiated). See ADR 0015.
+_Avoid_: "failed run" (slices can all pass), "not ready" (that is the
+run-summary's rendering, not the outcome), "exit code 2" (there is no
+per-class exit taxonomy)
 
 **Envelope**:
 The exact prompt string one agent invocation receives — the `prompt` field of
@@ -495,9 +498,6 @@ model-call cap stopped the run first) or `ERROR` (invocation, artifact or
 parser failure). Reported as counts and a per-case table, never as a rate; a
 run with any `NOT-RUN` case is `INCOMPLETE`. Never read by a gate.
 _Avoid_: "pass", "fail", "pass rate", "score"
-_Avoid_: "failed run" (slices can all pass), "not ready" (that is the
-run-summary's rendering, not the outcome), "exit code 2" (there is no
-per-class exit taxonomy)
 
 **Cap exit**:
 The **ship gate**'s unattended exit once it has spent `--guardian-round-cap`
