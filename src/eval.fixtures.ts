@@ -306,6 +306,18 @@ export const EVAL_ROLE_EXPECTED: Readonly<
   architect: { outcome: "SHIP" },
 };
 
+/** The artifact that makes {@link EVAL_ROLE_EXPECTED} a MATCH for each role. */
+export const EVAL_ROLE_MATCHING_ARTIFACT: Readonly<
+  Record<EvalRole, (cwd: string) => void>
+> = {
+  "evaluator-contract": (cwd) => writeEvalContractReview(cwd, "ACCEPT"),
+  "evaluator-qa": (cwd) => writeEvalQAReview(cwd, "PASS", "NONE"),
+  "evaluator-final": (cwd) => writeEvalFinalReview(cwd, "PASS"),
+  planner: (cwd) => writeEvalPlannerContract(cwd),
+  pm: (cwd) => writeEvalGuardianReview(cwd, "pm", "SHIP"),
+  architect: (cwd) => writeEvalGuardianReview(cwd, "architect", "SHIP"),
+};
+
 /**
  * Write a pack into a fresh temporary directory and return its path. Values
  * are JSON-encoded unless already a string, so a fixture can commit malformed
