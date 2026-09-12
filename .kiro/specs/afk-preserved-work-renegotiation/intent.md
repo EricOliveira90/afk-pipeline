@@ -24,7 +24,8 @@ Add one explicit preserve-work renegotiation transition:
 - `--extend-scope <slice|ghIssue>[,...]` is optional, additive-only, and valid
   only with `--renegotiate-stale`.
 
-The transition never merges, resets, rebases or otherwise changes a branch.
+The transition never merges, resets, rebases or otherwise changes the slice
+branch or feature branch.
 Admission requires a clean registered preserved worktree whose slice branch
 already contains the current feature-branch head and still has commits ahead
 of it.

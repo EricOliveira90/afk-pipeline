@@ -43,7 +43,7 @@ AFK performs these steps before ordinary resume and before any agent dispatch.
    branch, have a clean worktree, have commits ahead of the feature branch, and
    hold a valid locked accepted pair. The slice branch must already contain
    the exact current feature-branch head. AFK does not merge, reset or rebase
-   either branch.
+   either the slice branch or feature branch.
 2. Validate the whole extension set: each member is an AFK slice present in
    current `issues.md`, allowed by current `afk.json`, absent from persisted
    scope, identity-consistent, and has every blocker either already scoped or
@@ -55,21 +55,23 @@ AFK performs these steps before ordinary resume and before any agent dispatch.
    locked-pair validation agree with the source. Never overwrite a published
    snapshot. A snapshot not referenced by admitted lineage grants no authority
    and is safe for later collection.
-4. Recheck the target pair, branch heads, clean worktree, scope fingerprint and
-   request identity against the facts used to build the snapshot.
+4. Recheck the target pair, slice-branch head, feature-branch head, clean
+   worktree, scope fingerprint and request identity against the facts used to
+   build the snapshot.
 5. Acquire the ADR 0056 run-state lock. While holding it, reload run state and
-   repeat the pair, branch-head, clean-worktree, active-attempt, request and
-   scope-fingerprint comparisons. A mismatch is a pre-admission refusal; the
-   unreferenced snapshot remains inert. Otherwise atomically append a
-   `PENDING` event. This is the first admitted mutation. The event contains a
-   unique attempt ID; target, canonical reason and complete proposed extension
-   set; provider and branch; slice head and feature head; scope fingerprint;
-   immutable snapshot locator; and original pair fingerprints. Only after this
-   write commits may AFK reopen or modify either contract file or negotiation
-   state.
+   repeat the pair, slice-branch-head, feature-branch-head, clean-worktree,
+   active-attempt, request and scope-fingerprint comparisons. A mismatch is a
+   pre-admission refusal; the unreferenced snapshot remains inert. Otherwise
+   atomically append a `PENDING` event. This is the first admitted mutation.
+   The event contains a unique attempt ID; target, canonical reason and
+   complete proposed extension set; provider and slice branch; slice head and
+   feature head; scope fingerprint; immutable snapshot locator; and original
+   pair fingerprints. Only after this write commits may AFK reopen or modify
+   either contract file or negotiation state.
 
-Pre-admission refusal writes no lineage, changes no branch or accepted-pair
-byte, and admits no scope. Snapshot creation failure is also pre-admission.
+Pre-admission refusal writes no lineage, changes neither the slice branch nor
+feature branch, changes no accepted-pair byte, and admits no scope. Snapshot
+creation failure is also pre-admission.
 
 ### Canonical request and scope identity
 
@@ -228,8 +230,8 @@ later recovery of a genuinely newer lock.
 
 - Automatic stale-contract detection or automatic scope growth.
 - Multiple recovery targets in one invocation.
-- Any branch mutation, merge-conflict resolution, destructive restart,
-  adoption, or cleanup.
+- Any slice-branch or feature-branch mutation, merge-conflict resolution,
+  destructive restart, adoption, or cleanup.
 - Removing or replacing persisted scope identities.
 - Generalizing focused scope revision beyond its gate-evidenced purpose.
 - Launching AFK as part of this PRD.
