@@ -12,16 +12,25 @@ Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD sli
 
 ## Test loop discipline (read this)
 
-The full suite (`pnpm test`) takes about 7 minutes on Windows (416s
-measured 2026-08-26 after the two-file suite splits; paired alone-runs
-that day put the three split suites ~2.5 minutes faster combined than
-their single-file forms) — the pipeline integration suites
-(`orchestrator`, `wave`, `resume-integration`, `qa-orchestration`,
-`clean-failed`) spawn hundreds of real git processes. The three biggest
-suites are each split across two test files balanced by measured
-`describe`-block time (e.g. `wave.test.ts` + `wave-migrations.test.ts`),
-so a single `test:heavy:<name>` run schedules them across both vitest
-workers — see the file headers before adding or moving a block.
+The full suite (`pnpm test`) takes roughly 20–30 minutes on Windows. Every
+measurement since 2026-09-01 lands in that band: recorded in-chain totals
+of 1184–1443s of suite time (`suite-budgets.json`,
+`_measured2026_09_01_prd3_slice01_five_chain`), two sessions in the week of
+2026-09-08 at ~20 and ~26 minutes, and PRD 4's pre-ship gate at ~18.5
+minutes under agent load on 2026-09-11 (#250). The governing ceiling is
+`suite-budgets.json` `totalSeconds` (1877s, ~31 min): that number is the
+ratchet's budget, set ~30% above the slowest in-chain run, while the figure
+here is the observation — when they disagree, the budget file wins and this
+sentence is stale. (The earlier "about 7 minutes / 416s" figure was measured
+2026-08-26, before #76 gave every fixture repo a real sanity script; it no
+longer holds and no idle-host re-measurement has been recorded yet.) The
+cost is the pipeline integration suites (`orchestrator`, `wave`,
+`resume-integration`, `qa-orchestration`, `clean-failed`), which spawn
+hundreds of real git processes. The three biggest suites are each split
+across two test files balanced by measured `describe`-block time (e.g.
+`wave.test.ts` + `wave-migrations.test.ts`), so a single
+`test:heavy:<name>` run schedules them across both vitest workers — see the
+file headers before adding or moving a block.
 
 - **While iterating:** run the specific test file you are working on
   (`pnpm vitest run src/<file>.test.ts`), or `pnpm test:fast` (unit +
@@ -33,7 +42,7 @@ workers — see the file headers before adding or moving a block.
   `pnpm test:fast` plus the heavy suites your change touches (e.g.
   `pnpm run test:heavy:wave`). Do **not** run the full suite.
   The evaluator-qa runs it on your slice and the pre-ship gate runs it on
-  the merged feature branch. A third run costs about 7 minutes and proves
+  the merged feature branch. A third run costs 20–30 minutes and proves
   nothing the other two do not.
 - Never loop on the full suite to debug a single failure.
 
