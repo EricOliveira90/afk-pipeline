@@ -32,6 +32,7 @@ import {
 } from "./acceptance-manifest.js";
 import { ADJUDICATION_DECISIONS_FILENAME } from "./adjudication.js";
 import type { MergeResolutionRoundResult } from "./merge-resolution.js";
+import type { GatePolicy } from "./gate-policy.js";
 
 export type WaveOutcomePhase =
   | "PASS"
@@ -56,6 +57,14 @@ export interface WaveInput {
   featBranch: string;
   relevantFilesBlock: string;
   testCommand: string;
+  /**
+   * The run's gate-policy snapshot, taken by the launch path before any agent
+   * ran (#251), and passed straight through to every slice context this wave
+   * builds. Left unset — as direct `runWave` callers outside the orchestrator
+   * do — each context reads the policy from `config.repoRoot`, which is still
+   * the host checkout and still never a candidate worktree.
+   */
+  runGatePolicy?: GatePolicy | null;
   mergeMutex: <T>(fn: () => Promise<T>) => Promise<T>;
   /**
    * One scoped merge-resolution round for a slice whose merge hit a real
@@ -196,6 +205,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
     featBranch,
     relevantFilesBlock,
     testCommand,
+    runGatePolicy,
     mergeMutex,
     resolveMergeConflict,
     onOutcome,
@@ -246,6 +256,7 @@ export async function runWave(input: WaveInput): Promise<WaveResult> {
         featBranch,
         relevantFilesBlock,
         testCommand,
+        runGatePolicy,
       ),
       onContractLocked(contractPath) {
         const migrationObjection = migrationGate(contractPath);
