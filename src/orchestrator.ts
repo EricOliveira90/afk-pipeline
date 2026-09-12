@@ -1249,6 +1249,63 @@ function preserveContractNegotiationFailure(
 }
 
 /**
+ * The context an archive warning needs, and nothing more. Structural so a
+ * unit test can prove the non-fatality without standing up a slice.
+ */
+export interface ArchiveWarningContext {
+  tag: string;
+  slice: { ghIssue: string };
+  logger: Pick<RunJournal, "phase">;
+}
+
+/**
+ * Run one evidence archive write for the record, never for the slice's
+ * outcome (#258).
+ *
+ * An archive describes a run; it must not be able to end one. On #96 a
+ * `cpSync(..., { errorOnExist: true })` refusing to overwrite a name a
+ * *previous* run had already written threw out of the generator loop, ERRORed
+ * a slice holding seven good commits, and was charged as a resume attempt —
+ * half the slice's resume budget spent on a filesystem collision. Nothing
+ * about the implementation was wrong, and nothing the archive protects was
+ * lost: the refusal exists so an earlier attempt's evidence is never
+ * overwritten, and warning satisfies that just as well as throwing.
+ *
+ * The warning names the archive path, because a gap in the archive has to be
+ * traceable rather than invisible. Returns `null` when the write failed, so
+ * a caller that reads the archived names can tell.
+ *
+ * Deliberately not applied to the QA raw-canonical artifact, which fails
+ * closed on purpose (#79): that one is the evidence a PASS rests on, and an
+ * attempt whose evidence could not be preserved must not count. Every caller
+ * here archives a record of something that has *already* been decided.
+ */
+export function archiveForTheRecord<T>(
+  ctx: ArchiveWarningContext,
+  description: string,
+  archiveDir: string,
+  write: () => T,
+): T | null {
+  try {
+    return write();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.phase(
+      `${ctx.tag}: Warning: failed to archive ${description} to ` +
+        `${archiveDir}: ${message}`,
+      "error",
+      {
+        type: "warn",
+        reason: "evidence-archive-failed",
+        ghIssue: ctx.slice.ghIssue,
+        message,
+      },
+    );
+    return null;
+  }
+}
+
+/**
  * Keep one contract review attempt's artifacts. Best-effort: an audit
  * copy that cannot be written is a warning, never the thing that fails a
  * negotiation. The warning names the attempt so a gap in the archive is
@@ -5846,13 +5903,24 @@ export async function runSliceExecute(
           acceptedPair,
         );
         if (mutatedOwned.length > 0) {
-          const archived = artifacts.archiveRejectedContractMutation({
-            sliceDir: ctx.absSliceDir,
-            archiveDir: reviewArchiveDir,
-            round,
-            attempt: generatorAttempt,
-            files: mutatedOwned,
-          });
+          // For the record only (#258): the refusal below is the outcome, and
+          // an archive that cannot be written must not replace it with a
+          // filesystem error naming a different problem.
+          const archived =
+            archiveForTheRecord(
+              ctx,
+              `the rejected contract mutation of round ${round} attempt ` +
+                `${generatorAttempt}`,
+              reviewArchiveDir,
+              () =>
+                artifacts.archiveRejectedContractMutation({
+                  sliceDir: ctx.absSliceDir,
+                  archiveDir: reviewArchiveDir,
+                  round,
+                  attempt: generatorAttempt,
+                  files: mutatedOwned,
+                }),
+            ) ?? [];
           restoreAcceptedContractPair(ctx.absSliceDir, acceptedPair);
           throw new Error(
             `Generator round ${round} attempt ${generatorAttempt} changed ` +
@@ -5878,12 +5946,26 @@ export async function runSliceExecute(
 
         if (!existsSync(escalationPath)) break;
 
-        artifacts.archiveScopeEscalationAttempt({
-          sliceDir: ctx.absSliceDir,
-          archiveDir: reviewArchiveDir,
-          round,
-          attempt: generatorAttempt,
-        });
+        // #258, and the write that killed #96: the archive dir is keyed by
+        // slice while this name is keyed by round and attempt, so a resumed
+        // slice whose prior life died before QA re-derives round 1 and asks
+        // for a name the prior run already wrote. The refusal to overwrite is
+        // right — that file is the only record of the earlier escalation —
+        // but it is not the slice's business. Warn and carry on: the
+        // escalation the loop is about to act on is still on disk in the
+        // slice dir, and the grant that follows is unaffected.
+        archiveForTheRecord(
+          ctx,
+          `the scope escalation of round ${round} attempt ${generatorAttempt}`,
+          reviewArchiveDir,
+          () =>
+            artifacts.archiveScopeEscalationAttempt({
+              sliceDir: ctx.absSliceDir,
+              archiveDir: reviewArchiveDir,
+              round,
+              attempt: generatorAttempt,
+            }),
+        );
         const lockedManifest = loadAcceptanceManifest(ctx.absSliceDir);
         const escalation = parseScopeEscalation(
           readFileSync(escalationPath, "utf-8"),

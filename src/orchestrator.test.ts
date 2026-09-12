@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  archiveForTheRecord,
   collectRequiredGateFailures,
   isCancelled,
   makeAsyncMutex,
@@ -65,6 +66,7 @@ import {
 } from "./preship.js";
 import { buildDAG, parseIssuesMd, type Slice } from "./issues-parser.js";
 import { RunJournal as Logger } from "./run-journal.js";
+import type { RunEventPayload } from "./run-events.js";
 import type {
   AgentProvider,
   InvokeOptions,
@@ -2250,6 +2252,7 @@ describe("generator scope escalation", () => {
       });
     let state: {
       slices: Record<string, { phase: string; error?: string }>;
+      resume?: Record<string, { attempts: number }>;
     };
     /** The slice artifact dir inside the preserved slice worktree. */
     const sliceDir = (slice: Slice): string =>
@@ -2343,6 +2346,32 @@ describe("generator scope escalation", () => {
                 record.role === "evaluator-contract" &&
                 record.ghIssue === slice?.ghIssue,
             ).length;
+            // #258: make slice 07's escalation archive collide with a name
+            // already on disk, the way a resumed slice's round 1 collides
+            // with the round 1 its previous run archived. Injected from the
+            // generator invocation rather than written before the run,
+            // because slice preparation moves a pre-existing `reviews/` dir
+            // aside (#123) and would free the slot again — only a name that
+            // appears inside the round reproduces the collision.
+            if (
+              options.role === "generator" &&
+              slice?.ghIssue === slices[6]!.ghIssue
+            ) {
+              const reviews = join(
+                repo,
+                ".afk",
+                "artifacts",
+                `${slug}-stub`,
+                "slice-07",
+                "reviews",
+              );
+              mkdirSync(reviews, { recursive: true });
+              writeFileSync(
+                join(reviews, "escalation-r1-a1.md"),
+                "# a previous run's escalation, which must not be overwritten\n",
+                "utf-8",
+              );
+            }
             // Every focused revision, not just the first (#257). A single
             // rejection is no longer terminal — the round retries with the
             // rejecting findings — so a slice that must end ERROR has to
@@ -2478,6 +2507,50 @@ describe("generator scope escalation", () => {
       const planners = forSlice("planner");
       expect(planners[1]!.prompt).not.toContain(REVISION_REJECTION_FINDING);
       expect(planners[2]!.prompt).toContain(REVISION_REJECTION_FINDING);
+    });
+
+    // #258, on the same slice, because it is the same claim from the other
+    // side: the slice reaches its real outcome. #96 lost a slice holding
+    // seven commits to exactly this write, and paid a resume attempt for it.
+    it("#258 warns and carries on when an evidence archive write collides", () => {
+      const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+      const runDir = readdirSync(runRoot)
+        .map((name) => join(runRoot, name))
+        .find((path) => statSync(path).isDirectory())!;
+      const warnings = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter(
+          (event) =>
+            event.type === "warn" &&
+            event.reason === "evidence-archive-failed" &&
+            event.ghIssue === slices[6]!.ghIssue,
+        );
+
+      expect(warnings).toHaveLength(1);
+      // The slice's real outcome, not the archive's.
+      expect(state.slices[slices[6]!.ghIssue]!.phase).toBe("PASS");
+      // The prior name was not overwritten — the refusal the archiver makes
+      // is still the right one; it just is not the slice's business.
+      expect(
+        readFileSync(
+          join(
+            repo,
+            ".afk",
+            "artifacts",
+            `${slug}-stub`,
+            "slice-07",
+            "reviews",
+            "escalation-r1-a1.md",
+          ),
+          "utf-8",
+        ),
+      ).toContain("a previous run's escalation");
+      // And nothing was charged for it. An ERROR that never reached an agent
+      // must not consume a resume attempt (#188's charge-at-dispatch stands;
+      // the failure simply never reaches the charge).
+      expect(state.resume?.[slices[6]!.ghIssue]).toBeUndefined();
     });
 
     it("ends the slice ERROR naming a focused-revision lock-gate refusal", () => {
@@ -8069,4 +8142,76 @@ describe("run.log observability (ADR 0017)", () => {
     expect(secondRunLog).toContain("Pipeline run started");
     expect(secondRunLog).toContain("(already completed)");
   }, 240_000);
+});
+
+/**
+ * #258. An archive is a record *about* a run and must never be able to end
+ * one. A unit test rather than a spawned scenario: the whole claim is what
+ * this seam does with a throwing write.
+ */
+describe("archiveForTheRecord", () => {
+  const context = () => {
+    const messages: string[] = [];
+    const events: RunEventPayload[] = [];
+    return {
+      messages,
+      events,
+      ctx: {
+        tag: "#1146 s07",
+        slice: { ghIssue: "1146" },
+        logger: {
+          phase: (
+            message: string,
+            _via?: "error" | "log" | "warn",
+            event?: RunEventPayload,
+          ) => {
+            messages.push(message);
+            if (event) events.push(event);
+          },
+        },
+      } as Parameters<typeof archiveForTheRecord>[0],
+    };
+  };
+
+  it("returns the write's value and says nothing when it succeeds", () => {
+    const { ctx, messages } = context();
+    expect(
+      archiveForTheRecord(ctx, "the scope escalation", "/archive", () => [
+        "escalation-r1-a1.md",
+      ]),
+    ).toEqual(["escalation-r1-a1.md"]);
+    expect(messages).toEqual([]);
+  });
+
+  it("warns naming the archive path and the cause, and does not throw", () => {
+    const { ctx, messages, events } = context();
+    expect(
+      archiveForTheRecord(ctx, "the scope escalation", "/archive", () => {
+        throw new Error("EEXIST: file already exists");
+      }),
+    ).toBeNull();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("Warning: failed to archive");
+    expect(messages[0]).toContain("the scope escalation");
+    expect(messages[0]).toContain("/archive");
+    expect(messages[0]).toContain("EEXIST");
+    expect(events).toEqual([
+      {
+        type: "warn",
+        reason: "evidence-archive-failed",
+        ghIssue: "1146",
+        message: "EEXIST: file already exists",
+      },
+    ]);
+  });
+
+  it("carries a non-Error throw through as a warning too", () => {
+    const { ctx, events } = context();
+    expect(
+      archiveForTheRecord(ctx, "the rejected mutation", "/archive", () => {
+        throw "ENOSPC";
+      }),
+    ).toBeNull();
+    expect(events[0]).toMatchObject({ message: "ENOSPC" });
+  });
 });
