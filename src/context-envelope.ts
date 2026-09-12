@@ -1376,19 +1376,56 @@ export function assemblePlannerInitialEnvelope(
   );
 }
 
+/**
+ * Why the contract pair is named instead of inlined (#196, #265).
+ *
+ * The pair is the round's largest term — 39,529 bytes on evaluator slice
+ * #195 — and inlining it alongside the round's required delta evidence, prior
+ * findings, planner response and explorer projection put the floor at ~69,000
+ * bytes against a 65,536-byte budget, before a single byte of revision
+ * evidence. A revision round therefore could not fit, whatever the evidence
+ * block did.
+ *
+ * The first live #195 retry after that fix produced a larger round-1 pair and
+ * failed before evaluator dispatch at 66,818 bytes: the pair was again the
+ * dominant 43,179-byte term. Pair size is not bounded by the envelope, so
+ * "round 1 fits" is not a safe distinction.
+ *
+ * The planner revision round had the same shape and was left inline (#265):
+ * PRD 7 slice #262 died at 87,482 bytes with the pair at 55,892, and PRD 5
+ * slice #87 died twice at 83,744 and 75,247 with pairs of 47,777 and 45,872.
+ * A slice whose pair crosses ~34 KB could not survive any REVISE.
+ *
+ * Reference rather than omission: both roles run in the slice's worktree, so
+ * both files are at the named paths and each prompt requires the round to
+ * read them in full before acting. The evaluator additionally receives the
+ * changed regions — the only text a fresh revision finding may cite —
+ * verbatim in its revision evidence block. No evidence leaves any round; the
+ * bulk stops being copied into the prompt.
+ */
+const CONTRACT_PAIR_BY_REFERENCE =
+  "the contract pair travels by reference to its worktree path; the round " +
+  "must open both files before acting (#196, #265)";
+
 export function assemblePlannerRevisionEnvelope(
   input: PlannerRevisionEnvelopeInput,
 ): RoleEnvelopeResult {
   const openFindings = openContractReviewFindings(input.findings);
   const formattedOpenFindings = formatContractReviewFindings(openFindings);
   const repositoryContext = buildExplorerRepositoryContext(input.repoRoot);
+  /**
+   * `input.currentContract` and `input.currentAcceptanceManifest` are not
+   * rendered: the pair travels by reference to its worktree path (#265, ADR
+   * 0066), exactly as the evaluator rounds have carried it since #196. The
+   * fields stay on the input the way `proposedContract` stays on the
+   * evaluator's — every caller already reads and passes them, and the seam is
+   * not this change's to move.
+   */
   const prompt = renderPrompt("planner-revision", {
     GH_ISSUE: input.ghIssue,
     SPECS_DIR: input.specsDir,
     SLICE_DIR: input.sliceDir,
     ROUND: input.round,
-    CURRENT_CONTRACT: input.currentContract,
-    CURRENT_ACCEPTANCE_MANIFEST: input.currentAcceptanceManifest,
     OPEN_FINDINGS: formattedOpenFindings,
     RESOLVED_HISTORY: "(none)",
     CONTROL_SITUATION: input.controlSituation ?? "(none)",
@@ -1405,12 +1442,12 @@ export function assemblePlannerRevisionEnvelope(
       {
         artifactClass: "current-contract-pair",
         artifactId: `${input.sliceDir}/contract.md`,
-        ...contentLocator(input.currentContract),
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       {
         artifactClass: "current-contract-pair",
-        artifactId: `${input.sliceDir}/acceptance-manifest.json`,
-        ...contentLocator(input.currentAcceptanceManifest),
+        artifactId: `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`,
+        locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
       },
       ...(openFindings.length > 0
         ? [{
@@ -1521,31 +1558,6 @@ function durableLineageArtifact(
         ...contentLocator(durableLineage),
       }];
 }
-
-/**
- * Why evaluator rounds name the pair instead of inlining it (#196).
- *
- * The revised pair is the round's largest term — 39,529 bytes on slice #195 —
- * and inlining it alongside the round's required delta evidence, prior
- * findings, planner response and explorer projection put the floor at ~69,000
- * bytes against a 65,536-byte budget, before a single byte of revision
- * evidence. A revision round therefore could not fit, whatever the evidence
- * block did.
- *
- * The first live #195 retry after that fix produced a larger round-1 pair and
- * failed before evaluator dispatch at 66,818 bytes: the pair was again the
- * dominant 43,179-byte term. Pair size is not bounded by the envelope, so
- * "round 1 fits" is not a safe distinction.
- *
- * Reference rather than omission: the evaluator runs in the slice's worktree,
- * so both files are at the named paths, and the changed regions — the only
- * text a fresh revision finding may cite — are reproduced verbatim in the
- * revision evidence block. No evidence leaves either round; the bulk stops
- * being copied into the prompt.
- */
-const CONTRACT_PAIR_BY_REFERENCE =
-  "the contract pair travels by reference to its worktree path; evaluator " +
-  "rounds must open both files before review (#196)";
 
 export function assembleContractEvaluatorRevisionEnvelope(
   input: ContractEvaluatorRevisionEnvelopeInput,

@@ -561,8 +561,9 @@ describe("renderPrompt", () => {
         SPECS_DIR: "s",
         SLICE_DIR: "d",
         ROUND: 2,
-        CURRENT_CONTRACT: "contract",
-        CURRENT_ACCEPTANCE_MANIFEST: '{"version":2}',
+        // No CURRENT_CONTRACT / CURRENT_ACCEPTANCE_MANIFEST: the revision
+        // round names the pair by worktree path rather than inlining it
+        // (#265, ADR 0066), as the evaluator templates do.
         OPEN_FINDINGS: "(none)",
         RESOLVED_HISTORY: "(none)",
         CONTROL_SITUATION: "(none)",
