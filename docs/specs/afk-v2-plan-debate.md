@@ -283,3 +283,54 @@ which items 13–14 now exist to produce — says it pays.
   and asked to be re-dispatched — the round was re-run with the record
   delivered. No content in this document rests on an unverified
   reconstruction.
+
+
+---
+
+## 7. Plan amendment (2026-09-12) - PRD 7 rescoped: R1-R3 accepted
+
+Dated decision entry, in the form `docs/PRODUCT.md` "Changing this file"
+asks for. Source: the independent review of PRD 7's decision inventory,
+`.kiro/specs/afk-v2-agent-eval-harness/decisions-review.md`, §1 (the three
+headline rulings) and §2 (the Section H rulings). The human accepted all
+three rulings as written; `afk-v2-plan.md` §2, §3d, §4, §5 and §6 and the
+PRD 7 `intent.md` are amended to match in the same branch
+(`docs/prd7-rescope`). Not debate-rated; recorded here because it changes
+the plan's dependency graph, which is a plan decision and not a slice's.
+
+**R1 - the learning-proposal schema leaves PRD 7 and lands by hand on
+`main`.** Decided: the versioned `learning-proposals.json` schema (fields,
+validator, `./learning-proposal` package export, `CONTEXT.md` entry) is a
+hand-landed module, following plan §5's own rule that work smaller than one
+round's overhead is done by hand. PRD 6 now depends on PRD 4 only. Losing
+option: keep the schema as PRD 7 slice 1 (`decisions.md` D37), which put a
+cross-repo format on the critical path of the critical path for no shared
+code, concept or test with the eval runner. Citation: `decisions-review.md`
+§1 R1, §2 H3 (amended: rumo-app shipped a ledger, not a proposal format, so
+the schema is greenfield and AFK-canonical).
+
+**R2 - one case kind.** Decided: PRD 7 ships one scenario kind,
+`prompt-plus-expected-verdict`, with a required `source` field citing the
+issue, run or artifact the case came from. A case whose prompt text was
+recorded from a run is the same kind with a `source` naming the run. The
+"reuse the recorded envelope format" constraint is read as: the case input
+is the exact string `AgentProvider.invoke` receives, and the runner
+dispatches through `AgentProvider.invoke`. Losing option: two kinds
+(recorded-envelope plus prompt-plus-verdict), which needed a key (D3), a
+staleness outcome (D4), a redaction policy for recordings (D5) and per-kind
+fields (D7) for a file format that does not exist - no envelope is ever
+persisted (`decisions-review.md` H1). Citation: `decisions-review.md` §1 R2,
+§2 H1.
+
+**R3 - seed count = what the sources yield.** Decided: every case cites a
+source; the pack holds as many cases as the verified sources produce (#192,
+#194, run 5's steering defect, PRD 4's archived evaluator verdicts - roughly
+5-15 for v1) and grows from incidents. Losing option: the playbook's 20-50
+target, which had no inventory behind it (`decisions-review.md` H2: #111-#121
+are orchestrator defects and classifier cases are unit tests). Citation:
+`decisions-review.md` §1 R3, §2 H2.
+
+Vocabulary rider (D36, accepted with R2): `afk eval` says **verdict**, never
+"disposition"; AFK already carries `GuardianFindingDisposition` and rumo-app
+a third meaning. Plan §3d item 18's "prompt-plus-disposition" wording is
+corrected in the same branch.
