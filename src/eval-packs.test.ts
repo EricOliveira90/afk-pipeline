@@ -254,6 +254,16 @@ describe("the committed eval packs", () => {
     expect(one.prompt).toMatch(
       /case-only spelling difference cannot be a BLOCKING finding/,
     );
+    const manifest = JSON.parse(
+      seededFixtures(one).find(({ target }) =>
+        target.endsWith("194-acceptance-manifest.json"),
+      )!.text,
+    ) as {
+      behaviors: Array<{ id: string; observableResult: string }>;
+    };
+    expect(
+      manifest.behaviors.find(({ id }) => id === "B-13")!.observableResult,
+    ).toContain("[typecheck, lint, scope, tests]");
     expect(one.source).toContain("contract-review-r1-a1.json");
     expect(one.source).toContain("#194");
     // One case from #194, not two: the second run's archived inputs are absent.

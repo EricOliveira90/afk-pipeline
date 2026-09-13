@@ -138,7 +138,7 @@
       "given": "a gate runner constructed for a candidate whose changed set holds src/orchestrator.ts and afk.config.json, against a repository whose gatePolicy declares the baseline gatePolicyPaths",
       "when": "the declarations are resolved and their ids read in order",
       "then": "a declaration whose id is scope sits after typecheck and before tests, and it reads the policy once through loadGatePolicy rather than per changed path",
-      "observableResult": "an it block on the existing src/gate-runner.test.ts scenario asserts declarations.map(d => d.id) equals [typecheck, scope, tests] and that a loadGatePolicy spy is called exactly once",
+      "observableResult": "an it block on the existing src/gate-runner.test.ts scenario asserts declarations.map(d => d.id) equals [typecheck, lint, scope, tests] and that a loadGatePolicy spy is called exactly once",
       "preservation": false,
       "gateIds": ["tests"]
     },
