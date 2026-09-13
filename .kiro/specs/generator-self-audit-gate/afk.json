@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "selectedSlices": ["01", "02", "03"],
+  "migrationPrefixes": [],
+  "protectedIssues": [{ "number": 298, "state": "OPEN" }]
+}
