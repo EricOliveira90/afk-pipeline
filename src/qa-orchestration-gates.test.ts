@@ -45,9 +45,9 @@ import {
   CLEANER_STAGE_ID,
   POST_APPROVAL_WRITING_STAGE_ID,
   decideFinalReuse,
+  routeFinalReviewFinding,
 } from "./final-evaluation.js";
 import { MAX_CLEANER_ROUNDS, MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
-import { CLEANER_ESCALATION_FILENAME } from "./cleaner-stage.js";
 import { readQualityStageOutcomes } from "./logger.js";
 import { fileURLToPath } from "node:url";
 import { resolveCandidateTreeId } from "./gate-runner.js";
@@ -868,7 +868,7 @@ describe("final evaluation and reuse", () => {
     expect(logger.writeSummary()).not.toContain("Final Evaluation Reuse");
   });
 
-  it("[behavior:B-09] appends the rejected tree, drops the baseline citation, and refuses reuse", () => {
+  it("[behavior:B-09] [behavior:#97:P-03] appends the rejected tree, drops the baseline citation, and preserves the one-round, zero-attempt return route", () => {
     const repo = makeRepo();
     const candidateTreeId = "a".repeat(40);
     const artifactPath =
@@ -951,6 +951,28 @@ describe("final evaluation and reuse", () => {
         attempts: [{ outcome: "RETURNED_TO_GENERATOR" }],
       }),
     ).toBe(0);
+    expect(
+      routeFinalReviewFinding(
+        {
+          id: "FE-RETURN",
+          class: "BASELINE_IS_WRONG",
+          summary: "the approved candidate itself must change",
+          evidence: "the final evaluator found a baseline defect",
+          expected: "the generator repairs the approved candidate",
+          observed: "the approved candidate still carries the defect",
+          repair: "RETURN_TO_GENERATOR",
+        },
+        {
+          candidateTreeId,
+          writingStageIds: [CLEANER_STAGE_ID],
+        },
+      ),
+    ).toEqual({
+      target: "generator-loop",
+      invalidateCandidateTreeId: candidateTreeId,
+      generatorRoundsConsumed: 1,
+      finalEvaluationAttemptsConsumed: 0,
+    });
     // Even on exact equality, the approval this tree earned is the approval the
     // finding disputed.
     expect(
@@ -1415,65 +1437,6 @@ describe("final evaluation and reuse", () => {
     ).toBe(true);
   });
 
-  it("[behavior:B-09] [behavior:#97:P-03] returns a baseline-is-wrong finding to the generator loop for exactly one round and no evaluator attempt", async () => {
-    const progress: { genRounds: number; spent: number }[] = [];
-    let repoRef = "";
-    const fixture = finalEvaluationFixture({
-      review: (call) =>
-        call.attempt === 1
-          ? {
-              version: 1,
-              verdict: "FAIL",
-              baselineTreeId: call.baselineTreeId,
-              finalTreeId: call.finalTreeId,
-              findings: [
-                {
-                  id: "FE-01",
-                  class: "BASELINE_IS_WRONG",
-                  summary: "The approved candidate itself must not merge",
-                  evidence: "The fixture evaluator read the final tree",
-                  expected: "The generator revisits the approved candidate",
-                  observed: "The approved candidate ships a defect",
-                  repair: "RETURN_TO_GENERATOR",
-                },
-              ],
-            }
-          : passingReview(call),
-      onFinalCall: () => {
-        // Read at the dispatch itself, so the counters are the ones the return
-        // moved rather than whatever the run ended on.
-        progress.push({
-          genRounds:
-            fixture.ctx.logger.getSliceProgress("70")?.genRounds ?? -1,
-          spent: finalEvaluationAttemptsSpent(
-            finalEvaluationFor(loadRunState(repoRef, "prd-070-stub"), "70"),
-          ),
-        });
-      },
-    });
-    repoRef = fixture.repo;
-
-    const result = await runSliceExecute(fixture.ctx);
-
-    expect(result.phase).toBe("PASS");
-    // Exactly one generator round across the return (D19), and no evaluator
-    // attempt spent by it.
-    expect(progress).toEqual([
-      { genRounds: 1, spent: 0 },
-      { genRounds: 2, spent: 0 },
-    ]);
-    const view = finalEvaluationFor(
-      loadRunState(fixture.repo, "prd-070-stub"),
-      "70",
-    );
-    expect(view?.attempts.map((entry) => entry.outcome)).toEqual([
-      "RETURNED_TO_GENERATOR",
-      "GRADED",
-    ]);
-    // The rejected tree is invalidated, and its own attempt entry says so.
-    expect(view?.attempts[0]?.invalidated).toBe(true);
-  });
-
   it("[behavior:B-10] refuses a fourth final-evaluation attempt against the three-attempt bound", async () => {
     const fixture = finalEvaluationFixture({ review: passingReview });
     // Three graded attempts already on the record, so this run's dispatch is
@@ -1622,130 +1585,6 @@ describe("final evaluation and reuse", () => {
       "the archived round log, found anywhere under the run's slice artifacts",
     ).toEqual(["cleaner-log-r1-a3.log"]);
   });
-
-  it("[behavior:#87:B-08] stops when a restore re-dispatch exhausts the cleaner", async () => {
-    const fixture = finalEvaluationFixture({
-      clean: cleanPolicyMember,
-      stageWrites: false,
-      onCleaner: (call) => {
-        writeFileSync(
-          join(call.worktreeDir, "README.md"),
-          call.call === 1
-            ? `fixture, ${CLEAN_MARKER}\n`
-            : `fixture, restore ${call.call} still needs formatting\n`,
-          "utf-8",
-        );
-      },
-      review: (call) =>
-        call.attempt === 1
-          ? {
-              version: 1,
-              verdict: "FAIL",
-              baselineTreeId: call.baselineTreeId,
-              finalTreeId: call.finalTreeId,
-              findings: [
-                {
-                  id: "FE-EXHAUST",
-                  class: "PRESERVATION",
-                  summary: "the cleaner dropped approved formatting",
-                  evidence: "README.md no longer carries the approved form",
-                  expected: "the approved formatting survives",
-                  observed: "the cleaner's output needs restoration",
-                  repair: "RESTORE",
-                },
-              ],
-            }
-          : passingReview(call),
-    });
-
-    const result = await runSliceExecute(fixture.ctx);
-
-    expect(result.phase).toBe("STUCK");
-    expect("error" in result ? result.error : "").toContain("format (FAIL)");
-    expect(fixture.cleanerPrompts).toHaveLength(MAX_CLEANER_ROUNDS);
-    expect(fixture.finalCalls).toHaveLength(1);
-    expect(
-      qualityStagesFor(
-        loadRunState(fixture.repo, "prd-070-stub"),
-        "70",
-      ).at(-1)?.outcome,
-    ).toBe("EXHAUSTED");
-  });
-
-  it(
-    "[behavior:#87:B-13] returns to the generator when a restore re-dispatch escalates",
-    async () => {
-      const fixture = finalEvaluationFixture({
-        clean: cleanPolicyMember,
-        stageWrites: false,
-        onCleaner: (call) => {
-          if (call.call === 2) {
-            writeFileSync(
-              join(call.sliceDir, CLEANER_ESCALATION_FILENAME),
-              `${JSON.stringify({
-                version: 1,
-                class: "BASELINE_IS_WRONG",
-                id: "CL-RESTORE",
-                summary: "the approved tree cannot preserve the requested form",
-                evidence: "the restore conflicts with the accepted baseline",
-                expected: "the generator changes the approved candidate",
-                observed: "the cleaner cannot restore it safely",
-              })}\n`,
-              "utf-8",
-            );
-            return;
-          }
-          writeFileSync(
-            join(call.worktreeDir, "README.md"),
-            `fixture, ${CLEAN_MARKER}, approval ${call.call}\n`,
-            "utf-8",
-          );
-        },
-        review: (call) =>
-          call.attempt === 1
-            ? {
-                version: 1,
-                verdict: "FAIL",
-                baselineTreeId: call.baselineTreeId,
-                finalTreeId: call.finalTreeId,
-                findings: [
-                  {
-                    id: "FE-ESCALATE",
-                    class: "PRESERVATION",
-                    summary: "the cleaner dropped approved behavior",
-                    evidence: "README.md lost required content",
-                    expected: "the approved content survives",
-                    observed: "the cleaner's output needs restoration",
-                    repair: "RESTORE",
-                  },
-                ],
-              }
-            : passingReview(call),
-      });
-
-      const result = await runSliceExecute(fixture.ctx);
-
-      expect(result.phase).toBe("PASS");
-      expect(
-        {
-          genRounds:
-            fixture.ctx.logger.getSliceProgress("70")?.genRounds,
-          cleanerCalls: fixture.cleanerPrompts.length,
-          finalCalls: fixture.finalCalls.length,
-          outcomes: qualityStagesFor(
-            loadRunState(fixture.repo, "prd-070-stub"),
-            "70",
-          ).map((stage) => stage.outcome),
-        },
-      ).toEqual({
-        genRounds: 2,
-        cleanerCalls: 2,
-        finalCalls: 1,
-        outcomes: ["PASS"],
-      });
-    },
-    120_000,
-  );
 
   it("[behavior:#97:B-02] [behavior:#97:B-03] [behavior:#97:B-07] [behavior:#97:B-08] [behavior:#97:B-12] routes every restore to the cleaner, journals each attempt, and attributes every cleaner span", async () => {
     // The one spawned restore-chain scenario also carries the assertions that

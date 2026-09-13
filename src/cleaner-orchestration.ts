@@ -366,6 +366,12 @@ export function createCleanerOrchestrationSession(
 
   const decide = (result: CleanerStageResult): CleanerDecision => {
     if (result.outcome === "ESCALATED" && result.escalation) {
+      if (input.accepted.commitSha !== null) {
+        resetCleanerRangeTo(
+          slice.worktreeDir,
+          input.accepted.commitSha,
+        );
+      }
       invalidateFinalEvaluationBaseline(
         run.repoRoot,
         run.runSlug,
