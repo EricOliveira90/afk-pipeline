@@ -43,7 +43,6 @@ import {
   qualityStagesFor,
   saveRunState,
 } from "./run-state.js";
-import { parseGatePolicy } from "./gate-policy.js";
 import { CLEANER_ESCALATION_FILENAME } from "./cleaner-stage.js";
 import { resolveCandidateTreeId } from "./gate-runner.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
@@ -63,6 +62,7 @@ import {
   expectDeclaresInOrder,
   expectSomeAttemptDeclaresInOrder,
   git,
+  makeCleanPolicyWorktree,
   makeContext,
   makeRepo,
   terminateFixtureChildren,
@@ -2428,24 +2428,7 @@ function makeCleanerContext(
     infrastructureRetries: 0,
     ...configOverrides,
   });
-  // The locked pair on the feature branch, where the contract phase leaves it,
-  // so the worktree cut below carries it.
-  git(repo, ["add", "-A"]);
-  git(repo, ["commit", "-m", "lock the contract pair"]);
-  const worktreeParent = mkdtempSync(join(tmpdir(), "afk-qa-070-wt-"));
-  dirs.push(worktreeParent);
-  const worktree = join(worktreeParent, "wt");
-  git(repo, ["worktree", "add", "-b", "slice-01", worktree, "main"]);
-  ctx.worktreeDir = worktree;
-  ctx.branch = "slice-01";
-  ctx.absSliceDir = join(worktree, ctx.relSliceDir);
-  // The run's policy snapshot, never a read of the candidate worktree: a
-  // candidate that could author `gatePolicy.clean` could delete the stage that
-  // checks it (#251, and #87's call site for the same reason).
-  ctx.runGatePolicy = parseGatePolicy(
-    { version: 1, clean },
-    "fixture afk.config.json",
-  );
+  const worktree = makeCleanPolicyWorktree(repo, ctx, clean);
   return { repo, worktree, ctx };
 }
 

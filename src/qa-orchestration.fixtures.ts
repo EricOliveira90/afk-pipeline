@@ -31,6 +31,7 @@ import { lifecycle } from "./slice-lifecycle.js";
 import { RunJournal as Logger } from "./run-journal.js";
 import type { PipelineConfig, SliceContext } from "./orchestrator.js";
 import type { AgentProvider } from "./agent-provider.js";
+import { parseGatePolicy } from "./gate-policy.js";
 import { rmDirWithRetry } from "./test-support.js";
 
 /**
@@ -285,4 +286,35 @@ export function makeContext(
     runGatePolicy: null,
     invoke: (options) => provider.invoke(options),
   };
+}
+
+/**
+ * Gives a clean-policy scenario the production shape: a locked contract pair
+ * on the feature branch and a separate registered slice worktree.
+ *
+ * The policy is parsed before the candidate can change its worktree, matching
+ * the run-scoped snapshot that production carries into the quality stage.
+ */
+export function makeCleanPolicyWorktree(
+  repo: string,
+  ctx: SliceContext,
+  clean: unknown,
+): string {
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-m", "lock the contract pair"]);
+
+  const worktreeParent = mkdtempSync(join(tmpdir(), "afk-qa-070-wt-"));
+  dirs.push(worktreeParent);
+  const worktree = join(worktreeParent, "wt");
+  git(repo, ["worktree", "add", "-b", "slice-01", worktree, "main"]);
+
+  ctx.worktreeDir = worktree;
+  ctx.branch = "slice-01";
+  ctx.absSliceDir = join(worktree, ctx.relSliceDir);
+  ctx.runGatePolicy = parseGatePolicy(
+    { version: 1, clean },
+    "fixture afk.config.json",
+  );
+
+  return worktree;
 }

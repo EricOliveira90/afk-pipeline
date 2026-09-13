@@ -23,8 +23,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { lifecycle } from "./slice-lifecycle.js";
 import { RunJournal as Logger } from "./run-journal.js";
@@ -50,8 +48,6 @@ import {
 } from "./final-evaluation.js";
 import { MAX_CLEANER_ROUNDS, MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
 import { CLEANER_ESCALATION_FILENAME } from "./cleaner-stage.js";
-import { parseGatePolicy } from "./gate-policy.js";
-import { buildQualityStagePolicyEvent } from "./run-events.js";
 import { readQualityStageOutcomes } from "./logger.js";
 import { fileURLToPath } from "node:url";
 import { resolveCandidateTreeId } from "./gate-runner.js";
@@ -60,11 +56,11 @@ import { writeQAReview } from "./test-support.js";
 import {
   cleanupQATempDirs,
   declaresInOrder,
-  dirs,
   expectSomeAttemptDeclaresInOrder,
   GENERATOR_FIXTURE_CONTRACT,
   GENERATOR_FIXTURE_SCOPE,
   git,
+  makeCleanPolicyWorktree,
   makeContext,
   makeRepo,
   spawnFixtureChild,
@@ -1257,25 +1253,7 @@ describe("final evaluation and reuse", () => {
       },
     });
     if (options.clean !== undefined) {
-      // The locked pair on the feature branch, where the contract phase leaves
-      // it, so the worktree cut below carries it.
-      git(repo, ["add", "-A"]);
-      git(repo, ["commit", "-m", "lock the contract pair"]);
-      const worktreeParent = mkdtempSync(join(tmpdir(), "afk-qa-097-wt-"));
-      dirs.push(worktreeParent);
-      const worktree = join(worktreeParent, "wt");
-      git(repo, ["worktree", "add", "-b", "slice-01", worktree, "main"]);
-      ctx.worktreeDir = worktree;
-      ctx.branch = "slice-01";
-      ctx.absSliceDir = join(worktree, ctx.relSliceDir);
-      sliceWorktree = worktree;
-      // The run's policy snapshot, never a read of the candidate worktree: a
-      // candidate that could author `gatePolicy.clean` could delete the stage
-      // that checks it (#251, and #87's call site for the same reason).
-      ctx.runGatePolicy = parseGatePolicy(
-        { version: 1, clean: options.clean },
-        "fixture afk.config.json",
-      );
+      sliceWorktree = makeCleanPolicyWorktree(repo, ctx, options.clean);
     }
     if (options.seedCleanerRoundsSpent !== undefined) {
       // A killed stage's entry, left non-terminal so `resumableCleanerStage`
@@ -1620,9 +1598,7 @@ describe("final evaluation and reuse", () => {
     // before the wave loop that calls `runSliceExecute` exists — so the fixture
     // supplies it from the same production builder. The rows beneath it are
     // still derived from the attempt events this run journaled.
-    fixture.ctx.logger.event(
-      buildQualityStagePolicyEvent(fixture.ctx.runGatePolicy),
-    );
+    fixture.ctx.logger.recordQualityStagePolicy(fixture.ctx.runGatePolicy);
     const md = fixture.ctx.logger.writeSummary();
     const section = md.indexOf("## Quality Stages");
     expect(section).toBeGreaterThan(-1);
@@ -1689,9 +1665,7 @@ describe("final evaluation and reuse", () => {
     // No attempt ran, so there is nothing to pool and no row to render — the
     // #274 header line carries the whole fact, exactly as it did before #97.
     expect(readQualityStageOutcomes(fixture.ctx.logger.runDir)).toEqual([]);
-    fixture.ctx.logger.event(
-      buildQualityStagePolicyEvent(fixture.ctx.runGatePolicy),
-    );
+    fixture.ctx.logger.recordQualityStagePolicy(fixture.ctx.runGatePolicy);
     const md = fixture.ctx.logger.writeSummary();
     const section = md.indexOf("## Quality Stages");
     expect(section).toBeGreaterThan(-1);
