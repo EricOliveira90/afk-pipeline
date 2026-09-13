@@ -9,12 +9,19 @@
  * about.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   DEFAULT_SUPPRESSION_DETECTORS,
+  GATE_RISK_CLASSES,
   type GatePolicySuppressionDetector,
 } from "./gate-policy.js";
 import {
@@ -83,8 +90,8 @@ function runOn(
   });
 }
 
-describe("[behavior:B-10] the suppressions gate", () => {
-  it("[behavior:B-10] declares itself as a required in-process deterministic gate", () => {
+describe("[behavior:#87:B-10] the suppressions gate", () => {
+  it("[behavior:#87:B-10] declares itself as a required in-process deterministic gate", () => {
     const declaration = suppressionGateDeclaration({
       cwd: ".",
       inputCheckpointTree: "a",
@@ -100,7 +107,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(typeof declaration.run).toBe("function");
   });
 
-  it("[behavior:B-10] passes a tree that changed nothing a detector covers", () => {
+  it("[behavior:#87:B-10] passes a tree that changed nothing a detector covers", () => {
     const { repo, inputTree } = makeRepo();
     write(repo, "docs/notes.md", "A rewritten note.\n");
     const outputTree = commitAll(repo, "docs only");
@@ -110,7 +117,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(outcome.findings).toBeUndefined();
   });
 
-  it("[behavior:B-10] passes a pre-existing suppression: only an increase fails", () => {
+  it("[behavior:#87:B-10] passes a pre-existing suppression: only an increase fails", () => {
     const { repo, inputTree } = makeRepo();
     write(
       repo,
@@ -128,7 +135,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(outcome.detail).toContain("No detector counts more suppressions");
   });
 
-  it("[behavior:B-10] passes a tree that removed a suppression", () => {
+  it("[behavior:#87:B-10] passes a tree that removed a suppression", () => {
     const { repo, inputTree } = makeRepo();
     write(repo, "src/thing.ts", "export const thing = 3;\n");
     const outputTree = commitAll(repo, "remove the pragma");
@@ -136,7 +143,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(runOn(repo, inputTree, outputTree).status).toBe("PASS");
   });
 
-  it("[behavior:B-10] fails an added suppression and names the exact path, line and detector", () => {
+  it("[behavior:#87:B-10] fails an added suppression and names the exact path, line and detector", () => {
     const { repo, inputTree } = makeRepo();
     write(
       repo,
@@ -161,7 +168,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(outcome.detail).toContain("Remove the pragma");
   });
 
-  it("[behavior:B-10] counts an added file's suppressions, which have no input-side counterpart", () => {
+  it("[behavior:#87:B-10] counts an added file's suppressions, which have no input-side counterpart", () => {
     const { repo, inputTree } = makeRepo();
     write(
       repo,
@@ -179,7 +186,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     ]);
   });
 
-  it("[behavior:B-10] a changed file no glob covers is not a failure", () => {
+  it("[behavior:#87:B-10] a changed file no glob covers is not a failure", () => {
     const { repo, inputTree } = makeRepo();
     write(repo, "docs/notes.md", `Now with ${TS_IGNORE} in prose.\n`);
     const outputTree = commitAll(repo, "prose pragma");
@@ -191,7 +198,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(outcome.failureKind).toBeNull();
   });
 
-  it("[behavior:B-10] refuses a policy that declares no detector rather than reporting clean", () => {
+  it("[behavior:#87:B-10] refuses a policy that declares no detector rather than reporting clean", () => {
     const { repo, inputTree } = makeRepo();
     const outcome = runOn(repo, inputTree, inputTree, []);
     expect(outcome.status).toBe("FAIL");
@@ -199,7 +206,7 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(outcome.detail).toContain("No suppression detector is declared");
   });
 
-  it("[behavior:B-10] honours a project's own detector over the shipped default", () => {
+  it("[behavior:#87:B-10] honours a project's own detector over the shipped default", () => {
     const { repo, inputTree } = makeRepo();
     write(repo, "src/thing.ts", ["export const thing = 1; // NOSONAR", ""].join("\n"));
     const outputTree = commitAll(repo, "project-specific pragma");
@@ -212,5 +219,35 @@ describe("[behavior:B-10] the suppressions gate", () => {
     expect(outcome.findings?.suppressions).toEqual([
       { path: "src/thing.ts", line: 1, detectorId: "sonar" },
     ]);
+  });
+
+  it("[behavior:#87:B-10] runs whenever the stage runs, never consulting gatePolicy.riskClasses", () => {
+    // `"suppression"` is waiver vocabulary: it names what an operator may waive
+    // *after* the gate has reported, not a switch that decides whether it runs.
+    // A gate that could be turned off by omitting its risk class from the
+    // policy is a gate a run can silence by editing one config line — which is
+    // exactly the move this gate exists to catch.
+    expect(GATE_RISK_CLASSES).toContain("suppression");
+    const source = readFileSync(
+      new URL("./suppression-gate.ts", import.meta.url),
+      "utf-8",
+    );
+    expect(source).not.toContain("riskClasses");
+
+    // And the input carries no policy at all, so there is nothing to consult:
+    // the same two trees give the same verdict under any risk-class list.
+    const { repo, inputTree } = makeRepo();
+    write(
+      repo,
+      "src/thing.ts",
+      [
+        `// ${TS_IGNORE} legacy, predates this slice`,
+        `// ${TS_IGNORE} added by this round`,
+        "export const thing = 1;",
+        "",
+      ].join("\n"),
+    );
+    const outputTree = commitAll(repo, "one more pragma");
+    expect(runOn(repo, inputTree, outputTree).status).toBe("FAIL");
   });
 });
