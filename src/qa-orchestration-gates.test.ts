@@ -1013,7 +1013,7 @@ describe("final evaluation and reuse", () => {
       invalidatedCandidateTreeIds: [],
     });
     const bumped = loadRunState(repo, "prd-070-stub");
-    expect(bumped.version).toBe(5);
+    expect(bumped.version).toBe(6);
     expect(bumped.approvedBaselines?.["70"]?.commit).toBe("c".repeat(40));
     expect(bumped.appliedWaivers?.["70"]).toEqual([
       {
