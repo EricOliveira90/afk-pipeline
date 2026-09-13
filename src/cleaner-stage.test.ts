@@ -38,6 +38,12 @@ import {
   type CleanerStageResult,
 } from "./cleaner-stage.js";
 import { CHANGED_FILES_TOKEN, type GatePolicyClean } from "./gate-policy.js";
+import {
+  finalEvaluationFor,
+  invalidateFinalEvaluationBaseline,
+  loadRunState,
+  recordFinalEvaluation,
+} from "./run-state.js";
 import { assertGateEvidenceReleasesEvaluation } from "./candidate-gate-phase.js";
 import type { GateDeclaration, GateResult } from "./gate-runner.js";
 
@@ -158,6 +164,8 @@ interface Harness {
   dispatches: CleanerDispatchInput[];
   recorded: CleanerRoundRecord[];
   outcomes: { outcome: string; rounds: number }[];
+  /** Every `onInfrastructureRetry` message the gate phase emitted. */
+  retries: string[];
   head: () => string;
   headTree: () => string;
   log: () => string[];
@@ -178,11 +186,14 @@ async function runStage(options: {
   roundsAlreadySpent?: number;
   sliceDir?: string;
   acceptedPairIntact?: boolean;
+  infrastructureRetries?: number;
+  archiveRound?: CleanerStageContext["archiveRound"];
 }): Promise<Harness> {
   const { root, repo, acceptedTreeId } = options;
   const dispatches: CleanerDispatchInput[] = [];
   const recorded: CleanerRoundRecord[] = [];
   const outcomes: { outcome: string; rounds: number }[] = [];
+  const retries: string[] = [];
   const lines: string[] = [];
   const evidenceDir = join(root, ".afk", "evidence");
   const absSliceDir = join(repo, options.sliceDir ?? "slice");
@@ -203,6 +214,7 @@ async function runStage(options: {
     recordRound: (record) => recorded.push(record),
     recordOutcome: (outcome, rounds) => outcomes.push({ outcome, rounds }),
     log: (message) => lines.push(message),
+    ...(options.archiveRound ? { archiveRound: options.archiveRound } : {}),
     ...(options.roundsAlreadySpent !== undefined
       ? { roundsAlreadySpent: options.roundsAlreadySpent }
       : {}),
@@ -233,12 +245,12 @@ async function runStage(options: {
       tag: "s01",
       round: 2,
       evidenceDir,
-      infrastructureRetries: 0,
+      infrastructureRetries: options.infrastructureRetries ?? 0,
       inactivityTimeoutMs: 30_000,
       wallClockTimeoutMs: 60_000,
       heartbeatIntervalMs: 30_000,
       onGateOutcome: () => {},
-      onInfrastructureRetry: () => {},
+      onInfrastructureRetry: (message) => retries.push(message),
     },
     checkpointDirFor: (round) =>
       join(root, ".afk", "checkpoints", `cleaner-a${round}`),
@@ -255,6 +267,7 @@ async function runStage(options: {
     dispatches,
     recorded,
     outcomes,
+    retries,
     head: () => git(repo, ["rev-parse", "HEAD"]),
     headTree: () => git(repo, ["rev-parse", "HEAD^{tree}"]),
     log: () => lines,
@@ -644,6 +657,109 @@ describe("runCleanerStage rounds", () => {
     expect(harness.outcomes).toEqual([{ outcome: "ESCALATED", rounds: 2 }]);
   });
 
+  it("[behavior:#87:B-13] carries the archived escalation as the finding's artifactReference, and invalidates the accepted tree's baseline citation", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    const archived = "runs/run-1/reviews/cleaner-review-r2-a2.json";
+    const archiveCalls: { round: number; hasEscalation: boolean }[] = [];
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId,
+      clean: cleanPolicy(),
+      archiveRound: (call) => {
+        archiveCalls.push(call);
+        return call.hasEscalation ? { escalationArtifactId: archived } : {};
+      },
+      onDispatch: (input, cwd) => {
+        if (input.round === 1) {
+          write(cwd, "round-1.txt", "partial clean-up\n");
+          return;
+        }
+        write(
+          cwd,
+          `slice/${CLEANER_ESCALATION_FILENAME}`,
+          `${JSON.stringify({
+            version: 1,
+            class: "BASELINE_IS_WRONG",
+            id: "CL-02",
+            summary: "the approved candidate formats its own output",
+            evidence: "clean:format output",
+            expected: "the formatter's shape",
+            observed: "the approved shape",
+          })}\n`,
+        );
+      },
+    });
+    // The round is archived before anything resets it, and the escalating round
+    // is the only one that names an escalation.
+    expect(archiveCalls).toEqual([
+      { round: 1, hasEscalation: false },
+      { round: 2, hasEscalation: true },
+    ]);
+    expect(harness.result.outcome).toBe("ESCALATED");
+    expect(harness.result.escalationArtifactId).toBe(archived);
+
+    // The generator failure set the orchestrator builds from this result: the
+    // finding is the escalation, and its one artifact reference is the archived
+    // copy — the round's own file is gone with the reset, so citing the live
+    // path would point the generator at nothing.
+    const finding = {
+      id: harness.result.escalation!.id,
+      clearCondition: harness.result.escalation!.expected,
+      artifactReferences: harness.result.escalationArtifactId
+        ? [harness.result.escalationArtifactId]
+        : [`slice/${CLEANER_ESCALATION_FILENAME}`],
+    };
+    expect(finding).toEqual({
+      id: "CL-02",
+      clearCondition: "the formatter's shape",
+      artifactReferences: [archived],
+    });
+    expect(existsSync(join(repo, "slice", CLEANER_ESCALATION_FILENAME))).toBe(
+      false,
+    );
+
+    // And the accepted tree's baseline citation is invalidated, exactly as a
+    // final-evaluation RETURN_TO_GENERATOR invalidates the tree it graded. The
+    // orchestrator's own call site is read off the spawned "a clean policy
+    // escalates, then repairs the re-approved tree" scenario; what is asserted
+    // here is that the stage's accepted tree is the right argument for it.
+    const slug = "afk-v2-quality-loops";
+    recordFinalEvaluation(root, slug, "87", {
+      decision: "evaluate",
+      finalTreeId: acceptedTreeId,
+      baselineTreeId: acceptedTreeId,
+      attempts: [
+        {
+          attempt: 1,
+          candidateTreeId: acceptedTreeId,
+          verdict: "PASS",
+          outcome: "GRADED",
+        },
+      ],
+      invalidatedCandidateTreeIds: [],
+    });
+    invalidateFinalEvaluationBaseline(
+      root,
+      slug,
+      "87",
+      harness.result.outputTreeId,
+    );
+    const view = finalEvaluationFor(loadRunState(root, slug), "87");
+    expect(view?.invalidatedCandidateTreeIds).toEqual([acceptedTreeId]);
+    // The attempt that graded that tree survives, marked invalidated: what the
+    // return changes is what the tree means, not whether it was graded.
+    expect(view?.attempts).toEqual([
+      {
+        attempt: 1,
+        candidateTreeId: acceptedTreeId,
+        verdict: "PASS",
+        outcome: "GRADED",
+        invalidated: true,
+      },
+    ]);
+  });
+
   it("[behavior:#87:B-05] grants exactly MAX_CLEANER_ROUNDS rounds and compares against the remainder", async () => {
     const { root, repo, acceptedTreeId } = makeRepo();
     const harness = await runStage({
@@ -658,6 +774,86 @@ describe("runCleanerStage rounds", () => {
     expect(MAX_CLEANER_ROUNDS).toBe(3);
     expect(harness.result.roundsSpent).toBe(MAX_CLEANER_ROUNDS);
     expect(harness.result.outcome).toBe("EXHAUSTED");
+  });
+
+  it("[behavior:#87:B-05] spends no round on an INFRASTRUCTURE retry: the dispatch count is unchanged", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    let sanityRuns = 0;
+    // Red the way a machine is red, not the way a tree is: the first run of the
+    // round's regression bundle reports INFRASTRUCTURE, which
+    // `runCandidateGatePhase` retries in place. The retry is a second *gate*
+    // attempt, never a second cleaner round — a round is what a dispatch costs.
+    const flaky: GateDeclaration = {
+      id: "tests:sanity",
+      stage: "deterministic",
+      required: true,
+      run: () => {
+        sanityRuns++;
+        return sanityRuns === 1
+          ? {
+              // `null`, because only a FAIL carries a failure kind: an
+              // INFRASTRUCTURE status is a report about the machine, and
+              // `isGateResult` refuses evidence that says otherwise.
+              status: "INFRASTRUCTURE" as const,
+              failureKind: null,
+              detail: "the runner could not read the world",
+            }
+          : { status: "PASS" as const, failureKind: null };
+      },
+    };
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId,
+      clean: cleanPolicy(),
+      regressionDeclarations: [flaky],
+      infrastructureRetries: 1,
+      onDispatch: (_input, cwd) => write(cwd, "cleaned.txt", "clean\n"),
+    });
+    expect(sanityRuns).toBe(2);
+    expect(harness.retries).toHaveLength(1);
+    // One dispatch, one spent round, and the retried attempt's PASS is what the
+    // round is decided on — an INFRASTRUCTURE status never reverts the round.
+    expect(harness.dispatches).toHaveLength(1);
+    expect(harness.result.roundsSpent).toBe(1);
+    expect(harness.result.outcome).toBe("PASS");
+    expect(harness.recorded).toHaveLength(1);
+    expect(harness.recorded[0]?.outcome).toBe("PASS");
+  });
+
+  it("[behavior:#87:B-08] runs the next round from the previous round's output tree when a required clean gate is still red", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId,
+      clean: cleanPolicy(),
+      regressionDeclarations: [regressionGate("tests:sanity", () => false)],
+      onDispatch: (input, cwd) => {
+        // Round 1 writes something real but does not clear the gate; round 2
+        // clears it. The regression bundle is green throughout, so round 1's
+        // checkpoint stands even though its clean gate stayed red.
+        if (input.round === 1) {
+          write(cwd, "round-1.txt", "partial clean-up\n");
+          return;
+        }
+        write(cwd, "cleaned.txt", "clean\n");
+      },
+    });
+    expect(harness.dispatches).toHaveLength(2);
+    const round1Output = harness.recorded[0]?.outputTreeId;
+    expect(harness.recorded[0]?.outcome).toBe("FAIL");
+    expect(round1Output).toBeDefined();
+    expect(round1Output).not.toBe(acceptedTreeId);
+    // The next round starts from that tree, not from the accepted one: a green
+    // bundle means nothing was reverted, so the partial clean-up is kept.
+    expect(harness.dispatches[1]?.inputTreeId).toBe(round1Output);
+    expect(harness.dispatches[1]?.baselineTreeId).toBe(acceptedTreeId);
+    expect(harness.dispatches[1]?.regressionNote).toBe("");
+    expect(existsSync(join(repo, "round-1.txt"))).toBe(true);
+    expect(harness.result.outcome).toBe("PASS");
+    expect(harness.result.roundsSpent).toBe(2);
+    expect(harness.result.outputTreeId).toBe(harness.recorded[1]?.outputTreeId);
   });
 
   it("[behavior:#87:B-05] grants no round at all when the run state says the budget is spent", async () => {
