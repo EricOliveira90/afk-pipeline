@@ -2924,6 +2924,26 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
     expect(roundsFor("phase-started")).toEqual([1, 2, 3]);
     expect(roundsFor("phase-ended")).toEqual([1, 2, 3]);
     expect(roundsFor("stage-duration")).toEqual([1, 2, 3]);
+
+    // The whole sequence, not just the three counts: every start is followed
+    // by its own round's end before the next round opens, so the journal's
+    // open-stage set holds no cleaner round when the stage returns. This is
+    // what fails if the per-round key collapsed back to the generator round —
+    // three starts under one key pair into one sample, not three — or if
+    // either the start or the end were dropped.
+    expect(
+      cleanerJournalEvents.map((event) => `${event.type}:${event.round}`),
+    ).toEqual([
+      "phase-started:1",
+      "phase-ended:1",
+      "stage-duration:1",
+      "phase-started:2",
+      "phase-ended:2",
+      "stage-duration:2",
+      "phase-started:3",
+      "phase-ended:3",
+      "stage-duration:3",
+    ]);
   });
 
   it("[behavior:#87:B-07] reverts the regressing round and tells the next one what it reddened", () => {

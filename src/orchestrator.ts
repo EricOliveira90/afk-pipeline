@@ -6834,6 +6834,22 @@ export async function runSliceExecute(
               featureRef: featBranch,
               dispatch: async (cleanerInput) => {
                 const cleanerRound = cleanerInput.round;
+                // The log stream is opened *before* `phase-started`, so the
+                // journal's open-stage set is only ever entered by a round
+                // that reaches the `try`/`finally` below. Opening it after the
+                // start event would leave a permanently open cleaner stage —
+                // and so no `stage-duration` sample — if the stream failed to
+                // open (#87 B-06).
+                const cleanerLog = logger.agentLog(
+                  slice.number,
+                  "cleaner",
+                  round * 10 + cleanerRound,
+                );
+                // Keyed by the *cleaner* round, not the generator round: the
+                // journal pairs a `phase-ended` with its `phase-started` under
+                // `stageInvocationKey` = ghIssue|agent|round, so three cleaner
+                // rounds inside one generator round need three distinct keys
+                // to yield three `stage-duration` samples.
                 logger.phase(
                   `${ctx.tag}: cleaner round ${cleanerRound} of ` +
                     `${cleanerInput.roundLimit} on ${cleanerInput.inputTreeId}...`,
@@ -6845,11 +6861,6 @@ export async function runSliceExecute(
                     agent: "cleaner",
                     round: cleanerRound,
                   },
-                );
-                const cleanerLog = logger.agentLog(
-                  slice.number,
-                  "cleaner",
-                  round * 10 + cleanerRound,
                 );
                 try {
                   await invoke({
@@ -6903,7 +6914,12 @@ export async function runSliceExecute(
                     }),
                   });
                 } finally {
-                  closeAgentLog(cleanerLog);
+                  // Awaited, not fired and forgotten: `archiveRound` copies
+                  // this log the moment `dispatch` resolves (#87 B-09), and an
+                  // unflushed stream is a source path `existsSync` can still
+                  // answer `false` for — the round's rationale would then be
+                  // silently unarchived.
+                  await closeAgentLog(cleanerLog);
                   logger.event({
                     type: "phase-ended",
                     ghIssue: slice.ghIssue,
