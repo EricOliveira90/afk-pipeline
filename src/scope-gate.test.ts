@@ -246,6 +246,142 @@ describe("scope gate against a real candidate worktree", () => {
   });
 });
 
+/**
+ * The role source under `"declared-only"` — the cleaner's comparison (#87
+ * B-11). Checkpoint tree to checkpoint tree, never a working-tree probe, and
+ * with the prefix exemption dropped: the accepted artifacts are finished by the
+ * time a post-approval round runs, so a round that rewrites `feedback-r1.md` to
+ * make a gate green is the laundering this comparison exists to catch.
+ */
+describe("[behavior:#87:B-11] scope gate for a post-approval writing role", () => {
+  let repoDir: string;
+  let inputTree: string;
+  let outputTree: string;
+
+  beforeAll(() => {
+    repoDir = initRepo("afk-scope-gate-role-");
+    git(repoDir, ["checkout", "-b", "slice"]);
+    write(repoDir, `${REL_SLICE_DIR}/contract.md`, "# Slice Contract\n");
+    write(repoDir, `${REL_SLICE_DIR}/feedback-r1.md`, "# Round 1\n");
+    writeManifest(repoDir, ["src/declared.ts"]);
+    write(repoDir, "src/declared.ts", "export const declared = 1;\n");
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "the accepted candidate"]);
+    inputTree = git(repoDir, ["rev-parse", "HEAD^{tree}"]);
+
+    // What one cleaner round wrote: a declared source file (fine), the file the
+    // escalating role is asked to write (fine), a path only
+    // `additionalWriteScope` covers (fine), and two finished artifacts it had
+    // no licence to touch.
+    write(repoDir, "src/declared.ts", "export const declared = 2;\n");
+    write(
+      repoDir,
+      `${REL_SLICE_DIR}/cleaner-escalation.json`,
+      `{"version":1,"class":"BASELINE_IS_WRONG"}\n`,
+    );
+    write(repoDir, "dist/generated.txt", "generated\n");
+    write(repoDir, `${REL_SLICE_DIR}/contract.md`, "# Widened Contract\n");
+    write(repoDir, `${REL_SLICE_DIR}/feedback-r1.md`, "# Rewritten\n");
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "chore(#87): cleaner round 1"]);
+    outputTree = git(repoDir, ["rev-parse", "HEAD^{tree}"]);
+  });
+
+  afterAll(() => {
+    rmDirWithRetry(repoDir);
+  });
+
+  function runAsRole(
+    artifactDirPolicy: "exempt-prefix" | "declared-only" | undefined,
+    additionalWriteScope: readonly string[] = ["dist/**"],
+  ) {
+    return runScopeGate({
+      source: {
+        kind: "role",
+        cwd: repoDir,
+        inputCheckpointTree: inputTree,
+        outputCheckpointTree: outputTree,
+      },
+      absSliceDir: join(repoDir, ...REL_SLICE_DIR.split("/")),
+      sliceArtifactDir: REL_SLICE_DIR,
+      // The pair's own paths are not exempt from a post-approval round's write
+      // scope, which is a different question from whether the pair still holds
+      // the bytes the orchestrator accepted.
+      acceptedPairIntact: false,
+      ...(artifactDirPolicy ? { artifactDirPolicy } : {}),
+      additionalWriteScope,
+    });
+  }
+
+  it("[behavior:#87:B-11] names the finished artifacts the round rewrote and nothing else", () => {
+    const outcome = runAsRole("declared-only");
+
+    expect(outcome.status).toBe("FAIL");
+    expect(outcome.findings?.outOfScopePaths).toEqual([
+      `${REL_SLICE_DIR}/contract.md`,
+      `${REL_SLICE_DIR}/feedback-r1.md`,
+    ]);
+    // Named exactly, because this text is what the next round reads out of the
+    // gate log.
+    expect(outcome.detail).toContain(`${REL_SLICE_DIR}/feedback-r1.md`);
+  });
+
+  it("[behavior:#87:B-11] keeps the escalation, the declared path and the additionalWriteScope match in scope", () => {
+    const offenders = runAsRole("declared-only").findings?.outOfScopePaths ?? [];
+
+    expect(offenders).not.toContain(`${REL_SLICE_DIR}/cleaner-escalation.json`);
+    expect(offenders).not.toContain("src/declared.ts");
+    expect(offenders).not.toContain("dist/generated.txt");
+  });
+
+  it("[behavior:#87:B-11] widens by additionalWriteScope alone, with no heuristic deriving a path", () => {
+    // Drop the glob and the same path is an offender: the widening is the
+    // declared glob and nothing else — no "it looks like a build output", no
+    // test-path derivation from the declared sources.
+    expect(
+      runAsRole("declared-only", []).findings?.outOfScopePaths,
+    ).toContain("dist/generated.txt");
+    // And the manifest stays the only thing that can *narrow*: a glob matching
+    // a declared path cannot make it an offender, since the filter runs before
+    // classification and only ever removes candidates.
+    expect(
+      runAsRole("declared-only", ["dist/**", "src/**"]).findings
+        ?.outOfScopePaths,
+    ).toEqual([
+      `${REL_SLICE_DIR}/contract.md`,
+      `${REL_SLICE_DIR}/feedback-r1.md`,
+    ]);
+  });
+
+  it("[behavior:#87:B-11] leaves the prefix exemption in place for every caller that omits the policy", () => {
+    // Same tree, same paths, argument absent: `feedback-r1.md` is exempt by
+    // prefix again, and only the orchestrator-owned pair — whose refusal is
+    // unwaivable and independent of this argument — is named.
+    for (const policy of [undefined, "exempt-prefix"] as const) {
+      expect(runAsRole(policy).findings?.outOfScopePaths).toEqual([
+        `${REL_SLICE_DIR}/contract.md`,
+      ]);
+    }
+  });
+
+  it("[behavior:#87:P-05] classifies the same paths unchanged under the candidate source", () => {
+    // The very paths `"declared-only"` makes offenders above, read through the
+    // comparison every pre-cleaner call site uses: today's prefix exemption
+    // still applies, so the negotiating roles that legitimately write the
+    // slice's artifacts as they work are unaffected by #87.
+    const outcome = runScopeGate({
+      source: { kind: "candidate", worktreeDir: repoDir, featureRef: "main" },
+      absSliceDir: join(repoDir, ...REL_SLICE_DIR.split("/")),
+      sliceArtifactDir: REL_SLICE_DIR,
+      acceptedPairIntact: true,
+      additionalWriteScope: ["dist/**"],
+    });
+
+    expect(outcome.status).toBe("PASS");
+    expect(outcome.findings?.outOfScopePaths).toBeUndefined();
+  });
+});
+
 describe("scope gate fail-closed and base resolution", () => {
   it("B-05: reports an unprovable changed set as infrastructure with no findings", () => {
     const notARepo = mkdtempSync(join(tmpdir(), "afk-scope-gate-bare-"));

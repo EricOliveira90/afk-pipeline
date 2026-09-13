@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parseAcceptanceManifest } from "./acceptance-manifest.js";
 import {
@@ -567,5 +570,144 @@ describe("outOfScopeChangedPaths", () => {
     expect(call(["src/declared.ts"], noChanges)).toEqual(["src/declared.ts"]);
     // The slice's own artifacts are still its own.
     expect(call([`${SLICE_DIR}/escalation.md`], noChanges)).toEqual([]);
+  });
+});
+
+/**
+ * The prefix exemption above is written for a *negotiating* tree: the roles
+ * that reach this function through the pre-build guard and the `candidate`
+ * scope source legitimately write the slice's artifacts as they work. A
+ * post-approval writing role has the opposite licence — the accepted artifacts
+ * are finished, and a round that rewrites `feedback-r1.md` to make a gate green
+ * is exactly the laundering this module refuses elsewhere (#87 B-11).
+ */
+describe("[behavior:#87:B-11] artifactDirPolicy", () => {
+  const SLICE_DIR = ".kiro/specs/demo/slices/01-thing";
+  const declaredOnly = (changedFiles: string[], manifest = MANIFEST) =>
+    outOfScopeChangedPaths({
+      changedFiles,
+      manifest,
+      sliceArtifactDir: SLICE_DIR,
+      acceptedPairIntact: false,
+      artifactDirPolicy: "declared-only",
+    });
+
+  it("[behavior:#87:B-11] names the accepted artifacts a post-approval round rewrote", () => {
+    expect(
+      declaredOnly([
+        `${SLICE_DIR}/contract.md`,
+        `${SLICE_DIR}/feedback-r1.md`,
+        `${SLICE_DIR}/cleaner-escalation.json`,
+        "src/declared.ts",
+      ]),
+    ).toEqual([`${SLICE_DIR}/contract.md`, `${SLICE_DIR}/feedback-r1.md`]);
+  });
+
+  it("[behavior:#87:B-11] keeps exactly the one file the escalating role is asked to write in scope", () => {
+    // Not "the artifact directory minus two files": every *other* undeclared
+    // artifact is an offender too, so the exemption is the escalation alone.
+    expect(declaredOnly([`${SLICE_DIR}/cleaner-escalation.json`])).toEqual([]);
+    expect(declaredOnly([`${SLICE_DIR}/handoff.md`])).toEqual([
+      `${SLICE_DIR}/handoff.md`,
+    ]);
+    expect(declaredOnly([`${SLICE_DIR}/nested/anything.txt`])).toEqual([
+      `${SLICE_DIR}/nested/anything.txt`,
+    ]);
+    // And the escalation's exemption goes through the manifest's own
+    // normalization, for the same reason the prefix test above does.
+    expect(
+      declaredOnly([`./${SLICE_DIR}/cleaner-escalation.json`]),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#87:B-11] leaves the declared paths, the migration exemption and the unclassifiable rule untouched", () => {
+    // Dropping the prefix exemption is the whole change: a declared path is
+    // still declared, a migration is still the claim gate's business, and a
+    // path this module cannot normalize is still not proof of a clean tree.
+    expect(declaredOnly(["src/declared.ts"])).toEqual([]);
+    expect(declaredOnly(["supabase/migrations/0012_add_thing.sql"])).toEqual([]);
+    expect(declaredOnly(["src/weird[1].ts"])).toEqual(["src/weird[1].ts"]);
+  });
+});
+
+describe("[behavior:#87:P-10] what artifactDirPolicy did not change", () => {
+  const SLICE_DIR = ".kiro/specs/demo/slices/01-thing";
+
+  it("[behavior:#87:P-10] exempts an artifact-directory path by prefix when the argument is absent", () => {
+    // The pre-build escalation guard and the candidate-source scope gate both
+    // omit it. A default of `"declared-only"` would refuse every honest
+    // escalation on the very artifact that raised it.
+    expect(
+      outOfScopeChangedPaths({
+        changedFiles: [
+          `${SLICE_DIR}/escalation.md`,
+          `${SLICE_DIR}/feedback-r1.md`,
+          `${SLICE_DIR}/nested/anything.txt`,
+        ],
+        manifest: MANIFEST,
+        sliceArtifactDir: SLICE_DIR,
+        acceptedPairIntact: true,
+      }),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#87:P-10] names the orchestrator-owned pair under both policies when it cannot be proven intact", () => {
+    // The unwaivable refusal is independent of the new argument: the pair is
+    // out of scope under `"exempt-prefix"` (today's callers) and under
+    // `"declared-only"` (the cleaner), on the same condition.
+    for (const artifactDirPolicy of ["exempt-prefix", "declared-only"] as const) {
+      expect(
+        outOfScopeChangedPaths({
+          changedFiles: [
+            `${SLICE_DIR}/contract.md`,
+            `${SLICE_DIR}/acceptance-manifest.json`,
+          ],
+          manifest: MANIFEST,
+          sliceArtifactDir: SLICE_DIR,
+          acceptedPairIntact: false,
+          artifactDirPolicy,
+        }),
+      ).toEqual([
+        `${SLICE_DIR}/acceptance-manifest.json`,
+        `${SLICE_DIR}/contract.md`,
+      ]);
+    }
+  });
+
+  it("[behavior:#87:P-10] assigns sliceArtifactDir no empty-string literal anywhere in scope", () => {
+    // `artifactDir === ""` disables the orchestrator-owned carve-out entirely
+    // (see `outOfScopeChangedPaths`), so a caller that passes a blank directory
+    // silently buys itself the laundering this module exists to refuse. Read as
+    // source text, in the manner `src/orchestrator.test.ts` reads the launch
+    // command out of CLAUDE.md — a type cannot express "not this literal".
+    const scoped = [
+      "cleaner-stage.ts",
+      "scope-gate.ts",
+      "escalation.ts",
+      "final-evaluation.ts",
+      "run-state.ts",
+      "run-events.ts",
+      "context-envelope.ts",
+      "qa-review.ts",
+      "artifacts.ts",
+      "orchestrator.ts",
+      "gate-policy.ts",
+      "gate-runner.ts",
+      "suppression-gate.ts",
+      "bounds.ts",
+    ];
+    const offenders: string[] = [];
+    for (const name of scoped) {
+      const source = readFileSync(
+        join(fileURLToPath(new URL(".", import.meta.url)), name),
+        "utf-8",
+      );
+      for (const [index, line] of source.split("\n").entries()) {
+        if (/sliceArtifactDir\s*[:=]\s*(""|''|``)/.test(line)) {
+          offenders.push(`${name}:${index + 1}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
