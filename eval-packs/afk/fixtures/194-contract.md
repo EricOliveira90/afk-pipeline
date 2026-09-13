@@ -138,6 +138,7 @@ module-private and out of scope to change.
 - src/gate-policy.ts
 - src/gate-policy.test.ts
 - src/gate-runner.ts
+- src/gate-runner.test.ts
 - afk.config.json
 - ARCHITECTURE.md
 
@@ -184,7 +185,7 @@ scenario rather than a new spawned run (AGENTS.md assertion ladder).
       finding names the exact path and risk class.
 - [ ] `ARCHITECTURE.md` carries one new row for `src/gate-policy.ts`.
 - [ ] `src/base-gates.ts` and `src/acceptance-manifest.ts` are unmodified; no
-      file outside the five declared paths changes.
+      file outside the six declared paths changes.
 - [ ] No entry was added to `package.json`'s dependencies.
 - [ ] `pnpm vitest run src/gate-policy.test.ts` passes with nothing skipped, and
       `pnpm run typecheck` reports no error in the declared files.

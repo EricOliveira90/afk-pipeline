@@ -264,6 +264,12 @@ describe("the committed eval packs", () => {
     expect(
       manifest.behaviors.find(({ id }) => id === "B-13")!.observableResult,
     ).toContain("[typecheck, lint, scope, tests]");
+    const fileScope = JSON.parse(
+      seededFixtures(one).find(({ target }) =>
+        target.endsWith("194-acceptance-manifest.json"),
+      )!.text,
+    ) as { fileScope: { paths: string[] } };
+    expect(fileScope.fileScope.paths).toContain("src/gate-runner.test.ts");
     expect(one.source).toContain("contract-review-r1-a1.json");
     expect(one.source).toContain("#194");
     // One case from #194, not two: the second run's archived inputs are absent.

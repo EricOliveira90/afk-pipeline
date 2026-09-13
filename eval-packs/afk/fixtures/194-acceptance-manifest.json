@@ -6,6 +6,7 @@
       "src/gate-policy.ts",
       "src/gate-policy.test.ts",
       "src/gate-runner.ts",
+      "src/gate-runner.test.ts",
       "afk.config.json",
       "architecture.md"
     ]
