@@ -267,6 +267,80 @@ describe("buildPrCreationPlan adoption provenance", () => {
       }).body,
     );
   });
+
+  it("[behavior:#97:B-11] reports what each post-approval quality stage cost, above the closes list", () => {
+    const withStages = buildPrCreationPlan({
+      prdSlug: "demo",
+      specsDir: ".kiro/specs/demo",
+      architect: "SHIP",
+      pm: "SHIP",
+      openPrOnOverride: false,
+      closesIssues: ["97"],
+      adoptions: [],
+      qualityStages: [
+        {
+          ghIssue: "97",
+          sliceNumber: "03",
+          stage: "cleaner",
+          enabled: true,
+          outcome: "PASS",
+          roundsUsed: 2,
+          roundLimit: 3,
+          elapsedMs: 4_200,
+          modelMs: 1_800,
+          gateIds: ["clean:format", "scope"],
+          cacheReusedGateIds: ["scope"],
+          finalDecision: "evaluate",
+        },
+      ],
+    });
+
+    expect(withStages.body).toContain(
+      "## Post-approval quality stages (reported, never blocking)",
+    );
+    expect(withStages.body).toContain(
+      "| #97 | cleaner | yes | PASS | 2/3 | 4200ms | 1800ms | " +
+        "clean:format, scope | scope | evaluate |",
+    );
+    // Reported, never a gate: the section says so, for the same reason the
+    // advisory-gate block above does.
+    expect(withStages.body).toContain("ADR 0063");
+    expect(
+      withStages.body.indexOf("## Post-approval quality stages"),
+    ).toBeLessThan(withStages.body.indexOf("Closes #97"));
+  });
+
+  it("[behavior:#97:B-11] renders the section even when every stage is disabled, and none when the field is absent", () => {
+    // An empty array is a measured run that recorded no attempt — a PR that
+    // said nothing about the cleaner could not be read as evidence of either
+    // state (PRD D10 item 3).
+    const disabled = buildPrCreationPlan({
+      prdSlug: "demo",
+      specsDir: ".kiro/specs/demo",
+      architect: "SHIP",
+      pm: "SHIP",
+      openPrOnOverride: false,
+      closesIssues: ["97"],
+      adoptions: [],
+      qualityStages: [],
+    });
+    expect(disabled.body).toContain(
+      "`cleaner`: disabled (no `gatePolicy.clean`)",
+    );
+
+    // The field being *absent* is the different claim — this caller measures
+    // nothing — so a project that declares no policy keeps its PR body.
+    const without = buildPrCreationPlan({
+      prdSlug: "demo",
+      specsDir: ".kiro/specs/demo",
+      architect: "SHIP",
+      pm: "SHIP",
+      openPrOnOverride: false,
+      closesIssues: ["97"],
+      adoptions: [],
+    });
+    expect(without.body).not.toContain("Post-approval quality stages");
+  });
 });
 
 describe("runShipGate", () => {
