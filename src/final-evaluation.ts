@@ -38,6 +38,34 @@ export const FINAL_REPORT_FILENAME = "final-report.md";
  */
 export const POST_APPROVAL_WRITING_STAGE_ID = "post-approval-writing";
 
+/**
+ * The post-approval quality stage PRD 5 gives that seam first (#87 B-03).
+ *
+ * Beside `POST_APPROVAL_WRITING_STAGE_ID` and not inside it: the cleaner is a
+ * stage of its own that runs *before* the injectable writing stage, so the two
+ * ids name two different things and the injectable seam keeps its own
+ * behavior (P-02).
+ */
+export const CLEANER_STAGE_ID = "cleaner";
+
+/**
+ * The injectable post-approval writing stage (#96 B-03).
+ *
+ * Synchronous by design and unchanged by #87 (P-02): the production stage is a
+ * no-op, the tests inject a stub that writes into the worktree, and the
+ * orchestrator commits whatever it left. It lives here rather than in
+ * `src/orchestrator.ts` so the type and its default can be named — and
+ * asserted — without importing the orchestrator.
+ */
+export type PostApprovalWritingStage = (input: {
+  worktreeDir: string;
+  stageId: string;
+  repair?: "RESTORE";
+}) => void;
+
+/** The default stage: production writes nothing after approval. */
+export const noopPostApprovalWritingStage: PostApprovalWritingStage = () => {};
+
 /** What the slice's `approved-baseline.json` record contributes to the decision. */
 export interface FinalReuseBaseline {
   /** The tree ID the approval was graded against (D10: artifacts are keyed by tree). */

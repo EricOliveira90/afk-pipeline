@@ -171,14 +171,22 @@ import {
   type RunState,
 } from "./run-state.js";
 import {
+  CLEANER_STAGE_ID,
   decideFinalReuse,
   decideFinalVerdict,
   FINAL_REPORT_FILENAME,
   FINAL_REVIEW_FILENAME,
+  noopPostApprovalWritingStage,
   POST_APPROVAL_WRITING_STAGE_ID,
   routeFinalReviewFinding,
   validateFinalReview,
+  type PostApprovalWritingStage,
 } from "./final-evaluation.js";
+import {
+  cleanerExhaustionReason,
+  CLEANER_ESCALATION_FILENAME,
+  runCleanerStage,
+} from "./cleaner-stage.js";
 import {
   resolveRunScope,
   type ResolvedRunScope,
@@ -447,26 +455,13 @@ function formatBaseGateCatalog(catalog: readonly BindableGate[]): string {
     .join("\n");
 }
 /**
- * The internal shape of a post-approval writing stage (#96 B-03). Not
- * exported: the stage is an implementation detail of this module's accepted-
- * candidate path, and a stage id plus a function is the whole of it.
+ * The post-approval writing stage (#96 B-03) now lives in
+ * `src/final-evaluation.ts` and is re-exported through this module's existing
+ * `PipelineConfig` field. The type moved with #87 B-03 so
+ * `src/final-evaluation.test.ts` can assert the signature and the default seam
+ * P-02 locks without importing the orchestrator; the shape, the `repair`
+ * marker and the synchronous return are unchanged.
  */
-type PostApprovalWritingStage = (input: {
-  /** The slice worktree, checked out at the approved candidate. */
-  worktreeDir: string;
-  /** The stage's own id, so a write can be attributed without guessing. */
-  stageId: string;
-  /**
-   * Set only when a final-evaluation `PRESERVATION` (or restorable drift)
-   * finding routed back here (#96 B-08): the stage is being asked to put back
-   * what it wrote over, not to write again. Absent on the first call, which is
-   * what lets a stage distinguish its own turn from its own repair.
-   */
-  repair?: "RESTORE";
-}) => void;
-
-/** Production behavior: nothing, until PRD 5 (#96 B-03). */
-const noopPostApprovalWritingStage: PostApprovalWritingStage = () => {};
 
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
@@ -1011,7 +1006,14 @@ export interface SliceContext {
         sliceNumber: string;
         round: number;
         attempt?: number;
-        role: "evaluator-qa" | "evaluator-uat" | "evaluator-final";
+        role:
+          | "evaluator-qa"
+          | "evaluator-uat"
+          | "evaluator-final"
+          // The cleaner (#87 B-12) is dispatched the same way: prompt-only and
+          // manifest-declared, so its completion is journaled here rather than
+          // paired with a `prompt-assembly` event.
+          | "cleaner";
       };
     },
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -1077,7 +1079,14 @@ export function makeSliceContext(
         sliceNumber: string;
         round: number;
         attempt?: number;
-        role: "evaluator-qa" | "evaluator-uat" | "evaluator-final";
+        role:
+          | "evaluator-qa"
+          | "evaluator-uat"
+          | "evaluator-final"
+          // The cleaner (#87 B-12) is dispatched the same way: prompt-only and
+          // manifest-declared, so its completion is journaled here rather than
+          // paired with a `prompt-assembly` event.
+          | "cleaner";
       };
     },
   ) => {
@@ -6770,6 +6779,241 @@ export async function runSliceExecute(
             git.commitAll(
               ctx.worktreeDir,
               `feat(#${slice.ghIssue}): ${slice.title}`,
+            );
+          }
+          /**
+           * The cleaner stage (#87 B-03): after the approval commit and before
+           * the post-approval writing stage, so the tree it cleans is the one
+           * the gates authorized and the QA verdict is tied to, and so the
+           * writing stage's own output is never what a clean gate reads.
+           *
+           * Every argument the stage needs is a value this round already
+           * resolved — the declarations, the cost plan, the launch waivers, the
+           * evidence directory and the gate bounds. Nothing here re-reads the
+           * candidate's worktree for policy: `ctx.runGatePolicy` is the run's
+           * snapshot, for the same reason the feedback-integrity gate takes it
+           * (#251) — a candidate that could author `gatePolicy.clean` could
+           * delete the stage that checks it.
+           */
+          const cleaner = await runCleanerStage(
+            {
+              repoRoot: config.repoRoot,
+              worktreeDir: ctx.worktreeDir,
+              ghIssue: slice.ghIssue,
+              sliceNumber: slice.number,
+              relSliceDir: ctx.relSliceDir,
+              absSliceDir: ctx.absSliceDir,
+              featureRef: featBranch,
+              dispatch: async (cleanerInput) => {
+                logger.phase(
+                  `${ctx.tag}: cleaner round ${cleanerInput.round} of ` +
+                    `${cleanerInput.roundLimit} on ${cleanerInput.inputTreeId}...`,
+                  "error",
+                  {
+                    type: "phase-started",
+                    ghIssue: slice.ghIssue,
+                    sliceNumber: slice.number,
+                    agent: "cleaner",
+                    round,
+                  },
+                );
+                const cleanerLog = logger.agentLog(
+                  slice.number,
+                  "cleaner",
+                  round * 10 + cleanerInput.round,
+                );
+                await invoke({
+                  role: "cleaner",
+                  completionEvidence: {
+                    ghIssue: slice.ghIssue,
+                    sliceNumber: slice.number,
+                    round,
+                    attempt: cleanerInput.round,
+                    role: "cleaner",
+                  },
+                  prompt: renderPrompt("cleaner", {
+                    SLICE_DIR: ctx.relSliceDir,
+                    ROUND: String(cleanerInput.round),
+                    ROUND_LIMIT: String(cleanerInput.roundLimit),
+                    BASELINE_TREE_ID: cleanerInput.baselineTreeId,
+                    INPUT_TREE_ID: cleanerInput.inputTreeId,
+                    // The locked manifest by name, not its contents: the
+                    // cleaner reads the same document the `scope` gate
+                    // enforces, so a summary here could only ever disagree
+                    // with it.
+                    WRITE_SCOPE: [
+                      `- Every path in the locked ` +
+                        `\`${ctx.relSliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}\`` +
+                        ` \`fileScope\`.`,
+                      ...(ctx.runGatePolicy?.clean?.additionalWriteScope ?? [])
+                        .map(
+                          (glob) =>
+                            `- \`${glob}\` (this project's ` +
+                            `\`gatePolicy.clean.additionalWriteScope\`).`,
+                        ),
+                      `- \`${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}\`,` +
+                        ` and only to escalate.`,
+                    ].join("\n"),
+                    QUALITY_FAILURES: cleanerInput.qualityFailures
+                      .map(
+                        (failure) =>
+                          `- \`${failure.gateId}\` (${failure.status}): ` +
+                          `${failure.detail}\n  Log: ` +
+                          `\`${failure.logArtifactId}\``,
+                      )
+                      .join("\n"),
+                    REGRESSION_NOTE: cleanerInput.regressionNote,
+                  }),
+                  cwd: ctx.worktreeDir,
+                  logStream: cleanerLog,
+                  ...longCommandRoleBounds({
+                    idleTimeoutMs: timeoutMs,
+                    idleWarningIntervalMs: heartbeatMs,
+                    maxDurationMs: config.maxAgentDurationMs,
+                  }),
+                }).finally(() => closeAgentLog(cleanerLog));
+              },
+              log: (message, level) =>
+                logger.phase(`${ctx.tag}: ${message}`, level),
+              ...(signal ? { signal } : {}),
+            },
+            round,
+            {
+              ...(ctx.runGatePolicy?.clean
+                ? { clean: ctx.runGatePolicy.clean }
+                : {}),
+              acceptedTreeId,
+              runPolicy: ctx.runGatePolicy,
+              skipDetectors: costPlan.skipDetectors,
+              testFileGlobs: costPlan.testFileGlobs,
+              waivers: launchWaivers,
+              // The bundle the approval rested on, in the order this round ran
+              // it: a cleaner round has to clear its clean gate without
+              // reddening any of these (#87 B-06).
+              regressionDeclarations: [
+                ...preQaDeclarations,
+                ...fullSuiteDeclarations,
+              ],
+              gatePhase: {
+                repoRoot: config.repoRoot,
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                tag: ctx.tag,
+                round,
+                evidenceDir,
+                cache: gateCache,
+                ...(signal ? { signal } : {}),
+                infrastructureRetries:
+                  config.infrastructureRetries ??
+                  DEFAULT_INFRASTRUCTURE_RETRIES,
+                inactivityTimeoutMs:
+                  config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+                wallClockTimeoutMs:
+                  DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+                heartbeatIntervalMs:
+                  config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+                onGateOutcome: (outcome) => {
+                  logger.event({
+                    type: "gate-outcome",
+                    ghIssue: slice.ghIssue,
+                    sliceNumber: slice.number,
+                    round,
+                    ...outcome,
+                  });
+                },
+                onInfrastructureRetry: (message) => {
+                  logger.phase(message, "error", {
+                    type: "warn",
+                    reason: "infrastructure-retry",
+                    ghIssue: slice.ghIssue,
+                    message,
+                  });
+                },
+                ...(gatePrepare ? { prepare: gatePrepare } : {}),
+              },
+              ...(gatePrepare ? { prepare: gatePrepare } : {}),
+              options: { migrationPathPattern: config.migrationPathPattern },
+              checkpointDirFor: (cleanerRound) =>
+                join(
+                  config.repoRoot,
+                  ".afk",
+                  "checkpoints",
+                  `${config.prdSlug}-s${slice.number}-r${round}-` +
+                    `${CLEANER_STAGE_ID}-a${cleanerRound}-${randomUUID()}`,
+                ),
+              disposeCheckpoint: async (checkpointWorktreeDir) => {
+                await git.removeWorktreeOrWarn(
+                  ctx.worktreeDir,
+                  checkpointWorktreeDir,
+                  {
+                    label: ctx.tag,
+                    warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
+                  },
+                  ...(signal ? [{ signal }] : []),
+                );
+              },
+            },
+          );
+          if (cleaner.outcome === "ESCALATED" && cleaner.escalation) {
+            /**
+             * A valid `BASELINE_IS_WRONG` returns the slice to the generator
+             * loop with the baseline citation invalidated (#87 B-13) — the
+             * same route a final-evaluation `generator-loop` finding takes,
+             * because it is the same claim: the approved candidate itself has
+             * to change. The stage already reset the worktree to the accepted
+             * commit, so the round the generator gets is the approved tree and
+             * not a half-cleaned one.
+             */
+            invalidateFinalEvaluationBaseline(
+              config.repoRoot,
+              pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+              slice.ghIssue,
+              acceptedTreeId,
+            );
+            generatorFailureSet = {
+              findings: [
+                {
+                  id: cleaner.escalation.id,
+                  clearCondition: cleaner.escalation.expected,
+                  artifactReferences: cleaner.escalationArtifactId
+                    ? [cleaner.escalationArtifactId]
+                    : [
+                        `${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}`,
+                      ],
+                },
+              ],
+              gates: [],
+            };
+            retryNote =
+              `The cleaner escalated the approved baseline: ` +
+              `${cleaner.escalation.id}: ${cleaner.escalation.summary} ` +
+              `Expected: ${cleaner.escalation.expected} Observed: ` +
+              `${cleaner.escalation.observed}`;
+            logger.phase(
+              `${ctx.tag}: the cleaner returned the slice to the generator ` +
+                `loop and invalidated the baseline ${acceptedTreeId}`,
+              "error",
+            );
+            if (implementationAttempt < implementationAttemptLimit) continue;
+            return finishStuck(
+              `The cleaner returned slice #${slice.ghIssue} to the ` +
+                `generator with no implementation round left to spend. ` +
+                retryNote,
+            );
+          }
+          if (cleaner.outcome === "EXHAUSTED") {
+            stuckReferences.push(
+              ...cleaner.remainingFailures.map(
+                (failure) => failure.logArtifactId,
+              ),
+            );
+            return finishStuck(
+              cleanerExhaustionReason({
+                ghIssue: slice.ghIssue,
+                roundsSpent: cleaner.roundsSpent,
+                failures: cleaner.remainingFailures,
+                treeId: cleaner.outputTreeId,
+              }),
             );
           }
           /**

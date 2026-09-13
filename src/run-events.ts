@@ -133,7 +133,11 @@ export type RunEventPayload =
         // The final evaluator (#96 B-06) is journaled the same way and for the
         // same reason: it has a manifest-only role contract today, so its
         // reading time has no `prompt-assembly` event to pair with.
-        | "evaluator-final";
+        | "evaluator-final"
+        // The cleaner (#87 B-12) likewise: a prompt-only, manifest-declared
+        // role with no `PromptAssemblyRole` membership, so this event is where
+        // its invocation is accounted for.
+        | "cleaner";
       /** Evaluator attempt within the round, when the role retries. */
       attempt?: number;
       /** Provider-exposed token names and counts, never renamed. */
