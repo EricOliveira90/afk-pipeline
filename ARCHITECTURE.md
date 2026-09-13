@@ -60,21 +60,17 @@ entry in `afk.config.json`. Cap: 150 lines.
 - Post-approval writing stages (`PostApprovalWritingStage` in
   `src/final-evaluation.ts`) — a stage that runs after the approval commit and
   before the merge takes `{ worktreeDir, stageId, repair? }` and is wired at the
-  one accept seam in `src/orchestrator.ts`. The cleaner orchestration session
-  (`src/cleaner-orchestration.ts`) owns resume lookup, dispatch, persistence,
-  standing state across restores, and its typed terminal decisions; the
-  orchestrator retains generator availability, final-evaluation routing and
-  slice lifecycle. Its implementation (`src/cleaner-stage.ts`,
-  `prompts/cleaner.md`) runs under `gatePolicy.clean`: round 0 gates the accepted
-  tree, and each later round dispatches, checkpoints, and gates the clean gates
-  **plus the full set the approval rested on**, so a round that reddens any of
-  the latter is reverted with `git reset --hard` rather than re-baselined. Every
-  exit path resets (ADR 0051) and the loop continues on a comparison against the
-  remaining rounds rather than an incremented counter (ADR 0050); a
-  `BASELINE_IS_WRONG` escalation returns the slice to the generator with the
-  baseline citation invalidated, and exhaustion goes stuck with every still-red
-  gate named. A restore round (`repair`) skips round 0 — its input is the
-  cleaner's own green output, which round 0 would simply release.
+  one accept seam in `src/orchestrator.ts`. The cleaner session
+  (`src/cleaner-orchestration.ts`) owns resume, dispatch, persistence, restore
+  state, and terminal decisions; the orchestrator retains generator,
+  final-evaluation, and slice-lifecycle authority. Its implementation
+  (`src/cleaner-stage.ts`, `prompts/cleaner.md`) runs under `gatePolicy.clean`:
+  round 0 gates the accepted tree; later rounds gate their checkpoint against
+  the clean gates **plus the full approval gate set**, reverting regressions
+  with `git reset --hard`. Every exit resets (ADR 0051), and remaining rounds
+  are compared rather than incremented (ADR 0050). `BASELINE_IS_WRONG` returns
+  to the generator with the baseline invalidated; exhaustion goes stuck naming
+  every red gate. A restore (`repair`) skips round 0 on the cleaner's green output.
 - Gate cost (`gatePolicy.cost` → `resolveTestCostPlan` in `src/base-gates.ts`)
   — a gate's price is declared, not discovered: `expectedCostMs` decides what
   the generator's verification command may contain, `prerequisiteGateIds`
