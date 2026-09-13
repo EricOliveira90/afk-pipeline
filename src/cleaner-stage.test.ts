@@ -1135,6 +1135,35 @@ describe("runCleanerStage restore rounds", () => {
     expect(harness.result.outputTreeId).toBe(cleanerTreeId);
   });
 
+  it("[behavior:#97:B-07] reports the tree the restore round actually started from, not the approved baseline", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    // The shape a restore re-dispatch really has: a cleaner round already
+    // committed, so the tree the restore reads is that round's output and the
+    // approved baseline is two trees back. The other restore tests pass the
+    // cleaner's own tree as `acceptedTreeId`, which hides the difference.
+    write(repo, "cleaned.txt", "clean\n");
+    commitAll(repo, "chore(#87): cleaner round 1");
+    const cleanerTreeId = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    expect(cleanerTreeId).not.toBe(acceptedTreeId);
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId,
+      clean: cleanPolicy(),
+      repair: { findings },
+      onDispatch: restoreDispatch,
+    });
+    expect(harness.dispatches[0]?.inputTreeId).toBe(cleanerTreeId);
+    // The baseline slot still carries the approval's tree — the two facts are
+    // distinct, and only one of them moves with the rounds.
+    expect(harness.dispatches[0]?.baselineTreeId).toBe(acceptedTreeId);
+    expect(harness.attempts).toHaveLength(1);
+    expect(harness.attempts[0]?.inputTreeId).toBe(cleanerTreeId);
+    expect(harness.recorded[0]?.inputTreeId).toBe(cleanerTreeId);
+    expect(harness.result.inputTreeId).toBe(cleanerTreeId);
+    expect(harness.result.outputTreeId).not.toBe(cleanerTreeId);
+  });
+
   it("[behavior:#97:B-07] observes one measured attempt per round, with the round's own gate ids, outcome and wall clock", async () => {
     const { root, repo, acceptedTreeId } = makeRepo();
     let round = 0;

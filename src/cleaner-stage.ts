@@ -48,6 +48,7 @@ import type {
 } from "./gate-policy.js";
 import {
   createCandidateCheckpoint,
+  resolveCandidateTreeId,
   type GateDeclaration,
   type GateResult,
   type GateStatus,
@@ -129,7 +130,14 @@ export interface CleanerStageResult {
   /** False only for a run with no `gatePolicy.clean` (P-01). */
   ran: boolean;
   outcome: CleanerStageOutcome;
-  /** The accepted tree the stage started from. */
+  /**
+   * The tree *this dispatch* started from: the accepted tree on the stage's
+   * first run, and the cleaner's own newest committed tree on a restore
+   * re-dispatch (#97 B-03), which is what the worktree carried when the restore
+   * was asked for. The orchestrator keeps the accepted tree as the stage's
+   * standing input across dispatches, so "did the cleaner write?" stays a
+   * question about the whole range rather than about the last round.
+   */
   inputTreeId: string;
   /**
    * The tree the stage leaves behind. Equal to {@link inputTreeId} whenever no
@@ -573,9 +581,35 @@ export async function runCleanerStage(
   const limit = input.roundLimit ?? MAX_CLEANER_ROUNDS;
   const clean = input.clean;
   const rounds: CleanerRoundRecord[] = [];
-  // The commit the accepted tree sits on: the reset target for a valid
-  // escalation, and round 1's input checkpoint (#87 B-07).
-  const acceptedCommit = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
+  // The commit this stage run starts from: the reset target for a valid
+  // escalation, and its first round's input checkpoint (#87 B-07). On the
+  // stage's first dispatch it is the commit the accepted tree sits on; on a
+  // restore re-dispatch (#97 B-03) it is the cleaner's own newest commit,
+  // because that is what the worktree carries and what the restore round is
+  // being asked to repair.
+  const startCommit = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
+  /**
+   * The tree this stage run was actually handed (#97 B-07, QA-04).
+   *
+   * `input.acceptedTreeId` is the *baseline* — the tree the approval was given
+   * on — and on the stage's first dispatch the two are the same. A restore
+   * re-dispatch is handed the tree the cleaner's earlier rounds committed, so
+   * reporting the accepted tree as the round's input would break the per-round
+   * tree chain on the stream: the round would claim to have read a tree no
+   * round of it ever saw, and `inputTreeId === outputTreeId` — the event's own
+   * "this attempt changed nothing" reading — would stop meaning that.
+   *
+   * Hashed with the same `resolveCandidateTreeId` every other tree id in the
+   * pipeline comes from — tracked plus untracked — so this names what the round
+   * genuinely reads and no second hashing can disagree with the first. On a
+   * restore that is the graded tree, because the caller clears the attempt's own
+   * loose review artifacts before re-dispatching; if it ever stops doing so the
+   * chain visibly breaks here rather than quietly gating the evaluator's bytes
+   * as the cleaner's work.
+   */
+  const startTreeId = input.repair
+    ? resolveCandidateTreeId(ctx.worktreeDir)
+    : acceptedTreeId;
 
   const runGatePhase = async (
     declarations: readonly GateDeclaration[],
@@ -657,9 +691,9 @@ export async function runCleanerStage(
   }
 
   let spent = ctx.roundsAlreadySpent ?? 0;
-  let inputCommit = acceptedCommit;
-  let inputTreeId = acceptedTreeId;
-  let outputTreeId = acceptedTreeId;
+  let inputCommit = startCommit;
+  let inputTreeId = startTreeId;
+  let outputTreeId = startTreeId;
   let regressionNote = "";
 
   const finish = (
@@ -670,7 +704,10 @@ export async function runCleanerStage(
     return {
       ran: true,
       outcome,
-      inputTreeId: acceptedTreeId,
+      // The tree *this run* was handed, not the baseline: on a restore
+      // re-dispatch they differ, and the caller composes the stage's standing
+      // input/output pair from the first dispatch's input and this output.
+      inputTreeId: startTreeId,
       outputTreeId,
       roundsSpent: spent,
       ...(rounds.length > 0 ? { rounds } : {}),
@@ -790,11 +827,14 @@ export async function runCleanerStage(
       }
       // Exit path 4: the one documented exception to the input-checkpoint
       // target. An escalation invalidates the accepted tree's baseline
-      // citation, so every post-approval cleaner commit goes — not just this
-      // round's (#87 B-07, B-13).
-      resetHardTo(ctx.worktreeDir, acceptedCommit);
+      // citation, so every cleaner commit this stage run made goes — not just
+      // this round's (#87 B-07, B-13). On a restore re-dispatch that is every
+      // commit the restore made; the earlier rounds' range is the
+      // orchestrator's to undo, and it owns the one reset that can
+      // (`resetCleanerRangeTo`, #97 B-04).
+      resetHardTo(ctx.worktreeDir, startCommit);
       spent++;
-      outputTreeId = acceptedTreeId;
+      outputTreeId = startTreeId;
       recordRound({
         round: roundNumber,
         attempt: round,
@@ -812,7 +852,7 @@ export async function runCleanerStage(
       });
       log(
         `cleaner round ${roundNumber} escalated ${escalation.id} and reset ` +
-          `the worktree to the accepted tree ${acceptedTreeId}`,
+          `the worktree to ${startTreeId}`,
         "error",
       );
       return finish("ESCALATED", {
