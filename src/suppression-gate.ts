@@ -26,13 +26,12 @@
  * it counts over *raw* content: a suppression **is** a comment, so blanking
  * comments would read every tree as clean.
  */
-import { execFileSync } from "node:child_process";
 import {
   matchesGlob,
   type GatePolicySuppressionDetector,
 } from "./gate-policy.js";
 import type { GateDeclaration, GateFindings, GateRunOutcome } from "./gate-runner.js";
-import { diffTreePaths } from "./git.js";
+import { diffTreePaths, readFileOnRef } from "./git.js";
 
 /** The declared gate id, so callers and assertions share one spelling. */
 export const SUPPRESSION_GATE_ID = "suppressions";
@@ -58,28 +57,6 @@ type Occurrence = NonNullable<GateFindings["suppressions"]>[number];
 
 function matchesAny(globs: readonly string[], path: string): boolean {
   return globs.some((glob) => matchesGlob(glob, path));
-}
-
-/**
- * One blob's content at one tree, or `undefined` when the path is absent from
- * it. `git cat-file` refuses rather than inventing, and an added file simply has
- * no occurrences on the input side.
- */
-function readAtTree(
-  cwd: string,
-  tree: string,
-  path: string,
-): string | undefined {
-  try {
-    return execFileSync("git", ["cat-file", "-p", `${tree}:${path}`], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -145,8 +122,8 @@ export function runSuppressionGate(
 
   const added: Occurrence[] = [];
   for (const path of covered) {
-    const before = readAtTree(input.cwd, input.inputCheckpointTree, path);
-    const after = readAtTree(input.cwd, input.outputCheckpointTree, path);
+    const before = readFileOnRef(input.cwd, input.inputCheckpointTree, path);
+    const after = readFileOnRef(input.cwd, input.outputCheckpointTree, path);
     // A deleted file cannot have gained a suppression.
     if (after === undefined) continue;
     const outputOccurrences = occurrencesIn(input.detectors, path, after);

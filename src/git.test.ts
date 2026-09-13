@@ -31,6 +31,8 @@ import {
   lastCommitEpochSeconds,
   logCommitsWithStat,
   mergeBranchIntoWorktree,
+  readFileOnRef,
+  resetWorktreeTo,
   resetWorktreeToHead,
   findMigrationPrefixCollisions,
   findWorktreeForBranch,
@@ -918,7 +920,7 @@ describe("nextFreeMigrationPrefix (pure)", () => {
 
 // Shared repo: the missing-ref case reads nothing the other test writes
 // (see `git.branchExists`).
-describe("git.listFilesOnRef", () => {
+describe("git committed tree reads", () => {
   let repoDir: string;
 
   beforeAll(() => {
@@ -949,6 +951,12 @@ describe("git.listFilesOnRef", () => {
 
   it("returns empty for a ref that does not exist", () => {
     expect(listFilesOnRef(repoDir, "no/such/ref")).toEqual([]);
+  });
+
+  it("reads exact file content from a ref and returns undefined when absent", () => {
+    expect(readFileOnRef(repoDir, "main", "app.ts")).toBe("export {};");
+    expect(readFileOnRef(repoDir, "main", "missing.ts")).toBeUndefined();
+    expect(readFileOnRef(repoDir, "no/such/ref", "app.ts")).toBeUndefined();
   });
 });
 
@@ -1200,6 +1208,22 @@ describe("resume git primitives", () => {
       expect(readFileSync(join(sliceDir, "contract.md"), "utf-8")).toBe(
         "**Status:** LOCKED",
       );
+      expect(existsSync(join(wt, "orphan.txt"))).toBe(false);
+    });
+
+    it("restores an earlier commit and removes untracked files", () => {
+      const wt = join(repoDir, ".afk", "wt-slice");
+      createWorktree(repoDir, "slice", wt, "main");
+      commitFile(wt, "kept.txt", "target", "feat: target");
+      const target = git(wt, ["rev-parse", "HEAD"]);
+      commitFile(wt, "later.txt", "later", "feat: later");
+      writeFileSync(join(wt, "orphan.txt"), "never committed", "utf-8");
+
+      resetWorktreeTo(wt, target);
+
+      expect(git(wt, ["rev-parse", "HEAD"])).toBe(target);
+      expect(readFileSync(join(wt, "kept.txt"), "utf-8")).toBe("target");
+      expect(existsSync(join(wt, "later.txt"))).toBe(false);
       expect(existsSync(join(wt, "orphan.txt"))).toBe(false);
     });
   });

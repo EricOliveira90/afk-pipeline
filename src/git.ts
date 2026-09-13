@@ -575,6 +575,27 @@ export function listFilesOnRef(repoRoot: string, ref: string): string[] {
   }
 }
 
+/**
+ * Read one file from a committed ref without consulting working-tree state.
+ * Returns `undefined` when either the ref or path is absent.
+ */
+export function readFileOnRef(
+  repoRoot: string,
+  ref: string,
+  path: string,
+): string | undefined {
+  try {
+    return execFileSync("git", ["cat-file", "-p", `${ref}:${path}`], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      maxBuffer: 64 * 1024 * 1024,
+    }) as string;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Extract the leading numeric prefix of a migration filename, or null. */
 function migrationPrefix(filename: string): string | null {
   const m = /^(\d+)/.exec(filename);
@@ -712,7 +733,19 @@ export function resetWorktreeToHead(
   worktreeDir: string,
   excludePaths: string[] = [],
 ): void {
-  git(["reset", "--hard"], { cwd: worktreeDir });
+  resetWorktreeTo(worktreeDir, "HEAD", excludePaths);
+}
+
+/**
+ * Restore a worktree to `ref`, discarding later commits, tracked edits, and
+ * untracked files. `excludePaths` applies only to the untracked sweep.
+ */
+export function resetWorktreeTo(
+  worktreeDir: string,
+  ref: string,
+  excludePaths: string[] = [],
+): void {
+  git(["reset", "--hard", ref], { cwd: worktreeDir });
   const excludes = excludePaths.flatMap((p) => ["-e", p]);
   git(["clean", "-fd", ...excludes], { cwd: worktreeDir });
 }

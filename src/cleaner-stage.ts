@@ -27,7 +27,6 @@
  *   `{{TEST_COMMAND}}`: the verification command belongs to the role that
  *   iterates on it, and this role does not.
  */
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { runCandidateGatePhase } from "./candidate-gate-phase.js";
@@ -53,7 +52,14 @@ import {
   type GateResult,
   type GateStatus,
 } from "./gate-runner.js";
-import { commitAll, diffTreePaths, hasUncommittedChanges } from "./git.js";
+import {
+  commitAll,
+  diffTreePaths,
+  hasUncommittedChanges,
+  resolveCommit,
+  resolveTree,
+  resetWorktreeTo,
+} from "./git.js";
 import type { LaneResourceOptions } from "./lanes.js";
 import { scopeGateDeclaration } from "./scope-gate.js";
 import { skipGateDeclaration } from "./skip-gate.js";
@@ -308,14 +314,13 @@ export interface CleanerStageInput {
 }
 
 /**
- * `git reset --hard <commit>` plus the untracked sweep, exported for the one
- * caller that has to undo a whole cleaner range rather than one round (#97
- * B-04): the orchestrator, when a restore is routed here with no round left to
- * spend. Exported from this module rather than added to `src/git.ts` because
- * resetting a cleaner range is this stage's concern and nobody else's.
+ * Restore the whole cleaner range for the one caller that has to undo more
+ * than one round (#97 B-04): the orchestrator, when a restore is routed here
+ * with no round left to spend. The stage names the operation; `src/git.ts`
+ * owns the reset-and-clean mechanics.
  */
 export function resetCleanerRangeTo(cwd: string, commit: string): void {
-  resetHardTo(cwd, commit);
+  resetWorktreeTo(cwd, commit);
 }
 
 /**
@@ -354,20 +359,6 @@ export function renderCleanerQualityFailures(input: {
         `  Log: \`${failure.logArtifactId}\``,
     )
     .join("\n");
-}
-
-function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-  }).trim();
-}
-
-/** `git reset --hard <commit>` plus the untracked sweep a revert has to make. */
-function resetHardTo(cwd: string, commit: string): void {
-  git(cwd, ["reset", "--hard", commit]);
-  git(cwd, ["clean", "-fd"]);
 }
 
 /**
@@ -424,11 +415,15 @@ export function changedFilesForExpansion(input: {
   featureRef: string;
   treeIsh?: string;
 }): string[] {
-  const from = git(input.cwd, ["rev-parse", `${input.featureRef}^{tree}`]);
-  const to = git(input.cwd, [
-    "rev-parse",
-    `${input.treeIsh ?? "HEAD"}^{tree}`,
-  ]);
+  const from = resolveTree(input.cwd, input.featureRef);
+  if (!from) {
+    throw new Error(`Cannot resolve feature tree ${input.featureRef}`);
+  }
+  const toRef = input.treeIsh ?? "HEAD";
+  const to = resolveTree(input.cwd, toRef);
+  if (!to) {
+    throw new Error(`Cannot resolve cleaner tree ${toRef}`);
+  }
   return diffTreePaths(input.cwd, from, to);
 }
 
@@ -587,7 +582,10 @@ export async function runCleanerStage(
   // restore re-dispatch (#97 B-03) it is the cleaner's own newest commit,
   // because that is what the worktree carries and what the restore round is
   // being asked to repair.
-  const startCommit = git(ctx.worktreeDir, ["rev-parse", "HEAD"]);
+  const startCommit = resolveCommit(ctx.worktreeDir, "HEAD");
+  if (!startCommit) {
+    throw new Error(`Cannot resolve cleaner worktree HEAD in ${ctx.worktreeDir}`);
+  }
   /**
    * The tree this stage run was actually handed (#97 B-07, QA-04).
    *
@@ -751,7 +749,7 @@ export async function runCleanerStage(
     if (dispatchFailure !== null || ctx.signal?.aborted) {
       // Exit path 2: a dispatch that died spends its round (#87 B-05), and the
       // round's writes go back — a half-finished round is not a candidate.
-      resetHardTo(ctx.worktreeDir, inputCommit);
+      resetWorktreeTo(ctx.worktreeDir, inputCommit);
       spent++;
       recordRound({
         round: roundNumber,
@@ -800,7 +798,7 @@ export async function runCleanerStage(
         // Exit path 3: the round's checkpoint is discarded by this reset and is
         // therefore never gated, so `ESCALATION_MALFORMED` is the round's whole
         // outcome (#87 B-07, B-13).
-        resetHardTo(ctx.worktreeDir, inputCommit);
+        resetWorktreeTo(ctx.worktreeDir, inputCommit);
         spent++;
         recordRound({
           round: roundNumber,
@@ -832,7 +830,7 @@ export async function runCleanerStage(
       // commit the restore made; the earlier rounds' range is the
       // orchestrator's to undo, and it owns the one reset that can
       // (`resetCleanerRangeTo`, #97 B-04).
-      resetHardTo(ctx.worktreeDir, startCommit);
+      resetWorktreeTo(ctx.worktreeDir, startCommit);
       spent++;
       outputTreeId = startTreeId;
       recordRound({
@@ -954,7 +952,7 @@ export async function runCleanerStage(
     if (regressions.length > 0) {
       // Exit path 1: a required gate outside the clean set went red, so the
       // round is reverted and nothing re-baselines (#87 B-07).
-      resetHardTo(ctx.worktreeDir, inputCommit);
+      resetWorktreeTo(ctx.worktreeDir, inputCommit);
       recordRound({
         round: roundNumber,
         attempt: round,
