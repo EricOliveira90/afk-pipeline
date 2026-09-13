@@ -545,7 +545,7 @@ describe("runCleanerStage rounds", () => {
     expect(harness.dispatches[1]?.regressionNote).toContain(acceptedTreeId);
   });
 
-  it("[behavior:#87:B-07] resets to the round's input checkpoint and records FAIL when the dispatch throws", async () => {
+  it("[behavior:#87:B-07] [behavior:#97:P-05] resets to the round's input checkpoint and records FAIL when the dispatch throws", async () => {
     const { root, repo, acceptedTreeId } = makeRepo();
     const acceptedCommit = git(repo, ["rev-parse", "HEAD"]);
     const harness = await runStage({
@@ -868,7 +868,7 @@ describe("runCleanerStage rounds", () => {
     expect(harness.result.outputTreeId).toBe(harness.recorded[1]?.outputTreeId);
   });
 
-  it("[behavior:#87:B-05] grants no round at all when the run state says the budget is spent", async () => {
+  it("[behavior:#87:B-05] [behavior:#97:P-04] grants no round at all when the run state says the budget is spent", async () => {
     const { root, repo, acceptedTreeId } = makeRepo();
     const harness = await runStage({
       root,

@@ -1228,7 +1228,7 @@ describe("[behavior:#274:B-08] run-summary.md's Quality Stages section", () => {
     expect(section).toContain("(source: afk.config.json)");
   });
 
-  it("[behavior:#274:B-08] renders the line in the disabled case too", () => {
+  it("[behavior:#274:B-08] [behavior:#97:P-07] renders the line in the disabled case too", () => {
     const md = summaryWith("stage-disabled", {
       type: "quality-stage-policy",
       stage: "cleaner",
@@ -1246,7 +1246,7 @@ describe("[behavior:#274:B-08] run-summary.md's Quality Stages section", () => {
     expect(section).not.toContain("enabled");
   });
 
-  it("[behavior:#274:B-08] renders no section for a stream without the event", () => {
+  it("[behavior:#274:B-08] [behavior:#97:P-06] renders no section for a stream without the event", () => {
     // A historical stream carries none, so its summary stays byte-identical.
     const md = summaryWith("stage-absent");
     expect(md).not.toContain("## Quality Stages");

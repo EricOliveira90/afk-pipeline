@@ -503,7 +503,7 @@ describe("the post-approval stage seam under a shipped cleaner", () => {
     expect(CLEANER_STAGE_ID).not.toBe(POST_APPROVAL_WRITING_STAGE_ID);
   });
 
-  it("[behavior:#87:P-02] keeps PostApprovalWritingStage synchronous and the noop as the default", () => {
+  it("[behavior:#87:P-02] [behavior:#97:P-02] keeps PostApprovalWritingStage synchronous and the noop as the default", () => {
     // The `void` return is the load-bearing half: `src/qa-orchestration.test.ts`'s
     // "final evaluation and reuse" fixture injects a stub that writes into the
     // worktree and returns nothing, and the orchestrator commits whatever it
