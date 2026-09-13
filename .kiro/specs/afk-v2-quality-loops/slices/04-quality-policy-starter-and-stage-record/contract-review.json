@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-07"],
+      "evidence": "\"Given a fixture repo whose `afk.config.json` declares `gatePolicy.clean` with named gates, when its run's stream is filtered, then the single event reads `enabled: true` with those gate ids in declaration order.\"",
+      "expected": "The enabled-case half of B-07 must name the harness that produces it: either the existing spawned scenario whose fixture already declares `gatePolicy.clean`, or, if a fixture config must be created or edited, the owning fixture area in `fileScope` with explicit authorization (plus new-spawn justification and `pnpm test:ratchet` in the definition of done if it is a new spawn).",
+      "observed": "The orphan spawned bullet is gone and both branches now have a declared, in-scope proof site — which is what the clear condition asks for. B-07 records the derivation as one pure exported helper `buildQualityStagePolicyEvent(policy)` in `src/run-events.ts` (in `fileScope`) whose only caller is B-06's single emission site, and the test plan names two concrete unit tests in `src/logger.test.ts` (in `fileScope`): the `enabled: true` branch over the policy `parseGatePolicy` returns for the shipped `templates/quality-policy/afk.config.json` (also in `fileScope`, created by B-01) asserting the seven B-02 ids in declaration order, and the `enabled: false` branch over a `clean`-less policy and `null`. The manifest's B-07 `given`/`then`/`observableResult` carry the same claim, a definition-of-done line pins the export and the two branch tests, and the emission site is bound to the helper as its only payload source, so the real-stream assertion in the unchanged `src/orchestrator-runs.test.ts` bullet (`enabled: false`, `gateIds: []`, `source: \"afk.config.json\"`) still proves the wiring. No fixture repo config is written, no new spawn is added, `fileScope` is unchanged at the same ten paths, and P-01's root `afk.config.json` stays unedited.",
+      "clearCondition": "B-07 and its test plan name the concrete enabled-case harness so that both the `enabled: false` and `enabled: true` branches of the event have a declared, in-scope proof site.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01"],
+      "evidence": "\"`protectedPaths` (with `gatePolicyPaths` naming the threshold-bearing files the `feedback-integrity` `gate-policy` rule relies on, and `testGlobs`)\"",
+      "expected": "The obligation should either name the concrete `gatePolicyPaths` entries the template ships, or say plainly that the set is discovered during the slice and state what the test asserts about it.",
+      "observed": "B-01 now names the shipped values outright — `gatePolicyPaths: [\"afk.config.json\", \"suite-budgets.json\"]` and `testGlobs: [\"**/*.test.ts\"]` — and states that nothing is discovered during the slice. Every citation checks out in the working tree: `DEFAULT_GATE_POLICY_PATHS` is exactly those two strings at `src/gate-policy.ts:162-165`, `DEFAULT_TEST_GLOBS` is `[\"**/*.test.ts\"]` at `:168`, and `src/feedback-integrity-gate.ts:255` and `:265` are the `gate-policy` risk class's exact-path classification the contract describes. The test plan's first bullet, the manifest's B-01 `then`/`observableResult` and a definition-of-done line all assert both arrays element-for-element rather than only that the member parses.",
+      "clearCondition": "B-01 either lists the `gatePolicyPaths` values or states the discovery step and the assertion the test makes over that list.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "evidence": "\"with expectedCostMs wired to no pass/fail condition\"",
+      "expected": "Each clause of a `then` should be represented by the `observableResult`.",
+      "observed": "The clause moved to the non-goals, the first option the finding offered. B-02 now says only that whether `expectedCostMs` can decide anything is not its claim and points at the non-goals, and the new non-goal states that this slice adds no reader, so the values stay advisory metadata wired to no pass/fail condition — guaranteed by the absence of any new reader rather than by an assertion — keeping the ADR 0063 and `src/gate-policy.ts:268-269` citations. The manifest's B-02 `then` carries the same sentence.",
+      "clearCondition": "The `expectedCostMs` pass/fail clause moves to the non-goals or gains a stated observation.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-04"],
+      "evidence": "\"it carries a \\\"Quality policy starter\\\" section, placed before \\\"Setting up guardian reviews\\\"\"",
+      "expected": "If section ordering is part of the obligation, the observable result should assert the ordering.",
+      "observed": "The placement is no longer an obligation. B-04's `then` is now the heading, the template path and the clean-enables-the-cleaner statement; the placement immediately before `## Setting up guardian reviews` stays a recorded decision explicitly marked editorial and not gated, so a later reader may move the section without failing the behavior. The manifest's B-04 `then` and `observableResult` say the same and state that ordering relative to `## Setting up guardian reviews` is deliberately unasserted — the finding's second option.",
+      "clearCondition": "B-04's observable result asserts the relative ordering, or the `then` drops the placement clause and keeps it as a recorded decision only.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "evidence": "\"each carries command, args, an explicit required setting and expectedCostMs\"",
+      "expected": "The `expectedCostMs` presence clause should be observed, or dropped, because unlike `required` it is not enforced by the parser: `parseCleanGate` defaults a missing `expectedCostMs` to `DEFAULT_CHEAP_THRESHOLD_MS` (`src/gate-policy.ts:904-911`) while it throws on a non-boolean `required` (`:893`).",
+      "observed": "The revised B-02 `observableResult` asserts `gates.length === 7`, id non-reservation and collision-freedom, that every entry sets `required`, and the `{changedFiles}` token — but nothing asserts that any entry declares `expectedCostMs`. Because the parser silently supplies a default, a shipped template whose gates omit the field would parse cleanly under B-01 and satisfy every assertion B-02 states, yet the `then` claims each entry carries it. This is narrower than F-03: F-03 was about what `expectedCostMs` may decide, this is about whether the template actually declares it. It costs one assertion in the same B-02 unit test, so it does not prevent a lock.",
+      "clearCondition": "B-02's `observableResult` asserts that every `clean.gates` entry declares its own `expectedCostMs`, or the `then` drops the presence clause.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"observableResult\": \"a unit test asserts gates.length is 7, every id is absent from AFK's reserved ids, every entry has a boolean required, and every path-accepting entry's args include the {changedFiles} token\",",
+        "after": "      \"observableResult\": \"src/gate-policy.test.ts's [behavior:B-02] unit tests assert gates.length === 7, that every id is absent from RESERVED_GATE_IDS and collision-free, that every entry sets required, and the {changedFiles} token in args for every path-accepting entry\","
+      }
+    }
+  ]
+}

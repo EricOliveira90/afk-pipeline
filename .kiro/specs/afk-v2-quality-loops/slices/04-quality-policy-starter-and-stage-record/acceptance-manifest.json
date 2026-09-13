@@ -1,0 +1,188 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "templates/quality-policy/afk.config.json",
+      "package.json",
+      "readme.md",
+      "src/run-events.ts",
+      "src/orchestrator.ts",
+      "src/logger.ts",
+      "src/gate-policy.test.ts",
+      "src/logger.test.ts",
+      "src/orchestrator-runs.test.ts",
+      "src/wave.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #274 \"What to build\"; prd.md D6; src/gate-policy.ts:1070, :1121, :154-159, :161-168, :364, :388; src/feedback-integrity-gate.ts:255, :265",
+      "given": "the new shipped file templates/quality-policy/afk.config.json, read from disk as a complete afk.config.json, and a fixture copy of it with any one member renamed to an unknown key",
+      "when": "the shipped file is passed to the production parser parseGatePolicy, and separately the renamed fixture copy is",
+      "then": "the shipped file parses without throwing and its gatePolicy carries version 1, protectedPaths with gatePolicyPaths exactly [\"afk.config.json\", \"suite-budgets.json\"] and testGlobs exactly [\"**/*.test.ts\"] — the shipped baselines DEFAULT_GATE_POLICY_PATHS and DEFAULT_TEST_GLOBS written out explicitly so a consuming project sees the shape it edits, gatePolicyPaths being the exact-path list the feedback-integrity gate's gate-policy risk class classifies a changed path against — riskClasses holding all four members of GATE_RISK_CLASSES, acceptance, cost and clean; and the renamed copy throws naming the offending key, because requireKnownKeys / requireExactKeys refuse an unknown member, which is why no _note-style comment member exists anywhere in the file and the tool-choice notes live in README.md instead",
+      "observableResult": "src/gate-policy.test.ts's [behavior:B-01] unit tests (no git) assert the successful parse, gatePolicyPaths and testGlobs deep-equal to those two exact arrays, the presence of all four riskClasses plus acceptance, cost and clean, and the named-key throw from the renamed fixture copy",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #274; prd.md D6; src/gate-policy.ts:77-89 (RESERVED_GATE_IDS), :117 (CHANGED_FILES_TOKEN), :879 (parseCleanGate)",
+      "given": "the shipped template's clean.gates list, declaring seven gates for format, lint, typecheck, changed-code coverage, complexity/CRAP, duplication and architecture rules",
+      "when": "each entry is inspected and the file is parsed",
+      "then": "there are exactly seven entries; each carries command, args, an explicit required setting and expectedCostMs; each id is namespaced (clean:format, clean:lint, clean:typecheck, clean:coverage-changed, clean:complexity, clean:duplication, clean:architecture) because RESERVED_GATE_IDS already owns the bare lint, tests and typecheck ids and parseCleanGate refuses a collision — the issue names the checks, the shipped parser names the id rule; and every entry whose named tool accepts paths carries the literal CHANGED_FILES_TOKEN {changedFiles} in args. What expectedCostMs can decide is not this behavior's claim: the non-goals hold it, guaranteed by the absence of any new reader (ADR 0063 \"a wall-clock budget cannot fail a gate\")",
+      "observableResult": "src/gate-policy.test.ts's [behavior:B-02] unit tests assert gates.length === 7, that every id is absent from RESERVED_GATE_IDS and collision-free, that every entry sets required, and the {changedFiles} token in args for every path-accepting entry",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #274 AC2; PRD D6",
+      "given": "package.json files and the contents of templates/",
+      "when": "the packaged path set under templates/ is computed",
+      "then": "files contains \"templates\" beside dist, prompts and agents, and the set equals exactly templates/quality-policy/afk.config.json, templates/agents/architect-review.md and templates/agents/pm-review.md",
+      "observableResult": "a whole-set equality assertion over a recursive walk of templates/, so a fourth packaged file fails it",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #274; prd.md D6; README.md:447-456",
+      "given": "README.md, whose existing ### Templates copy instructions sit beside ## Setting up guardian reviews",
+      "when": "the file is read",
+      "then": "it carries a new top-level ## Quality policy starter section saying how to copy templates/quality-policy/afk.config.json into a consuming project and stating that declaring gatePolicy.clean is what turns the cleaner on, and no existing section is rewritten. The section's placement immediately before ## Setting up guardian reviews is a recorded decision but is editorial and deliberately not gated, so a later reader may move it without failing this behavior",
+      "observableResult": "src/gate-policy.test.ts's [behavior:B-04] unit test asserts the ## Quality policy starter heading, the templates/quality-policy/afk.config.json path and the clean-enables-the-cleaner statement are present; ordering relative to ## Setting up guardian reviews is deliberately unasserted",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #274 AC6; PRD D10 item 1",
+      "given": "src/run-events.ts",
+      "when": "the RunEventPayload union is used",
+      "then": "it admits { type: \"quality-stage-policy\"; stage: \"cleaner\"; enabled: boolean; gateIds: string[]; source: \"afk.config.json\" } and EVENTS_SCHEMA_VERSION is still 1",
+      "observableResult": "a typed payload literal compiles under tsc --noEmit and a unit test asserts EVENTS_SCHEMA_VERSION === 1",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #274 AC4; PRD D10 item 1",
+      "given": "a single-slice run and a two-slice wave in the existing spawned scenarios",
+      "when": "each run's events.jsonl is filtered for quality-stage-policy",
+      "then": "each stream holds exactly one such event, never one per slice, and it is the line immediately after run-started",
+      "observableResult": "an it on each existing spawned scenario's shared events.jsonl asserts a length of 1 and the run-started adjacency",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #274 \"with enabled read from the run's own loadGatePolicy snapshot\"; prd.md D10 item 1; #251; AGENTS.md test ladder; ARCHITECTURE.md \"Placement rules\"",
+      "given": "one pure exported helper buildQualityStagePolicyEvent(policy: GatePolicy | null) in src/run-events.ts — the recorded decision that gives both branches a declared, in-scope proof site — called with the policy parseGatePolicy returns for the shipped templates/quality-policy/afk.config.json (B-01), with a clean-less policy, and with null",
+      "when": "the helper builds the payload B-06's single emission site emits",
+      "then": "enabled is policy?.clean !== undefined and gateIds are that snapshot's clean.gates ids in declaration order, [] when disabled, read from the run's own snapshot and never from a worktree, a candidate tree or a per-slice context (#251); so the template's policy yields enabled: true with B-02's seven ids in declaration order, and the clean-less policy and null each yield enabled: false with gateIds []",
+      "observableResult": "src/logger.test.ts's [behavior:B-07] unit tests assert the enabled: true payload with gateIds deep-equal to the seven ids in declaration order over the shipped template's parsed policy, and the enabled: false payload with gateIds [] for both a clean-less policy and null — the in-scope proof site for both branches, in the file where this slice's other src/run-events.ts pin lives. No new spawned scenario is added, so pnpm test:ratchet is not implicated; no spawned fixture repo gains a gatePolicy.clean afk.config.json, which would turn the cleaner on inside a scenario that exists to assert something else; and this repository's own afk.config.json stays unedited (P-01). B-06's two its corroborate the disabled branch in a real stream",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #274 AC5; PRD D10 item 2",
+      "given": "a runEvents array holding one quality-stage-policy event, enabled with gate ids in one case and disabled with none in the other",
+      "when": "writeSummary renders run-summary.md",
+      "then": "a ## Quality Stages section carries one per-run header line naming the cleaner stage, enabled or disabled, and the gate ids in both cases, and no section is rendered when the event is absent",
+      "observableResult": "unit assertions in src/logger.test.ts on the returned summary string for the enabled, disabled and event-absent cases",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #274 AC6; PRD \"Scope\", D5",
+      "given": "the repository's own afk.config.json",
+      "when": "the slice's diff and the existing loadGatePolicy(REPO_ROOT) assertions are examined",
+      "then": "the file is unedited — three riskClasses, no clean member — and src/gate-policy.test.ts's repo-root assertions pass unchanged",
+      "observableResult": "the file is absent from the slice's changed paths and the existing repo-root tests stay green",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #274 AC6",
+      "given": "src/run-events.ts before this slice",
+      "when": "EVENTS_SCHEMA_VERSION and every pre-existing RunEventPayload member are compared",
+      "then": "the version is still 1 and header, run-started, phase-started, phase-ended and every other member keep their current shape and emission sites",
+      "observableResult": "existing run-events, run-snapshot and prompt-recorder tests pass unchanged and typecheck is clean",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "PRD D6 (\"templates/agents/* ride along unchanged\")",
+      "given": "templates/agents/architect-review.md and templates/agents/pm-review.md",
+      "when": "the slice's diff is examined",
+      "then": "both files are unedited and README.md's existing Templates copy instructions still name them",
+      "observableResult": "neither path appears in the slice's changed paths and the README Templates block is untouched",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "PRD D10 item 2 (rendered as ## Final Evaluation Reuse is)",
+      "given": "a run whose event stream carries no quality-stage-policy event",
+      "when": "writeSummary renders",
+      "then": "every other section — Base Gates, Advisory Gates, Behavior Coverage, Candidate Review Isolation, Merge Resolution Rounds, Applied Waivers, Final Evaluation Reuse, Dependency Holds, Adopted Slices — plus the table, totals row and trailing lines render exactly as today from both write sites",
+      "observableResult": "the existing src/logger.test.ts summary assertions pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "#251; PRD D10 item 1",
+      "given": "a run in progress",
+      "when": "the policy readers in src/orchestrator.ts are traced",
+      "then": "loadGatePolicy is the single reader and the run keeps exactly one snapshot, still taken before any agent runs, with no reader handed a policy loaded from a candidate worktree",
+      "observableResult": "one loadGatePolicy call in runPipeline feeding every reader, and the existing #251 run-policy tests pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

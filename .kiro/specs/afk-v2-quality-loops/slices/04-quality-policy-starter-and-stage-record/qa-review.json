@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06"],
+      "summary": "The wave-side B-06 assertion asserts zero quality-stage-policy events rather than the contracted exactly-one, because the wave scenario never calls runPipeline; the exactly-one and run-started-adjacency claims are proved only on the orchestrator-runs multi-slice scenario.",
+      "evidence": "src/wave.test.ts:416-452 — `it(\"[behavior:#274:B-06] runs disjoint slices in parallel lanes\")` ends with `expect(readRunEvents(logger.runDir)?.events.filter((event) => event.type === \"quality-stage-policy\")).toEqual([])`. The scenario calls `runWave({...})` directly with a hand-built RunJournal (line 428), so no `run-started` line exists in that stream and a run-level event structurally cannot appear. The contracted claim is instead proved at src/orchestrator-runs.test.ts:2088-2107 on the four-slice/three-dispatched `runPipeline` scenario (`expect(stagePolicy).toHaveLength(1)` plus `expect(lines[2]).toMatchObject({ type: \"quality-stage-policy\" })`). Probe: `pnpm vitest run src/orchestrator-runs.test.ts` → `Test Files 1 passed (1) / Tests 48 passed (48)`, exit 0, 324.95s.",
+      "expected": "Contract test plan: \"Given an existing two-slice wave scenario in `src/wave.test.ts`, when its `events.jsonl` is filtered, then it holds exactly one `quality-stage-policy` event, never one per slice\"; acceptance-manifest B-06 observableResult: \"an it on each existing spawned scenario's shared events.jsonl asserts a length of 1 and the run-started adjacency\".",
+      "observed": "The wave `it` asserts a length of 0 and no adjacency, with a code comment and a handoff entry explaining why (`src/wave.test.ts:442-446`; handoff.md:27-39). The substantive claim — one record per run, never N per slice — is still covered, because the orchestrator-runs scenario dispatches three slices across two waves in one run and asserts exactly one event immediately after `run-started`. No behavior defect: the emission site is single (src/orchestrator.ts:8320) and `buildQualityStagePolicyEvent` has exactly one production caller.",
+      "clearCondition": "B-06's exactly-one-and-immediately-after-run-started assertion is proved on a spawned multi-slice `runPipeline` stream (already observable in src/orchestrator-runs.test.ts), and the contract's B-06 test plan and manifest observableResult describe the wave-layer `it` as the zero-at-the-runWave-layer complement it actually is rather than as a second exactly-one assertion.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
