@@ -17,15 +17,23 @@
  * total flat is a cost the diff added, wherever the seconds happened to
  * land that afternoon.
  *
- * The count is not free, and the cost lands on the other number: with
- * trace2 on, git walks the Windows process ancestry at startup, ~80ms per
- * process on the dev machine of record. `clean-failed` measures 23.5s
- * untraced and 39.6s traced for its 203 git processes — 1.69x, all of it
- * that walk. So the seconds a traced run records read high against
- * `suite-budgets.json`, uniformly across the chain, which the check
- * attributes as host load and warns about. Compare counts against traced
- * runs and seconds against untraced ones; `suite-budgets.json`'s `_comment`
- * carries the same warning for whoever reads a red chain.
+ * The three `clean-failed` runs that verified this say both halves of that
+ * at once. Untraced: 23.5s. Traced: 39.6s and 30.9s — and **203 git
+ * processes both times**. The seconds moved 28% between two runs of one
+ * unchanged tree; the count did not move at all.
+ *
+ * The count is not free either, and the cost lands on the seconds: with
+ * trace2 on, git walks the Windows process ancestry at startup, which a
+ * microbench puts at ~70ms per process on the dev machine of record (`git
+ * status` 108ms plain against 180ms traced, and the same 180ms with an
+ * event file, EVENT_BRIEF or EVENT_NESTING=0 — so it is the walk, not the
+ * I/O). Against 203 processes that predicts ~14s, and the two traced runs
+ * came in +16.1s and +7.4s on a host too noisy to pin it closer. So read a
+ * traced run's seconds as high against `suite-budgets.json`, evenly across
+ * the chain, which the check attributes as host load and warns about:
+ * compare counts against traced runs and seconds against untraced ones.
+ * `suite-budgets.json`'s `_comment` carries the same warning for whoever
+ * reads a red chain.
  *
  * Usage: node scripts/timed-suite.mjs <suite-name> <command> [args...]
  */
