@@ -32,6 +32,15 @@
  * one this run was compared against — and which it refused to compare. That
  * half is advisory: it warns, it never changes the exit code.
  *
+ * Alongside the seconds it reports each suite's `gitProcesses` — how many git
+ * processes the suite spawned, recorded by `timed-suite.mjs` from git's own
+ * trace2 stream. Reports, and only reports: nothing here fails or warns on
+ * the count. Seconds are a measurement of the host and this file is mostly a
+ * record of overruns that turned out to be the host; the count is exact, so
+ * it is the number to read when asking whether a change made the suite
+ * cheaper. Gating it is a separate argument, on a branch that has enough
+ * recorded counts to set a number from.
+ *
  * Usage: node scripts/check-suite-budgets.mjs [reportsDir]
  */
 import { execFileSync } from "node:child_process";
@@ -86,6 +95,79 @@ export function chooseBaseline(blockNames, currentBranch) {
       .filter((name) => name !== baseline)
       .map((name) => ({ name, branch: measurementBranch(name) })),
   };
+}
+
+/**
+ * What a recorded measurement block says about one suite.
+ *
+ * An entry is either the bare seconds number the file has always carried or
+ * `{ "seconds": …, "gitProcesses": … }`, which also records how many git
+ * processes the suite spawned. Either half may be missing and reads as null:
+ * every block on record predates the count, and they all have to stay
+ * comparable on the half they do have.
+ */
+export function baselineEntry(value) {
+  const asNumber = (candidate) =>
+    typeof candidate === "number" ? candidate : null;
+  if (typeof value === "number") return { seconds: value, gitProcesses: null };
+  if (typeof value === "object" && value !== null) {
+    return {
+      seconds: asNumber(value.seconds),
+      gitProcesses: asNumber(value.gitProcesses),
+    };
+  }
+  return { seconds: null, gitProcesses: null };
+}
+
+/**
+ * One row of the measured-vs-budget table.
+ *
+ * `gitProcesses` and `host` are printed when whatever wrote the timing took
+ * them. A record that has neither is the norm across older reports and must
+ * stay readable, so a missing one is silence and not a zero.
+ *
+ * @param {{ suite: string, seconds: number, budget?: number,
+ *           gitProcesses?: number, host?: string }} timing
+ */
+export function formatSuiteRow({ suite, seconds, budget, gitProcesses, host }) {
+  return (
+    `  ${suite.padEnd(20)} ${seconds.toFixed(1).padStart(7)}s` +
+    (budget === undefined ? "  (no budget)" : ` / ${budget}s`) +
+    (seconds > budget ? ` (${(seconds / budget).toFixed(2)}x)` : "") +
+    (typeof gitProcesses === "number"
+      ? `  git ${String(gitProcesses).padStart(6)}`
+      : "") +
+    (typeof host === "string" ? `  host: ${host}` : "")
+  );
+}
+
+/**
+ * One row of the `vs _measured…` comparison, or null when the block records
+ * nothing comparable for the suite.
+ *
+ * The git delta is the point of the count — it is exact, so a change in it
+ * is the diff and not the afternoon — but it can only be shown when the
+ * recorded block carries one too. Against a seconds-only block the row is
+ * exactly what it always was.
+ *
+ * @param {{ suite: string, seconds: number, gitProcesses?: number }} timing
+ * @param {unknown} recorded the measurement block's entry for that suite
+ */
+export function formatBaselineRow({ suite, seconds, gitProcesses }, recorded) {
+  const before = baselineEntry(recorded);
+  if (before.seconds === null) return null;
+  const signed = (value, digits) =>
+    `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+  const row =
+    `  ${suite.padEnd(20)} ${before.seconds.toFixed(1)}s -> ` +
+    `${seconds.toFixed(1)}s (${signed(seconds - before.seconds, 1)}s)`;
+  if (before.gitProcesses === null || typeof gitProcesses !== "number") {
+    return row;
+  }
+  return (
+    `${row}, git ${before.gitProcesses} -> ${gitProcesses} ` +
+    `(${signed(gitProcesses - before.gitProcesses, 0)})`
+  );
 }
 
 /**
@@ -294,6 +376,7 @@ function main() {
   const budgets = JSON.parse(readFileSync(BUDGETS_PATH, "utf-8"));
   const measured = new Map();
   const host = new Map();
+  const gitProcesses = new Map();
   const finishedAt = [];
   for (const entry of readdirSync(reportsDir)) {
     if (!entry.endsWith(".json")) continue;
@@ -302,6 +385,10 @@ function main() {
     // A coarse host reading, if whatever wrote the timing took one. Records
     // without it are the norm today and must stay readable.
     if (typeof timing.host === "string") host.set(timing.suite, timing.host);
+    // Same contract for the git process count: reported when recorded, never
+    // invented, and never part of a pass/fail decision.
+    if (typeof timing.gitProcesses === "number")
+      gitProcesses.set(timing.suite, timing.gitProcesses);
     if (typeof timing.finishedAt === "number")
       finishedAt.push(timing.finishedAt);
   }
@@ -326,15 +413,22 @@ function main() {
   let total = 0;
 
   const records = [];
+  let totalGitProcesses = null;
   for (const [suite, seconds] of [...measured].sort((a, b) => b[1] - a[1])) {
     total += seconds;
+    if (gitProcesses.has(suite)) {
+      totalGitProcesses = (totalGitProcesses ?? 0) + gitProcesses.get(suite);
+    }
     const budget = budgets.suites[suite];
     records.push({ suite, seconds, budget });
     console.log(
-      `  ${suite.padEnd(20)} ${seconds.toFixed(1).padStart(7)}s` +
-        (budget === undefined ? "  (no budget)" : ` / ${budget}s`) +
-        (seconds > budget ? ` (${(seconds / budget).toFixed(2)}x)` : "") +
-        (host.has(suite) ? `  host: ${host.get(suite)}` : ""),
+      formatSuiteRow({
+        suite,
+        seconds,
+        budget,
+        gitProcesses: gitProcesses.get(suite),
+        host: host.get(suite),
+      }),
     );
     if (budget === undefined) {
       // A new suite script without a budget is how the ratchet gets
@@ -368,7 +462,12 @@ function main() {
   }
 
   console.log(
-    `  ${"TOTAL".padEnd(20)} ${total.toFixed(1).padStart(7)}s / ${budgets.totalSeconds}s`,
+    `  ${"TOTAL".padEnd(20)} ${total.toFixed(1).padStart(7)}s / ${budgets.totalSeconds}s` +
+      // Only a sum of the suites that recorded one, and nothing is budgeted
+      // against it — there is no total-process ceiling in the file.
+      (totalGitProcesses === null
+        ? ""
+        : `  git ${String(totalGitProcesses).padStart(6)}`),
   );
   if (total > budgets.totalSeconds) {
     // Every suite can sit just inside its own budget while the whole thing
@@ -396,13 +495,11 @@ function main() {
   } else {
     console.log(`\n  vs ${baseline}:`);
     for (const [suite, seconds] of [...measured].sort((a, b) => b[1] - a[1])) {
-      const before = budgets[baseline][suite];
-      if (typeof before !== "number") continue;
-      const delta = seconds - before;
-      console.log(
-        `  ${suite.padEnd(20)} ${before.toFixed(1)}s -> ${seconds.toFixed(1)}s` +
-          ` (${delta >= 0 ? "+" : ""}${delta.toFixed(1)}s)`,
+      const row = formatBaselineRow(
+        { suite, seconds, gitProcesses: gitProcesses.get(suite) },
+        budgets[baseline][suite],
       );
+      if (row !== null) console.log(row);
     }
   }
   if (refused.length > 0) {
