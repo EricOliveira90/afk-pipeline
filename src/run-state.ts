@@ -50,15 +50,21 @@ export interface PersistedSliceState {
  * The schema version every writer emits. v4 carries two independent additions,
  * both keyed by GitHub issue and both optional: the per-slice approved baseline
  * locator below (#91) and `appliedWaivers` (#193). v5 adds a third of the same
- * shape, `finalEvaluations` (#96 B-02/B-09). `adaptLoadedState` normalizes a
- * v3 or v4 file to it in memory, so a resumed run reads one shape, and
- * `writeRunState` stamps it on every write so a stale caller literal can never
- * reach disk.
+ * shape, `finalEvaluations` (#96 B-02/B-09). v6 adds a fourth, `qualityStages`
+ * (#87 B-14). `adaptLoadedState` normalizes a v3, v4 or v5 file to it in memory,
+ * so a resumed run reads one shape, and `writeRunState` stamps it on every write
+ * so a stale caller literal can never reach disk.
+ *
+ * The v6 bump is unconditional: a run that declares no `gatePolicy.clean`
+ * persists version `6` with no `qualityStages` member, because "no stage ran"
+ * and "this file predates quality stages" are the same fact to every reader and
+ * a version conditional on a policy member is a version two runs disagree about
+ * (#87 P-01).
  *
  * Exported because it is the one number a reader has to compare against, and a
  * duplicated literal is how two modules disagree about what "current" means.
  */
-export const RUN_STATE_VERSION = 5;
+export const RUN_STATE_VERSION = 6;
 
 /**
  * Where one slice's approved baseline artifact is, and which candidate it
@@ -173,14 +179,79 @@ export function finalEvaluationAttemptsSpent(
   ).length;
 }
 
+/**
+ * One post-approval quality-stage round as persisted (#87 B-14).
+ *
+ * Per round rather than a count, for the same reason
+ * {@link PersistedFinalEvaluationAttempt} is per attempt: "how many rounds are
+ * left" and "which tree did the round that reverted read" are different
+ * questions, and a count answers only the first. `outputTreeId` is absent for a
+ * round that produced no gated checkpoint — a failed dispatch, or a malformed
+ * escalation whose checkpoint was discarded before any gate ran.
+ */
+export interface PersistedQualityStageRound {
+  /** 1-based round number within the stage. */
+  round: number;
+  /** The generator round the approval this stage cleans happened in. */
+  attempt: number;
+  /** The tree the round started from: the accepted tree, or a prior round's. */
+  inputTreeId: string;
+  /** The checkpoint the round produced, when one was gated. */
+  outputTreeId?: string;
+  /** Every gate id the round ran, in declaration order. */
+  gateIds: string[];
+  outcome:
+    | "PASS"
+    | "FAIL"
+    | "REVERTED"
+    | "EXHAUSTED"
+    | "ESCALATED"
+    | "ESCALATION_MALFORMED";
+}
+
+/**
+ * One run of one post-approval quality stage for one slice (#87 B-14).
+ *
+ * A list per issue rather than a single record: a `BASELINE_IS_WRONG`
+ * escalation sends the slice back through the generator, and the next approval
+ * appends a **fresh** entry. Tree ids are content-addressed and a generator can
+ * answer an escalation without changing tracked content, so a single record
+ * keyed by tree would charge the escalating round to the re-approved
+ * candidate's budget whenever the two trees are identical (#87 B-13).
+ */
+export interface PersistedQualityStage {
+  stage: "cleaner";
+  /** Whether the stage's policy member was declared for this run. */
+  enabled: boolean;
+  rounds: PersistedQualityStageRound[];
+  outcome: "DISABLED" | "PASS" | "EXHAUSTED" | "ESCALATED";
+}
+
+/**
+ * How many cleaner rounds one stage entry spent, for
+ * `cleanerRoundsRemaining` (#87 B-14).
+ *
+ * Counts recorded rounds with `round >= 1` — every recorded round is a spent
+ * one, including a reverted and a malformed-escalation round, which is what
+ * stops a resumed run from buying a fourth.
+ */
+export function cleanerRoundsSpent(
+  record:
+    | { rounds: readonly Pick<PersistedQualityStageRound, "round">[] }
+    | undefined,
+): number {
+  return (record?.rounds ?? []).filter((entry) => entry.round >= 1).length;
+}
+
 export interface RunState {
   /**
    * Schema version. Writers emit {@link RUN_STATE_VERSION} and
-   * `adaptLoadedState` returns it for every accepted file; the literals `3`
-   * and `4` stay assignable so callers and fixtures holding an older record
-   * keep compiling, and nothing reads a `3` or `4` back out of a loaded state.
+   * `adaptLoadedState` returns it for every accepted file; the literals `3`,
+   * `4` and `5` stay assignable so callers and fixtures holding an older record
+   * keep compiling, and nothing reads a `3`, `4` or `5` back out of a loaded
+   * state.
    */
-  version: 3 | 4 | 5;
+  version: 3 | 4 | 5 | 6;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -259,6 +330,12 @@ export interface RunState {
    * v3 or v4 file loads unchanged.
    */
   finalEvaluations?: Record<string, PersistedFinalEvaluation>;
+  /**
+   * Per-slice post-approval quality-stage runs, keyed by GitHub issue — v6's
+   * single addition (#87). Absent entries read as "no stage ran", so a v3, v4 or
+   * v5 file loads unchanged.
+   */
+  qualityStages?: Record<string, PersistedQualityStage[]>;
 }
 
 /**
@@ -725,6 +802,195 @@ export function invalidateFinalEvaluationBaseline(
 }
 
 /**
+ * Keep only well-formed quality-stage records (#87 B-14), in the same style as
+ * {@link sanitizeFinalEvaluations}.
+ *
+ * A malformed round degrades the whole entry to absent rather than only itself,
+ * for the reason the attempt sanitizer gives: a dropped round would understate
+ * the spent budget and buy a free extra dispatch.
+ */
+function sanitizeQualityStages(
+  value: unknown,
+): Record<string, PersistedQualityStage[]> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const nonblank = (field: unknown): field is string =>
+    typeof field === "string" && field.trim() !== "";
+  const ROUND_OUTCOMES = new Set([
+    "PASS",
+    "FAIL",
+    "REVERTED",
+    "EXHAUSTED",
+    "ESCALATED",
+    "ESCALATION_MALFORMED",
+  ]);
+  const STAGE_OUTCOMES = new Set([
+    "DISABLED",
+    "PASS",
+    "EXHAUSTED",
+    "ESCALATED",
+  ]);
+  const out: Record<string, PersistedQualityStage[]> = {};
+  for (const [ghIssue, raw] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(raw)) continue;
+    const entries: PersistedQualityStage[] = [];
+    let dropped = false;
+    for (const candidate of raw) {
+      if (typeof candidate !== "object" || candidate === null) {
+        dropped = true;
+        break;
+      }
+      const entry = candidate as Partial<
+        Record<keyof PersistedQualityStage, unknown>
+      >;
+      if (entry.stage !== "cleaner") {
+        dropped = true;
+        break;
+      }
+      if (typeof entry.enabled !== "boolean") {
+        dropped = true;
+        break;
+      }
+      if (!STAGE_OUTCOMES.has(entry.outcome as string)) {
+        dropped = true;
+        break;
+      }
+      if (!Array.isArray(entry.rounds)) {
+        dropped = true;
+        break;
+      }
+      const rounds: PersistedQualityStageRound[] = [];
+      for (const roundRaw of entry.rounds) {
+        if (typeof roundRaw !== "object" || roundRaw === null) {
+          dropped = true;
+          break;
+        }
+        const round = roundRaw as Partial<
+          Record<keyof PersistedQualityStageRound, unknown>
+        >;
+        if (
+          !Number.isSafeInteger(round.round) ||
+          (round.round as number) < 1 ||
+          !Number.isSafeInteger(round.attempt) ||
+          !nonblank(round.inputTreeId) ||
+          !Array.isArray(round.gateIds) ||
+          !round.gateIds.every(nonblank) ||
+          !ROUND_OUTCOMES.has(round.outcome as string) ||
+          (round.outputTreeId !== undefined && !nonblank(round.outputTreeId))
+        ) {
+          dropped = true;
+          break;
+        }
+        rounds.push({
+          round: round.round as number,
+          attempt: round.attempt as number,
+          inputTreeId: round.inputTreeId,
+          ...(round.outputTreeId !== undefined
+            ? { outputTreeId: round.outputTreeId as string }
+            : {}),
+          gateIds: [...(round.gateIds as string[])],
+          outcome: round.outcome as PersistedQualityStageRound["outcome"],
+        });
+      }
+      if (dropped) break;
+      entries.push({
+        stage: "cleaner",
+        enabled: entry.enabled,
+        rounds,
+        outcome: entry.outcome as PersistedQualityStage["outcome"],
+      });
+    }
+    if (dropped || entries.length === 0) continue;
+    out[ghIssue] = entries;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * One slice's quality-stage entries, oldest first (#87 B-14). The current run's
+ * entry is the last one: a fresh entry is appended per approval, so the earlier
+ * ones are the escalated attempts that came before it.
+ */
+export function qualityStagesFor(
+  state: RunState,
+  ghIssue: string,
+): readonly PersistedQualityStage[] {
+  return state.qualityStages?.[ghIssue] ?? [];
+}
+
+/**
+ * Record one cleaner round the moment it ends — persist-per-round, exactly as
+ * `persistAttempts` persists per attempt (#87 B-14), so a run killed mid-stage
+ * resumes having spent the rounds it actually spent.
+ *
+ * `startNewEntry` appends a fresh {@link PersistedQualityStage}; every later
+ * round of the same stage run amends the last entry. That is what keeps an
+ * escalated run's rounds off the re-approved candidate's budget (#87 B-13).
+ */
+export function recordQualityStageRound(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  round: PersistedQualityStageRound,
+  options: { startNewEntry?: boolean } = {},
+): void {
+  updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    const existing = [...(state.qualityStages?.[ghIssue] ?? [])];
+    const last = existing[existing.length - 1];
+    if (options.startNewEntry || last === undefined) {
+      existing.push({
+        stage: "cleaner",
+        enabled: true,
+        rounds: [round],
+        // The stage is still running; the outcome is stamped by
+        // `recordQualityStageOutcome` when it ends.
+        outcome: "EXHAUSTED",
+      });
+    } else {
+      existing[existing.length - 1] = {
+        ...last,
+        rounds: [...last.rounds, round],
+      };
+    }
+    state.qualityStages = {
+      ...(state.qualityStages ?? {}),
+      [ghIssue]: existing,
+    };
+  });
+}
+
+/**
+ * Stamp the stage's outcome on its current entry (#87 B-14). Called once, when
+ * the stage ends — including for a `DISABLED` stage, which records the fact that
+ * the run had no `gatePolicy.clean` without pretending a round ran.
+ */
+export function recordQualityStageOutcome(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  outcome: PersistedQualityStage["outcome"],
+  options: { enabled?: boolean } = {},
+): void {
+  updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    const existing = [...(state.qualityStages?.[ghIssue] ?? [])];
+    const last = existing[existing.length - 1];
+    const enabled = options.enabled ?? outcome !== "DISABLED";
+    if (last === undefined) {
+      existing.push({ stage: "cleaner", enabled, rounds: [], outcome });
+    } else {
+      existing[existing.length - 1] = { ...last, enabled, outcome };
+    }
+    state.qualityStages = {
+      ...(state.qualityStages ?? {}),
+      [ghIssue]: existing,
+    };
+  });
+}
+
+/**
  * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
@@ -734,7 +1000,9 @@ export function invalidateFinalEvaluationBaseline(
  * (#193). A v3 file simply has neither — it adapts to v4 in memory with no
  * locator, no waivers and no write. v5 adds `finalEvaluations` (#96) the same
  * way: a v4 file keeps its locator and its waivers and gains no final
- * evaluation, because it had none. Throws on unknown status strings rather than
+ * evaluation, because it had none. v6 adds `qualityStages` (#87) the same way
+ * again: a v5 file with no such member reads as "no stage ran" and the adapter
+ * writes nothing. Throws on unknown status strings rather than
  * silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
@@ -769,6 +1037,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     approvedBaselines?: unknown;
     appliedWaivers?: unknown;
     finalEvaluations?: unknown;
+    qualityStages?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -785,7 +1054,8 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     r.version === 2 ||
     r.version === 3 ||
     r.version === 4 ||
-    r.version === 5
+    r.version === 5 ||
+    r.version === 6
   ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
@@ -800,6 +1070,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const approvedBaselines = sanitizeApprovedBaselines(r.approvedBaselines);
     const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
     const finalEvaluations = sanitizeFinalEvaluations(r.finalEvaluations);
+    const qualityStages = sanitizeQualityStages(r.qualityStages);
     return {
       version: RUN_STATE_VERSION,
       prdSlug,
@@ -831,6 +1102,10 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       // final evaluation happened" and "this file predates final evaluation"
       // are the same fact to every reader.
       ...(finalEvaluations !== undefined ? { finalEvaluations } : {}),
+      // v1–v5 files have no such field, so the upgrade leaves it absent and
+      // writes nothing: "no quality stage ran" and "this file predates quality
+      // stages" are the same fact to every reader (#87 B-14).
+      ...(qualityStages !== undefined ? { qualityStages } : {}),
     };
   }
 

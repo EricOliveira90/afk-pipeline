@@ -167,6 +167,10 @@ import {
   finalEvaluationFor,
   invalidateFinalEvaluationBaseline,
   recordFinalEvaluation,
+  cleanerRoundsSpent,
+  qualityStagesFor,
+  recordQualityStageOutcome,
+  recordQualityStageRound,
   type PersistedFinalEvaluationAttempt,
   type RunState,
 } from "./run-state.js";
@@ -6795,6 +6799,30 @@ export async function runSliceExecute(
            * (#251) — a candidate that could author `gatePolicy.clean` could
            * delete the stage that checks it.
            */
+          /**
+           * The stage entry a killed run left behind, and whether this run may
+           * continue it (#87 B-14).
+           *
+           * `ESCALATED` and `PASS` are terminal: that stage run ended, and a
+           * candidate approved after one is a new candidate whose budget starts
+           * at zero — which is the whole reason `qualityStages` holds a list per
+           * issue rather than one record (#87 B-13). An unfinished entry, or one
+           * left `EXHAUSTED`, is continued, so a resumed run cannot buy a fourth
+           * round by restarting.
+           */
+          const priorCleanerStage = qualityStagesFor(
+            loadRunState(
+              config.repoRoot,
+              pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
+            ),
+            slice.ghIssue,
+          ).at(-1);
+          const resumableCleanerStage =
+            priorCleanerStage !== undefined &&
+            priorCleanerStage.outcome !== "ESCALATED" &&
+            priorCleanerStage.outcome !== "PASS"
+              ? priorCleanerStage
+              : undefined;
           const cleaner = await runCleanerStage(
             {
               repoRoot: config.repoRoot,
@@ -6873,8 +6901,91 @@ export async function runSliceExecute(
                   }),
                 }).finally(() => closeAgentLog(cleanerLog));
               },
+              /**
+               * Archive the round before anything resets it (#87 B-09): the
+               * escalation under the `cleaner-` prefix its own
+               * `qaArchivePrefix` branch supplies, and the agent log — which
+               * carries the commit rationale, the one account of the round's
+               * reasoning that survives a `git reset --hard`.
+               *
+               * Archiving never fails the round: the artifacts are evidence for
+               * an operator, and losing a copy of a log is not a reason to throw
+               * away a tree the gates just released.
+               */
+              archiveRound: ({ round: cleanerRound, hasEscalation }) => {
+                let escalationArtifactId: string | undefined;
+                try {
+                  if (hasEscalation) {
+                    const name = artifacts.archiveQAReviewAttempt({
+                      sliceDir: ctx.absSliceDir,
+                      archiveDir: reviewArchiveDir,
+                      stage: CLEANER_STAGE_ID,
+                      round,
+                      attempt: cleanerRound,
+                    });
+                    if (name !== null) {
+                      escalationArtifactId = relative(
+                        config.repoRoot,
+                        join(reviewArchiveDir, name),
+                      ).replace(/\\/g, "/");
+                    }
+                  }
+                  artifacts.archiveCleanerLog({
+                    source: join(
+                      logger.runDir,
+                      `slice-${slice.number}-${CLEANER_STAGE_ID}-r` +
+                        `${round * 10 + cleanerRound}.log`,
+                    ),
+                    archiveDir: reviewArchiveDir,
+                    round,
+                    attempt: cleanerRound,
+                    runId: runIdFor(logger.runDir),
+                  });
+                } catch (error) {
+                  logger.phase(
+                    `${ctx.tag}: could not archive cleaner round ` +
+                      `${cleanerRound}: ` +
+                      `${error instanceof Error ? error.message : String(error)}`,
+                    "error",
+                  );
+                }
+                return escalationArtifactId
+                  ? { escalationArtifactId }
+                  : undefined;
+              },
+              // Persist-per-round, exactly as `persistAttempts` persists
+              // per attempt: a run killed mid-stage resumes having spent the
+              // rounds it actually spent (#87 B-14).
+              recordRound: (record) =>
+                recordQualityStageRound(
+                  config.repoRoot,
+                  pipelineRunSlug(
+                    config.prdSlug,
+                    config.provider ?? kiroProvider,
+                  ),
+                  slice.ghIssue,
+                  { ...record, gateIds: [...record.gateIds] },
+                  // The first round of this approval opens a fresh entry, so an
+                  // earlier escalated run's rounds are never charged to this
+                  // candidate's budget even when the two trees are identical
+                  // (#87 B-13).
+                  { startNewEntry: record.round === 1 },
+                ),
+              recordOutcome: (outcome) =>
+                recordQualityStageOutcome(
+                  config.repoRoot,
+                  pipelineRunSlug(
+                    config.prdSlug,
+                    config.provider ?? kiroProvider,
+                  ),
+                  slice.ghIssue,
+                  outcome,
+                ),
               log: (message, level) =>
                 logger.phase(`${ctx.tag}: ${message}`, level),
+              // Read back out of the run state, never counted in memory: that
+              // is what makes the bound hold across processes (#87 B-14).
+              roundsAlreadySpent: cleanerRoundsSpent(resumableCleanerStage),
               ...(signal ? { signal } : {}),
             },
             round,
