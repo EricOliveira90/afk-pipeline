@@ -48,9 +48,11 @@ function recordPathForLog(logPath: string): string | undefined {
 /**
  * Write this invocation's prompt beside its log, or write nothing.
  *
- * Three ways to write nothing, all silent and none fatal: no `logStream` at
+ * Four ways to write nothing, all silent and none fatal: no `logStream` at
  * all (a future unlogged call site is already unlogged), a stream whose
- * `path` is absent at runtime, and a path that is not a `.log`.
+ * `path` is absent at runtime, a path that is not a `.log`, and any
+ * filesystem failure while choosing or writing the record path. Recording
+ * is diagnostic; it must never prevent the provider invocation.
  */
 function recordPrompt(options: InvokeOptions): void {
   const stream = options.logStream;
@@ -60,12 +62,20 @@ function recordPrompt(options: InvokeOptions): void {
   // and so nothing in src/agent-provider.ts has to be widened.
   const rawPath: unknown = stream.path;
   if (rawPath === undefined || rawPath === null) return;
-  const recordPath = recordPathForLog(String(rawPath));
-  if (recordPath === undefined) return;
-  // `wx` is the guarantee, not an optimisation: the scan above chose a free
-  // name, and the flag refuses to append to or overwrite a record if that
-  // ever stops being true.
-  writeFileSync(recordPath, options.prompt, { encoding: "utf-8", flag: "wx" });
+  try {
+    const recordPath = recordPathForLog(String(rawPath));
+    if (recordPath === undefined) return;
+    // `wx` is the guarantee, not an optimisation: the scan above chose a free
+    // name, and the flag refuses to append to or overwrite a record if that
+    // ever stops being true.
+    writeFileSync(recordPath, options.prompt, {
+      encoding: "utf-8",
+      flag: "wx",
+    });
+  } catch {
+    // Fail open. A prompt record is diagnostic evidence, not a prerequisite
+    // for spending the provider invocation it describes.
+  }
 }
 
 /**

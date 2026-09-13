@@ -212,6 +212,21 @@ describe("withPromptRecording", () => {
     expect(readdirSync(dir)).toEqual([]);
     expect(result).toBe(RESULT);
   });
+
+  it("fails open when the prompt record cannot be written", async () => {
+    const dir = makeTempDir();
+    const inner = makeInner();
+    const missingLogPath = join(dir, "missing", "slice-03-generator.log");
+    const stream = { path: missingLogPath } as unknown as WriteStream;
+
+    const result = await withPromptRecording(inner).invoke(
+      invokeOptions("still invoke", stream),
+    );
+
+    expect(result).toBe(RESULT);
+    expect(inner.calls).toHaveLength(1);
+    expect(existsSync(join(dir, "missing"))).toBe(false);
+  });
 });
 
 describe("providerForRun", () => {
