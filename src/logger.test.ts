@@ -8,11 +8,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readAdvisoryGateOutcomes } from "./logger.js";
 import {
   RunJournal as Logger,
   type TerminalOutcome,
 } from "./run-journal.js";
+import {
+  buildQualityStagePolicyEvent,
+  EVENTS_SCHEMA_VERSION,
+  type RunEventPayload,
+} from "./run-events.js";
+import { parseGatePolicy, type GatePolicy } from "./gate-policy.js";
 import { lifecycle } from "./slice-lifecycle.js";
 
 const tempDirs: string[] = [];
@@ -1071,5 +1078,174 @@ describe("Logger events tee (events.jsonl)", () => {
 
     const lines = eventLines(log.runDir);
     expect(lines).toHaveLength(1); // header only
+  });
+});
+
+/**
+ * The quality-stage record (#274): one additive event type, one pure payload
+ * builder, and one `run-summary.md` section rendered from that event alone.
+ *
+ * The builder is proved here rather than in a spawned run — the first rung of
+ * AGENTS.md's ladder. The `enabled: true` branch needs a policy with a `clean`
+ * member, and the only shipped one is `templates/quality-policy/afk.config.json`;
+ * feeding the parsed template to a unit test costs milliseconds, whereas
+ * proving that branch in a real stream would mean giving a spawned fixture
+ * repo a `gatePolicy.clean` — turning the cleaner on inside a scenario that
+ * exists to assert something else — or enabling it for this repository, which
+ * the PRD puts out of scope. The disabled branch is corroborated in a real
+ * stream by the orchestrator-runs and wave `[behavior:#274:B-06]` assertions.
+ */
+describe("[behavior:#274:B-05] the quality-stage-policy event", () => {
+  const TEMPLATE_DIR = fileURLToPath(
+    new URL("../templates/quality-policy", import.meta.url),
+  );
+
+  /** The shipped starter's parsed policy — the one policy with a `clean`. */
+  function templatePolicy(): GatePolicy {
+    const config = JSON.parse(
+      readFileSync(join(TEMPLATE_DIR, "afk.config.json"), "utf-8"),
+    ) as { gatePolicy: unknown };
+    return parseGatePolicy(config.gatePolicy);
+  }
+
+  it("[behavior:#274:B-05] keeps the events schema at version 1, because the member is additive", () => {
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
+  });
+
+  it("[behavior:#274:B-05] admits the payload as a typed literal", () => {
+    // Compiles under `tsc --noEmit`, which is the type-level half of B-05;
+    // the runtime half is that the journal accepts and tees it.
+    const payload: RunEventPayload = {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: true,
+      gateIds: ["clean:format"],
+      source: "afk.config.json",
+    };
+    const log = new Logger(makeRepo(), "stage-event-literal");
+    log.event(payload);
+    const lines = readFileSync(join(log.runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines[1]).toMatchObject(payload);
+  });
+
+  it("[behavior:#274:B-07] reads enabled and the gate ids off the shipped template's policy", () => {
+    expect(buildQualityStagePolicyEvent(templatePolicy())).toEqual({
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: true,
+      // Declaration order, not sorted: the record must agree with the file it
+      // was read from, and that is the order the cleaner would run them in.
+      gateIds: [
+        "clean:format",
+        "clean:lint",
+        "clean:typecheck",
+        "clean:coverage-changed",
+        "clean:complexity",
+        "clean:duplication",
+        "clean:architecture",
+      ],
+      source: "afk.config.json",
+    });
+  });
+
+  it("[behavior:#274:B-07] reads a clean-less policy and null alike as disabled", () => {
+    const { clean: _clean, ...cleanLess } = templatePolicy();
+    const disabled = {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: false,
+      gateIds: [],
+      source: "afk.config.json",
+    };
+    // The member's presence is the whole switch, so "no policy at all" and "a
+    // policy that declares no clean stage" are one answer, not two.
+    expect(buildQualityStagePolicyEvent(cleanLess)).toEqual(disabled);
+    expect(buildQualityStagePolicyEvent(null)).toEqual(disabled);
+  });
+
+  it("[behavior:#274:B-07] never reaches past the snapshot it is handed", () => {
+    // Pure: no filesystem, no repo root, no per-slice context (#251). Proved
+    // by a hand-built policy the parser never saw producing exactly its ids.
+    const handBuilt = {
+      version: 1 as const,
+      protectedPaths: { gatePolicyPaths: [], testGlobs: [] },
+      riskClasses: [],
+      clean: {
+        gates: [
+          {
+            id: "only:gate",
+            command: "pnpm",
+            args: [],
+            required: true,
+            expectedCostMs: 1,
+          },
+        ],
+        additionalWriteScope: [],
+        suppressionDetectors: [],
+      },
+    };
+    expect(buildQualityStagePolicyEvent(handBuilt).gateIds).toEqual([
+      "only:gate",
+    ]);
+  });
+});
+
+describe("[behavior:#274:B-08] run-summary.md's Quality Stages section", () => {
+  function summaryWith(
+    slug: string,
+    event?: Extract<RunEventPayload, { type: "quality-stage-policy" }>,
+  ): string {
+    const log = new Logger(makeRepo(), slug);
+    log.restoreCompleted(id("274", "Quality policy starter", "afk/274"));
+    if (event) log.event(event);
+    return log.writeSummary();
+  }
+
+  it("[behavior:#274:B-08] names the stage, its enabled state and every gate id", () => {
+    const md = summaryWith("stage-enabled", {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: true,
+      gateIds: ["clean:format", "clean:lint"],
+      source: "afk.config.json",
+    });
+
+    expect(md).toContain("## Quality Stages");
+    const section = md.slice(md.indexOf("## Quality Stages"));
+    expect(section).toContain("`cleaner`: enabled");
+    expect(section).toContain("gates `clean:format`, `clean:lint`");
+    expect(section).toContain("(source: afk.config.json)");
+  });
+
+  it("[behavior:#274:B-08] renders the line in the disabled case too", () => {
+    const md = summaryWith("stage-disabled", {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: false,
+      gateIds: [],
+      source: "afk.config.json",
+    });
+
+    // A run that said nothing here could not be read as evidence of either
+    // state — which is the whole reason this section is unconditional.
+    expect(md).toContain("## Quality Stages");
+    const section = md.slice(md.indexOf("## Quality Stages"));
+    expect(section).toContain("`cleaner`: disabled");
+    expect(section).toContain("no gates declared");
+    expect(section).not.toContain("enabled");
+  });
+
+  it("[behavior:#274:B-08] renders no section for a stream without the event", () => {
+    // A historical stream carries none, so its summary stays byte-identical.
+    const md = summaryWith("stage-absent");
+    expect(md).not.toContain("## Quality Stages");
+    expect(md).not.toContain("cleaner");
+    // And every other section still renders: the totals row and the trailing
+    // lines are untouched (P-04).
+    expect(md).toContain("| **Run totals** |");
+    expect(md).toContain("Pre-ship sanity gate: N/A");
   });
 });

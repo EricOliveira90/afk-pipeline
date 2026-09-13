@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SliceLifecycle } from "./slice-lifecycle.js";
+import type { GatePolicy } from "./gate-policy.js";
 import type { BehaviorCoverageStatus } from "./acceptance-gate.js";
 import type {
   GateFailureKind,
@@ -388,6 +389,33 @@ export type RunEventPayload =
        */
       failureKind?: GateFailureKind;
     }
+  | {
+      /**
+       * Whether one quality stage is switched on for this run, and by what
+       * (#274, PRD D10 item 1). Emitted exactly once per run, immediately
+       * after `run-started`, from the run's own `loadGatePolicy` snapshot —
+       * never per slice and never from a candidate worktree (#251), because
+       * the fact it records is a property of the run's rulebook, not of any
+       * tree being judged.
+       *
+       * Recorded even when the stage is off. A run that says nothing about the
+       * cleaner cannot be read as evidence of either state, and "was the
+       * cleaner on?" is the first question asked of a run that shipped
+       * unexpectedly clean or unexpectedly dirty work.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same way
+       * `behavior-coverage`, `approved-baseline` and `final-evaluation-reuse`
+       * arrived. Built by {@link buildQualityStagePolicyEvent} rather than
+       * inline at the emission site, so both the enabled and the disabled
+       * branch have one pure, testable derivation.
+       */
+      type: "quality-stage-policy";
+      stage: "cleaner";
+      enabled: boolean;
+      /** The declared gate ids in declaration order; `[]` when disabled. */
+      gateIds: string[];
+      source: "afk.config.json";
+    }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
   | {
@@ -501,6 +529,32 @@ export type RunEvent = RunEventPayload & {
 export interface RunEvents {
   version: number;
   events: RunEvent[];
+}
+
+/**
+ * The one derivation of the `quality-stage-policy` payload (#274).
+ *
+ * Pure, and pure on purpose: it reads only the policy snapshot it is handed,
+ * so the recorded fact cannot drift from the rulebook the run is actually
+ * enforcing. `null` — no `afk.config.json`, or one with no `gatePolicy` — and
+ * a policy with no `clean` member are the same answer, because the member's
+ * presence is the cleaner stage's only switch (`GatePolicyClean`).
+ *
+ * The gate ids travel in declaration order, which is the order the cleaner
+ * would run them in; sorting them here would make the record disagree with
+ * the file it was read from.
+ */
+export function buildQualityStagePolicyEvent(
+  policy: GatePolicy | null,
+): Extract<RunEventPayload, { type: "quality-stage-policy" }> {
+  const clean = policy?.clean;
+  return {
+    type: "quality-stage-policy",
+    stage: "cleaner",
+    enabled: clean !== undefined,
+    gateIds: clean === undefined ? [] : clean.gates.map((gate) => gate.id),
+    source: "afk.config.json",
+  };
 }
 
 /** Serialize one event as a single JSON line (newline-terminated). */

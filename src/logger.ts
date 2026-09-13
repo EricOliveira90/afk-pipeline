@@ -609,6 +609,41 @@ ${reuseEvents
   )
   .join("\n")}
 `;
+    /**
+     * Which quality stages this run was running under (#274, PRD D10 item 2).
+     *
+     * Rendered from the `quality-stage-policy` event alone, so the summary and
+     * `events.jsonl` cannot disagree — the same rule as Applied Waivers and
+     * Final Evaluation Reuse above. Unlike those two, the enabled/disabled
+     * distinction is the whole content, so the disabled case renders its line
+     * too: a summary that fell silent when the cleaner was off could not be
+     * told from one written before the stage existed.
+     *
+     * A historical stream carries no such event and therefore renders no
+     * section, which keeps every pre-#274 summary byte-identical. One line per
+     * stage and no per-slice row: the per-slice attempt rows are #97's.
+     */
+    const stagePolicyEvents = runEvents.filter(
+      (event) => event.type === "quality-stage-policy",
+    );
+    const qualityStageSection =
+      stagePolicyEvents.length === 0
+        ? ""
+        : `
+## Quality Stages
+
+${stagePolicyEvents
+  .map(
+    (event) =>
+      `- \`${event.stage}\`: ${event.enabled ? "enabled" : "disabled"} — ` +
+      `${
+        event.gateIds.length === 0
+          ? "no gates declared"
+          : `gates ${event.gateIds.map((id) => `\`${id}\``).join(", ")}`
+      } (source: ${event.source})`,
+  )
+  .join("\n")}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -662,7 +697,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}
