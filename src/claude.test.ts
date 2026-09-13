@@ -196,6 +196,52 @@ describe("invoke spawn args", () => {
       result: "done",
     });
   });
+
+  it("counts every tool_use while displaying arguments only for allowlisted tools", async () => {
+    const proc = makeFakeProc();
+    const onStreamEvent = vi.fn();
+    spawnMock.mockReturnValue(proc);
+    const promise = invoke({
+      role: "generator",
+      prompt: "go",
+      cwd: "/tmp/x",
+      onStreamEvent,
+    });
+
+    proc.stdout.push(
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_bash",
+              name: "Bash",
+              input: { command: "pnpm test" },
+            },
+            {
+              type: "tool_use",
+              id: "toolu_read",
+              name: "Read",
+              input: { file_path: "secret.txt" },
+            },
+          ],
+        },
+      }) + "\n",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    proc.emit("exit", 0);
+
+    await expect(promise).resolves.toMatchObject({
+      stats: { toolCallCount: 2 },
+    });
+    expect(onStreamEvent).toHaveBeenCalledTimes(1);
+    expect(onStreamEvent).toHaveBeenCalledWith({
+      type: "tool_call",
+      name: "Bash",
+      args: "pnpm test",
+    });
+  });
 });
 
 

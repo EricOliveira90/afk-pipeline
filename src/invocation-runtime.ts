@@ -21,6 +21,14 @@ const DEFAULT_MAX_DURATION_MS = 3_600_000;
 
 export type InvocationStream = "stdout" | "stderr";
 
+/**
+ * Provider-internal stream record. `tool_call_observed` contributes to
+ * accounting and bounds without exposing tool arguments to display consumers.
+ */
+export type InvocationStreamEvent =
+  | StreamEvent
+  | { type: "tool_call_observed" };
+
 export interface InvocationExit {
   exitCode: number;
   stdout: string;
@@ -33,7 +41,7 @@ export interface PreparedInvocation {
   env?: NodeJS.ProcessEnv;
   shell?: boolean | string;
   stdin?: string;
-  parseStreamLine?: (line: string) => StreamEvent[];
+  parseStreamLine?: (line: string) => InvocationStreamEvent[];
   activityFilter?: (stream: InvocationStream, text: string) => boolean;
   onOutput?: (stream: InvocationStream, text: string) => Error | undefined;
   classifyExit?: (exit: InvocationExit) => Error;
@@ -348,7 +356,10 @@ export function runInvocation(
       if (!line || !invocation.parseStreamLine) return;
       try {
         for (const event of invocation.parseStreamLine(line)) {
-          if (event.type === "tool_call") {
+          if (
+            event.type === "tool_call" ||
+            event.type === "tool_call_observed"
+          ) {
             watcher!.reset();
             toolCallCount++;
             // Kill only when a caller opted into a cap (no default —
@@ -362,7 +373,7 @@ export function runInvocation(
               toolCapExceeded = true;
             }
           }
-          onStreamEvent?.(event);
+          if (event.type !== "tool_call_observed") onStreamEvent?.(event);
           if (toolCapExceeded) stopProcess();
         }
       } catch (error) {
