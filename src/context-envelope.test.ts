@@ -4,6 +4,7 @@ import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
 import {
   CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
+  CLEANER_CONTEXT_MANIFEST,
   CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
   EXPLORER_CONTEXT_MANIFEST,
   FINAL_EVALUATOR_CONTEXT_MANIFEST,
@@ -28,7 +29,10 @@ import {
   validateContextEnvelopeManifest,
   validateExplorerEvidenceMap,
   type ContextEnvelopeManifest,
+  type ContextEnvelopeRole,
+  type PromptAssemblyRole,
 } from "./context-envelope.js";
+import { renderPrompt, type PromptArgs } from "./prompt-template.js";
 import { boundMergeResolutionBlock } from "./merge-resolution.js";
 import type { ContractReviewFinding } from "./contract-review.js";
 import { formatContractReviewFindings } from "./contract-review.js";
@@ -2402,6 +2406,7 @@ describe("role contract manifests", () => {
     CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
     CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
     FINAL_EVALUATOR_CONTEXT_MANIFEST,
+    CLEANER_CONTEXT_MANIFEST,
     GENERATOR_CONTEXT_MANIFEST,
   ];
 
@@ -3166,5 +3171,139 @@ describe("the merge-resolution data block in the repair situation (#132)", () =>
     expect(
       mergeResolutionBlockRoom({ ...input, inlineSizeBudgetBytes: 1_000_000 }),
     ).toBe(wide);
+  });
+});
+
+describe("[behavior:#87:B-12] the cleaner role contract", () => {
+  /**
+   * Exactly the key set `src/orchestrator.ts` renders `prompts/cleaner.md`
+   * with. `renderPrompt` throws in both directions — on a placeholder with no
+   * value and on a value no placeholder references — so rendering with this
+   * object *is* the assertion that the template's declared placeholders and
+   * the call site's substitutions are the same set.
+   */
+  const CLEANER_PROMPT_ARGS = {
+    SLICE_DIR: ".kiro/specs/demo/slices/01-thing",
+    ROUND: "2",
+    ROUND_LIMIT: "3",
+    BASELINE_TREE_ID: "aaaaaaa1111",
+    INPUT_TREE_ID: "bbbbbbb2222",
+    WRITE_SCOPE: "- Every path in the locked `fileScope`.",
+    // The failures arrive as gate id + detail + a *log artifact path*, never
+    // as inlined log bytes.
+    QUALITY_FAILURES:
+      "- `lint` (FAIL): 3 problems\n  Log: `s01-cleaner-r1-a2.log`",
+    REGRESSION_NOTE: "Round 1 was reverted; it reddened `tests`.",
+  } satisfies PromptArgs;
+
+  it("[behavior:#87:B-12] validates on the same role-contract schema as every other role", () => {
+    expect(() =>
+      validateContextEnvelopeManifest(CLEANER_CONTEXT_MANIFEST),
+    ).not.toThrow();
+    expect(CLEANER_CONTEXT_MANIFEST).toMatchObject({
+      version: 1,
+      role: "cleaner",
+      outputArtifact: "cleaner-checkpoint",
+      inlineSizeBudgetBytes: 65_536,
+    });
+    // The three scopes the round may write: the locked file scope, the
+    // project's widening, and the one escalation file. The `scope` gate with
+    // `artifactDirPolicy: "declared-only"` is what enforces it (B-11).
+    expect(CLEANER_CONTEXT_MANIFEST.allowedWriteScope).toEqual([
+      "the locked acceptance manifest's fileScope",
+      "gatePolicy.clean.additionalWriteScope",
+      "slice/cleaner-escalation.json",
+    ]);
+    // The failing gates lead: they are the assignment. The locked contract is
+    // last — the boundary the round is checked against, not a brief to reread.
+    expect(CLEANER_CONTEXT_MANIFEST.inputOrder).toEqual([
+      "quality-failures",
+      "change-summary",
+      "approved-baseline",
+      "acceptance-manifest",
+      "locked-contract",
+    ]);
+    expect(CLEANER_CONTEXT_MANIFEST.acceptedInputArtifactClasses).toEqual(
+      CLEANER_CONTEXT_MANIFEST.inputOrder,
+    );
+  });
+
+  it("[behavior:#87:B-12] withholds every review artifact and the handoff from the writing role", () => {
+    const accepted: readonly string[] =
+      CLEANER_CONTEXT_MANIFEST.acceptedInputArtifactClasses;
+    const omitted: readonly string[] =
+      CLEANER_CONTEXT_MANIFEST.omittedArtifactClasses;
+    for (const withheld of [
+      "qa-review-artifacts",
+      "final-review-pair",
+      "candidate-handoff",
+      "dependency-sibling-handoffs",
+      "other-qa-stage-findings",
+    ]) {
+      expect(accepted, withheld).not.toContain(withheld);
+      expect(omitted, withheld).toContain(withheld);
+    }
+    // Not just the two canonical spellings: no handoff class of any name.
+    expect(accepted.filter((entry) => entry.includes("handoff"))).toEqual([]);
+    expect(accepted.filter((entry) => entry.includes("review"))).toEqual([]);
+  });
+
+  it('[behavior:#87:B-12] makes "cleaner" a ContextEnvelopeRole and not a PromptAssemblyRole', () => {
+    const cleanerRole: ContextEnvelopeRole = "cleaner";
+    expect(cleanerRole).toBe(CLEANER_CONTEXT_MANIFEST.role);
+    // A compile-time proof rather than a string comparison: if "cleaner" were
+    // ever added to PromptAssemblyRole this alias resolves to `never` and the
+    // assignment below stops typechecking. Manifest-only is the whole point —
+    // no assembly path consumes this manifest, the orchestrator renders
+    // `prompts/cleaner.md` directly.
+    type CleanerIsNotAssembled = "cleaner" extends PromptAssemblyRole
+      ? never
+      : true;
+    const manifestOnly: CleanerIsNotAssembled = true;
+    expect(manifestOnly).toBe(true);
+    const deferredRoles: Exclude<ContextEnvelopeRole, PromptAssemblyRole>[] = [
+      "evaluator-qa",
+      "evaluator-final",
+      "cleaner",
+    ];
+    expect(deferredRoles).toContain(cleanerRole);
+  });
+
+  it("[behavior:#87:B-12] renders every declared placeholder, and never a test command", () => {
+    const prompt = renderPrompt("cleaner", CLEANER_PROMPT_ARGS);
+
+    // Every substitution reached the output, and nothing was left unrendered.
+    for (const [key, value] of Object.entries(CLEANER_PROMPT_ARGS)) {
+      expect(prompt, key).toContain(String(value));
+      expect(prompt, key).not.toContain(`{{${key}}}`);
+    }
+    expect(prompt).not.toMatch(/\{\{[A-Za-z_]/);
+
+    // The cleaner is handed its gate verdicts by the orchestrator and must not
+    // spend the round re-running the suite itself, so the one placeholder the
+    // generator templates carry is absent here by design.
+    expect(prompt).not.toContain("{{TEST_COMMAND}}");
+    expect(prompt).not.toContain("TEST_COMMAND");
+    expect(prompt).toContain("Do not run the project's test suite");
+
+    // The escalation file is named under the rendered slice dir, and the
+    // BASELINE_IS_WRONG shape the parser accepts is spelled out in full.
+    expect(prompt).toContain(
+      `${CLEANER_PROMPT_ARGS.SLICE_DIR}/cleaner-escalation.json`,
+    );
+    expect(prompt).toContain("BASELINE_IS_WRONG");
+  });
+
+  it("[behavior:#87:B-12] refuses a render that drops a placeholder the template declares", () => {
+    const { QUALITY_FAILURES: _dropped, ...missingFailures } =
+      CLEANER_PROMPT_ARGS;
+    expect(() => renderPrompt("cleaner", missingFailures)).toThrow(
+      /references \{\{QUALITY_FAILURES\}\}/,
+    );
+    // And a value the template does not reference is equally a defect: the
+    // call site cannot quietly stop feeding the round its failures.
+    expect(() =>
+      renderPrompt("cleaner", { ...CLEANER_PROMPT_ARGS, TEST_COMMAND: "x" }),
+    ).toThrow(/does not reference it/);
   });
 });
