@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "verdict": "FAIL",
+  "failureClass": "IMPLEMENTATION",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01", "B-02", "B-12"],
+      "summary": "The restore re-dispatch never refreshes the cleaner result it routes from, so a second RESTORE is routed to the no-op post-approval stub instead of the cleaner that wrote, and the restore round's bytes are attributed to that stub in the change summary.",
+      "evidence": "Probe (temporary `it` appended to the `final evaluation and reuse` describe in `src/qa-orchestration-gates.test.ts`, reverted afterwards): the S1/S3 fixture with `clean: cleanPolicyMember`, `stageWrites: false`, and an `evaluator-final` that returns a `FAIL` carrying one `PRESERVATION` / `repair: \"RESTORE\"` finding on attempts 1 AND 2 and `passingReview` on attempt 3. Command: `npx vitest run src/qa-orchestration-gates.test.ts -t \"QA PROBE\"` (passed, 34.0s). Output:\n  `PROBE cleanerPrompts: 3 stageCalls: [{\"stageId\":\"post-approval-writing\"},{\"stageId\":\"post-approval-writing\",\"repair\":\"RESTORE\"}] finalCalls: 3`\n  `PROBE last change summary byStage: {\"cleaner\":[\"README.md\", ...qa artifacts...],\"post-approval-writing\":[\"README.md\"]}`\nThe cleaner attempt events show the cleaner did write last before attempt 2 — `[\"cleaner\",3,\"PASS\",\"ca73af39...\",\"b303267a...\"]` immediately preceding `[\"final-evaluation\",2,\"GRADED\",\"b303267a...\"]` — yet the second restore went to the stub with `repair: \"RESTORE\"`.\nRoot cause is readable in the source: `const cleaner = await dispatchCleanerStage({...})` (src/orchestrator.ts:7162) and `const stageInputTreeId = ...` (src/orchestrator.ts:7250) are computed once and never reassigned, while the restore re-dispatch at src/orchestrator.ts:8042 discards the `CleanerStageResult` it returns. On the next loop iteration `buildWritingStageIds` (src/orchestrator.ts:7898) therefore compares the *new* `currentFinalTreeId` against the *stale* `stageInputTreeId`, appends `POST_APPROVAL_WRITING_STAGE_ID`, and B-01's last-id rule names the stub.",
+      "expected": "Contract B-01/B-02: `writingStageIds` holds \"only the stages that actually changed the tree, in the order they ran\", so \"a `RESTORE` route whose `stageId` is `CLEANER_STAGE_ID` re-dispatches the cleaner instead of the stub\" (B-03) whenever the cleaner is the stage that wrote most recently. Contract B-12: `writeFinalChangeSummary`'s `stages` is \"tiled per stage that actually wrote\", so \"the cleaner's bytes are attributed to the cleaner\" and not to the stub.",
+      "observed": "After one cleaner restore re-dispatch, the cleaner is the only stage that wrote (production's post-approval stage is a no-op, and the fixture's is `stageWrites: false`), but the next attempt's `writingStageIds` is `[cleaner, post-approval-writing]`: the restore is handed to `noopPostApprovalWritingStage` with `repair: \"RESTORE\"`, which writes nothing, and the change summary attributes the restore round's `README.md` change to `post-approval-writing`. Both are the exact defects this slice exists to remove, reappearing on the second restore.",
+      "clearCondition": "A run whose final evaluator returns a `RESTORE` on two consecutive attempts, with the cleaner as the only stage that writes, routes both restores to `cleaner`: the injected post-approval writing stage is never called with `repair: \"RESTORE\"`, and the change summary written for the second attempt attributes the restore round's changed paths to `cleaner` with an empty `post-approval-writing` span. A regression test on the shared `finalEvaluationFixture` covers it.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-08"],
+      "summary": "The `quality-stage-attempt` event for a final-evaluation attempt sets `inputTreeId` to the graded tree rather than to the cited baseline tree, contradicting the locked contract and the acceptance manifest.",
+      "evidence": "`src/orchestrator.ts:7728` reads `inputTreeId: currentFinalTreeId,` inside `emitFinalAttemptEvent`, with `outputTreeId: currentFinalTreeId` on the following line and a comment defending the equality (\"Input and output are the same tree because an evaluation reads\"). Confirmed on the stream by the probe of QA-01: every `final-evaluation` line carries the same value in both slots — `[\"final-evaluation\",1,\"GRADED\",\"e76c42b3...\",\"e76c42b3...\"]`, `[\"final-evaluation\",2,\"GRADED\",\"b303267a...\",\"b303267a...\"]` — while the cited approved baseline for that run is `ca73af39...` (the accepted tree named as `inputTreeId` of cleaner round 1). No test asserts `inputTreeId` for a final-evaluation attempt: the S1 assertion at `src/qa-orchestration-gates.test.ts` checks `outputTreeId` only, so the deviation is unpinned in either direction.",
+      "expected": "Contract B-08: \"`inputTreeId` = the baseline tree cited, `outputTreeId` = `currentFinalTreeId`\". Acceptance manifest B-08 `then`: \"the cited baseline tree as inputTreeId, the graded tree as outputTreeId\".",
+      "observed": "`inputTreeId === outputTreeId === currentFinalTreeId` for every final-evaluation attempt, so the event cannot answer which tree the attempt started from — the tree-identity fact PRD D11 asks the family to carry — and the run stream disagrees with the locked behavior text.",
+      "clearCondition": "A final-evaluation `quality-stage-attempt` line carries the cited approved-baseline tree id as `inputTreeId` and the graded tree id as `outputTreeId`, asserted on the run's own stream (both values, not just `outputTreeId`) in the S1 scenario.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-09"],
+      "summary": "`src/logger.ts` now contains a raw NUL byte, used as the pooling-key separator, which makes git treat the whole file as binary and stop diffing it.",
+      "evidence": "`git diff --stat 8bbb969..HEAD -- src/logger.ts` reports `src/logger.ts | Bin 33823 -> 41253 bytes` instead of a line diff; the same is true of `git diff --stat main...HEAD`. The byte is new in this slice: `[byte]0` count is 1 in the working file at offset 7336 and 0 in both `main:src/logger.ts` and `8bbb969:src/logger.ts`. `Grep` on the file reports `binary file matches (found \"\\0\" byte around offset 7336)`. The byte sits inside the template literal at `src/logger.ts:210`, which the Read tool renders as `const key = `${attempt.ghIssue} ${attempt.stage}`;` because the NUL is unprintable. The escape `\\u0000` would produce the identical key with no NUL byte in the source.",
+      "expected": "Convention: source files in this repo are text, and every changed line is reviewable in a diff — `readAdvisoryGateOutcomes`, the reader B-09 is modelled on, uses no such separator.",
+      "observed": "Every future `git diff`, `git log -p`, blame-by-diff and code-review tool reports `src/logger.ts` as a binary blob, so the 8.8KB this slice added to the file — and everything added to it from now on — is unreviewable without `--text`.",
+      "clearCondition": "`git diff --text=never main...HEAD -- src/logger.ts` renders a textual line diff, and `src/logger.ts` contains no byte equal to 0.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "summary": "A restore re-dispatch's rounds report the original accepted tree as `inputTreeId`, not the cleaner-committed tree the round actually started from.",
+      "evidence": "Probe of QA-01: the re-dispatched rounds are journaled as `[\"cleaner\",2,\"REVERTED\",\"ca73af39...\",\"791c9b5f...\"]` and `[\"cleaner\",3,\"PASS\",\"ca73af39...\",\"b303267a...\"]`, both naming `ca73af39...` — the same `inputTreeId` cleaner round 1 reported — even though round 1 had already committed `e76c42b3...` and the worktree HEAD carried it when the restore round began. The re-dispatch at `src/orchestrator.ts:8042` reuses the same `CleanerStageInput`, whose accepted tree id is the pre-cleaner tree.",
+      "expected": "Contract B-07: one event per cleaner round carrying that round's own tree identity, so `inputTreeId === outputTreeId` is the claim \"this round changed nothing\" (`src/run-events.ts` member doc).",
+      "observed": "A restore round claims an input tree that no round of it ever read, so the per-round tree chain on the stream is discontinuous and the ROI evidence cannot be walked round by round.",
+      "clearCondition": "A restore re-dispatch's `quality-stage-attempt` lines name the tree the round actually started from as `inputTreeId` — the previous cleaner round's output — asserted on the run's own stream.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

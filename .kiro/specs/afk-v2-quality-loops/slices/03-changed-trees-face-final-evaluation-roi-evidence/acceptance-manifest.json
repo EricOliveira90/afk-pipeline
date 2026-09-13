@@ -1,0 +1,304 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/final-evaluation.ts",
+      "src/final-evaluation.test.ts",
+      "src/cleaner-stage.ts",
+      "src/cleaner-stage.test.ts",
+      "src/run-events.ts",
+      "src/orchestrator.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/ship-gate.ts",
+      "src/ship-gate.test.ts",
+      "src/qa-orchestration-gates.test.ts",
+      "prompts/cleaner.md",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #97 AC1; prd.md D12 (\"routeFinalReviewFinding gains the writing stage id as an input… returns stageId = the last stage that ran\"); src/final-evaluation.ts:429-436, :438-455, :39, :49, :42-48, :67",
+      "given": "routeFinalReviewFinding taking context: { candidateTreeId: string; writingStageIds: readonly string[] }, where writingStageIds is declared on the parameter to hold only the stages that actually changed the tree, in the order they ran — a stage that ran and left the tree byte-identical contributes no id, which is why production's noopPostApprovalWritingStage never appears",
+      "when": "a FinalReviewFinding with repair: \"RESTORE\" is routed with writingStageIds of [CLEANER_STAGE_ID], of [CLEANER_STAGE_ID, POST_APPROVAL_WRITING_STAGE_ID], and of [], and separately a non-RESTORE finding is routed",
+      "then": "the RESTORE route returns { target: \"writing-stage\", repair: \"RESTORE\", stageId } with stageId = the last id in writingStageIds — \"cleaner\" for [CLEANER_STAGE_ID], \"post-approval-writing\" for the two-id list because that stage wrote last, and \"post-approval-writing\" for [] by the pre-slice fallback so no caller loses a route by not knowing about a cleaner; the last-id rule is well-defined only against the list contract B-02 satisfies, and the committed cleaner's id is last even though the cleaner runs first (src/final-evaluation.ts:42-48) precisely because the no-op stage contributes nothing; a non-RESTORE repair still routes to generator-loop with generatorRoundsConsumed: 1 and finalEvaluationAttemptsConsumed: 0, and the FinalReviewRoute shape at :429-436 is otherwise unchanged",
+      "observableResult": "src/final-evaluation.test.ts's [behavior:B-01] unit tests (no git, no pipeline — the file's existing posture) assert the three stageId values for the three lists and the unchanged generator-loop route with its two round counts",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #97 AC1; prd.md D12; src/orchestrator.ts:7701-7703, :7772-7776; src/final-evaluation.ts:39, :49, :67",
+      "given": "the one routeFinalReviewFinding call site (src/orchestrator.ts:7701-7703) and the three tree ids it already holds — the accepted tree, the cleaner's inputTreeId/outputTreeId, and currentFinalTreeId",
+      "when": "writingStageIds is built for the route",
+      "then": "it appends, in run order, one id per stage that changed the tree it was handed: CLEANER_STAGE_ID when cleaner.ran && cleaner.outputTreeId !== cleaner.inputTreeId, then POST_APPROVAL_WRITING_STAGE_ID when currentFinalTreeId !== stageInputTreeId, where stageInputTreeId is the cleaner's outputTreeId if the cleaner committed and the accepted tree otherwise. So the committed-cleaner case under production's no-op stage is exactly [CLEANER_STAGE_ID] and B-01's last-id rule names the cleaner; a test-injected stage that writes on top of a committed cleaner yields [CLEANER_STAGE_ID, POST_APPROVAL_WRITING_STAGE_ID] and names the stub, which is correct because the stub wrote last; neither writing yields [] and B-01's fallback keeps the pre-slice route. The two ids stay distinct constants, and the comparisons are the same three tree ids B-12 tiles its spans from, computed once at this call site, so the route and the change-summary attribution cannot disagree about who wrote",
+      "observableResult": "src/final-evaluation.test.ts asserts the pure list builder returns [CLEANER_STAGE_ID] for a committed cleaner with an unmoved post-approval checkpoint, [] for neither writing, and the two-id list when both wrote; the spawned S3 scenario in src/qa-orchestration-gates.test.ts corroborates it against real trees — the RESTORE it produces is handled by the cleaner branch, not the stub",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #97 AC1; prd.md D12; ADR 0050 (round accounting compares against remaining rounds); src/orchestrator.ts:7017, :6821-6826; src/cleaner-stage.ts:139, :533",
+      "given": "a RESTORE route whose stageId is CLEANER_STAGE_ID and a just-completed cleaner stage whose CleanerStageResult.roundsSpent is held in memory at the call site",
+      "when": "the orchestrator handles the route",
+      "then": "it calls runCleanerStage again with repair: { findings } carrying the PRESERVATION / GATE_INVISIBLE_DRIFT findings and with roundsAlreadySpent = cleaner.roundsSpent read from that in-memory result, never re-derived through cleanerRoundsSpent(resumableCleanerStage) (src/orchestrator.ts:7017, :6821-6826) — a stage that ended PASS is terminal to that predicate and would hand the restore zero spent rounds and three fresh ones; the restore round is gated exactly like any cleaner round, and the resume path's roundsAlreadySpent keeps its meaning (P-04)",
+      "observableResult": "src/cleaner-stage.test.ts drives runCleanerStage directly against real git trees and real gate processes with repair and a seeded roundsAlreadySpent and asserts the round dispatches and is gated with the full regression bundle; S3 asserts the in-memory hand-off from the run side, where the persisted entry is already PASS",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #97 AC1 (PRD D12: no rounds left means revert the cleaner's whole range, record EXHAUSTED, and the final evaluation then reuses)",
+      "given": "a RESTORE route to the cleaner with cleanerRoundsRemaining({ spent: cleaner.roundsSpent, limit }) equal to 0",
+      "when": "the orchestrator handles the route",
+      "then": "no round dispatches, the cleaner's whole committed range is hard-reset to the accepted commit, the stage outcome EXHAUSTED is recorded, and the next final-evaluation iteration reuses because the tree now equals the tree the baseline authorizes",
+      "observableResult": "the S3 scenario reads the persisted stage outcome EXHAUSTED, finalEvaluationFor(...).decision \"reuse\" for the surviving tree, and a worktree tree id equal to the accepted tree id",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #97 AC1 (PRD D12: the prompt's {{QUALITY_FAILURES}} block is replaced by the PRESERVATION / GATE_INVISIBLE_DRIFT findings and the instruction to restore)",
+      "given": "CleanerStageInput carrying repair { findings }",
+      "when": "a restore round dispatches",
+      "then": "CleanerDispatchInput.repair carries those findings and the rendered prompts/cleaner.md restore variant names them in place of {{QUALITY_FAILURES}}, with the same gating as any round",
+      "observableResult": "src/cleaner-stage.test.ts inspects the CleanerDispatchInput handed to its dispatch seam and the rendered prompt text contains each finding id, class and observed value instead of a gate-failure list",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #97 AC4 (PRD D11: one new event family with exactly the listed fields)",
+      "given": "src/run-events.ts",
+      "when": "a quality-stage-attempt event is built by the new pure builder",
+      "then": "the payload carries ghIssue, sliceNumber, round, stage, stageRound, attempt, inputTreeId, optional outputTreeId, gateIds, outcome, startedAt, endedAt, durationMs and cacheReusedGateIds, and EVENTS_SCHEMA_VERSION is still 1",
+      "observableResult": "src/logger.test.ts asserts the built object's keys and types and that the serialized schema version is unchanged",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #97 AC4 (events carry stage start/end, attempt, tree identity, gate IDs and duration for every gauntlet stage)",
+      "given": "a run whose cleaner stage runs rounds",
+      "when": "each cleaner round ends",
+      "then": "exactly one quality-stage-attempt event is journaled with stage \"cleaner\", the cleaner round as stageRound and attempt, the recorded round outcome, the round's own wall clock as durationMs, and cacheReusedGateIds taken from that round's gate evidence entries flagged cacheReused",
+      "observableResult": "the S1 scenario reads events.jsonl and finds one cleaner quality-stage-attempt line per round with those fields populated from the run, and a round-0 pass emits stageRound 0 with inputTreeId equal to outputTreeId",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #97 AC4 (PRD D11: emitted by the final-evaluation loop per attempt)",
+      "given": "a run whose final evaluation grades at least one attempt",
+      "when": "each attempt ends",
+      "then": "exactly one quality-stage-attempt event is journaled with stage \"final-evaluation\", finalAttempt as stageRound and attempt, the cited baseline tree as inputTreeId, the graded tree as outputTreeId, the verdict or RETURNED_TO_GENERATOR as outcome, and the attempt's gate ids; a reuse emits none",
+      "observableResult": "the S1 scenario finds one final-evaluation quality-stage-attempt line for its single attempt, and the existing reuse scenario's events.jsonl contains none",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #97 AC4; prd.md D10 item 3, D11 (\"model time (sum of stage-duration.durationMs)\"), prd.md:514, :569-573, :741-742; src/logger.ts:104-135, :116, :118-135; src/run-events.ts:347-371; src/run-journal.ts:133-168; src/stage-durations.ts:57-63; src/orchestrator.ts:6862, :6928, :7559",
+      "given": "a run directory whose events.jsonl carries quality-stage-policy, quality-stage-attempt and stage-duration lines, and separately a run directory with no events",
+      "when": "readQualityStageOutcomes(runDir) — new in src/logger.ts, modelled on readAdvisoryGateOutcomes (:118-135) — reads it",
+      "then": "it reads events.jsonl alone and returns one QualityStageOutcome per (ghIssue, stage): enabled (from quality-stage-policy), outcome, rounds used, round limit, elapsed ms (sum of the stage's quality-stage-attempt durationMs), model ms, gate ids, cache-reused gate ids, and the final decision (reuse / evaluate from final-evaluation-reuse or its absence). Model ms is the sum of the stage-duration events already on the stream — the RunEventPayload member at src/run-events.ts:347-371 carrying ghIssue, sliceNumber?, agent, round?, durationMs, history, ratioToMedian? — matched on ghIssue plus agent, with agent === \"cleaner\" for stage \"cleaner\" and agent === \"evaluator-final\" for stage \"final-evaluation\", the two literal roles the orchestrator's phase events already carry (:6862, :6928, :7559). Those events are derived, not hand-emitted: RunJournal.observeStageDuration (src/run-journal.ts:133-168) pairs each phase-ended with the newest unmatched phase-started under stageInvocationKey (src/stage-durations.ts:57-63) and appends the line, so this reader adds no writer and src/stage-durations.ts stays read-only. A stage whose phase-ended never arrived contributes no sample and its model ms is 0. A run directory with no events or no such event returns [] rather than throwing, for the reason :116 gives",
+      "observableResult": "src/logger.test.ts unit tests seed events.jsonl by hand with one quality-stage-policy line, three quality-stage-attempt lines across two slices, and stage-duration lines carrying agent \"cleaner\" and \"evaluator-final\", then assert the returned entries field by field — summed elapsed, summed model ms, rounds used, gate ids, cache-reused gate ids — plus model ms 0 when the stage-duration lines are absent and [] for a directory with no events",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #97 AC4; prd.md D10 item 2, D11 per-slice row (prd.md:569-573), prd.md:705, :511; src/logger.ts:626-646",
+      "given": "a run stream carrying #274's quality-stage-policy event plus quality-stage-attempt lines, and separately a stream with the policy event and no attempt events",
+      "when": "writeSummary renders run-summary.md",
+      "then": "one per-slice row per readQualityStageOutcomes entry appears beneath #274's existing ## Quality Stages header lines (src/logger.ts:626-646) with PRD D11's columns — slice, stage, enabled, outcome, rounds used / limit, elapsed, model time (B-09's stage-duration sum), gate ids, cache-reused gate ids, final decision; and the stream with no attempt events renders the header lines and no table, so every #274-era summary stays byte-identical",
+      "observableResult": "assertions extending the existing [behavior:#274:B-08] describe block at src/logger.test.ts:1196 on the returned summary string for both cases",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #97 AC3 (PRD D10 item 3: buildPrCreationPlan gains qualityStages, passed at both call sites as advisoryGates is, and rendered even when disabled)",
+      "given": "buildPrCreationPlan called with qualityStages holding one disabled cleaner entry",
+      "when": "the plan is built",
+      "then": "the PR body carries a quality-stages section stating the stage is disabled, and a plan built with the field absent or empty carries no such section",
+      "observableResult": "src/ship-gate.test.ts asserts the section's presence and its disabled wording for the seeded entry and its absence for a plan without the field",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #97 AC1 via PRD D11 attribution (stage tiling for writeFinalChangeSummary; PRD 4 D11 one change-summary producer)",
+      "given": "a round whose cleaner committed before the post-approval writing stage ran",
+      "when": "the orchestrator writes the final change summary for an attempt",
+      "then": "stages holds one span per stage that wrote — cleaner from the baseline tree to the cleaner's output tree, then post-approval-writing from that tree to the final tree — so the cleaner's bytes are attributed to the cleaner",
+      "observableResult": "the S1 scenario reads the written change-summary artifact and finds a per-stage attribution naming \"cleaner\" for the cleaner's paths",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-13",
+      "source": "GH #97 AC4 (\"preserves every stage's attempt evidence end to end\"); #87 B-09; src/artifacts.ts:758-775, name built at :772; src/orchestrator.ts:6962-6972, archiveDir at :6968",
+      "given": "a slice whose cleaner committed on its third cleaner round inside its first generator round",
+      "when": "the archived round evidence is located",
+      "then": "the file is named cleaner-log-r1-a3.log — the stem src/artifacts.ts:772 builds from the caller's slots, where round is the generator round and attempt is the cleaner round (src/orchestrator.ts:6962-6972) — inside whatever directory that call site passes as archiveDir, the reviewArchiveDir value it already holds (:6968) under .afk/artifacts/<run-slug>/slice-<n>/. The directory segment beneath that prefix is deliberately not pinned by this contract, because the builder that composes it lives in the out-of-scope src/artifacts.ts; the assertion resolves it from the run's artifact tree instead of hard-coding it. No argument re-mapping is authorized: a re-map would silently rename every already-archived round's log",
+      "observableResult": "S3 asserts the surviving archived log has the stem cleaner-log-r1-a3.log, with its directory discovered under the run's .afk/artifacts/<run-slug>/slice-<n>/ tree rather than written into the assertion",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #97 AC2 (cleaner stage not configured, or no changes made: exact-tree reuse, no final evaluation invocation); PRD D12/D20",
+      "given": "a run with no gatePolicy.clean, or one whose cleaner passed round 0 without committing",
+      "when": "the accept seam decides reuse",
+      "then": "decideFinalReuse still answers reuse on exact string equality with no cosmetic exception and dispatches zero evaluator-final invocations",
+      "observableResult": "the S2 scenario asserts decision \"reuse\" and an empty finalCalls list, and src/final-evaluation.test.ts's existing reuse decision-table tests still pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "PRD D12 (with the cleaner off, #96's reuse and stub-restore branches run unchanged)",
+      "given": "a run with no cleaner",
+      "when": "a RESTORE finding routes to the stub",
+      "then": "PostApprovalWritingStage is still synchronous with noopPostApprovalWritingStage as production's default and is still called with repair \"RESTORE\"",
+      "observableResult": "the existing #96 stub scenarios and src/final-evaluation.test.ts's [behavior:#87:P-02] assertion pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "PRD 4 D19 and src/bounds.ts:59 (MAX_FINAL_EVALUATION_ATTEMPTS = 3; a return spends one generator round and zero attempts)",
+      "given": "a final review carrying a RETURN_TO_GENERATOR repair",
+      "when": "the loop routes it",
+      "then": "decideFinalVerdict keeps its fail-closed conditions, the attempt budget stays 3, and the return still spends exactly one generator round and zero final-evaluation attempts",
+      "observableResult": "src/bounds.test.ts's pins and the existing [behavior:B-09] scenario pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "#87 B-14 and ADR 0050 (the round bound is read from run state and continuation is a remainder, not a counter)",
+      "given": "a run resumed after a killed cleaner stage",
+      "when": "the stage restarts",
+      "then": "roundsAlreadySpent is still read from run state via cleanerRoundsSpent(resumableCleanerStage) and continuation is still cleanerRoundsRemaining({ spent, limit }) > 0, so no resumed run buys a fourth round",
+      "observableResult": "src/cleaner-stage.test.ts's existing resume assertions pass unchanged, and B-03's in-memory hand-off is an additional route into the same bound rather than a replacement",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "#87 B-07/B-13 and ADR 0051 (every cleaner exit path resets; a valid BASELINE_IS_WRONG returns the slice to the generator)",
+      "given": "a cleaner round that fails to dispatch, regresses, or writes an escalation",
+      "when": "the stage exits by that path",
+      "then": "the worktree is still reset and the round still recorded, and a valid BASELINE_IS_WRONG still returns the slice to the generator with the baseline citation invalidated",
+      "observableResult": "src/cleaner-stage.test.ts's four exit-path assertions and the orchestrator's escalation route tests pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-06",
+      "source": "src/run-events.ts:406-410 (additive members keep EVENTS_SCHEMA_VERSION at 1)",
+      "given": "a historical events.jsonl written before this slice",
+      "when": "the summary and PR body are rendered from it",
+      "then": "the schema version is still 1, every existing event member and reader is untouched, and the stream renders no quality-stage rows and no PR section",
+      "observableResult": "src/logger.test.ts asserts a pre-slice stream's summary is unchanged and readQualityStageOutcomes returns an empty array for it",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-07",
+      "source": "#274 B-08 / PRD D10 item 2 (the header line renders from quality-stage-policy alone, disabled case included)",
+      "given": "a run whose events carry only the quality-stage-policy event",
+      "when": "writeSummary renders",
+      "then": "the ## Quality Stages header lines still render from that event alone, including the disabled wording",
+      "observableResult": "the existing [behavior:#274:B-08] assertions in src/logger.test.ts pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-08",
+      "source": "#96 P-01 (the merge stays serialized through the existing mergeMutex; no second lock primitive)",
+      "given": "the files this slice edits",
+      "when": "they are scanned for lock primitives",
+      "then": "none of them declares mergeMutex, makeAsyncMutex, AsyncMutex, acquireLock or lockFile, and src/wave.ts still owns the one mutex",
+      "observableResult": "the existing [behavior:P-01] source-text assertion in src/qa-orchestration-gates.test.ts, extended to src/cleaner-stage.ts and src/ship-gate.ts, passes",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}
