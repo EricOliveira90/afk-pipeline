@@ -18,8 +18,6 @@ import {
   type TerminalOutcome,
 } from "./run-journal.js";
 import {
-  buildQualityStageAttemptEvent,
-  buildQualityStagePolicyEvent,
   EVENTS_SCHEMA_VERSION,
   type RunEventPayload,
 } from "./run-events.js";
@@ -31,6 +29,12 @@ import { parseGatePolicy, type GatePolicy } from "./gate-policy.js";
 import { lifecycle } from "./slice-lifecycle.js";
 
 const tempDirs: string[] = [];
+type QualityStageAttemptInput = Parameters<
+  Logger["recordQualityStageAttempt"]
+>[0];
+type JournalTestInput =
+  | RunEventPayload
+  | { qualityStageAttempt: QualityStageAttemptInput };
 
 afterEach(() => {
   while (tempDirs.length > 0) {
@@ -47,6 +51,34 @@ function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-logger-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function recordedPayloads(log: Logger): Array<Record<string, unknown>> {
+  return readFileSync(join(log.runDir, "events.jsonl"), "utf-8")
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => {
+      const { ts: _ts, ...payload } = JSON.parse(line) as Record<
+        string,
+        unknown
+      >;
+      return payload;
+    });
+}
+
+function recordTestInput(log: Logger, input: JournalTestInput) {
+  if ("qualityStageAttempt" in input) {
+    log.recordQualityStageAttempt(input.qualityStageAttempt);
+  } else {
+    log.event(input);
+  }
+}
+
+function qualityStageAttempt(
+  input: QualityStageAttemptInput,
+): JournalTestInput {
+  return { qualityStageAttempt: input };
 }
 
 const PROGRESS = { genRounds: 1, evalRounds: 2 };
@@ -1121,26 +1153,20 @@ describe("[behavior:#274:B-05] the quality-stage-policy event", () => {
   });
 
   it("[behavior:#274:B-05] admits the payload as a typed literal", () => {
-    // Compiles under `tsc --noEmit`, which is the type-level half of B-05;
-    // the runtime half is that the journal accepts and tees it.
-    const payload: RunEventPayload = {
+    const log = new Logger(makeRepo(), "stage-event-literal");
+    log.recordQualityStagePolicy(templatePolicy());
+    expect(recordedPayloads(log)[0]).toMatchObject({
       type: "quality-stage-policy",
       stage: "cleaner",
       enabled: true,
-      gateIds: ["clean:format"],
       source: "afk.config.json",
-    };
-    const log = new Logger(makeRepo(), "stage-event-literal");
-    log.event(payload);
-    const lines = readFileSync(join(log.runDir, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(lines[1]).toMatchObject(payload);
+    });
   });
 
   it("[behavior:#274:B-07] reads enabled and the gate ids off the shipped template's policy", () => {
-    expect(buildQualityStagePolicyEvent(templatePolicy())).toEqual({
+    const log = new Logger(makeRepo(), "stage-policy-enabled");
+    log.recordQualityStagePolicy(templatePolicy());
+    expect(recordedPayloads(log)[0]).toEqual({
       type: "quality-stage-policy",
       stage: "cleaner",
       enabled: true,
@@ -1170,8 +1196,12 @@ describe("[behavior:#274:B-05] the quality-stage-policy event", () => {
     };
     // The member's presence is the whole switch, so "no policy at all" and "a
     // policy that declares no clean stage" are one answer, not two.
-    expect(buildQualityStagePolicyEvent(cleanLess)).toEqual(disabled);
-    expect(buildQualityStagePolicyEvent(null)).toEqual(disabled);
+    const cleanLessLog = new Logger(makeRepo(), "stage-policy-clean-less");
+    cleanLessLog.recordQualityStagePolicy(cleanLess);
+    expect(recordedPayloads(cleanLessLog)[0]).toEqual(disabled);
+    const nullLog = new Logger(makeRepo(), "stage-policy-null");
+    nullLog.recordQualityStagePolicy(null);
+    expect(recordedPayloads(nullLog)[0]).toEqual(disabled);
   });
 
   it("[behavior:#274:B-07] never reaches past the snapshot it is handed", () => {
@@ -1195,9 +1225,9 @@ describe("[behavior:#274:B-05] the quality-stage-policy event", () => {
         suppressionDetectors: [],
       },
     };
-    expect(buildQualityStagePolicyEvent(handBuilt).gateIds).toEqual([
-      "only:gate",
-    ]);
+    const log = new Logger(makeRepo(), "stage-policy-snapshot");
+    log.recordQualityStagePolicy(handBuilt);
+    expect(recordedPayloads(log)[0]?.gateIds).toEqual(["only:gate"]);
   });
 });
 
@@ -1290,7 +1320,9 @@ describe("[behavior:#97:B-06] the quality-stage-attempt event", () => {
   });
 
   it("[behavior:#97:B-06] builds exactly PRD D11's fields and nothing else", () => {
-    expect(buildQualityStageAttemptEvent(ATTEMPT)).toEqual({
+    const log = new Logger(makeRepo(), "attempt-fields");
+    log.recordQualityStageAttempt(ATTEMPT);
+    expect(recordedPayloads(log)[0]).toEqual({
       type: "quality-stage-attempt",
       ...ATTEMPT,
     });
@@ -1298,7 +1330,9 @@ describe("[behavior:#97:B-06] the quality-stage-attempt event", () => {
 
   it("[behavior:#97:B-06] omits outputTreeId when no tree of the attempt survived", () => {
     const { outputTreeId: _dropped, ...withoutOutput } = ATTEMPT;
-    const event = buildQualityStageAttemptEvent(withoutOutput);
+    const log = new Logger(makeRepo(), "attempt-without-output");
+    log.recordQualityStageAttempt(withoutOutput);
+    const event = recordedPayloads(log)[0]!;
     // Omitted, not `undefined`: a serialized line carries only what the attempt
     // actually knows, and `"outputTreeId": null` would be a claim about a tree.
     expect("outputTreeId" in event).toBe(false);
@@ -1306,20 +1340,45 @@ describe("[behavior:#97:B-06] the quality-stage-attempt event", () => {
 
   it("[behavior:#97:B-06] copies the id arrays, so a later mutation cannot rewrite the record", () => {
     const gateIds = ["clean:format"];
-    const event = buildQualityStageAttemptEvent({ ...ATTEMPT, gateIds });
+    const cacheReusedGateIds = ["scope"];
+    const log = new Logger(makeRepo(), "attempt-defensive-copies");
+    log.recordQualityStageAttempt({
+      ...ATTEMPT,
+      gateIds,
+      cacheReusedGateIds,
+    });
     gateIds.push("clean:lint");
+    cacheReusedGateIds.push("clean:lint");
+    const event = recordedPayloads(log)[0]!;
     expect(event.gateIds).toEqual(["clean:format"]);
+    expect(event.cacheReusedGateIds).toEqual(["scope"]);
   });
 
   it("[behavior:#97:B-06] tees through the journal as a typed literal", () => {
-    const payload: RunEventPayload = buildQualityStageAttemptEvent(ATTEMPT);
+    const attempt: QualityStageAttemptInput = ATTEMPT;
     const log = new Logger(makeRepo(), "attempt-event-literal");
-    log.event(payload);
-    const lines = readFileSync(join(log.runDir, "events.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(lines[1]).toMatchObject(payload);
+    log.recordQualityStageAttempt(attempt);
+    expect(recordedPayloads(log)[0]).toMatchObject({
+      type: "quality-stage-attempt",
+      ...ATTEMPT,
+    });
+  });
+
+  it("[behavior:#97:B-06] records synchronously in call order", () => {
+    const log = new Logger(makeRepo(), "attempt-event-order");
+    log.event({
+      type: "run-started",
+      provider: "stub",
+      runSlug: "attempt-event-order",
+    });
+    log.recordQualityStageAttempt(ATTEMPT);
+    log.recordQualityStagePolicy(null);
+
+    expect(recordedPayloads(log).map((event) => event.type)).toEqual([
+      "run-started",
+      "quality-stage-attempt",
+      "quality-stage-policy",
+    ]);
   });
 });
 
@@ -1327,17 +1386,17 @@ describe("[behavior:#97:B-09] readQualityStageOutcomes", () => {
   /** A run directory holding exactly the events a test names. */
   function streamWith(
     slug: string,
-    events: readonly RunEventPayload[],
+    events: readonly JournalTestInput[],
   ): Logger {
     const log = new Logger(makeRepo(), slug);
-    for (const event of events) log.event(event);
+    for (const event of events) recordTestInput(log, event);
     return log;
   }
 
   const attempt = (
-    overrides: Partial<Parameters<typeof buildQualityStageAttemptEvent>[0]>,
-  ): RunEventPayload =>
-    buildQualityStageAttemptEvent({
+    overrides: Partial<QualityStageAttemptInput>,
+  ): JournalTestInput =>
+    qualityStageAttempt({
       ghIssue: "97",
       sliceNumber: "03",
       round: 1,
@@ -1494,10 +1553,13 @@ describe("[behavior:#97:B-09] readQualityStageOutcomes", () => {
 });
 
 describe("[behavior:#97:B-10] run-summary.md's per-slice quality-stage rows", () => {
-  function summaryWith(slug: string, events: readonly RunEventPayload[]): string {
+  function summaryWith(
+    slug: string,
+    events: readonly JournalTestInput[],
+  ): string {
     const log = new Logger(makeRepo(), slug);
     log.restoreCompleted(id("97", "Changed trees face final evaluation", "afk/97"));
-    for (const event of events) log.event(event);
+    for (const event of events) recordTestInput(log, event);
     return log.writeSummary();
   }
 
@@ -1512,7 +1574,7 @@ describe("[behavior:#97:B-10] run-summary.md's per-slice quality-stage rows", ()
   it("[behavior:#97:B-10] renders one row per entry beneath #274's header lines", () => {
     const md = summaryWith("rows-rendered", [
       POLICY,
-      buildQualityStageAttemptEvent({
+      qualityStageAttempt({
         ghIssue: "97",
         sliceNumber: "03",
         round: 1,

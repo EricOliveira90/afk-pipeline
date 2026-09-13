@@ -7,11 +7,14 @@ import {
   type SanityGateResult,
 } from "./logger.js";
 import {
+  buildQualityStageAttemptEvent,
+  buildQualityStagePolicyEvent,
   EVENTS_FILE,
   EVENTS_SCHEMA_VERSION,
   serializeRunEvent,
   type RunEventPayload,
 } from "./run-events.js";
+import type { GatePolicy } from "./gate-policy.js";
 import {
   ratioToMedian,
   readStageDurationHistory,
@@ -105,6 +108,16 @@ export class RunJournal {
     const ts = new Date().toISOString();
     this.append(payload, ts);
     this.observeStageDuration(payload, ts);
+  }
+
+  recordQualityStagePolicy(policy: GatePolicy | null) {
+    this.event(buildQualityStagePolicyEvent(policy));
+  }
+
+  recordQualityStageAttempt(
+    attempt: Parameters<typeof buildQualityStageAttemptEvent>[0],
+  ) {
+    this.event(buildQualityStageAttemptEvent(attempt));
   }
 
   private append(payload: RunEventPayload, ts: string) {
