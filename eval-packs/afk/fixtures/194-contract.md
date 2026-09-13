@@ -92,9 +92,10 @@ module-private and out of scope to change.
   once through `loadGatePolicy` and compares the candidate's changed set against
   `gatePolicy.protectedPaths.gatePolicyPaths` with `matchesGlob`
   (prd.md D2, D3).
-- [behavior:B-14] A changed path matching `gatePolicyPaths` with no covering
-  waiver fails the `scope` gate closed, and the `GateResult.findings` entry
-  names the exact path and its risk class (prd.md D4, D5).
+- [behavior:B-14] A changed path matching `gatePolicyPaths` on a launch with no
+  `protectedChangeWaivers` fails the `scope` gate closed, and the
+  `GateResult.findings` entry names the exact path and its risk class
+  (prd.md D4, D5).
 - [behavior:B-15] A refused or malformed `gatePolicy` reaches the operator
   through the feedback channel as a `GATE-SCOPE` finding rather than an
   uncaught throw, so a policy typo parks the slice instead of aborting the run
@@ -109,6 +110,8 @@ module-private and out of scope to change.
 - Deletion and skip detection, and the risk-class-to-path association consuming
   `riskClasses` beyond `gate-policy` (prd.md D6's deletion rule).
 - The `acceptance` (#85) and `cost` (#86) members — unknown keys here, by B-05.
+- Reading or interpreting present or unmatched `protectedChangeWaivers`; B-14
+  pins only a launch where that list is absent.
 - Any runtime dependency for glob matching (prd.md D6).
 - Any change to `src/acceptance-manifest.ts`.
 
@@ -138,6 +141,7 @@ module-private and out of scope to change.
 - src/gate-policy.ts
 - src/gate-policy.test.ts
 - src/gate-runner.ts
+- src/gate-runner.test.ts
 - afk.config.json
 - ARCHITECTURE.md
 
@@ -184,7 +188,7 @@ scenario rather than a new spawned run (AGENTS.md assertion ladder).
       finding names the exact path and risk class.
 - [ ] `ARCHITECTURE.md` carries one new row for `src/gate-policy.ts`.
 - [ ] `src/base-gates.ts` and `src/acceptance-manifest.ts` are unmodified; no
-      file outside the five declared paths changes.
+      file outside the six declared paths changes.
 - [ ] No entry was added to `package.json`'s dependencies.
 - [ ] `pnpm vitest run src/gate-policy.test.ts` passes with nothing skipped, and
       `pnpm run typecheck` reports no error in the declared files.
