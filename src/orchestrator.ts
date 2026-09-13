@@ -6170,6 +6170,7 @@ export async function runSliceExecute(
       // is what keeps every project that never opted in on today's path.
       const acceptanceDeclaration = acceptanceGateDeclaration({
         absSliceDir: ctx.absSliceDir,
+        issueNumber: slice.ghIssue,
         plan: resolveAcceptancePlan(ctx.worktreeDir),
         bounds: {
           inactivityTimeoutMs:
@@ -7640,6 +7641,7 @@ export async function runSliceMergeResolution(args: {
     const acceptanceCoverage: BehaviorCoverageRecord[] = [];
     const acceptanceDeclaration = acceptanceGateDeclaration({
       absSliceDir: ctx.absSliceDir,
+      issueNumber: slice.ghIssue,
       plan: resolveAcceptancePlan(ctx.worktreeDir),
       bounds: {
         inactivityTimeoutMs:

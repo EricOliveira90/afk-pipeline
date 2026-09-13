@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acceptanceGateDeclaration,
+  behaviorTag,
   matchVitestJson,
   runAcceptanceGate,
   type AcceptanceRunner,
@@ -25,6 +26,7 @@ import {
 } from "./gate-runner.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ISSUE_NUMBER = 85;
 
 const PLAN: AcceptancePlan = {
   command: "pnpm",
@@ -39,60 +41,31 @@ const PLAN: AcceptancePlan = {
   matcher: "vitest-json",
 };
 
-/**
- * Three reporter documents transcribed verbatim from real filtered runs of this
- * repo's own suite (vitest 3.2.4, node 22.15.1), recorded once while
- * implementing #85 so the suite itself spawns no vitest. `testResults` and
- * `snapshot` are elided — the matcher reads only the counts, and pinning
- * hundreds of lines of per-test payload would pin vitest's internals instead of
- * the rule.
- *
- * The `numPendingTests` values are the whole reason this slice does not read
- * `numTotalTests`: a filtered run leaves every non-matching test collected and
- * counted there.
- */
-const MATCHED_AND_PASSED = {
-  numTotalTestSuites: 7,
-  numPassedTestSuites: 7,
-  numFailedTestSuites: 0,
-  numPendingTestSuites: 0,
-  numTotalTests: 18,
-  numPassedTests: 1,
-  numFailedTests: 0,
-  numPendingTests: 17,
-  numTodoTests: 0,
-  startTime: 1757000000000,
-  success: true,
-} as const;
+type TestStatus = "passed" | "failed" | "pending" | "todo";
 
-/** Pattern matched nothing. Note `success: true` and exit code 0. */
-const MATCHED_NOTHING = {
-  numTotalTestSuites: 7,
-  numPassedTestSuites: 7,
-  numFailedTestSuites: 0,
-  numPendingTestSuites: 0,
-  numTotalTests: 18,
-  numPassedTests: 0,
-  numFailedTests: 0,
-  numPendingTests: 18,
-  numTodoTests: 0,
-  startTime: 1757000000000,
-  success: true,
-} as const;
+function assertion(fullName: string, status: TestStatus) {
+  return { ancestorTitles: [], fullName, status, title: fullName };
+}
 
-const MATCHED_AND_FAILED = {
-  numTotalTestSuites: 2,
-  numPassedTestSuites: 0,
-  numFailedTestSuites: 2,
-  numPendingTestSuites: 0,
-  numTotalTests: 2,
-  numPassedTests: 1,
-  numFailedTests: 1,
-  numPendingTests: 0,
-  numTodoTests: 0,
-  startTime: 1757000000000,
-  success: false,
-} as const;
+function report(...assertions: ReturnType<typeof assertion>[]) {
+  return {
+    numTotalTests: assertions.length,
+    numPassedTests: assertions.filter((entry) => entry.status === "passed")
+      .length,
+    numFailedTests: assertions.filter((entry) => entry.status === "failed")
+      .length,
+    success: assertions.every((entry) => entry.status !== "failed"),
+    testResults: [{ assertionResults: assertions }],
+  };
+}
+
+function qualified(id: string, status: TestStatus = "passed") {
+  return assertion(`${behaviorTag(ISSUE_NUMBER, id)} proves ${id}`, status);
+}
+
+function legacy(id: string, status: TestStatus = "passed") {
+  return assertion(`[behavior:${id}] belongs to another PRD`, status);
+}
 
 const roots: string[] = [];
 
@@ -138,22 +111,16 @@ function manifestBinding(...ids: string[]) {
   };
 }
 
-/** A runner that answers from a per-behavior document table. */
+/** A runner that returns one shared reporter document. */
 function runnerFor(
-  documents: Record<string, unknown>,
+  document: unknown,
   calls?: { command: string; args: readonly string[]; cwd: string }[],
 ): AcceptanceRunner {
   return async (input) => {
     calls?.push({ command: input.command, args: input.args, cwd: input.cwd });
-    const behaviorId = input.args[input.args.length - 1]!;
-    const document = documents[behaviorId];
     return {
       output:
-        document === undefined
-          ? "no document here"
-          : typeof document === "string"
-            ? document
-            : JSON.stringify(document),
+        typeof document === "string" ? document : JSON.stringify(document),
     };
   };
 }
@@ -331,91 +298,125 @@ describe("resolveBindableGateCatalog", () => {
 });
 
 describe("matchVitestJson", () => {
-  it("B-03 reads matched as numPassedTests + numFailedTests, never numTotalTests", () => {
-    expect(matchVitestJson(MATCHED_AND_PASSED)).toEqual({
-      status: "covered",
-      matched: 1,
-      passed: 1,
-      failed: 0,
-    });
-    // The whole point: `numTotalTests` is 18 on a run that matched one test.
-    expect(MATCHED_AND_PASSED.numTotalTests).toBe(18);
-
-    expect(matchVitestJson(MATCHED_NOTHING)).toEqual({
-      status: "untested",
-      matched: 0,
-      passed: 0,
-      failed: 0,
-    });
-    // ...and 18 again on a run that matched nothing and still exited 0.
-    expect(MATCHED_NOTHING.numTotalTests).toBe(18);
-    expect(MATCHED_NOTHING.success).toBe(true);
-
-    expect(matchVitestJson(MATCHED_AND_FAILED)).toEqual({
-      status: "failed",
-      matched: 2,
-      passed: 1,
-      failed: 1,
-    });
-  });
-
-  it("B-03 counts a skipped- or todo-only match as untested, not covered", () => {
+  it("[behavior:#85:B-03] applies the qualified assertion evidence policy", () => {
     expect(
-      matchVitestJson({
-        ...MATCHED_NOTHING,
-        numTotalTests: 4,
-        numPendingTests: 3,
-        numTodoTests: 1,
-      })?.status,
-    ).toBe("untested");
+      matchVitestJson(
+        report(
+          qualified("B-01"),
+          qualified("B-01", "pending"),
+          qualified("B-01", "todo"),
+          legacy("B-01"),
+          qualified("B-02"),
+          qualified("B-02", "failed"),
+          assertion("[behavior:#777:B-01] unrelated PRD", "passed"),
+        ),
+        ISSUE_NUMBER,
+        ["B-01", "B-02", "B-03"],
+      ),
+    ).toEqual({
+      records: [
+        {
+          behaviorId: "B-01",
+          status: "covered",
+          matched: 1,
+          passed: 1,
+          failed: 0,
+        },
+        {
+          behaviorId: "B-02",
+          status: "failed",
+          matched: 2,
+          passed: 1,
+          failed: 1,
+        },
+        {
+          behaviorId: "B-03",
+          status: "untested",
+          matched: 0,
+          passed: 0,
+          failed: 0,
+        },
+      ],
+      ambiguousLegacyIds: [],
+    });
   });
 
-  it("B-03 returns null for anything that is not a reporter document", () => {
+  it("[behavior:#85:B-03] reports legacy-only and skipped qualified tags as untested", () => {
+    expect(
+      matchVitestJson(
+        report(
+          legacy("B-01"),
+          qualified("B-02", "pending"),
+          qualified("B-02", "todo"),
+        ),
+        ISSUE_NUMBER,
+        ["B-01", "B-02"],
+      ),
+    ).toEqual({
+      records: [
+        {
+          behaviorId: "B-01",
+          status: "untested",
+          matched: 0,
+          passed: 0,
+          failed: 0,
+        },
+        {
+          behaviorId: "B-02",
+          status: "untested",
+          matched: 0,
+          passed: 0,
+          failed: 0,
+        },
+      ],
+      ambiguousLegacyIds: ["B-01"],
+    });
+  });
+
+  it("[behavior:#85:B-03] returns null for anything that is not a reporter document", () => {
     for (const value of [
       null,
       undefined,
       7,
-      "numPassedTests",
-      [MATCHED_AND_PASSED],
+      "testResults",
+      [report()],
       {},
-      { numPassedTests: 1 },
-      { numPassedTests: "1", numFailedTests: 0 },
-      { numPassedTests: Number.NaN, numFailedTests: 0 },
-      // `success` alone is not enough: it is true on a zero-match run.
-      { success: true },
+      { testResults: {} },
+      { testResults: [null] },
+      { testResults: [{}] },
+      { testResults: [{ assertionResults: [null] }] },
+      { testResults: [{ assertionResults: [{ fullName: "x" }] }] },
     ]) {
-      expect(matchVitestJson(value)).toBeNull();
+      expect(matchVitestJson(value, ISSUE_NUMBER, ["B-01"])).toBeNull();
     }
   });
 });
 
 describe("acceptanceGateDeclaration", () => {
-  it("B-04 declares one aggregate required gate with D8's id and stage", () => {
+  it("[behavior:#85:B-04] declares one aggregate required gate with D8's id and stage", () => {
     const declaration = acceptanceGateDeclaration({
       absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+      issueNumber: ISSUE_NUMBER,
       plan: PLAN,
     })!;
-    expect(declaration.id).toBe("acceptance:behaviors");
     expect(declaration.id).toBe(ACCEPTANCE_GATE_ID);
     expect(declaration.stage).toBe(ACCEPTANCE_GATE_STAGE);
     expect(declaration.required).toBe(true);
-    // P-02's exactly-one-of rule: the declaration carries `run`, never a
-    // `command` the runner would classify from an exit code.
     expect(declaration.run).toBeTypeOf("function");
     expect(declaration.command).toBeUndefined();
   });
 
-  it("B-04 declares nothing when the manifest binds no behavior to it", () => {
+  it("[behavior:#85:B-04] declares nothing when the manifest binds no behavior to it", () => {
     expect(
       acceptanceGateDeclaration({
         absSliceDir: sliceDir({
           ...manifestBinding("B-01"),
           behaviors: [behavior("B-01", ["typecheck", "tests"])],
         }),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
       }),
     ).toBeUndefined();
-    // A v1 manifest has no behaviors at all.
     expect(
       acceptanceGateDeclaration({
         absSliceDir: sliceDir({
@@ -423,69 +424,68 @@ describe("acceptanceGateDeclaration", () => {
           fileScope: { kind: "paths", paths: ["src/a.ts"] },
           migrationCount: 0,
         }),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
       }),
     ).toBeUndefined();
-    // Build time tolerates a missing or unreadable manifest — nothing to
-    // prove — while `run` below does not.
     expect(
-      acceptanceGateDeclaration({ absSliceDir: sliceDir(null), plan: PLAN }),
+      acceptanceGateDeclaration({
+        absSliceDir: sliceDir(null),
+        issueNumber: ISSUE_NUMBER,
+        plan: PLAN,
+      }),
     ).toBeUndefined();
     expect(
       acceptanceGateDeclaration({
         absSliceDir: sliceDir("{ not json"),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
       }),
     ).toBeUndefined();
   });
 
-  it("B-04 substitutes the behavior id into every token occurrence, once per behavior", () => {
+  it("[behavior:#85:B-04] invokes the runner once with one selector for every required tag", async () => {
     const calls: { command: string; args: readonly string[]; cwd: string }[] =
       [];
     const declaration = acceptanceGateDeclaration({
       absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+      issueNumber: ISSUE_NUMBER,
       plan: {
         command: "pnpm",
-        args: ["exec", "vitest", `--reporter=json`, `-t=^${BEHAVIOR_ID_TOKEN}$`, BEHAVIOR_ID_TOKEN],
+        args: [
+          "exec",
+          "vitest",
+          "--reporter=json",
+          `-t=^${BEHAVIOR_ID_TOKEN}$`,
+          BEHAVIOR_ID_TOKEN,
+        ],
         matcher: "vitest-json",
       },
-      runner: runnerFor(
-        { "B-01": MATCHED_AND_PASSED, "B-02": MATCHED_AND_PASSED },
-        calls,
-      ),
+      runner: runnerFor(report(qualified("B-01"), qualified("B-02")), calls),
     })!;
 
-    return Promise.resolve(
-      declaration.run!({ treeId: "t1", cwd: "/candidate" }),
-    ).then((outcome) => {
-      expect(outcome.status).toBe("PASS");
-      expect(calls).toEqual([
-        {
-          command: "pnpm",
-          args: ["exec", "vitest", "--reporter=json", "-t=^B-01$", "B-01"],
-          cwd: "/candidate",
-        },
-        {
-          command: "pnpm",
-          args: ["exec", "vitest", "--reporter=json", "-t=^B-02$", "B-02"],
-          cwd: "/candidate",
-        },
-      ]);
+    const outcome = await declaration.run!({
+      treeId: "t1",
+      cwd: "/candidate",
     });
+    expect(outcome.status).toBe("PASS");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ command: "pnpm", cwd: "/candidate" });
+    for (const arg of calls[0]!.args.slice(-2)) {
+      expect(arg).toContain("\\[behavior:#85:B-01\\]");
+      expect(arg).toContain("\\[behavior:#85:B-02\\]");
+      expect(arg).toContain("\\[behavior:B-01\\]");
+    }
   });
 
-  it("B-04 reads the manifest at run time, not at declaration time", async () => {
+  it("[behavior:#85:B-04] reads the manifest at run time, not declaration time", async () => {
     const absSliceDir = sliceDir(manifestBinding("B-01"));
     const declaration = acceptanceGateDeclaration({
       absSliceDir,
+      issueNumber: ISSUE_NUMBER,
       plan: PLAN,
-      runner: runnerFor({
-        "B-01": MATCHED_AND_PASSED,
-        "B-09": MATCHED_NOTHING,
-      }),
+      runner: runnerFor(report(qualified("B-01"))),
     })!;
-    // An amendment landing between build and run is the manifest the gate
-    // honours (the rule `src/scope-gate.ts` states).
     writeFileSync(
       join(absSliceDir, "acceptance-manifest.json"),
       JSON.stringify(manifestBinding("B-01", "B-09")),
@@ -496,129 +496,106 @@ describe("acceptanceGateDeclaration", () => {
     expect(outcome.detail).toContain("B-09");
   });
 
-  it("B-04 stops the loop on cancellation and never reports PASS from a partial run", async () => {
+  it("[behavior:#85:B-04] forwards cancellation and never reports a partial run PASS", async () => {
     const controller = new AbortController();
-    const seen: string[] = [];
+    let receivedSignal: AbortSignal | undefined;
     const declaration = acceptanceGateDeclaration({
-      absSliceDir: sliceDir(manifestBinding("B-01", "B-02", "B-03")),
+      absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+      issueNumber: ISSUE_NUMBER,
       plan: PLAN,
       runner: async (input) => {
-        const behaviorId = input.args[input.args.length - 1]!;
-        seen.push(behaviorId);
-        if (behaviorId === "B-01") controller.abort();
-        return { output: JSON.stringify(MATCHED_AND_PASSED) };
+        receivedSignal = input.signal;
+        controller.abort();
+        return { output: JSON.stringify(report(qualified("B-01"))) };
       },
     })!;
-
     const outcome = await declaration.run!({
       treeId: "t1",
       cwd: "/candidate",
       signal: controller.signal,
     });
-    expect(seen).toEqual(["B-01"]);
-    expect(outcome.status).not.toBe("PASS");
+    expect(receivedSignal).toBe(controller.signal);
     expect(outcome.status).toBe("INFRASTRUCTURE");
     expect(outcome.detail).toContain("B-02");
-    // The signal reaches the child too, so a cancelled run does not wait out
-    // the suite it already started (ADR 0003).
-    expect(
-      await new Promise<AbortSignal | undefined>((resolve) => {
-        acceptanceGateDeclaration({
-          absSliceDir: sliceDir(manifestBinding("B-01")),
-          plan: PLAN,
-          runner: async (input) => {
-            resolve(input.signal);
-            return { output: JSON.stringify(MATCHED_AND_PASSED) };
-          },
-        })!.run!({ treeId: "t1", cwd: "/c", signal: new AbortController().signal });
-      }),
-    ).toBeInstanceOf(AbortSignal);
   });
 });
 
 describe("runAcceptanceGate verdicts", () => {
   const ctx = { cwd: "/candidate" };
 
-  it("B-05 passes only when every bound behavior is covered", async () => {
-    const outcome = await runAcceptanceGate(
+  it("[behavior:#85:B-05] passes only when every bound qualified behavior is covered", async () => {
+    const red = await runAcceptanceGate(
       {
         absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor({
-          "B-01": MATCHED_AND_PASSED,
-          "B-02": MATCHED_AND_FAILED,
-        }),
+        runner: runnerFor(
+          report(qualified("B-01"), qualified("B-02", "failed")),
+        ),
       },
       ctx,
     );
-    expect(outcome).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
+    expect(red).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
 
     const green = await runAcceptanceGate(
       {
         absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor({
-          "B-01": MATCHED_AND_PASSED,
-          "B-02": MATCHED_AND_PASSED,
-        }),
+        runner: runnerFor(
+          report(
+            qualified("B-01"),
+            qualified("B-01", "pending"),
+            qualified("B-01", "todo"),
+            legacy("B-01"),
+            qualified("B-02"),
+          ),
+        ),
       },
       ctx,
     );
     expect(green).toMatchObject({ status: "PASS", failureKind: null });
   });
 
-  it("B-05 names every failing id with its counts and its untested-versus-failed reason", async () => {
+  it("[behavior:#85:B-05] rejects unrelated and ambiguous legacy evidence in one combined verdict", async () => {
     const outcome = await runAcceptanceGate(
       {
-        absSliceDir: sliceDir(manifestBinding("B-01", "B-02", "B-03", "B-04")),
+        absSliceDir: sliceDir(
+          manifestBinding("B-01", "B-02", "B-03", "B-04"),
+        ),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor({
-          "B-01": MATCHED_AND_PASSED,
-          "B-02": MATCHED_NOTHING,
-          "B-03": MATCHED_AND_FAILED,
-          "B-04": MATCHED_NOTHING,
-        }),
+        runner: runnerFor(
+          report(
+            qualified("B-01"),
+            legacy("B-02"),
+            qualified("B-03"),
+            qualified("B-03", "failed"),
+            assertion("[behavior:#777:B-04] unrelated PRD", "passed"),
+          ),
+        ),
       },
       ctx,
     );
 
     expect(outcome).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
     const detail = outcome.detail!;
-    // Every failing id in one detail, so one repair round sees the whole red
-    // set (#85 AC5) — and the passing one is not blamed.
     expect(detail).toContain("B-02 (matched 0, passed 0, failed 0)");
     expect(detail).toContain("B-04 (matched 0, passed 0, failed 0)");
     expect(detail).toContain("B-03 (matched 2, passed 1, failed 1)");
     expect(detail).not.toContain("B-01 (");
-    expect(detail).toContain("No test names");
-    expect(detail).toContain("Matched tests fail for");
+    expect(detail).toContain("Legacy-only tags are ambiguous");
+    expect(detail).toContain("[behavior:#85:B-01]");
     expect(detail).toContain("3 of 4");
   });
 
-  it("B-05 reports a no-match run as an untested COMMAND failure, not a configuration error", async () => {
-    const outcome = await runAcceptanceGate(
-      {
-        absSliceDir: sliceDir(manifestBinding("B-01")),
-        plan: PLAN,
-        runner: runnerFor({ "B-01": MATCHED_NOTHING }),
-      },
-      ctx,
-    );
-    // The run emitted a document, so this is evidence about the tree: the
-    // generator can fix it by naming the id in a test.
-    expect(outcome).toMatchObject({ status: "FAIL", failureKind: "COMMAND" });
-    expect(outcome.detail).toContain("No test names B-01");
-  });
-
-  it("B-05 reports CONFIGURATION for output with no reporter document, naming the ids and matcher", async () => {
+  it("[behavior:#85:B-05] reports CONFIGURATION for an unreadable shared report", async () => {
     const outcome = await runAcceptanceGate(
       {
         absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor({
-          "B-01": MATCHED_AND_PASSED,
-          "B-02": "ERR_PNPM_NO_SCRIPT  Command \"vitest\" not found",
-        }),
+        runner: runnerFor('ERR_PNPM_NO_SCRIPT Command "vitest" not found'),
       },
       ctx,
     );
@@ -626,83 +603,95 @@ describe("runAcceptanceGate verdicts", () => {
       status: "FAIL",
       failureKind: "CONFIGURATION",
     });
+    expect(outcome.detail).toContain("B-01");
     expect(outcome.detail).toContain("B-02");
     expect(outcome.detail).toContain("vitest-json");
-    expect(outcome.detail).not.toContain("B-01");
   });
 
-  it("B-05 reports CONFIGURATION for an unsupported matcher, naming the ids and matcher", async () => {
-    const outcome = await runAcceptanceGate(
+  it("[behavior:#85:B-05] fails closed for unsupported matcher, missing plan, or missing issue identity", async () => {
+    const absSliceDir = sliceDir(manifestBinding("B-01"));
+    const unsupported = await runAcceptanceGate(
       {
-        absSliceDir: sliceDir(manifestBinding("B-01")),
+        absSliceDir,
+        issueNumber: ISSUE_NUMBER,
         plan: { ...PLAN, matcher: "jest-json" as never },
-        runner: runnerFor({ "B-01": MATCHED_AND_PASSED }),
+        runner: runnerFor(report(qualified("B-01"))),
       },
       ctx,
     );
-    expect(outcome).toMatchObject({
+    expect(unsupported.detail).toContain("jest-json");
+
+    const noPlan = await runAcceptanceGate(
+      { absSliceDir, issueNumber: ISSUE_NUMBER, plan: null },
+      ctx,
+    );
+    expect(noPlan).toMatchObject({
       status: "FAIL",
       failureKind: "CONFIGURATION",
     });
-    expect(outcome.detail).toContain("jest-json");
-    expect(outcome.detail).toContain("B-01");
-  });
 
-  it("B-05 reports CONFIGURATION when behaviors are bound but no plan resolved", async () => {
-    const outcome = await runAcceptanceGate(
+    const noIssue = await runAcceptanceGate(
       {
-        absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
-        plan: null,
+        absSliceDir,
+        plan: PLAN,
+        runner: runnerFor(report(qualified("B-01"))),
       },
       ctx,
     );
-    // A silent PASS here would be the hole this gate exists to close.
-    expect(outcome).toMatchObject({
+    expect(noIssue).toMatchObject({
       status: "FAIL",
       failureKind: "CONFIGURATION",
     });
-    expect(outcome.detail).toContain("B-01");
-    expect(outcome.detail).toContain("B-02");
+    expect(noIssue.detail).toContain("GitHub issue number");
   });
 
-  it("B-05 throws on an unreadable manifest, which runGates records as INFRASTRUCTURE", async () => {
+  it("[behavior:#85:B-05] throws on an unreadable manifest and passes one binding nothing", async () => {
     await expect(
       runAcceptanceGate(
-        { absSliceDir: sliceDir("{ not json"), plan: PLAN },
+        {
+          absSliceDir: sliceDir("{ not json"),
+          issueNumber: ISSUE_NUMBER,
+          plan: PLAN,
+        },
         ctx,
       ),
     ).rejects.toThrow();
     await expect(
-      runAcceptanceGate({ absSliceDir: sliceDir(null), plan: PLAN }, ctx),
+      runAcceptanceGate(
+        {
+          absSliceDir: sliceDir(null),
+          issueNumber: ISSUE_NUMBER,
+          plan: PLAN,
+        },
+        ctx,
+      ),
     ).rejects.toThrow();
-  });
 
-  it("B-05 passes a manifest binding nothing, saying so", async () => {
     const outcome = await runAcceptanceGate(
       {
         absSliceDir: sliceDir({
           ...manifestBinding("B-01"),
           behaviors: [behavior("B-01", ["tests"])],
         }),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
       },
       ctx,
     );
-    // PASS and not SKIPPED: a required SKIPPED would block evaluation.
     expect(outcome).toMatchObject({ status: "PASS", failureKind: null });
-    expect(outcome.detail).toContain(ACCEPTANCE_GATE_ID);
   });
 
-  it("B-05 finds the reporter document on the last line, behind package-manager noise", async () => {
+  it("[behavior:#85:B-05] finds the shared reporter document behind package-manager noise", async () => {
+    const document = report(qualified("B-01"), qualified("B-02"));
     const outcome = await runAcceptanceGate(
       {
         absSliceDir: sliceDir(manifestBinding("B-01", "B-02")),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor({
-          // Merged stdout/stderr: a progress line, and an unterminated stderr
-          // write prefixing the JSON line.
-          "B-01": `> vitest run\n{"not":"a document"}\n${JSON.stringify(MATCHED_AND_PASSED)}`,
-          "B-02": `stderr noise ${JSON.stringify(MATCHED_AND_PASSED)}`,
+        runner: async () => ({
+          output:
+            `> vitest run\n{"not":"a document"}\n` +
+            `stderr noise ${JSON.stringify(document)}`,
         }),
       },
       ctx,
@@ -710,37 +699,37 @@ describe("runAcceptanceGate verdicts", () => {
     expect(outcome.status).toBe("PASS");
   });
 
-  it("B-06 reports one record per behavior as each run settles", async () => {
+  it("[behavior:#85:B-06] reports one record per behavior from the one execution", async () => {
     const records: BehaviorCoverageRecord[] = [];
+    let invocations = 0;
     await runAcceptanceGate(
       {
         absSliceDir: sliceDir(manifestBinding("B-01", "B-02", "B-03")),
+        issueNumber: ISSUE_NUMBER,
         plan: PLAN,
-        runner: runnerFor({
-          "B-01": MATCHED_AND_PASSED,
-          "B-02": MATCHED_NOTHING,
-          "B-03": "no document",
-        }),
+        runner: async () => {
+          invocations += 1;
+          return {
+            output: JSON.stringify(
+              report(qualified("B-01"), qualified("B-03", "failed")),
+            ),
+          };
+        },
         onBehaviorResult: (record) => records.push(record),
       },
       ctx,
     );
+    expect(invocations).toBe(1);
     expect(records).toEqual([
       { behaviorId: "B-01", status: "covered", matched: 1, passed: 1, failed: 0 },
       { behaviorId: "B-02", status: "untested", matched: 0, passed: 0, failed: 0 },
-      {
-        behaviorId: "B-03",
-        status: "unparsable",
-        matched: 0,
-        passed: 0,
-        failed: 0,
-      },
+      { behaviorId: "B-03", status: "failed", matched: 1, passed: 0, failed: 1 },
     ]);
   });
 });
 
 describe("this repository as the gate's own project", () => {
-  it("B-07 resolves a plan whose command is the declared runner", () => {
+  it("[behavior:#85:B-07] resolves a plan whose command is the declared runner", () => {
     const plan = resolveAcceptancePlan(REPO_ROOT)!;
     expect(plan.matcher).toBe("vitest-json");
     expect(plan.args.some((arg) => arg.includes(BEHAVIOR_ID_TOKEN))).toBe(true);
