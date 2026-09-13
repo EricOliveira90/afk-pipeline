@@ -7157,9 +7157,21 @@ export async function runSliceExecute(
               },
             },
           );
-          // Read back out of the run state, never counted in memory: that is
-          // what makes the bound hold across processes (#87 B-14).
-          const cleaner = await dispatchCleanerStage({
+          /**
+           * The cleaner stage's standing result, across every dispatch it gets.
+           *
+           * `let` rather than `const` because a restore re-dispatch (#97 B-03)
+           * is the *same* stage running another round, not a second stage: the
+           * tree it leaves behind is the cleaner's output from then on, and a
+           * reader that kept the first dispatch's trees would ask the next
+           * restore of whichever stage the stale numbers happened to name — the
+           * defect QA-01 found from the second restore onward.
+           *
+           * `roundsAlreadySpent` for the first dispatch is read back out of the
+           * run state, never counted in memory: that is what makes the bound
+           * hold across processes (#87 B-14).
+           */
+          let cleaner = await dispatchCleanerStage({
             roundsAlreadySpent: cleanerRoundsSpent(resumableCleanerStage),
           });
           if (cleaner.outcome === "ESCALATED" && cleaner.escalation) {
@@ -7246,11 +7258,18 @@ export async function runSliceExecute(
            * output when it committed one, and otherwise the accepted tree. It is
            * the "before" a restore is decided against — a tree the writing stage
            * left byte-identical is a stage that wrote nothing to restore from.
+           *
+           * A function, read at each use rather than captured once, because a
+           * restore re-dispatch moves the cleaner's output tree: the "before"
+           * for the next attempt's restore decision is the tree that dispatch
+           * left, and a snapshot taken before the first attempt would make every
+           * later attempt compare the graded tree against a tree no stage was
+           * handed (QA-01).
            */
-          const stageInputTreeId =
-            cleaner.ran && cleaner.outputTreeId !== cleaner.inputTreeId
-              ? cleaner.outputTreeId
-              : acceptedTreeId;
+          const cleanerWrote = (): boolean =>
+            cleaner.ran && cleaner.outputTreeId !== cleaner.inputTreeId;
+          const stageInputTreeId = (): string =>
+            cleanerWrote() ? cleaner.outputTreeId : acceptedTreeId;
           writingStage({
             worktreeDir: ctx.worktreeDir,
             stageId: POST_APPROVAL_WRITING_STAGE_ID,
@@ -7598,29 +7617,34 @@ export async function runSliceExecute(
                        * The writing stage's span may legitimately be empty — the
                        * production stage is a no-op — and an empty span is still
                        * the truthful attribution of an empty change.
+                       *
+                       * Tiled from `cleanerWrote()` / `stageInputTreeId()`, the
+                       * same two readings `buildWritingStageIds` is given below,
+                       * so a restore re-dispatch moves the seam here and the
+                       * route together: attributing this attempt's bytes to the
+                       * cleaner while routing its restore at the stub is the
+                       * disagreement B-02 exists to make impossible (QA-01).
                        */
-                      stages:
-                        cleaner.ran &&
-                        cleaner.outputTreeId !== cleaner.inputTreeId
-                          ? [
-                              {
-                                stageId: CLEANER_STAGE_ID,
-                                fromRef: persistedBaseline!.treeId,
-                                toRef: cleaner.outputTreeId,
-                              },
-                              {
-                                stageId: POST_APPROVAL_WRITING_STAGE_ID,
-                                fromRef: cleaner.outputTreeId,
-                                toRef: currentFinalTreeId,
-                              },
-                            ]
-                          : [
-                              {
-                                stageId: POST_APPROVAL_WRITING_STAGE_ID,
-                                fromRef: persistedBaseline!.treeId,
-                                toRef: currentFinalTreeId,
-                              },
-                            ],
+                      stages: cleanerWrote()
+                        ? [
+                            {
+                              stageId: CLEANER_STAGE_ID,
+                              fromRef: persistedBaseline!.treeId,
+                              toRef: stageInputTreeId(),
+                            },
+                            {
+                              stageId: POST_APPROVAL_WRITING_STAGE_ID,
+                              fromRef: stageInputTreeId(),
+                              toRef: currentFinalTreeId,
+                            },
+                          ]
+                        : [
+                            {
+                              stageId: POST_APPROVAL_WRITING_STAGE_ID,
+                              fromRef: persistedBaseline!.treeId,
+                              toRef: currentFinalTreeId,
+                            },
+                          ],
                     }).path,
                   ).replace(/\\/g, "/")
                 : "not generated — no approved baseline is cited for this slice";
@@ -7712,9 +7736,17 @@ export async function runSliceExecute(
                * loop and so emits none — which is the point: the absence of an
                * event is what "the approval was reused" costs.
                *
-               * Input and output are the same tree because an evaluation reads;
-               * a restore's write shows up as the *next* attempt's input.
+               * `inputTreeId` is the tree the attempt was *measured against* —
+               * the approved baseline it cites — and `outputTreeId` is the tree
+               * it graded. The pair is what makes the event answer "what changed
+               * between the approval and the thing about to merge?", which is
+               * the tree-identity fact PRD D11 asks this family for; two copies
+               * of the graded tree answer nothing (QA-02). With no baseline
+               * cited, the accepted tree is the only "before" this run has.
                */
+              const attemptInputTreeId = citesBaseline
+                ? persistedBaseline!.treeId
+                : acceptedTreeId;
               const emitFinalAttemptEvent = (outcome: string): void => {
                 const endedAt = Date.now();
                 logger.event(
@@ -7725,7 +7757,7 @@ export async function runSliceExecute(
                     stage: "final-evaluation",
                     stageRound: finalAttempt,
                     attempt: finalAttempt,
-                    inputTreeId: currentFinalTreeId,
+                    inputTreeId: attemptInputTreeId,
                     outputTreeId: currentFinalTreeId,
                     gateIds: [SCOPE_GATE_ID],
                     outcome,
@@ -7903,7 +7935,7 @@ export async function runSliceExecute(
                         outputTreeId: cleaner.outputTreeId,
                       }
                     : null,
-                  stageInputTreeId,
+                  stageInputTreeId: stageInputTreeId(),
                   finalTreeId: currentFinalTreeId,
                 });
                 const routes = reviewValidation.review.findings.map(
@@ -8039,10 +8071,52 @@ export async function runSliceExecute(
                     );
                     continue;
                   }
-                  await dispatchCleanerStage({
+                  /**
+                   * The attempt's own review artifacts go before the round does.
+                   *
+                   * They are already archived per attempt, and the next loop
+                   * iteration removes them anyway — but the restore round runs
+                   * *before* that iteration, so leaving them loose would fold
+                   * the evaluator's own bytes into the round's checkpoint: the
+                   * round would be gated for writing `final-review.json`
+                   * (a reverted round, one of three, spent on nothing) and its
+                   * reported input tree would name a tree neither the evaluator
+                   * nor any round ever read.
+                   */
+                  rmSync(finalReviewPath, { force: true });
+                  rmSync(finalReportPath, { force: true });
+                  const restored = await dispatchCleanerStage({
                     roundsAlreadySpent: cleaner.roundsSpent,
                     repair: { findings: restoreFindings },
                   });
+                  /**
+                   * The re-dispatch's result replaces the standing one, because
+                   * it is the same stage's newer state (#97 B-02/B-12).
+                   *
+                   * Three fields are merged rather than taken, and each for its
+                   * own reason:
+                   *
+                   * - `inputTreeId` stays the *first* dispatch's, which is the
+                   *   accepted tree. `outputTreeId !== inputTreeId` is the one
+                   *   "did the cleaner write?" predicate the route and the
+                   *   change-summary attribution both read, and the question is
+                   *   whether the cleaner's range differs from the tree the
+                   *   approval was given on — not whether this last round did.
+                   * - `ran` is sticky: a re-dispatch that returned without
+                   *   running cannot un-run the rounds already on record.
+                   * - `roundsSpent` never decreases, so no re-dispatch can hand
+                   *   the next restore a larger budget than this one had
+                   *   (ADR 0050).
+                   */
+                  cleaner = {
+                    ...restored,
+                    ran: cleaner.ran || restored.ran,
+                    inputTreeId: cleaner.inputTreeId,
+                    roundsSpent: Math.max(
+                      cleaner.roundsSpent,
+                      restored.roundsSpent,
+                    ),
+                  };
                   continue;
                 }
                 writingStage({

@@ -1603,6 +1603,14 @@ describe("final evaluation and reuse", () => {
       outputTreeId: fixture.finalCalls[0]!.finalTreeId,
     });
     expect(finalAttempts[0]!.gateIds).toContain("scope");
+    // Both tree slots, because the pair is the fact: the attempt was measured
+    // against the baseline it cites and graded the tree the cleaner left. Two
+    // copies of the graded tree would answer neither question, and asserting
+    // `outputTreeId` alone is what let that deviation stay invisible.
+    expect(finalAttempts[0]!.inputTreeId).toBe(view!.baselineTreeId);
+    expect(finalAttempts[0]!.inputTreeId).not.toBe(
+      finalAttempts[0]!.outputTreeId,
+    );
 
     // B-10: the rows render from those events under #274's header lines. The
     // header event is a run-level record (`src/orchestrator.ts:8597`), emitted
@@ -1778,5 +1786,153 @@ describe("final evaluation and reuse", () => {
       archived.map((file) => file.name),
       "the archived round log, found anywhere under the run's slice artifacts",
     ).toEqual(["cleaner-log-r1-a3.log"]);
+  });
+
+  it("[behavior:#97:B-02] [behavior:#97:B-03] [behavior:#97:B-07] [behavior:#97:B-12] routes a second restore to the cleaner too, and chains each restore round onto the tree it started from", async () => {
+    // S4. An `it` on the same fixture, not a fifth spawn.
+    //
+    // The first restore is the case S3 covers from the refusal side; this one
+    // covers the case that comes *after* a re-dispatch actually ran, which is
+    // where the stage's standing result stops being the one the first dispatch
+    // returned. Two consecutive `RESTORE` verdicts with the cleaner as the only
+    // stage that writes: both must reach the cleaner, and neither may reach the
+    // no-op stub, whose whole defect #97 exists to remove.
+    let repoDir = "";
+    /** The change summary as it stood for each attempt, read before its dispatch. */
+    const summaries: {
+      attempt: number;
+      stageOrder: string[];
+      byStage: Record<string, string[]>;
+    }[] = [];
+    const fixture = finalEvaluationFixture({
+      clean: cleanPolicyMember,
+      stageWrites: false,
+      onCleaner: (call) => {
+        // Distinct content per round, so every round genuinely moves the tree
+        // and the chain the assertions walk has three real links. The marker
+        // stays, so the clean gate is green and the round passes.
+        writeFileSync(
+          join(call.worktreeDir, "README.md"),
+          `fixture, ${CLEAN_MARKER}, restore ${call.call}\n`,
+          "utf-8",
+        );
+      },
+      onFinalCall: ({ attempt }) => {
+        const path = join(
+          repoDir,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "final-change-summary.json",
+        );
+        if (!existsSync(path)) return;
+        const parsed = JSON.parse(readFileSync(path, "utf-8")) as {
+          stageOrder: string[];
+          byStage: Record<string, { files: { path: string }[] }>;
+        };
+        summaries.push({
+          attempt,
+          stageOrder: parsed.stageOrder,
+          byStage: Object.fromEntries(
+            Object.entries(parsed.byStage).map(([stageId, span]) => [
+              stageId,
+              span.files.map((file) => file.path),
+            ]),
+          ),
+        });
+      },
+      review: (call) =>
+        call.attempt <= 2
+          ? {
+              version: 1,
+              verdict: "FAIL",
+              baselineTreeId: call.baselineTreeId,
+              finalTreeId: call.finalTreeId,
+              findings: [
+                {
+                  id: `FE-0${call.attempt}`,
+                  class: "PRESERVATION",
+                  summary: "the cleaner dropped behavior the approval had",
+                  evidence: "README.md lost a line the baseline carried",
+                  expected: "the approved README.md content survives",
+                  observed: "the cleaner's round rewrote it away",
+                  repair: "RESTORE",
+                },
+              ],
+            }
+          : passingReview(call),
+    });
+    repoDir = fixture.repo;
+
+    const result = await runSliceExecute(fixture.ctx);
+
+    expect(result.phase).toBe("PASS");
+    // B-03: three cleaner rounds for one round-1 dispatch plus two restores,
+    // all inside the one budget of three.
+    expect(MAX_CLEANER_ROUNDS).toBe(3);
+    expect(fixture.cleanerPrompts).toHaveLength(3);
+    expect(fixture.finalCalls).toHaveLength(3);
+    // B-02: the stub is called exactly once — for the stage itself — and never
+    // with a repair. A `repair: "RESTORE"` here would be the second restore
+    // handed to a stage that writes nothing.
+    expect(fixture.stageCalls).toEqual([
+      {
+        worktreeDir: fixture.worktree,
+        stageId: POST_APPROVAL_WRITING_STAGE_ID,
+      },
+    ]);
+    // B-05: both restores were rendered as restore rounds, naming their finding.
+    expect(fixture.cleanerPrompts[1]).toContain("FE-01");
+    expect(fixture.cleanerPrompts[2]).toContain("FE-02");
+
+    const attempts = attemptEvents(fixture.ctx.logger.runDir);
+    const cleanerAttempts = attempts.filter(
+      (event) => event.stage === CLEANER_STAGE_ID,
+    );
+    expect(
+      cleanerAttempts.map((event) => [event.stageRound, event.outcome]),
+    ).toEqual([
+      [1, "PASS"],
+      [2, "PASS"],
+      [3, "PASS"],
+    ]);
+    // B-07: each restore round names the tree it actually started from — the
+    // previous round's output — so the per-round tree chain can be walked. A
+    // round that re-reported the pre-cleaner accepted tree would claim to have
+    // read a tree no round of it ever saw.
+    expect(cleanerAttempts[1]!.inputTreeId).toBe(
+      cleanerAttempts[0]!.outputTreeId,
+    );
+    expect(cleanerAttempts[2]!.inputTreeId).toBe(
+      cleanerAttempts[1]!.outputTreeId,
+    );
+    // Each round is measured as a tree change, which is what makes the chain
+    // above three links rather than one repeated id.
+    for (const attempt of cleanerAttempts) {
+      expect(attempt.outputTreeId).not.toBe(attempt.inputTreeId);
+    }
+    // Every final-evaluation attempt grades the tree the newest cleaner round
+    // left, and cites the one baseline throughout.
+    const finalAttempts = attempts.filter(
+      (event) => event.stage === "final-evaluation",
+    );
+    expect(finalAttempts.map((event) => event.outputTreeId)).toEqual(
+      cleanerAttempts.map((event) => event.outputTreeId),
+    );
+
+    // B-12: the change summary for the attempt *after* a restore round still
+    // attributes the cleaner's paths to the cleaner, with the no-op stub's span
+    // truthfully empty. Attributing them to the stub is the other half of the
+    // same stale-reading defect.
+    expect(summaries.map((entry) => entry.attempt)).toEqual([1, 2, 3]);
+    for (const entry of summaries) {
+      expect(entry.stageOrder).toEqual([
+        CLEANER_STAGE_ID,
+        POST_APPROVAL_WRITING_STAGE_ID,
+      ]);
+      expect(entry.byStage[CLEANER_STAGE_ID]).toContain("README.md");
+      expect(entry.byStage[POST_APPROVAL_WRITING_STAGE_ID]).toEqual([]);
+    }
   });
 });
