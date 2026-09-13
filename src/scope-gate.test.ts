@@ -165,6 +165,22 @@ describe("scope gate against a real candidate worktree", () => {
     );
   });
 
+  it("[behavior:#87:B-11] keeps the accepted pair unwaivable under a broad additionalWriteScope", () => {
+    const outcome = runScopeGate({
+      source: { kind: "candidate", worktreeDir: repoDir, featureRef: "main" },
+      absSliceDir: join(repoDir, ...REL_SLICE_DIR.split("/")),
+      sliceArtifactDir: REL_SLICE_DIR,
+      acceptedPairIntact: false,
+      additionalWriteScope: ["**"],
+    });
+
+    expect(outcome.status).toBe("FAIL");
+    expect(outcome.findings?.outOfScopePaths).toEqual([
+      `${REL_SLICE_DIR}/acceptance-manifest.json`,
+      `${REL_SLICE_DIR}/contract.md`,
+    ]);
+  });
+
   it("B-07: compares against the manifest bytes on disk at gate time, not at declaration time", async () => {
     const declaration = scopeGateDeclaration({
       source: { kind: "candidate", worktreeDir: repoDir, featureRef: "main" },
