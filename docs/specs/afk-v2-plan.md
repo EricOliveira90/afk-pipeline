@@ -1,9 +1,9 @@
 # AFK v2 — the single plan
 
 One document: where the work stands, the seven PRDs in dependency order
-(plus the post-plan PRDs 8–10 registered in §2b and their operator work in
-§2c), the agreed hardening set from the plan debate, and a sequencing that
-pays the next runs first.
+(plus the post-plan PRDs 8–12 registered in §2b, their operator work in
+§2c, and the current run-derived backlog in §2d), the agreed hardening set
+from the plan debate, and a sequencing that pays the next runs first.
 
 Three companion documents, each authoritative for its own scope:
 
@@ -67,6 +67,24 @@ truth-on-exit gaps.
 All six are one class: **the pipeline records or classifies something that
 misleads the next actor.**
 
+### Current delivery snapshot (2026-09-13)
+
+- **Test-timing Wave A is complete on `main`.** The QA-orchestration split,
+  six-worker fast suite, and opt-in git-process measurement landed in
+  `8b129c4`, `4124297`, and `e85e338`. The quiet-host full-suite measurement
+  is 1022.1 seconds (17m02s, 2560 tests), recorded under
+  `_measured2026_09_13_wave_a@main`. This is PRD 12's first delivered wave,
+  not pending implementation.
+- **PRD 5 is still implementing.** Draft PR #297 is the active integration
+  surface. Its open guardian notes #290–#296 stay with that branch until the
+  run finishes; they are not seven new parallel projects.
+- **PRD 7's three implementation slices are complete.** #262–#264 merged
+  through PR #287. Parent #152 remains open for explicit maintainer
+  acceptance, while #284 and #286 are non-blocking follow-ups.
+- **Preserve-work renegotiation is already PRD 9.** #276–#278 and draft
+  PR #282 reserve that number. The later self-audit and mutation PRDs move
+  to 10 and 11 below.
+
 ---
 
 ## 2. The seven PRDs, in dependency order — with the agreed deferrals
@@ -77,9 +95,9 @@ misleads the next actor.**
 | 2 (#70) | Routing and adjudication | 1 | #80, #81, #82, #89, #129 (AFK) + #94 (manual courier follow-up after #89) | carries `afk adopt` (§3 item 10, ticket #129); **defer story 14** (babysit-skill packaging; #94 rescoped to courier-only, manual) |
 | 3 (#71) | Context envelopes and prompts v2 | 1 | #83, #90, #95, #99 | carries the candidate-evaluator manifest entry (§3 item 5), the ADR-index envelope entry, the `ARCHITECTURE.md` envelope entry, and the §3c escalation-criteria prompt text; **defer story 16** (live cross-provider parity matrix) with the fence: envelope *assembly* and stub-provider parity stay provider-agnostic at the interface (ADR 0002; #71 story 17's determinism requirement depends on it); the approved cheap-check → candidate-QA → full-suite sequence ships during this PRD as early #86 delivery |
 | 4 (#72) | Acceptance and scope gates | 1, 3 | #84, #85, #91, #96, #86, #132 | carries §3 items 2, 5 (artifact), 12, 15 (#132), and 17; #86 credits PRD 3's early sequence but still owns policy selection, caching, prerequisites, and advisory gates; **defer story 9** (probe-as-evidence) and **story 15** (final-evaluator code attribution — moot while cleaner/hardener are off) |
-| 5 (#73) | Quality loops | 4 | #87, #92, #97 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20 |
+| 5 (#73) | Quality loops | 4 | #87, #97, #274 | cleaner + hardener **default off** until story 17 ROI evidence (§3 item 8); #274 is the tail split from #87; **defer stories 9–15 and 19** (all hardener/mutation machinery), keeping 3/4/5/16/17/20; implementing in draft PR #297 |
 | 6 (#74) | Aggregate: guardians and remediator | 4 | #88, #93, #98 plus item 19 slice to ticket | under item 8 governance; final evaluator is free while cleaner/hardener are off (#72 story 13); recurring-finding proposals use the versioned learning-proposal schema, which lands by hand on `main` (`afk-v2-plan-debate.md` §7, R1) and is AFK-canonical, consumed by rumo-app #809 |
-| 7 (#152) | Agent-behavior eval harness | 4 | slices to ticket after PRD 4 | carries §3 item 18: report-only `afk eval`, versioned scenario packs, one case kind (`prompt-plus-expected-verdict`, every case citing a `source`; count = what the sources yield), and consumer-owned packs |
+| 7 (#152) | Agent-behavior eval harness | 4 | #262–#264 | carries §3 item 18: report-only `afk eval`, versioned scenario packs, one case kind (`prompt-plus-expected-verdict`, every case citing a `source`; count = what the sources yield), and consumer-owned packs; implementation merged via PR #287, parent remains open for explicit acceptance |
 
 The dependency logic: PRD 1 makes control-plane facts
 machine-readable; PRD 3 shapes what each role receives before PRD 4 adds
@@ -89,7 +107,8 @@ serialize, because PRD 3's tickets consume PRD 2 outputs (#83 assumes
 PRDs 1–2 landed; #71 names PRD 2's escalation instruction and computed
 unresolved sets as inputs) and the two PRDs overlap maximally on prompts
 and orchestrator files, so a concurrent launch fails §3c policy 5's
-overlap condition. After PRD 4, **PRD 5 and PRD 7** may run concurrently.
+overlap condition. After PRD 4, **PRD 5 and PRD 7** could run concurrently;
+PRD 7 is now merged while PRD 5 remains active.
 PRD 6 is the final implementation run; it no longer waits on PRD 7, because
 the learning-proposal schema item 19 consumes lands by hand on `main`
 (§2 PRD 6 row).
@@ -102,11 +121,13 @@ off; recorded evidence — not argument — decides escalation or deletion.
 
 | PRD | Theme | Depends on | Slices | Status and notes |
 |---|---|---|---|---|
-| 8 (#271) | Generator required-input budget | #270 (pair-by-reference fix) | #273 | Replaces the generator's 65,536-byte inline-only limit with a 98,304-byte required-input budget (inline prompt + required worktree reads). Motivated by PRD 5 slice #87's dispatch failure. Spec'd and ticketed; prep not yet committed. Source: `.kiro/specs/generator-required-input-budget/intent.md`. |
-| 9 (#298) | Generator self-audit gate | none beyond current `main` | #299–#301 | Port of SwarmForge's two-call audit gate (R. C. Martin): one bounded post-generation audit invocation between the candidate gate phase and QA dispatch; verdict is exact git tree identity, never agent-certified (`AUDIT_UNCHANGED` / `AUDIT_CHANGED` / `AUDIT_NOT_RUN`); consumes no generator round; the changed-rate reports and never gates. `--self-audit`, default off. **Prepared 2026-09-13:** branch `prd/generator-self-audit-gate` (37950f4), tickets linted, dry-run verified (wave 1: #299; wave 2: #300 + #301). Source: `.kiro/specs/generator-self-audit-gate/intent.md`. |
-| 10 (#302) | Mutation survivor report | none beyond current `main` | #303–#304 | Report-only ship-gate mutation step behind `--mutation-report`: project-declared command + mutation-testing-elements JSON schema, differential scope from the change-summary builder, concurrent with guardians, flat 30-min bound, `MUTATION_REPORTED` / `MUTATION_NOT_RUN`, never blocks a ship. Survivors land in run-summary.md and the draft PR body, split new/pre-existing against a committed baseline, with adjudicated survivors marked accepted. This is the ROI instrument for the PRD 5 cleaner/hardener decision (item 8) without building the role. **Prepared 2026-09-13:** branch `prd/mutation-survivor-report` (7ed91d9), tickets linted, dry-run verified (wave 1: #303; wave 2: #304). Source: `.kiro/specs/mutation-survivor-report/intent.md`. |
+| 8 (#271) | Generator required-input budget | #270 (merged) | #273 | Replaces the generator's 65,536-byte inline-only limit with a 98,304-byte required-input budget (inline prompt + required worktree reads). Motivated by PRD 5 slice #87's dispatch failure. Spec'd and ticketed; dependency satisfied. Source: `.kiro/specs/generator-required-input-budget/intent.md`. |
+| 9 (#276) | Preserve-work contract renegotiation | current `main` | #277–#278 | Adds a supported, crash-recoverable path to reopen a stale locked contract without discarding landed slice commits, plus atomic additive scope extension for a spec-level re-slice. Prepared in draft PR #282; run after PRD 5, whose recovery exposed both missing paths. |
+| 10 (#298) | Generator self-audit gate | none beyond current `main` | #299–#301 | Port of SwarmForge's two-call audit gate (R. C. Martin): one bounded post-generation audit invocation between the candidate gate phase and QA dispatch; verdict is exact git tree identity, never agent-certified (`AUDIT_UNCHANGED` / `AUDIT_CHANGED` / `AUDIT_NOT_RUN`); consumes no generator round; the changed-rate reports and never gates. `--self-audit`, default off. **Prepared 2026-09-13:** branch `prd/generator-self-audit-gate` (37950f4), tickets linted, dry-run verified (wave 1: #299; wave 2: #300 + #301). Source: `.kiro/specs/generator-self-audit-gate/intent.md`. |
+| 11 (#302) | Mutation survivor report | none beyond current `main` | #303–#304 | Report-only ship-gate mutation step behind `--mutation-report`: project-declared command + mutation-testing-elements JSON schema, differential scope from the change-summary builder, concurrent with guardians, flat 30-min bound, `MUTATION_REPORTED` / `MUTATION_NOT_RUN`, never blocks a ship. Survivors land in run-summary.md and the draft PR body, split new/pre-existing against a committed baseline, with adjudicated survivors marked accepted. This is the ROI instrument for the PRD 5 cleaner/hardener decision (item 8) without building the role. **Prepared 2026-09-13:** branch `prd/mutation-survivor-report` (7ed91d9), tickets linted, dry-run verified (wave 1: #303; wave 2: #304). Source: `.kiro/specs/mutation-survivor-report/intent.md`. |
+| 12 (parent to ticket) | Test-suite timing reduction | none; measurement-led | Wave A complete; later slices to ticket only from evidence | Wave A is on `main`: split the heaviest QA suite, run the fast suite with six workers, and make git-process counting opt-in. The quiet-host full suite fell to 1022.1 seconds from the roughly 1612-second planning baseline. Next work absorbs #239 (host-load sampling) and starts with process-listing seams and fixture hygiene; structural consolidation is ticketed only when a fresh profile names it. Budgets are not raised to make this PRD green. |
 
-PRDs 9 and 10 are independent of each other and of PRDs 5–7's remaining
+PRDs 10 and 11 are independent of each other and of PRDs 5–7's remaining
 work; they launch as serial self-runs in either order (§3c policy 5's
 one-clone-per-run condition is moot for self-runs, which stay strictly
 serial) once the in-flight PRD 5 gauntlet run finishes. Provenance for
@@ -115,7 +136,12 @@ both: the 2026-09-13 SwarmForge analysis — the port keeps the mechanisms
 tests) and drops the choreography, consistent with Martin's own 2026
 retraction of heavy harness constraints.
 
-### 2c. Operator work attached to PRDs 9–10 — never AFK slices, never prompts
+PRD 9 is the run-recovery work exposed by PRD 5 and should precede another
+re-slice or stale-contract recovery. PRD 12 is different: Wave A is already
+delivered manually, and its remaining work stays manual because an AFK run
+would confound the host-sensitive timings it is trying to improve.
+
+### 2c. Operator work attached to PRDs 10–11 — never AFK slices, never prompts
 
 These actions are load-bearing for the two PRDs' value but are deliberately
 outside every contract. The principle, recorded in both intents: **the
@@ -126,14 +152,30 @@ that satisfy them; "mutant killed" is a gameable acceptance criterion.
 | # | Action | Mode | When | What it unblocks / decides |
 |---|---|---|---|---|
 | O1 | **Mutation tool adoption + cost measurement for this repo:** decide and declare the mutation command and JSON path (StrykerJS incremental is the working assumption), then time one differential run on a quiet host before trusting the ship-gate-concurrent placement. | Manual, direct session | Any time; required before `--mutation-report` is exercisable on self-runs | If measured cost blows the 30-min bound on a typical diff, the bound or the placement is revisited *with the measurement in hand* — never by raising a number under pressure (ADR 0063's lesson) |
-| O2 | **Baseline campaign, module by module:** run mutation over the load-bearing pure modules (contract-convergence, guardian-convergence, failure-cause classification, gate-runner decisions, scope gate, lane partitioning, afk-manifest validation; the PRD 9 verdict classifier once it lands) and commit the incremental baseline artifact. Explicitly not full-repo: the integration-tested orchestration hubs are excluded as cost-prohibitive and low-signal. | Manual, parallel direct sessions (kill/survive results are load-insensitive; only durations are not) | After O1; before PRD 10's attribution labels carry weight | New-vs-pre-existing survivor attribution in every subsequent report |
-| O3 | **Stage A triage sessions:** one batch session per baselined module — an agent pre-triages survivors by consequence (what observable lie would the pipeline tell?) × containment (would any downstream gate catch it?); the human ratifies top-down; every decision (KILL / ACCEPT + one-line reasoning) is recorded in the committed decisions file, schema per PRD 10's ADR. | Manual, human + agent | After O2, per module | The accepted-survivor marking in reports, and the decision corpus that Stage B autonomy is later measured against |
+| O2 | **Baseline campaign, module by module:** run mutation over the load-bearing pure modules (contract-convergence, guardian-convergence, failure-cause classification, gate-runner decisions, scope gate, lane partitioning, afk-manifest validation; the PRD 10 verdict classifier once it lands) and commit the incremental baseline artifact. Explicitly not full-repo: the integration-tested orchestration hubs are excluded as cost-prohibitive and low-signal. | Manual, parallel direct sessions (kill/survive results are load-insensitive; only durations are not) | After O1; before PRD 11's attribution labels carry weight | New-vs-pre-existing survivor attribution in every subsequent report |
+| O3 | **Stage A triage sessions:** one batch session per baselined module — an agent pre-triages survivors by consequence (what observable lie would the pipeline tell?) × containment (would any downstream gate catch it?); the human ratifies top-down; every decision (KILL / ACCEPT + one-line reasoning) is recorded in the committed decisions file, schema per PRD 11's ADR. | Manual, human + agent | After O2, per module | The accepted-survivor marking in reports, and the decision corpus that Stage B autonomy is later measured against |
 | O4 | **Critical-survivor remediation:** KILL decisions from O3 become ordinary human-reviewed tickets worked in direct sessions. Never unattended AFK — the writer of a killing test must never be its accepter. | Manual | As O3 produces them; Pareto order | Closes the proven blind spots worth closing; ACCEPT is the default when confidence is low |
 | O5 | **Stage B/C formalization:** only after the O3 corpus holds ~20–30 decisions, turn it into eval-pack cases (PRD 7 harness, `prompt-plus-expected-verdict`) and measure triage-agent agreement per category. No machinery before that threshold. | Manual, then PRD 7 tooling | Earliest after several O3 sessions | The per-category autonomy graduation in §6 |
 
 The two decision points these feed — `--self-audit` default-on and
 `--mutation-report` escalate-or-delete — are standing triggers in §6, not
 scheduled work.
+
+### 2d. Pending improvements from the PRD 5/7 self-runs
+
+This is the run-derived queue discussed on 2026-09-12/13, not a replacement
+for the full issue backlog. It records ownership so each symptom does not
+become a new PRD.
+
+| Issues | Disposition | Sequence |
+|---|---|---|
+| #275 host-wide AFK lease | Small pipeline-safety change; implement directly, not through AFK. Until it lands, keep one live AFK run per host. | After the active PRD 5 process stops; before intentionally concurrent self-runs. |
+| #276–#278 preserve-work renegotiation | PRD 9. This owns both locked-contract reopening with commits preserved and additive split-scope recovery. | First recovery PRD after PRD 5. Do not add one-off operator edits instead. |
+| #272 crash misclassification | Direct correctness fix. Preserve the native crash identity instead of reporting a candidate CONFIGURATION failure. | High priority after PRD 5; it need not interrupt a healthy active run. |
+| #239 host-load sampling and #250 timing-document closeout | Fold into PRD 12's reporting/measurement wave; neither justifies a separate PRD. | After Wave A's merged baseline, on a quiet host. |
+| #238 absent pre-ship step | Small direct reporting fix: record the configured step as skipped instead of dropping it. | After PRD 5; no separate PRD. |
+| #284 and #286 PRD 7 notes | Direct follow-ups: remove or specify the unread contract view, and reduce eval-pack/provider-decorator coupling. | After PRD 5; they do not reopen the completed PRD 7 run. |
+| #290–#296 PRD 5 guardian notes | Resolve against draft PR #297 on its feature branch. #289, the blocking restore-outcome defect, is already closed. | Triage at PRD 5 handoff; fix blockers before merge and file true non-blockers once. Do not race the active branch from parallel worktrees. |
 
 ---
 
@@ -359,13 +401,21 @@ GATE: PRD 1 closed + wave merged + tickets linted
        learning-proposal module is on main.
 ```
 
-Post-plan PRDs (§2b) slot in without gating anything above: PRDs 9 and 10
-launch as serial self-runs in either order once the in-flight PRD 5
-gauntlet run finishes — both are prepared and waiting. PRD 9's flag is
-exercisable the day it merges; PRD 10's flag is exercisable on this repo
-only after operator item O1 (declared mutation command + measured cost),
-and its attribution labels only earn weight after O2's baseline lands.
-PRD 8 waits on its own dependency (#270).
+Post-plan work (§2b–§2d) continues in this order:
+
+1. Finish PRD 5 on draft PR #297 and resolve its blocking guardian notes
+   on that branch.
+2. Land #275 before intentionally running concurrent AFK processes on one
+   host; until then, one live run per host.
+3. Run PRD 9's preserve-work recovery before another stale-contract or
+   additive re-slice incident needs a hand-built recovery.
+4. PRD 8 is unblocked because #270 is merged. PRDs 10 and 11 then launch
+   as serial self-runs in either order. PRD 10's flag is exercisable the
+   day it merges; PRD 11's flag is exercisable on this repo only after
+   operator item O1, and its attribution labels earn weight only after O2.
+5. PRD 12 Wave A is complete. Profile the merged baseline before selecting
+   Wave B; work #239 and #250 inside that measurement track, not as new
+   standalone projects. Keep #238 as a direct reporting fix.
 
 What each stage banks for the runs after it:
 
@@ -433,7 +483,9 @@ The rule of thumb the debate converged on:
 | ADRs (classifier, loaded-in-chain budget, ADR 0012 amendment), the `AGENTS.md` correction, and the learning-proposal schema module (§2 PRD 6 row) | **Manual** | Documents and one validator smaller than a round's overhead. Zero benefit from the pipeline. |
 | Hand-finishing stuck slices (until item 10 exists) | **Manual, documented procedure** | Verify with the full suite, merge, then edit state — and prefer waiting for `afk adopt` over fresh JSON surgery on `isSliceComplete` (`run-state.ts:416`). |
 | PRDs 2–7 | **AFK** | Multi-slice, contract-sized feature work where negotiation, lock validation, and gate evidence earn their cost. |
-| PRDs 8–10 (§2b) | **AFK** | Same rule — and PRDs 9–10 are additionally the dogfood experiments for their own report-only instruments: the runs that deliver them produce the first evidence their §6 triggers consume. |
+| PRDs 8–11 (§2b) | **AFK** | Same rule. PRD 9 exercises the recovery path it adds; PRDs 10–11 are additionally the dogfood experiments for their own report-only instruments, so their delivery runs produce the first evidence their §6 triggers consume. |
+| PRD 12 test-suite timing reduction | **Manual**, measured waves | The suite and host are the instrument. Running the optimization through AFK would add the load being measured and make failures depend on the pipeline under repair. Wave A is complete; later waves start only from a quiet-host profile. |
+| Run-derived direct fixes (#272, #275, #284, #286) | **Manual**, isolated worktrees | Each is a focused pipeline-safety or maintainability change smaller than a contract round. They should not depend on AFK to repair AFK, and they must not race the active PRD 5 branch. |
 | Mutation operator work O1–O4 (§2c): tool adoption + cost measurement, baseline campaign, Stage A triage sessions, survivor remediation | **Manual** | The instrument must not be built by the process it measures. Mutation results judge the pipeline's tests, so the pipeline must not generate the tests that satisfy them; "mutant killed" is a gameable criterion, so remediation is never unattended; and the cost measurement is host-sensitive work in ADR 0063's class. |
 | PRD-embedded hardening (items 2, 5, 10, 12, 13, provenance story 1) | **AFK**, as slices of their PRDs | Each is genuine feature work inside a PRD's contract, not pipeline first-aid; splitting them out would re-create the double-counting the debate removed. |
 | Guardian policy (item 20) and provider environment filtering (item 21) | **Manual, between PRDs 3 and 4** | Both changes are small. The guardian change must use PRD 3's measured evidence, and the environment change is security work that should not depend on the pipeline it constrains. Item 21 is sequenced after PRD 3 only to avoid concurrent edits to the provider dispatch files (`src/claude.ts`, `src/codex.ts`, `src/kiro.ts`) while PRD 3's run is live; nothing in it consumes PRD 3's output. |
@@ -489,23 +541,27 @@ What remains is not open questions but **standing triggers**:
   ADR 0016 action-space-reduction pattern — over hooks, and start
   deterministic deny-only: no `ask`, no LLM-evaluated policy, no stop
   loops, no per-edit test runs.
-- **PRD 5 and PRD 7** may run concurrently under §3c policy 5 after
-  PRD 4 merges. PRD 6 launches after PRD 4 merges and the hand-landed
-  learning-proposal module is on `main`; it does not wait on PRD 7.
+- **PRD 7 is complete; PRD 5 remains active.** PRD 6 launches after PRD 4
+  merges and the hand-landed learning-proposal module is on `main`; it
+  does not wait on PRD 7.
 - **Agent-eval merge gating** stays rejected. Re-open it only after
   repeated evidence shows stable results with an agreed false-positive rate.
-- **`--self-audit` default-on (PRD 9)** is decided by the recorded
+- **`--self-audit` default-on (PRD 10)** is decided by the recorded
   `AUDIT_CHANGED` rate against the added invocation cost across opted-in
   runs, not by argument. The trigger is falsifiable in both directions: a
   near-zero changed-rate over several opted-in runs deletes the gate; a
   material rate at acceptable cost defaults it on and retires the
   prompt-prose self-audit section it supersedes.
-- **`--mutation-report` escalation (PRD 10)** — anything beyond a report —
+- **`--mutation-report` escalation (PRD 11)** — anything beyond a report —
   requires recorded evidence that new-in-run survivors pointed at real
   defects caught at the draft PR; absent that across several opted-in
   runs, delete the flag. A blocking mutation gate, any kill-rate or score
   threshold, and mutation in the generator's verification command stay
-  refused, with the killing arguments recorded in PRD 10's ADR.
+  refused, with the killing arguments recorded in PRD 11's ADR.
+- **PRD 12 structural work** re-opens one item at a time from a quiet-host
+  profile. A timing regression does not authorize raising
+  `suite-budgets.json`; first move the assertion toward a unit test or an
+  existing spawned fixture, then remeasure.
 - **Automated survivor-killing** stays refused outright: the writer of a
   killing test must never be its accepter. Triage autonomy (Stage B/C) is
   earned per category via eval-pack agreement with the recorded Stage A
