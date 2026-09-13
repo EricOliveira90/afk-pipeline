@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "round": 3,
+  "responses": [
+    {
+      "findingId": "F-08",
+      "position": "CONDITION_MET",
+      "evidence": "B-28's then now reads \"the pack is refused with an error naming that unknown member, and eval-packs/fixtures/refused/ contains no other file, since every other refusing pack of B-02–B-07 lives in a per-test temporary directory; the listing is bounded to the directory this slice owns rather than to all of eval-packs/, so the sibling packs #263 adds under eval-packs/afk/ and eval-packs/fixtures/consumer-governance/ on the same feature branch cannot falsify it at the pre-ship gate\", and its observableResult now reads \"asserts a recursive listing of eval-packs/fixtures/refused/ equals exactly [\\\"01-unknown-member.json\\\"]\" — the clear-condition's first branch. contract.md's B-28 bullet and the matching test-plan line were bounded the same way (\"a recursive listing of eval-packs/fixtures/refused/ equals exactly [\\\"01-unknown-member.json\\\"] — bounded to this slice's own directory so a sibling pack #263 adds elsewhere under eval-packs/ cannot falsify it\"); no directory-wide absence claim over eval-packs/ remains in either artifact. The scope-lock prose naming this as the only pack S1 commits is unchanged, as the clear condition permits, and no other behavior entry, scope term, gate binding or file-scope path changed. Note for the record: acceptance-manifest.json was absent from the slice directory at the start of this round (only .afk/artifacts/.../negotiation-r1-preserved/acceptance-manifest.json existed), so the manifest was rewritten in full from contract.md's current text plus the round-2 fragments quoted in contract-review.json (B-27's given/observableResult verbatim from F-06's evidence, B-28's then from F-08's revisionCitation); every behavior ID is stable and file scope matches contract.md's \"Files expected to change\" exactly."
+    }
+  ]
+}

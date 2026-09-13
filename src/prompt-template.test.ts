@@ -391,6 +391,28 @@ describe("renderPrompt", () => {
     }
   });
 
+  it("tells both contract evaluators that file-scope path comparison is case-insensitive", () => {
+    const rendered = renderContractEvaluation();
+    const semantics = Object.entries(rendered).map(([name, prompt]) => {
+      const section = prompt.match(
+        /^# File-scope path semantics\r?\n([\s\S]*?)(?=^# )/m,
+      );
+      expect(section, name).not.toBeNull();
+      return section![1]!;
+    });
+
+    expect(new Set(semantics.map((section) => section.trim())).size).toBe(1);
+    for (const [index, section] of semantics.entries()) {
+      const name = Object.keys(rendered)[index]!;
+      expect(section, name).toMatch(/case-insensitive/);
+      expect(section, name).toContain("normalizeAcceptanceManifestPath");
+      expect(section, name).toMatch(/lowercase/);
+      expect(section, name).toMatch(
+        /case-only spelling difference cannot be a BLOCKING finding/,
+      );
+    }
+  });
+
   /**
    * The rubric is additive (#193 P-04): the lineage, control-plane and review
    * artifact contracts the contract-evaluation prompts already carried still

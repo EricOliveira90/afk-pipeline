@@ -1,0 +1,227 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/prompt-recorder.ts",
+      "src/prompt-recorder.test.ts",
+      "src/cli-entries.test.ts",
+      "src/cli-options.ts",
+      "src/cli-options.test.ts",
+      "src/afk.ts",
+      "src/afk-claude.ts",
+      "src/afk-codex.ts",
+      "src/run-events.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "CONTEXT.md",
+      "ARCHITECTURE.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #264 AC1",
+      "given": "an argv array passed to parsePipelineRuntimeOptions in src/cli-options.ts",
+      "when": "it contains the exact token --record-prompts, and separately when it does not, and separately when it contains only a near miss (--record-prompt or --record-prompts=false)",
+      "then": "the returned PipelineRuntimeOptions has recordPrompts true only for the exact token and leaves the field unset for plain absence and for either near miss, because args.includes is an exact-membership test and the flag has no value form",
+      "observableResult": "a unit test in src/cli-options.test.ts named for B-01 asserts recordPrompts === true for the flagged argv and undefined for the unflagged argv, for [\"--record-prompt\"] and for [\"--record-prompts=false\"]",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #264 AC2",
+      "given": "withPromptRecording from the new src/prompt-recorder.ts wrapping a fake inner AgentProvider, invoked with a logStream opened on a temp path ending in .log — node:fs's WriteStream declares path: string | Buffer (@types/node fs.d.ts, class WriteStream), the type already named by InvokeOptions.logStream?: WriteStream at src/agent-provider.ts:36",
+      "when": "the wrapped provider's invoke runs",
+      "then": "a sibling file whose path is String(options.logStream.path) with the trailing .log replaced by .prompt.md is created, its bytes equal options.prompt exactly with no header, fence, metadata or added trailing newline, and no type in src/agent-provider.ts is widened to expose the path",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-02 reads the .prompt.md file back and compares it byte-for-byte with the prompt string it passed, and typecheck resolves options.logStream.path against the unmodified node:fs WriteStream type",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #264 AC3",
+      "given": "a record already present at the derived .prompt.md path for a log path, as happens when the append-mode log is legitimately reopened in the same round",
+      "when": "the wrapper records another invocation for that same log path, twice more",
+      "then": "the records go to .prompt.2.md and then .prompt.3.md at the lowest free integer, and no existing record is appended to or overwritten",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-03 asserts the .prompt.2.md and .prompt.3.md files exist with their own distinct prompt bytes while the original .prompt.md bytes are unchanged",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #264 AC4",
+      "given": "two fake inner AgentProviders, one defining parseStreamLine and one not, each returning a known InvokeResult",
+      "when": "each is passed through withPromptRecording and the wrapper is inspected and invoked",
+      "then": "the wrapper's name equals the inner provider's name, parseStreamLine is forwarded when the inner defines one and absent when it does not, and invoke resolves to the inner provider's InvokeResult unchanged",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-04 asserts name equality, the presence and absence of parseStreamLine, and identity of the resolved InvokeResult",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #264 AC5",
+      "given": "a wrapped provider invoked with InvokeOptions that has no logStream",
+      "when": "invoke runs against an empty temp directory",
+      "then": "no file is written and invoke still resolves to the inner provider's result without throwing",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-05 asserts the temp directory is still empty and the promise resolved to the inner result",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #264 AC6",
+      "given": "an argv without --record-prompts, and a pipeline run launched without the flag",
+      "when": "that argv's recordPrompts is handed to providerForRun, and separately when the run completes and its run directory is listed",
+      "then": "providerForRun returns the identical inner provider object, so no provider was wrapped and nothing can record, and no .prompt.md file exists anywhere in the run directory",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-06 asserts providerForRun(inner, undefined) is inner by reference (toBe) and that invoking it writes no file, plus an it on an existing spawned fixture in src/orchestrator.test.ts named for B-06 that lists the run directory and asserts no entry matches .prompt.md",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #264 AC7",
+      "given": "PipelineConfig gaining an optional recordPrompts field and the single run-started emission site in src/orchestrator.ts adding recordPrompts: config.recordPrompts ?? false",
+      "when": "a new run's events.jsonl is read and filtered to type === \"run-started\"",
+      "then": "the event carries recordPrompts as a boolean matching the flag, run-started in src/run-events.ts declares recordPrompts as one optional field, and EVENTS_SCHEMA_VERSION remains 1",
+      "observableResult": "an it on an existing spawned fixture in src/orchestrator.test.ts named for B-07 parses the run-started line and asserts recordPrompts === false, plus an assertion that EVENTS_SCHEMA_VERSION === 1",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #264 AC9",
+      "given": "src/prompt-recorder.ts also exporting providerForRun(inner: AgentProvider, recordPrompts?: boolean): AgentProvider, and the three pipeline entries src/afk.ts, src/afk-claude.ts and src/afk-codex.ts",
+      "when": "a flagged and an unflagged argv are parsed by parsePipelineRuntimeOptions and their recordPrompts handed to providerForRun with a fake inner provider, and separately when each entry file is read as text and each entry is spawned with no arguments",
+      "then": "providerForRun returns withPromptRecording(inner) for the flagged argv — a different object whose invoke writes the sibling .prompt.md — and the identical inner reference for the unflagged one; each entry passes provider: providerForRun(<its provider>, runtimeOptions.recordPrompts) to runPipeline and calls withPromptRecording nowhere directly; and each usage() string contains the literal [--record-prompts]",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-08 asserts the flagged provider is not inner and writes the sibling .prompt.md when invoked while the unflagged provider is inner (toBe) and writes nothing, and a test in src/cli-entries.test.ts named for B-08 asserts each of the three entry sources passes providerForRun( with runtimeOptions.recordPrompts and contains no direct withPromptRecording( call, and that each entry's spawned usage() stderr contains [--record-prompts]",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #264 AC12",
+      "given": "CONTEXT.md's Pipeline concepts section and ARCHITECTURE.md's CLI entries row — both declared in fileScope above with the repository's exact casing (CONTEXT.md, ARCHITECTURE.md), the names they carry on disk",
+      "when": "both files are read by src/prompt-recorder.test.ts after the slice's docs edit",
+      "then": "CONTEXT.md contains the Prompt record entry with the text drafted at prd.md:663-670 in the file's existing Term/prose/_Avoid_ format, and ARCHITECTURE.md's CLI entries row names src/prompt-recorder.ts in its internals column",
+      "observableResult": "a test in src/prompt-recorder.test.ts named for B-09 reads both files and asserts the Prompt record heading with its _Avoid_ line and the src/prompt-recorder.ts mention in the CLI entries row",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #264 AC2/AC5; prd.md:579-580, prd.md:598-600",
+      "given": "a wrapped provider invoked with a present logStream whose String(path) yields no .prompt.md sibling — a temp path that does not end in .log (e.g. …/guardian-review.txt), or a path member absent at runtime",
+      "when": "invoke runs against an otherwise empty temp directory",
+      "then": "no file is written, nothing throws, no fallback record name is invented, and invoke resolves to the inner provider's result exactly as B-05's absent stream does",
+      "observableResult": "a unit test in src/prompt-recorder.test.ts named for B-10 opens a logStream on a temp …/guardian-review.txt, invokes the wrapped provider, and asserts the temp directory gained no file, nothing threw, and the promise resolved to the inner result",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #264 AC10",
+      "given": "src/agent-provider.ts, src/claude.ts, src/codex.ts, src/kiro.ts and src/invocation-runtime.ts as they exist on the base commit",
+      "when": "the slice's diff against base is taken",
+      "then": "none of those five files appears in the diff, and the AgentProvider interface, InvokeOptions fields and the stdin write path are unchanged",
+      "observableResult": "those paths are absent from the manifest fileScope, so any edit is a scope violation, and the existing provider and invocation-runtime suites still pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #264 AC11",
+      "given": "src/run-events.ts and src/orchestrator.ts, which PRD 5 also edits concurrently",
+      "when": "the slice's diff against base is taken for those two files",
+      "then": "the only changes are the optional recordPrompts field on the run-started payload, the optional recordPrompts field on PipelineConfig, and the one recordPrompts property in the run-started emission, with EVENTS_SCHEMA_VERSION still 1",
+      "observableResult": "gate-produced: an assertion that EVENTS_SCHEMA_VERSION === 1 and the existing run-events and orchestrator suites passing unchanged. Diff-review obligation, not a gate outcome: that the diff for both files adds no line beyond those three additions — no gate in the catalog compares file content against base line by line, so the reviewer holds that half",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #264 AC8",
+      "given": "a historical events.jsonl whose run-started event carries no recordPrompts field",
+      "when": "it is read and parsed as a run event payload",
+      "then": "parsing still succeeds because the new field is optional in the type",
+      "observableResult": "a test named for P-03 parses a run-started object literal with no recordPrompts key and asserts it reads cleanly and type-checks",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #264 AC13",
+      "given": "AGENTS.md and CLAUDE.md as they exist on the base commit — neither is named in fileScope above, whose only root-level entries are CONTEXT.md and ARCHITECTURE.md",
+      "when": "the slice's diff against base is taken",
+      "then": "neither file appears in the diff, because the self-run launch convention must not claim a flag that is not yet on main",
+      "observableResult": "both paths are absent from the manifest fileScope, so any edit is a scope violation, and the orchestrator tests that read the launch command out of both files still pass",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #264 AC14",
+      "given": "src/orchestrator.test.ts, whose spawned scenarios each cost seconds on every future run",
+      "when": "the run-started assertion is added",
+      "then": "it is an it attached to an existing spawned fixture that already reads events.jsonl, and the file's count of spawned pipeline scenarios is unchanged",
+      "observableResult": "gate-produced: the existing orchestrator suite passes with the new assertions running inside an existing describe. Diff-review obligation, not a gate outcome: that the diff to src/orchestrator.test.ts adds no new spawned-fixture setup — per-suite wall-clock is deliberately outside the gates (pnpm test:ratchet / pnpm test:budgets, ADR 0063), so no gate can report suite growth",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

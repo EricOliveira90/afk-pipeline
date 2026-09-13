@@ -107,6 +107,15 @@ from the files themselves is refused unless it happens to land on changed text.
 Limit any fresh judgment to gate aptness, scenario honesty, evidence-backed
 scope, blocking UNKNOWNs, single-session feasibility, and explicit non-goals.
 
+# File-scope path semantics
+
+Acceptance-manifest `fileScope` paths are case-insensitive comparison keys, not
+case-preserving repository spellings. `normalizeAcceptanceManifestPath` trims
+them, normalizes separators, removes leading `./`, and lowercases them; changed
+paths go through the same normalization before comparison. Therefore a
+case-only spelling difference cannot be a BLOCKING finding. Do not ask the
+planner to revise only the casing of a `fileScope` path.
+
 # Parser regression surface
 
 When the contract changes a parser's accepted input language, its regression

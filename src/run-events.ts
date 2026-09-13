@@ -37,6 +37,11 @@ export type RunEventPayload =
       /** Configured convergence limits; absent in historical streams. */
       contractRoundLimit?: number;
       implementationRoundLimit?: number;
+      /**
+       * Whether `--record-prompts` was on (#264). Always written by a new
+       * run; absent in historical streams, which is why it is optional.
+       */
+      recordPrompts?: boolean;
     }
   | { type: "wave-dispatched"; wave: number; slices: string[] }
   | { type: "wave-completed"; wave: number }
@@ -451,6 +456,15 @@ export type RunEventPayload =
          * one, so the warning is the whole consequence.
          */
         | "evidence-archive-failed"
+        /**
+         * The contract-lock gate substituted the slice's claimed migration
+         * prefixes into the `RESERVED_PREFIX_` placeholders it had told the
+         * planner to write, and locked the contract in the round it was
+         * accepted in (#267, ADR 0067). The locked pair therefore differs
+         * from what the planner wrote, so the substitution is journalled
+         * with both paths.
+         */
+        | "migration-prefix-substituted"
         | "feature-branch-fast-forward"
         | "restart-refused"
         | "preflight"

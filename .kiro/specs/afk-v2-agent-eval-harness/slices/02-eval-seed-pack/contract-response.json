@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-07",
+      "position": "CONDITION_MET",
+      "evidence": "Cleared by route (a): B-05 now names, per case, in-repo material the generator can read for both halves of prd.md D2's criterion. The verdict content is the committed final verdict artifact — .kiro/specs/afk-v2-acceptance-scope-gates/slices/02-behavior-coverage-gate/contract-review.json and 05-test-cost-split-and-caching/contract-review.json both carry \"verdict\": \"ACCEPT\", and 03-candidate-evaluator-isolation/qa-review.json and 08-file-scope-gate/qa-review.json both carry \"verdict\": \"PASS\" with \"failureClass\": \"NONE\" (verified by reading all four files in this worktree). The prompt-reconstruction inputs are the same slices' committed contract.md, acceptance-manifest.json and qa-report-r*-a1.md, all present. The human confirmation is a commit reachable from this checkout: PR #256, merge commit dbd6fdc266ce48253a81e051bf724c4d9a92e664 (2026-09-12), which merged feat-claude-code/afk-v2-acceptance-scope-gates to main with all eight PRD 4 slices; `git merge-base --is-ancestor dbd6fdc HEAD` exits 0 on this branch. B-05 records the consequence explicitly: only final-round verdicts are used, because a round-1 REVISE would need the round-1 contract pair, which no commit carries — so the REVISE-accepted-next-round branch of D2's criterion yields no case. No .afk/artifacts/**/reviews/ path is cited as the origin of any expected value, and B-06's source-name list and fallback clause were restated to match. The file scope, the nine-case count, B-01, B-07 and the fixture list are unchanged, so routes (b) and (c) were not needed and D2's criterion is preserved verbatim rather than replaced."
+    },
+    {
+      "findingId": "F-08",
+      "position": "CONDITION_MET",
+      "evidence": "B-05 now fixes the literal substring the confirming fact must carry, on the pattern B-06 uses for hand-reconstructed: each of the four PRD 4 sources contains \"confirmed-by: dbd6fdc\" and the repo-relative path of the verdict artifact it took expected from, under .kiro/specs/afk-v2-acceptance-scope-gates/slices/, ending in contract-review.json (06-, 07-) or qa-review.json (08-, 09-). The manifest's B-05 observableResult states the assertion in those terms — it asserts each of the four source strings contains the literal \"confirmed-by: dbd6fdc\", and additionally reads the artifact path out of each source, loads that committed JSON from the repository and asserts the case's expected deep-equals its verdict projection — so the acceptance:behaviors gate decides a textual property plus an in-repo cross-check rather than judging prose. The test plan's third bullet was restated to the same marker and paths."
+    }
+  ]
+}

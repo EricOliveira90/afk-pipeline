@@ -12,8 +12,11 @@ import { describe, expect, it } from "vitest";
 import {
   CONCENTRATION_RATIO,
   attributeOverruns,
+  baselineEntry,
   chooseBaseline,
   describeDivergence,
+  formatBaselineRow,
+  formatSuiteRow,
   measurementBranch,
 } from "../scripts/check-suite-budgets.mjs";
 
@@ -213,6 +216,119 @@ describe("describeDivergence", () => {
   it("is empty when the governing numbers agree", () => {
     const numbers = { suites: { fast: 170 }, totalSeconds: 1287 };
     expect(describeDivergence(numbers, structuredClone(numbers))).toEqual([]);
+  });
+});
+
+describe("baselineEntry", () => {
+  it("reads a bare number as seconds with no recorded git count", () => {
+    // Every block in the file today is this shape, and each one has to stay
+    // comparable on the half it has.
+    expect(baselineEntry(23.9)).toEqual({ seconds: 23.9, gitProcesses: null });
+  });
+
+  it("reads both halves of a block that recorded the git count", () => {
+    expect(baselineEntry({ seconds: 23.9, gitProcesses: 1204 })).toEqual({
+      seconds: 23.9,
+      gitProcesses: 1204,
+    });
+  });
+
+  it("is null-for-null on a missing half and on a non-measurement value", () => {
+    expect(baselineEntry({ gitProcesses: 1204 })).toEqual({
+      seconds: null,
+      gitProcesses: 1204,
+    });
+    // `_note` strings and arrays sit in the same blocks as the suite entries.
+    expect(baselineEntry("Two full-chain runs")).toEqual({
+      seconds: null,
+      gitProcesses: null,
+    });
+    expect(baselineEntry(undefined)).toEqual({
+      seconds: null,
+      gitProcesses: null,
+    });
+  });
+});
+
+describe("formatSuiteRow", () => {
+  it("prints the git process count next to the seconds", () => {
+    const row = formatSuiteRow({
+      suite: "clean-failed",
+      seconds: 23.5,
+      budget: 46,
+      gitProcesses: 1204,
+    });
+    expect(row).toContain("23.5s / 46s");
+    expect(row).toContain("git   1204");
+  });
+
+  it("stays readable for a timing that recorded no count", () => {
+    // The count is a measurement, not a gate: a record written without one
+    // prints the row it always printed rather than a misleading zero.
+    const row = formatSuiteRow({
+      suite: "clean-failed",
+      seconds: 23.5,
+      budget: 46,
+    });
+    expect(row).toContain("23.5s / 46s");
+    expect(row).not.toContain("git");
+    expect(row).not.toContain("0");
+  });
+
+  it("keeps the overrun factor, the no-budget note and the host reading", () => {
+    expect(
+      formatSuiteRow({
+        suite: "clean-failed",
+        seconds: 92,
+        budget: 46,
+        gitProcesses: 1204,
+        host: "busy",
+      }),
+    ).toContain("(2.00x)");
+    expect(
+      formatSuiteRow({ suite: "brand-new", seconds: 90, gitProcesses: 12 }),
+    ).toContain("(no budget)");
+    expect(
+      formatSuiteRow({ suite: "fast", seconds: 90, budget: 258, host: "busy" }),
+    ).toContain("host: busy");
+  });
+});
+
+describe("formatBaselineRow", () => {
+  const measured = { suite: "clean-failed", seconds: 20.5, gitProcesses: 1100 };
+
+  it("diffs the git count when the recorded block has one", () => {
+    // The reason the count exists: seconds move with the host, so a chain
+    // that got 3s faster proves nothing, while 104 fewer git processes is
+    // the diff.
+    const row = formatBaselineRow(measured, { seconds: 23.5, gitProcesses: 1204 });
+    expect(row).toBe(
+      "  clean-failed         23.5s -> 20.5s (-3.0s), git 1204 -> 1100 (-104)",
+    );
+  });
+
+  it("signs a rise in the count", () => {
+    expect(
+      formatBaselineRow(measured, { seconds: 20.0, gitProcesses: 1000 }),
+    ).toContain("git 1000 -> 1100 (+100)");
+  });
+
+  it("compares seconds only against a block recorded without a count", () => {
+    const row = formatBaselineRow(measured, 23.5);
+    expect(row).toBe("  clean-failed         23.5s -> 20.5s (-3.0s)");
+  });
+
+  it("omits the count when the run recorded none, block or not", () => {
+    const row = formatBaselineRow(
+      { suite: "clean-failed", seconds: 20.5 },
+      { seconds: 23.5, gitProcesses: 1204 },
+    );
+    expect(row).toBe("  clean-failed         23.5s -> 20.5s (-3.0s)");
+  });
+
+  it("is null when the block records nothing comparable for the suite", () => {
+    expect(formatBaselineRow(measured, undefined)).toBeNull();
+    expect(formatBaselineRow(measured, "9 tests")).toBeNull();
   });
 });
 

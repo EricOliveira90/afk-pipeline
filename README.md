@@ -221,6 +221,28 @@ blocked rather than reporting success on findings recorded nowhere but its
 own state. Notes that ship unfixed are filed the same way, once each across
 rounds. The PR is a draft either way; a human still merges (ADR 0057).
 
+`--record-prompts` records every agent invocation's exact prompt beside its
+`.log` file as `.prompt.md` (then `.prompt.2.md`, and so on). Recording is off
+by default and fails open: a recorder write failure never prevents the agent
+invocation. Use it when a run may produce an incident worth adding to an eval
+pack.
+
+### Evaluating agent behavior
+
+```bash
+npx afk eval --pack <dir> [--max-calls <n>] [--out <dir>] [--dry-run]
+```
+
+`afk eval` runs the scenario pack in `--pack` sequentially, with one provider
+call per case. `--max-calls` sets the whole-run call budget (default 50);
+remaining cases are reported as `NOT-RUN`. `--out` chooses the report parent
+(default `.afk/eval`), where each run writes a timestamped directory containing
+`report.json` and per-case logs. `--dry-run` validates the pack and lists its
+cases without model calls or a report. The command is report-only: mismatches
+and case errors are measurements, so it exits 0 whenever it successfully writes
+`report.json`; refusal or failure before a report exists is non-zero. Use
+`afk-claude eval` or `afk-codex eval` to measure with those providers.
+
 ### Cleaning up after failed runs
 
 ```bash
