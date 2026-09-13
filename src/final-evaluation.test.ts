@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLEANER_STAGE_ID,
   decideFinalReuse,
   decideFinalVerdict,
   FINAL_REPORT_FILENAME,
   FINAL_REVIEW_FILENAME,
   POST_APPROVAL_WRITING_STAGE_ID,
+  noopPostApprovalWritingStage,
   parseFinalReview,
   routeFinalReviewFinding,
   validateFinalReview,
   type FinalReviewFinding,
+  type PostApprovalWritingStage,
 } from "./final-evaluation.js";
 
 const BASELINE_TREE = "a".repeat(40);
@@ -377,5 +380,61 @@ describe("decideFinalVerdict", () => {
     });
 
     expect(outcome.blockers).toHaveLength(3);
+  });
+});
+
+describe("the post-approval stage seam under a shipped cleaner", () => {
+  it("[behavior:#87:B-03] names the cleaner stage beside the writing stage, not inside it", () => {
+    expect(CLEANER_STAGE_ID).toBe("cleaner");
+    // Two ids for two things: the cleaner runs *before* the injectable writing
+    // stage, so a reader of a journal or a `byStage` key can tell which stage
+    // wrote a file. Folding the cleaner into the writing stage's id would make
+    // that attribution unrecoverable.
+    expect(CLEANER_STAGE_ID).not.toBe(POST_APPROVAL_WRITING_STAGE_ID);
+  });
+
+  it("[behavior:#87:P-02] keeps PostApprovalWritingStage synchronous and the noop as the default", () => {
+    // The `void` return is the load-bearing half: `src/qa-orchestration.test.ts`'s
+    // "final evaluation and reuse" fixture injects a stub that writes into the
+    // worktree and returns nothing, and the orchestrator commits whatever it
+    // left. An async signature would silently commit before the stub finished.
+    // Asserting it as a value typed `PostApprovalWritingStage` is what makes
+    // typecheck the witness; the runtime assertion below is the shipped default.
+    const stub: PostApprovalWritingStage = ({ worktreeDir, stageId, repair }) => {
+      expect(typeof worktreeDir).toBe("string");
+      expect(typeof stageId).toBe("string");
+      expect(repair === undefined || repair === "RESTORE").toBe(true);
+    };
+    expect(
+      stub({ worktreeDir: "/tmp/x", stageId: POST_APPROVAL_WRITING_STAGE_ID }),
+    ).toBeUndefined();
+
+    // The cleaner is not shoehorned into the seam: production still writes
+    // nothing after approval, so a run with no `gatePolicy.clean` is unchanged.
+    expect(
+      noopPostApprovalWritingStage({
+        worktreeDir: "/tmp/x",
+        stageId: CLEANER_STAGE_ID,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("[behavior:#87:P-03] leaves reuse as exact tree equality with no writing-stage predicate", () => {
+    // D12/D13: a cleaner that wrote is observable in the tree id alone. Adding
+    // a "did the writing stage write?" input would let a stage that changed
+    // nothing still force an evaluation, and a stage that changed something
+    // still reuse — both of which the tree comparison already answers.
+    expect(
+      decideFinalReuse({
+        finalTreeId: BASELINE_TREE,
+        baseline: { treeId: BASELINE_TREE },
+      }).decision,
+    ).toBe("reuse");
+    expect(
+      decideFinalReuse({
+        finalTreeId: OTHER_TREE,
+        baseline: { treeId: BASELINE_TREE },
+      }).decision,
+    ).toBe("evaluate");
   });
 });
