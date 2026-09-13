@@ -200,6 +200,7 @@ import {
   renderCleanerQualityFailures,
   resetCleanerRangeTo,
   runCleanerStage,
+  type CleanerStageResult,
 } from "./cleaner-stage.js";
 import {
   resolveRunScope,
@@ -7158,6 +7159,74 @@ export async function runSliceExecute(
             },
           );
           /**
+           * Apply one cleaner result's terminal policy, regardless of whether
+           * it came from the initial dispatch or a final-evaluation restore.
+           *
+           * Keeping the decision here prevents the two call sites from
+           * disagreeing about an `EXHAUSTED` or `ESCALATED` re-dispatch: the
+           * caller still owns whether RETURN_TO_GENERATOR means `continue` or
+           * breaking out of the final-evaluation loop.
+           */
+          const handleCleanerTerminalOutcome = (
+            result: CleanerStageResult,
+          ):
+            | { kind: "PROCEED" }
+            | { kind: "RETURN_TO_GENERATOR" }
+            | { kind: "STUCK"; reason: string } => {
+            if (result.outcome === "ESCALATED" && result.escalation) {
+              invalidateFinalEvaluationBaseline(
+                config.repoRoot,
+                pipelineRunSlug(
+                  config.prdSlug,
+                  config.provider ?? kiroProvider,
+                ),
+                slice.ghIssue,
+                acceptedTreeId,
+              );
+              generatorFailureSet = {
+                findings: [
+                  {
+                    id: result.escalation.id,
+                    clearCondition: result.escalation.expected,
+                    artifactReferences: result.escalationArtifactId
+                      ? [result.escalationArtifactId]
+                      : [
+                          `${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}`,
+                        ],
+                  },
+                ],
+                gates: [],
+              };
+              retryNote =
+                `The cleaner escalated the approved baseline: ` +
+                `${result.escalation.id}: ${result.escalation.summary} ` +
+                `Expected: ${result.escalation.expected} Observed: ` +
+                `${result.escalation.observed}`;
+              logger.phase(
+                `${ctx.tag}: the cleaner returned the slice to the generator ` +
+                  `loop and invalidated the baseline ${acceptedTreeId}`,
+                "error",
+              );
+              return { kind: "RETURN_TO_GENERATOR" };
+            }
+            if (result.outcome === "EXHAUSTED") {
+              const remaining = result.remainingFailures ?? [];
+              stuckReferences.push(
+                ...remaining.map((failure) => failure.logArtifactId),
+              );
+              return {
+                kind: "STUCK",
+                reason: cleanerExhaustionReason({
+                  ghIssue: slice.ghIssue,
+                  roundsSpent: result.roundsSpent,
+                  failures: remaining,
+                  treeId: result.outputTreeId,
+                }),
+              };
+            }
+            return { kind: "PROCEED" };
+          };
+          /**
            * The cleaner stage's standing result, across every dispatch it gets.
            *
            * `let` rather than `const` because a restore re-dispatch (#97 B-03)
@@ -7174,46 +7243,9 @@ export async function runSliceExecute(
           let cleaner = await dispatchCleanerStage({
             roundsAlreadySpent: cleanerRoundsSpent(resumableCleanerStage),
           });
-          if (cleaner.outcome === "ESCALATED" && cleaner.escalation) {
-            /**
-             * A valid `BASELINE_IS_WRONG` returns the slice to the generator
-             * loop with the baseline citation invalidated (#87 B-13) — the
-             * same route a final-evaluation `generator-loop` finding takes,
-             * because it is the same claim: the approved candidate itself has
-             * to change. The stage already reset the worktree to the accepted
-             * commit, so the round the generator gets is the approved tree and
-             * not a half-cleaned one.
-             */
-            invalidateFinalEvaluationBaseline(
-              config.repoRoot,
-              pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
-              slice.ghIssue,
-              acceptedTreeId,
-            );
-            generatorFailureSet = {
-              findings: [
-                {
-                  id: cleaner.escalation.id,
-                  clearCondition: cleaner.escalation.expected,
-                  artifactReferences: cleaner.escalationArtifactId
-                    ? [cleaner.escalationArtifactId]
-                    : [
-                        `${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}`,
-                      ],
-                },
-              ],
-              gates: [],
-            };
-            retryNote =
-              `The cleaner escalated the approved baseline: ` +
-              `${cleaner.escalation.id}: ${cleaner.escalation.summary} ` +
-              `Expected: ${cleaner.escalation.expected} Observed: ` +
-              `${cleaner.escalation.observed}`;
-            logger.phase(
-              `${ctx.tag}: the cleaner returned the slice to the generator ` +
-                `loop and invalidated the baseline ${acceptedTreeId}`,
-              "error",
-            );
+          const initialCleanerTerminal =
+            handleCleanerTerminalOutcome(cleaner);
+          if (initialCleanerTerminal.kind === "RETURN_TO_GENERATOR") {
             if (implementationAttempt < implementationAttemptLimit) continue;
             return finishStuck(
               `The cleaner returned slice #${slice.ghIssue} to the ` +
@@ -7221,19 +7253,8 @@ export async function runSliceExecute(
                 retryNote,
             );
           }
-          if (cleaner.outcome === "EXHAUSTED") {
-            const remaining = cleaner.remainingFailures ?? [];
-            stuckReferences.push(
-              ...remaining.map((failure) => failure.logArtifactId),
-            );
-            return finishStuck(
-              cleanerExhaustionReason({
-                ghIssue: slice.ghIssue,
-                roundsSpent: cleaner.roundsSpent,
-                failures: remaining,
-                treeId: cleaner.outputTreeId,
-              }),
-            );
+          if (initialCleanerTerminal.kind === "STUCK") {
+            return finishStuck(initialCleanerTerminal.reason);
           }
           /**
            * The post-approval writing stage, and the reuse decision it decides
@@ -8117,6 +8138,17 @@ export async function runSliceExecute(
                       restored.roundsSpent,
                     ),
                   };
+                  const restoredCleanerTerminal =
+                    handleCleanerTerminalOutcome(cleaner);
+                  if (
+                    restoredCleanerTerminal.kind === "RETURN_TO_GENERATOR"
+                  ) {
+                    returnToGenerator = true;
+                    break;
+                  }
+                  if (restoredCleanerTerminal.kind === "STUCK") {
+                    return finishStuck(restoredCleanerTerminal.reason);
+                  }
                   continue;
                 }
                 writingStage({

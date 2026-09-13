@@ -49,6 +49,7 @@ import {
   decideFinalReuse,
 } from "./final-evaluation.js";
 import { MAX_CLEANER_ROUNDS, MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
+import { CLEANER_ESCALATION_FILENAME } from "./cleaner-stage.js";
 import { parseGatePolicy } from "./gate-policy.js";
 import { buildQualityStagePolicyEvent } from "./run-events.js";
 import { readQualityStageOutcomes } from "./logger.js";
@@ -1146,6 +1147,7 @@ describe("final evaluation and reuse", () => {
     onCleaner?: (call: {
       call: number;
       worktreeDir: string;
+      sliceDir: string;
       prompt: string;
     }) => void;
     /**
@@ -1202,6 +1204,7 @@ describe("final evaluation and reuse", () => {
           options.onCleaner?.({
             call: cleanerPrompts.length,
             worktreeDir: sliceWorktree,
+            sliceDir: artifactDir,
             prompt: invokeOptions.prompt ?? "",
           });
         }
@@ -1787,6 +1790,130 @@ describe("final evaluation and reuse", () => {
       "the archived round log, found anywhere under the run's slice artifacts",
     ).toEqual(["cleaner-log-r1-a3.log"]);
   });
+
+  it("[behavior:#87:B-08] stops when a restore re-dispatch exhausts the cleaner", async () => {
+    const fixture = finalEvaluationFixture({
+      clean: cleanPolicyMember,
+      stageWrites: false,
+      onCleaner: (call) => {
+        writeFileSync(
+          join(call.worktreeDir, "README.md"),
+          call.call === 1
+            ? `fixture, ${CLEAN_MARKER}\n`
+            : `fixture, restore ${call.call} still needs formatting\n`,
+          "utf-8",
+        );
+      },
+      review: (call) =>
+        call.attempt === 1
+          ? {
+              version: 1,
+              verdict: "FAIL",
+              baselineTreeId: call.baselineTreeId,
+              finalTreeId: call.finalTreeId,
+              findings: [
+                {
+                  id: "FE-EXHAUST",
+                  class: "PRESERVATION",
+                  summary: "the cleaner dropped approved formatting",
+                  evidence: "README.md no longer carries the approved form",
+                  expected: "the approved formatting survives",
+                  observed: "the cleaner's output needs restoration",
+                  repair: "RESTORE",
+                },
+              ],
+            }
+          : passingReview(call),
+    });
+
+    const result = await runSliceExecute(fixture.ctx);
+
+    expect(result.phase).toBe("STUCK");
+    expect("error" in result ? result.error : "").toContain("format (FAIL)");
+    expect(fixture.cleanerPrompts).toHaveLength(MAX_CLEANER_ROUNDS);
+    expect(fixture.finalCalls).toHaveLength(1);
+    expect(
+      qualityStagesFor(
+        loadRunState(fixture.repo, "prd-070-stub"),
+        "70",
+      ).at(-1)?.outcome,
+    ).toBe("EXHAUSTED");
+  });
+
+  it(
+    "[behavior:#87:B-13] returns to the generator when a restore re-dispatch escalates",
+    async () => {
+      const fixture = finalEvaluationFixture({
+        clean: cleanPolicyMember,
+        stageWrites: false,
+        onCleaner: (call) => {
+          if (call.call === 2) {
+            writeFileSync(
+              join(call.sliceDir, CLEANER_ESCALATION_FILENAME),
+              `${JSON.stringify({
+                version: 1,
+                class: "BASELINE_IS_WRONG",
+                id: "CL-RESTORE",
+                summary: "the approved tree cannot preserve the requested form",
+                evidence: "the restore conflicts with the accepted baseline",
+                expected: "the generator changes the approved candidate",
+                observed: "the cleaner cannot restore it safely",
+              })}\n`,
+              "utf-8",
+            );
+            return;
+          }
+          writeFileSync(
+            join(call.worktreeDir, "README.md"),
+            `fixture, ${CLEAN_MARKER}, approval ${call.call}\n`,
+            "utf-8",
+          );
+        },
+        review: (call) =>
+          call.attempt === 1
+            ? {
+                version: 1,
+                verdict: "FAIL",
+                baselineTreeId: call.baselineTreeId,
+                finalTreeId: call.finalTreeId,
+                findings: [
+                  {
+                    id: "FE-ESCALATE",
+                    class: "PRESERVATION",
+                    summary: "the cleaner dropped approved behavior",
+                    evidence: "README.md lost required content",
+                    expected: "the approved content survives",
+                    observed: "the cleaner's output needs restoration",
+                    repair: "RESTORE",
+                  },
+                ],
+              }
+            : passingReview(call),
+      });
+
+      const result = await runSliceExecute(fixture.ctx);
+
+      expect(result.phase).toBe("PASS");
+      expect(
+        {
+          genRounds:
+            fixture.ctx.logger.getSliceProgress("70")?.genRounds,
+          cleanerCalls: fixture.cleanerPrompts.length,
+          finalCalls: fixture.finalCalls.length,
+          outcomes: qualityStagesFor(
+            loadRunState(fixture.repo, "prd-070-stub"),
+            "70",
+          ).map((stage) => stage.outcome),
+        },
+      ).toEqual({
+        genRounds: 2,
+        cleanerCalls: 2,
+        finalCalls: 1,
+        outcomes: ["PASS"],
+      });
+    },
+    120_000,
+  );
 
   it("[behavior:#97:B-02] [behavior:#97:B-03] [behavior:#97:B-07] [behavior:#97:B-12] routes a second restore to the cleaner too, and chains each restore round onto the tree it started from", async () => {
     // S4. An `it` on the same fixture, not a fifth spawn.
