@@ -250,6 +250,10 @@ describe("the committed eval packs", () => {
     expect(one.id).toBe("194-f03-evaluator-contract");
     expect(one.role).toBe("evaluator-contract");
     expect(expectedOf(one)).toEqual({ verdict: "ACCEPT" });
+    expect(one.prompt).toContain("# File-scope path semantics");
+    expect(one.prompt).toMatch(
+      /case-only spelling difference cannot be a BLOCKING finding/,
+    );
     expect(one.source).toContain("contract-review-r1-a1.json");
     expect(one.source).toContain("#194");
     // One case from #194, not two: the second run's archived inputs are absent.

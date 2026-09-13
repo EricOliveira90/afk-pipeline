@@ -72,6 +72,15 @@ Limit judgment to:
 Do not re-run deterministic manifest checks or invent style findings outside
 this judgment boundary.
 
+# File-scope path semantics
+
+Acceptance-manifest `fileScope` paths are case-insensitive comparison keys, not
+case-preserving repository spellings. `normalizeAcceptanceManifestPath` trims
+them, normalizes separators, removes leading `./`, and lowercases them; changed
+paths go through the same normalization before comparison. Therefore a
+case-only spelling difference cannot be a BLOCKING finding. Do not ask the
+planner to revise only the casing of a `fileScope` path.
+
 # Parser regression surface
 
 When the contract changes a parser's accepted input language, its regression
