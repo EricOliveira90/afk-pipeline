@@ -41,6 +41,7 @@ import {
   finalEvaluationFor,
   loadRunState,
   qualityStagesFor,
+  recordQualityStageRound,
   saveRunState,
 } from "./run-state.js";
 import { CLEANER_ESCALATION_FILENAME } from "./cleaner-stage.js";
@@ -2779,25 +2780,22 @@ describe("a clean policy escalates, then repairs the re-approved tree", () => {
 });
 
 /**
- * A run whose cleaner reverts a regressing round and then spends its bound
- * (#87 B-07, B-08).
+ * A resumed run whose cleaner has two persisted rounds and spends its last one
+ * (#87 B-06, B-08).
  *
- * The second and last new spawn. What no cheaper assertion reaches: the
- * `finishStuck` route out of an exhausted stage — the code-assembled `stuck.md`
- * listing every remaining red gate with its detail and its log artifact id, and
- * the preserved last checkpoint the reason promises an operator. The revert
- * itself is unit-tested in `src/cleaner-stage.test.ts`; what is here is that
- * the orchestrator turns the exhaustion into a STUCK diagnosis rather than a
- * merge, and that an *optional* red clean gate never contributes to either.
+ * The second and last new spawn. What no cheaper assertion reaches is the
+ * `finishStuck` route out of an exhausted stage: the code-assembled `stuck.md`
+ * listing every remaining red gate with its log artifact, and the preserved
+ * last checkpoint the reason promises an operator. The focused cleaner-stage
+ * tests already own the default three-round bound, the reverted regression,
+ * and the regression note handed to the next round. Seed those two spent
+ * rounds through the production run-state writer instead of replaying their
+ * git-heavy gate phases in a second pipeline.
  */
-describe("a clean policy reverts a regression and exhausts its rounds", () => {
-  const UNDECLARED = "undeclared-cleanup.txt";
+describe("a clean policy resumes at its final round and exhausts", () => {
   let phase: { phase: string; error?: string } | undefined;
   let cleanerCalls = 0;
-  let cleanerPrompts: string[] = [];
   let stuckDiagnosis = "";
-  let sweepCommits: string[] = [];
-  let undeclaredSurvived = true;
   let headTree = "";
   let stages: unknown;
   let roundAttempts: GateAttemptEvidence[] = [];
@@ -2810,9 +2808,10 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
   beforeAll(async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     cleanerCalls = 0;
-    cleanerPrompts = [];
     let artifactDir = "";
+    let repo = "";
     let tree = "";
+    let seededRounds = false;
     const provider: AgentProvider = {
       name: "stub",
       async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -2825,29 +2824,46 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
             "utf-8",
           );
           writeQAReview(artifactDir, "deterministic");
+          if (!seededRounds) {
+            seededRounds = true;
+            const inputTreeId = treeOf(tree);
+            recordQualityStageRound(
+              repo,
+              "prd-070-stub",
+              "70",
+              {
+                round: 1,
+                attempt: 1,
+                inputTreeId,
+                outputTreeId: inputTreeId,
+                gateIds: ["format"],
+                outcome: "FAIL",
+              },
+              { startNewEntry: true },
+            );
+            recordQualityStageRound(repo, "prd-070-stub", "70", {
+              round: 2,
+              attempt: 1,
+              inputTreeId,
+              outputTreeId: inputTreeId,
+              gateIds: ["format"],
+              outcome: "FAIL",
+            });
+          }
         } else if (options.role === "cleaner") {
           cleanerCalls++;
-          cleanerPrompts.push(options.prompt ?? "");
-          if (cleanerCalls === 1) {
-            // A path the locked manifest does not declare and the clean
-            // policy's `additionalWriteScope` does not widen to: the `scope`
-            // gate is required and outside the clean set, so this is a
-            // regression and the round goes back.
-            writeFileSync(join(tree, UNDECLARED), "swept\n", "utf-8");
-          } else {
-            // Declared, so no regression — and still not the marker, so the
-            // required clean gate stays red and the bound is what ends it.
-            writeFileSync(
-              join(tree, "change.txt"),
-              `round 1, tidied ${cleanerCalls}\n`,
-              "utf-8",
-            );
-          }
+          // Declared, so no regression — and still not the marker, so the
+          // required clean gate stays red and the persisted bound ends it.
+          writeFileSync(
+            join(tree, "change.txt"),
+            `round 1, tidied ${cleanerCalls}\n`,
+            "utf-8",
+          );
         }
         return { exitCode: 0, stdout: "", stats: {} };
       },
     };
-    const { repo, worktree, ctx } = makeCleanerContext(provider, {
+    const fixture = makeCleanerContext(provider, {
       gates: [
         FORMAT_GATE,
         // Advisory and permanently red: an optional clean gate is recorded and
@@ -2862,14 +2878,14 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
       ],
       additionalWriteScope: [CLEAN_SET_PATH],
     });
+    repo = fixture.repo;
+    const { worktree, ctx } = fixture;
     artifactDir = ctx.absSliceDir;
     tree = worktree;
 
     phase = (await runSliceExecute(ctx)) as { phase: string; error?: string };
 
     stuckDiagnosis = readFileSync(join(ctx.absSliceDir, "stuck.md"), "utf-8");
-    sweepCommits = subjects(worktree, "chore(#70): cleaner round");
-    undeclaredSurvived = existsSync(join(worktree, UNDECLARED));
     headTree = treeOf(worktree);
     stages = JSON.parse(
       JSON.stringify(qualityStagesFor(loadRunState(repo, "prd-070-stub"), "70")),
@@ -2898,61 +2914,23 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
       .filter((event) => event.agent === "cleaner");
   }, 300_000);
 
-  it("[behavior:#87:B-06] journals every cleaner round as one completed stage", () => {
+  it("[behavior:#87:B-06] journals the resumed final cleaner round as one completed stage", () => {
     const roundsFor = (type: string) =>
       cleanerJournalEvents
         .filter((event) => event.type === type)
         .map((event) => event.round);
 
-    expect(roundsFor("phase-started")).toEqual([1, 2, 3]);
-    expect(roundsFor("phase-ended")).toEqual([1, 2, 3]);
-    expect(roundsFor("stage-duration")).toEqual([1, 2, 3]);
-
-    // The whole sequence, not just the three counts: every start is followed
-    // by its own round's end before the next round opens, so the journal's
-    // open-stage set holds no cleaner round when the stage returns. This is
-    // what fails if the per-round key collapsed back to the generator round —
-    // three starts under one key pair into one sample, not three — or if
-    // either the start or the end were dropped.
+    expect(cleanerCalls).toBe(1);
+    expect(roundsFor("phase-started")).toEqual([3]);
+    expect(roundsFor("phase-ended")).toEqual([3]);
+    expect(roundsFor("stage-duration")).toEqual([3]);
     expect(
       cleanerJournalEvents.map((event) => `${event.type}:${event.round}`),
     ).toEqual([
-      "phase-started:1",
-      "phase-ended:1",
-      "stage-duration:1",
-      "phase-started:2",
-      "phase-ended:2",
-      "stage-duration:2",
       "phase-started:3",
       "phase-ended:3",
       "stage-duration:3",
     ]);
-  });
-
-  it("[behavior:#87:B-07] reverts the regressing round and tells the next one what it reddened", () => {
-    // The round's write is gone, and no sweep commit for it survives: a
-    // regressing round is reverted with `git reset --hard`, not re-baselined.
-    expect(undeclaredSurvived).toBe(false);
-    expect(sweepCommits).toEqual([
-      "chore(#70): cleaner round 3",
-      "chore(#70): cleaner round 2",
-    ]);
-    expect(
-      (stages as Array<{ rounds: Array<{ outcome: string }> }>)[0]!.rounds.map(
-        (round) => round.outcome,
-      ),
-    ).toEqual(["REVERTED", "FAIL", "EXHAUSTED"]);
-    // Round 2 was told, in its own prompt, what round 1 reddened and that its
-    // edit is gone — the `{{REGRESSION_NOTE}}` the template declares.
-    expect(cleanerCalls).toBe(3);
-    // (Keyed on the note's own wording: the template body mentions
-    // `git reset --hard` in every rendered prompt, note or no note.)
-    expect(cleanerPrompts[0]).not.toContain("Your edit is gone");
-    expect(cleanerPrompts[1]).toContain("Round 1 was reverted");
-    expect(cleanerPrompts[1]).toContain("scope");
-    expect(cleanerPrompts[1]).toContain("Your edit is gone");
-    // Round 3 regressed nothing, so it carries no note.
-    expect(cleanerPrompts[2]).not.toContain("Round 2 was reverted");
   });
 
   it("[behavior:#87:B-08] finishes stuck with every remaining red gate and the preserved checkpoint", () => {
@@ -2970,7 +2948,7 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
     expect(stuckDiagnosis).toMatch(/-format\.log/);
     // The optional gate was red on every round and is in none of it: it is
     // recorded, and it blocks nothing.
-    expect(roundAttempts).toHaveLength(3);
+    expect(roundAttempts).toHaveLength(1);
     for (const attempt of roundAttempts) {
       expect(attempt.results.find((gate) => gate.gateId === "style")).
         toMatchObject({ status: "FAIL" });
@@ -2980,9 +2958,20 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
     // is still the worktree's HEAD, not the accepted tree it started from.
     const rounds = (
       stages as Array<{
-        rounds: Array<{ inputTreeId: string; outputTreeId?: string }>;
+        rounds: Array<{
+          round: number;
+          inputTreeId: string;
+          outputTreeId?: string;
+          outcome: string;
+        }>;
       }>
     )[0]!.rounds;
+    expect(rounds.map((round) => round.round)).toEqual([1, 2, 3]);
+    expect(rounds.map((round) => round.outcome)).toEqual([
+      "FAIL",
+      "FAIL",
+      "EXHAUSTED",
+    ]);
     expect(headTree).toBe(rounds[2]!.outputTreeId);
     expect(headTree).not.toBe(rounds[0]!.inputTreeId);
   });
