@@ -37,6 +37,11 @@ export type RunEventPayload =
       /** Configured convergence limits; absent in historical streams. */
       contractRoundLimit?: number;
       implementationRoundLimit?: number;
+      /**
+       * Whether `--record-prompts` was on (#264). Always written by a new
+       * run; absent in historical streams, which is why it is optional.
+       */
+      recordPrompts?: boolean;
     }
   | { type: "wave-dispatched"; wave: number; slices: string[] }
   | { type: "wave-completed"; wave: number }

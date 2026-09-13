@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-08",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-28"],
+      "evidence": "B-28 then: \"the pack is refused with an error naming that unknown member, and eval-packs/fixtures/refused/ contains no other file, since every other refusing pack of B-02–B-07 lives in a per-test temporary directory; the listing is bounded to the directory this slice owns rather than to all of eval-packs/, so the sibling packs #263 adds under eval-packs/afk/ and eval-packs/fixtures/consumer-governance/ on the same feature branch cannot falsify it at the pre-ship gate\"; B-28 observableResult: \"asserts a recursive listing of eval-packs/fixtures/refused/ equals exactly [\\\"01-unknown-member.json\\\"]\"; contract.md test plan: \"a recursive listing of `eval-packs/fixtures/refused/` equals exactly `[\\\"01-unknown-member.json\\\"]` — bounded to this slice's own directory so a sibling pack #263 adds elsewhere under `eval-packs/` cannot falsify it (B-28)\"; contract.md scope lock (unchanged): \"`eval-packs/fixtures/refused/01-unknown-member.json` (B-28) is the only committed pack this slice adds.\"",
+      "expected": "The scope statement the revision needed — that this slice commits exactly one pack file — must be made observable in a way that stays true on the merged feature branch, since a `tests` / `acceptance:behaviors` gate is run again at pre-ship after sibling slices land. An assertion is apt evidence only if the contract's own plan does not require it to go red.",
+      "observed": "The revision took the clear-condition's first branch. Both halves of the pair now bound the listing to `eval-packs/fixtures/refused/`: B-28's `then` asserts that directory \"contains no other file\" and states in terms why it is not bounded to all of `eval-packs/`, and its observableResult pins a recursive listing of `eval-packs/fixtures/refused/` to exactly `[\"01-unknown-member.json\"]`. contract.md's B-28 bullet (lines 223-234) and the matching test-plan line (lines 349-353) were bounded the same way, and no directory-wide absence claim over `eval-packs/` survives in either artifact — so the two paths this slice's own non-goals assign to #263, `eval-packs/afk/` and `eval-packs/fixtures/consumer-governance/`, land outside the asserted directory and cannot turn B-28 red at the pre-ship gate. The scope lock that names this as the only committed pack S1 adds remains as prose at contract.md:38-40 and the definition of done's `git status` clause plus the single `eval-packs/` path in file scope still lock the scope, which is what the clear-condition explicitly permitted. No other behavior entry, scope term, gate binding or file-scope path changed with it.",
+      "clearCondition": "B-28's `then` and observableResult bound the listing assertion to what this slice owns — e.g. a recursive listing of `eval-packs/fixtures/refused/` equals exactly `[\"01-unknown-member.json\"]`, or the assertion is over the paths this slice's diff adds under `eval-packs/` — so that sibling packs added under `eval-packs/` by #263 cannot falsify it; the scope-lock sentence naming this as the only pack S1 commits may stay as prose.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

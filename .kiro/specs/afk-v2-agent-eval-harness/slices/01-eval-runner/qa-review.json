@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-12"],
+      "summary": "B-12's report-level half is unasserted: no test reads the architect UNPARSEABLE case's report.json entry to show it carries actual.outcome \"UNPARSEABLE\" and no error key.",
+      "evidence": "`Select-String -Path src/*.test.ts -Pattern 'B-12'` finds exactly one test, `src/eval-compare.test.ts:143` (\"B-12 projects a guardian review's outcome, and UNPARSEABLE as a value\"). It asserts `projectOutput(guardian, unparseable)` equals `{ outcome: \"UNPARSEABLE\" }` and that `compareProjection({outcome:\"SHIP\"}, {outcome:\"UNPARSEABLE\"})` is \"MISMATCH\". No test in src/eval-command.test.ts dispatches a guardian case whose stub writes an unparseable review, so no assertion ever reads a report.json entry for that case. `pnpm vitest run src/eval-command.test.ts` (21 passed) contains no `pm`/`architect` MISMATCH scenario at all.",
+      "expected": "acceptance-manifest.json B-12 observableResult: \"a unit test asserts the pm projection, and asserts the architect case entry in report.json has outcome MISMATCH with actual.outcome \\\"UNPARSEABLE\\\" and no error key\".",
+      "observed": "The two composed halves (projection, then comparison) are asserted separately at the unit level; the composed end-to-end claim — that a full `runEvalCli` run records this case as MISMATCH rather than ERROR in report.json, with no `error` key — is not asserted anywhere. The behavior is correct on inspection (`src/eval-command.ts:236-242` attaches `actual` and omits `error` on any non-MATCH compare result, and `src/eval-report.ts:83-84` serializes by presence), so this is a coverage gap rather than a defect: a future change that routed an UNPARSEABLE projection through `failed()` in `src/eval-command.ts:214` would leave every existing test green.",
+      "clearCondition": "A test named for B-12 dispatches a guardian case through runEvalCli whose stub writes an unparseable review against an expected SHIP, and asserts that case's report.json entry has outcome \"MISMATCH\", actual.outcome \"UNPARSEABLE\", and no \"error\" own key.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

@@ -56,6 +56,14 @@ export interface PipelineRuntimeOptions {
   /** Execute otherwise independent slice lanes one at a time. */
   serialLanes?: boolean;
   /**
+   * Write every provider invocation's exact prompt to a `.prompt.md` file
+   * beside that invocation's `.log` in the run directory, so a past
+   * incident can become an eval case from a recording rather than a hand
+   * reconstruction. Default off; the `run-started` event records whether it
+   * was on. See CONTEXT.md **Prompt record** (#264).
+   */
+  recordPrompts?: boolean;
+  /**
    * Open the draft PR despite an unfavorable PM verdict, recording the
    * human override and both guardian verdicts in the PR body (ADR 0015).
    * Requires a favorable architect verdict; only a real FIX-BEFORE-SHIP
@@ -239,6 +247,12 @@ export function parsePipelineRuntimeOptions(
   const preflightReportOnly = args.includes("--preflight-report-only");
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
+  // Exact-token membership like the booleans above, but left unset rather
+  // than `false` when absent, so the field is only present on a run that
+  // asked for it. A near miss (`--record-prompt`,
+  // `--record-prompts=false`) is silently not the flag: it has no value
+  // form, and no boolean flag here rejects anything either.
+  const recordPrompts = args.includes("--record-prompts") ? true : undefined;
   const forceRestart = parseSliceIdList(args, "--force-restart");
   const resumeStuck = parseSliceIdList(args, "--resume-stuck");
   // "Throw this tree away" and "finish this tree" are contradictory
@@ -272,6 +286,7 @@ export function parsePipelineRuntimeOptions(
     preflightReportOnly,
     serialLanes,
     openPrOnOverride,
+    recordPrompts,
     guardianRoundCap,
     forceRestart,
     resumeStuck,
