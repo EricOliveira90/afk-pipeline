@@ -2818,6 +2818,11 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
   let headTree = "";
   let stages: unknown;
   let roundAttempts: GateAttemptEvidence[] = [];
+  let cleanerJournalEvents: Array<{
+    type: string;
+    agent?: string;
+    round?: number;
+  }> = [];
 
   beforeAll(async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -2893,7 +2898,33 @@ describe("a clean policy reverts a regression and exhausts its rounds", () => {
         attempt.results.some((gate) => gate.gateId === "format") &&
         attempt.results.length > 2,
     );
+    cleanerJournalEvents = readFileSync(
+      join(ctx.logger.runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type: string;
+            agent?: string;
+            round?: number;
+          },
+      )
+      .filter((event) => event.agent === "cleaner");
   }, 300_000);
+
+  it("[behavior:#87:B-06] journals every cleaner round as one completed stage", () => {
+    const roundsFor = (type: string) =>
+      cleanerJournalEvents
+        .filter((event) => event.type === type)
+        .map((event) => event.round);
+
+    expect(roundsFor("phase-started")).toEqual([1, 2, 3]);
+    expect(roundsFor("phase-ended")).toEqual([1, 2, 3]);
+    expect(roundsFor("stage-duration")).toEqual([1, 2, 3]);
+  });
 
   it("[behavior:#87:B-07] reverts the regressing round and tells the next one what it reddened", () => {
     // The round's write is gone, and no sweep commit for it survives: a

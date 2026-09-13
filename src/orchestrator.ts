@@ -6833,8 +6833,9 @@ export async function runSliceExecute(
               absSliceDir: ctx.absSliceDir,
               featureRef: featBranch,
               dispatch: async (cleanerInput) => {
+                const cleanerRound = cleanerInput.round;
                 logger.phase(
-                  `${ctx.tag}: cleaner round ${cleanerInput.round} of ` +
+                  `${ctx.tag}: cleaner round ${cleanerRound} of ` +
                     `${cleanerInput.roundLimit} on ${cleanerInput.inputTreeId}...`,
                   "error",
                   {
@@ -6842,64 +6843,75 @@ export async function runSliceExecute(
                     ghIssue: slice.ghIssue,
                     sliceNumber: slice.number,
                     agent: "cleaner",
-                    round,
+                    round: cleanerRound,
                   },
                 );
                 const cleanerLog = logger.agentLog(
                   slice.number,
                   "cleaner",
-                  round * 10 + cleanerInput.round,
+                  round * 10 + cleanerRound,
                 );
-                await invoke({
-                  role: "cleaner",
-                  completionEvidence: {
+                try {
+                  await invoke({
+                    role: "cleaner",
+                    completionEvidence: {
+                      ghIssue: slice.ghIssue,
+                      sliceNumber: slice.number,
+                      round,
+                      attempt: cleanerRound,
+                      role: "cleaner",
+                    },
+                    prompt: renderPrompt("cleaner", {
+                      SLICE_DIR: ctx.relSliceDir,
+                      ROUND: String(cleanerRound),
+                      ROUND_LIMIT: String(cleanerInput.roundLimit),
+                      BASELINE_TREE_ID: cleanerInput.baselineTreeId,
+                      INPUT_TREE_ID: cleanerInput.inputTreeId,
+                      // The locked manifest by name, not its contents: the
+                      // cleaner reads the same document the `scope` gate
+                      // enforces, so a summary here could only ever disagree
+                      // with it.
+                      WRITE_SCOPE: [
+                        `- Every path in the locked ` +
+                          `\`${ctx.relSliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}\`` +
+                          ` \`fileScope\`.`,
+                        ...(ctx.runGatePolicy?.clean?.additionalWriteScope ?? [])
+                          .map(
+                            (glob) =>
+                              `- \`${glob}\` (this project's ` +
+                              `\`gatePolicy.clean.additionalWriteScope\`).`,
+                          ),
+                        `- \`${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}\`,` +
+                          ` and only to escalate.`,
+                      ].join("\n"),
+                      QUALITY_FAILURES: cleanerInput.qualityFailures
+                        .map(
+                          (failure) =>
+                            `- \`${failure.gateId}\` (${failure.status}): ` +
+                            `${failure.detail}\n  Log: ` +
+                            `\`${failure.logArtifactId}\``,
+                        )
+                        .join("\n"),
+                      REGRESSION_NOTE: cleanerInput.regressionNote,
+                    }),
+                    cwd: ctx.worktreeDir,
+                    logStream: cleanerLog,
+                    ...longCommandRoleBounds({
+                      idleTimeoutMs: timeoutMs,
+                      idleWarningIntervalMs: heartbeatMs,
+                      maxDurationMs: config.maxAgentDurationMs,
+                    }),
+                  });
+                } finally {
+                  closeAgentLog(cleanerLog);
+                  logger.event({
+                    type: "phase-ended",
                     ghIssue: slice.ghIssue,
                     sliceNumber: slice.number,
-                    round,
-                    attempt: cleanerInput.round,
-                    role: "cleaner",
-                  },
-                  prompt: renderPrompt("cleaner", {
-                    SLICE_DIR: ctx.relSliceDir,
-                    ROUND: String(cleanerInput.round),
-                    ROUND_LIMIT: String(cleanerInput.roundLimit),
-                    BASELINE_TREE_ID: cleanerInput.baselineTreeId,
-                    INPUT_TREE_ID: cleanerInput.inputTreeId,
-                    // The locked manifest by name, not its contents: the
-                    // cleaner reads the same document the `scope` gate
-                    // enforces, so a summary here could only ever disagree
-                    // with it.
-                    WRITE_SCOPE: [
-                      `- Every path in the locked ` +
-                        `\`${ctx.relSliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}\`` +
-                        ` \`fileScope\`.`,
-                      ...(ctx.runGatePolicy?.clean?.additionalWriteScope ?? [])
-                        .map(
-                          (glob) =>
-                            `- \`${glob}\` (this project's ` +
-                            `\`gatePolicy.clean.additionalWriteScope\`).`,
-                        ),
-                      `- \`${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}\`,` +
-                        ` and only to escalate.`,
-                    ].join("\n"),
-                    QUALITY_FAILURES: cleanerInput.qualityFailures
-                      .map(
-                        (failure) =>
-                          `- \`${failure.gateId}\` (${failure.status}): ` +
-                          `${failure.detail}\n  Log: ` +
-                          `\`${failure.logArtifactId}\``,
-                      )
-                      .join("\n"),
-                    REGRESSION_NOTE: cleanerInput.regressionNote,
-                  }),
-                  cwd: ctx.worktreeDir,
-                  logStream: cleanerLog,
-                  ...longCommandRoleBounds({
-                    idleTimeoutMs: timeoutMs,
-                    idleWarningIntervalMs: heartbeatMs,
-                    maxDurationMs: config.maxAgentDurationMs,
-                  }),
-                }).finally(() => closeAgentLog(cleanerLog));
+                    agent: "cleaner",
+                    round: cleanerRound,
+                  });
+                }
               },
               /**
                * Archive the round before anything resets it (#87 B-09): the
