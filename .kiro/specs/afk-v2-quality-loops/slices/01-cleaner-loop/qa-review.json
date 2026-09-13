@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-06"],
+      "summary": "The cleaner dispatch now journals a paired phase-started/phase-ended under a per-cleaner-round stageInvocationKey, so every round yields a stage-duration sample and no cleaner stage is left open.",
+      "evidence": "a713fc7 and 6026c0a rewrote src/orchestrator.ts:6835-6931: the agent log is opened before phase-started, both events carry `round: cleanerRound` (not the generator `round`), and the `finally` block awaits `closeAgentLog(cleanerLog)` before emitting phase-ended. `pnpm vitest run src/qa-orchestration.test.ts -t \"a clean policy\"` => 8 passed | 28 skipped, exit 0 (56.5s), including `[behavior:#87:B-06] journals every cleaner round as one completed stage`, which pins the whole sequence phase-started:1/phase-ended:1/stage-duration:1/...:2/...:3 (src/qa-orchestration.test.ts:2913-2946). Two probes in this disposable worktree proved the test can fail: (1) changing both events back to `round` (the generator round) => `AssertionError: expected [ 1, 1, 1 ] to deeply equal [ 1, 2, 3 ]` at src/qa-orchestration.test.ts:2924, exit 1; (2) deleting the `phase-ended` emit => `expected [] to deeply equal [ 1, 2, 3 ]` at src/qa-orchestration.test.ts:2925, exit 1. Both probes were reverted (`git status --porcelain` shows no src/ modification).",
+      "expected": "After a run in which the cleaner stage executes N rounds, the run journal holds N phase-started and N matching phase-ended events for agent \"cleaner\" pairing under distinct per-round stageInvocationKeys, yielding N stage-duration events and leaving no open cleaner stage, asserted by a test that fails if the start, the end, or the per-round key distinction is removed.",
+      "observed": "The exhaustion scenario's journal contains exactly phase-started/phase-ended/stage-duration for cleaner rounds 1, 2 and 3, in that order, with nothing left open when the stage returns; the B-06 journal test asserts that whole sequence and fails under both regressions probed.",
+      "clearCondition": "After a run in which the cleaner stage executes N rounds, the run journal contains, for agent \"cleaner\", N phase-started events and N matching phase-ended events that pair under distinct stageInvocationKeys (one per cleaner round, not per generator round), yielding N stage-duration events; RunJournal leaves no cleaner stage open at the end of the stage; and a test observing the journal of a spawned or dispatch-level cleaner run asserts those events and would fail if either the start, the end, or the per-round key distinction were removed.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-09", "B-14"],
+      "summary": "The words \"round\" and \"attempt\" are inverted between a cleaner round's archive filename and its persisted record, so the same two numbers swap names inside one slice.",
+      "evidence": "src/orchestrator.ts:6947-6971 archives with `round` = the generator round and `attempt: cleanerRound`, producing `cleaner-log-r2-a1.log` for generator round 2 / cleaner round 1. src/cleaner-stage.ts:558-563 (and :601, :623, :735, :772, :787) persists the same round as `{ round: roundNumber /* cleaner round */, attempt: round /* generator round */ }`, which src/qa-orchestration.test.ts:2775-2787 reads back as `{ round: 1, attempt: 2 }` for the round archived as `r2-a1`.",
+      "expected": "Contract B-09 names the archive `cleaner-log-r<round>-a<attempt>.log` and B-14 names the record `{ round; attempt; ... }`; neither fixes which number is which, but one slice reading the same two numbers under one vocabulary is the maintainable choice.",
+      "observed": "An operator correlating `cleaner-log-r2-a1.log` with the persisted `{ round: 1, attempt: 2 }` must know the two conventions are mirror images of each other; nothing in either module's comments states the inversion.",
+      "clearCondition": "A cleaner round's archive filename and its PersistedQualityStageRound use the same field for the same number, or a comment at each of the two sites states the inversion and why the archive keeps archiveQAReviewAttempt's generator-round-first convention.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

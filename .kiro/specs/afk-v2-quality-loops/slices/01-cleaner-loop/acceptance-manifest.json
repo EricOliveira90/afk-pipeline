@@ -1,0 +1,282 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/cleaner-stage.ts",
+      "src/scope-gate.ts",
+      "src/escalation.ts",
+      "src/final-evaluation.ts",
+      "src/run-state.ts",
+      "src/run-events.ts",
+      "src/context-envelope.ts",
+      "src/qa-review.ts",
+      "src/artifacts.ts",
+      "src/orchestrator.ts",
+      "src/gate-policy.ts",
+      "src/gate-runner.ts",
+      "src/suppression-gate.ts",
+      "src/bounds.ts",
+      "prompts/cleaner.md",
+      "ARCHITECTURE.md",
+      "src/acceptance-gate.test.ts",
+      "src/cleaner-stage.test.ts",
+      "src/scope-gate.test.ts",
+      "src/escalation.test.ts",
+      "src/final-evaluation.test.ts",
+      "src/run-state.test.ts",
+      "src/context-envelope.test.ts",
+      "src/artifacts.test.ts",
+      "src/gate-policy.test.ts",
+      "src/gate-runner.test.ts",
+      "src/suppression-gate.test.ts",
+      "src/bounds.test.ts",
+      "src/qa-orchestration.test.ts",
+      "src/qa-orchestration-gates.test.ts",
+      "src/eval-boundary.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "prd.md D1, D14; GH #87 \"enabled by gatePolicy.clean\"; ADR 0063; landed in 5b77dd1",
+      "given": "the shipped src/gate-policy.ts, whose POLICY_KEYS already carries clean and whose parseClean landed in 5b77dd1 (src/gate-policy.ts:975, wired at :1107), together with a gatePolicy.clean carrying an unknown sub-key, an id colliding with a catalog gate id, an empty gates array, and a valid minimal shape",
+      "when": "parseClean runs on each and the valid one is turned into GateDeclarations at stage \"clean\"",
+      "then": "the shipped behavior stays true and is not re-implemented: requireKnownKeys makes every unknown sub-key fatal and names it, a gates id colliding with BASE_GATE_IDS, scope, feedback-integrity, tests:skipped, acceptance:behaviors, test:budgets or suppressions is fatal, an empty gates array is fatal, and the valid shape takes additionalWriteScope [], the ts-eslint suppressionDetectors set and expectedCostMs DEFAULT_CHEAP_THRESHOLD_MS, which is budgeting and reporting only and can never fail a gate (ADR 0063)",
+      "observableResult": "src/gate-policy.test.ts's [behavior:#87:B-01] tests assert each refusal with the offending key or id named, each default, and that GatePolicy.clean typechecks as GatePolicyClean; typecheck holds the type-level half",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-02",
+      "source": "prd.md D1; landed in 07cb5e3",
+      "given": "a clean gate whose args entry is exactly the literal token {changedFiles}, and a slice worktree whose HEAD differs from the feature base by two paths in one case and by none in another",
+      "when": "that round's declarations are built, after the hasUncommittedChanges to commitAll sweep and createCandidateCheckpoint have run",
+      "then": "the token expands via diffTreePaths (src/git.ts) to one repo-relative forward-slash argument per changed path, mirroring {behaviorId}, and an empty expansion records the gate SKIPPED with detail \"no changed files\" rather than PASS",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:B-02] tests assert the two expanded arguments and the SKIPPED result with that exact detail",
+      "preservation": false,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-03",
+      "source": "prd.md D2; ARCHITECTURE.md \"Hubs\"; landed in 07cb5e3",
+      "given": "the shipped CLEANER_STAGE_ID at src/final-evaluation.ts:49 beside POST_APPROVAL_WRITING_STAGE_ID, the one runCleanerStage call site in src/orchestrator.ts's post-approval block after the accept-seam window check and the feat(#…) commit and before finalTreeId resolves, and a spawned run with a clean policy and an injected stub writing stage",
+      "when": "runCleanerStage(ctx, round, input) returns from a stage that ran and from one that did not, and the spawned run's post-approval journal is read",
+      "then": "the return carries exactly { ran, outcome, inputTreeId, outputTreeId, roundsSpent } with ran true and false respectively, and the cleaner stage is entered before the injectable config.postApprovalWritingStage ?? noopPostApprovalWritingStage",
+      "observableResult": "src/cleaner-stage.test.ts and src/final-evaluation.test.ts's [behavior:#87:B-03] tests assert the exported id's placement and the returned shape, and the shared beforeAll result of src/qa-orchestration.test.ts's \"a clean policy escalates, then repairs the re-approved tree\" scenario shows cleaner before the stub stage in the journal",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-04",
+      "source": "prd.md D4 including its 2026-09-12 SKIPPED ruling, D17; src/candidate-gate-phase.ts:47-72; landed in 07cb5e3",
+      "given": "an accepted tree and clean declarations passed to runCandidateGatePhase with round-0 cache options, using the shipped signature (declarations: readonly GateDeclaration[] plus an optional pass-through cache?: GateCacheOptions) with src/candidate-gate-phase.ts unedited",
+      "when": "round 0 gates the accepted tree and every required clean gate is PASS or SKIPPED, and separately when a required clean gate FAILs",
+      "then": "the all-green-or-skipped case gives stage outcome PASS with zero cleaner invocations, roundsSpent 0 and inputTreeId === outputTreeId, a SKIPPED never counting as a FAIL, and the failing case proceeds to round 1",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:B-04] tests assert the zero-invocation PASS for both the passing and the empty-expansion SKIPPED gate, and the transition to round 1 on a required FAIL",
+      "preservation": false,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-05",
+      "source": "prd.md D4, D14; ADR 0050; ADR 0041; landed in 5b77dd1 (constant and helper) and 07cb5e3 (the loop's use)",
+      "given": "the shipped MAX_CLEANER_ROUNDS = 3 and cleanerRoundsRemaining({ spent, limit? }) at src/bounds.ts:84 and :92, modelled on MAX_FINAL_EVALUATION_ATTEMPTS and finalEvaluationAttemptsRemaining, and a stage loop whose continuation is that remainder",
+      "when": "cleanerRoundsRemaining is called for spent 0..4, and when a round's gate returns INFRASTRUCTURE and when a dispatch dies",
+      "then": "the remainder is Math.max(0, 3 - spent), the loop continues on an enforced comparison against that remainder rather than an incremented counter (ADR 0050 / ADR 0041), an INFRASTRUCTURE status retries under runCandidateGatePhase's existing infrastructureRetries and spends no round, and a dispatch that dies spends its round",
+      "observableResult": "src/bounds.test.ts:33 and src/cleaner-stage.test.ts's [behavior:#87:B-05] tests assert the remainder for each spent value, the no-round INFRASTRUCTURE retry, the three-dispatch bound, and the spent round on a dead dispatch, corroborated by the \"reverts a regression and exhausts its rounds\" shared result",
+      "preservation": false,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-06",
+      "source": "prd.md D4; src/candidate-gate-phase.ts:47-72; src/gate-runner.ts:130, :451; landed in 07cb5e3",
+      "given": "a clean policy whose fake node -e gate fails until a stub cleaner writes a file, and a slice worktree ctx.worktreeDir",
+      "when": "cleaner round n (1..3) runs",
+      "then": "the round is exactly: dispatch with phase-started and phase-ended journaled at agent \"cleaner\" (src/run-events.ts) so stage-duration exists without new code; sweep anything uncommitted into chore(#<issue>): cleaner round <n> via hasUncommittedChanges to commitAll and take createCandidateCheckpoint as the output tree; then one runCandidateGatePhase call over, in order, the clean gates, scope (role source), feedback-integrity, tests:skipped, suppressions and the regression bundle from resolvePreQAGateDeclarations, resolveAcceptancePlan's acceptance:behaviors and resolveFullSuiteGateDeclarations — with src/candidate-gate-phase.ts unedited, since GateDeclaration.stage is typed stage: string validated only as non-blank",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:B-06] tests assert the dispatch's failure detail, the sweep commit in the worktree log, the exact gate id order and the PASS on the repaired tree; the \"escalates, then repairs\" shared result asserts the same against a real dispatch and a real candidate approval",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-07",
+      "source": "prd.md D4; GH #87 AC4 \"restore or revert, never redefine\"; ADR 0051; landed in 07cb5e3",
+      "given": "a round that wrote, reached by each of exactly four exit paths: a required non-clean gate red, a dispatch that throws or is cancelled, a malformed cleaner-escalation.json, and a valid escalation raised in round 2",
+      "when": "the orchestrator ends that round",
+      "then": "every exit path out of a round that wrote resets — not only the regression path (ADR 0051) — with exactly one reset target and exactly one recorded outcome each: red non-clean gate resets to the round's input checkpoint with outcome REVERTED and the red gate ids and the next round's prompt carrying {{REGRESSION_NOTE}}; a dead or cancelled dispatch resets to the input checkpoint with outcome FAIL and empty gate ids, the round spent; a malformed escalation resets to the input checkpoint with outcome ESCALATION_MALFORMED as that round's whole outcome, its checkpoint discarded and never gated; a valid escalation resets to the accepted tree with outcome ESCALATED, the one documented exception to the input-checkpoint target. Nothing re-baselines and no expectation is edited",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:B-07] tests assert HEAD and the single recorded outcome for each of the four paths, one it each, including that HEAD after a round-2 escalation is the accepted tree rather than round 1's output commit; the \"reverts a regression and exhausts its rounds\" shared result asserts the revert, the REVERTED record and the round-2 prompt's regression note",
+      "preservation": false,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-08",
+      "source": "prd.md D4; GH #87 AC2; landed in 07cb5e3",
+      "given": "a clean policy with a required gate and a second, optional gate red throughout, run to green, to a still-red required gate with rounds remaining, and to exhaustion",
+      "when": "each round's gate set is evaluated",
+      "then": "regression bundle green plus required clean gates green gives PASS at the last checkpoint; a green bundle with a required clean gate still red and rounds remaining runs the next round from that output tree; rounds exhausted with a required clean gate red gives EXHAUSTED through the existing finishStuck path with stuck.md listing every remaining red gate id, its detail and its log artifact id and the last checkpoint preserved; an optional clean gate still red never blocks and is only recorded",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:B-08] tests assert the outcome selection and the three dispatches, and the \"reverts a regression and exhausts its rounds\" shared result asserts finishStuck, stuck.md's contents and that the optional gate never blocked",
+      "preservation": false,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-09",
+      "source": "prd.md D4 (prd.md:294-299); GH #87 AC2; ADR 0052 / ADR 0060; landed in 1a9961a",
+      "given": "three cleaner rounds under negotiationArchiveDir (.afk/artifacts/<run-slug>/slice-<n>/), the shipped \"cleaner\" QAReviewStage member (src/qa-review.ts:92) with its qaArchivePrefix branch, its qaReviewFilename branch at src/qa-review.ts:452 returning cleaner-escalation.json, and the docstring exception landed at src/qa-review.ts:77",
+      "when": "the stage ends and qaArchivePrefix and qaReviewFilename are called for each stage value",
+      "then": "one archived attempt per round is stamped with round and attempt under the cleaner prefix so the switch's else-to-\"final\" fallback cannot mislabel it, no existing name is overwritten, the escalation is archived by archiveQAReviewAttempt as cleaner-review-r<round>-a<attempt>.json and the agent log as cleaner-log-r<round>-a<attempt>.log by a source-named export over archiveEvidenceCopy, the three existing members' answers are unchanged, qaArchivePrefix's return type is \"qa\" | \"uat\" | \"final\" | \"cleaner\", and \"cleaner\" widens the union only — it does not join QA_REVIEW_STAGES and STAGE_BY_ARCHIVE_PREFIX gains no inverse entry",
+      "observableResult": "src/artifacts.test.ts's [behavior:#87:B-09] tests assert the per-round archive names, the no-overwrite rule and both mapping branches; typecheck holds the widened return type; src/qa-review.test.ts needs no edit because the array-derived structures are untouched",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-10",
+      "source": "prd.md D5, D14; GH #87 AC3; landed in 526260c (gate, field, constants) and 4a64b90 (the pin at src/acceptance-gate.test.ts:306)",
+      "given": "the shipped in-process gate src/suppression-gate.ts, id suppressions, stage \"deterministic\", modelled on src/skip-gate.ts; the optional GateFindings.suppressions field; GATE_EVIDENCE_VERSION = 4 and SUPPORTED_GATE_EVIDENCE_VERSIONS = [1, 2, 3, 4] with their version-history paragraph; and the pin already reading expect(GATE_EVIDENCE_VERSION).toBe(4) at src/acceptance-gate.test.ts:306 with its #87 comment paragraph — no toBe(3) pin on that constant survives anywhere",
+      "when": "the gate counts each detector's patterns over files matching its globs on the input tree and on the output tree, and the evidence document is read",
+      "then": "only an increase fails, a changed file no detector's globs cover is not a failure, findings are exact { path, line, detectorId } triples, only evidence version 4 may carry suppressions, GateRiskClass's \"suppression\" is waiver vocabulary only and the gate never consults gatePolicy.riskClasses to decide whether to run — and the constant, the supported list and the pin are all locked at 4: a bump to 5, a re-widened list or a pin moved back to 3 is a defect, so nothing in B-10 is outstanding",
+      "observableResult": "src/suppression-gate.test.ts and src/gate-runner.test.ts's [behavior:#87:B-10] tests assert the added triple, the removed-suppression and uncovered-file passes, and the version-4 evidence document; src/acceptance-gate.test.ts:306 still reads 4",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-11",
+      "source": "prd.md D3; GH #87 AC6; ADR 0048; ADR 0052 / ADR 0060; src/escalation.ts:259-325; landed in 07cb5e3 and 0386eef",
+      "given": "the shipped optional argument artifactDirPolicy?: \"exempt-prefix\" | \"declared-only\" on outOfScopeChangedPaths (src/escalation.ts:307, defaulted at :315), mirrored as an optional ScopeGateInput field, and a role-source comparison whose output tree writes slice/contract.md, slice/feedback-r1.md, slice/cleaner-escalation.json and an additionalWriteScope glob match",
+      "when": "the scope gate runs for ScopeComparisonSource kind \"role\" with artifactDirPolicy \"declared-only\", which is what the cleaner's declaration passes, and separately under the candidate source",
+      "then": "the prefix exemption at src/escalation.ts:315-320 is not applied, so contract.md and feedback-r1.md are outOfScopePaths while cleaner-escalation.json stays exempt and the additionalWriteScope match is in scope; the migration exemption and the unclassifiable-path rule are untouched; sliceArtifactDir is never \"\" so the orchestratorOwned expression is unedited; the cleaner's declaration passes acceptedPairIntact: false so a touched accepted pair is named through the existing unwaivable carve-out; and the write scope is the locked fileScope widened only by additionalWriteScope, applied with matchesGlob in src/scope-gate.ts before outOfScopeChangedPaths sees it, with no heuristic deriving test paths from source paths. The rule lands in src/escalation.ts rather than src/scope-gate.ts, where a pre-filter could only widen the accepted set. #226 is not closed",
+      "observableResult": "src/scope-gate.test.ts and src/escalation.test.ts's [behavior:#87:B-11] tests assert each classification under both policies; typecheck holds the additive optional argument and the ScopeGateInput field",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-12",
+      "source": "prd.md D7; ADR 0038; landed in 07cb5e3, covered in c012fa4",
+      "given": "the shipped CLEANER_CONTEXT_MANIFEST at src/context-envelope.ts:771 beside FINAL_EVALUATOR_CONTEXT_MANIFEST, \"cleaner\" added to the slice invoke wrapper's completionEvidence.role, invocation-completed.role and ContextEnvelopeRole but not PromptAssemblyRole, and prompts/cleaner.md",
+      "when": "validateContextEnvelopeManifest runs on the manifest and prompts/cleaner.md is rendered",
+      "then": "the manifest validates with allowedWriteScope = locked fileScope + additionalWriteScope + slice/cleaner-escalation.json, outputArtifact \"cleaner-checkpoint\", inputOrder [\"quality-failures\", \"change-summary\", \"approved-baseline\", \"acceptance-manifest\", \"locked-contract\"], review artifacts and handoff.md in omittedArtifactClasses and inlineSizeBudgetBytes 65536; the prompt renders {{SLICE_DIR}}, {{ROUND}}, {{ROUND_LIMIT}}, {{BASELINE_TREE_ID}}, {{INPUT_TREE_ID}}, {{WRITE_SCOPE}}, {{QUALITY_FAILURES}} (per failing clean gate: id, detail and the repo-relative log artifact path rather than inlined output) and {{REGRESSION_NOTE}}, plus the two anti-gaming lines, the no-redefinition line, the commit-with-rationale instruction and the escalation instruction, and no {{TEST_COMMAND}} (ADR 0038); there is no agents/cleaner.md; bounds are longCommandRoleBounds with the generator's idleTimeoutMs and maxDurationMs and deferIdleKillWhenBusy on",
+      "observableResult": "src/context-envelope.test.ts's [behavior:#87:B-12] tests assert the validation, the role memberships and non-membership, every rendered placeholder and the absence of {{TEST_COMMAND}}; typecheck holds the ContextEnvelopeRole / PromptAssemblyRole split",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-13",
+      "source": "prd.md D8, D9; GH #87 AC5; ADR 0048; landed in 07cb5e3 and 1a9961a, covered in 4174ae9 and e16d6de",
+      "given": "a <slice>/cleaner-escalation.json written in round 2, well-formed in one case and carrying a blank field, an unknown key or the wrong class in others, parsed by the pure parseCleanerEscalation in src/cleaner-stage.ts against { version: 1, class: \"BASELINE_IS_WRONG\", id, summary, evidence, expected, observed } in the FinalReviewFinding vocabulary",
+      "when": "the round ends",
+      "then": "valid gives stage outcome ESCALATED with the worktree reset to the accepted tree first — B-07's one declared exception, so a round-2 or round-3 escalation has one post-reset HEAD — then exactly what a final-evaluation RETURN_TO_GENERATOR does: invalidateFinalEvaluationBaseline(repoRoot, runSlug, ghIssue, accepted tree), a generatorFailureSet whose finding is the escalation with artifactReferences naming the archived file, a retryNote, one generator round consumed and zero final-evaluation attempts consumed; invalid gives an archived file and outcome ESCALATION_MALFORMED as that round's whole outcome, with HEAD at the round's input checkpoint and no gate run on the discarded checkpoint. Because tree ids are content-addressed, the escalating round stays recorded ESCALATED on its own stage entry and the next approval appends a fresh PersistedQualityStage entry, so cleanerRoundsSpent reads the new entry and the escalating round is never charged to the re-approved candidate even when the re-approved tree id is identical",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:B-13] tests assert the parse, both outcomes, the reset target and the baseline invalidation; the \"escalates, then repairs\" shared result asserts generator re-entry with that finding, exactly one generator round and zero final-evaluation attempts, and a fresh stage entry whose cleanerRoundsSpent starts at 0 on a re-approved tree whose id is identical to the escalated one",
+      "preservation": false,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "B-14",
+      "source": "prd.md D9; ADR 0052 / ADR 0060 (additive scope discovery); landed in 1a9961a, covered in dabc777 and b817ef2",
+      "given": "the shipped RUN_STATE_VERSION = 6 at src/run-state.ts:67 with RunState.version admitting 6, qualityStages?: Record<string, PersistedQualityStage[]> at :338, recordQualityStageRound at :931, recordQualityStageOutcome and the reader cleanerRoundsSpent at :238 — and two stale version-5 literals still pinned against that constant outside the schema's own files: expect(RUN_STATE_VERSION).toBe(5) at src/eval-boundary.test.ts:127, which fails pnpm test:fast, and expect(bumped.version).toBe(5) at src/qa-orchestration-gates.test.ts:1016, which fails pnpm run test:heavy:qa, the six in-scope occurrences of the same literal already being repaired",
+      "when": "a version-5 file with no qualityStages is loaded by adaptLoadedState, rounds are recorded and a run resumes, and each of those two pins is moved 5 to 6 and nothing else in either file is changed",
+      "then": "the version-5 file reads as \"no stage ran\" and nothing is written; PersistedQualityStage is { stage: \"cleaner\"; enabled: boolean; rounds; outcome: \"DISABLED\" | \"PASS\" | \"EXHAUSTED\" | \"ESCALATED\" } and PersistedQualityStageRound is { round; attempt; inputTreeId; outputTreeId?; gateIds; outcome: \"PASS\" | \"FAIL\" | \"REVERTED\" | \"EXHAUSTED\" | \"ESCALATED\" | \"ESCALATION_MALFORMED\" }, modelled on finalEvaluations and persisted per attempt; cleanerRoundsSpent counts rounds with round >= 1 so a resumed run cannot buy a fourth round; and no version-5 pin against RUN_STATE_VERSION survives anywhere in src/, with the bump itself not reverted and both files' remaining assertions, fixtures and describe-block placement untouched",
+      "observableResult": "src/run-state.test.ts's [behavior:#87:B-14] tests assert the version-5 read, the persisted shapes and the reader's fourth-round refusal; src/eval-boundary.test.ts:127 reads toBe(6) under pnpm test:fast and src/qa-orchestration-gates.test.ts:1016 reads toBe(6) under pnpm run test:heavy:qa, which runs both halves of the split qa-orchestration suite; typecheck holds RunState.version admitting 6 and the two new persisted types",
+      "preservation": false,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #87 AC1; prd.md D9",
+      "given": "a GatePolicy with no clean member and an approved worktree, reached through the unconditional call site B-03 adds",
+      "when": "runCleanerStage is called",
+      "then": "it returns ran: false, outcome \"DISABLED\", roundsSpent 0 and inputTreeId === outputTreeId, dispatches nothing and writes no qualityStages entry — which is the whole of the call site's effect, so config.postApprovalWritingStage ?? noopPostApprovalWritingStage remains the entire stage list, finalTreeId remains the accepted tree and the final-evaluation reuse branch is untouched. This is deliberately not a byte-identical claim, and it explicitly excludes the run-state version field: B-14's RUN_STATE_VERSION 5 to 6 is unconditional, every run persists version 6 whether or not clean is declared, and making the bump conditional on clean is not authorized",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:P-01] test asserts the returned object, the zero dispatches and the absent qualityStages entry; src/orchestrator.ts's existing clean-less spawned coverage continues to pass unchanged. No spawned scenario is cited: both tier-2 scenarios declare clean, so neither can observe a clean-less run",
+      "preservation": true,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-02",
+      "source": "prd.md D2 \"Rejected: replacing the stub\"",
+      "given": "PostApprovalWritingStage in src/final-evaluation.ts and the noopPostApprovalWritingStage seam that src/qa-orchestration.test.ts's \"final evaluation and reuse\" fixture injects",
+      "when": "the cleaner stage is wired at the accept seam",
+      "then": "PostApprovalWritingStage keeps its synchronous signature, noopPostApprovalWritingStage stays the injectable default, and the cleaner is not shoehorned into either",
+      "observableResult": "src/final-evaluation.test.ts's [behavior:#87:P-02] test asserts the signature and the default, and typecheck holds the signature half",
+      "preservation": true,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-03",
+      "source": "prd.md D12, D13",
+      "given": "decideFinalReuse in src/final-evaluation.ts and pairs of equal and unequal tree ids",
+      "when": "it decides reuse or evaluate",
+      "then": "the decision is exact tree equality alone, with no second \"did the writing stage write?\" predicate added",
+      "observableResult": "src/final-evaluation.test.ts's [behavior:#87:P-03] test asserts reuse on equal ids and evaluate on unequal ids with no writing-stage input in the decision",
+      "preservation": true,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-04",
+      "source": "prd.md D4; src/candidate-gate-phase.ts:47-72; src/gate-runner.ts:130, :451",
+      "given": "the imported assertGateEvidenceReleasesEvaluation from src/candidate-gate-phase.ts, which is deliberately absent from this slice's fileScope, and a required SKIPPED, a required PASS and an optional FAIL result",
+      "when": "it is called with each, and a cleaner round decides its own outcome",
+      "then": "the helper still refuses to release on the required SKIPPED and releases on the required PASS and the optional FAIL, keeping its !declaration.required || result.status === \"PASS\" condition over the pre-QA gate set, and the cleaner's round decision is computed from the round's own runCandidateGatePhase results with no call into it — so B-04's SKIPPED rule never reaches the helper. Its source is held unedited by fileScope exclusion, which is safe because B-04's and B-06's uses need no additive parameter: the signature already takes declarations: readonly GateDeclaration[] plus an optional pass-through cache?: GateCacheOptions, and GateDeclaration.stage is stage: string validated only as non-blank, so the \"clean\" stage string, the suppressions gate and the round-0 cache options all pass through the file unedited",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:P-04] test asserts the three release decisions on the imported helper and that the round decision reads the phase results; typecheck holds the signature and default-argument half, which tests alone cannot observe",
+      "preservation": true,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-05",
+      "source": "prd.md D3, D13",
+      "given": "the candidate comparison source and QA_WINDOW_ARTIFACT_NAME / reviewArtifactViolations in src/post-qa-gates.ts",
+      "when": "the candidate-source scope gate runs on artifact-directory paths and the post-QA window check runs",
+      "then": "the candidate source keeps today's slice-artifact-directory exemption and src/post-qa-gates.ts is unchanged",
+      "observableResult": "src/scope-gate.test.ts's [behavior:#87:P-05] test asserts the candidate-source exemption still applies to the same paths B-11 makes offenders under the role source",
+      "preservation": true,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-06",
+      "source": "prd.md D5",
+      "given": "gate-evidence documents at versions 1, 2 and 3",
+      "when": "the readers read them after B-10's version-4 field shipped",
+      "then": "versions 1 to 3 are still accepted and no version-3 evidence document carries a suppressions field",
+      "observableResult": "src/gate-runner.test.ts's [behavior:#87:P-06] test asserts the three accepted reads and the absent field",
+      "preservation": true,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-07",
+      "source": "prd.md D13",
+      "given": "the in-process suppressions gate run twice over identical trees, and src/gate-cache.ts absent from this slice's fileScope",
+      "when": "the runs complete",
+      "then": "in-process gates are never cached, so the gate executes both times and produces no cache entry, and the gate cache key is unchanged",
+      "observableResult": "src/gate-runner.test.ts's [behavior:#87:P-07] test asserts both executions and the absent cache entry",
+      "preservation": true,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-08",
+      "source": "prd.md D13",
+      "given": "a cleaner round that passes",
+      "when": "the stage completes",
+      "then": "approved-baseline.json is still written from its one site in src/orchestrator.ts and the stage writes none, and behavior IDs keep their B-01 spelling",
+      "observableResult": "src/cleaner-stage.test.ts's [behavior:#87:P-08] test asserts the stage writes no approved-baseline.json",
+      "preservation": true,
+      "gateIds": ["tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-09",
+      "source": "prd.md D4; src/qa-review.ts:754-755",
+      "given": "the QAReviewStage union widened with \"cleaner\" by B-09, and src/qa-review.ts's array-derived structures read from src/artifacts.test.ts, the in-scope home for this assertion",
+      "when": "those structures and qaArchivePrefix(\"cleaner\") are read",
+      "then": "QA_REVIEW_STAGES still holds exactly [\"deterministic\", \"shared-preview\", \"final-evaluation\"], the attempt-record stage validator still rejects any stage absent from that array including \"cleaner\" with its message unchanged, the resume-precedence sweep still iterates exactly those three, and RECORD_FILENAME is left alone so a cleaner-prefixed archive is never read back as a QA attempt record. That last clause is held by proxy and stated as one: RECORD_FILENAME is a module-private literal that does not derive from the array, so the whole observable is that qaArchivePrefix(\"cleaner\") is outside the qa|uat|final prefix set the resume scan replays and a cleaner-prefixed filename cannot match a (qa|uat|final)-anchored pattern. B-09's docstring amendment at src/qa-review.ts:77 is comment text and the only edit to that region",
+      "observableResult": "src/artifacts.test.ts's [behavior:#87:P-09] test asserts the exact array contents and the prefix's exclusion from the replayed set; typecheck holds the widened union, which tests alone cannot observe; src/qa-review.test.ts needs no edit",
+      "preservation": true,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    },
+    {
+      "id": "P-10",
+      "source": "ADR 0055 Seam 1 §3; ADR 0048; ADR 0052; src/escalation.ts:284-325",
+      "given": "outOfScopeChangedPaths called with artifactDirPolicy absent — every existing caller, namely the pre-build escalation guard in src/orchestrator.ts and the candidate-source scope gate — and separately acceptedPairIntact: false with a non-blank sliceArtifactDir under either policy",
+      "when": "an artifact-directory path is classified, and when the in-scope .ts files listed under \"Files expected to change\" are read as source text",
+      "then": "with the argument absent every path under the slice artifact directory is still exempt by prefix and the default is \"exempt-prefix\"; the unwaivable orchestratorOwned refusal keeps its exact condition, so contract.md and acceptance-manifest.json at the artifact-directory root are named offenders whenever sliceArtifactDir is non-blank and acceptedPairIntact is false, even when the manifest declares them; and none of those files contains a sliceArtifactDir assignment to an empty string literal, so the fail-closed rule is not routed around",
+      "observableResult": "src/escalation.test.ts's [behavior:#87:P-10] tests assert the absent-argument exemption, the offender list under acceptedPairIntact: false, and the source-text scan over the fixed in-scope file list in the manner src/orchestrator.test.ts reads the launch command out of CLAUDE.md — a vitest unit test has no view of a diff; typecheck holds that every existing call site still compiles with artifactDirPolicy absent",
+      "preservation": true,
+      "gateIds": ["typecheck", "tests", "acceptance:behaviors"]
+    }
+  ]
+}
