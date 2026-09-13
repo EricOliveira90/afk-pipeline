@@ -408,6 +408,54 @@ A failed dependency holds its dependents — fix the broken slice and re-run.
 | architect-review | `prompts/architect-review.md`; optional Kiro config at `.kiro/agents/architect-review.md` |
 | pm-review | `prompts/pm-review.md`; optional Kiro config at `.kiro/agents/pm-review.md` |
 
+## Quality policy starter
+
+AFK ships a starter quality policy at
+`templates/quality-policy/afk.config.json`. Copy it into the root of your
+project and edit it — it is a complete `afk.config.json`, not a fragment:
+
+```bash
+cp node_modules/afk-pipeline/templates/quality-policy/afk.config.json ./afk.config.json
+```
+
+If you already have an `afk.config.json`, copy only its `gatePolicy` object
+into yours.
+
+**Declaring `gatePolicy.clean` is what turns the cleaner on.** The member's
+presence is the whole switch: with no `clean` member the cleaner stage does not
+exist for your project, and nothing about your runs changes. Delete it to turn
+the cleaner off again.
+
+The starter's `clean.gates` declares seven quality checks — format, lint,
+typecheck, changed-code coverage, complexity/CRAP, duplication and architecture
+rules. The tool choices are examples, and this section is where the notes about
+them live, because `afk.config.json` refuses an unknown member: a `_note` key
+inside the policy would refuse the launch, so the file carries no comments.
+
+- `clean:format` / `clean:lint` — Prettier and ESLint. Swap in your own
+  formatter and linter; both accept paths.
+- `clean:typecheck` — `tsc --noEmit` over the whole project. Deliberately
+  **not** given `{changedFiles}`: passing `tsc` a file list drops your
+  `tsconfig.json` compiler options.
+- `clean:coverage-changed` — `vitest related --coverage`, so coverage is
+  measured on the code the slice changed rather than on the whole repo.
+- `clean:complexity` — a `pnpm run quality:complexity` script you supply;
+  there is no de-facto standard CRAP tool for TypeScript.
+- `clean:duplication` — `jscpd`.
+- `clean:architecture` — `dependency-cruiser`, validating your own ruleset.
+
+Every entry whose tool accepts paths carries the literal `{changedFiles}`
+token in `args`; AFK expands it to one repo-relative path per changed file.
+`required: false` makes a gate report without blocking. `expectedCostMs` is
+budgeting and reporting metadata only — a wall-clock figure never fails a gate
+(ADR 0063).
+
+Each run records the resulting fact once, in `events.jsonl` as a
+`quality-stage-policy` event and in `run-summary.md` under
+`## Quality Stages`: which stage, whether it is enabled, and the gate ids.
+That line is written whether the cleaner is on or off, so a run can be read
+as evidence of either state.
+
 ## Setting up guardian reviews
 
 After every AFK slice merges into the feature branch, two guardian

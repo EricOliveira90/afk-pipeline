@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -919,5 +925,242 @@ describe("the policy-less fallback", () => {
     const source = readFileSync(MODULE_SOURCE_PATH, "utf-8");
     expect(source).not.toContain('from "./acceptance-manifest.js"');
     expect(source).not.toContain("toLowerCase");
+  });
+});
+
+/**
+ * The shipped starter quality policy (#274). These are unit assertions with no
+ * git and no spawn: the template is a file on disk in this repository, and the
+ * only production code they exercise is the parser every launch already runs
+ * it through. That is the point — the starter's shape is pinned by the parser,
+ * not by prose, so a member the parser would refuse cannot ship.
+ */
+describe("[behavior:#274:B-01] templates/quality-policy/afk.config.json", () => {
+  const TEMPLATE_DIR = join(REPO_ROOT, "templates", "quality-policy");
+  const TEMPLATE_PATH = join(TEMPLATE_DIR, "afk.config.json");
+
+  /** The template's raw `gatePolicy` object, straight off disk. */
+  function rawPolicy(): Record<string, unknown> {
+    const config = JSON.parse(readFileSync(TEMPLATE_PATH, "utf-8")) as Record<
+      string,
+      unknown
+    >;
+    return config.gatePolicy as Record<string, unknown>;
+  }
+
+  it("[behavior:#274:B-01] parses through the production parser as a complete config", () => {
+    const policy = parseGatePolicy(rawPolicy());
+    expect(policy.version).toBe(1);
+    // And through the loader too, because the template *is* an
+    // `afk.config.json`: a consumer copies the whole file to their repo root.
+    expect(loadGatePolicy(TEMPLATE_DIR)).toEqual(policy);
+  });
+
+  it("[behavior:#274:B-01] writes both protectedPaths baselines out explicitly", () => {
+    const policy = parseGatePolicy(rawPolicy());
+    // Element for element, not merely "the member parses": a consuming project
+    // has to see the shape it edits rather than inherit a default it cannot
+    // see. `gatePolicyPaths` is the exact-path list the feedback-integrity
+    // gate's `gate-policy` risk class classifies a changed path against.
+    expect(policy.protectedPaths.gatePolicyPaths).toEqual([
+      "afk.config.json",
+      "suite-budgets.json",
+    ]);
+    expect(policy.protectedPaths.testGlobs).toEqual(["**/*.test.ts"]);
+    // The two arrays are the shipped baselines, spelled out.
+    expect(policy.protectedPaths.gatePolicyPaths).toEqual([
+      ...DEFAULT_GATE_POLICY_PATHS,
+    ]);
+    expect(policy.protectedPaths.testGlobs).toEqual([...DEFAULT_TEST_GLOBS]);
+  });
+
+  it("[behavior:#274:B-01] declares all four risk classes, acceptance, cost and clean", () => {
+    const policy = parseGatePolicy(rawPolicy());
+    expect(policy.riskClasses).toEqual([...GATE_RISK_CLASSES]);
+    expect(policy.riskClasses).toHaveLength(4);
+    expect(policy.acceptance).toBeDefined();
+    expect(policy.acceptance?.matcher).toBe("vitest-json");
+    expect(policy.acceptance?.args).toContain(BEHAVIOR_ID_TOKEN);
+    expect(policy.cost).toBeDefined();
+    expect(policy.clean).toBeDefined();
+  });
+
+  it("[behavior:#274:B-01] carries no _note-style comment member anywhere", () => {
+    // The parser refuses an unknown member, so a comment key would refuse the
+    // launch of every project that copied the file. The tool-choice notes live
+    // in README.md instead.
+    const source = readFileSync(TEMPLATE_PATH, "utf-8");
+    expect(source).not.toMatch(/"_/);
+    // JSONC comment syntax, checked per line rather than anywhere in the file:
+    // `**/*.test.ts` and the other globs legitimately carry `/*`.
+    for (const line of source.split(/\r?\n/)) {
+      expect(line.trimStart().slice(0, 2)).not.toBe("//");
+      expect(line.trimStart().slice(0, 2)).not.toBe("/*");
+    }
+    // And it is strict JSON, which a trailing comment would also break.
+    expect(() => JSON.parse(source) as unknown).not.toThrow();
+  });
+
+  it("[behavior:#274:B-01] refuses a fixture copy with any one member renamed, naming the key", () => {
+    // Pins that the shipped file's shape is the parser's, not prose: rename a
+    // member and the launch stops, naming the offender.
+    const renamed: Record<string, unknown> = { ...rawPolicy() };
+    renamed.riskClass = renamed.riskClasses;
+    delete renamed.riskClasses;
+    expect(messageOf(() => parseGatePolicy(renamed))).toContain(`"riskClass"`);
+
+    const nested = structuredClone(rawPolicy()) as {
+      clean: { gates: Record<string, unknown>[] };
+    };
+    nested.clean.gates[0]!.commands = nested.clean.gates[0]!.command;
+    delete nested.clean.gates[0]!.command;
+    expect(messageOf(() => parseGatePolicy(nested))).toContain(`"commands"`);
+  });
+});
+
+describe("[behavior:#274:B-02] the starter's seven clean gates", () => {
+  const TEMPLATE_PATH = join(
+    REPO_ROOT,
+    "templates",
+    "quality-policy",
+    "afk.config.json",
+  );
+  const EXPECTED_IDS = [
+    "clean:format",
+    "clean:lint",
+    "clean:typecheck",
+    "clean:coverage-changed",
+    "clean:complexity",
+    "clean:duplication",
+    "clean:architecture",
+  ];
+  /**
+   * `clean:typecheck` is the one entry deliberately without the token: `tsc`
+   * accepts paths, but passing it a file list drops the project's
+   * `tsconfig.json` compiler options, so it is not a tool that accepts paths
+   * *in the sense this gate needs*. README.md carries that note.
+   */
+  const WITHOUT_PATHS = new Set(["clean:typecheck"]);
+
+  function gates() {
+    const config = JSON.parse(readFileSync(TEMPLATE_PATH, "utf-8")) as {
+      gatePolicy: unknown;
+    };
+    return parseGatePolicy(config.gatePolicy).clean!.gates;
+  }
+
+  it("[behavior:#274:B-02] declares exactly seven gates, namespaced in declaration order", () => {
+    expect(gates().map((gate) => gate.id)).toEqual(EXPECTED_IDS);
+    // Collision-free within the list, and every id namespaced: the bare `lint`,
+    // `tests` and `typecheck` ids belong to AFK's own catalog.
+    expect(new Set(EXPECTED_IDS).size).toBe(7);
+    for (const id of EXPECTED_IDS) expect(id.startsWith("clean:")).toBe(true);
+  });
+
+  it("[behavior:#274:B-02] avoids AFK's reserved ids — the parse itself is the proof", () => {
+    // `parseCleanGate` refuses a reserved id, so a successful parse of the
+    // shipped file *is* the non-collision assertion. The refusal is live:
+    // the bare id the starter deliberately does not use is rejected.
+    expect(gates()).toHaveLength(7);
+    const config = JSON.parse(readFileSync(TEMPLATE_PATH, "utf-8")) as {
+      gatePolicy: { clean: { gates: { id: string }[] } };
+    };
+    const collided = structuredClone(config.gatePolicy);
+    collided.clean.gates[1]!.id = "lint";
+    expect(messageOf(() => parseGatePolicy(collided))).toContain(
+      `"lint" is a gate AFK declares itself`,
+    );
+  });
+
+  it("[behavior:#274:B-02] gives every gate a command, args, an explicit required and expectedCostMs", () => {
+    const raw = (
+      JSON.parse(readFileSync(TEMPLATE_PATH, "utf-8")) as {
+        gatePolicy: { clean: { gates: Record<string, unknown>[] } };
+      }
+    ).gatePolicy.clean.gates;
+    for (const gate of raw) {
+      // Read from the raw JSON, not the parsed policy: `required` and
+      // `expectedCostMs` must be *declared*, and the parser defaults the
+      // latter, so a parsed value would prove nothing about the file.
+      expect(typeof gate.command).toBe("string");
+      expect(Array.isArray(gate.args)).toBe(true);
+      expect(typeof gate.required).toBe("boolean");
+      expect(typeof gate.expectedCostMs).toBe("number");
+    }
+    expect(raw).toHaveLength(7);
+  });
+
+  it("[behavior:#274:B-02] carries {changedFiles} wherever the named tool accepts paths", () => {
+    for (const gate of gates()) {
+      const carries = gate.args.some((arg) => arg.includes(CHANGED_FILES_TOKEN));
+      expect(carries).toBe(!WITHOUT_PATHS.has(gate.id));
+    }
+  });
+
+  it("[behavior:#274:B-02] leaves expectedCostMs wired to nothing that can fail a gate", () => {
+    // ADR 0063: a wall-clock budget cannot fail a gate. Guaranteed by the
+    // absence of a reader, so the assertion is that the values are advisory
+    // metadata the parser merely carries through.
+    expect(gates().map((gate) => gate.expectedCostMs)).toEqual([
+      20_000, 45_000, 60_000, 110_000, 30_000, 30_000, 40_000,
+    ]);
+  });
+});
+
+describe("[behavior:#274:B-03] the packaged templates/ tree", () => {
+  /** Every file under a directory, repo-relative with forward slashes. */
+  function walk(dir: string, prefix: string): string[] {
+    return readdirSync(join(REPO_ROOT, dir), { withFileTypes: true }).flatMap(
+      (entry) =>
+        entry.isDirectory()
+          ? walk(join(dir, entry.name), `${prefix}${entry.name}/`)
+          : [`${prefix}${entry.name}`],
+    );
+  }
+
+  it("[behavior:#274:B-03] ships templates/ and exactly the three expected paths", () => {
+    const pkg = JSON.parse(
+      readFileSync(join(REPO_ROOT, "package.json"), "utf-8"),
+    ) as { files: string[] };
+    // What first makes templates/ ship at all, beside the existing three.
+    expect(pkg.files).toEqual(["dist", "prompts", "agents", "templates"]);
+
+    // A whole-set equality, so a fourth packaged file fails this: an
+    // unreviewed file under templates/ would be published to every consumer.
+    expect(walk("templates", "templates/").sort()).toEqual([
+      "templates/agents/architect-review.md",
+      "templates/agents/pm-review.md",
+      "templates/quality-policy/afk.config.json",
+    ]);
+  });
+});
+
+describe("[behavior:#274:B-04] README.md's Quality policy starter section", () => {
+  // Line endings are normalized: the file is checked in with CRLF on Windows,
+  // and a heading assertion must not turn into an accidental EOL assertion.
+  const readme = () =>
+    readFileSync(join(REPO_ROOT, "README.md"), "utf-8").replace(/\r\n/g, "\n");
+
+  it("[behavior:#274:B-04] names the template path and says clean turns the cleaner on", () => {
+    const text = readme();
+    // The heading, the path and the clean-enables-the-cleaner statement are
+    // the obligation. Placement is editorial and deliberately unasserted, so a
+    // later reader may move the section.
+    expect(text).toContain("\n## Quality policy starter\n");
+    expect(text).toContain("templates/quality-policy/afk.config.json");
+    expect(text).toContain(
+      "Declaring `gatePolicy.clean` is what turns the cleaner on",
+    );
+  });
+
+  it("[behavior:#274:B-04] leaves the existing Templates copy instructions intact", () => {
+    const text = readme();
+    expect(text).toContain("### Templates");
+    expect(text).toContain(
+      "cp node_modules/afk-pipeline/templates/agents/architect-review.md .kiro/agents/",
+    );
+    expect(text).toContain(
+      "cp node_modules/afk-pipeline/templates/agents/pm-review.md .kiro/agents/",
+    );
   });
 });

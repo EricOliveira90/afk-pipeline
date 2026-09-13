@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "gatePolicy": {
+    "version": 1,
+    "protectedPaths": {
+      "gatePolicyPaths": ["afk.config.json", "suite-budgets.json"],
+      "testGlobs": ["**/*.test.ts"]
+    },
+    "riskClasses": [
+      "gate-policy",
+      "deleted-test",
+      "skipped-test",
+      "suppression"
+    ],
+    "acceptance": {
+      "command": "pnpm",
+      "args": [
+        "exec",
+        "vitest",
+        "run",
+        "--reporter=json",
+        "--testNamePattern",
+        "{behaviorId}"
+      ],
+      "matcher": "vitest-json"
+    },
+    "cost": {
+      "cheapThresholdMs": 120000,
+      "environmentSensitive": ["test:budgets"],
+      "cacheEnabled": true,
+      "relatedTests": {
+        "command": "pnpm",
+        "args": ["exec", "vitest", "related", "--run"]
+      }
+    },
+    "clean": {
+      "gates": [
+        {
+          "id": "clean:format",
+          "command": "pnpm",
+          "args": ["exec", "prettier", "--check", "{changedFiles}"],
+          "required": true,
+          "expectedCostMs": 20000
+        },
+        {
+          "id": "clean:lint",
+          "command": "pnpm",
+          "args": ["exec", "eslint", "--max-warnings=0", "{changedFiles}"],
+          "required": true,
+          "expectedCostMs": 45000
+        },
+        {
+          "id": "clean:typecheck",
+          "command": "pnpm",
+          "args": ["exec", "tsc", "--noEmit"],
+          "required": true,
+          "expectedCostMs": 60000
+        },
+        {
+          "id": "clean:coverage-changed",
+          "command": "pnpm",
+          "args": [
+            "exec",
+            "vitest",
+            "related",
+            "--run",
+            "--coverage",
+            "{changedFiles}"
+          ],
+          "required": true,
+          "expectedCostMs": 110000
+        },
+        {
+          "id": "clean:complexity",
+          "command": "pnpm",
+          "args": ["run", "quality:complexity", "--", "{changedFiles}"],
+          "required": false,
+          "expectedCostMs": 30000
+        },
+        {
+          "id": "clean:duplication",
+          "command": "pnpm",
+          "args": ["exec", "jscpd", "--min-lines", "5", "{changedFiles}"],
+          "required": false,
+          "expectedCostMs": 30000
+        },
+        {
+          "id": "clean:architecture",
+          "command": "pnpm",
+          "args": [
+            "exec",
+            "depcruise",
+            "--validate",
+            ".dependency-cruiser.cjs",
+            "{changedFiles}"
+          ],
+          "required": true,
+          "expectedCostMs": 40000
+        }
+      ],
+      "additionalWriteScope": []
+    }
+  }
+}
