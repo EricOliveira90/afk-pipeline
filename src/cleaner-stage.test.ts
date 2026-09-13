@@ -30,14 +30,19 @@ import {
   CLEAN_GATE_STAGE,
   NO_CHANGED_FILES_DETAIL,
   parseCleanerEscalation,
+  renderCleanerQualityFailures,
+  resetCleanerRangeTo,
   runCleanerStage,
   type CleanerDispatchInput,
+  type CleanerRoundAttempt,
   type CleanerRoundRecord,
   type CleanerStageContext,
   type CleanerStageInput,
   type CleanerStageResult,
 } from "./cleaner-stage.js";
+import type { FinalReviewFinding } from "./final-evaluation.js";
 import { CHANGED_FILES_TOKEN, type GatePolicyClean } from "./gate-policy.js";
+import { renderPrompt } from "./prompt-template.js";
 import {
   finalEvaluationFor,
   invalidateFinalEvaluationBaseline,
@@ -166,6 +171,8 @@ interface Harness {
   outcomes: { outcome: string; rounds: number }[];
   /** Every `onInfrastructureRetry` message the gate phase emitted. */
   retries: string[];
+  /** Every measured attempt the stage observed, in order (#97 B-07). */
+  attempts: CleanerRoundAttempt[];
   head: () => string;
   headTree: () => string;
   log: () => string[];
@@ -188,9 +195,11 @@ async function runStage(options: {
   acceptedPairIntact?: boolean;
   infrastructureRetries?: number;
   archiveRound?: CleanerStageContext["archiveRound"];
+  repair?: { findings: readonly FinalReviewFinding[] };
 }): Promise<Harness> {
   const { root, repo, acceptedTreeId } = options;
   const dispatches: CleanerDispatchInput[] = [];
+  const attempts: CleanerRoundAttempt[] = [];
   const recorded: CleanerRoundRecord[] = [];
   const outcomes: { outcome: string; rounds: number }[] = [];
   const retries: string[] = [];
@@ -213,6 +222,7 @@ async function runStage(options: {
     },
     recordRound: (record) => recorded.push(record),
     recordOutcome: (outcome, rounds) => outcomes.push({ outcome, rounds }),
+    observeRoundAttempt: (attempt) => attempts.push(attempt),
     log: (message) => lines.push(message),
     ...(options.archiveRound ? { archiveRound: options.archiveRound } : {}),
     ...(options.roundsAlreadySpent !== undefined
@@ -260,6 +270,7 @@ async function runStage(options: {
     ...(options.roundLimit !== undefined
       ? { roundLimit: options.roundLimit }
       : {}),
+    ...(options.repair ? { repair: options.repair } : {}),
   };
   const result = await runCleanerStage(ctx, 2, input);
   return {
@@ -268,6 +279,7 @@ async function runStage(options: {
     recorded,
     outcomes,
     retries,
+    attempts,
     head: () => git(repo, ["rev-parse", "HEAD"]),
     headTree: () => git(repo, ["rev-parse", "HEAD^{tree}"]),
     log: () => lines,
@@ -982,6 +994,220 @@ describe("runCleanerStage rounds", () => {
         "t1",
       ),
     ).not.toThrow();
+  });
+});
+
+/**
+ * The restore re-dispatch (#97 B-03/B-05) and the measured attempt (#97 B-07).
+ *
+ * Same apparatus as the rounds above: the only new input is `repair`, and the
+ * only new seam is `observeRoundAttempt`. Nothing here spawns a pipeline —
+ * S1/S3 in `src/qa-orchestration-gates.test.ts` corroborate the run side.
+ */
+describe("runCleanerStage restore rounds", () => {
+  const cleanPolicy = (): GatePolicyClean => ({
+    gates: [markerGate("clean:format", "cleaned.txt")],
+    additionalWriteScope: ["cleaned.txt"],
+    suppressionDetectors: [
+      { id: "ts-ignore", globs: ["src/**/*.ts"], patterns: ["@ts-ignore"] },
+    ],
+  });
+
+  const findings: FinalReviewFinding[] = [
+    {
+      id: "F-01",
+      class: "PRESERVATION",
+      summary: "the retry banner the approved candidate rendered is gone",
+      evidence: "src/thing.ts:1",
+      expected: "thing exports the banner",
+      observed: "thing exports nothing",
+      repair: "RESTORE",
+    },
+    {
+      id: "F-02",
+      class: "GATE_INVISIBLE_DRIFT",
+      summary: "the error path lost its detail string",
+      evidence: "src/other.ts:1",
+      expected: "other carries the detail",
+      observed: "other throws bare",
+      repair: "RESTORE",
+    },
+  ];
+
+  /** The restore the cleaner is asked for: put the behavior back, stay clean. */
+  const restoreDispatch = (_input: CleanerDispatchInput, cwd: string): void => {
+    write(cwd, "cleaned.txt", "clean\n");
+    write(cwd, "src/thing.ts", "export const thing = 1; // banner restored\n");
+  };
+
+  it("[behavior:#97:B-05] hands the findings to the dispatch and renders the restore variant of {{QUALITY_FAILURES}} in place of a gate-failure list", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId,
+      clean: cleanPolicy(),
+      repair: { findings },
+      onDispatch: restoreDispatch,
+    });
+    expect(harness.dispatches).toHaveLength(1);
+    const [dispatch] = harness.dispatches;
+    expect(dispatch?.repair?.findings).toEqual(findings);
+    // A restore has no red gate to read, so the failure list is empty and the
+    // substitution takes its other form rather than rendering as nothing.
+    expect(dispatch?.qualityFailures).toEqual([]);
+
+    const prompt = renderPrompt("cleaner", {
+      ROUND: String(dispatch!.round),
+      ROUND_LIMIT: String(dispatch!.roundLimit),
+      INPUT_TREE_ID: dispatch!.inputTreeId,
+      BASELINE_TREE_ID: dispatch!.baselineTreeId,
+      QUALITY_FAILURES: renderCleanerQualityFailures(dispatch!),
+      REGRESSION_NOTE: dispatch!.regressionNote,
+      SLICE_DIR: "slice",
+      WRITE_SCOPE: "src/thing.ts",
+    });
+    for (const finding of findings) {
+      expect(prompt).toContain(finding.id);
+      expect(prompt).toContain(finding.class);
+      expect(prompt).toContain(finding.observed);
+      expect(prompt).toContain(finding.expected);
+    }
+    expect(prompt).toContain("restore");
+    // The clean-gate form's marker: a log artifact reference per failure.
+    expect(renderCleanerQualityFailures(dispatch!)).not.toContain("Log: ");
+  });
+
+  it("[behavior:#97:B-03] skips round 0, spends the round from roundsAlreadySpent, and gates the restore with the full regression bundle", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    // The tree the restore starts from is already clean-gate green, exactly as a
+    // committed cleaner's output is: an unskipped round 0 would release it and
+    // return PASS having dispatched nothing, and the restore would never happen.
+    write(repo, "cleaned.txt", "clean\n");
+    commitAll(repo, "chore(#87): cleaner round 1");
+    const cleanerTreeId = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId: cleanerTreeId,
+      clean: cleanPolicy(),
+      regressionDeclarations: [regressionGate("tests:sanity", () => false)],
+      // The in-memory CleanerStageResult.roundsSpent from the stage that just
+      // ended PASS, not a re-derivation through the resumable entry.
+      roundsAlreadySpent: 2,
+      roundLimit: 3,
+      repair: { findings },
+      onDispatch: restoreDispatch,
+    });
+    expect(harness.dispatches).toHaveLength(1);
+    expect(harness.dispatches[0]?.round).toBe(3);
+    expect(harness.result.outcome).toBe("PASS");
+    expect(harness.result.roundsSpent).toBe(3);
+    expect(harness.recorded[0]?.gateIds).toEqual([
+      "clean:format",
+      "scope",
+      "feedback-integrity",
+      "tests:skipped",
+      "suppressions",
+      "tests:sanity",
+    ]);
+    expect(harness.log().join("\n")).toContain("restoring F-01, F-02");
+  });
+
+  it("[behavior:#97:B-03] reverts a restore that reddens the regression bundle, exactly as any other round", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    write(repo, "cleaned.txt", "clean\n");
+    commitAll(repo, "chore(#87): cleaner round 1");
+    const cleanerCommit = git(repo, ["rev-parse", "HEAD"]);
+    const cleanerTreeId = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId: cleanerTreeId,
+      clean: cleanPolicy(),
+      regressionDeclarations: [regressionGate("tests:sanity", () => true)],
+      roundLimit: 1,
+      repair: { findings },
+      onDispatch: restoreDispatch,
+    });
+    expect(harness.recorded[0]?.outcome).toBe("REVERTED");
+    expect(harness.head()).toBe(cleanerCommit);
+    expect(harness.result.outputTreeId).toBe(cleanerTreeId);
+  });
+
+  it("[behavior:#97:B-07] observes one measured attempt per round, with the round's own gate ids, outcome and wall clock", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    let round = 0;
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId,
+      clean: cleanPolicy(),
+      regressionDeclarations: [regressionGate("tests:sanity", () => round === 1)],
+      onDispatch: (input, cwd) => {
+        round = input.round;
+        write(cwd, "cleaned.txt", `round ${input.round}\n`);
+      },
+    });
+    // Round 0 went red on `clean:format`, so every attempt here is a real round.
+    expect(harness.attempts.map((a) => a.round)).toEqual([1, 2]);
+    expect(harness.attempts.map((a) => a.outcome)).toEqual([
+      "REVERTED",
+      "PASS",
+    ]);
+    // The seam reports the same rounds `recordRound` does, gate ids included —
+    // one measurement per round, never a second view of the same round.
+    expect(harness.attempts.map((a) => a.outcome)).toEqual(
+      harness.recorded.map((r) => r.outcome),
+    );
+    expect(harness.attempts[1]?.gateIds).toEqual(harness.recorded[1]?.gateIds);
+    for (const attempt of harness.attempts) {
+      expect(attempt.durationMs).toBeGreaterThanOrEqual(0);
+      expect(Date.parse(attempt.endedAt) - Date.parse(attempt.startedAt)).toBe(
+        attempt.durationMs,
+      );
+      expect(attempt.inputTreeId).toBe(acceptedTreeId);
+      expect(attempt.cacheReusedGateIds).toEqual([]);
+    }
+    expect(harness.attempts[1]?.outputTreeId).toBe(harness.result.outputTreeId);
+  });
+
+  it("[behavior:#97:B-07] measures the round-0 release too, with inputTreeId equal to outputTreeId", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    write(repo, "cleaned.txt", "clean\n");
+    commitAll(repo, "chore(#87): already clean");
+    const treeId = git(repo, ["rev-parse", "HEAD^{tree}"]);
+    const harness = await runStage({
+      root,
+      repo,
+      acceptedTreeId: treeId,
+      clean: cleanPolicy(),
+    });
+    expect(harness.result.roundsSpent).toBe(0);
+    expect(harness.attempts).toHaveLength(1);
+    const [attempt] = harness.attempts;
+    expect(attempt?.round).toBe(0);
+    expect(attempt?.outcome).toBe("PASS");
+    expect(attempt?.inputTreeId).toBe(treeId);
+    expect(attempt?.outputTreeId).toBe(treeId);
+    expect(attempt?.gateIds).toEqual(["clean:format"]);
+  });
+
+  it("[behavior:#97:B-04] unwinds the cleaner's whole committed range, not just the last round", async () => {
+    const { root, repo, acceptedTreeId } = makeRepo();
+    const acceptedCommit = git(repo, ["rev-parse", "HEAD"]);
+    write(repo, "cleaned.txt", "clean\n");
+    commitAll(repo, "chore(#87): cleaner round 1");
+    write(repo, "notes.md", "round 2\n");
+    commitAll(repo, "chore(#87): cleaner round 2");
+    write(repo, "untracked.txt", "left behind by a dead round\n");
+
+    resetCleanerRangeTo(repo, acceptedCommit);
+
+    expect(git(repo, ["rev-parse", "HEAD"])).toBe(acceptedCommit);
+    expect(git(repo, ["rev-parse", "HEAD^{tree}"])).toBe(acceptedTreeId);
+    expect(existsSync(join(repo, "cleaned.txt"))).toBe(false);
+    expect(existsSync(join(repo, "untracked.txt"))).toBe(false);
   });
 });
 
