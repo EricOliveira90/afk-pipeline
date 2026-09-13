@@ -2930,6 +2930,34 @@ describe("focused generator scope revision", () => {
     ).not.toContain("## Behavior Coverage");
   });
 
+  /**
+   * The prompt recorder's two spawned assertions (#264), attached to the run
+   * this scenario already produced rather than a new spawned scenario — the
+   * same ADR 0063 / AGENTS.md-ladder reasoning as the `it` above. This run
+   * was launched with no `recordPrompts`, which is the default-off case both
+   * behaviors are about.
+   */
+  it("B-06 B-07 records the disabled recorder in run evidence and writes no prompt record", () => {
+    const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
+    const runDir = readdirSync(runRoot)
+      .map((name) => join(runRoot, name))
+      .find((path) => statSync(path).isDirectory())!;
+    const runStarted = readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.type === "run-started");
+
+    expect(runStarted).toHaveLength(1);
+    // Always written, never absent, for a new run — `false` is the record
+    // that the recorder was off, not a missing field.
+    expect(runStarted[0]!.recordPrompts).toBe(false);
+    // And nothing was wrapped, so no record exists to find.
+    expect(
+      readdirSync(runDir).filter((name) => name.includes(".prompt.")),
+    ).toEqual([]);
+  });
+
   it("resumes generation in the same implementation round", () => {
     const runRoot = join(repo, ".afk", "logs", `${slug}-stub`);
     const runDir = readdirSync(runRoot)

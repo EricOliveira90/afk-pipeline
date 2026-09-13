@@ -4,12 +4,11 @@
  * reaches behavioral evaluation (#85).
  *
  * The verdict is content-derived, so this gate cannot be a `command`
- * declaration. `pnpm exec vitest run --testNamePattern B-04` exits 0 when it
- * matched nothing at all, and the gate runner classifies a command gate from
- * its exit code (`classifyExecution`, `src/gate-runner.ts`) — an untested
- * behavior would report PASS. It reports its own status through D22's
- * in-process `run` seam instead, deciding from the runner's JSON alone and
- * never from prose.
+ * declaration. Vitest exits 0 when a name filter matched nothing at all, and
+ * the gate runner classifies a command gate from its exit code
+ * (`classifyExecution`, `src/gate-runner.ts`) — an untested behavior would
+ * report PASS. It reports its own status through D22's in-process `run` seam
+ * instead, deciding from one runner JSON document and never from prose.
  *
  * One aggregate declaration, not one per behavior: the failing ids are named in
  * one `detail` so a single repair round sees the whole red set (#85 AC5).
@@ -28,7 +27,7 @@ import {
 } from "./gate-runner.js";
 
 /**
- * How one behavior's filtered run turned out.
+ * How one behavior's assertions in the shared run turned out.
  *
  * `unparsable` is not a spelling of "no tests": it means the run produced no
  * reporter document at all, which is a configuration failure about the runner
@@ -44,54 +43,96 @@ export type BehaviorCoverageStatus =
 export interface BehaviorCoverageRecord {
   behaviorId: string;
   status: BehaviorCoverageStatus;
-  /** Tests the filter actually selected: passed + failed. */
+  /** Qualified assertions that provide evidence: passed + failed. */
   matched: number;
   passed: number;
   failed: number;
 }
 
 /**
- * The `vitest-json` matcher, over an already-parsed reporter document. Pure, so
- * the suite proves the rule against transcribed real documents rather than
- * spawning vitest (`contract.md` test plan).
- *
- * The match count is `numPassedTests + numFailedTests`, *not* `numTotalTests`.
- * D8 named the latter, and it cannot work: in this tree's vitest 3.2.4 a
- * `--testNamePattern` run still collects every non-matching test and counts it
- * there as skipped (`@vitest/runner`'s `interpretTaskModes`), so a filter that
- * matched nothing reports `numTotalTests: 18, numPendingTests: 18` and never
- * reaches 0 — both of D8's verdicts would be unreachable. The reporter counts
- * only genuinely run tests into `numPassedTests`/`numFailedTests`, so their sum
- * is the match count D8 meant. Consequence, intended: a behavior whose only
- * matching test is skipped or `todo` is untested, not covered.
- *
- * `null` means "this is not a reporter document" — the caller turns that into
- * the CONFIGURATION failure, and must not read it as zero matches.
+ * The issue-qualified tag is the proof identity. A bare legacy tag such as
+ * `[behavior:B-01]` is deliberately not evidence: unrelated PRDs reuse those
+ * local IDs. Coverage requires at least one qualified pass and rejects any
+ * qualified failure. Skipped/todo qualified assertions and bare legacy tags
+ * provide no evidence, but neither invalidates separate qualified passing
+ * evidence. The matcher records legacy-only sightings so an untested failure
+ * can tell the generator how to migrate the tag.
  */
+export interface VitestBehaviorCoverage {
+  records: BehaviorCoverageRecord[];
+  ambiguousLegacyIds: string[];
+}
+
 export function matchVitestJson(
   document: unknown,
-): Omit<BehaviorCoverageRecord, "behaviorId"> | null {
+  issueNumber: string | number,
+  behaviorIds: readonly string[],
+): VitestBehaviorCoverage | null {
   if (!document || typeof document !== "object" || Array.isArray(document)) {
     return null;
   }
-  const record = document as Record<string, unknown>;
-  const passed = record.numPassedTests;
-  const failed = record.numFailedTests;
-  if (
-    typeof passed !== "number" ||
-    typeof failed !== "number" ||
-    !Number.isFinite(passed) ||
-    !Number.isFinite(failed)
-  ) {
+  const testResults = (document as Record<string, unknown>).testResults;
+  if (!Array.isArray(testResults)) {
     return null;
   }
-  const matched = passed + failed;
-  return {
-    status: matched === 0 ? "untested" : failed > 0 ? "failed" : "covered",
-    matched,
-    passed,
-    failed,
-  };
+
+  const assertions: { fullName: string; status: string }[] = [];
+  for (const testResult of testResults) {
+    if (
+      !testResult ||
+      typeof testResult !== "object" ||
+      Array.isArray(testResult)
+    ) {
+      return null;
+    }
+    const assertionResults = (testResult as Record<string, unknown>)
+      .assertionResults;
+    if (!Array.isArray(assertionResults)) return null;
+    for (const assertion of assertionResults) {
+      if (
+        !assertion ||
+        typeof assertion !== "object" ||
+        Array.isArray(assertion)
+      ) {
+        return null;
+      }
+      const { fullName, status } = assertion as Record<string, unknown>;
+      if (typeof fullName !== "string" || typeof status !== "string") {
+        return null;
+      }
+      assertions.push({ fullName, status });
+    }
+  }
+
+  const ambiguousLegacyIds: string[] = [];
+  const records = behaviorIds.map((behaviorId): BehaviorCoverageRecord => {
+    const qualifiedTag = behaviorTag(issueNumber, behaviorId);
+    const legacyTag = `[behavior:${behaviorId}]`;
+    const qualified = assertions.filter((assertion) =>
+      assertion.fullName.includes(qualifiedTag),
+    );
+    const passed = qualified.filter(
+      (assertion) => assertion.status === "passed",
+    ).length;
+    const failed = qualified.filter(
+      (assertion) => assertion.status === "failed",
+    ).length;
+    const matched = passed + failed;
+    if (
+      matched === 0 &&
+      assertions.some((assertion) => assertion.fullName.includes(legacyTag))
+    ) {
+      ambiguousLegacyIds.push(behaviorId);
+    }
+    return {
+      behaviorId,
+      status: matched === 0 ? "untested" : failed > 0 ? "failed" : "covered",
+      matched,
+      passed,
+      failed,
+    };
+  });
+  return { records, ambiguousLegacyIds };
 }
 
 /**
@@ -111,7 +152,14 @@ function readReporterDocument(output: string): unknown | undefined {
     for (const candidate of brace === 0 ? [text] : [text, text.slice(brace)]) {
       try {
         const parsed: unknown = JSON.parse(candidate);
-        if (matchVitestJson(parsed)) return parsed;
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          !Array.isArray(parsed) &&
+          Array.isArray((parsed as Record<string, unknown>).testResults)
+        ) {
+          return parsed;
+        }
       } catch {
         // Not JSON, or not the document — keep scanning upwards.
       }
@@ -120,7 +168,7 @@ function readReporterDocument(output: string): unknown | undefined {
   return undefined;
 }
 
-/** What one filtered run produced. Only the output matters; see the matcher. */
+/** What the shared acceptance run produced. Only the output matters. */
 export interface AcceptanceRunResult {
   output: string;
 }
@@ -180,16 +228,48 @@ export interface AcceptanceGateInput {
    * honoured — the same rule `src/scope-gate.ts` states.
    */
   absSliceDir: string;
+  /** GitHub issue owning this slice; behavior tags are qualified by it. */
+  issueNumber?: string | number;
   /** From `resolveAcceptancePlan`; `null` when the project resolved none. */
   plan: AcceptancePlan | null;
   runner?: AcceptanceRunner;
   bounds?: AcceptanceRunBounds;
   /**
-   * Called once per behavior as its run settles, so the orchestrator can
+   * Called once per behavior after the shared run is classified, so the orchestrator can
    * journal per-behavior coverage without `src/candidate-gate-phase.ts`
    * learning about this gate (D22 keeps that file unedited).
    */
   onBehaviorResult?: (record: BehaviorCoverageRecord) => void;
+}
+
+/** The exact tag a test must carry to prove one slice behavior. */
+export function behaviorTag(
+  issueNumber: string | number,
+  behaviorId: string,
+): string {
+  return `[behavior:#${issueNumber}:${behaviorId}]`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * One filter selects every required qualified tag plus its legacy spelling.
+ * Legacy tests are included only so the report can diagnose them; the matcher
+ * never counts them as coverage.
+ */
+function behaviorSelector(
+  issueNumber: string,
+  behaviorIds: readonly string[],
+): string {
+  return `(?:${behaviorIds
+    .flatMap((behaviorId) => [
+      behaviorTag(issueNumber, behaviorId),
+      `[behavior:${behaviorId}]`,
+    ])
+    .map(escapeRegExp)
+    .join("|")})`;
 }
 
 /** Behavior ids this manifest binds to the acceptance gate, in manifest order. */
@@ -209,7 +289,8 @@ function describeRecord(record: BehaviorCoverageRecord): string {
 }
 
 /**
- * Run every bound behavior and fold the records into one outcome.
+ * Run one report for every bound behavior and fold its assertions into one
+ * outcome.
  *
  * Exported for direct unit coverage; the pipeline reaches it through
  * {@link acceptanceGateDeclaration}.
@@ -259,37 +340,60 @@ export async function runAcceptanceGate(
         `${behaviorIds.join(", ")} could not be decided.`,
     };
   }
+  const issueNumber =
+    input.issueNumber === undefined ? "" : String(input.issueNumber);
+  if (!/^[1-9]\d*$/.test(issueNumber)) {
+    return {
+      status: "FAIL",
+      failureKind: "CONFIGURATION",
+      detail:
+        `The coverage of ${behaviorIds.join(", ")} could not be qualified: ` +
+        `the acceptance gate received no positive GitHub issue number.`,
+    };
+  }
 
   const runner =
     input.runner ?? boundedAcceptanceRunner(input.bounds ?? DEFAULT_RUN_BOUNDS);
-  const records: BehaviorCoverageRecord[] = [];
-  for (const behaviorId of behaviorIds) {
-    // Checked per behavior, and the partial set is never folded into a PASS
-    // (ADR 0003): a cancelled loop has not proved the behaviors it skipped.
-    if (ctx.signal?.aborted) {
-      return {
-        status: "INFRASTRUCTURE",
-        failureKind: null,
-        detail:
-          `Cancelled after ${records.length} of ${behaviorIds.length} ` +
-          `behavior(s); ${behaviorId} onwards never ran, so this candidate's ` +
-          `coverage is unknown rather than green.`,
-      };
-    }
-    const { output } = await runner({
-      command: plan.command,
-      args: plan.args.map((arg) => arg.split(BEHAVIOR_ID_TOKEN).join(behaviorId)),
-      cwd: ctx.cwd,
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    });
-    const verdict = matchVitestJson(readReporterDocument(output));
-    const record: BehaviorCoverageRecord = {
-      behaviorId,
-      ...(verdict ?? { status: "unparsable", matched: 0, passed: 0, failed: 0 }),
+  if (ctx.signal?.aborted) {
+    return {
+      status: "INFRASTRUCTURE",
+      failureKind: null,
+      detail:
+        `Cancelled before the shared acceptance run; coverage of ` +
+        `${behaviorIds.join(", ")} is unknown rather than green.`,
     };
-    records.push(record);
-    input.onBehaviorResult?.(record);
   }
+  const selector = behaviorSelector(issueNumber, behaviorIds);
+  const { output } = await runner({
+    command: plan.command,
+    args: plan.args.map((arg) => arg.split(BEHAVIOR_ID_TOKEN).join(selector)),
+    cwd: ctx.cwd,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  });
+  if (ctx.signal?.aborted) {
+    return {
+      status: "INFRASTRUCTURE",
+      failureKind: null,
+      detail:
+        `Cancelled during the shared acceptance run; coverage of ` +
+        `${behaviorIds.join(", ")} is unknown rather than green.`,
+    };
+  }
+  const verdict = matchVitestJson(
+    readReporterDocument(output),
+    issueNumber,
+    behaviorIds,
+  );
+  const records =
+    verdict?.records ??
+    behaviorIds.map((behaviorId) => ({
+      behaviorId,
+      status: "unparsable" as const,
+      matched: 0,
+      passed: 0,
+      failed: 0,
+    }));
+  for (const record of records) input.onBehaviorResult?.(record);
 
   const unparsable = records.filter((r) => r.status === "unparsable");
   if (unparsable.length > 0) {
@@ -302,9 +406,9 @@ export async function runAcceptanceGate(
       failureKind: "CONFIGURATION",
       detail:
         `The ${plan.matcher} matcher found no reporter document in the ` +
-        `output of ${unparsable.length} run(s) — ` +
-        `${unparsable.map((r) => r.behaviorId).join(", ")} — so their ` +
-        `coverage could not be decided. Command: ` +
+        `output of the shared run, so coverage of ` +
+        `${unparsable.map((r) => r.behaviorId).join(", ")} could not be ` +
+        `decided. Command: ` +
         `${[plan.command, ...plan.args].join(" ")}`,
     };
   }
@@ -320,6 +424,7 @@ export async function runAcceptanceGate(
   }
   const untested = red.filter((r) => r.status === "untested");
   const failed = red.filter((r) => r.status === "failed");
+  const ambiguousLegacy = verdict?.ambiguousLegacyIds ?? [];
   return {
     status: "FAIL",
     failureKind: "COMMAND",
@@ -333,7 +438,12 @@ export async function runAcceptanceGate(
       (failed.length > 0
         ? `Matched tests fail for ${failed.map(describeRecord).join("; ")}. `
         : "") +
-      `Name each behavior id in at least one passing test.`,
+      (ambiguousLegacy.length > 0
+        ? `Legacy-only tags are ambiguous across PRDs for ` +
+          `${ambiguousLegacy.join(", ")}. `
+        : "") +
+      `Name each behavior with its issue-qualified tag, for example ` +
+      `${behaviorTag(issueNumber, behaviorIds[0]!)}, in at least one passing test.`,
   };
 }
 

@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-06",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09", "P-04"],
+      "evidence": "\"      \\\"CONTEXT.md\\\",\\n      \\\"ARCHITECTURE.md\\\"\"",
+      "expected": "The manifest fileScope names, with the repository's exact casing, every path a declared behavior requires the slice to edit. B-09 requires edits to CONTEXT.md and ARCHITECTURE.md, and the contract's \"Files expected to change\" still lists them that way.",
+      "observed": "Resolved by this revision. fileScope entries 17-18 are now \"CONTEXT.md\" and \"ARCHITECTURE.md\", matching the repository's exact casing: the working tree lists AGENTS.md, ARCHITECTURE.md, CLAUDE.md, CONTEXT.md, README.md, and `git ls-files` reports the same five names, so the tracked paths a case-sensitive CI checkout would materialize are the strings now declared. The contract's \"Files expected to change\" list (contract.md:230-231) and B-09's cited paths (contract.md:120-127) agree, and the two argue-by-absence preservation behaviors read the same strings: B-09's given now records that both paths are declared in fileScope with the casing they carry on disk, and P-04's given states that fileScope's only root-level entries are CONTEXT.md and ARCHITECTURE.md, which keeps AGENTS.md and CLAUDE.md unambiguously outside scope. No path in fileScope now differs in case from its on-disk name.",
+      "clearCondition": "fileScope lists \"CONTEXT.md\" and \"ARCHITECTURE.md\" with the repository's exact casing, matching the contract's \"Files expected to change\" list and B-09's cited paths.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-07",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-10"],
+      "evidence": "\"      \\\"id\\\": \\\"B-10\\\",\"",
+      "expected": "A behavior the contract declares in scope, gives a test-plan line and a Definition-of-done checkbox has a matching entry in acceptance-manifest.json with its own given/when/then, observableResult and gateIds, so the acceptance surface and the contract agree on the behavior set.",
+      "observed": "Resolved by this revision. The manifest's behaviors array is now B-01 through B-10 plus P-01 through P-05, with the B-10 entry inserted between B-09 and P-01. It carries its own given (a present logStream whose String(path) yields no .prompt.md sibling — a temp path not ending in .log such as …/guardian-review.txt, or a path member absent at runtime), when (invoke runs against an otherwise empty temp directory) and then (no file written, nothing thrown, no fallback name invented, resolves to the inner result exactly as B-05's absent stream does). Its observableResult names src/prompt-recorder.test.ts and describes a unit test named for B-10 that opens a logStream on a temp …/guardian-review.txt and asserts the directory gained no file and the promise resolved to the inner result; its gateIds are typecheck, tests and acceptance:behaviors, all present in the executable gate catalog, so `acceptance:behaviors --testNamePattern B-10` selects it and the derived-path branch cannot ship unwritten with the gates green. The entry matches the contract's B-10 in-scope bullet (contract.md:128-139), its guardian-review.txt test-plan line (contract.md:277-280) and its Definition-of-done checkbox (contract.md:323-324).",
+      "clearCondition": "acceptance-manifest.json gains a B-10 behavior entry whose observableResult names src/prompt-recorder.test.ts and whose gateIds include tests and acceptance:behaviors, matching the contract's B-10 bullet and test-plan line.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

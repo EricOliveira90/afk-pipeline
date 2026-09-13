@@ -143,6 +143,13 @@ run out, so an escalated slice says why.
   scope in the parent spec, and handing the planner the free prefix gets
   the same outcome inside the rounds it already has.
 
+  > **Narrowed by ADR 0067:** the reasoning above is about a *real*
+  > prefix and still holds. A `RESERVED_PREFIX_` placeholder is a hole
+  > the pipeline asked for, with one legal filling that only the
+  > pipeline knows, so the gate substitutes the claim into it and
+  > re-validates instead of spending a round asking the planner to
+  > transcribe a number (#267).
+
   > **Amended by ADR 0034:** for runs with an `afk.json` manifest, the
   > planner is handed an exact pipeline-owned *claim* rather than the
   > next free prefix, and renumbering guidance is removed from the

@@ -7,6 +7,7 @@ import type {
 import {
   createCommandTimeTracker,
   runInvocation,
+  type InvocationStreamEvent,
 } from "./invocation-runtime.js";
 
 const DEFAULT_MODEL = "claude-opus-5";
@@ -25,30 +26,36 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
  * zero or more stream events. Mirrors src/AgentProvider.ts
  * `parseStreamJsonLine`. See ADR 0004.
  */
-export function parseStreamLine(line: string): StreamEvent[] {
+function parseInvocationStreamLine(line: string): InvocationStreamEvent[] {
   if (!line.startsWith("{")) return [];
   try {
     const obj = JSON.parse(line);
     if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
-      const events: StreamEvent[] = [];
+      const events: InvocationStreamEvent[] = [];
       const texts: string[] = [];
       for (const block of obj.message.content as {
         type: string;
         text?: string;
         name?: string;
-        input?: Record<string, unknown>;
+        input?: unknown;
       }[]) {
         if (block.type === "text" && typeof block.text === "string") {
           texts.push(block.text);
         } else if (
           block.type === "tool_use" &&
           typeof block.name === "string" &&
-          block.input !== undefined
+          typeof block.input === "object" &&
+          block.input !== null
         ) {
           const argField = TOOL_ARG_FIELDS[block.name];
-          if (argField === undefined) continue;
-          const argValue = block.input[argField];
-          if (typeof argValue !== "string") continue;
+          const argValue =
+            argField === undefined
+              ? undefined
+              : (block.input as Record<string, unknown>)[argField];
+          if (typeof argValue !== "string") {
+            events.push({ type: "tool_call_observed" });
+            continue;
+          }
           if (texts.length > 0) {
             events.push({ type: "text", text: texts.join("") });
             texts.length = 0;
@@ -79,6 +86,12 @@ export function parseStreamLine(line: string): StreamEvent[] {
     // Not valid JSON — skip
   }
   return [];
+}
+
+export function parseStreamLine(line: string): StreamEvent[] {
+  return parseInvocationStreamLine(line).filter(
+    (event): event is StreamEvent => event.type !== "tool_call_observed",
+  );
 }
 
 /**
@@ -209,7 +222,7 @@ export function invoke(options: InvokeOptions): Promise<InvokeResult> {
             // parseStreamLine handles malformed input below.
           }
         }
-        return parseStreamLine(line);
+        return parseInvocationStreamLine(line);
       },
       stats: () => ({
         costUsd,
