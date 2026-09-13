@@ -137,10 +137,14 @@ export interface CleanerStageResult {
    */
   outputTreeId: string;
   roundsSpent: number;
-  /** Every round, in order, for the caller's persistence and its journal. */
-  rounds: readonly CleanerRoundRecord[];
+  /**
+   * Every round, in order, for the caller's journal. Absent — not an empty
+   * array — when no round ran, so a stage that spent nothing returns exactly the
+   * five fields that describe it and nothing a reader has to interpret.
+   */
+  rounds?: readonly CleanerRoundRecord[];
   /** Gates still red when the stage ended (`EXHAUSTED`), with their logs. */
-  remainingFailures: readonly CleanerGateFailure[];
+  remainingFailures?: readonly CleanerGateFailure[];
   /** The parsed escalation (`ESCALATED`). */
   escalation?: CleanerEscalation;
   /** The archived escalation, repo-relative, for `artifactReferences`. */
@@ -218,6 +222,12 @@ export interface CleanerStageInput {
   testFileGlobs: readonly string[];
   /** The launch manifest's waivers, and only those. */
   waivers: Parameters<typeof skipGateDeclaration>[0]["waivers"];
+  /**
+   * The orchestrator's proven accepted-pair integrity verdict, forwarded to the
+   * round's `feedback-integrity` gate. Required rather than defaulted, because a
+   * default is a caller-side literal wearing a different hat.
+   */
+  acceptedPairIntact: boolean;
   /**
    * The regression bundle the approval rested on, in the order the
    * orchestrator built it: `resolvePreQAGateDeclarations` +
@@ -423,8 +433,6 @@ export async function runCleanerStage(
     inputTreeId: acceptedTreeId,
     outputTreeId: acceptedTreeId,
     roundsSpent: 0,
-    rounds: [],
-    remainingFailures: [],
   };
   if (!input.clean) return disabled;
 
@@ -490,8 +498,6 @@ export async function runCleanerStage(
       inputTreeId: acceptedTreeId,
       outputTreeId: acceptedTreeId,
       roundsSpent: 0,
-      rounds: [],
-      remainingFailures: [],
     };
   }
 
@@ -512,8 +518,8 @@ export async function runCleanerStage(
       inputTreeId: acceptedTreeId,
       outputTreeId,
       roundsSpent: spent,
-      rounds,
-      remainingFailures: blocking,
+      ...(rounds.length > 0 ? { rounds } : {}),
+      ...(blocking.length > 0 ? { remainingFailures: blocking } : {}),
       ...extra,
     };
   };
@@ -670,7 +676,15 @@ export async function runCleanerStage(
         featureRef: ctx.featureRef,
         waivers: input.waivers ?? [],
         runPolicy: input.runPolicy,
-        acceptedPairIntact: false,
+        // The orchestrator's *proven* verdict, threaded — never a literal, for
+        // the reason `src/merge-resolution.ts` was made to thread it too. Here a
+        // literal `false` would fail this gate closed and unwaivably on every
+        // round, so no clean-up could ever be released; a literal `true` would
+        // assert an integrity check this stage never ran. The scope gate above
+        // takes `false` because it is answering a different question — whether
+        // the pair's own paths are exempt from the round's write scope, which
+        // they are not.
+        acceptedPairIntact: input.acceptedPairIntact,
       }),
       skipGateDeclaration({
         worktreeDir: ctx.worktreeDir,

@@ -6998,6 +6998,9 @@ export async function runSliceExecute(
               skipDetectors: costPlan.skipDetectors,
               testFileGlobs: costPlan.testFileGlobs,
               waivers: launchWaivers,
+              // The value this run's own integrity check produced, the same one
+              // the pre-QA and post-QA phases were handed — never a literal.
+              acceptedPairIntact,
               // The bundle the approval rested on, in the order this round ran
               // it: a cleaner round has to clear its clean gate without
               // reddening any of these (#87 B-06).
@@ -7113,16 +7116,15 @@ export async function runSliceExecute(
             );
           }
           if (cleaner.outcome === "EXHAUSTED") {
+            const remaining = cleaner.remainingFailures ?? [];
             stuckReferences.push(
-              ...cleaner.remainingFailures.map(
-                (failure) => failure.logArtifactId,
-              ),
+              ...remaining.map((failure) => failure.logArtifactId),
             );
             return finishStuck(
               cleanerExhaustionReason({
                 ghIssue: slice.ghIssue,
                 roundsSpent: cleaner.roundsSpent,
-                failures: cleaner.remainingFailures,
+                failures: remaining,
                 treeId: cleaner.outputTreeId,
               }),
             );
