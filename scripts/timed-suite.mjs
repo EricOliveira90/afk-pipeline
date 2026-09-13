@@ -17,25 +17,37 @@
  * total flat is a cost the diff added, wherever the seconds happened to
  * land that afternoon.
  *
- * The three `clean-failed` runs that verified this say both halves of that
- * at once. Untraced: 23.5s. Traced: 39.6s and 30.9s — and **203 git
- * processes both times**. The seconds moved 28% between two runs of one
- * unchanged tree; the count did not move at all.
+ * The count is exact and it repeats: 203 for `clean-failed` across four
+ * traced runs spanning 21.9-39.6s, 1365 for `resume-integration` across
+ * two. The seconds moved 80%; neither count moved at all.
  *
- * The count is not free either, and the cost lands on the seconds: with
- * trace2 on, git walks the Windows process ancestry at startup, which a
- * microbench puts at ~70ms per process on the dev machine of record (`git
- * status` 108ms plain against 180ms traced, and the same 180ms with an
- * event file, EVENT_BRIEF or EVENT_NESTING=0 — so it is the walk, not the
- * I/O). Against 203 processes that predicts ~14s, and the two traced runs
- * came in +16.1s and +7.4s on a host too noisy to pin it closer. So read a
- * traced run's seconds as high against `suite-budgets.json`, evenly across
- * the chain, which the check attributes as host load and warns about:
- * compare counts against traced runs and seconds against untraced ones.
- * `suite-budgets.json`'s `_comment` carries the same warning for whoever
- * reads a red chain.
+ * It is not free, so it is opt-in — set `AFK_SUITE_GIT_TRACE=1` on the runs
+ * you are pricing a change with. trace2 makes git walk the Windows process
+ * ancestry at startup, and paired interleaved alone-runs on a quiet host
+ * put that at ~41ms per process, which on these suites is 60-70% of their
+ * wall clock:
+ *
+ *   suite                trace off        trace on          processes
+ *   clean-failed         13.9 / 13.1s     22.6 / 22.6s            203
+ *   resume-integration   83.0 / 95.1s    141.1 / 148.8s          1365
+ *
+ * So nothing sets the variable for you, `pnpm test` included. The AFK gates
+ * and the pre-ship sanity gate would pay 60% for a number none of them
+ * reads, and `test:ratchet` compares seconds against `suite-budgets.json`:
+ * a traced chain reads high *unevenly*, because the tax tracks each suite's
+ * git count rather than its seconds, which is precisely the mis-attribution
+ * ADR 0063 built the check to avoid. Read seconds off untraced runs and
+ * counts off traced ones; §5.3 of the speedup analysis already prescribes
+ * an alone-run pair per change, which is where the variable belongs.
+ *
+ * An event *directory* (one trace file per process) and a single appended
+ * event *file* measured the same — 22.6s against 22.1s on `clean-failed`,
+ * inside the noise — so the per-process file create is not the cost and the
+ * directory form stays: it is the one git documents as safe for concurrent
+ * processes.
  *
  * Usage: node scripts/timed-suite.mjs <suite-name> <command> [args...]
+ *        AFK_SUITE_GIT_TRACE=1 node scripts/timed-suite.mjs … (adds the count)
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -88,7 +100,9 @@ function countGitProcesses(dir) {
 // Outside the repo on purpose: a heavy suite writes one trace file per git
 // process — thousands of them — and a run killed before the cleanup below
 // must not leave them anywhere `git add` can see.
-const traceDir = mkdtempSync(join(tmpdir(), `afk-suite-trace-${suite}-`));
+const traceDir = /^(1|true|on)$/i.test(process.env.AFK_SUITE_GIT_TRACE ?? "")
+  ? mkdtempSync(join(tmpdir(), `afk-suite-trace-${suite}-`))
+  : null;
 
 // Run vitest's ESM entry directly rather than the `.cmd` shim: no shell
 // means the glob arguments reach vitest exactly as written, instead of
@@ -101,14 +115,20 @@ try {
   result = spawnSync(
     process.execPath,
     ["node_modules/vitest/vitest.mjs", ...args],
-    { stdio: "inherit", env: { ...process.env, GIT_TRACE2_EVENT: traceDir } },
+    {
+      stdio: "inherit",
+      env:
+        traceDir === null
+          ? process.env
+          : { ...process.env, GIT_TRACE2_EVENT: traceDir },
+    },
   );
   // Stop the clock before reading the traces: counting thousands of files is
   // seconds of its own and none of it is the suite's cost.
   seconds = (Date.now() - startedAt) / 1000;
-  gitProcesses = countGitProcesses(traceDir);
+  if (traceDir !== null) gitProcesses = countGitProcesses(traceDir);
 } finally {
-  rmSync(traceDir, { recursive: true, force: true });
+  if (traceDir !== null) rmSync(traceDir, { recursive: true, force: true });
 }
 
 const dir = ".vitest-reports";
