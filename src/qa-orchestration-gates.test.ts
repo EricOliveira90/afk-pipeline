@@ -1304,7 +1304,7 @@ describe("final evaluation and reuse", () => {
     findings: [],
   });
 
-  it("[behavior:B-02] records a reuse in all three stores and dispatches no evaluator when the writing stage writes nothing", async () => {
+  it("[behavior:B-02] [behavior:#97:P-01] [behavior:#97:P-06] records a reuse in all three stores, dispatches no evaluator, and renders no quality-stage row", async () => {
     // The reuse path as production runs it: the stage is a no-op, so every
     // value below is read back out of the run the orchestrator performed. A
     // hand-written record and a hand-emitted event would pass with the
@@ -1352,6 +1352,20 @@ describe("final evaluation and reuse", () => {
     expect(section).toBeGreaterThan(-1);
     expect(md.slice(section)).toContain(view!.finalTreeId);
     expect(md.slice(section)).toMatch(/\|\s*0\s*\|/);
+    // #97 P-01/P-06: this same run already has exact tree equality and no
+    // cleaner policy. Reuse its spawned result instead of repeating the whole
+    // pipeline solely to inspect the quality-stage projection.
+    expect(readQualityStageOutcomes(ctx.logger.runDir)).toEqual([]);
+    ctx.logger.recordQualityStagePolicy(ctx.runGatePolicy);
+    const qualityMd = ctx.logger.writeSummary();
+    const qualitySection = qualityMd.indexOf("## Quality Stages");
+    expect(qualitySection).toBeGreaterThan(-1);
+    expect(qualityMd.slice(qualitySection)).toContain(
+      `\`${CLEANER_STAGE_ID}\`: disabled`,
+    );
+    expect(qualityMd.slice(qualitySection)).not.toContain(
+      "| Slice | Stage | Enabled |",
+    );
   });
 
   it("[behavior:B-03] runs an injected post-approval writing stage and evaluates the tree it dirtied exactly once", async () => {
@@ -1516,162 +1530,6 @@ describe("final evaluation and reuse", () => {
     }
     return out;
   }
-
-  it("[behavior:#97:B-07] [behavior:#97:B-08] [behavior:#97:B-12] a cleaner commit faces the final evaluator, and both stages report what they cost", async () => {
-    // S1. The candidate PASS alone did not certify this tree: the cleaner
-    // committed onto it after the approval, so `decideFinalReuse` answers
-    // `evaluate` and one evaluator-final invocation grades it (#97 AC1). A
-    // spawned scenario because only an executing run can put a cleaner commit
-    // in front of the final evaluator.
-    const fixture = finalEvaluationFixture({
-      review: passingReview,
-      stageWrites: false,
-      clean: cleanPolicyMember,
-      onCleaner: (call) => {
-        // The declared file, rewritten so the clean gate is green.
-        writeFileSync(
-          join(call.worktreeDir, "README.md"),
-          `fixture, ${CLEAN_MARKER}\n`,
-          "utf-8",
-        );
-      },
-    });
-
-    const result = await runSliceExecute(fixture.ctx);
-
-    expect(result.phase).toBe("PASS");
-    expect(fixture.cleanerPrompts).toHaveLength(1);
-    const view = finalEvaluationFor(
-      loadRunState(fixture.repo, "prd-070-stub"),
-      "70",
-    );
-    expect(view?.decision).toBe("evaluate");
-    expect(fixture.finalCalls).toHaveLength(1);
-
-    // B-07: one cleaner attempt line, measured off this run's own round.
-    const attempts = attemptEvents(fixture.ctx.logger.runDir);
-    const cleanerAttempts = attempts.filter(
-      (event) => event.stage === CLEANER_STAGE_ID,
-    );
-    expect(cleanerAttempts).toHaveLength(1);
-    expect(cleanerAttempts[0]).toMatchObject({
-      ghIssue: "70",
-      sliceNumber: "01",
-      stage: CLEANER_STAGE_ID,
-      stageRound: 1,
-      attempt: 1,
-      outcome: "PASS",
-    });
-    // The round committed, so it is measured as a tree change, and its gate ids
-    // are the round's own bundle rather than a hand-written list.
-    expect(cleanerAttempts[0]!.outputTreeId).not.toBe(
-      cleanerAttempts[0]!.inputTreeId,
-    );
-    expect(cleanerAttempts[0]!.gateIds).toContain("format");
-    expect(Array.isArray(cleanerAttempts[0]!.cacheReusedGateIds)).toBe(true);
-    expect(cleanerAttempts[0]!.durationMs as number).toBeGreaterThanOrEqual(0);
-
-    // B-08: one final-evaluation attempt line for the one attempt spent.
-    const finalAttempts = attempts.filter(
-      (event) => event.stage === "final-evaluation",
-    );
-    expect(finalAttempts).toHaveLength(1);
-    expect(finalAttempts[0]).toMatchObject({
-      stage: "final-evaluation",
-      stageRound: 1,
-      attempt: 1,
-      outcome: "PASS",
-      outputTreeId: fixture.finalCalls[0]!.finalTreeId,
-    });
-    expect(finalAttempts[0]!.gateIds).toContain("scope");
-    // Both tree slots, because the pair is the fact: the attempt was measured
-    // against the baseline it cites and graded the tree the cleaner left. Two
-    // copies of the graded tree would answer neither question, and asserting
-    // `outputTreeId` alone is what let that deviation stay invisible.
-    expect(finalAttempts[0]!.inputTreeId).toBe(view!.baselineTreeId);
-    expect(finalAttempts[0]!.inputTreeId).not.toBe(
-      finalAttempts[0]!.outputTreeId,
-    );
-
-    // B-10: the rows render from those events under #274's header lines. The
-    // header event is a run-level record (`src/orchestrator.ts:8597`), emitted
-    // before the wave loop that calls `runSliceExecute` exists — so the fixture
-    // supplies it from the same production builder. The rows beneath it are
-    // still derived from the attempt events this run journaled.
-    fixture.ctx.logger.recordQualityStagePolicy(fixture.ctx.runGatePolicy);
-    const md = fixture.ctx.logger.writeSummary();
-    const section = md.indexOf("## Quality Stages");
-    expect(section).toBeGreaterThan(-1);
-    expect(md.slice(section)).toContain("| Slice | Stage | Enabled |");
-    expect(md.slice(section)).toContain(`| #70 | ${CLEANER_STAGE_ID} | yes |`);
-    // B-09 over the run's real stream, not a hand-seeded one.
-    expect(
-      readQualityStageOutcomes(fixture.ctx.logger.runDir).map((o) => [
-        o.stage,
-        o.roundsUsed,
-        o.finalDecision,
-      ]),
-    ).toEqual([
-      [CLEANER_STAGE_ID, 1, "evaluate"],
-      ["final-evaluation", 1, "evaluate"],
-    ]);
-
-    // B-12: the cleaner's bytes are attributed to the cleaner, and the two
-    // spans tile the whole baseline → final range.
-    const summary = JSON.parse(
-      readFileSync(
-        join(
-          fixture.repo,
-          ".afk",
-          "artifacts",
-          "prd-070-stub",
-          "slice-01",
-          "final-change-summary.json",
-        ),
-        "utf-8",
-      ),
-    ) as {
-      stageOrder: string[];
-      byStage: Record<string, { files: { path: string }[] }>;
-    };
-    expect(summary.stageOrder).toEqual([
-      CLEANER_STAGE_ID,
-      POST_APPROVAL_WRITING_STAGE_ID,
-    ]);
-    expect(
-      summary.byStage[CLEANER_STAGE_ID]!.files.map((file) => file.path),
-    ).toContain("README.md");
-    // The injected stage is production's no-op here, so its truthful span is
-    // empty — and an empty span is still an attribution.
-    expect(summary.byStage[POST_APPROVAL_WRITING_STAGE_ID]!.files).toEqual([]);
-  });
-
-  it("[behavior:#97:P-01] [behavior:#97:P-06] reuses on exact tree equality with no cleaner declared, and reports the stage as disabled with no row", async () => {
-    // S2. An `it` on the shared fixture, not a fourth spawn.
-    const fixture = finalEvaluationFixture({
-      review: passingReview,
-      stageWrites: false,
-    });
-
-    const result = await runSliceExecute(fixture.ctx);
-
-    expect(result.phase).toBe("PASS");
-    const view = finalEvaluationFor(
-      loadRunState(fixture.repo, "prd-070-stub"),
-      "70",
-    );
-    expect(view?.decision).toBe("reuse");
-    expect(fixture.finalCalls).toEqual([]);
-    // No attempt ran, so there is nothing to pool and no row to render — the
-    // #274 header line carries the whole fact, exactly as it did before #97.
-    expect(readQualityStageOutcomes(fixture.ctx.logger.runDir)).toEqual([]);
-    fixture.ctx.logger.recordQualityStagePolicy(fixture.ctx.runGatePolicy);
-    const md = fixture.ctx.logger.writeSummary();
-    const section = md.indexOf("## Quality Stages");
-    expect(section).toBeGreaterThan(-1);
-    expect(md.slice(section)).toContain(`\`${CLEANER_STAGE_ID}\`: disabled`);
-    expect(md.slice(section)).not.toContain("| Slice | Stage | Enabled |");
-  });
 
   it("[behavior:#97:B-04] [behavior:#97:B-13] refuses a restore for want of a cleaner round, reverts the cleaner's range, and reuses the accepted tree", async () => {
     // S3. Two rounds are already spent when this run starts, so the committing
@@ -1889,8 +1747,9 @@ describe("final evaluation and reuse", () => {
     120_000,
   );
 
-  it("[behavior:#97:B-02] [behavior:#97:B-03] [behavior:#97:B-07] [behavior:#97:B-12] routes a second restore to the cleaner too, and chains each restore round onto the tree it started from", async () => {
-    // S4. An `it` on the same fixture, not a fifth spawn.
+  it("[behavior:#97:B-02] [behavior:#97:B-03] [behavior:#97:B-07] [behavior:#97:B-08] [behavior:#97:B-12] routes every restore to the cleaner, journals each attempt, and attributes every cleaner span", async () => {
+    // The one spawned restore-chain scenario also carries the assertions that
+    // used to repeat its round-1 prefix in a separate pipeline run.
     //
     // The first restore is the case S3 covers from the refusal side; this one
     // covers the case that comes *after* a re-dispatch actually ran, which is
@@ -2018,9 +1877,57 @@ describe("final evaluation and reuse", () => {
     const finalAttempts = attempts.filter(
       (event) => event.stage === "final-evaluation",
     );
+    expect(finalAttempts).toHaveLength(3);
     expect(finalAttempts.map((event) => event.outputTreeId)).toEqual(
       cleanerAttempts.map((event) => event.outputTreeId),
     );
+    const view = finalEvaluationFor(
+      loadRunState(fixture.repo, "prd-070-stub"),
+      "70",
+    );
+    expect(view?.decision).toBe("evaluate");
+    for (const [index, attempt] of finalAttempts.entries()) {
+      expect(attempt).toMatchObject({
+        stage: "final-evaluation",
+        stageRound: index + 1,
+        attempt: index + 1,
+        outcome: index === 2 ? "PASS" : "GRADED",
+        outputTreeId: fixture.finalCalls[index]!.finalTreeId,
+      });
+      expect(attempt.gateIds).toContain("scope");
+      expect(attempt.inputTreeId).toBe(view!.baselineTreeId);
+      expect(attempt.inputTreeId).not.toBe(attempt.outputTreeId);
+    }
+    expect(cleanerAttempts[0]).toMatchObject({
+      ghIssue: "70",
+      sliceNumber: "01",
+      stage: CLEANER_STAGE_ID,
+      stageRound: 1,
+      attempt: 1,
+      outcome: "PASS",
+    });
+    for (const attempt of cleanerAttempts) {
+      expect(attempt.gateIds).toContain("format");
+      expect(Array.isArray(attempt.cacheReusedGateIds)).toBe(true);
+      expect(attempt.durationMs as number).toBeGreaterThanOrEqual(0);
+    }
+
+    fixture.ctx.logger.recordQualityStagePolicy(fixture.ctx.runGatePolicy);
+    const md = fixture.ctx.logger.writeSummary();
+    const section = md.indexOf("## Quality Stages");
+    expect(section).toBeGreaterThan(-1);
+    expect(md.slice(section)).toContain("| Slice | Stage | Enabled |");
+    expect(md.slice(section)).toContain(`| #70 | ${CLEANER_STAGE_ID} | yes |`);
+    expect(
+      readQualityStageOutcomes(fixture.ctx.logger.runDir).map((outcome) => [
+        outcome.stage,
+        outcome.roundsUsed,
+        outcome.finalDecision,
+      ]),
+    ).toEqual([
+      [CLEANER_STAGE_ID, 3, "evaluate"],
+      ["final-evaluation", 3, "evaluate"],
+    ]);
 
     // B-12: the change summary for the attempt *after* a restore round still
     // attributes the cleaner's paths to the cleaner, with the no-op stub's span
@@ -2035,5 +1942,5 @@ describe("final evaluation and reuse", () => {
       expect(entry.byStage[CLEANER_STAGE_ID]).toContain("README.md");
       expect(entry.byStage[POST_APPROVAL_WRITING_STAGE_ID]).toEqual([]);
     }
-  });
+  }, 120_000);
 });
