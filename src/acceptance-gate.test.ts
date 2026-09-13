@@ -290,6 +290,9 @@ describe("resolveBindableGateCatalog", () => {
         ),
       ),
     ).toContain("typecheck");
+  });
+
+  it("[behavior:#87:B-10] pins the written gate-evidence version at 4", () => {
     // 3 since #86: version 3 added the optional cache/prerequisite/advisory
     // markers. The `version: 2` fixture above is an acceptance *manifest*, a
     // different document with its own version line, and stays 2.

@@ -30,27 +30,27 @@ describe("finalEvaluationAttemptsRemaining", () => {
   });
 });
 
-describe("[behavior:B-05] cleanerRoundsRemaining", () => {
-  it("[behavior:B-05] bounds the cleaner to three rounds (PRD D4)", () => {
+describe("[behavior:#87:B-05] cleanerRoundsRemaining", () => {
+  it("[behavior:#87:B-05] bounds the cleaner to three rounds (PRD D4)", () => {
     expect(MAX_CLEANER_ROUNDS).toBe(3);
     expect(cleanerRoundsRemaining({ spent: 0 })).toBe(3);
   });
 
-  it("[behavior:B-05] charges each spent round against the cap", () => {
+  it("[behavior:#87:B-05] charges each spent round against the cap", () => {
     expect(cleanerRoundsRemaining({ spent: 1 })).toBe(2);
     expect(cleanerRoundsRemaining({ spent: 3 })).toBe(0);
   });
 
-  it("[behavior:B-05] reports zero — never a negative budget — so a resumed run cannot buy a fourth round", () => {
+  it("[behavior:#87:B-05] reports zero — never a negative budget — so a resumed run cannot buy a fourth round", () => {
     expect(cleanerRoundsRemaining({ spent: 4 })).toBe(0);
     expect(cleanerRoundsRemaining({ spent: 9 })).toBe(0);
   });
 
-  it("[behavior:B-05] honors an explicit limit for a caller that carries its own", () => {
+  it("[behavior:#87:B-05] honors an explicit limit for a caller that carries its own", () => {
     expect(cleanerRoundsRemaining({ spent: 1, limit: 2 })).toBe(1);
   });
 
-  it("[behavior:B-05] the remainder, not an incremented counter, is what a loop compares", () => {
+  it("[behavior:#87:B-05] the remainder, not an incremented counter, is what a loop compares", () => {
     // The loop shape B-05 mandates: continuation is a comparison against the
     // remainder, so an off-by-one in a counter cannot buy a round.
     const rounds: number[] = [];

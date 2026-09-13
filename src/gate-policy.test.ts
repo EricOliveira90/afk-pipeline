@@ -541,7 +541,7 @@ describe("parseGatePolicy's cost member", () => {
   });
 });
 
-describe("[behavior:B-01] parseGatePolicy's clean member", () => {
+describe("[behavior:#87:B-01] parseGatePolicy's clean member", () => {
   const CLEAN_GATE = {
     id: "format",
     command: "pnpm",
@@ -553,7 +553,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     return { ...structuredClone(EXAMPLE_POLICY), clean };
   }
 
-  it("[behavior:B-01] parses a declared clean stage and fills its defaults", () => {
+  it("[behavior:#87:B-01] parses a declared clean stage and fills its defaults", () => {
     const policy = parseGatePolicy(withClean({ gates: [CLEAN_GATE] }));
     expect(policy.clean).toEqual({
       gates: [
@@ -574,13 +574,13 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     });
   });
 
-  it("[behavior:B-01] leaves clean omitted rather than defaulted, so the stage does not exist", () => {
+  it("[behavior:#87:B-01] leaves clean omitted rather than defaulted, so the stage does not exist", () => {
     const policy = parseGatePolicy(structuredClone(EXAMPLE_POLICY));
     expect("clean" in policy).toBe(false);
     expect(policy.clean).toBeUndefined();
   });
 
-  it("[behavior:B-01] keeps a declared expectedCostMs, additionalWriteScope and detectors", () => {
+  it("[behavior:#87:B-01] keeps a declared expectedCostMs, additionalWriteScope and detectors", () => {
     const policy = parseGatePolicy(
       withClean({
         gates: [{ ...CLEAN_GATE, expectedCostMs: 5_000 }],
@@ -600,7 +600,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     ]);
   });
 
-  it("[behavior:B-01] refuses an unknown member of clean, naming it", () => {
+  it("[behavior:#87:B-01] refuses an unknown member of clean, naming it", () => {
     expect(
       messageOf(() =>
         parseGatePolicy(withClean({ gates: [CLEAN_GATE], _note: "why" })),
@@ -612,7 +612,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     );
   });
 
-  it("[behavior:B-01] refuses an unknown member of one gate, naming its index", () => {
+  it("[behavior:#87:B-01] refuses an unknown member of one gate, naming its index", () => {
     expect(
       messageOf(() =>
         parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, retries: 2 }] })),
@@ -622,7 +622,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     );
   });
 
-  it("[behavior:B-01] refuses a gate missing required, because a gate must say whether it may block", () => {
+  it("[behavior:#87:B-01] refuses a gate missing required, because a gate must say whether it may block", () => {
     const { required: _required, ...withoutRequired } = CLEAN_GATE;
     expect(
       messageOf(() => parseGatePolicy(withClean({ gates: [withoutRequired] }))),
@@ -631,13 +631,13 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     );
   });
 
-  it("[behavior:B-01] refuses an empty gates list", () => {
+  it("[behavior:#87:B-01] refuses an empty gates list", () => {
     expect(messageOf(() => parseGatePolicy(withClean({ gates: [] })))).toContain(
       `gatePolicy.clean.gates must declare at least one gate`,
     );
   });
 
-  it("[behavior:B-01] refuses clean with no gates member at all", () => {
+  it("[behavior:#87:B-01] refuses clean with no gates member at all", () => {
     expect(messageOf(() => parseGatePolicy(withClean({})))).toContain(
       `gatePolicy.clean.gates must be an array of`,
     );
@@ -654,7 +654,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     "test:budgets",
     "suppressions",
   ]) {
-    it(`[behavior:B-01] refuses the catalog gate id "${reserved}"`, () => {
+    it(`[behavior:#87:B-01] refuses the catalog gate id "${reserved}"`, () => {
       expect(
         messageOf(() =>
           parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, id: reserved }] })),
@@ -665,7 +665,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     });
   }
 
-  it("[behavior:B-01] refuses two gates with one id", () => {
+  it("[behavior:#87:B-01] refuses two gates with one id", () => {
     expect(
       messageOf(() =>
         parseGatePolicy(withClean({ gates: [CLEAN_GATE, { ...CLEAN_GATE }] })),
@@ -673,7 +673,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     ).toContain(`gatePolicy.clean.gates declares the id "format" twice`);
   });
 
-  it("[behavior:B-01] refuses a non-boolean required and a blank command", () => {
+  it("[behavior:#87:B-01] refuses a non-boolean required and a blank command", () => {
     expect(
       messageOf(() =>
         parseGatePolicy(withClean({ gates: [{ ...CLEAN_GATE, required: "yes" }] })),
@@ -686,7 +686,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     ).toContain(`gatePolicy.clean.gates[0].command must be a non-blank string`);
   });
 
-  it("[behavior:B-01] refuses an additionalWriteScope glob outside the D6 dialect, naming the member", () => {
+  it("[behavior:#87:B-01] refuses an additionalWriteScope glob outside the D6 dialect, naming the member", () => {
     expect(
       messageOf(() =>
         parseGatePolicy(
@@ -701,7 +701,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     );
   });
 
-  it("[behavior:B-01] refuses a suppression detector with no pattern and one that cannot compile", () => {
+  it("[behavior:#87:B-01] refuses a suppression detector with no pattern and one that cannot compile", () => {
     expect(
       messageOf(() =>
         parseGatePolicy(
@@ -732,7 +732,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     );
   });
 
-  it("[behavior:B-01] expectedCostMs is budgeting only: a gate over the threshold still parses", () => {
+  it("[behavior:#87:B-01] expectedCostMs is budgeting only: a gate over the threshold still parses", () => {
     const policy = parseGatePolicy(
       withClean({ gates: [{ ...CLEAN_GATE, expectedCostMs: 600_000 }] }),
     );
@@ -740,7 +740,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     expect(policy.clean?.gates[0]?.required).toBe(true);
   });
 
-  it("[behavior:B-01] the default suppression detector set is the ts-eslint one", () => {
+  it("[behavior:#87:B-01] the default suppression detector set is the ts-eslint one", () => {
     expect(DEFAULT_SUPPRESSION_DETECTORS.map((d) => d.id)).toEqual([
       "ts-eslint",
     ]);
@@ -749,7 +749,7 @@ describe("[behavior:B-01] parseGatePolicy's clean member", () => {
     );
   });
 
-  it("[behavior:B-02] an args entry may be exactly the changed-files token", () => {
+  it("[behavior:#87:B-02] an args entry may be exactly the changed-files token", () => {
     const policy = parseGatePolicy(
       withClean({
         gates: [{ ...CLEAN_GATE, args: [CHANGED_FILES_TOKEN] }],
