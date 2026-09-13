@@ -1,140 +1,116 @@
-# Architecture review — afk-v2-quality-loops (round 2, verification)
-
-## Scope of this round
-
-`git diff d5fe47b37eb71aca3b30252900780898e6b1c13a..HEAD` is **empty**.
-`git rev-parse HEAD` returns `d5fe47b37eb71aca3b30252900780898e6b1c13a`, which
-is the exact base this round was asked to diff against, and `git status -sb`
-reports a clean tree at `origin/feat-claude-code/afk-v2-quality-loops` with no
-local commits ahead. `git cherry -v main HEAD` ends at `d5fe47b`
-("docs(afk-v2-quality-loops): add post-impl guardian reviews"), the round-1
-review artifact commit itself.
-
-No fix was produced for any of the five open findings. I therefore re-verified
-each clear condition directly against the current tree rather than against a
-diff, and every one of them still fails on the same code round 1 read. All five
-dispositions are `REPEATED`.
-
-## A-01 — INTEGRITY — REPEATED (blocking)
-
-**Clear condition not met.** The condition requires that after the RESTORE
-re-dispatch the merged stage result's terminal outcomes be acted on with the
-same authority as the first dispatch, pinned by a test beside "refuses a restore
-for want of a cleaner round".
-
-What I read:
-
-- `src/orchestrator.ts:8088-8121`. `const restored = await
-  dispatchCleanerStage({ roundsAlreadySpent: cleaner.roundsSpent, repair: {
-  findings: restoreFindings } })` is followed only by the three-field merge into
-  `cleaner` (`ran` sticky, `inputTreeId` held at the first dispatch's,
-  `roundsSpent` monotonic) and then `continue`. There is no read of
-  `restored.outcome` anywhere between line 8088 and the `continue` at 8120.
-  `EXHAUSTED` and `ESCALATED` are simply dropped.
-- `src/orchestrator.ts:7174-7237` is the first dispatch, and it is the
-  asymmetry. `if (cleaner.outcome === "ESCALATED" && cleaner.escalation)` at
-  7177 calls `invalidateFinalEvaluationBaseline` (7187), builds
-  `generatorFailureSet` from the escalation (7193-7206), sets `retryNote`
-  (7207-7211) and either `continue`s into another implementation attempt or
-  `finishStuck`s (7217-7222). `if (cleaner.outcome === "EXHAUSTED")` at 7224
-  pushes the remaining failures' log artifact ids into `stuckReferences` and
-  returns `finishStuck(cleanerExhaustionReason({...}))` (7229-7236). Both
-  handlers sit at the top of the slice body, outside the final-evaluation
-  attempt loop, so the `continue` at 8120 cannot reach either: it continues the
-  attempt loop, whose next iteration re-runs the final evaluator on the restored
-  tree.
-- Consequence on the reachable trigger. A restore round that leaves a required
-  clean gate red and spends its last round returns `EXHAUSTED`; the merge keeps
-  `roundsSpent` and discards the outcome; the attempt loop grades the tree
-  again; a `PASS` from the final evaluator merges a tree a required clean gate
-  rejected. On the `ESCALATED` branch a valid `BASELINE_IS_WRONG` written by the
-  restore round is discarded entirely — no baseline invalidation, no
-  `generatorFailureSet`, no `retryNote` — so the claim "the approved candidate
-  itself has to change" is silently lost. Contrast the pre-dispatch path at
-  8036-8073, which does handle the no-round-left case correctly (reset the whole
-  cleaner range to `acceptedCommitSha`, record `EXHAUSTED`, `continue`); the
-  post-dispatch path has no equivalent.
-- The pinning test does not exist. `Select-String` for "refuses a restore for
-  want of a cleaner round" matches exactly one site,
-  `src/qa-orchestration-gates.test.ts:1699`, and its single `EXHAUSTED`
-  assertion is at line 1756. That test exercises the *pre*-dispatch branch
-  (`cleanerRoundsRemaining(...) === 0`, orchestrator 8036-8073). Nothing in that
-  file between 1650 and 1900 asserts anything about a terminal outcome returned
-  *by* the re-dispatch.
-
-Authority (round 2, prior-lineage branch): A-01 is matched to prior stable
-lineage from round 1, its disposition is `REPEATED` and not `RESOLVED`, and
-`reachableTrigger` still names a non-blank normal-operation trigger — a project
-declaring `gatePolicy.clean` whose final evaluation returns an all-RESTORE
-review routed to the cleaner, where the restore round leaves a required clean
-gate red with its budget spent. Under that branch the finding's class and
-`introducedByReviewedDiff` value do not remove the continuing authority, and the
-evidence above is my own reading of the current tree, not a restatement of round
-1 or of the concurrent PM review. This is a durable-authority defect: a required
-gate's refusal stops governing the merge, and there is no recovery step
-downstream that restores it.
-
-## A-02 — AUTHORITY — REPEATED (note)
-
-**Clear condition not met.** `src/scope-gate.ts:151-156` still pre-filters:
-`additional.length === 0 ? changed.paths : changed.paths.filter((path) =>
-!additional.some((glob) => matchesGlob(glob, path)))`. The filtered
-`changedPaths` is what reaches `outOfScopeChangedPaths` at 157-166, so a path
-matched by an `additionalWriteScope` glob never enters classification at all and
-the unwaivable accepted-pair / `ORCHESTRATOR_OWNED_SLICE_FILENAMES` carve-out
-inside that function cannot run on it. The widening therefore can still remove
-orchestrator-owned filenames from classification, which is what P-10 says must
-be impossible. Ordering fix, not a behavioral rewrite: pass `additional` into
-`outOfScopeChangedPaths` and apply it after the carve-out. Note-only —
-`reachableTrigger` was not established in round 1 and I did not establish one
-now, and it is not introduced by the reviewed diff.
-
-## A-03 — CONVENTION — REPEATED (note)
-
-**Clear condition not met** on both of its alternatives.
-`src/cleaner-stage.ts:56` imports only `commitAll, diffTreePaths,
-hasUncommittedChanges` from `./git.js`; the reset is local at
-`resetHardTo` (367-371), which is `git reset --hard <commit>` followed by a bare
-`git clean -fd` with no exclusions. `src/git.ts:711-716` already offers
-`resetWorktreeToHead(..., excludePaths: string[] = [])` building `-e` arguments
-for exactly this purpose. The comment at 310-316 answers only why the *export*
-lives here ("resetting a cleaner range is this stage's concern"), which is a
-reasonable module-boundary argument; it does not document at the sweep site why
-no untracked slice artifact can be destroyed by `clean -fd`, which is the other
-half the condition asks for. Note.
-
-## A-04 — MAINTAINABILITY — REPEATED (note)
-
-**Clear condition not met.** `src/orchestrator.ts:8011-8013` still reads
-"`at(-1)` reads that agreed target off the first route", while the code
-immediately below at 8014-8017 performs `routes[0] && routes[0].route.target
-=== "writing-stage" ? routes[0].route.stageId : POST_APPROVAL_WRITING_STAGE_ID`.
-The comment names an operation the code does not perform, and "`at(-1)` ... off
-the first route" is self-contradictory besides. One-line comment fix. Note.
-
-## A-05 — EVIDENCE — REPEATED (note)
-
-**Clear condition not met.** `src/logger.ts:217` is still `enabled:
-policyFor(attempt.stage) ?? true`, and `policyFor` (197-202) returns `undefined`
-when no `quality-stage-policy` event names the stage. The field is typed
-`enabled: boolean` at 153-158, so there is no representation for "unknown" to
-render: a stage with no policy event prints `yes` in the summary row and the PR
-table from a default rather than an unknown marker, which reports policy the run
-never declared. Widening the field to `boolean | null` (or `| "unknown"`) and
-rendering the third state is the shape of the fix. Note.
-
-## Assessment
-
-The branch's structure is otherwise the one round 1 described, and I did not
-resample it for new findings. The single blocker is narrow and local: the
-restore re-dispatch at `src/orchestrator.ts:8088-8121` needs the two terminal
-outcomes the first dispatch at 7174-7237 already handles, plus a test beside
-`src/qa-orchestration-gates.test.ts:1699` covering the post-dispatch case rather
-than only the pre-dispatch one. A-02 through A-05 are notes and can ship; A-02
-is the one I would fix soonest after, because it is an authority carve-out that
-the code claims is unwaivable and is not.
+# Architecture review — round 3 (verification)
 
 **Verdict:** FIX-BEFORE-SHIP
+
+## Scope and the central fact of this round
+
+This round was scoped to `git diff c44b47b..HEAD` — the fix diff. That diff
+is **empty**: `git rev-parse HEAD` returns
+`c44b47b6f3bebe345e6bed9d6223187d772047e8`, the very commit round 2 was
+reviewed at, and `git log --oneline c44b47b..HEAD` prints nothing. The
+working tree is clean and level with `origin/feat-claude-code/afk-v2-quality-loops`.
+
+So no repair round landed between round 2 and this one. I did not resample
+the branch for new findings; I re-read each open finding's cited site to
+confirm the code still reads the way round 2 described it, and every one
+does. All five findings are `REPEATED`, none is `RESOLVED`, and no finding
+is new.
+
+## Findings
+
+### [A-01] INTEGRITY — REPEATED (blocking)
+
+- **File / location:** `src/orchestrator.ts`, the restore branch
+  `if (restoreStageId === CLEANER_STAGE_ID)` and the re-dispatch that follows
+  it (approximately lines 8025–8121).
+- **What I read:** I read the whole branch as it stands today. The
+  zero-rounds-remaining case is handled *before* dispatch: when
+  `cleanerRoundsRemaining({spent: cleaner.roundsSpent, limit: cleanerLimit}) === 0`
+  the code resets via `resetCleanerRangeTo(ctx.worktreeDir, acceptedCommitSha)`,
+  records `"EXHAUSTED"` through `recordQualityStageOutcome`, logs, and
+  `continue`s. That path is intact and is not the finding. The finding is the
+  path taken when a round *is* available: `const restored = await
+  dispatchCleanerStage({roundsAlreadySpent: cleaner.roundsSpent, repair:
+  {findings: restoreFindings}})`, then the documented three-field merge
+  (`ran` sticky, `inputTreeId` pinned to the accepted tree, `roundsSpent`
+  monotonic), then a bare `continue;`. Nothing between the merge and that
+  `continue` inspects `restored.outcome`.
+- **Why that is a defect and not a style note:** the same two terminal
+  outcomes *are* acted on with full authority on the first dispatch —
+  `cleaner.outcome === "ESCALATED" && cleaner.escalation` at
+  `src/orchestrator.ts:7177` (reset to the accepted commit, baseline
+  invalidation, generator failure set, retry note) and
+  `cleaner.outcome === "EXHAUSTED"` at `:7224`, which builds its still-red
+  gate list through `cleanerExhaustionReason` (imported at `:198`). Those
+  two blocks sit upstream of the final-evaluation loop, so a `continue` from
+  inside that loop cannot reach them. The merge deliberately makes `restored`
+  the standing result, which means the loop's next iteration proceeds with a
+  cleaner whose stage run ended EXHAUSTED or ESCALATED as though it had
+  merely finished a round. A required clean gate the restore round left red,
+  with the round budget spent, is therefore never converted into a
+  `finishStuck`, and a `BASELINE_IS_WRONG` escalation the restore round wrote
+  is dropped on the floor rather than routed to the generator.
+- **Authority basis (round ≥2, prior-lineage branch):** this finding is
+  matched to the round-2 stable finding A-01. Its disposition is not
+  `RESOLVED`, and its `reachableTrigger` remains a non-blank
+  normal-operation trigger — on a project declaring `gatePolicy.clean`, the
+  final evaluation returns an all-`RESTORE` review, the restore is routed to
+  the cleaner with a round in hand, and that round leaves a required clean
+  gate red or writes a valid `cleaner-escalation.json`. The run then continues,
+  the evaluator can PASS the restored tree, and the slice merges. Under the
+  prior-lineage branch, class and `introducedByReviewedDiff` do not remove
+  the continuing authority; for the record, the control flow in question was
+  introduced by this branch (`991acb7`, `08e4f70`), so attribution holds
+  independently.
+- **Clear condition (unchanged):** after the re-dispatch, the merged stage
+  result's terminal outcomes must be acted on with the same authority as the
+  first dispatch — `EXHAUSTED` ends the slice through `finishStuck` with
+  `cleanerExhaustionReason`'s still-red gates (or resets the cleaner range to
+  `acceptedCommitSha`), and `ESCALATED` takes the `:7177` route. Pin it with a
+  test beside `[behavior:#97:B-04] [behavior:#97:B-13] refuses a restore for
+  want of a cleaner round, reverts the cleaner's range, and reuses the
+  accepted tree` (`src/qa-orchestration-gates.test.ts:1699`), which today
+  covers only the pre-dispatch refusal.
+
+### [A-02] AUTHORITY — REPEATED (note)
+
+`src/scope-gate.ts:145–166` still filters `changed.paths` by
+`additionalWriteScope` globs *before* calling `outOfScopeChangedPaths`. In
+`src/escalation.ts` the `orchestratorOwned` carve-out is built from
+`ORCHESTRATOR_OWNED_SLICE_FILENAMES` and tested first in the loop, with the
+comment "Refused even if the manifest declares it" — but a path removed by the
+pre-filter never reaches that loop, so a policy glob covering the slice
+artifact directory silently un-does an exemption the module documents as
+unwaivable (P-10). The in-code comment ("a pre-filter cannot turn an
+internally exempted path into one") asserts the opposite of what the two
+functions compose to. Note, not a blocker: no reachable trigger was recorded
+and it is not introduced by the reviewed diff.
+
+### [A-03] CONVENTION — REPEATED (note)
+
+`src/cleaner-stage.ts:367–371` still defines a private `resetHardTo` that runs
+`git reset --hard <commit>` followed by an unqualified `git clean -fd`, while
+`src/git.ts:697–716` already provides `resetWorktreeToHead` with an
+`excludePaths` parameter whose docstring exists precisely so artifacts survive
+a sweep. The docstring at `:311–317` explains why the *export* lives here, not
+why the sweep needs no exclusions. Note.
+
+### [A-04] MAINTAINABILITY — REPEATED (note)
+
+`src/orchestrator.ts:8010–8016` still reads
+`routes[0] && routes[0].route.target === "writing-stage" ? routes[0].route.stageId : ...`
+directly above a comment ending "`at(-1)` reads that agreed target off the
+first route" — which names a read the code does not perform and contradicts
+itself in the same sentence. Note.
+
+### [A-05] EVIDENCE — REPEATED (note)
+
+`src/logger.ts:217` still defaults with `enabled: policyFor(attempt.stage) ?? true`,
+and `policyFor` returns `undefined` when no `quality-stage-policy` event
+describes the stage (`:197–202`). The field's own docstring at `:157` says
+"From `quality-stage-policy`; `false` for a stage the run declared none of",
+so the summary row and PR table print an asserted `yes` for a stage the stream
+never described. Note.
 
 ## Structured findings (v2)
 
