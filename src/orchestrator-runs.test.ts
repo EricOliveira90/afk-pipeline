@@ -2085,6 +2085,36 @@ describe("events.jsonl tee (spec #26)", () => {
       expect(lines[1]).toMatchObject({ type: "run-started", provider: "stub" });
     });
 
+    it("[behavior:#274:B-06] records the quality-stage policy once, right after run-started", () => {
+      const stagePolicy = lines.filter(
+        (l) => l.type === "quality-stage-policy",
+      );
+      // Four slices, three dispatched, two waves — and still one record. The
+      // policy is a property of the run, so a per-slice or per-wave emission
+      // would be N of them and would invite a second `loadGatePolicy` read of
+      // a candidate worktree (#251).
+      expect(stagePolicy).toHaveLength(1);
+      // Third line, i.e. immediately after run-started: a reader that stops at
+      // the first slice event has already seen it.
+      expect(lines[2]).toMatchObject({ type: "quality-stage-policy" });
+      expect(stagePolicy[0]).toMatchObject({
+        stage: "cleaner",
+        // The fixture repo declares no `gatePolicy.clean`, so the run records
+        // the stage as off — which is the state that must still be recorded.
+        enabled: false,
+        gateIds: [],
+        source: "afk.config.json",
+      });
+    });
+
+    it("[behavior:#274:B-08] names the stage in run-summary.md even though it is off", () => {
+      const section = firstSummary.slice(
+        firstSummary.indexOf("## Quality Stages"),
+      );
+      expect(firstSummary).toContain("## Quality Stages");
+      expect(section).toContain("`cleaner`: disabled");
+    });
+
     it("timestamps every event", () => {
       for (const line of lines) {
         expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);

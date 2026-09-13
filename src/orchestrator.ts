@@ -148,6 +148,7 @@ import {
   feedbackIntegrityGateDeclaration,
 } from "./feedback-integrity-gate.js";
 import { loadGatePolicy, type GatePolicy } from "./gate-policy.js";
+import { buildQualityStagePolicyEvent } from "./run-events.js";
 import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
@@ -8301,6 +8302,22 @@ export async function runPipeline(
       recordPrompts: config.recordPrompts ?? false,
     },
   );
+  // The run's gate policy, snapshotted once, here — before any agent has run,
+  // and before the wave loop exists to ask about it. Every gate whose rulebook
+  // it is reads it from this one binding, so no gate can be handed the policy
+  // the candidate it is judging now presents (#251), and a mid-run edit to the
+  // base checkout cannot move the rules either.
+  //
+  // It is read immediately after the `run-started` line rather than beside the
+  // cheap-gate catalog below so that the quality-stage record can be the very
+  // next event (#274): a malformed policy still refuses the launch after the
+  // first `run.log` line, exactly as it did when this sat lower down.
+  const runGatePolicy = loadGatePolicy(repoRoot);
+  // Whether the cleaner stage is on for this run, recorded once per run — not
+  // per slice — and recorded in both states, because a run that says nothing
+  // is not evidence that the stage was off (#274, PRD D10 item 1). No run.log
+  // line: `event` rather than `phase`, so the human log stays byte-identical.
+  logger.event(buildQualityStagePolicyEvent(runGatePolicy));
   // --- The cancellation record, written when the signal fires (#114).
   //
   // The wave loop's cancellation sweep further down only runs once
@@ -8489,13 +8506,6 @@ export async function runPipeline(
     resolveCheapGateCatalog(repoRoot),
     config.testCommand,
   );
-  // The run's gate policy, snapshotted here — beside the cheap-gate catalog,
-  // which already resolves this same policy once per run — and before any agent
-  // has run. Every gate whose rulebook it is reads it from the snapshot, so no
-  // gate can be handed the policy the candidate it is judging now presents
-  // (#251), and a mid-run edit to the base checkout cannot move the rules
-  // either.
-  const runGatePolicy = loadGatePolicy(repoRoot);
   let scope: ResolvedRunScope | undefined;
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;
