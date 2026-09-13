@@ -184,6 +184,7 @@ import {
   type PostApprovalWritingStage,
 } from "./final-evaluation.js";
 import { createCleanerOrchestrationSession } from "./cleaner-orchestration.js";
+import { createCleanerContinuation } from "./cleaner-continuation.js";
 import {
   resolveRunScope,
   type ResolvedRunScope,
@@ -6875,13 +6876,23 @@ export async function runSliceExecute(
             },
             ...(signal ? { signal } : {}),
           });
-          const initialCleaner = await cleanerSession.advance({
+          const cleanerContinuation = createCleanerContinuation(
+            cleanerSession,
+            {
+              returnToGenerator: (failureSet, note) => {
+                generatorFailureSet = failureSet;
+                retryNote = note;
+              },
+              finishStuck: (reason, artifactReferences) => {
+                stuckReferences.push(...artifactReferences);
+                return finishStuck(reason);
+              },
+            },
+          );
+          const initialCleaner = await cleanerContinuation.advance({
             kind: "INITIAL",
           });
-          let cleaner = initialCleaner.result;
           if (initialCleaner.kind === "RETURN_TO_GENERATOR") {
-            generatorFailureSet = initialCleaner.failureSet;
-            retryNote = initialCleaner.retryNote;
             if (implementationAttempt < implementationAttemptLimit) continue;
             return finishStuck(
               `The cleaner returned slice #${slice.ghIssue} to the ` +
@@ -6890,8 +6901,7 @@ export async function runSliceExecute(
             );
           }
           if (initialCleaner.kind === "STUCK") {
-            stuckReferences.push(...initialCleaner.artifactReferences);
-            return finishStuck(initialCleaner.reason);
+            return initialCleaner.terminal;
           }
           /**
            * The post-approval writing stage, and the reuse decision it decides
@@ -6925,9 +6935,13 @@ export async function runSliceExecute(
            * handed (QA-01).
            */
           const cleanerWrote = (): boolean =>
-            cleaner.ran && cleaner.outputTreeId !== cleaner.inputTreeId;
+            cleanerContinuation.current.ran &&
+            cleanerContinuation.current.outputTreeId !==
+              cleanerContinuation.current.inputTreeId;
           const stageInputTreeId = (): string =>
-            cleanerWrote() ? cleaner.outputTreeId : acceptedTreeId;
+            cleanerWrote()
+              ? cleanerContinuation.current.outputTreeId
+              : acceptedTreeId;
           writingStage({
             worktreeDir: ctx.worktreeDir,
             stageId: POST_APPROVAL_WRITING_STAGE_ID,
@@ -7584,11 +7598,13 @@ export async function runSliceExecute(
                 // the stage that made the change rather than to whichever stage
                 // happens to be last in the code.
                 const writingStageIds = buildWritingStageIds({
-                  cleaner: cleaner.ran
+                  cleaner: cleanerContinuation.current.ran
                     ? {
                         ran: true,
-                        inputTreeId: cleaner.inputTreeId,
-                        outputTreeId: cleaner.outputTreeId,
+                        inputTreeId:
+                          cleanerContinuation.current.inputTreeId,
+                        outputTreeId:
+                          cleanerContinuation.current.outputTreeId,
                       }
                     : null,
                   stageInputTreeId: stageInputTreeId(),
@@ -7666,7 +7682,7 @@ export async function runSliceExecute(
                 const restoreFindings = routes.map(({ finding }) => finding);
                 // Every restore in this review goes to one stage: the routes
                 // agree on it, because they are all resolved against the same
-                // list. `at(-1)` reads that agreed target off the first route.
+                // list. `routes[0]` reads that agreed target off the first route.
                 const restoreStageId =
                   routes[0] && routes[0].route.target === "writing-stage"
                     ? routes[0].route.stageId
@@ -7679,23 +7695,17 @@ export async function runSliceExecute(
                   "error",
                 );
                 if (restoreStageId === CLEANER_STAGE_ID) {
-                  const restoredCleaner = await cleanerSession.advance({
+                  const restoredCleaner = await cleanerContinuation.advance({
                     kind: "RESTORE",
                     findings: restoreFindings,
                     discardArtifacts: [finalReviewPath, finalReportPath],
                   });
-                  cleaner = restoredCleaner.result;
                   if (restoredCleaner.kind === "RETURN_TO_GENERATOR") {
-                    generatorFailureSet = restoredCleaner.failureSet;
-                    retryNote = restoredCleaner.retryNote;
                     returnToGenerator = true;
                     break;
                   }
                   if (restoredCleaner.kind === "STUCK") {
-                    stuckReferences.push(
-                      ...restoredCleaner.artifactReferences,
-                    );
-                    return finishStuck(restoredCleaner.reason);
+                    return restoredCleaner.terminal;
                   }
                   continue;
                 }
