@@ -6,6 +6,7 @@ import {
   beforeEach,
   afterAll,
   afterEach,
+  vi,
 } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
@@ -279,6 +280,321 @@ describe("git.findWorktreeForBranch — regression for PRD 012 run-2", () => {
     // Only main is checked out; prd/012-foo exists but isn't in any worktree
     expect(findWorktreeForBranch(repoDir, "prd/012-foo")).toBeNull();
     expect(findWorktreeForBranch(repoDir, "main")).not.toBeNull();
+  });
+});
+
+describe("git.listWorktrees cache", () => {
+  const porcelain = [
+    "worktree C:/repo",
+    "HEAD 0000000000000000000000000000000000000000",
+    "branch refs/heads/main",
+  ].join("\n");
+  const quiet = async () => ({
+    observed: [],
+    terminated: [],
+    survivors: [],
+    verified: true,
+  });
+
+  async function importWithExecFileSync(execFileSync: ReturnType<typeof vi.fn>) {
+    vi.resetModules();
+    const actual =
+      await vi.importActual<typeof import("node:child_process")>(
+        "node:child_process",
+      );
+    vi.doMock("node:child_process", () => ({ ...actual, execFileSync }));
+    return import("./git.js");
+  }
+
+  function countWorktreeLists(execFileSync: ReturnType<typeof vi.fn>): number {
+    return execFileSync.mock.calls.filter(([, args]) => {
+      const gitArgs = args as string[];
+      return (
+        gitArgs[0] === "worktree" &&
+        gitArgs[1] === "list" &&
+        gitArgs[2] === "--porcelain"
+      );
+    }).length;
+  }
+
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  });
+
+  it("reuses one porcelain read in a synchronous sequence but not across an await", async () => {
+    vi.resetModules();
+    const actual =
+      await vi.importActual<typeof import("node:child_process")>(
+        "node:child_process",
+      );
+    const execFileSync = vi.fn().mockReturnValue(
+      [
+        "worktree C:/repo",
+        "HEAD 0000000000000000000000000000000000000000",
+        "branch refs/heads/main",
+      ].join("\n"),
+    );
+    vi.doMock("node:child_process", () => ({ ...actual, execFileSync }));
+    const isolatedGit = await import("./git.js");
+
+    expect(isolatedGit.listWorktrees("C:/repo")).toEqual([
+      { path: "C:/repo", branch: "main" },
+    ]);
+    expect(isolatedGit.listWorktrees("C:/repo")).toEqual([
+      { path: "C:/repo", branch: "main" },
+    ]);
+    expect(execFileSync).toHaveBeenCalledTimes(1);
+
+    await Promise.resolve();
+
+    isolatedGit.listWorktrees("C:/repo");
+    expect(execFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates before createWorktree adds a worktree", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (args[0] === "worktree" && args[1] === "add") {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    isolatedGit.createWorktree(
+      "C:/repo",
+      "feature/create",
+      "C:/not-present/feature-create",
+      "main",
+    );
+
+    expect(mutationReads).toBe(1);
+    expect(countWorktreeLists(execFileSync)).toBe(2);
+  });
+
+  it("invalidates before removeWorktree unregisters a worktree", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (args[0] === "worktree" && args[1] === "remove") {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    await isolatedGit.removeWorktree("C:/repo", "C:/not-present/remove", {
+      quiesce: quiet,
+    });
+
+    expect(mutationReads).toBe(1);
+    expect(countWorktreeLists(execFileSync)).toBe(2);
+  });
+
+  it("invalidates before pruneWorktrees reconciles registrations", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (args[0] === "worktree" && args[1] === "prune") {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    isolatedGit.pruneWorktrees("C:/repo");
+
+    expect(mutationReads).toBe(1);
+    expect(countWorktreeLists(execFileSync)).toBe(2);
+  });
+
+  it("invalidates both mutations in recreateWorktreeFromBase", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (
+        args[0] === "worktree" &&
+        (args[1] === "remove" || args[1] === "add")
+      ) {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    await isolatedGit.recreateWorktreeFromBase(
+      "C:/repo",
+      "feature/recreate",
+      "C:/not-present/recreate",
+      "main",
+      { quiesce: quiet },
+    );
+
+    expect(mutationReads).toBe(2);
+    expect(countWorktreeLists(execFileSync)).toBe(3);
+  });
+
+  it("invalidates scratch merge worktree add and removal", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (
+        args[0] === "worktree" &&
+        (args[1] === "remove" || args[1] === "add")
+      ) {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    await isolatedGit.mergeSliceBranch(
+      "C:/repo",
+      "slice",
+      "feature/not-checked-out",
+      "C:/not-present/scratch-merge",
+    );
+
+    expect(mutationReads).toBe(2);
+    expect(countWorktreeLists(execFileSync)).toBe(4);
+  });
+
+  it("invalidates before createCandidateMerge adds its detached worktree", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const objectId = "1".repeat(40);
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (args[0] === "worktree" && args[1] === "add") {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      if (args[0] === "rev-parse") return objectId;
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    await isolatedGit.createCandidateMerge(
+      "C:/repo",
+      "slice",
+      "feature",
+      "C:/not-present/candidate",
+    );
+
+    expect(mutationReads).toBe(1);
+    expect(countWorktreeLists(execFileSync)).toBe(2);
+  });
+
+  it("invalidates before mergeBranch changes the checked-out branch", async () => {
+    let isolatedGit!: typeof import("./git.js");
+    let mutationReads = 0;
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      if (args[0] === "worktree" && args[1] === "list") return porcelain;
+      if (args[0] === "checkout") {
+        mutationReads++;
+        isolatedGit.listWorktrees("C:/repo");
+      }
+      return "";
+    });
+    isolatedGit = await importWithExecFileSync(execFileSync);
+    isolatedGit.listWorktrees("C:/repo");
+
+    expect(isolatedGit.mergeBranch("C:/repo", "source", "target")).toBe(true);
+
+    expect(mutationReads).toBe(1);
+    expect(countWorktreeLists(execFileSync)).toBe(2);
+  });
+});
+
+describe("git.removeWorktree prune decisions", () => {
+  const quiet = async () => ({
+    observed: [],
+    terminated: [],
+    survivors: [],
+    verified: true,
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  });
+
+  async function runRemoval(
+    removeOutcome: "complete" | "failed-gone" | "partial",
+  ): Promise<string[][]> {
+    const repoDir = mkdtempSync(join(tmpdir(), "afk-prune-decision-"));
+    const worktreeDir = join(repoDir, "worktree");
+    mkdirSync(worktreeDir);
+    const commands: string[][] = [];
+    const actual =
+      await vi.importActual<typeof import("node:child_process")>(
+        "node:child_process",
+      );
+    const execFileSync = vi.fn((_file: string, args: readonly string[]) => {
+      const gitArgs = [...args];
+      commands.push(gitArgs);
+      if (gitArgs[0] === "worktree" && gitArgs[1] === "remove") {
+        if (removeOutcome !== "partial") rmSync(worktreeDir, { recursive: true });
+        if (removeOutcome === "failed-gone") {
+          throw new Error("simulated worktree remove failure");
+        }
+      }
+      return "";
+    });
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({ ...actual, execFileSync }));
+    const isolatedGit = await import("./git.js");
+    try {
+      await isolatedGit.removeWorktree(repoDir, worktreeDir, {
+        quiesce: quiet,
+        rm:
+          removeOutcome === "partial"
+            ? (path, options) => rmSync(path, options)
+            : undefined,
+      });
+      return commands;
+    } finally {
+      rmDirWithRetry(repoDir);
+    }
+  }
+
+  it("skips prune only when git remove exits zero and the directory is gone", async () => {
+    const commands = await runRemoval("complete");
+    expect(commands).toContainEqual([
+      "worktree",
+      "remove",
+      expect.any(String),
+      "--force",
+    ]);
+    expect(commands).not.toContainEqual(["worktree", "prune"]);
+  });
+
+  it("keeps prune when git remove fails even if the directory is gone", async () => {
+    const commands = await runRemoval("failed-gone");
+    expect(commands).toContainEqual(["worktree", "prune"]);
+  });
+
+  it("keeps prune when git remove exits zero but leaves on-disk cleanup", async () => {
+    const commands = await runRemoval("partial");
+    expect(commands).toContainEqual(["worktree", "prune"]);
   });
 });
 
@@ -833,6 +1149,23 @@ describe("git.assertWorktreeRegistered", { timeout: 240_000 }, () => {
     expect(() =>
       assertWorktreeRegistered(repoDir, "feat/elsewhere", expected),
     ).toThrow(/registered at .* expected/i);
+  });
+
+  it("observes an out-of-band removal even when the list cache is warm", () => {
+    const wt = join(repoDir, "wt-removed-out-of-band");
+    git(repoDir, ["branch", "feat/removed-out-of-band"]);
+    git(repoDir, ["worktree", "add", wt, "feat/removed-out-of-band"]);
+    expect(
+      findWorktreeForBranch(repoDir, "feat/removed-out-of-band")
+        ?.replace(/\\/g, "/")
+        .toLowerCase(),
+    ).toBe(wt.replace(/\\/g, "/").toLowerCase());
+
+    git(repoDir, ["worktree", "remove", wt, "--force"]);
+
+    expect(() =>
+      assertWorktreeRegistered(repoDir, "feat/removed-out-of-band", wt),
+    ).toThrow(/not registered/i);
   });
 });
 

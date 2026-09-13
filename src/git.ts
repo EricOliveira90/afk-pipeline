@@ -15,6 +15,27 @@ import {
 const git = (args: string[], opts?: ExecFileSyncOptions): string =>
   (execFileSync("git", args, { encoding: "utf-8", ...opts }) as string).trim();
 
+export interface WorktreeRegistration {
+  path: string;
+  branch: string | null;
+}
+
+interface WorktreeListCacheEntry {
+  value: WorktreeRegistration[];
+  token: symbol;
+}
+
+const worktreeListCache = new Map<string, WorktreeListCacheEntry>();
+
+function worktreeCacheKey(repoRoot: string): string {
+  const normalized = repoRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function invalidateWorktreeList(repoRoot: string): void {
+  worktreeListCache.delete(worktreeCacheKey(repoRoot));
+}
+
 export type MergeResult =
   | { status: "merged"; cleanupWarning?: string }
   | { status: "conflict"; details: string };
@@ -134,6 +155,7 @@ export function createWorktree(
   worktreeDir: string,
   from: string,
 ) {
+  invalidateWorktreeList(repoRoot);
   if (existsSync(worktreeDir)) {
     const registered = findWorktreeForBranch(repoRoot, branch);
     if (registered && pathEquals(registered, worktreeDir)) return;
@@ -145,7 +167,12 @@ export function createWorktree(
     );
   }
   createBranch(repoRoot, branch, from);
-  git(["worktree", "add", worktreeDir, branch], { cwd: repoRoot });
+  invalidateWorktreeList(repoRoot);
+  try {
+    git(["worktree", "add", worktreeDir, branch], { cwd: repoRoot });
+  } finally {
+    invalidateWorktreeList(repoRoot);
+  }
 }
 
 /**
@@ -165,6 +192,9 @@ export function assertWorktreeRegistered(
   branch: string,
   worktreeDir: string,
 ): void {
+  // This is an ownership assertion, not an opportunistic lookup. Force a
+  // fresh read so an out-of-band removal is observed within the same turn.
+  invalidateWorktreeList(repoRoot);
   const registered = findWorktreeForBranch(repoRoot, branch);
   if (!registered) {
     throw new Error(
@@ -285,6 +315,7 @@ export async function removeWorktree(
   worktreeDir: string,
   options: RemoveWorktreeOptions = {},
 ): Promise<RemoveWorktreeResult> {
+  invalidateWorktreeList(repoRoot);
   const timeoutMs = options.timeoutMs ?? DEFAULT_REMOVAL_TIMEOUT_MS;
   const now = options.now ?? Date.now;
   const signal = options.signal;
@@ -305,11 +336,16 @@ export async function removeWorktree(
   // empty") — and git unregisters the admin metadata on the FIRST attempt
   // even when the on-disk delete fails, so there is no point retrying
   // this step: a second call just reports "not a working tree".
+  let gitRemovalComplete = false;
   await runAdmin(async () => {
+    invalidateWorktreeList(repoRoot);
     try {
       git(["worktree", "remove", worktreeDir, "--force"], { cwd: repoRoot });
+      gitRemovalComplete = !existsSync(worktreeDir);
     } catch {
       // Already removed, doesn't exist, or stragglers — fall through.
+    } finally {
+      invalidateWorktreeList(repoRoot);
     }
   });
 
@@ -355,14 +391,21 @@ export async function removeWorktree(
     }
   }
 
-  // Step 3: reconcile git's admin state in case step 1 silently failed.
-  await runAdmin(async () => {
-    try {
-      git(["worktree", "prune"], { cwd: repoRoot });
-    } catch {
-      // Best effort.
-    }
-  });
+  // Step 3: reconcile git's admin state only when step 1 did not fully
+  // succeed. A zero exit plus a confirmed-gone directory means git already
+  // removed both the tree and its registration, so prune would be redundant.
+  if (!gitRemovalComplete) {
+    await runAdmin(async () => {
+      invalidateWorktreeList(repoRoot);
+      try {
+        git(["worktree", "prune"], { cwd: repoRoot });
+      } catch {
+        // Best effort.
+      } finally {
+        invalidateWorktreeList(repoRoot);
+      }
+    });
+  }
 
   const removed = !existsSync(worktreeDir);
   return {
@@ -814,7 +857,12 @@ export function mergeBranch(
   target: string,
 ): boolean {
   // Checkout target
-  git(["checkout", target], { cwd: repoRoot });
+  invalidateWorktreeList(repoRoot);
+  try {
+    git(["checkout", target], { cwd: repoRoot });
+  } finally {
+    invalidateWorktreeList(repoRoot);
+  }
   try {
     git(["merge", source, "--no-edit"], { cwd: repoRoot });
     return true;
@@ -870,6 +918,7 @@ export async function createCandidateMerge(
   featureBranch: string,
   worktreeDir: string,
 ): Promise<CandidateMergeResult> {
+  invalidateWorktreeList(repoRoot);
   const featureCommit = resolveCommit(repoRoot, featureBranch);
   if (!featureCommit) {
     throw new Error(`Feature branch not found: ${featureBranch}`);
@@ -879,9 +928,14 @@ export async function createCandidateMerge(
     throw new Error(`Slice branch not found: ${sliceBranch}`);
   }
 
-  git(["worktree", "add", "--detach", worktreeDir, featureCommit], {
-    cwd: repoRoot,
-  });
+  invalidateWorktreeList(repoRoot);
+  try {
+    git(["worktree", "add", "--detach", worktreeDir, featureCommit], {
+      cwd: repoRoot,
+    });
+  } finally {
+    invalidateWorktreeList(repoRoot);
+  }
   // Both abandon paths below tear the candidate down, and neither may
   // discard the teardown outcome: a surviving directory is residue that
   // refuses the next launch (ADR 0035 decision 5, ADR 0042 decision 1),
@@ -961,9 +1015,13 @@ export function updateBranchIfUnchanged(
  */
 export function listWorktrees(
   repoRoot: string,
-): Array<{ path: string; branch: string | null }> {
+): WorktreeRegistration[] {
+  const key = worktreeCacheKey(repoRoot);
+  const cached = worktreeListCache.get(key);
+  if (cached) return cached.value;
+
   const output = git(["worktree", "list", "--porcelain"], { cwd: repoRoot });
-  const result: Array<{ path: string; branch: string | null }> = [];
+  const result: WorktreeRegistration[] = [];
   for (const block of output.split(/\r?\n\r?\n/)) {
     let path: string | null = null;
     let branch: string | null = null;
@@ -974,6 +1032,13 @@ export function listWorktrees(
     }
     if (path) result.push({ path, branch });
   }
+  const token = Symbol();
+  worktreeListCache.set(key, { value: result, token });
+  queueMicrotask(() => {
+    if (worktreeListCache.get(key)?.token === token) {
+      worktreeListCache.delete(key);
+    }
+  });
   return result;
 }
 
@@ -1009,6 +1074,7 @@ export async function mergeSliceBranch(
   featureBranch: string,
   scratchMergeDir: string,
 ): Promise<MergeResult> {
+  invalidateWorktreeList(repoRoot);
   const existingWorktree = findWorktreeForBranch(repoRoot, featureBranch);
 
   let mergeDir: string;
@@ -1018,9 +1084,19 @@ export async function mergeSliceBranch(
   } else {
     mergeDir = scratchMergeDir;
     if (existsSync(mergeDir)) {
-      git(["worktree", "remove", mergeDir, "--force"], { cwd: repoRoot });
+      invalidateWorktreeList(repoRoot);
+      try {
+        git(["worktree", "remove", mergeDir, "--force"], { cwd: repoRoot });
+      } finally {
+        invalidateWorktreeList(repoRoot);
+      }
     }
-    git(["worktree", "add", mergeDir, featureBranch], { cwd: repoRoot });
+    invalidateWorktreeList(repoRoot);
+    try {
+      git(["worktree", "add", mergeDir, featureBranch], { cwd: repoRoot });
+    } finally {
+      invalidateWorktreeList(repoRoot);
+    }
     cleanupWorktree = true;
   }
 
@@ -1058,10 +1134,13 @@ export async function mergeSliceBranch(
 }
 
 export function pruneWorktrees(repoRoot: string) {
+  invalidateWorktreeList(repoRoot);
   try {
     git(["worktree", "prune"], { cwd: repoRoot });
   } catch {
     // Best effort
+  } finally {
+    invalidateWorktreeList(repoRoot);
   }
 }
 
@@ -1093,6 +1172,7 @@ export async function recreateWorktreeFromBase(
   base: string,
   removal: RemoveWorktreeOptions = {},
 ): Promise<void> {
+  invalidateWorktreeList(repoRoot);
   const result = await removeWorktree(repoRoot, worktreeDir, removal);
   if (!result.removed) {
     // Issue #102: proceeding here deleted the branch and then failed in
