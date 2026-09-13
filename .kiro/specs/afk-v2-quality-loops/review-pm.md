@@ -1,128 +1,111 @@
-# PM review — PRD 5 (quality loops: cleaner only, default off)
+# PM review — PRD 5 (quality loops, cleaner only), slices 01 / 03 / 04
 
 **Verdict:** ACCEPT-WITH-NOTES
 
-Scope reviewed: slices 01 (#87 cleaner loop), 04 (#274 quality policy starter
-and stage record) and 03 (#97 changed trees face final evaluation; ROI
-evidence). Slice 02 (#92 hardener) was not selected and is not judged here.
+## Scope judged
+
+Selected slices only: 01 (#87 cleaner loop), 03 (#97 changed trees face final
+evaluation; ROI evidence), 04 (#274 quality policy starter and stage record).
+Slice 02 (#92, hardener) is out of scope and did not influence this verdict.
 
 ## What a user gets, checked against the PRD
 
-**The cleaner exists, is off unless one config member says otherwise (D1, #87
-AC1).** `src/cleaner-stage.ts:565-579` — `runCleanerStage` returns
-`{ ran: false, outcome: "DISABLED", inputTreeId === outputTreeId }` before it
-touches git, so a project with no `gatePolicy.clean` gets no dispatch and no
-gate phase. The orchestrator keeps the old shape around it: the change-summary
-tiling at `src/orchestrator.ts:7621-7640` emits today single stub entry when
-`cleanerWrote()` is false, and the injected `postApprovalWritingStage` seam is
-still read at `:7255`. The committed `afk.config.json` of this repo carries no
-`clean` member, which is the intended state for the self-run (launch
-precondition 4).
+**The cleaner exists, is off unless the project asks for it (D1, #87 AC1).**
+`src/gate-policy.ts` carries `clean` in `POLICY_KEYS`; the stage's own entry
+returns early with `outcome: "DISABLED"` and `ran: false` when the policy has
+no `clean` member (`src/cleaner-stage.ts:571-580`), and the orchestrator only
+passes `clean` through when `ctx.runGatePolicy?.clean` exists
+(`src/orchestrator.ts:6837-6841`). This repo's own `afk.config.json` still has
+no `clean` member (checked), so the self-run stays off as the PRD promises.
 
-**Turning it on is one config line, and the run says which state it was in
-(D10).** `buildQualityStagePolicyEvent` has exactly one production caller
-(`src/orchestrator.ts:8671`, at run entry); `src/logger.ts:796-813` renders
-`## Quality Stages` from that event alone with an enabled/disabled header line
-plus the #97 per-slice rows; `src/ship-gate.ts:462-498` renders the PR section
-unconditionally, including the explicit "`cleaner`: disabled (no
-`gatePolicy.clean`) — no round ran" line (pinned at
-`src/ship-gate.test.ts:328`). A reader of a PR body can tell the two states
-apart, which was the point of D10 item 3.
+**One bounded loop with the promised shape (D4).** `runCleanerStage`
+(`src/cleaner-stage.ts:565-`) gates the accepted tree first and returns `PASS`
+with `roundsSpent: 0` and zero invocations when the required clean gates
+release it (`:645-690`); an empty `{changedFiles}` expansion records `SKIPPED`
+and releases the tree exactly as `PASS` does (`:395-400`, `:506-508`). Each
+round runs the clean gates plus `scope` (`role` source with
+`artifactDirPolicy: "declared-only"`, `:882-895`), `tests:skipped`,
+`suppressions` and the caller's regression bundle (`:914-927`). I ran
+`src/cleaner-stage.test.ts src/cleaner-orchestration.test.ts
+src/suppression-gate.test.ts` — 41 passed — including the round bound, the
+infrastructure retry spending no round, revert-on-regression, `EXHAUSTED`
+naming every remaining red gate with its log artifact id, and the escalation
+path invalidating the baseline citation.
 
-**A bounded loop that never redefines the target (D4, D5, #73 stories 3-8).**
-I ran `pnpm vitest run src/cleaner-stage.test.ts src/ship-gate.test.ts
-src/suppression-gate.test.ts` in this tree: 3 files, 74 tests passed, 128s,
-exit 0. Among the passing cases I read the names of: round 0 releasing the
-accepted tree with zero invocations (story 20), `EXHAUSTED` naming every
-remaining red gate with its detail and log artifact id (story 18), a restore
-round reverted when it reddens the regression bundle, the whole committed
-cleaner range unwound rather than the last round only, and the suppressions
-counter failing only on an increase.
+**Escalation and exhaustion reach a human the way the PRD says.** A valid
+`cleaner-escalation.json` becomes a `RETURN_TO_GENERATOR` decision with the
+finding, the archived artifact reference and
+`invalidateFinalEvaluationBaseline` (`src/cleaner-orchestration.ts:357-405`);
+exhaustion becomes `STUCK` and the orchestrator's `finishStuck`
+(`src/orchestrator.ts:6891-6894`). The prompt (`prompts/cleaner.md`) carries
+the three rules, both anti-gaming warnings, "restore or revert — never
+redefine", the commit-with-rationale instruction and the escalation shape, and
+carries no `{{TEST_COMMAND}}` — matching D7.
 
-**A cleaner-changed tree faces the final evaluator, and a RESTORE reaches the
-stage that wrote (D12, #97 AC1-AC2).** `routeFinalReviewFinding`
-(`src/final-evaluation.ts:473-496`) now takes `writingStageIds` and returns the
-last stage that ran; `src/orchestrator.ts:8025` routes a cleaner-authored
-restore back into `dispatchCleanerStage` (`:8088`) under the remaining round
-budget, and `decideFinalReuse` is untouched, so a stage that wrote nothing
-still reuses. `runCleanerStage restore rounds` covers the repair dispatch,
-its start tree and its revert in the run I executed above.
+**Changed trees face final evaluation, and RESTORE goes to the writer (#97
+AC1/AC2, D12).** `routeFinalReviewFinding` takes the writing stage ids and
+`CLEANER_STAGE_ID` is appended when the cleaner wrote
+(`src/final-evaluation.ts:465`); the loop re-dispatches the cleaner with the
+findings (`src/orchestrator.ts:7681-7700`), and a restore with no budget left
+resets the cleaner's whole range to the accepted commit, records `EXHAUSTED`
+and proceeds — so the tree equals the baseline and reuses
+(`src/cleaner-orchestration.ts:450-480`). The unit suite pins the whole-range
+unwind and the restore round's true start tree.
 
-**ROI evidence is readable by a human without new machinery (D11).**
-`buildQualityStageAttemptEvent` (`src/run-events.ts:604-631`) is emitted per
-cleaner round and per final-evaluation attempt (`src/orchestrator.ts:7052`,
-`:7753`), and the run-summary rows carry rounds used / limit, elapsed, model
-time, gate ids, cache-reused gate ids and the final decision — the exact
-columns D11 specifies. No threshold, no alert, no keyed store, as the PRD asked.
+**ROI evidence is readable (D10/D11, #97 AC3/AC4).** One
+`quality-stage-policy` event per run, emitted immediately after `run-started`
+in both states (`src/orchestrator.ts:8237-8251`), one
+`quality-stage-attempt` per cleaner round and per final-evaluation attempt,
+and one derivation (`deriveQualityStageOutcomes`, `src/logger.ts:188-260`)
+behind both `run-summary.md`'s `## Quality Stages` header + rows
+(`src/logger.ts:752-812`) and the draft-PR section
+(`src/ship-gate.ts:462-496`). Rounds used / limit, wall clock, model time,
+gate ids, cache-reused ids and the reuse-vs-evaluate decision are all in the
+row, and nothing is thresholded.
 
-**The starter template ships (D6, #87 AC7).** `templates/quality-policy/afk.config.json`
-is a complete config that names seven gates (format, lint, typecheck,
-changed-code coverage, complexity, duplication, architecture) with
-`{changedFiles}` wherever the tool takes paths; `package.json:42` adds
-`templates` to `files`; `README.md:411-` explains how to copy it and states
-that declaring `gatePolicy.clean` is the whole switch.
+**The starter ships (D6, #87 AC7).** `templates/quality-policy/afk.config.json`
+parses (`json.load` clean) with `protectedPaths`, all four `riskClasses`
+including `suppression`, `acceptance`, `cost` and seven `clean.gates`
+(`clean:format`, `clean:lint`, `clean:typecheck`, `clean:coverage-changed`,
+`clean:complexity`, `clean:duplication`, `clean:architecture`);
+`package.json` `files` now includes `templates`; `README.md:411-457` explains
+how to copy it, that `gatePolicy.clean` is the switch, why `clean:typecheck`
+gets no `{changedFiles}`, and that the record is written in both states.
 
-## Notes (do not block the merge)
+## Notes (not blocking)
 
-**P-01 — a copier of the starter template is not told to protect its own
-threshold files.** PRD D5 makes "threshold edits" one of the three anti-gaming
-detections and says it is served by `feedback-integrity`'s `gate-policy` rule
-over `protectedPaths.gatePolicyPaths`, adding that "a project whose thresholds
-live in `vitest.config.ts` or `.eslintrc` lists those files there, and the
-starter template (D6) does". The shipped template lists only
-`["afk.config.json", "suite-budgets.json"]`
-(`templates/quality-policy/afk.config.json`, `gatePolicy.protectedPaths`),
-which slice 04's contract records as a deliberate choice
-(`slices/04-.../contract.md:38-48`: the shipped defaults written out
-explicitly). I read the whole new README section (`README.md:411-462`) and it
-never mentions `protectedPaths` either. Net user effect for someone who copies
-the template verbatim: the template's own `clean:lint` /
-`clean:coverage-changed` / `clean:architecture` gates are configured by files
-(`.eslintrc*`, `vitest.config.*`, `.dependency-cruiser.cjs`) that nothing
-protects, so a cleaner could relax a rule instead of satisfying it and still
-pass the round. This is a one-line documentation or template change, and the
-detection mechanism itself exists and works, so it is a note rather than a
-blocker.
-
-**P-02 — the archive filename and the persisted record swap "round" and
-"attempt" (slice 01 QA-02, still OPEN and advisory).** I confirmed the two
-sites: `src/orchestrator.ts` archives cleaner rounds with the generator round
-first (`cleaner-log-r<generatorRound>-a<cleanerRound>.log`) while
-`PersistedQualityStageRound` records `{ round: cleanerRound, attempt:
-generatorRound }`. An operator doing exactly what story 17 asks — correlating
-per-round cost evidence with the archived logs — has to know the two
-conventions are mirror images. Cheap fix: one comment at each site, or one
-consistent order.
-
-**P-03 — slice 01's `stuck.md` and `intervention.json` are still in the spec
-directory although the slice finished PASS.** `slices/01-cleaner-loop/stuck.md`
-describes QA-01 as OPEN and instructs a human to intervene, while
-`slices/01-cleaner-loop/qa-review.json` records the same QA-01 as `RESOLVED`
-with the verdict `PASS`. A human triaging this branch reads the stale file
-first. Nothing about the shipped behavior is affected.
+- **N-01 — the PR body can call an enabled cleaner "disabled".**
+  `src/ship-gate.ts:469-474` prints the literal
+  "`cleaner`: disabled (no `gatePolicy.clean`)" whenever
+  `args.qualityStages` is empty, and `qualityStages` comes from
+  `readQualityStageOutcomes(journal.runDir)` (`:1286`), which derives from
+  `quality-stage-attempt` events only. A run with `gatePolicy.clean`
+  declared but no attempt event in *this* run directory — e.g. a resumed run
+  whose slices were approved and cleaned in a prior run dir — would print the
+  disabled line for an enabled policy. The `quality-stage-policy` event and
+  `run-summary.md` both already carry the truthful fact, so the fix is to
+  source the PR line from that event too. Narrow enough to defer.
+- **N-02 — the starter declares no `suppressionDetectors`,** so a project
+  copying it inherits AFK's TypeScript detector set by default (D1's stated
+  default). That is right for a TS project and silent for others; the README
+  section does not mention the detectors or how to replace them.
+- **N-03 — #226 correctly stays open;** the cleaner round's `scope`
+  declaration is noted in slice 01's handoff as the `role` source's first
+  production caller.
 
 ## Out-of-scope PRD gaps (for the operator, not the verdict)
 
-- **#92 / stories 9-15, 19 (hardener, mutation testing)** are deferred by plan
-  §2 and were not selected. I found no `hardener` stage id, no mutation gate
-  and no survivor schema on this branch, which matches the PRD's "Deferred"
-  section.
-- **Story 17's ROI evidence is not produced by this run.** By design (PRD
-  "Scope", precondition 4) the self-run launches with the cleaner off, so this
-  branch ships the measurement channels but no measurement. The decision the
-  PRD wants — cleaner default on or off — still needs a later run whose
-  `afk.config.json` declares `gatePolicy.clean`.
-- **`suppressions` runs only inside the cleaner's round set** (D5, explicitly
-  out of scope for generator candidates). A project without a cleaner gets no
-  suppression detection; the PRD names this a follow-up.
-- **#226 must stay OPEN.** The cleaner is now the first production caller of
-  the `scope` gate's `role` source; every other writing role is still unwired.
-  Slice 01's handoff records this (`handoff.md`, "Gotchas").
-- **`suite-budgets.json` overrun.** Slice 01's handoff measured
-  `test:heavy:qa` at 178.7s against a 151s budget, caused by its two new
-  spawned scenarios, and did not raise the number (it is out of file scope).
-  `pnpm test:budgets` will be red until an operator rules on it.
+- Slice 02 / #92 (hardener loop, #73 stories 9–15, 19) is deferred by plan §2
+  and not selected in `afk.json`. Nothing on this branch builds toward it: no
+  `hardener` stage id or mutation gate exists.
+- Story 17's ROI *decision* still needs a later run whose `afk.config.json`
+  declares `gatePolicy.clean`. This PRD deliberately keeps this repo's cleaner
+  off (Launch precondition 4), so the branch ships the measurement channels
+  but no measurements yet.
+- Running `suppressions` on generator candidates, `afk status` rendering of
+  quality stages, and any per-role `SliceTotals` column remain out of scope by
+  the PRD's own "Out of scope" section.
 
 ## Structured findings (v1)
 
-{"version":1,"findings":[{"id":"P-01","title":"Starter template and its README never tell a copier to protect their own threshold-bearing config files","class":"PRODUCT","clearCondition":"templates/quality-policy/afk.config.json's protectedPaths.gatePolicyPaths lists the config files its own clean gates read (eslint, vitest, dependency-cruiser), or the README 'Quality policy starter' section tells the copier to add them and says why the threshold-edit detection depends on it.","disposition":"OPEN"},{"id":"P-02","title":"Cleaner round archive filename and persisted record invert 'round' and 'attempt'","class":"PRODUCT","clearCondition":"A cleaner round's archive filename and its PersistedQualityStageRound name the same number with the same field, or a comment at each site states the inversion.","disposition":"OPEN"},{"id":"P-03","title":"Stale stuck.md and intervention.json remain in slice 01's directory after the slice passed","class":"DOC","clearCondition":"slices/01-cleaner-loop holds no stuck diagnosis that contradicts its PASS qa-review.json, or the file states that it was superseded.","disposition":"OPEN"}]}
+{"version":1,"findings":[{"id":"P-01","title":"Draft-PR quality-stage line can report an enabled cleaner as disabled when the run directory holds no attempt event","class":"PRODUCT","clearCondition":"The PR body's quality-stage line derives enabled/disabled from the run's `quality-stage-policy` event rather than from the emptiness of `readQualityStageOutcomes`, so a run with `gatePolicy.clean` declared and no attempt event in its run directory renders 'enabled'.","disposition":"OPEN"},{"id":"P-02","title":"Starter template ships no suppressionDetectors and the README does not mention the default","class":"PRODUCT","clearCondition":"The README's Quality policy starter section states that `clean.suppressionDetectors` defaults to AFK's TypeScript detector set and how a non-TypeScript project replaces it (or the template declares the detectors explicitly).","disposition":"OPEN"}]}
