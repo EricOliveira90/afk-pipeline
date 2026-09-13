@@ -416,6 +416,49 @@ export type RunEventPayload =
       gateIds: string[];
       source: "afk.config.json";
     }
+  | {
+      /**
+       * One post-approval quality attempt, measured (#97, PRD story 17's ROI
+       * dataset). One event per cleaner round and one per final-evaluation
+       * attempt; a reuse emits none, because nothing ran.
+       *
+       * Measurement, never a gate (ADR 0063): nothing thresholds, alerts on, or
+       * branches on any number here — the same rule `stage-duration` above is
+       * kept under. What it answers is what a quality stage cost and what it
+       * bought, per attempt, from the one stream both the summary and the PR
+       * body read.
+       *
+       * `durationMs` is the attempt's whole wall clock, gates included, because
+       * a round's cost to the run is the time the run waited for it, not the
+       * time the agent spent typing. `inputTreeId === outputTreeId` says the
+       * attempt changed nothing — a released round 0 is exactly that — and an
+       * absent `outputTreeId` says no tree of this attempt survived to be named.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1, the same way
+       * `quality-stage-policy` above arrived.
+       */
+      type: "quality-stage-attempt";
+      ghIssue: string;
+      sliceNumber: string;
+      /** The generator round the approval this attempt follows happened in. */
+      round: number;
+      stage: "cleaner" | "final-evaluation";
+      /** The attempt's number *within its stage*: cleaner round, or `0` for a round-0 release. */
+      stageRound: number;
+      /** The attempt number the artifacts of this attempt are named with. */
+      attempt: number;
+      inputTreeId: string;
+      outputTreeId?: string;
+      /** Every gate the attempt declared, in declaration order. */
+      gateIds: string[];
+      /** The attempt's own outcome vocabulary — the stage's, not a shared enum. */
+      outcome: string;
+      startedAt: string;
+      endedAt: string;
+      durationMs: number;
+      /** The subset of `gateIds` served from the gate cache (D17's `reused`). */
+      cacheReusedGateIds: string[];
+    }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
   | {
@@ -554,6 +597,54 @@ export function buildQualityStagePolicyEvent(
     enabled: clean !== undefined,
     gateIds: clean === undefined ? [] : clean.gates.map((gate) => gate.id),
     source: "afk.config.json",
+  };
+}
+
+/**
+ * The one derivation of the `quality-stage-attempt` payload (#97 B-06).
+ *
+ * Modelled on {@link buildQualityStagePolicyEvent} and pure for the same
+ * reason: two emission sites — the cleaner's round seam and the final
+ * evaluation's attempt loop — produce this event, and a second inline copy of
+ * the shape is how the two start disagreeing about what a field means.
+ *
+ * The optional members are omitted rather than set to `undefined`, so a
+ * serialized line carries only what the attempt actually knows.
+ */
+export function buildQualityStageAttemptEvent(attempt: {
+  ghIssue: string;
+  sliceNumber: string;
+  round: number;
+  stage: "cleaner" | "final-evaluation";
+  stageRound: number;
+  attempt: number;
+  inputTreeId: string;
+  outputTreeId?: string;
+  gateIds: readonly string[];
+  outcome: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  cacheReusedGateIds: readonly string[];
+}): Extract<RunEventPayload, { type: "quality-stage-attempt" }> {
+  return {
+    type: "quality-stage-attempt",
+    ghIssue: attempt.ghIssue,
+    sliceNumber: attempt.sliceNumber,
+    round: attempt.round,
+    stage: attempt.stage,
+    stageRound: attempt.stageRound,
+    attempt: attempt.attempt,
+    inputTreeId: attempt.inputTreeId,
+    ...(attempt.outputTreeId !== undefined
+      ? { outputTreeId: attempt.outputTreeId }
+      : {}),
+    gateIds: [...attempt.gateIds],
+    outcome: attempt.outcome,
+    startedAt: attempt.startedAt,
+    endedAt: attempt.endedAt,
+    durationMs: attempt.durationMs,
+    cacheReusedGateIds: [...attempt.cacheReusedGateIds],
   };
 }
 

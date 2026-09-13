@@ -31,6 +31,14 @@ are not yours to edit.
 
 # The failures to clear
 
+This block takes one of two forms, and which one it is tells you what this round
+is for. Either a list of red clean gates with their logs — clear them — or a
+**restore**: the final evaluation graded a tree *you* committed and found that it
+dropped behavior the approved candidate had. A restore names each missing
+behavior with what was expected and what it observed instead. Put those back,
+change nothing else, and leave the clean-gate work that is still green alone. A
+restore is not a licence to revert your whole round.
+
 {{QUALITY_FAILURES}}
 
 {{REGRESSION_NOTE}}

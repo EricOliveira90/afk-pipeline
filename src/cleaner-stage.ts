@@ -39,6 +39,7 @@ import {
 } from "./contract-review.js";
 import { CLEANER_ESCALATION_ARTIFACT_NAME } from "./escalation.js";
 import { feedbackIntegrityGateDeclaration } from "./feedback-integrity-gate.js";
+import type { FinalReviewFinding } from "./final-evaluation.js";
 import { CHANGED_FILES_TOKEN } from "./gate-policy.js";
 import type {
   GatePolicy,
@@ -164,6 +165,39 @@ export interface CleanerDispatchInput {
    * did not regress. Rendered as `{{REGRESSION_NOTE}}` (#87 B-07).
    */
   regressionNote: string;
+  /**
+   * The restore this dispatch is, when it is one (#97 B-05).
+   *
+   * Present exactly when the final evaluation routed a `RESTORE` at this stage:
+   * the round's job is then to put the named preserved behaviors back, not to
+   * clear a red clean gate — which is why `qualityFailures` is empty on a repair
+   * round and why the prompt substitution takes the restore form.
+   */
+  repair?: { findings: readonly FinalReviewFinding[] };
+}
+
+/**
+ * One cleaner round as the ROI evidence stream needs to read it (#97 B-07).
+ *
+ * A separate seam from {@link CleanerStageContext.recordRound}, because that
+ * record is persisted verbatim by `recordQualityStageRound` and cannot carry
+ * timing or cache facts without changing the persisted shape. The stage
+ * measures — it does not decide anything on these numbers (ADR 0063).
+ */
+export interface CleanerRoundAttempt {
+  /** The cleaner round: `0` for a round-0 release, `1..limit` otherwise. */
+  round: number;
+  inputTreeId: string;
+  /** Absent when no checkpoint of this round survived to be named. */
+  outputTreeId?: string;
+  gateIds: readonly string[];
+  /** The gates this round did not re-run, from their own results' `cacheReused`. */
+  cacheReusedGateIds: readonly string[];
+  outcome: string;
+  /** ISO 8601, the round's wall clock — the dispatch *and* its gates. */
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
 }
 
 export interface CleanerStageContext {
@@ -192,6 +226,11 @@ export interface CleanerStageContext {
   recordRound?: (record: CleanerRoundRecord) => void;
   /** Persist the stage's outcome (#87 B-14). */
   recordOutcome?: (outcome: CleanerStageOutcome, rounds: number) => void;
+  /**
+   * One round's measured attempt, the moment it ends (#97 B-07). Optional: a
+   * caller that measures nothing still runs and gates rounds.
+   */
+  observeRoundAttempt?: (attempt: CleanerRoundAttempt) => void;
   /** Rounds already spent for this issue, read from `RunState` on resume. */
   roundsAlreadySpent?: number;
   log?: (message: string, level?: "error") => void;
@@ -246,6 +285,67 @@ export interface CleanerStageInput {
   disposeCheckpoint?: (checkpointWorktreeDir: string) => Promise<void> | void;
   /** Overrides `MAX_CLEANER_ROUNDS`, for tests and for nothing else. */
   roundLimit?: number;
+  /**
+   * The restore this whole stage run is, when the final evaluation routed one
+   * back here (#97 B-03/B-05).
+   *
+   * Its presence changes one thing about the loop: round 0 is skipped. On a
+   * re-dispatch the worktree already carries the cleaner's own committed tree,
+   * which cleared the clean gates when it was made — so round 0 would release
+   * it again, return `PASS` with zero dispatches, and the restore would never
+   * be asked for. The round's gates still run, so a restore that regresses the
+   * approval is reverted exactly as any other round is.
+   */
+  repair?: { findings: readonly FinalReviewFinding[] };
+}
+
+/**
+ * `git reset --hard <commit>` plus the untracked sweep, exported for the one
+ * caller that has to undo a whole cleaner range rather than one round (#97
+ * B-04): the orchestrator, when a restore is routed here with no round left to
+ * spend. Exported from this module rather than added to `src/git.ts` because
+ * resetting a cleaner range is this stage's concern and nobody else's.
+ */
+export function resetCleanerRangeTo(cwd: string, commit: string): void {
+  resetHardTo(cwd, commit);
+}
+
+/**
+ * The `{{QUALITY_FAILURES}}` substitution, in both of its forms (#97 B-05).
+ *
+ * Pure, and here rather than at the call site, so the two forms are one
+ * decision: a normal round lists the red clean gates with their logs, a repair
+ * round lists the preserved behaviors the final evaluator found missing and
+ * says what to do about them. No new placeholder, because `renderPrompt` is
+ * strict in both directions — an extra template variable would be a second
+ * thing to keep in sync for no gain.
+ */
+export function renderCleanerQualityFailures(input: {
+  qualityFailures: readonly CleanerGateFailure[];
+  repair?: { findings: readonly FinalReviewFinding[] };
+}): string {
+  if (input.repair) {
+    return [
+      `This round is a **restore**, not a clean-up. The final evaluation`,
+      `found that this stage's own commits dropped behavior the approved`,
+      `candidate had. Put each of the following back, changing nothing else,`,
+      `and do not undo the clean-gate work that is still green:`,
+      "",
+      ...input.repair.findings.map(
+        (finding) =>
+          `- \`${finding.id}\` (${finding.class}): ${finding.summary}\n` +
+          `  Expected: ${finding.expected}\n` +
+          `  Observed: ${finding.observed}`,
+      ),
+    ].join("\n");
+  }
+  return input.qualityFailures
+    .map(
+      (failure) =>
+        `- \`${failure.gateId}\` (${failure.status}): ${failure.detail}\n` +
+        `  Log: \`${failure.logArtifactId}\``,
+    )
+    .join("\n");
 }
 
 function git(cwd: string, args: string[]): string {
@@ -413,6 +513,40 @@ function failuresIn(
 }
 
 /**
+ * The gates a phase did not re-run, by id (#97 B-07).
+ *
+ * `cacheReused` is present only when true (`GateResult`), so this is a filter
+ * and never a comparison against `false`.
+ */
+function cacheReusedIn(results: readonly GateResult[]): string[] {
+  return results
+    .filter((result) => result.cacheReused === true)
+    .map((result) => result.gateId);
+}
+
+/**
+ * Hand one measured round to the caller, stamping the clock here so a round's
+ * end is the moment the stage finished with it rather than the moment the
+ * caller got around to reading it.
+ */
+function observeAttempt(
+  ctx: CleanerStageContext,
+  attempt: Omit<CleanerRoundAttempt, "startedAt" | "endedAt" | "durationMs"> & {
+    startedAt: number;
+  },
+): void {
+  if (!ctx.observeRoundAttempt) return;
+  const endedAt = Date.now();
+  const { startedAt, ...rest } = attempt;
+  ctx.observeRoundAttempt({
+    ...rest,
+    startedAt: new Date(startedAt).toISOString(),
+    endedAt: new Date(endedAt).toISOString(),
+    durationMs: endedAt - startedAt,
+  });
+}
+
+/**
  * Run the cleaner stage for one approved candidate.
  *
  * `round` is the generator round the approval happened in: it stamps the
@@ -471,34 +605,55 @@ export async function runCleanerStage(
    * Round 0: the accepted tree, the clean gates and nothing else (#87 B-04).
    * Zero invocations when they release it, which is the case this stage is
    * cheap in — the common one, for a project whose gates were already green.
+   *
+   * Skipped entirely for a repair run (#97 B-03): see
+   * {@link CleanerStageInput.repair}. A restore has no red gate to read, so it
+   * enters the loop with no failures rather than with a verdict that would end
+   * the stage before the round it exists to spend.
    */
-  const round0Declarations = cleanDeclarationsFor();
-  const round0 = await runGatePhase(
-    round0Declarations,
-    acceptedTreeId,
-    ctx.worktreeDir,
-    "cleaner round 0",
-  );
-  let failures = failuresIn(
-    round0.evidence.results,
-    round0Declarations,
-    input.gatePhase.evidenceDir,
-    ctx.repoRoot,
-  );
-  let blocking = failures.filter((failure) => failure.required);
-  if (blocking.length === 0) {
-    log(
-      `cleaner: every required clean gate released the accepted tree ` +
-        `${acceptedTreeId} — no round was spent`,
+  let failures: CleanerGateFailure[] = [];
+  let blocking: CleanerGateFailure[] = [];
+  if (!input.repair) {
+    const round0Declarations = cleanDeclarationsFor();
+    const round0StartedAt = Date.now();
+    const round0 = await runGatePhase(
+      round0Declarations,
+      acceptedTreeId,
+      ctx.worktreeDir,
+      "cleaner round 0",
     );
-    ctx.recordOutcome?.("PASS", 0);
-    return {
-      ran: true,
-      outcome: "PASS",
-      inputTreeId: acceptedTreeId,
-      outputTreeId: acceptedTreeId,
-      roundsSpent: 0,
-    };
+    failures = failuresIn(
+      round0.evidence.results,
+      round0Declarations,
+      input.gatePhase.evidenceDir,
+      ctx.repoRoot,
+    );
+    blocking = failures.filter((failure) => failure.required);
+    if (blocking.length === 0) {
+      log(
+        `cleaner: every required clean gate released the accepted tree ` +
+          `${acceptedTreeId} — no round was spent`,
+      );
+      // The cheapest possible stage is still measured (#97 B-07): input and
+      // output are the same tree, because nothing wrote.
+      observeAttempt(ctx, {
+        round: 0,
+        inputTreeId: acceptedTreeId,
+        outputTreeId: acceptedTreeId,
+        gateIds: round0Declarations.map((declaration) => declaration.id),
+        cacheReusedGateIds: cacheReusedIn(round0.evidence.results),
+        outcome: "PASS",
+        startedAt: round0StartedAt,
+      });
+      ctx.recordOutcome?.("PASS", 0);
+      return {
+        ran: true,
+        outcome: "PASS",
+        inputTreeId: acceptedTreeId,
+        outputTreeId: acceptedTreeId,
+        roundsSpent: 0,
+      };
+    }
   }
 
   let spent = ctx.roundsAlreadySpent ?? 0;
@@ -532,6 +687,7 @@ export async function runCleanerStage(
   // The continuation is the remainder, not a counter (#87 B-05, ADR 0050).
   while (cleanerRoundsRemaining({ spent, limit }) > 0) {
     const roundNumber = spent + 1;
+    const roundStartedAt = Date.now();
     const dispatchInput: CleanerDispatchInput = {
       round: roundNumber,
       roundLimit: limit,
@@ -539,10 +695,15 @@ export async function runCleanerStage(
       baselineTreeId: acceptedTreeId,
       qualityFailures: failures,
       regressionNote,
+      ...(input.repair ? { repair: input.repair } : {}),
     };
     log(
       `cleaner round ${roundNumber}/${limit} on ${inputTreeId}: ` +
-        `${blocking.map((failure) => failure.gateId).join(", ")}`,
+        (input.repair
+          ? `restoring ${input.repair.findings
+              .map((finding) => finding.id)
+              .join(", ")}`
+          : blocking.map((failure) => failure.gateId).join(", ")),
     );
     let dispatchFailure: string | null = null;
     try {
@@ -561,6 +722,14 @@ export async function runCleanerStage(
         inputTreeId,
         gateIds: [],
         outcome: "FAIL",
+      });
+      observeAttempt(ctx, {
+        round: roundNumber,
+        inputTreeId,
+        gateIds: [],
+        cacheReusedGateIds: [],
+        outcome: "FAIL",
+        startedAt: roundStartedAt,
       });
       log(
         `cleaner round ${roundNumber} failed and was reset to ${inputCommit}: ` +
@@ -603,6 +772,14 @@ export async function runCleanerStage(
           gateIds: [],
           outcome: "ESCALATION_MALFORMED",
         });
+        observeAttempt(ctx, {
+          round: roundNumber,
+          inputTreeId,
+          gateIds: [],
+          cacheReusedGateIds: [],
+          outcome: "ESCALATION_MALFORMED",
+          startedAt: roundStartedAt,
+        });
         log(
           `cleaner round ${roundNumber} wrote a malformed escalation and was ` +
             `reset to ${inputCommit}: ${malformed}`,
@@ -624,6 +801,14 @@ export async function runCleanerStage(
         inputTreeId,
         gateIds: [],
         outcome: "ESCALATED",
+      });
+      observeAttempt(ctx, {
+        round: roundNumber,
+        inputTreeId,
+        gateIds: [],
+        cacheReusedGateIds: [],
+        outcome: "ESCALATED",
+        startedAt: roundStartedAt,
       });
       log(
         `cleaner round ${roundNumber} escalated ${escalation.id} and reset ` +
@@ -738,6 +923,15 @@ export async function runCleanerStage(
         gateIds,
         outcome: "REVERTED",
       });
+      observeAttempt(ctx, {
+        round: roundNumber,
+        inputTreeId,
+        outputTreeId: checkpoint.treeId,
+        gateIds,
+        cacheReusedGateIds: cacheReusedIn(phase.evidence.results),
+        outcome: "REVERTED",
+        startedAt: roundStartedAt,
+      });
       regressionNote =
         `Round ${roundNumber} was reverted with \`git reset --hard\`: it ` +
         `reddened ${regressions.length} required gate(s) the approval rested ` +
@@ -775,6 +969,15 @@ export async function runCleanerStage(
         gateIds,
         outcome: "PASS",
       });
+      observeAttempt(ctx, {
+        round: roundNumber,
+        inputTreeId: dispatchInput.inputTreeId,
+        outputTreeId: checkpoint.treeId,
+        gateIds,
+        cacheReusedGateIds: cacheReusedIn(phase.evidence.results),
+        outcome: "PASS",
+        startedAt: roundStartedAt,
+      });
       log(
         `cleaner round ${roundNumber} passed: ${checkpoint.treeId} releases ` +
           `every required clean gate`,
@@ -789,6 +992,15 @@ export async function runCleanerStage(
       outputTreeId: checkpoint.treeId,
       gateIds,
       outcome: exhausted ? "EXHAUSTED" : "FAIL",
+    });
+    observeAttempt(ctx, {
+      round: roundNumber,
+      inputTreeId: dispatchInput.inputTreeId,
+      outputTreeId: checkpoint.treeId,
+      gateIds,
+      cacheReusedGateIds: cacheReusedIn(phase.evidence.results),
+      outcome: exhausted ? "EXHAUSTED" : "FAIL",
+      startedAt: roundStartedAt,
     });
     log(
       `cleaner round ${roundNumber} left ` +

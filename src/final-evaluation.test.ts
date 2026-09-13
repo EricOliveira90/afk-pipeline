@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CLEANER_STAGE_ID,
+  buildWritingStageIds,
   decideFinalReuse,
   decideFinalVerdict,
   FINAL_REPORT_FILENAME,
@@ -288,7 +289,49 @@ describe("routeFinalReviewFinding", () => {
 
   it("[behavior:B-08] routes a preservation finding to the single post-approval writing stage", () => {
     expect(
-      routeFinalReviewFinding(finding(), { candidateTreeId: BASELINE_TREE }),
+      routeFinalReviewFinding(finding(), {
+        candidateTreeId: BASELINE_TREE,
+        writingStageIds: [POST_APPROVAL_WRITING_STAGE_ID],
+      }),
+    ).toEqual({
+      target: "writing-stage",
+      stageId: POST_APPROVAL_WRITING_STAGE_ID,
+      repair: "RESTORE",
+    });
+  });
+
+  it("[behavior:#97:B-01] routes a restore to the last stage that actually wrote", () => {
+    // The cleaner wrote last, so it is the stage that dropped the behavior —
+    // routing at the writing stage instead would ask a no-op to undo a commit
+    // it never made.
+    expect(
+      routeFinalReviewFinding(finding(), {
+        candidateTreeId: BASELINE_TREE,
+        writingStageIds: [POST_APPROVAL_WRITING_STAGE_ID, CLEANER_STAGE_ID],
+      }),
+    ).toEqual({
+      target: "writing-stage",
+      stageId: CLEANER_STAGE_ID,
+      repair: "RESTORE",
+    });
+    expect(
+      routeFinalReviewFinding(finding(), {
+        candidateTreeId: BASELINE_TREE,
+        writingStageIds: [CLEANER_STAGE_ID],
+      }),
+    ).toEqual({
+      target: "writing-stage",
+      stageId: CLEANER_STAGE_ID,
+      repair: "RESTORE",
+    });
+  });
+
+  it("[behavior:#97:B-01] keeps the pre-slice fallback when no stage wrote", () => {
+    expect(
+      routeFinalReviewFinding(finding(), {
+        candidateTreeId: BASELINE_TREE,
+        writingStageIds: [],
+      }),
     ).toEqual({
       target: "writing-stage",
       stageId: POST_APPROVAL_WRITING_STAGE_ID,
@@ -303,7 +346,10 @@ describe("routeFinalReviewFinding", () => {
           class: "BASELINE_IS_WRONG",
           repair: "RETURN_TO_GENERATOR",
         }),
-        { candidateTreeId: BASELINE_TREE },
+        {
+          candidateTreeId: BASELINE_TREE,
+          writingStageIds: [CLEANER_STAGE_ID],
+        },
       ),
     ).toEqual({
       target: "generator-loop",
@@ -311,6 +357,70 @@ describe("routeFinalReviewFinding", () => {
       generatorRoundsConsumed: 1,
       finalEvaluationAttemptsConsumed: 0,
     });
+  });
+});
+
+describe("buildWritingStageIds", () => {
+  const CLEANED_TREE = "c".repeat(40);
+
+  it("[behavior:#97:B-02] names the cleaner only when it ran and moved the tree", () => {
+    expect(
+      buildWritingStageIds({
+        cleaner: {
+          ran: true,
+          inputTreeId: BASELINE_TREE,
+          outputTreeId: CLEANED_TREE,
+        },
+        stageInputTreeId: CLEANED_TREE,
+        finalTreeId: CLEANED_TREE,
+      }),
+    ).toEqual([CLEANER_STAGE_ID]);
+
+    // Ran, cleared its gates without a commit: nothing to restore from it.
+    expect(
+      buildWritingStageIds({
+        cleaner: {
+          ran: true,
+          inputTreeId: BASELINE_TREE,
+          outputTreeId: BASELINE_TREE,
+        },
+        stageInputTreeId: BASELINE_TREE,
+        finalTreeId: BASELINE_TREE,
+      }),
+    ).toEqual([]);
+
+    // Disabled entirely.
+    expect(
+      buildWritingStageIds({
+        cleaner: null,
+        stageInputTreeId: BASELINE_TREE,
+        finalTreeId: BASELINE_TREE,
+      }),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#97:B-02] appends the writing stage when the final tree moved off the tree it was handed", () => {
+    expect(
+      buildWritingStageIds({
+        cleaner: null,
+        stageInputTreeId: BASELINE_TREE,
+        finalTreeId: OTHER_TREE,
+      }),
+    ).toEqual([POST_APPROVAL_WRITING_STAGE_ID]);
+  });
+
+  it("[behavior:#97:B-02] lists both in run order when both wrote", () => {
+    expect(
+      buildWritingStageIds({
+        cleaner: {
+          ran: true,
+          inputTreeId: BASELINE_TREE,
+          outputTreeId: CLEANED_TREE,
+        },
+        stageInputTreeId: CLEANED_TREE,
+        finalTreeId: OTHER_TREE,
+      }),
+    ).toEqual([CLEANER_STAGE_ID, POST_APPROVAL_WRITING_STAGE_ID]);
   });
 });
 

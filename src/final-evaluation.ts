@@ -435,14 +435,65 @@ export type FinalReviewRoute =
       finalEvaluationAttemptsConsumed: 0;
     };
 
+/**
+ * Which post-approval stages actually wrote, in run order (#97 B-02).
+ *
+ * The list a `RESTORE` route is resolved against. Only a stage that *changed
+ * the tree* can be the stage that dropped a preserved behavior, so a stage
+ * that ran and left the tree byte-identical is absent: routing a restore to it
+ * would spend a round asking a no-op to undo something it never did. Order is
+ * run order, so the last entry is the stage that wrote last — the one whose
+ * output the final evaluator actually graded.
+ *
+ * Pure and exported so the one orchestrator call site is a call, not a second
+ * copy of the rule: the cleaner is included when it ran and committed, then
+ * the writing stage when the final tree moved off the tree that stage was
+ * handed.
+ */
+export function buildWritingStageIds(input: {
+  cleaner: { ran: boolean; inputTreeId: string; outputTreeId: string } | null;
+  /** The tree the writing stage was handed: the cleaner's output if it committed, else the accepted tree. */
+  stageInputTreeId: string;
+  /** The tree the run is about to merge, after the writing stage's commit. */
+  finalTreeId: string;
+}): string[] {
+  const ids: string[] = [];
+  if (
+    input.cleaner?.ran &&
+    input.cleaner.outputTreeId !== input.cleaner.inputTreeId
+  ) {
+    ids.push(CLEANER_STAGE_ID);
+  }
+  if (input.finalTreeId !== input.stageInputTreeId) {
+    ids.push(POST_APPROVAL_WRITING_STAGE_ID);
+  }
+  return ids;
+}
+
 export function routeFinalReviewFinding(
   finding: FinalReviewFinding,
-  context: { candidateTreeId: string },
+  context: {
+    candidateTreeId: string;
+    /**
+     * The stages that wrote, in run order — see {@link buildWritingStageIds}.
+     *
+     * Required rather than optional: a caller that forgets it would silently
+     * get the pre-#97 behavior of routing every restore at the writing stage,
+     * which is the exact defect this field exists to fix.
+     */
+    writingStageIds: readonly string[];
+  },
 ): FinalReviewRoute {
   if (finding.repair === "RESTORE") {
     return {
       target: "writing-stage",
-      stageId: POST_APPROVAL_WRITING_STAGE_ID,
+      // The *last* stage that wrote owns the restore: it is the one whose
+      // output the evaluator graded, so it is the one that dropped the
+      // behavior. An empty list means nothing wrote after approval — there is
+      // no stage to blame, so the route keeps the pre-slice fallback rather
+      // than inventing a stage id no dispatcher knows.
+      stageId:
+        context.writingStageIds.at(-1) ?? POST_APPROVAL_WRITING_STAGE_ID,
       repair: "RESTORE",
     };
   }
