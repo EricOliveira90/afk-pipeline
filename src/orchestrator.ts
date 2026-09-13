@@ -88,11 +88,9 @@ import {
 import { cleanupEligibility } from "./cleanup-eligibility.js";
 import { DEFAULT_MAX_CONTRACT_ROUNDS } from "./cli-options.js";
 import {
-  cleanerRoundsRemaining,
   computeSliceBounds,
   finalEvaluationAttemptsRemaining,
   formatSliceBounds,
-  MAX_CLEANER_ROUNDS,
   MAX_FINAL_EVALUATION_ATTEMPTS,
 } from "./bounds.js";
 import {
@@ -151,10 +149,6 @@ import {
 } from "./feedback-integrity-gate.js";
 import { loadGatePolicy, type GatePolicy } from "./gate-policy.js";
 import {
-  buildQualityStageAttemptEvent,
-  buildQualityStagePolicyEvent,
-} from "./run-events.js";
-import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
   type BaseGateSkipAuthorization,
@@ -173,10 +167,6 @@ import {
   finalEvaluationFor,
   invalidateFinalEvaluationBaseline,
   recordFinalEvaluation,
-  cleanerRoundsSpent,
-  qualityStagesFor,
-  recordQualityStageOutcome,
-  recordQualityStageRound,
   type PersistedFinalEvaluationAttempt,
   type RunState,
 } from "./run-state.js";
@@ -191,17 +181,9 @@ import {
   POST_APPROVAL_WRITING_STAGE_ID,
   routeFinalReviewFinding,
   validateFinalReview,
-  type FinalReviewFinding,
   type PostApprovalWritingStage,
 } from "./final-evaluation.js";
-import {
-  cleanerExhaustionReason,
-  CLEANER_ESCALATION_FILENAME,
-  renderCleanerQualityFailures,
-  resetCleanerRangeTo,
-  runCleanerStage,
-  type CleanerStageResult,
-} from "./cleaner-stage.js";
+import { createCleanerOrchestrationSession } from "./cleaner-orchestration.js";
 import {
   resolveRunScope,
   type ResolvedRunScope,
@@ -6821,279 +6803,46 @@ export async function runSliceExecute(
            * (#251) — a candidate that could author `gatePolicy.clean` could
            * delete the stage that checks it.
            */
-          /**
-           * The stage entry a killed run left behind, and whether this run may
-           * continue it (#87 B-14).
-           *
-           * `ESCALATED` and `PASS` are terminal: that stage run ended, and a
-           * candidate approved after one is a new candidate whose budget starts
-           * at zero — which is the whole reason `qualityStages` holds a list per
-           * issue rather than one record (#87 B-13). An unfinished entry, or one
-           * left `EXHAUSTED`, is continued, so a resumed run cannot buy a fourth
-           * round by restarting.
-           */
-          const priorCleanerStage = qualityStagesFor(
-            loadRunState(
-              config.repoRoot,
-              pipelineRunSlug(config.prdSlug, config.provider ?? kiroProvider),
-            ),
-            slice.ghIssue,
-          ).at(-1);
-          const resumableCleanerStage =
-            priorCleanerStage !== undefined &&
-            priorCleanerStage.outcome !== "ESCALATED" &&
-            priorCleanerStage.outcome !== "PASS"
-              ? priorCleanerStage
-              : undefined;
-          /**
-           * One cleaner stage run, parameterized by the two things that differ
-           * between the stage's first run and a restore re-dispatch (#97 B-03):
-           * the rounds already spent, and the repair itself.
-           *
-           * A function rather than two call sites, because everything else —
-           * the dispatch, the archives, the gate bundle, the checkpoint
-           * directories — has to be identical for the re-dispatch to be the
-           * same stage rather than a second one wearing its name.
-           */
-          const dispatchCleanerStage = (dispatchOptions: {
-            roundsAlreadySpent: number;
-            repair?: { findings: readonly FinalReviewFinding[] };
-          }) =>
-            runCleanerStage(
-            {
+          const cleanerSession = createCleanerOrchestrationSession({
+            run: {
               repoRoot: config.repoRoot,
-              worktreeDir: ctx.worktreeDir,
+              runSlug: pipelineRunSlug(
+                config.prdSlug,
+                config.provider ?? kiroProvider,
+              ),
+              prdSlug: config.prdSlug,
+              reviewArchiveDir,
+              logger,
+            },
+            slice: {
               ghIssue: slice.ghIssue,
-              sliceNumber: slice.number,
+              number: slice.number,
+              tag: ctx.tag,
+              worktreeDir: ctx.worktreeDir,
               relSliceDir: ctx.relSliceDir,
               absSliceDir: ctx.absSliceDir,
               featureRef: featBranch,
-              dispatch: async (cleanerInput) => {
-                const cleanerRound = cleanerInput.round;
-                // The log stream is opened *before* `phase-started`, so the
-                // journal's open-stage set is only ever entered by a round
-                // that reaches the `try`/`finally` below. Opening it after the
-                // start event would leave a permanently open cleaner stage —
-                // and so no `stage-duration` sample — if the stream failed to
-                // open (#87 B-06).
-                const cleanerLog = logger.agentLog(
-                  slice.number,
-                  "cleaner",
-                  round * 10 + cleanerRound,
-                );
-                // Keyed by the *cleaner* round, not the generator round: the
-                // journal pairs a `phase-ended` with its `phase-started` under
-                // `stageInvocationKey` = ghIssue|agent|round, so three cleaner
-                // rounds inside one generator round need three distinct keys
-                // to yield three `stage-duration` samples.
-                logger.phase(
-                  `${ctx.tag}: cleaner round ${cleanerRound} of ` +
-                    `${cleanerInput.roundLimit} on ${cleanerInput.inputTreeId}...`,
-                  "error",
-                  {
-                    type: "phase-started",
-                    ghIssue: slice.ghIssue,
-                    sliceNumber: slice.number,
-                    agent: "cleaner",
-                    round: cleanerRound,
-                  },
-                );
-                try {
-                  await invoke({
-                    role: "cleaner",
-                    completionEvidence: {
-                      ghIssue: slice.ghIssue,
-                      sliceNumber: slice.number,
-                      round,
-                      attempt: cleanerRound,
-                      role: "cleaner",
-                    },
-                    prompt: renderPrompt("cleaner", {
-                      SLICE_DIR: ctx.relSliceDir,
-                      ROUND: String(cleanerRound),
-                      ROUND_LIMIT: String(cleanerInput.roundLimit),
-                      BASELINE_TREE_ID: cleanerInput.baselineTreeId,
-                      INPUT_TREE_ID: cleanerInput.inputTreeId,
-                      // The locked manifest by name, not its contents: the
-                      // cleaner reads the same document the `scope` gate
-                      // enforces, so a summary here could only ever disagree
-                      // with it.
-                      WRITE_SCOPE: [
-                        `- Every path in the locked ` +
-                          `\`${ctx.relSliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}\`` +
-                          ` \`fileScope\`.`,
-                        ...(ctx.runGatePolicy?.clean?.additionalWriteScope ?? [])
-                          .map(
-                            (glob) =>
-                              `- \`${glob}\` (this project's ` +
-                              `\`gatePolicy.clean.additionalWriteScope\`).`,
-                          ),
-                        `- \`${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}\`,` +
-                          ` and only to escalate.`,
-                      ].join("\n"),
-                      // One derivation for both of the block's forms — the red
-                      // clean gates, or the restore the final evaluation routed
-                      // back here (#97 B-05).
-                      QUALITY_FAILURES:
-                        renderCleanerQualityFailures(cleanerInput),
-                      REGRESSION_NOTE: cleanerInput.regressionNote,
-                    }),
-                    cwd: ctx.worktreeDir,
-                    logStream: cleanerLog,
-                    ...longCommandRoleBounds({
-                      idleTimeoutMs: timeoutMs,
-                      idleWarningIntervalMs: heartbeatMs,
-                      maxDurationMs: config.maxAgentDurationMs,
-                    }),
-                  });
-                } finally {
-                  // Awaited, not fired and forgotten: `archiveRound` copies
-                  // this log the moment `dispatch` resolves (#87 B-09), and an
-                  // unflushed stream is a source path `existsSync` can still
-                  // answer `false` for — the round's rationale would then be
-                  // silently unarchived.
-                  await closeAgentLog(cleanerLog);
-                  logger.event({
-                    type: "phase-ended",
-                    ghIssue: slice.ghIssue,
-                    sliceNumber: slice.number,
-                    agent: "cleaner",
-                    round: cleanerRound,
-                  });
-                }
-              },
-              /**
-               * Archive the round before anything resets it (#87 B-09): the
-               * escalation under the `cleaner-` prefix its own
-               * `qaArchivePrefix` branch supplies, and the agent log — which
-               * carries the commit rationale, the one account of the round's
-               * reasoning that survives a `git reset --hard`.
-               *
-               * Archiving never fails the round: the artifacts are evidence for
-               * an operator, and losing a copy of a log is not a reason to throw
-               * away a tree the gates just released.
-               */
-              archiveRound: ({ round: cleanerRound, hasEscalation }) => {
-                let escalationArtifactId: string | undefined;
-                try {
-                  if (hasEscalation) {
-                    const name = artifacts.archiveQAReviewAttempt({
-                      sliceDir: ctx.absSliceDir,
-                      archiveDir: reviewArchiveDir,
-                      stage: CLEANER_STAGE_ID,
-                      round,
-                      attempt: cleanerRound,
-                    });
-                    if (name !== null) {
-                      escalationArtifactId = relative(
-                        config.repoRoot,
-                        join(reviewArchiveDir, name),
-                      ).replace(/\\/g, "/");
-                    }
-                  }
-                  artifacts.archiveCleanerLog({
-                    source: join(
-                      logger.runDir,
-                      `slice-${slice.number}-${CLEANER_STAGE_ID}-r` +
-                        `${round * 10 + cleanerRound}.log`,
-                    ),
-                    archiveDir: reviewArchiveDir,
-                    round,
-                    attempt: cleanerRound,
-                    runId: runIdFor(logger.runDir),
-                  });
-                } catch (error) {
-                  logger.phase(
-                    `${ctx.tag}: could not archive cleaner round ` +
-                      `${cleanerRound}: ` +
-                      `${error instanceof Error ? error.message : String(error)}`,
-                    "error",
-                  );
-                }
-                return escalationArtifactId
-                  ? { escalationArtifactId }
-                  : undefined;
-              },
-              // Persist-per-round, exactly as `persistAttempts` persists
-              // per attempt: a run killed mid-stage resumes having spent the
-              // rounds it actually spent (#87 B-14).
-              recordRound: (record) =>
-                recordQualityStageRound(
-                  config.repoRoot,
-                  pipelineRunSlug(
-                    config.prdSlug,
-                    config.provider ?? kiroProvider,
-                  ),
-                  slice.ghIssue,
-                  { ...record, gateIds: [...record.gateIds] },
-                  // The first round of this approval opens a fresh entry, so an
-                  // earlier escalated run's rounds are never charged to this
-                  // candidate's budget even when the two trees are identical
-                  // (#87 B-13).
-                  { startNewEntry: record.round === 1 },
-                ),
-              recordOutcome: (outcome) =>
-                recordQualityStageOutcome(
-                  config.repoRoot,
-                  pipelineRunSlug(
-                    config.prdSlug,
-                    config.provider ?? kiroProvider,
-                  ),
-                  slice.ghIssue,
-                  outcome,
-                ),
-              /**
-               * One `quality-stage-attempt` per cleaner round, from the round's
-               * own measurements (#97 B-07). Emitted here rather than derived
-               * later, because the gate cache facts and the round's wall clock
-               * exist only while the round is running.
-               */
-              observeRoundAttempt: (attempt) => {
-                logger.event(
-                  buildQualityStageAttemptEvent({
-                    ghIssue: slice.ghIssue,
-                    sliceNumber: slice.number,
-                    round,
-                    stage: "cleaner",
-                    stageRound: attempt.round,
-                    attempt: attempt.round,
-                    inputTreeId: attempt.inputTreeId,
-                    ...(attempt.outputTreeId !== undefined
-                      ? { outputTreeId: attempt.outputTreeId }
-                      : {}),
-                    gateIds: attempt.gateIds,
-                    outcome: attempt.outcome,
-                    startedAt: attempt.startedAt,
-                    endedAt: attempt.endedAt,
-                    durationMs: attempt.durationMs,
-                    cacheReusedGateIds: attempt.cacheReusedGateIds,
-                  }),
-                );
-              },
-              log: (message, level) =>
-                logger.phase(`${ctx.tag}: ${message}`, level),
-              roundsAlreadySpent: dispatchOptions.roundsAlreadySpent,
-              ...(signal ? { signal } : {}),
             },
-            round,
-            {
-              ...(dispatchOptions.repair
-                ? { repair: dispatchOptions.repair }
-                : {}),
+            generatorRound: round,
+            accepted: {
+              treeId: acceptedTreeId,
+              commitSha: acceptedCommitSha,
+            },
+            invoke,
+            invocationBounds: longCommandRoleBounds({
+              idleTimeoutMs: timeoutMs,
+              idleWarningIntervalMs: heartbeatMs,
+              maxDurationMs: config.maxAgentDurationMs,
+            }),
+            stageInput: {
               ...(ctx.runGatePolicy?.clean
                 ? { clean: ctx.runGatePolicy.clean }
                 : {}),
-              acceptedTreeId,
               runPolicy: ctx.runGatePolicy,
               skipDetectors: costPlan.skipDetectors,
               testFileGlobs: costPlan.testFileGlobs,
               waivers: launchWaivers,
-              // The value this run's own integrity check produced, the same one
-              // the pre-QA and post-QA phases were handed — never a literal.
               acceptedPairIntact,
-              // The bundle the approval rested on, in the order this round ran
-              // it: a cleaner round has to clear its clean gate without
-              // reddening any of these (#87 B-06).
               regressionDeclarations: [
                 ...preQaDeclarations,
                 ...fullSuiteDeclarations,
@@ -7115,137 +6864,24 @@ export async function runSliceExecute(
                 wallClockTimeoutMs:
                   DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
                 heartbeatIntervalMs:
-                  config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
-                onGateOutcome: (outcome) => {
-                  logger.event({
-                    type: "gate-outcome",
-                    ghIssue: slice.ghIssue,
-                    sliceNumber: slice.number,
-                    round,
-                    ...outcome,
-                  });
-                },
-                onInfrastructureRetry: (message) => {
-                  logger.phase(message, "error", {
-                    type: "warn",
-                    reason: "infrastructure-retry",
-                    ghIssue: slice.ghIssue,
-                    message,
-                  });
-                },
+                  config.heartbeatIntervalMs ??
+                  DEFAULT_HEARTBEAT_INTERVAL_MS,
                 ...(gatePrepare ? { prepare: gatePrepare } : {}),
               },
               ...(gatePrepare ? { prepare: gatePrepare } : {}),
-              options: { migrationPathPattern: config.migrationPathPattern },
-              checkpointDirFor: (cleanerRound) =>
-                join(
-                  config.repoRoot,
-                  ".afk",
-                  "checkpoints",
-                  `${config.prdSlug}-s${slice.number}-r${round}-` +
-                    `${CLEANER_STAGE_ID}-a${cleanerRound}-${randomUUID()}`,
-                ),
-              disposeCheckpoint: async (checkpointWorktreeDir) => {
-                await git.removeWorktreeOrWarn(
-                  ctx.worktreeDir,
-                  checkpointWorktreeDir,
-                  {
-                    label: ctx.tag,
-                    warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
-                  },
-                  ...(signal ? [{ signal }] : []),
-                );
+              options: {
+                migrationPathPattern: config.migrationPathPattern,
               },
             },
-          );
-          /**
-           * Apply one cleaner result's terminal policy, regardless of whether
-           * it came from the initial dispatch or a final-evaluation restore.
-           *
-           * Keeping the decision here prevents the two call sites from
-           * disagreeing about an `EXHAUSTED` or `ESCALATED` re-dispatch: the
-           * caller still owns whether RETURN_TO_GENERATOR means `continue` or
-           * breaking out of the final-evaluation loop.
-           */
-          const handleCleanerTerminalOutcome = (
-            result: CleanerStageResult,
-          ):
-            | { kind: "PROCEED" }
-            | { kind: "RETURN_TO_GENERATOR" }
-            | { kind: "STUCK"; reason: string } => {
-            if (result.outcome === "ESCALATED" && result.escalation) {
-              invalidateFinalEvaluationBaseline(
-                config.repoRoot,
-                pipelineRunSlug(
-                  config.prdSlug,
-                  config.provider ?? kiroProvider,
-                ),
-                slice.ghIssue,
-                acceptedTreeId,
-              );
-              generatorFailureSet = {
-                findings: [
-                  {
-                    id: result.escalation.id,
-                    clearCondition: result.escalation.expected,
-                    artifactReferences: result.escalationArtifactId
-                      ? [result.escalationArtifactId]
-                      : [
-                          `${ctx.relSliceDir}/${CLEANER_ESCALATION_FILENAME}`,
-                        ],
-                  },
-                ],
-                gates: [],
-              };
-              retryNote =
-                `The cleaner escalated the approved baseline: ` +
-                `${result.escalation.id}: ${result.escalation.summary} ` +
-                `Expected: ${result.escalation.expected} Observed: ` +
-                `${result.escalation.observed}`;
-              logger.phase(
-                `${ctx.tag}: the cleaner returned the slice to the generator ` +
-                  `loop and invalidated the baseline ${acceptedTreeId}`,
-                "error",
-              );
-              return { kind: "RETURN_TO_GENERATOR" };
-            }
-            if (result.outcome === "EXHAUSTED") {
-              const remaining = result.remainingFailures ?? [];
-              stuckReferences.push(
-                ...remaining.map((failure) => failure.logArtifactId),
-              );
-              return {
-                kind: "STUCK",
-                reason: cleanerExhaustionReason({
-                  ghIssue: slice.ghIssue,
-                  roundsSpent: result.roundsSpent,
-                  failures: remaining,
-                  treeId: result.outputTreeId,
-                }),
-              };
-            }
-            return { kind: "PROCEED" };
-          };
-          /**
-           * The cleaner stage's standing result, across every dispatch it gets.
-           *
-           * `let` rather than `const` because a restore re-dispatch (#97 B-03)
-           * is the *same* stage running another round, not a second stage: the
-           * tree it leaves behind is the cleaner's output from then on, and a
-           * reader that kept the first dispatch's trees would ask the next
-           * restore of whichever stage the stale numbers happened to name — the
-           * defect QA-01 found from the second restore onward.
-           *
-           * `roundsAlreadySpent` for the first dispatch is read back out of the
-           * run state, never counted in memory: that is what makes the bound
-           * hold across processes (#87 B-14).
-           */
-          let cleaner = await dispatchCleanerStage({
-            roundsAlreadySpent: cleanerRoundsSpent(resumableCleanerStage),
+            ...(signal ? { signal } : {}),
           });
-          const initialCleanerTerminal =
-            handleCleanerTerminalOutcome(cleaner);
-          if (initialCleanerTerminal.kind === "RETURN_TO_GENERATOR") {
+          const initialCleaner = await cleanerSession.advance({
+            kind: "INITIAL",
+          });
+          let cleaner = initialCleaner.result;
+          if (initialCleaner.kind === "RETURN_TO_GENERATOR") {
+            generatorFailureSet = initialCleaner.failureSet;
+            retryNote = initialCleaner.retryNote;
             if (implementationAttempt < implementationAttemptLimit) continue;
             return finishStuck(
               `The cleaner returned slice #${slice.ghIssue} to the ` +
@@ -7253,8 +6889,9 @@ export async function runSliceExecute(
                 retryNote,
             );
           }
-          if (initialCleanerTerminal.kind === "STUCK") {
-            return finishStuck(initialCleanerTerminal.reason);
+          if (initialCleaner.kind === "STUCK") {
+            stuckReferences.push(...initialCleaner.artifactReferences);
+            return finishStuck(initialCleaner.reason);
           }
           /**
            * The post-approval writing stage, and the reuse decision it decides
@@ -7770,26 +7407,24 @@ export async function runSliceExecute(
                 : acceptedTreeId;
               const emitFinalAttemptEvent = (outcome: string): void => {
                 const endedAt = Date.now();
-                logger.event(
-                  buildQualityStageAttemptEvent({
-                    ghIssue: slice.ghIssue,
-                    sliceNumber: slice.number,
-                    round,
-                    stage: "final-evaluation",
-                    stageRound: finalAttempt,
-                    attempt: finalAttempt,
-                    inputTreeId: attemptInputTreeId,
-                    outputTreeId: currentFinalTreeId,
-                    gateIds: [SCOPE_GATE_ID],
-                    outcome,
-                    startedAt: new Date(attemptStartedAt).toISOString(),
-                    endedAt: new Date(endedAt).toISOString(),
-                    durationMs: endedAt - attemptStartedAt,
-                    cacheReusedGateIds: (finalScopeEvidence?.results ?? [])
-                      .filter((result) => result.cacheReused === true)
-                      .map((result) => result.gateId),
-                  }),
-                );
+                logger.recordQualityStageAttempt({
+                  ghIssue: slice.ghIssue,
+                  sliceNumber: slice.number,
+                  round,
+                  stage: "final-evaluation",
+                  stageRound: finalAttempt,
+                  attempt: finalAttempt,
+                  inputTreeId: attemptInputTreeId,
+                  outputTreeId: currentFinalTreeId,
+                  gateIds: [SCOPE_GATE_ID],
+                  outcome,
+                  startedAt: new Date(attemptStartedAt).toISOString(),
+                  endedAt: new Date(endedAt).toISOString(),
+                  durationMs: endedAt - attemptStartedAt,
+                  cacheReusedGateIds: (finalScopeEvidence?.results ?? [])
+                    .filter((result) => result.cacheReused === true)
+                    .map((result) => result.gateId),
+                });
               };
               /**
                * One evaluator invocation, in a disposable worktree at the final
@@ -8044,110 +7679,23 @@ export async function runSliceExecute(
                   "error",
                 );
                 if (restoreStageId === CLEANER_STAGE_ID) {
-                  /**
-                   * The restore goes back to the cleaner (#97 B-03/B-04).
-                   *
-                   * `cleaner.roundsSpent` is read off the in-memory result and
-                   * never re-derived with `cleanerRoundsSpent`: the stage just
-                   * finished, so its persisted entry is terminal to that
-                   * predicate, and a re-read would hand the restore three fresh
-                   * rounds — the opposite of the bound (ADR 0050).
-                   */
-                  const cleanerLimit = MAX_CLEANER_ROUNDS;
-                  if (
-                    cleanerRoundsRemaining({
-                      spent: cleaner.roundsSpent,
-                      limit: cleanerLimit,
-                    }) === 0
-                  ) {
-                    /**
-                     * No round left to spend, so nothing is dispatched: the
-                     * cleaner's whole range is reset to the accepted commit and
-                     * the stage is recorded `EXHAUSTED`. Undoing every cleaner
-                     * commit rather than the last one is the point — the stage
-                     * cannot repair what it broke, so the tree goes back to the
-                     * one the approval was actually given, which the next loop
-                     * iteration then reuses.
-                     */
-                    if (acceptedCommitSha !== null) {
-                      resetCleanerRangeTo(ctx.worktreeDir, acceptedCommitSha);
-                    }
-                    recordQualityStageOutcome(
-                      config.repoRoot,
-                      pipelineRunSlug(
-                        config.prdSlug,
-                        config.provider ?? kiroProvider,
-                      ),
-                      slice.ghIssue,
-                      "EXHAUSTED",
-                    );
-                    logger.phase(
-                      `${ctx.tag}: the cleaner has no round left to restore ` +
-                        `${restoreFindings
-                          .map((finding) => finding.id)
-                          .join(", ")}, so its ${cleaner.roundsSpent} round(s) ` +
-                        `were reset to the accepted commit ` +
-                        `${acceptedCommitSha ?? "(unresolved)"}`,
-                      "error",
-                    );
-                    continue;
-                  }
-                  /**
-                   * The attempt's own review artifacts go before the round does.
-                   *
-                   * They are already archived per attempt, and the next loop
-                   * iteration removes them anyway — but the restore round runs
-                   * *before* that iteration, so leaving them loose would fold
-                   * the evaluator's own bytes into the round's checkpoint: the
-                   * round would be gated for writing `final-review.json`
-                   * (a reverted round, one of three, spent on nothing) and its
-                   * reported input tree would name a tree neither the evaluator
-                   * nor any round ever read.
-                   */
-                  rmSync(finalReviewPath, { force: true });
-                  rmSync(finalReportPath, { force: true });
-                  const restored = await dispatchCleanerStage({
-                    roundsAlreadySpent: cleaner.roundsSpent,
-                    repair: { findings: restoreFindings },
+                  const restoredCleaner = await cleanerSession.advance({
+                    kind: "RESTORE",
+                    findings: restoreFindings,
+                    discardArtifacts: [finalReviewPath, finalReportPath],
                   });
-                  /**
-                   * The re-dispatch's result replaces the standing one, because
-                   * it is the same stage's newer state (#97 B-02/B-12).
-                   *
-                   * Three fields are merged rather than taken, and each for its
-                   * own reason:
-                   *
-                   * - `inputTreeId` stays the *first* dispatch's, which is the
-                   *   accepted tree. `outputTreeId !== inputTreeId` is the one
-                   *   "did the cleaner write?" predicate the route and the
-                   *   change-summary attribution both read, and the question is
-                   *   whether the cleaner's range differs from the tree the
-                   *   approval was given on — not whether this last round did.
-                   * - `ran` is sticky: a re-dispatch that returned without
-                   *   running cannot un-run the rounds already on record.
-                   * - `roundsSpent` never decreases, so no re-dispatch can hand
-                   *   the next restore a larger budget than this one had
-                   *   (ADR 0050).
-                   */
-                  cleaner = {
-                    ...restored,
-                    ran: cleaner.ran || restored.ran,
-                    inputTreeId: cleaner.inputTreeId,
-                    roundsSpent: Math.max(
-                      cleaner.roundsSpent,
-                      restored.roundsSpent,
-                    ),
-                  };
-                  const restoredCleanerTerminal =
-                    handleCleanerTerminalOutcome(cleaner);
-                  if (
-                    restoredCleanerTerminal.kind === "RETURN_TO_GENERATOR"
-                  ) {
+                  cleaner = restoredCleaner.result;
+                  if (restoredCleaner.kind === "RETURN_TO_GENERATOR") {
+                    generatorFailureSet = restoredCleaner.failureSet;
+                    retryNote = restoredCleaner.retryNote;
                     returnToGenerator = true;
                     break;
                   }
-                  if (restoredCleanerTerminal.kind === "STUCK") {
-                    return finishStuck(restoredCleanerTerminal.reason);
+                  if (restoredCleaner.kind === "STUCK") {
+                    stuckReferences.push(
+                      ...restoredCleaner.artifactReferences,
+                    );
+                    return finishStuck(restoredCleaner.reason);
                   }
                   continue;
                 }
@@ -8700,7 +8248,7 @@ export async function runPipeline(
   // per slice — and recorded in both states, because a run that says nothing
   // is not evidence that the stage was off (#274, PRD D10 item 1). No run.log
   // line: `event` rather than `phase`, so the human log stays byte-identical.
-  logger.event(buildQualityStagePolicyEvent(runGatePolicy));
+  logger.recordQualityStagePolicy(runGatePolicy);
   // --- The cancellation record, written when the signal fires (#114).
   //
   // The wave loop's cancellation sweep further down only runs once

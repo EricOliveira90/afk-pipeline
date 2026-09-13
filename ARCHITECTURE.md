@@ -27,7 +27,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
 | Review rails | Contract/QA lifecycle, candidate review isolation, accepted-candidate policy (PRD 1, PRD 3, PRD 4) | `src/contract-review.ts`, `src/qa-review.ts`, `src/change-summary.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
 | Final evaluation | Exact-tree reuse decision, final review schema, finding routing to the stage that actually wrote, final verdict (PRD 4 D9, D19, D20; PRD 5 D12, #97) | `src/final-evaluation.ts` | — |
-| Post-approval quality stages | Bounded post-approval rounds that make declared *clean* gates green without changing approved behavior, re-dispatched with the final evaluator's `RESTORE` findings under the same round budget and reverted whole when none is left; each attempt reported as `quality-stage-attempt` ROI evidence, never as a gate (PRD 5 D2/D4/D10–D12, ADR 0063, #87, #97) | `src/cleaner-stage.ts` | `src/suppression-gate.ts`, `prompts/cleaner.md`, `src/run-events.ts` |
+| Post-approval quality stages | Bounded post-approval rounds that make declared *clean* gates green without changing approved behavior, re-dispatched with the final evaluator's `RESTORE` findings under the same round budget and reverted whole when none is left; each attempt reported as `quality-stage-attempt` ROI evidence, never as a gate (PRD 5 D2/D4/D10–D12, ADR 0063, #87, #97) | `src/cleaner-orchestration.ts` | `src/cleaner-stage.ts`, `src/suppression-gate.ts`, `prompts/cleaner.md`, `src/run-events.ts` |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
@@ -60,17 +60,21 @@ entry in `afk.config.json`. Cap: 150 lines.
 - Post-approval writing stages (`PostApprovalWritingStage` in
   `src/final-evaluation.ts`) — a stage that runs after the approval commit and
   before the merge takes `{ worktreeDir, stageId, repair? }` and is wired at the
-  one accept seam in `src/orchestrator.ts`. The cleaner (`src/cleaner-stage.ts`,
-  `prompts/cleaner.md`) runs at that same seam under `gatePolicy.clean`: round 0
-  gates the accepted tree, and each later round dispatches, checkpoints, and
-  gates the clean gates **plus the full set the approval rested on**, so a round
-  that reddens any of the latter is reverted with `git reset --hard` rather than
-  re-baselined. Every exit path resets (ADR 0051) and the loop continues on a
-  comparison against the remaining rounds rather than an incremented counter
-  (ADR 0050); a `BASELINE_IS_WRONG` escalation returns the slice to the
-  generator with the baseline citation invalidated, and exhaustion goes stuck
-  with every still-red gate named. A restore round (`repair`) skips round 0 — its
-  input is the cleaner's own green output, which round 0 would simply release.
+  one accept seam in `src/orchestrator.ts`. The cleaner orchestration session
+  (`src/cleaner-orchestration.ts`) owns resume lookup, dispatch, persistence,
+  standing state across restores, and its typed terminal decisions; the
+  orchestrator retains generator availability, final-evaluation routing and
+  slice lifecycle. Its implementation (`src/cleaner-stage.ts`,
+  `prompts/cleaner.md`) runs under `gatePolicy.clean`: round 0 gates the accepted
+  tree, and each later round dispatches, checkpoints, and gates the clean gates
+  **plus the full set the approval rested on**, so a round that reddens any of
+  the latter is reverted with `git reset --hard` rather than re-baselined. Every
+  exit path resets (ADR 0051) and the loop continues on a comparison against the
+  remaining rounds rather than an incremented counter (ADR 0050); a
+  `BASELINE_IS_WRONG` escalation returns the slice to the generator with the
+  baseline citation invalidated, and exhaustion goes stuck with every still-red
+  gate named. A restore round (`repair`) skips round 0 — its input is the
+  cleaner's own green output, which round 0 would simply release.
 - Gate cost (`gatePolicy.cost` → `resolveTestCostPlan` in `src/base-gates.ts`)
   — a gate's price is declared, not discovered: `expectedCostMs` decides what
   the generator's verification command may contain, `prerequisiteGateIds`
