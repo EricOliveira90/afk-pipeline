@@ -13,7 +13,7 @@ Standalone CLI tool that orchestrates multi-agent pipelines to implement PRD sli
 
 ## Test loop discipline (agents: read this)
 
-The full suite (`pnpm test`) takes roughly 20–30 minutes on Windows. Every
+The full suite (`pnpm test`) takes 17–30 minutes on Windows. Every
 measurement since 2026-09-01 lands in that band: recorded in-chain totals
 of 1184–1443s of suite time (`suite-budgets.json`,
 `_measured2026_09_01_prd3_slice01_five_chain`), two sessions in the week of
@@ -24,12 +24,16 @@ ratchet's budget, set ~30% above the slowest in-chain run, while the figure
 here is the observation — when they disagree, the budget file wins and this
 sentence is stale. (The earlier "about 7 minutes / 416s" figure was measured
 2026-08-26, before #76 gave every fixture repo a real sanity script; it no
-longer holds and no idle-host re-measurement has been recorded yet.) The
+longer holds. The idle-host re-measurement it asked for now exists:
+1022.1s — 17m02s, 2560 tests, exit 0 — on 2026-09-13 with the fast suite
+on 6 workers and qa-orchestration split in two, recorded as
+`_measured2026_09_13_wave_a@main`.) The
 cost is the pipeline integration suites (`orchestrator`, `wave`,
 `resume-integration`, `qa-orchestration`, `clean-failed`), which spawn
-hundreds of real git processes. The three biggest suites are each split
-across two test files balanced by measured `describe`-block time (e.g.
-`wave.test.ts` + `wave-migrations.test.ts`), so a single
+hundreds of real git processes. The four biggest suites are each split
+across two test files balanced by measured `describe`-block time
+(`wave.test.ts` + `wave-migrations.test.ts`, `qa-orchestration.test.ts` +
+`qa-orchestration-gates.test.ts`), so a single
 `test:heavy:<name>` run schedules them across both vitest workers — see the
 file headers before adding or moving a block.
 
