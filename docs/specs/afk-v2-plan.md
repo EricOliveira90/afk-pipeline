@@ -177,6 +177,12 @@ become a new PRD.
 | #284 and #286 PRD 7 notes | Direct follow-ups: remove or specify the unread contract view, and reduce eval-pack/provider-decorator coupling. | After PRD 5; they do not reopen the completed PRD 7 run. |
 | #290–#296 PRD 5 guardian notes | Resolve against draft PR #297 on its feature branch. #289, the blocking restore-outcome defect, is already closed. | Triage at PRD 5 handoff; fix blockers before merge and file true non-blockers once. Do not race the active branch from parallel worktrees. |
 
+Not scheduled from the same field notes: raising the negotiation round cap,
+adding a provider watchdog from one stalled stream, automating host-branch
+merge-forward, or filtering self-run fixture text out of the launcher log.
+The observations stay evidence; another incident or a measured recurring
+cost must justify permanent machinery.
+
 ---
 
 ## 3. The agreed hardening set (debate consensus, priority order)
