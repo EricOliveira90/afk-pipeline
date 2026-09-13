@@ -253,6 +253,17 @@ _Avoid_: "lock" (nothing is held against other processes), "assignment
 from the manifest" (the manifest owns the pool; the pipeline owns
 claims)
 
+**Reserved-prefix placeholder**:
+`RESERVED_PREFIX_<name>.sql`, what a planner writes for a new migration
+path on a round before AFK has allocated the slice a **migration
+claim** — the prefix is not knowable to it. The contract-lock gate
+substitutes the claim into the placeholder in `contract.md` and
+`acceptance-manifest.json` and re-validates, so the contract locks in
+the round it was accepted in. See ADR 0067.
+_Avoid_: "template prefix", "temporary prefix" (it is never a prefix);
+"renumbering" for the substitution (ADR 0028's rejected alternative is
+about a real prefix)
+
 **Protected issue**:
 A source GH issue listed in the **AFK manifest** whose GitHub state the
 run must not disturb (e.g. a parent spec issue that must stay open).
@@ -316,8 +327,9 @@ declared migration whose numeric prefix already exists on the **feature
 branch** under a different filename is refused with the colliding prefix
 and the next free one, seconds after the planner named the file rather
 than hours later at the merge. A refusal costs one contract round and no
-generation; exhausting the rounds triggers ordinary **escalation**. See
-ADR 0028.
+generation; exhausting the rounds triggers ordinary **escalation**. One
+objection it does *not* raise: a **reserved-prefix placeholder**, which
+it substitutes and re-validates in place. See ADR 0028 and ADR 0067.
 _Avoid_: "pre-flight check" (it is not before the pipeline, it is inside
 negotiation), "validation" (too generic), "merge check" (the merge-mutex
 collision check is a different, and still authoritative, thing)
@@ -385,6 +397,13 @@ separate decision from the **sanity command set**, and reaching only the
 generator roles (ADR 0038).
 _Avoid_: "test command" bare (ambiguous with the sanity set), "QA
 command" (the evaluator runs the sanity set, not this)
+
+**Prompt record**:
+The `slice-<NN>-<role>[-r<N>].prompt.md` file `--record-prompts` writes beside
+the invocation's `.log` in the run directory: the envelope's bytes, unchanged,
+one file per invocation. Default off; the `run-started` event records whether
+it was on. The raw material for an eval case's `prompt`.
+_Avoid_: "prompt log", "transcript", "envelope dump"
 
 **Sanity command set**:
 What `resolveSanityPlan` says the **pre-ship sanity gate** executes and
@@ -461,6 +480,36 @@ the run stays successful. Neither is a **cap exit**. Distinct from
 _Avoid_: "failed run" (slices can all pass), "not ready" (that is the
 run-summary's rendering, not the outcome), "exit code 2" (there is no
 per-class exit taxonomy)
+
+**Envelope**:
+The exact prompt string one agent invocation receives — the `prompt` field of
+`InvokeOptions`, assembled by the orchestrator and piped to the provider on
+stdin. It is never persisted by a pipeline run; `--record-prompts` writes a
+copy beside the invocation's log (see **Prompt record**). An eval case's
+`prompt` is an envelope.
+_Avoid_: "context", "fixture", "transcript" (a transcript includes the reply)
+
+**Scenario pack**:
+A directory of `*.json` eval cases read by `afk eval`. Every file carries the
+pack schema `version`; the reader refuses the whole pack on an unknown member,
+an unsupported version, or files that disagree on version. AFK owns
+`eval-packs/afk/`; consuming projects own their own packs.
+_Avoid_: "test suite", "golden set", "benchmark" (nothing here gates or scores)
+
+**Eval case**:
+One member of a scenario pack: a `role`, a required `source` naming the issue,
+run or artifact it came from, the envelope (`prompt`), the `files` seeded
+into a fresh scratch directory, and the `expected` projection of the role's
+verdict. Replayed against a live model through `AgentProvider.invoke`; never
+replays a recorded reply.
+_Avoid_: "scenario" alone, "test case", "recorded envelope" (one case kind)
+
+**Eval outcome**:
+The per-case result `afk eval` reports: `MATCH`, `MISMATCH`, `NOT-RUN` (the
+model-call cap stopped the run first) or `ERROR` (invocation, artifact or
+parser failure). Reported as counts and a per-case table, never as a rate; a
+run with any `NOT-RUN` case is `INCOMPLETE`. Never read by a gate.
+_Avoid_: "pass", "fail", "pass rate", "score"
 
 **Cap exit**:
 The **ship gate**'s unattended exit once it has spent `--guardian-round-cap`

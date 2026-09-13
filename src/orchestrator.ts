@@ -542,6 +542,13 @@ export interface PipelineConfig {
    * whole-suite guarantee moves per-checkpoint, not away. See ADR 0038.
    */
   testCommand?: string;
+  /**
+   * Whether this run's provider was wrapped to record every invocation's
+   * prompt beside its log (`--record-prompts`, #264). Evidence only: the
+   * recorder is a provider decorator the CLI entry applies, so the
+   * orchestrator reads this for the `run-started` event and nothing else.
+   */
+  recordPrompts?: boolean;
   /** Effective inline byte limit for each assembled generator prompt. */
   generatorInlineSizeBudgetBytes?: number;
   /** Effective inline byte limit for each assembled explorer prompt. */
@@ -1217,7 +1224,8 @@ function migrationReservationBlock(
       "AFK has not assigned this slice a prefix yet. Declare the exact count under " +
       '`## Migration requirements` as `- New migration files: N`. Use ' +
       "`RESERVED_PREFIX_<name>.sql` placeholders for new migration paths. " +
-      "Never inspect the tree or calculate a prefix; AFK will assign it after this draft."
+      "Never inspect the tree or calculate a prefix; AFK will assign it after this draft " +
+      "and substitute it into those paths itself, so the placeholder costs you nothing."
     );
   }
   if (claim.length === 0) {
@@ -6169,6 +6177,7 @@ export async function runSliceExecute(
       // is what keeps every project that never opted in on today's path.
       const acceptanceDeclaration = acceptanceGateDeclaration({
         absSliceDir: ctx.absSliceDir,
+        issueNumber: slice.ghIssue,
         plan: resolveAcceptancePlan(ctx.worktreeDir),
         bounds: {
           inactivityTimeoutMs:
@@ -7639,6 +7648,7 @@ export async function runSliceMergeResolution(args: {
     const acceptanceCoverage: BehaviorCoverageRecord[] = [];
     const acceptanceDeclaration = acceptanceGateDeclaration({
       absSliceDir: ctx.absSliceDir,
+      issueNumber: slice.ghIssue,
       plan: resolveAcceptancePlan(ctx.worktreeDir),
       bounds: {
         inactivityTimeoutMs:
@@ -7903,6 +7913,7 @@ export async function runPipeline(
       contractRoundLimit:
         config.maxContractRounds ?? DEFAULT_MAX_CONTRACT_ROUNDS,
       implementationRoundLimit: MAX_GENERATOR_ROUNDS,
+      recordPrompts: config.recordPrompts ?? false,
     },
   );
   // --- The cancellation record, written when the signal fires (#114).

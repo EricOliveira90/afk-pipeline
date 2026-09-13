@@ -48,15 +48,20 @@ first; unresolved evidence and output contract last; nothing else.
 
 ### M2. The behavior-ID thread and the coverage gate
 
-One string joins obligation, proof, and evidence:
+One issue-qualified string joins obligation, proof, and evidence:
 
-1. Policy declares gate `acceptance:behaviors` with a command like
-   `pnpm vitest run --testNamePattern {{BEHAVIOR_ID}}`.
+1. Policy declares gate `acceptance:behaviors` with a command carrying the
+   behavior-selector token.
 2. The planner binds each behavior ID to that gate in the manifest.
-3. The generator names at least one test with the behavior ID.
-4. AFK code runs the gate per behavior ID and checks two facts: at
-   least one test matched (zero matches = FAIL, behavior untested) and
-   the matched tests exit 0.
+3. The generator names at least one test
+   `[behavior:#<GitHub issue>:<behavior ID>]`. The former
+   `[behavior:<behavior ID>]` form is ambiguous across PRDs and is not proof.
+4. AFK code runs one test report for the required set, attributes assertions
+   by the exact qualified tags, and applies four rules per behavior: at least
+   one qualified assertion must pass; any qualified failed assertion fails
+   coverage; skipped/todo qualified assertions provide no evidence but do not
+   invalidate another pass; bare legacy tags provide no evidence but do not
+   invalidate valid qualified evidence.
 
 The planner defines deterministic obligations. It never writes commands
 (agent-generated shell text stays banned). An untested behavior is a
@@ -301,8 +306,9 @@ Decisions:
 - Exit state is a committed candidate checkpoint. Gates decide
   everything else. No self-certification anywhere: no "when all
   behaviors are green", no handoff status claims.
-- Coverage obligation stated as fact: "the acceptance gate runs per
-  behavior ID; a behavior with no tagged test fails." This replaces the
+- Coverage obligation stated as fact: "the acceptance gate reads all required
+  issue-qualified behavior tags from one report; a behavior with no tagged
+  test fails." This replaces the
   TDD ritual section entirely.
 - **Escalation channel** (M4): a fix outside the declared files is
   never the generator's to make — escalate, do not edit, do not stall.
@@ -350,9 +356,11 @@ artifacts.
 # Task
 1. Read `{{SLICE_DIR}}/contract.md`, the acceptance manifest, and the
    ADRs the contract cites.
-2. Implement each manifest behavior. Name at least one test with its
-   behavior ID — the acceptance gate runs per ID, and an ID with no
-   matching test fails.
+2. Implement each manifest behavior. Name at least one test
+   `[behavior:#<GitHub issue>:<behavior ID>]` — the acceptance gate reads the
+   required set from one report. Each behavior needs a qualified passing
+   assertion and no qualified failures. Skipped/todo assertions and bare legacy
+   tags provide no evidence but do not invalidate a separate qualified pass.
 3. Behaviors in touched files keep working unless the contract
    authorizes the change.
 4. Verify locally with `{{TEST_COMMAND}}`. Commit per behavior

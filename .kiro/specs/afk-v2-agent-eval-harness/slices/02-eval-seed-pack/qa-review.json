@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-03", "B-05", "B-06"],
+      "summary": "Seeded fixtures no longer state their case's graded answer; the answer-key header is gone from all sixteen fixtures and a fixture-byte assertion now guards the channel.",
+      "evidence": "`Get-ChildItem eval-packs\\afk\\fixtures | %{ Get-Content $_ -TotalCount 6 }` shows every fixture opening as its own document (`# Context — Slice 01 (#84): Gate policy reader`, `# Slice Contract — Behavior coverage gate`, `{`) with no HTML comment. A probe reproducing `seedScratchDir` byte-for-byte for all ten cases (inline files and `fromFile` copies) and grepping the seeded bytes for `**Verdict:**`, `**Failure class:**`, `\"verdict\"`, `FIX-BEFORE-SHIP`, `hand-reconstruct` and `<!--` returned only prompt-template schema lines and genuine document content: the one seeded verdict declaration, `prd4-qa-a/.kiro/.../qa-report-r1-a1.md:3 **Verdict:** FAIL / :4 **Failure class:** IMPLEMENTATION`, is the round-1 report and is the opposite of that case's expected `PASS`/`NONE`. `src/eval-packs.test.ts:385-416` scans every `fromFile` payload against nine disclosure patterns plus per-case verdict-declaration and bare-token shapes, and asserts the scanned set equals the whole `fixtures/` directory. Mutation probe: re-inserting the old header (`<!--\\nHand-reconstructed fixture for eval-packs/afk case 03-192-final-planner.\\nThe expected artifact for this case is therefore a CONTRACT.\\n-->`) into `eval-packs/afk/fixtures/192-context-final.md` turns the suite red — `AssertionError: fixtures/192-context-final.md (seeded by 192-final-planner) carries an HTML comment: expected true to be false`, 2 failed | 20 passed — and the file was restored (`git diff --stat` clean). `pnpm vitest run src/eval-packs.test.ts`: 22 passed.",
+      "expected": "No file under eval-packs/afk/fixtures/ that a case seeds through fromFile states that case's expected artifact, verdict or outcome, prescribes what the role should do, or identifies itself as an eval fixture; provenance lives in the case's source member or in eval-packs/afk/README.md; and src/eval-packs.test.ts asserts this over the seeded fixture bytes.",
+      "observed": "All sixteen fixtures are the reconstructed document alone. Provenance moved to each case's `source` member and to a `## Fixture provenance` section in eval-packs/afk/README.md, neither of which reaches the role (`src/eval-command.ts:136-150` seeds only `files`; `:189-194` passes only `prompt` and the scratch cwd). The three `192-` contexts remain discriminative on their own material — pre-restart-1 leaves the `gatePolicy` JSON shape UNKNOWN, pre-restart-2 leaves the D5 waiver `path` matching rule UNKNOWN with two disagreeing in-repo precedents, and 192-context-final settles D5 and D6 and leaves only mechanical unknowns — so the ESCALATION/ESCALATION/CONTRACT split is decidable from the context rather than from a disclosure.",
+      "clearCondition": "No file under eval-packs/afk/fixtures/ that a case seeds through fromFile contains a statement of that case's expected artifact, verdict or outcome, a statement of what the role \"should\" or \"should not\" do, or a self-identification as an eval fixture; each fixture's provenance is recorded instead in the case's source member or in eval-packs/afk/README.md, and src/eval-packs.test.ts asserts over the seeded fixture bytes that no such statement is present.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02", "B-03", "B-05"],
+      "summary": "The remaining provenance comments are gone too: every seeded fixture's bytes are now the reconstructed document alone, with reconstruction provenance only in the case's source and the README.",
+      "evidence": "`Select-String -Path eval-packs\\afk\\fixtures\\* -Pattern '<!--','hand-reconstruct','eval-pack','fixture','Provenance','expected artifact','ESCALATION','should escalate','graded'` returns no disclosure: the only hits are the reconstructed documents' own words (`**Lock-Provenance:** negotiation round 2` in the committed PRD 4 contracts, `src/wave.fixtures.ts` rows in a change summary, `the exact tree the gates graded` in prd4-qa-a-contract.md). `src/eval-packs.test.ts:418-428` asserts each seeded fixture's first line matches `/^# \\S/` (or `/^\\{$/` for JSON), and `:430-453` asserts eval-packs/afk/README.md names every seeded fixture. `eval-packs/afk/README.md` sections: `## Cases, in declared order`, `## Why only final-round verdicts for cases 6–9`, `## Fixture provenance`.",
+      "expected": "Every seeded fixture's bytes are the reconstructed document alone, with reconstruction provenance recorded only in the case's source member or in eval-packs/afk/README.md.",
+      "observed": "All sixteen fixtures open directly as their document. The eight provenance comments were removed and every removed sentence is carried in the README's `## Fixture provenance` section; the three `192-` sources were rewritten so they no longer claim the fixtures name their own provenance.",
+      "clearCondition": "Every seeded fixture's bytes are the reconstructed document alone, with reconstruction provenance recorded only in the case's source member or in eval-packs/afk/README.md.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

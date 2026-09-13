@@ -14,7 +14,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 
 | Module | Purpose (one line) | Public seam (import this) | Internals (do not import) |
 |---|---|---|---|
-| CLI entries | Parse options, pick provider, call the orchestrator | `src/afk.ts`, `src/afk-claude.ts`, `src/afk-codex.ts` | `src/cli-options.ts`, `src/cli-run-scope.ts` |
+| CLI entries | Parse options, pick provider, call the orchestrator | `src/afk.ts`, `src/afk-claude.ts`, `src/afk-codex.ts` | `src/cli-options.ts`, `src/cli-run-scope.ts`, `src/prompt-recorder.ts` |
 | Orchestrator core | Run lifecycle: waves, dispatch, merges, resume | `src/orchestrator.ts` (`runPipeline`) | `src/wave.ts`, `src/resume.ts` |
 | Lane partitioner | Pure function: wave → serial lanes by file overlap + resource keys (ADR 0005, 0027) | `src/lanes.ts` | — |
 | Agent providers | One interface, three backends (ADR 0002, 0013, 0016) | `src/agent-provider.ts` | `src/claude.ts`, `src/codex.ts`, `src/kiro.ts` |
@@ -32,7 +32,8 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
 | Guardian round persistence | The complete persistence invariant for guardian round evidence: persisted shape, normalization, ledger writes (ADR 0057, #221) | `src/guardian-round-persistence.ts`, `src/guardian-round-records.ts` | — |
 | Control surface | Status, stop, preflight, cleanup (ADR 0023, 0042, 0043) | `src/status.ts`, `src/stop-command.ts`, `src/preflight.ts`, `src/clean-failed.ts` | `src/status-*.ts`, `src/stop-sentinel.ts`, `src/cancellation.ts`, `src/crash-records.ts` |
-| Prompts | Role prompt templates, interpolated per invocation | `prompts/*.md` (e.g. `prompts/evaluator-final.md`), `src/prompt-template.ts` | PRD 3 replaces raw templates with assembled envelopes |
+| Prompts | Role prompt templates, assembled into per-invocation context envelopes (PRD 3, shipped) | `prompts/*.md` (e.g. `prompts/evaluator-final.md`), `src/prompt-template.ts` | — |
+| Agent eval | `afk eval`: replay a scenario pack against a live model, report only — never gates (PRD 7, #262) | `src/eval-command.ts` | `src/eval-pack.ts`, `src/eval-compare.ts`, `src/eval-report.ts` |
 
 ## Hubs — do not grow these; extract instead
 
