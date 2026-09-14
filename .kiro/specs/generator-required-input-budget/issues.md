@@ -1,4 +1,23 @@
-# PRD 8 ticket breakdown
+# PRD 8 ticket breakdown - Slice Index
+
+**Parent PRD:** #271 (spec of record). One slice, #273. The title is
+deliberately short: slice artifact directories and branch names derive from
+`slugify(title)` and long titles have hit Windows' 260-char path limit before
+(see the guardian convergence PRD's launch notes).
+
+| Slice | GH Issue | Title | Type | Blocked by | User stories covered |
+|-------|----------|-------|------|------------|----------------------|
+| 01 | #273 | Required-input budget | AFK | — | 1–7 (all) |
+
+The ticket's `#269`/`#270` dependency is external and already satisfied
+(#269 closed, PR #270 merged: the locked contract pair travels by worktree
+reference). It is deliberately **not** encoded in the Blocked by column —
+that column is for in-run slice ordering, and an out-of-run issue there
+would hold the slice back forever.
+
+## Expected wave structure
+
+- **Wave 1:** #273 alone. Nothing else in the run.
 
 ## 1. #273 — PRD8-S1: Enforce the generator required-input budget
 
