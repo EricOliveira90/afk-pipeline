@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-01 now names the seam whose return value carries the accepted pair: a new exported `parseStaleRenegotiationRequest` in `src/cli-options.ts` that `parsePipelineRuntimeOptions` calls before the #335 guard, returning a request value carrying the selector and the accepted `--recovery-reason` text. B-12 now states that `parsePipelineRuntimeOptions` itself throws for that same input, and its recorded decision keeps #335's change to deleting one guard in the parser with the helper untouched. Test plan bullet 1 asserts the accepted return on the helper and the #335 throw on the parser, explicitly on different functions. Manifest B-01 observableResult cites the helper's return value; manifest B-12 cites the parser throw. The new export is declared under \"Changes to existing behavior\" and the scope lock; no file scope change was needed because `src/cli-options.ts` and `src/cli-options.test.ts` were already in scope."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "Confirmed in the worktree: `withRunStateLock` (`src/run-state.ts:516-522`) calls `withFileLock(statePath(...), action)` with no options object, so `afterLockPublished` (`src/file-lock.ts:110`, fired at `:165`) is unreachable from `transactRunState` (`:545-557`). Rather than change a shared primitive, B-08's recorded decision takes the finding's second option: the interleave is driven by an optional `beforeLockAcquired?: () => void` parameter on the new module's own exported admission entry point, invoked after snapshot publication and before `transactRunState`; the contention test runs the mutating child process to completion inside it. `withFileLock`, `withRunStateLock` and `transactRunState` keep their signatures, `src/file-lock.ts` stays out of file scope, \"Changes to existing behavior\" records that no lock primitive moves, the \"New patterns\" entry names the seam, the test-plan contention bullet is rewritten to it, and manifest B-08's observableResult cites `beforeLockAcquired` instead of `afterLockPublished`."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "P-05 keeps `acceptance:behaviors` and gains an assertion a `--testNamePattern P-05` run can produce: stubbing exactly `hasUncommittedChanges`, `countCommitsAhead` and `isAncestor` (`src/git.ts:476`, `:683`, `:1446`) at their current signatures flips every git-derived eligibility outcome and no other `src/git.ts` or `src/worktree-processes.ts` export is invoked. Manifest P-05's given/when/then and observableResult now state that stub-driven assertion instead of a branch diff, and the test plan gains the matching Given/When/Then bullet."
+    }
+  ]
+}

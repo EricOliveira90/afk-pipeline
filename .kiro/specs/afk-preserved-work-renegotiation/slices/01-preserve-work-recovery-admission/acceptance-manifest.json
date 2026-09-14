@@ -1,0 +1,250 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/cli-options.ts",
+      "src/cli-options.test.ts",
+      "src/cli-entries.test.ts",
+      "src/preserve-work-recovery.ts",
+      "src/preserve-work-recovery.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/eval-boundary.test.ts",
+      "ARCHITECTURE.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #277 AC1 (prd.md:54-60; src/cli-options.ts:117-125, :185-207, :210)",
+      "given": "the args `--renegotiate-stale 12 --recovery-reason \" stale lock \"`, and separately each of `--renegotiate-stale 12,13`, `--renegotiate-stale 12,12` and a repeated `--renegotiate-stale`",
+      "when": "the new exported `parseStaleRenegotiationRequest(args)` runs on each, and `parsePipelineRuntimeOptions` runs on the well-formed pair",
+      "then": "the helper returns a request value carrying selector `12` and reason `stale lock`, and refuses the comma-separated list, the duplicated selector inside one value and the second flag occurrence with three distinct messages; the parser calls the helper before the B-12 guard, so those three refusals are observable on the parser too, while the well-formed pair throws B-12's #335 refusal there instead of returning",
+      "observableResult": "unit tests in src/cli-options.test.ts named for B-01 assert the helper's returned selector and reason, assert the three thrown messages are pairwise distinct on both the helper and the parser, and assert the parser throws the #335 refusal for the accepted input",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #277 AC2 (prd.md:60-63; src/cli-options.ts:272-276)",
+      "given": "argument lists with a missing `--recovery-reason` value, a blank value, a repeated `--recovery-reason`, `--renegotiate-stale` alone, and `--recovery-reason` alone",
+      "when": "the shared `parsePipelineRuntimeOptions` runs on each",
+      "then": "each case is refused with its own distinct message, the required-together check being one paired-presence check after each flag is parsed independently, following the `--preview-verify-command` / `--preview-apply-command` precedent",
+      "observableResult": "unit tests named for B-02 assert one throw per case and that no two of the five messages are equal, nor equal to any B-01 message",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #277 AC4-AC5 (prd.md:107-113; src/afk-manifest.ts:240-243, src/slice-selector.ts:6-17, ADR 0065)",
+      "given": "a persisted run scope and CLI reasons differing only by leading/trailing whitespace, interior spacing, letter case and Unicode composition, plus a selector given once as a slice number and once as a GH issue id",
+      "when": "the exported canonicalizer produces the canonical request",
+      "then": "the reason is the CLI value after ECMAScript `String.prototype.trim()` with no case folding, whitespace collapse or Unicode normalization, and a resolved identity is the pair `{number, ghIssue}` whose `number` comes from `canonicalSliceNumber` resolved against the persisted scope entries — not through `matchesSliceSelector`'s inline `Number(...)` comparison",
+      "observableResult": "unit tests named for B-03 assert the canonical reason bytes for each variant, assert two differently-composed reasons stay distinct, and assert both selector forms resolve to the same `{number, ghIssue}` pair drawn from the persisted scope",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #277 AC6 (prd.md:114-118; src/run-state.ts:273, src/slice-scope.ts:9-12, src/adjudication.ts:418-424)",
+      "given": "a `RunState.scope` of two slices in a known persisted order",
+      "when": "the exported scope-fingerprint encoder runs over it",
+      "then": "the JSON byte string is exactly `{\"mode\":<mode>,\"slices\":[{\"number\":<canonical>,\"ghIssue\":<id>}]}` with no insignificant whitespace, in persisted order and in the shown key order emitted explicitly by the encoder, and the fingerprint is its SHA-256 over UTF-8",
+      "observableResult": "a unit test named for B-04 asserts the exact JSON byte string and that its SHA-256 equals an independently computed digest, and asserts the encoder is exported so #335 can call the same one",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #277 AC7-AC8 (prd.md:69-75; src/run-state.ts:33, src/run-identity.ts:16-50, src/git.ts:476, :683, :1446)",
+      "given": "a temp repo whose target fails exactly one eligibility predicate — out of persisted scope, no recorded slice branch, missing registered worktree, dirty worktree, no commits ahead of the feature branch, current feature head not contained in the slice branch, invalid or unlocked accepted pair — and a run with no persisted scope at all",
+      "when": "read-only eligibility runs for each",
+      "then": "each is refused with that predicate's own stable reason code, the scope of record being `RunState.scope` rather than a re-read of `afk.json`, the recorded branch being `PersistedSliceState.branch` with its absence its own reason, names resolved through src/run-identity.ts, and the predicates composed from the already-exported `hasUncommittedChanges`, `countCommitsAhead` and `isAncestor`",
+      "observableResult": "unit tests named for B-05 assert one distinct reason code per case, that all reason codes are pairwise distinct, and that src/git.ts and src/worktree-processes.ts are unmodified in the diff",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #277 AC9 (prd.md:74-75, ADR 0039)",
+      "given": "the admission, refusal, snapshot and lock paths in src/preserve-work-recovery.ts and a temp repo whose slice-branch and feature-branch tips are recorded before each path runs",
+      "when": "a source-level check reads the module and each exercised path runs",
+      "then": "no path invokes a git merge, reset or rebase, and every exercised path leaves both tips at their recorded commits",
+      "observableResult": "a unit test named for B-06 asserts the recorded tips are unchanged after every exercised path and that the module's source and call graph contain no merge, reset or rebase invocation",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #277 AC10-AC11 (prd.md:80-86, ADR 0055; src/acceptance-manifest.ts:290-296, src/contract-review.ts:529-530)",
+      "given": "an eligible target with a locked accepted pair, and separately a publication that fails after the temporary sibling is written",
+      "when": "snapshot publication runs",
+      "then": "the eligible case publishes a new directory beneath the target's artifact directory holding byte-identical `contract.md` and `acceptance-manifest.json`, written through a temporary sibling and published atomically only after both files' presence, SHA-256 fingerprints and locked-pair validation agree with the source, with no temporary sibling left and no published directory ever overwritten; the failing case leaves no published directory, appends no lineage and reports pre-admission failure, and a snapshot no `PENDING` event references grants no recovery authority",
+      "observableResult": "unit tests named for B-07 compare both files' bytes, assert no temporary sibling remains, assert a second attempt does not overwrite the published directory, and assert the failure case has no published directory and no lineage",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #277 AC12 (prd.md:88-94, ADR 0056; src/run-state.ts:516-522, :545-557, src/file-lock.ts:109-110)",
+      "given": "an eligible target and the admission entry point's own optional `beforeLockAcquired?: () => void` seam, which runs a spawned child process to completion so the accepted pair or the run state's scope changes after snapshot publication and before `transactRunState` takes the lock",
+      "when": "admission acquires the ADR 0056 run-state lock and rechecks the accepted pair, clean worktree, slice head, feature head, active attempt, request identity and canonical scope fingerprint against the facts the snapshot was built from",
+      "then": "the mismatch is a pre-admission refusal that appends no lineage, changes no accepted-pair byte and leaves the published snapshot inert, with `withRunStateLock`, `transactRunState` and `withFileLock`'s `afterLockPublished` keeping their current signatures and behavior and src/file-lock.ts out of scope",
+      "observableResult": "a cross-process contention test named for B-08 asserts the mismatch reason, asserts the run-state file holds no new lineage event, asserts the accepted-pair bytes are unchanged, and asserts the three lock primitives' signatures are untouched in the diff",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #277 AC13, AC17 (prd.md:94-98, 133-136; src/run-identity.ts:23-36)",
+      "given": "an eligible target whose recheck is clean, and separately a target whose last lineage event is already `PENDING`",
+      "when": "admission commits inside the run-state transaction",
+      "then": "the first mutation on disk is exactly one appended `PENDING` event carrying attempt ID, target identity, canonical reason, `extensions: []`, provider name from the caller's run identity, slice branch, slice head, feature head, scope fingerprint, snapshot locator and original pair fingerprints, every other run-state field unchanged; the second admission for the same target is refused and appends nothing",
+      "observableResult": "unit tests named for B-09 assert the run-state diff is that single appended event with those members, assert `extensions` deep-equals [], and assert the second admission is refused with no second event",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #277 AC14 (prd.md:122-126, ADR 0018; src/run-state.ts:49-66, :67, :1022, src/eval-boundary.test.ts:127)",
+      "given": "run-state files at every currently supported version and a v7 file whose recovery lineage is malformed",
+      "when": "run state loads, and a test reads the version literal and its assertions",
+      "then": "recovery lineage is one new optional `RunState` field, the version literal at src/run-state.ts:67 is 7 with its change documented in the same running comment block at :49-66, a `sanitize`-style reader degrades malformed data to `undefined`, `adaptLoadedState` wires it, the field is read and written only through focused APIs inside the run-state transaction, and the one assertion of that literal outside src/run-state.test.ts — src/eval-boundary.test.ts:127, inside PRD 7's `P-05 ... leaves both schema versions alone` — reads 7 instead of 6 with no other change to that file",
+      "observableResult": "unit tests named for B-10 assert the version literal is 7, assert the comment block names the v7 addition, assert malformed lineage degrades to absent, and src/eval-boundary.test.ts asserts `RUN_STATE_VERSION` is 7 with `EVENTS_SCHEMA_VERSION` still 1 and its forbidden-import offender list still empty",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #277 AC16 (prd.md:127-149)",
+      "given": "every ordered transition pair over the four lineage states",
+      "when": "the exported transition validator runs on each",
+      "then": "only `PENDING -> COMPLETED`, `PENDING -> ROLLED_BACK`, `PENDING -> ROLLBACK_FAILED` and `ROLLBACK_FAILED -> ROLLED_BACK` are accepted, every other transition including any return to `PENDING` is refused, and the writers append rather than edit or delete an event so a retry is always a new attempt ID",
+      "observableResult": "a table-driven unit test named for B-11 asserts accept/refuse for every pair and asserts a retry produces a new attempt ID with the earlier event still present byte-identical",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #277 AC15 (prd.md:35-40)",
+      "given": "a well-formed `--renegotiate-stale` plus `--recovery-reason` pair — the same input B-01's helper returns a request value for — and the three CLI entry sources",
+      "when": "`parsePipelineRuntimeOptions` runs on it and a source-level test reads src/afk.ts, src/afk-claude.ts and src/afk-codex.ts",
+      "then": "the shared parser itself throws a refusal naming #335, after `parseStaleRenegotiationRequest` has validated the flags and before any eligibility check, snapshot or lock acquisition, and each entry reaches its runtime options through `parsePipelineRuntimeOptions`, so all three refuse without any entry file being modified or advertising the flag in its `usage()` text",
+      "observableResult": "unit tests named for B-12 assert the thrown message contains \"#335\", assert no eligibility, snapshot or lock code executed, and src/cli-entries.test.ts asserts all three entries call the shared parser and that no entry's usage text names either new flag",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #277 AC3 (src/cli-options.ts:117-125, :210-301, :272-276)",
+      "given": "every flag `parsePipelineRuntimeOptions` parses today",
+      "when": "the parser runs over each existing flag's accepted and refused inputs after the two new flags are added",
+      "then": "each keeps its current parsing behavior and error text, including `optionValue`'s `` `${flag} requires a value` `` and the paired preview-command message",
+      "observableResult": "unit tests named for P-01 assert the existing accepted results and the exact existing error strings, unchanged from before the slice",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #277 AC18",
+      "given": "an argument list carrying neither `--renegotiate-stale` nor `--recovery-reason`",
+      "when": "the shared parser runs",
+      "then": "the result equals today's result, no new check runs, no refusal is raised, no new output is produced, the parsed options carry the two new members as `undefined`, and no eligibility, snapshot or lock code executes",
+      "observableResult": "a unit test named for P-02 deep-equals the parsed options against today's expected object, asserts both new members are `undefined` by key, and asserts injected recovery seams recorded zero calls",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #277 AC14 second half (ADR 0018; src/run-state.ts:524-536, :1022-1147)",
+      "given": "run-state files at v3, v4, v5 and v6, and a v7 file carrying no recovery lineage",
+      "when": "run state loads through `adaptLoadedState` and is written back by `writeRunState`",
+      "then": "every currently supported earlier version loads without loss and the no-lineage file round-trips unchanged apart from the version stamp `writeRunState` already applies",
+      "observableResult": "unit tests named for P-03 assert each loaded version's fields survive and assert the round-tripped bytes differ from the input only in the version stamp",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "prd.md:167-169, 208-210 (src/run-state.ts:545-557)",
+      "given": "a run state carrying resume counters, slice outcomes, migrations, guardian history, quality stages and other slices' fields",
+      "when": "the lineage writer appends an event through `transactRunState`",
+      "then": "every unrelated run-state field is preserved byte-identically, because the writer mutates only through the run-state transaction",
+      "observableResult": "a unit test named for P-04 diffs the loaded state before and after the append and asserts the recovery-lineage field is the only difference",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #277 \"Where the git-side eligibility predicates land\" (src/git.ts:476, :683, :1446)",
+      "given": "stubs for exactly `hasUncommittedChanges`, `countCommitsAhead` and `isAncestor` at their current signatures",
+      "when": "the new module's eligibility predicates run",
+      "then": "every git-derived eligibility outcome follows the stubs, no other src/git.ts or src/worktree-processes.ts export is invoked, and neither file is modified, so no existing git helper's signature or behavior changes",
+      "observableResult": "a unit test named for P-05 asserts stubbing exactly those three flips every git-derived eligibility outcome and that no other export of either module is invoked; `--testNamePattern P-05` also selects PRD 7's unrelated `P-05` case in src/eval-boundary.test.ts, which must be green too",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}
