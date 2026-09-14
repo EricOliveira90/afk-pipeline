@@ -66,6 +66,22 @@
 - ARCHITECTURE.md was already at its 150-line cap, so the trailing "Tests:"
   placement-rule bullet was compressed from three lines to two to make room for
   the new module row. The file is still exactly 150 lines.
+- P-02's manifest clause "asserts injected recovery seams recorded zero calls"
+  has no literal counterpart, because `src/cli-options.ts` injects no recovery
+  seam and imports the recovery module not at all. The clause is discharged as a
+  source-level assertion that the parser's code (comments stripped) references
+  neither `preserve-work-recovery` nor `git.js`/`run-state.js`/`file-lock.js` —
+  a seam that cannot be reached records zero calls by construction, and a
+  counter would only prove the counter was wired.
+- P-02's shape assertion is an explicit literal under `toStrictEqual` plus an
+  explicit `Object.keys` list. `toStrictEqual` (not `toEqual`) is what
+  distinguishes a present-but-`undefined` member from an absent one, which is
+  exactly the property P-02 pins.
+- B-11's "a retry is always a new attempt ID" is proven by admitting twice with
+  no `attemptId` supplied, resolving the first attempt in between by writing the
+  legal `PENDING -> COMPLETED` into the fixture's state file directly — this
+  slice ships the transition validator but none of the terminal writers (#335),
+  so there is no in-repo API to resolve an attempt with yet.
 
 ## Gotchas / learnings
 
@@ -93,6 +109,11 @@
   CRLF, so the source-reading assertions in its test normalize line endings
   before comparing. A raw `readFileSync` comparison against a multi-line literal
   passes locally and fails on a fresh clone.
+- A test whose expected value is spread from the actual value (`toEqual({
+  ...options, x: undefined })`) cannot fail; QA proved it by both adding an
+  unrelated member and deleting the two pinned ones. Write the expected object
+  out by hand, and re-probe it the same way — delete the member the test exists
+  to pin and confirm the test goes red.
 - The test file builds one real git repository in `beforeAll` and resets the
   artifact directory, fake worktree and run-state file before each test. Git is
   needed only for `resolveCommit`; every eligibility outcome comes from stubs, so

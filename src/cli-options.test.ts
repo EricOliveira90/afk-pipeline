@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MAX_CONTRACT_ROUNDS,
@@ -475,15 +476,77 @@ describe("preserved-work recovery flags", () => {
 
     const options = parsePipelineRuntimeOptions(flagless);
 
-    expect(options.renegotiateStale).toBeUndefined();
-    expect(options.recoveryReason).toBeUndefined();
-    // The whole result still equals what the same list produced before the two
-    // flags existed: the new members are absent-valued, not new behavior.
-    expect(options).toEqual({
-      ...options,
+    // The expected value is written out independently of the call's result, so
+    // deleting either new member — or adding an unrelated one — turns this red.
+    // `toStrictEqual` distinguishes a present-but-`undefined` member from an
+    // absent one, which is the whole point of P-02: the shape a flagless run
+    // carries gained two keys and nothing else.
+    expect(options).toStrictEqual({
+      commandTimeoutMs: 900000,
+      heartbeatIntervalMs: undefined,
+      infrastructureRetries: undefined,
+      transientRetryWindowMs: undefined,
+      maxAgentDurationMs: undefined,
+      testCommand: undefined,
+      minFreeDiskGb: undefined,
+      preflightReportOnly: false,
+      serialLanes: true,
+      openPrOnOverride: false,
+      recordPrompts: undefined,
+      guardianRoundCap: undefined,
+      forceRestart: undefined,
+      resumeStuck: undefined,
       renegotiateStale: undefined,
       recoveryReason: undefined,
+      sharedPreview: {
+        verifyMigrationCommand: "pnpm verify",
+        applyMigrationCommand: "pnpm apply",
+        lockPath: undefined,
+      },
     });
+    // Key-level pin as well as value-level: `toStrictEqual` would accept a
+    // renamed member if both literals were derived from the same source, and an
+    // explicit list says out loud which keys a flagless launch carries.
+    expect(Object.keys(options).sort()).toEqual(
+      [
+        "commandTimeoutMs",
+        "heartbeatIntervalMs",
+        "infrastructureRetries",
+        "transientRetryWindowMs",
+        "maxAgentDurationMs",
+        "testCommand",
+        "minFreeDiskGb",
+        "preflightReportOnly",
+        "serialLanes",
+        "openPrOnOverride",
+        "recordPrompts",
+        "guardianRoundCap",
+        "forceRestart",
+        "resumeStuck",
+        "renegotiateStale",
+        "recoveryReason",
+        "sharedPreview",
+      ].sort(),
+    );
+    expect("renegotiateStale" in options).toBe(true);
+    expect("recoveryReason" in options).toBe(true);
+  });
+
+  it("[behavior:#277:P-02] runs no eligibility, snapshot or lock code on a flagless list", () => {
+    // The recovery seams cannot record a call from here because the parser
+    // cannot reach them: `src/cli-options.ts` imports the recovery module not at
+    // all, so a flagless launch runs exactly today's code.
+    const source = readFileSync(new URL("./cli-options.ts", import.meta.url), "utf8");
+    // Comments name the modules the parser must not reach (that is the point of
+    // the note above the flags), so prose is stripped before the code is read.
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    expect(code).toContain("parseStaleRenegotiationRequest");
+    expect(code).not.toMatch(
+      /preserve-work-recovery|\.\/git\.js|\.\/run-state\.js|\.\/file-lock\.js/,
+    );
   });
 
   it("[behavior:#277:P-01] keeps optionValue's and the paired preview-command messages intact", () => {

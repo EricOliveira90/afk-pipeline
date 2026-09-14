@@ -840,6 +840,52 @@ describe("recovery lineage transitions", () => {
     expect(recoveryLineageFor(state, "278")).toEqual(untouched);
   });
 
+  it("[behavior:#277:B-11] mints a fresh attempt ID for a retry, leaving the earlier event's bytes alone", () => {
+    // Neither admission supplies `attemptId`, so the module's own minting is
+    // what makes a retry a new attempt — the point B-11 records.
+    const first = admit(fixture);
+    expect(first.admitted).toBe(true);
+    const firstId = first.admitted ? first.attemptId : "";
+    const firstBytes = JSON.stringify(
+      (stateDocument(fixture).recoveryLineage as Record<string, unknown[]>)[
+        GH_ISSUE
+      ]![0],
+    );
+
+    // Resolve the first attempt so a retry is admissible at all. This slice
+    // ships the transition validator but none of the terminal writers (#335),
+    // so the fixture records the legal `PENDING -> COMPLETED` itself.
+    expect(isLegalRecoveryTransition("PENDING", "COMPLETED")).toBe(true);
+    const document = stateDocument(fixture);
+    const events = (document.recoveryLineage as Record<
+      string,
+      PersistedRecoveryLineageEvent[]
+    >)[GH_ISSUE]!;
+    events.push({ ...events[0]!, state: "COMPLETED" });
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+
+    const second = admit(fixture);
+
+    expect(second.admitted).toBe(true);
+    const secondId = second.admitted ? second.attemptId : "";
+    expect(secondId).not.toBe(firstId);
+    expect(firstId).not.toBe("");
+    const lineage = (stateDocument(fixture).recoveryLineage as Record<
+      string,
+      unknown[]
+    >)[GH_ISSUE]!;
+    // Append-only: the retry added one new `PENDING` event and rewrote nothing,
+    // so the first attempt's bytes are still exactly its own.
+    expect(lineage).toHaveLength(3);
+    expect(JSON.stringify(lineage[0])).toBe(firstBytes);
+    expect((lineage[2] as PersistedRecoveryLineageEvent).attemptId).toBe(secondId);
+    // Two attempt IDs mean two snapshot directories; one ID would have collided
+    // with the published-never-overwritten rule instead.
+    expect(listPublishedPairSnapshots(fixture.sliceDir).sort()).toEqual(
+      [firstId, secondId].sort(),
+    );
+  }, 30_000);
+
   function lineageEvent(
     overrides: Partial<PersistedRecoveryLineageEvent>,
   ): PersistedRecoveryLineageEvent {
