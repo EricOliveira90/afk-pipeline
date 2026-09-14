@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "verdict": "REVISE",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": [],
+      "evidence": "\"All 17 in-scope behaviors and 6 preservation behaviors have tests whose names contain their behavior ID\" together with a 22-path file scope that creates five new modules and their test files (\"src/recovery-identity.ts\", \"src/recovery-snapshot.ts\", \"src/recovery-lineage.ts\", \"src/preserve-work-recovery.ts\") plus \"src/run-state.ts\", \"src/run-events.ts\", \"src/run-snapshot.ts\", \"src/orchestrator.ts\", \"src/resume-integration.fixtures.ts\".",
+      "expected": "A contract one generator session can deliver end to end: a bounded behavior set whose evidence a single session can write and verify, with the remainder named as follow-on work.",
+      "observed": "One slice carries the entire PRD recovery protocol at once — flag parsing, canonical identity, a new scope-fingerprint encoder, read-only git eligibility, atomic snapshot publication, a RUN_STATE_VERSION bump, an append-only lineage state machine, live-control archival, explorer/planner rerun, five distinct failure-path rollbacks, fail-closed ROLLBACK_FAILED dispatch blocking, pre-resume reconciliation at an orchestrator call site, completion compare-and-swap, replay idempotence, and run-event/snapshot folding — 23 ID-selectable behaviors across 22 files, including a cross-process lock-contention test and an extended resume-integration fixture, with a definition of done that also requires test:heavy:resume and test:heavy:orchestrator.",
+      "clearCondition": "The contract's in-scope behavior set and file scope are reduced to a coherent subset one session can deliver and verify (for example the admission path through the PENDING write and its rollback, leaving completion, replay, reconciliation and run-event folding to named follow-on slice behaviors), with the deferred behaviors listed under Non-goals and pointed at their successor slice.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-17", "P-04"],
+      "evidence": "P-04 observableResult: \"existing run-events parsing tests pass unmodified\"; B-17 observableResult: \"tests assert one recovery event per append and four distinct snapshot-derived states surfaced to status output\"; file scope lists \"src/run-events.ts\" and \"src/run-snapshot.test.ts\" only.",
+      "expected": "Because the slice widens the input language of the `readRunEvents`/`serializeRunEvent` parser in `src/run-events.ts` with a new `RunEventPayload` variant, the pair must bind both halves of the regression evidence — at least one newly accepted serialized recovery event, and relevant rejected-or-boundary input that must stay rejected — and must declare the established harness file that owns those assertions.",
+      "observed": "There is no `src/run-events.test.ts` in the repository; the established harness that round-trips `events.jsonl` and asserts `EVENTS_SCHEMA_VERSION` is `src/logger.test.ts` (imports `EVENTS_SCHEMA_VERSION` and `RunEventPayload` at lines 21-23, asserts the version at 1152 and 1319), and it is absent from the file scope. The declared evidence therefore covers only the in-memory snapshot fold in `src/run-snapshot.test.ts` (positive half), names a nonexistent test file for the preservation half, and declares no rejected-or-boundary input for the widened payload union.",
+      "clearCondition": "The file scope adds the concrete test file that owns run-event serialization/parse assertions (`src/logger.test.ts`, or an explicitly authorized new `src/run-events.test.ts`), and B-17/P-04 declare both a newly accepted serialized recovery event and a rejected-or-boundary payload case that must remain rejected, with P-04's observableResult naming a harness that exists.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-04", "B-05"],
+      "evidence": "B-04: \"has a registered worktree at its recorded slice branch, has a clean worktree, has commits ahead of the feature branch, has a slice branch already containing the exact current feature-branch head\".",
+      "expected": "Git-side eligibility predicates either cite the existing helper they reuse or declare where the new predicate lands, given the explorer left open whether any module already computes a clean registered worktree or commits-ahead check (`src/git.ts` and `src/worktree-processes.ts` uninspected).",
+      "observed": "B-04 cites only `PersistedRunScope` (`src/slice-scope.ts:9`); no git or worktree module appears in the file scope, so the contract silently asserts that every one of these four git predicates can be built inside `src/preserve-work-recovery.ts` from already-exported primitives.",
+      "clearCondition": "B-04 names the git/worktree helpers it reuses, or states that the predicates are implemented inside the new recovery module over existing exports and that no git module needs modification.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "evidence": "Contract B-05: \"in any code path including rollback\"; manifest B-05 then: \"no git merge, reset, rebase or conflict handling touches the slice branch or feature branch, and a target whose branch lacks the exact current feature-branch head is refused before admission\".",
+      "expected": "The scenario's observable result should prove the obligation it states, and the manifest half should carry the same obligation as the contract half of the same ID.",
+      "observed": "The contract states a universally quantified absence over all code paths, while the declared evidence can only show it for the enumerated exercised paths; the manifest additionally attaches the feature-head refusal (a B-04 obligation) to B-05, which the contract's B-05 text does not carry.",
+      "clearCondition": "B-05 scopes its no-mutation claim to the enumerated paths its evidence exercises (refusal, admission, negotiation, rollback), and the feature-head refusal obligation sits under B-04 in both halves.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-10", "P-03"],
+      "evidence": "B-10: \"clears only the target's contract-stage checkpoint (`clearExactStageCheckpoint`, `src/exact-stage-resume.ts:179`)\"; P-03: \"keep their current signatures and per-slice semantics\".",
+      "expected": "Direct reuse of `clearExactStageCheckpoint` should be stated as an assumption with a fallback, since the explorer left its signature and single-vs-multi-target behavior unknown and `src/exact-stage-resume.ts` is not in the file scope.",
+      "observed": "The contract asserts single-target reuse as settled fact and excludes the file from scope, so if a wrapper or signature widening turns out to be required the scope statement is wrong mid-slice.",
+      "clearCondition": "B-10 states that any adaptation of `clearExactStageCheckpoint` lands as a wrapper inside the in-scope recovery module, leaving `src/exact-stage-resume.ts` unmodified.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}

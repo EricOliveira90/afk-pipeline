@@ -18,10 +18,10 @@ lock), and ADR 0062 (contract revision lineage).
 Everything below specifies the finished protocol. It ships in six slices,
 because two contract negotiations refused the original one-slice admission-plus-
 rollback-plus-completion boundary as larger than one generator session
-(2026-09-14; `feedback-r1.md` finding F-01 and `planner-escalation.md` under
-`.afk/artifacts/afk-preserved-work-renegotiation-claude-code/slice-01/`). The
-cut follows this document's own state machine, one transition per slice, and
-`issues.md` holds the table and the waves:
+(2026-09-14). The verbatim evidence — finding F-01, the escalation and the first
+run's outcome — is committed in `escalations/slice-01-2026-09-14/` in this
+directory. The cut follows this document's own state machine, one transition per
+slice, and `issues.md` holds the table and the waves:
 
 | Section of this PRD | Slice |
 |---|---|

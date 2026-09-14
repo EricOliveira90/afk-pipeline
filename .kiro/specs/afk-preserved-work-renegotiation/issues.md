@@ -32,12 +32,13 @@ The first cut put admission, rollback and completion in slice 01. Two contract
 negotiations refused that boundary as bigger than one generator session
 (23 selectable behaviors across 22 files), and the second escalated the
 contradiction between the refusal and this document. The maintainer adopted the
-planner's re-cut on 2026-09-14; the two governing artifacts are
-`.afk/artifacts/afk-preserved-work-renegotiation-claude-code/slice-01/feedback-r1.md`
-(finding F-01, the size refusal) and
-`.afk/artifacts/afk-preserved-work-renegotiation-claude-code/slice-01/planner-escalation.md`
-(the re-cut request, option 1). The cut now follows the recovery lineage's own
-state machine, one transition per slice:
+planner's re-cut on 2026-09-14. The governing artifacts are committed beside
+this file in `escalations/slice-01-2026-09-14/`: `feedback-r1.md` (finding F-01,
+the size refusal), `planner-escalation.md` (the re-cut request, whose option 1
+is the one taken) and `run-1-outcome.md` (the first run's approved keep-list).
+They are copies, because the run directories they came from live under the
+gitignored `.afk/`. The cut now follows the recovery lineage's own state
+machine, one transition per slice:
 
 - **#277** ships the admission half: the flags, canonical identity, the scope
   fingerprint encoder, read-only eligibility, the immutable accepted-pair
