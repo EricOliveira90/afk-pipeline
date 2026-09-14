@@ -5,33 +5,22 @@
     {
       "id": "F-01",
       "severity": "ADVISORY",
-      "behaviorIds": ["B-05", "B-08"],
-      "evidence": "\"assert that src/git.ts and src/worktree-processes.ts are unmodified in the diff\" (B-05 observableResult); \"asserts the three lock primitives' signatures are untouched in the diff\" (B-08 observableResult)",
-      "expected": "Every clause of an observable result should be producible by one of the declared gates — here `tests` and `acceptance:behaviors`, both of which run vitest by name pattern.",
-      "observed": "A vitest case has no baseline to diff against, so \"unmodified in the diff\" is not something the declared gates can witness. The property itself is already enforced deterministically: none of `src/git.ts`, `src/worktree-processes.ts` or `src/file-lock.ts` appears in the manifest's `fileScope`, so a change to them fails file-scope adjudication rather than a test.",
-      "clearCondition": "Restate both clauses as source-level assertions the harness can actually make (e.g. the recovery module invokes only the three named git exports; `src/file-lock.ts` still declares `afterLockPublished?: () => void` and declares no `beforeLockAcquired`), or drop the clause and rely on `fileScope` for the non-modification guarantee.",
+      "behaviorIds": ["B-09"],
+      "evidence": "\"the first mutation on disk is exactly one appended `PENDING` event\" (acceptance-manifest B-09 then; contract.md:128-129 \"On a clean recheck the first mutation on disk is one appended `PENDING` event\")",
+      "expected": "B-09's obligation stated so it does not contradict B-07: the appended `PENDING` event is the first mutation to persisted run state (the first *admitted* mutation, as the scope lock at contract.md:16-18 words it), with the published snapshot directory acknowledged as an earlier, deliberately inert on-disk write.",
+      "observed": "B-09 claims the lineage event is the first mutation on disk, while B-07 and B-08 require a snapshot directory to be published to disk beforehand and B-07 explicitly permits a published snapshot that no `PENDING` event references. Read literally, no test can make B-09's ordering claim true.",
+      "clearCondition": "B-09's `then` (and contract.md:128) scope the ordering claim to run-state/admitted mutation rather than to all on-disk mutation, matching the scope lock's \"first admitted mutation on disk\".",
       "state": "OPEN",
       "revisionCitation": null
     },
     {
       "id": "F-02",
       "severity": "ADVISORY",
-      "behaviorIds": ["B-09"],
-      "evidence": "\"On a clean recheck the first mutation on disk is one appended `PENDING` event\"",
-      "expected": "B-09's Then should carry the same qualifier the scope lock uses, since B-07 publishes a snapshot directory to disk before the lock is ever taken.",
-      "observed": "The scope lock says \"the first admitted mutation on disk\"; B-09 drops \"admitted\" and reads as though nothing at all touched disk earlier, which contradicts B-07's published snapshot directory. B-09's observableResult is precise (\"the run-state diff is that single appended event\"), so the obligation is recoverable, but the Then as written is a false statement a strict evaluator could fail the slice on.",
-      "clearCondition": "B-09's Then says the appended `PENDING` event is the first *admitted* mutation — the first change to run state — rather than the first mutation on disk.",
-      "state": "OPEN",
-      "revisionCitation": null
-    },
-    {
-      "id": "F-03",
-      "severity": "ADVISORY",
-      "behaviorIds": [],
-      "evidence": "\"the version literal at `src/run-state.ts:67` bumps to 7\"; \"`PersistedSliceState.branch` (`src/run-state.ts:33`)\"; \"`RunState.scope` (`src/run-state.ts:273`\"; \"`transactRunState` (`src/run-state.ts:545-557`)\"; \"`adaptLoadedState` (`src/run-state.ts:1022`)\"",
-      "expected": "Line citations should resolve in the worktree the generator will work in.",
-      "observed": "Every `src/run-state.ts` line number is shifted, because the citations were taken against `main` while this branch already carries the prior attempt's commits: `RUN_STATE_VERSION` is at :76, `PersistedSliceState.branch` at :29, `RunState.scope` at :344, `withRunStateLock` at :598, `transactRunState` at :627, `adaptLoadedState` at :1233. Every named symbol exists and every claim about it holds, so no obligation is unreadable — the numbers alone are stale.",
-      "clearCondition": "The `src/run-state.ts` citations resolve against this branch's HEAD, or the contract states once that its line numbers are `main`-relative and symbol names are authoritative.",
+      "behaviorIds": ["B-05", "B-06", "B-08"],
+      "evidence": "\"assert that src/git.ts and src/worktree-processes.ts are unmodified in the diff\" (B-05 observableResult); \"asserts the three lock primitives' signatures are untouched in the diff\" (B-08 observableResult); \"the module's source and call graph contain no merge, reset or rebase invocation\" (B-06 observableResult)",
+      "expected": "Observable results under the `tests` / `acceptance:behaviors` gates describe assertions a vitest run can actually make; \"this file is unmodified relative to main\" is enforced by the manifest `fileScope` check and the definition-of-done file-scope rule, not by a named test.",
+      "observed": "Three observable results attribute diff-level and whole-call-graph facts to the test gate. The substantive properties are already covered by testable clauses (P-05's stub-only reachability, B-05's per-predicate reason codes, B-06's unmoved branch tips) plus the deterministic file-scope gate, so the extra clauses overstate what the named tests observe without changing what must be built.",
+      "clearCondition": "Those three observable results drop or reattribute the diff/call-graph clauses, leaving the vitest-observable assertions (reason codes, unmoved tips, stub-driven outcomes, absent lineage) as the behaviors' evidence.",
       "state": "OPEN",
       "revisionCitation": null
     }

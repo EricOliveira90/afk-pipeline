@@ -89,8 +89,16 @@
   "leaves both schema versions alone" assertion. The focused scope revision
   brought that file into scope and the pin moved from `6` to `7` — the literal is
   the only edit to it, so PRD 7's property (an eval run writes no run state) is
-  unchanged. A future schema bump must move this pin too; it is the only
-  assertion of the version literal outside `src/run-state.test.ts`.
+  unchanged.
+- Two further version pins live in the `qa-orchestration` suite and read the
+  version off a *loaded* state as a bare literal rather than importing
+  `RUN_STATE_VERSION`: `src/qa-orchestration.test.ts:1028`
+  (`expect(state.version).toBe(7)`) and
+  `src/qa-orchestration-gates.test.ts:1043` (`expect(bumped.version).toBe(7)`).
+  A survey of `RUN_STATE_VERSION` importers misses both, and they surface only
+  when the heavy `qa-orchestration` suite runs (`expected 7 to be 6`). A future
+  schema bump must move all three of these pins plus the eval-boundary one;
+  grep for `\.version\)\.toBe\(` as well as for the constant.
 - In `parsePipelineRuntimeOptions`, reading `staleRenegotiation?.selector`
   *after* the `#335` guard makes TypeScript narrow the variable to `undefined`
   and the property access to `never` (TS2339). Both members are read out into

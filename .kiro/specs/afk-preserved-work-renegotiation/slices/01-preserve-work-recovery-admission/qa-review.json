@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["P-02"],
+      "summary": "The P-02 test's expected value is now written out independently of the call's result, and both probes the finding named turn it red.",
+      "evidence": "Probe 1 — deleted `renegotiateStale` from `parsePipelineRuntimeOptions`' returned object (src/cli-options.ts:418): `npx vitest run src/cli-options.test.ts -t \"P-02\"` -> `Tests 1 failed | 1 passed`, `AssertionError` at src/cli-options.test.ts:484 with the diff line `- \"renegotiateStale\": undefined`. This is also the present-but-`undefined` vs absent distinction the clear condition required: the key was absent, the literal had it present-and-undefined, and `toStrictEqual` failed. Probe 2 — added `probeUnrelatedMember: undefined` to the same object: same command -> `Tests 1 failed | 1 passed`, `AssertionError` at src/cli-options.test.ts:484. Both probes reverted (`git status --porcelain -- src` empty). Unprobed: `npx vitest run src/cli-options.test.ts` -> 76 passed.",
+      "expected": "A P-02 test whose expected value is independent of the call's result, red when either new member is removed, red when an unrelated member is added, and able to distinguish a present-but-`undefined` member from an absent one.",
+      "observed": "src/cli-options.test.ts:484 asserts `toStrictEqual` against a hand-written 17-key literal, backed by an explicit `Object.keys(options).sort()` list and two `in` checks. Both probes fail against it, and the absent-key probe is exactly the present-vs-absent case. A second P-02 case at src/cli-options.test.ts:539 discharges the manifest's \"recovery seams recorded zero calls\" clause as a source-level assertion that src/cli-options.ts references neither the recovery module nor git.js, run-state.js or file-lock.js.",
+      "clearCondition": "A P-02 test whose expected value is written out independently of the call's result fails when either new member is removed from `parsePipelineRuntimeOptions`' returned object, fails when an unrelated member is added to it, and distinguishes a present-but-`undefined` member from an absent one.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-11"],
+      "summary": "A new B-11 case admits twice with no `attemptId` supplied and asserts the two minted IDs differ while the first event's bytes are unchanged, so the minting path is executed.",
+      "evidence": "src/preserve-work-recovery.test.ts:843 `[behavior:#277:B-11] mints a fresh attempt ID for a retry, leaving the earlier event's bytes alone` calls `admit(fixture)` twice with no `attemptId` override, resolves the first attempt in between via the legal `PENDING -> COMPLETED`, then asserts `secondId` !== `firstId`, `lineage` has length 3, `JSON.stringify(lineage[0])` equals the bytes captured before the retry, and two published snapshot directories exist. Probe — replaced `args.attemptId ?? randomUUID()` with `args.attemptId ?? \"PROBE-FIXED-ID\"` (src/preserve-work-recovery.ts:659): `npx vitest run src/preserve-work-recovery.test.ts -t \"B-11\"` -> `Tests 1 failed | 18 passed`, `AssertionError: expected false to be true` at src/preserve-work-recovery.test.ts:869 (the reused ID collided with the published-never-overwritten rule, so the second admission was refused). Probe reverted; unprobed run -> 54 tests, exit 0.",
+      "expected": "A B-11-named test admits twice without supplying `attemptId`, asserts the two attempt IDs differ, and asserts the earlier event's bytes are unchanged.",
+      "observed": "Exactly that test exists and is red when the mint is made constant.",
+      "clearCondition": "A B-11-named test admits twice without supplying `attemptId` (resolving the first attempt in between, or asserting on two `publishAcceptedPairSnapshot`/mint calls) and asserts the two attempt IDs differ while the earlier event's bytes are unchanged.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-10"],
+      "summary": "src/run-state.test.ts ends with a newline again.",
+      "evidence": "`git diff bff786d HEAD -- src/run-state.test.ts | Select-String \"No newline\"` returns nothing. Commit 9b8e30c's diff for that file is `-});\\ No newline at end of file` / `+});`.",
+      "expected": "src/run-state.test.ts ends with a newline and `git diff` reports no `\\ No newline at end of file` for it.",
+      "observed": "The cumulative diff against the merge-base contains no `\\ No newline at end of file` marker for src/run-state.test.ts.",
+      "clearCondition": "src/run-state.test.ts ends with a newline and `git diff` reports no `\\ No newline at end of file` for it.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

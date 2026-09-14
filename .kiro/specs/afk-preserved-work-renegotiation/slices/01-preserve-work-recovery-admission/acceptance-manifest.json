@@ -11,6 +11,8 @@
       "src/run-state.ts",
       "src/run-state.test.ts",
       "src/eval-boundary.test.ts",
+      "src/qa-orchestration.test.ts",
+      "src/qa-orchestration-gates.test.ts",
       "ARCHITECTURE.md"
     ]
   },
@@ -140,11 +142,11 @@
     },
     {
       "id": "B-10",
-      "source": "GH #277 AC14 (prd.md:122-126, ADR 0018; src/run-state.ts:49-66, :67, :1022, src/eval-boundary.test.ts:127)",
-      "given": "run-state files at every currently supported version and a v7 file whose recovery lineage is malformed",
-      "when": "run state loads, and a test reads the version literal and its assertions",
-      "then": "recovery lineage is one new optional `RunState` field, the version literal at src/run-state.ts:67 is 7 with its change documented in the same running comment block at :49-66, a `sanitize`-style reader degrades malformed data to `undefined`, `adaptLoadedState` wires it, the field is read and written only through focused APIs inside the run-state transaction, and the one assertion of that literal outside src/run-state.test.ts — src/eval-boundary.test.ts:127, inside PRD 7's `P-05 ... leaves both schema versions alone` — reads 7 instead of 6 with no other change to that file",
-      "observableResult": "unit tests named for B-10 assert the version literal is 7, assert the comment block names the v7 addition, assert malformed lineage degrades to absent, and src/eval-boundary.test.ts asserts `RUN_STATE_VERSION` is 7 with `EVENTS_SCHEMA_VERSION` still 1 and its forbidden-import offender list still empty",
+      "source": "GH #277 AC14 (prd.md:122-126, ADR 0018; src/run-state.ts:50-75, :76, :1022, src/eval-boundary.test.ts:127, src/qa-orchestration.test.ts:1028, src/qa-orchestration-gates.test.ts:1043)",
+      "given": "run-state files at every currently supported version, a v7 file whose recovery lineage is malformed, and the three assertions of the run-state version that live outside src/run-state.test.ts",
+      "when": "run state loads, and each of those three assertions runs after the bump",
+      "then": "recovery lineage is one new optional `RunState` field, the version literal at src/run-state.ts:76 is 7 with its change documented in the same running comment block above it (:50-75), a `sanitize`-style reader degrades malformed data to `undefined`, `adaptLoadedState` wires it, the field is read and written only through focused APIs inside the run-state transaction, and each outside assertion reads 7 instead of 6 — src/eval-boundary.test.ts:127 inside PRD 7's `P-05 ... leaves both schema versions alone`, src/qa-orchestration.test.ts:1028 (`expect(state.version).toBe(6)`) and src/qa-orchestration-gates.test.ts:1043 (`expect(bumped.version).toBe(6)`), the latter two reading the version off a loaded state rather than importing `RUN_STATE_VERSION`, which is why an earlier importer survey missed them — one literal per file with nothing else in any of the three files touched",
+      "observableResult": "unit tests named for B-10 assert the version literal is 7, assert the comment block names the v7 addition, and assert malformed lineage degrades to absent; src/eval-boundary.test.ts asserts `RUN_STATE_VERSION` is 7 with `EVENTS_SCHEMA_VERSION` still 1 and its forbidden-import offender list still empty; the two qa-orchestration scenarios assert the loaded version is 7 while their own locked properties still hold unchanged — the #91 approved-baseline locator in src/qa-orchestration.test.ts, and the #91 locator plus #193 applied waivers plus the added `finalEvaluations` record in src/qa-orchestration-gates.test.ts — with no test in either file added, removed, renamed or otherwise edited",
       "preservation": false,
       "gateIds": [
         "typecheck",

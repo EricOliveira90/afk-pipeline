@@ -4,7 +4,7 @@
 **GH issue:** #277
 **Status:** LOCKED
 
-**Lock-Provenance:** focused-scope-revision round 3
+**Lock-Provenance:** focused-scope-revision round 4
 
 **Negotiation round:** 2
 
@@ -25,7 +25,11 @@ reconciliation (#334) are unshipped, the shared parser refuses a well-formed
 check, so no live run can create a `PENDING` event (issue #277, "First, the
 entry points refuse the flag until #335 lands"; prd.md:35-40). The whole slice is
 proven through exported seams plus one cross-process contention test; it adds no
-spawned pipeline scenario.
+spawned pipeline scenario. The additive schema bump's version pins outside
+`src/run-state.test.ts` are updated in place — one literal each in
+`src/eval-boundary.test.ts`, `src/qa-orchestration.test.ts` and
+`src/qa-orchestration-gates.test.ts` — which adds no spawned scenario and
+changes no scenario's structure, name or asserted properties (B-10).
 
 ### In scope
 
@@ -135,18 +139,31 @@ spawned pipeline scenario.
   field.
 - [behavior:B-10] Recovery lineage persists as one new optional `RunState`
   field, additive under ADR 0018's pattern: the version literal at
-  `src/run-state.ts:67` bumps to 7 and its change is documented in the same
-  running comment block at `:49-66`; a `sanitize`-style reader degrades
+  `src/run-state.ts:76` is 7 and its change is documented in the same
+  running comment block above it (`:50-75`); a `sanitize`-style reader degrades
   malformed data to `undefined`, `adaptLoadedState` (`src/run-state.ts:1022`)
   wires it, and the field is read and written only through focused APIs that go
   through the run-state transaction (issue #277 AC14; prd.md:122-126, ADR 0018).
-  Recorded decision: exactly one assertion of that version literal lives outside
-  `src/run-state.test.ts` — PRD 7's boundary test at
-  `src/eval-boundary.test.ts:127`, inside `P-05 ... leaves both schema versions
-  alone` — so the same change moves that pinned literal from 6 to 7 and nothing
-  else in that file. The assertion keeps the property PRD 7 locked, that an eval
-  run writes no run state; the precedent is that the same pin already moved when
-  an earlier bump landed (that slice's own manifest still reads `RUN_STATE_VERSION
+  Recorded decision: three assertions of that version pin the literal outside
+  `src/run-state.test.ts`, and the same change moves each from 6 to 7 — PRD 7's
+  boundary test at `src/eval-boundary.test.ts:127`, inside `P-05 ... leaves both
+  schema versions alone`, and two that read the version off a loaded state as a
+  bare `6` rather than importing `RUN_STATE_VERSION`:
+  `src/qa-orchestration.test.ts:1028` (`expect(state.version).toBe(6)`) and
+  `src/qa-orchestration-gates.test.ts:1043` (`expect(bumped.version).toBe(6)`).
+  The earlier round's survey searched importers of `RUN_STATE_VERSION` and so
+  missed those two; the tests gate reports them as `expected 7 to be 6`, and
+  because this behavior already decided the literal is 7, no edit inside the
+  earlier file scope can make them pass. Each is one literal per file with
+  nothing else in either file touched: the properties those two scenarios lock —
+  the #91 approved-baseline locator and the #193 applied waivers still loading
+  unchanged across an additive bump — are exactly what an additive v7 bump must
+  keep true, so updating the expected version preserves the assertion instead of
+  weakening it, and each test's name, structure and every other expectation stay
+  as they are. The eval-boundary assertion likewise keeps the property PRD 7
+  locked, that an eval run writes no run state; the precedent for moving a pin
+  with the bump is that the same pin already moved when an earlier bump landed
+  (that slice's own manifest still reads `RUN_STATE_VERSION
   still 5`, `.kiro/specs/afk-v2-agent-eval-harness/slices/01-eval-runner/acceptance-manifest.json`).
   No eval-boundary rule, forbidden-import list, module set or events-schema pin
   changes, and `EVENTS_SCHEMA_VERSION` stays 1.
@@ -228,10 +245,12 @@ spawned pipeline scenario.
 
 - `RUN_STATE_VERSION` moves from 6 to 7 with one additive optional field,
   documented in the same version comment block (issue #277 AC14, ADR 0018). The
-  single assertion of that literal outside `src/run-state.test.ts` —
-  `src/eval-boundary.test.ts:127` — is updated from 6 to 7; no behavior,
-  interface, data format, security posture or acceptance criterion of PRD 7
-  changes with it (B-10).
+  three assertions of that version outside `src/run-state.test.ts` —
+  `src/eval-boundary.test.ts:127`, `src/qa-orchestration.test.ts:1028` and
+  `src/qa-orchestration-gates.test.ts:1043` — are each updated from 6 to 7, one
+  literal per file; no behavior, interface, data format, security posture or
+  acceptance criterion of PRD 7, #91, #193 or #96 changes with it, and no test
+  is renamed, added, removed or otherwise edited (B-10).
 - `parsePipelineRuntimeOptions`' returned options gain two optional members and
   the two new refusals; no existing member or message changes (issue #277 AC3).
 - `src/cli-options.ts` gains one new export, `parseStaleRenegotiationRequest`,
@@ -252,6 +271,8 @@ spawned pipeline scenario.
 - src/run-state.ts
 - src/run-state.test.ts
 - src/eval-boundary.test.ts
+- src/qa-orchestration.test.ts
+- src/qa-orchestration-gates.test.ts
 - ARCHITECTURE.md
 
 ## Migration requirements
@@ -337,6 +358,14 @@ spawned pipeline scenario.
   asserts `RUN_STATE_VERSION` is 7 with `EVENTS_SCHEMA_VERSION` still 1 and its
   forbidden-import offender list still empty — the pinned literal is the only
   edit to that file.
+- Given the two spawned scenarios that read the version off a loaded state —
+  `src/qa-orchestration.test.ts:1028` and
+  `src/qa-orchestration-gates.test.ts:1043` — when each runs after the bump, then
+  it asserts the loaded version is 7 while its own locked properties still hold
+  unchanged: the #91 approved-baseline locator in the first, and the #91 locator
+  plus the #193 applied waivers plus the added `finalEvaluations` record in the
+  second. One literal per file is the only edit; no test name, structure or other
+  expectation changes, and no scenario is added.
 - Given a well-formed `--renegotiate-stale` plus `--recovery-reason` pair, when
   the shared parser runs, then it throws a refusal naming #335, and
   `src/cli-entries.test.ts` asserts each of `src/afk.ts`, `src/afk-claude.ts`
@@ -354,17 +383,22 @@ spawned pipeline scenario.
 - [ ] `pnpm run typecheck` passes.
 - [ ] `pnpm test:fast` passes.
 - [ ] `pnpm run test:heavy:resume` passes, because `src/run-state.ts` changed.
+- [ ] `pnpm run test:heavy:qa` passes, because the two version pins live in
+      `src/qa-orchestration.test.ts` and `src/qa-orchestration-gates.test.ts`.
 - [ ] No file outside "Files expected to change" is modified, except the
       planner's, evaluator's and orchestrator's own contract, manifest,
       response, review, feedback and negotiation artifacts under
       `.kiro/specs/afk-preserved-work-renegotiation/slices/01-preserve-work-recovery-admission/`.
 - [ ] No spawned pipeline scenario is added, and no test in the
-      `orchestrator`, `wave`, `qa-orchestration` or `clean-failed` suites is
-      added or modified.
+      `orchestrator`, `wave` or `clean-failed` suites is added or modified. In
+      the `qa-orchestration` suite the only edit is B-10's version pin — the
+      literal `6` at `src/qa-orchestration.test.ts:1028` and at
+      `src/qa-orchestration-gates.test.ts:1043` becomes `7`, one per file, with
+      no test added, removed, renamed or otherwise changed in either.
 - [ ] ARCHITECTURE.md gains one module-table row for
       `src/preserve-work-recovery.ts` and stays within its 150-line cap.
-- [ ] `RUN_STATE_VERSION` is 7 and the comment block at `src/run-state.ts:49-66`
-      names the v7 addition.
+- [ ] `RUN_STATE_VERSION` is 7 and the comment block above it
+      (`src/run-state.ts:50-75`) names the v7 addition.
 - [ ] `src/eval-boundary.test.ts` pins `RUN_STATE_VERSION` to 7 and is otherwise
       unchanged: same test names, same forbidden-import list, same module set,
       `EVENTS_SCHEMA_VERSION` still 1.
