@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPipeline, makeSliceContext, prepareSliceWorktree } from "./orchestrator.js";
 import { RunJournal as Logger } from "./run-journal.js";
+import type { RunEventPayload } from "./run-events.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 import {
@@ -535,6 +536,63 @@ describe("retried slice resume (spec #33)", () => {
           `.kiro/specs/${slug}/slices/01-resumable/context.md`,
           "generator:failure-set",
         ],
+      });
+    });
+
+    it("[behavior:#273:P-05] resumes a pre-slice journal on the same decision and aggregates its prompt bytes unchanged", () => {
+      // The resumed slice's own assembly event, stripped of #273's five
+      // additive fields: what is left is exactly what a journal written before
+      // this slice carries, taken from the real shape rather than invented.
+      const assembly = promptAssemblyEvents(repo, `${slug}-stub`, "4001").at(
+        -1,
+      )!;
+      const {
+        ts: _ts,
+        inlineByteSize: _inline,
+        requiredReferencedByteSize: referenced,
+        requiredInputByteSize: _total,
+        allowedByteSize: _allowed,
+        requiredReferencedArtifacts: _artifacts,
+        ...preSlice
+      } = assembly;
+      // The post-#273 run counted the pair, so the stripped copy is a faithful
+      // "before" and not a copy of itself.
+      expect(referenced).toBeGreaterThan(0);
+      for (const field of [
+        "inlineByteSize",
+        "requiredReferencedByteSize",
+        "requiredInputByteSize",
+        "allowedByteSize",
+        "requiredReferencedArtifacts",
+      ]) {
+        expect(preSlice, field).not.toHaveProperty(field);
+      }
+
+      // The resume decision reads worktree and branch state, never the byte
+      // accounting: slice 01 resumed from its surviving commit here, and a
+      // journal missing every new field would reach the same decision because
+      // no resume input comes from these events.
+      expect(logFor("4001")).toMatch(/resuming from 1 commit/);
+
+      const replay = new Logger(repo, `${slug}-preslice`);
+      replay.restoreCompleted({
+        ghIssue: "4001",
+        title: "Resumable",
+        branch: "merged",
+      });
+      replay.event(preSlice as unknown as RunEventPayload);
+      const summary = replay.writeSummary();
+
+      // Prompt bytes still sum `assembledByteSize` alone: the absent referenced
+      // weight is neither added nor defaulted to a 0 that gets added.
+      const assembled = Number(preSlice.assembledByteSize);
+      expect(assembled).toBeGreaterThan(0);
+      expect(summary).toContain(`| ${assembled} |`);
+      expect(summary).toContain(`**${assembled}**`);
+      expect(summary).not.toContain("| 0 |");
+      rmSync(join(repo, ".afk", "logs", `${slug}-preslice`), {
+        recursive: true,
+        force: true,
       });
     });
 

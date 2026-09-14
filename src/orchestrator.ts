@@ -18,7 +18,12 @@ import { finished } from "node:stream/promises";
 import { buildDAG, type Slice, type DAG } from "./issues-parser.js";
 import * as git from "./git.js";
 import { kiroProvider } from "./kiro.js";
-import type { AgentProvider, InvokeOptions } from "./agent-provider.js";
+import type {
+  AgentProvider,
+  ContextEnvelopeInvocationEvidence,
+  InvokeOptions,
+} from "./agent-provider.js";
+import { renderPromptPreparationRefusal } from "./logger.js";
 import { CancelledError, isTransientProviderError } from "./agent-provider.js";
 import { withTransientRetry, type TransientRetryOptions } from "./transient-retry.js";
 import * as artifacts from "./artifacts.js";
@@ -35,6 +40,7 @@ import { renderPrompt } from "./prompt-template.js";
 import {
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
+  ContextEnvelopeConfigurationError,
   mergeResolutionBlockRoom,
   projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
@@ -42,6 +48,7 @@ import {
   withMergeResolutionSituation,
   type GeneratorEnvelopeInput,
   type GeneratorFailureSet,
+  type RequiredInputEvidence,
 } from "./context-envelope.js";
 import {
   resolveRef,
@@ -995,6 +1002,14 @@ export interface SliceContext {
   invoke: (
     opts: Parameters<AgentProvider["invoke"]>[0] & {
       /**
+       * Widened over the provider's own field so the generator's additive
+       * required-input byte accounting reaches the `prompt-assembly` event
+       * typed rather than as an untyped passthrough (#273 B-06). Providers
+       * still ignore the metadata.
+       */
+      contextEnvelope?: ContextEnvelopeInvocationEvidence &
+        RequiredInputEvidence;
+      /**
        * Identity for the post-return `invocation-completed` event when the
        * invocation carries no assembled envelope (candidate-QA, shared-preview
        * and final evaluators). Stripped before the provider call.
@@ -1015,6 +1030,41 @@ export interface SliceContext {
       };
     },
   ) => ReturnType<AgentProvider["invoke"]>;
+}
+
+/**
+ * The one generator prompt-preparation seam (#273 B-03, B-10).
+ *
+ * Two things every generator dispatch needs and neither call site should be
+ * trusted to remember:
+ *
+ * 1. `requiredReadRoot` — the slice worktree, which is what the pair's
+ *    worktree-relative artifact ids resolve against. Passed explicitly rather
+ *    than assumed from `process.cwd()`: the orchestrator dispatches from the
+ *    host checkout, not from inside the worktree.
+ * 2. The refusal record. A `CONFIGURATION` refusal used to reach neither
+ *    `run.log` nor `run-summary.md` — the byte accounting #273 adds would have
+ *    been thrown into a void. The entry is written *before* the rethrow, and the
+ *    error leaves this function unchanged in type, message, and the terminal
+ *    outcome the wave records from it (P-04).
+ */
+function assembleGeneratorRoundEnvelope(
+  ctx: Pick<SliceContext, "worktreeDir" | "tag" | "logger">,
+  input: GeneratorEnvelopeInput,
+): ReturnType<typeof assembleGeneratorEnvelope> {
+  try {
+    return assembleGeneratorEnvelope({
+      ...input,
+      requiredReadRoot: ctx.worktreeDir,
+    });
+  } catch (error) {
+    if (error instanceof ContextEnvelopeConfigurationError) {
+      ctx.logger.phase(
+        renderPromptPreparationRefusal(ctx.tag, error.message),
+      );
+    }
+    throw error;
+  }
 }
 
 export function makeSliceContext(
@@ -1063,6 +1113,9 @@ export function makeSliceContext(
 
   const invoke = async (
     opts: Parameters<AgentProvider["invoke"]>[0] & {
+      /** See {@link SliceContext.invoke} — widened for #273 B-06. */
+      contextEnvelope?: ContextEnvelopeInvocationEvidence &
+        RequiredInputEvidence;
       /**
        * Identity for the post-return `invocation-completed` event when the
        * invocation carries no assembled envelope (candidate-QA and
@@ -5835,7 +5888,7 @@ export async function runSliceExecute(
                 ...(scopeRevisionNote ? [scopeRevisionNote] : []),
               ].join("\n\n")
             : undefined;
-        const assembled = assembleGeneratorEnvelope({
+        const assembled = assembleGeneratorRoundEnvelope(ctx, {
           mode,
           sliceDir: ctx.relSliceDir,
           contractView: projectGeneratorContractView(contract),
@@ -7968,6 +8021,10 @@ export async function runSliceMergeResolution(args: {
       ...(config.generatorInlineSizeBudgetBytes !== undefined
         ? { inlineSizeBudgetBytes: config.generatorInlineSizeBudgetBytes }
         : {}),
+      // Named here as well as in `assembleGeneratorRoundEnvelope`, because
+      // `mergeResolutionBlockRoom` sizes the block off this same input and has
+      // to reserve the pair's bytes to do it (#273 B-02/B-03).
+      requiredReadRoot: ctx.worktreeDir,
       repairSituation: situationFacts,
     };
 
@@ -8038,7 +8095,7 @@ export async function runSliceMergeResolution(args: {
       conflictDetails,
       blockBudgetBytes: mergeResolutionBlockRoom(envelopeInput),
       dispatchGenerator: async (block) => {
-        const assembled = assembleGeneratorEnvelope({
+        const assembled = assembleGeneratorRoundEnvelope(ctx, {
           ...envelopeInput,
           repairSituation: withMergeResolutionSituation(
             situationFacts,
