@@ -30,6 +30,7 @@ import {
   recoveryLineageFor,
   appendRecoveryLineageEvent,
   updateRunState,
+  RECOVERY_FINGERPRINT_ABSENT,
   RUN_STATE_VERSION,
   type PersistedRecoveryLineageEvent,
   type RunState,
@@ -1517,6 +1518,211 @@ describe("[behavior:#277:B-10] persisted recovery lineage", () => {
       >;
       expect(rewritten).toEqual({ ...document, version: RUN_STATE_VERSION });
       expect(rewritten.recoveryLineage).toBeUndefined();
+    }
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Rollback-failure observations on a lineage event (#333)
+ * ---------------------------------------------------------------------------
+ *
+ * #333 adds three optional members — `rollbackError`,
+ * `observedContractFingerprint`, `observedManifestFingerprint` — that a
+ * `ROLLBACK_FAILED` event must carry and no other state may. That changes the
+ * validator's accepted input language, so both halves of the regression surface
+ * are bound here per ADR 0060: the newly accepted document round-trips, and each
+ * newly rejected one degrades the target's whole list to absent. Every rejection
+ * case also loads the *corrected* document, so none of them can pass because of
+ * an unrelated malformation.
+ */
+const ROLLBACK_ISSUE = "333";
+
+const ROLLBACK_OBSERVATIONS = {
+  rollbackError: "the snapshot contract.md could not be read (ENOENT)",
+  observedContractFingerprint: "1".repeat(64),
+  observedManifestFingerprint: RECOVERY_FINGERPRINT_ABSENT,
+} as const;
+
+/** The three members only a `ROLLBACK_FAILED` event may carry. */
+const ROLLBACK_FIELDS = [
+  "rollbackError",
+  "observedContractFingerprint",
+  "observedManifestFingerprint",
+] as const;
+
+function rollbackLineageEvent(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    attemptId: "attempt-333",
+    state: "PENDING",
+    target: { number: "4", ghIssue: ROLLBACK_ISSUE },
+    reason: "the accepted pair went stale",
+    extensions: [],
+    provider: "claude-code",
+    sliceBranch: "afk-claude-code/demo-slice-04",
+    sliceHead: "a".repeat(40),
+    featureHead: "b".repeat(40),
+    scopeFingerprint: "c".repeat(64),
+    snapshotPath: ".kiro/specs/demo/slices/04-x/recovery-snapshots/attempt-333",
+    contractFingerprint: "d".repeat(64),
+    manifestFingerprint: "e".repeat(64),
+    recordedAt: "2026-09-14T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Load a lineage list the way `loadRunState` would, without touching disk. */
+function adaptLineage(events: Record<string, unknown>[]): RunState {
+  return adaptLoadedState(
+    {
+      version: 7,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+      recoveryLineage: { [ROLLBACK_ISSUE]: events },
+    },
+    "demo",
+  );
+}
+
+describe("[behavior:#333:B-06] rollback-failure observations on a lineage event", () => {
+  it("[behavior:#333:B-06] round-trips a well-formed ROLLBACK_FAILED event through save/load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const pending = rollbackLineageEvent() as unknown as PersistedRecoveryLineageEvent;
+    const failed = rollbackLineageEvent({
+      state: "ROLLBACK_FAILED",
+      ...ROLLBACK_OBSERVATIONS,
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, pending);
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, failed);
+    });
+
+    // Purely additive: the field the events ride on is still v7's.
+    expect(RUN_STATE_VERSION).toBe(7);
+    const loaded = recoveryLineageFor(loadRunState(repo, "demo"), ROLLBACK_ISSUE);
+    expect(loaded).toEqual([pending, failed]);
+    // The `PENDING` half carries none of the three, and the loader invents none.
+    for (const field of ROLLBACK_FIELDS) {
+      expect(field in loaded[0]!).toBe(false);
+      expect(loaded[1]![field]).toBe(ROLLBACK_OBSERVATIONS[field]);
+    }
+  });
+
+  it.each(
+    ROLLBACK_FIELDS.flatMap((field) => [
+      [`${field} missing`, field, undefined] as const,
+      [`${field} present but blank`, field, "   "] as const,
+    ]),
+  )(
+    "[behavior:#333:B-06] rejects a ROLLBACK_FAILED event with %s",
+    (_label, field, value) => {
+      const complete = rollbackLineageEvent({
+        state: "ROLLBACK_FAILED",
+        ...ROLLBACK_OBSERVATIONS,
+      });
+      const broken = { ...complete };
+      if (value === undefined) delete broken[field];
+      else broken[field] = value;
+
+      expect(adaptLineage([broken]).recoveryLineage).toBeUndefined();
+      expect(
+        recoveryLineageFor(adaptLineage([broken]), ROLLBACK_ISSUE),
+      ).toEqual([]);
+      // The same document, corrected, loads: the rejection is about this field.
+      expect(
+        recoveryLineageFor(adaptLineage([complete]), ROLLBACK_ISSUE),
+      ).toEqual([complete]);
+    },
+  );
+
+  it.each([
+    ["PENDING", "rollbackError"],
+    ["ROLLED_BACK", "observedContractFingerprint"],
+    ["COMPLETED", "observedManifestFingerprint"],
+  ] as const)(
+    "[behavior:#333:B-06] rejects a %s event carrying %s",
+    (state, field) => {
+      const clean = rollbackLineageEvent({ state });
+      const carrying = { ...clean, [field]: ROLLBACK_OBSERVATIONS[field] };
+
+      expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+      // Removing the offending field is the whole difference.
+      expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+        clean,
+      ]);
+    },
+  );
+
+  it("[behavior:#333:B-06] drops the whole list when one event of several is malformed", () => {
+    const pending = rollbackLineageEvent();
+    const failed = rollbackLineageEvent({
+      state: "ROLLBACK_FAILED",
+      ...ROLLBACK_OBSERVATIONS,
+      rollbackError: "",
+    });
+
+    expect(adaptLineage([pending, failed]).recoveryLineage).toBeUndefined();
+    // Not "keep the good ones": a surviving PENDING would read as an open attempt.
+    expect(
+      recoveryLineageFor(adaptLineage([pending, failed]), ROLLBACK_ISSUE),
+    ).toEqual([]);
+  });
+});
+
+describe("[behavior:#333:P-04] the #277 lineage shape still loads unchanged", () => {
+  it("[behavior:#333:P-04] loads a PENDING-only #277 lineage field for field with the three new members absent", () => {
+    const pending = rollbackLineageEvent();
+
+    const loaded = recoveryLineageFor(adaptLineage([pending]), ROLLBACK_ISSUE);
+
+    expect(loaded).toEqual([pending]);
+    for (const [key, value] of Object.entries(pending)) {
+      expect(loaded[0]![key as keyof PersistedRecoveryLineageEvent]).toEqual(value);
+    }
+    expect(Object.keys(loaded[0]!).sort()).toEqual(Object.keys(pending).sort());
+  });
+
+  it("[behavior:#333:P-04] still degrades the whole list to absent on a pre-existing malformation", () => {
+    const missingProvider = rollbackLineageEvent();
+    delete missingProvider.provider;
+
+    expect(adaptLineage([missingProvider]).recoveryLineage).toBeUndefined();
+    expect(
+      adaptLineage([rollbackLineageEvent({ extensions: "none" })])
+        .recoveryLineage,
+    ).toBeUndefined();
+  });
+
+  it("[behavior:#333:P-04] rejects the newly-forbidden direction too, so the rule cannot ship half-enforced", () => {
+    const pendingCarrying = rollbackLineageEvent({
+      rollbackError: ROLLBACK_OBSERVATIONS.rollbackError,
+    });
+    const rolledBackCarrying = rollbackLineageEvent({
+      state: "ROLLED_BACK",
+      observedContractFingerprint:
+        ROLLBACK_OBSERVATIONS.observedContractFingerprint,
+    });
+
+    expect(adaptLineage([pendingCarrying]).recoveryLineage).toBeUndefined();
+    expect(adaptLineage([rolledBackCarrying]).recoveryLineage).toBeUndefined();
+    // And both load once the offending field is removed.
+    for (const clean of [
+      rollbackLineageEvent(),
+      rollbackLineageEvent({ state: "ROLLED_BACK" }),
+    ]) {
+      expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+        clean,
+      ]);
     }
   });
 });

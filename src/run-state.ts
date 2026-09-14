@@ -312,7 +312,52 @@ export interface PersistedRecoveryLineageEvent {
   manifestFingerprint: string;
   /** ISO-8601 instant the event was appended. */
   recordedAt: string;
+  /**
+   * Why a rollback did not prove out — the failure message the restore-and-verify
+   * routine reported, verbatim (#333 B-06).
+   *
+   * One of three fields that exist only on a `ROLLBACK_FAILED` event, and are
+   * *required* there: {@link sanitizeRecoveryLineage} demands all three non-blank
+   * when `state` is `ROLLBACK_FAILED` and demands all three absent on every other
+   * state. Optional in the type and purely additive on disk, with no
+   * {@link RUN_STATE_VERSION} bump, on the {@link RunState.specsDir} precedent: a
+   * v7 file written before #333 simply has none of them and adapts in memory
+   * unchanged. The per-state rule is what keeps those older events round-tripping
+   * through a gate that otherwise requires every member.
+   */
+  rollbackError?: string;
+  /**
+   * The `contract.md` fingerprint actually observed in the slice directory when
+   * the rollback failed — {@link RECOVERY_FINGERPRINT_ABSENT} when the file could
+   * not be read at all (#333 B-06).
+   *
+   * Recorded beside the original {@link contractFingerprint} rather than instead
+   * of it: "what should be there" and "what is there" are the two halves of the
+   * hold a human has to resolve, and one field can only carry one of them.
+   */
+  observedContractFingerprint?: string;
+  /** The `acceptance-manifest.json` half of {@link observedContractFingerprint}. */
+  observedManifestFingerprint?: string;
 }
+
+/**
+ * The value an observed-fingerprint field carries when there were no bytes to
+ * fingerprint (#333 B-06).
+ *
+ * An explicit marker rather than a blank or an omitted field, because both of
+ * those read as "nobody looked" while this says "somebody looked and the file was
+ * not readable" — which is the difference between a rollback that never ran and
+ * one that ran and found the pair gone. Declared here, beside the persisted shape
+ * that carries it, for the reason {@link RecoveryLineageState} is.
+ */
+export const RECOVERY_FINGERPRINT_ABSENT = "absent";
+
+/** The three members {@link PersistedRecoveryLineageEvent} carries only on `ROLLBACK_FAILED`. */
+const ROLLBACK_FAILURE_FIELDS = [
+  "rollbackError",
+  "observedContractFingerprint",
+  "observedManifestFingerprint",
+] as const;
 
 export interface RunState {
   /**
@@ -1089,6 +1134,15 @@ const RECOVERY_LINEAGE_STATE_VALUES: ReadonlySet<string> = new Set([
  * Absence is safe in the other direction — it refuses nothing and loses no
  * commits, because the snapshot on disk is what an unreferenced attempt leaves
  * behind and it grants no authority on its own.
+ *
+ * The three rollback-failure members are validated *per state* (#333 B-06):
+ * required non-blank when `state` is `ROLLBACK_FAILED`, required absent
+ * otherwise. Both directions are enforced here rather than only the first,
+ * because a `PENDING` event carrying a `rollbackError` describes an event that
+ * never happened, and a validator that accepts it would let a reader conclude a
+ * rollback was attempted on an open attempt. A rejection takes the same
+ * consequence every other malformation takes — the target's whole list degrades
+ * to absent — so this is extra branches in that gate, not a second failure mode.
  */
 function sanitizeRecoveryLineage(
   value: unknown,
@@ -1140,9 +1194,20 @@ function sanitizeRecoveryLineage(
         dropped = true;
         break;
       }
+      const state = event.state as RecoveryLineageState;
+      const rollbackFailure =
+        state === "ROLLBACK_FAILED"
+          ? ROLLBACK_FAILURE_FIELDS.every((field) => nonblank(event[field]))
+          : ROLLBACK_FAILURE_FIELDS.every(
+              (field) => event[field] === undefined,
+            );
+      if (!rollbackFailure) {
+        dropped = true;
+        break;
+      }
       events.push({
         attemptId: event.attemptId,
-        state: event.state as RecoveryLineageState,
+        state,
         target: { number: target.number, ghIssue: target.ghIssue },
         reason: event.reason,
         extensions: [...(event.extensions as string[])],
@@ -1155,6 +1220,15 @@ function sanitizeRecoveryLineage(
         contractFingerprint: event.contractFingerprint,
         manifestFingerprint: event.manifestFingerprint,
         recordedAt: event.recordedAt,
+        ...(state === "ROLLBACK_FAILED"
+          ? {
+              rollbackError: event.rollbackError as string,
+              observedContractFingerprint:
+                event.observedContractFingerprint as string,
+              observedManifestFingerprint:
+                event.observedManifestFingerprint as string,
+            }
+          : {}),
       });
     }
     if (dropped || events.length === 0) continue;
