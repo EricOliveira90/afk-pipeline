@@ -51,4 +51,38 @@ describe("pipeline CLI entries", () => {
 
     expect(stderr).toContain("[--record-prompts]");
   }, 40_000);
+
+  /**
+   * The #335 refusal reaches all three entries because all three read their
+   * runtime options through the one shared parser (#277 B-12). Asserted as
+   * source wiring rather than by spawning each entry with the flag: the refusal
+   * itself is asserted directly on `parsePipelineRuntimeOptions` in
+   * `src/cli-options.test.ts`, and what an entry could get wrong is having its
+   * own second parse path.
+   */
+  it.each(ENTRIES)(
+    "[behavior:#277:B-12] routes %s's runtime options through parsePipelineRuntimeOptions alone",
+    (entry) => {
+      const source = readFileSync(resolve("src", entry), "utf-8");
+
+      expect(source).toContain(
+        'import { parsePipelineRuntimeOptions } from "./cli-options.js"',
+      );
+      expect(source).toContain("parsePipelineRuntimeOptions(args)");
+      // A second parse path is how one entry would keep accepting a flag the
+      // shared guard refuses.
+      expect(source).not.toContain("parseStaleRenegotiationRequest");
+    },
+  );
+
+  it.each(ENTRIES)(
+    "[behavior:#277:B-12] does not advertise the unusable --renegotiate-stale in %s's usage",
+    (entry) => {
+      const stderr = usageStderr(entry);
+
+      expect(stderr).not.toContain("--renegotiate-stale");
+      expect(stderr).not.toContain("--recovery-reason");
+    },
+    40_000,
+  );
 });
