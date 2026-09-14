@@ -1,14 +1,43 @@
 # PRD 9: Preserve-work contract renegotiation
 
 **GH issue:** #276.
-**Slice issues:** #277 (recovery state machine), #278 (atomic additive
-split-scope extension, blocked by #277).
+**Slice issues:** #277 (admission), #332 (attempt execution), #333 (verified
+rollback and fail-closed hold), #334 (launch-time reconciliation), #335
+(completion, replay and reporting), #278 (atomic additive split-scope
+extension, blocked by #335). `issues.md` in this directory is the authoritative
+slice table and wave structure; see "Delivery slices" below.
 **Parent design:** `intent.md` in this directory and
 `docs/specs/afk-v2-plan.md` PRD 9.
 **Binding decisions:** ADR 0018 (run state), ADR 0039 (never destroy unmerged
 commits), ADRs 0050–0051 (focused revision bounds and rollback), ADR 0055
 (accepted-pair validation, lock gate and provenance), ADR 0056 (run-state
 lock), and ADR 0062 (contract revision lineage).
+
+## Delivery slices
+
+Everything below specifies the finished protocol. It ships in six slices,
+because two contract negotiations refused the original one-slice admission-plus-
+rollback-plus-completion boundary as larger than one generator session
+(2026-09-14; `feedback-r1.md` finding F-01 and `planner-escalation.md` under
+`.afk/artifacts/afk-preserved-work-renegotiation-claude-code/slice-01/`). The
+cut follows this document's own state machine, one transition per slice, and
+`issues.md` holds the table and the waves:
+
+| Section of this PRD | Slice |
+|---|---|
+| Interface parsing, Admission Protocol steps 1, 3, 4, 5, canonical identity, the lineage shape and its transition rules | #277 |
+| Attempt Execution: the negotiation-state preservation and clears, and the explorer plus planner/evaluator rerun | #332 |
+| Failure Semantics: verified restore then `ROLLED_BACK`, or `ROLLBACK_FAILED` and the fail-closed dispatch hold | #333 |
+| Failure Semantics: the launch-time reconciliation of an unresolved attempt before ordinary resume | #334 |
+| Successful Completion, the pre-dispatch fingerprint check, Replay and Conflicts, and attempt-state reporting | #335 |
+| Admission Protocol step 2 and the scope half of the completion write (`--extend-scope`) | #278 |
+
+Until #335 merges, an admitted attempt has no way to end, so #277 ships a
+refusal of `--renegotiate-stale` at all three entry points, before any
+eligibility check. Slices #277 through #334 are therefore proven through
+exported seams and existing resume/negotiation fixtures rather than a live
+recovery run; #335 removes the refusal. This staging changes no behavior
+specified below — it only fixes when each part becomes reachable.
 
 ## Problem Statement
 
