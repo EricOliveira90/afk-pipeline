@@ -129,7 +129,7 @@ off; recorded evidence — not argument — decides escalation or deletion.
 | 9 (#276) | Preserve-work contract renegotiation | current `main` | #277–#278 | Adds a supported, crash-recoverable path to reopen a stale locked contract without discarding landed slice commits, plus atomic additive scope extension for a spec-level re-slice. Prepared in draft PR #282; run after PRD 5, whose recovery exposed both missing paths. |
 | 10 (#298) | Generator self-audit gate | none beyond current `main` | #299–#301 | Port of SwarmForge's two-call audit gate (R. C. Martin): one bounded post-generation audit invocation between the candidate gate phase and QA dispatch; verdict is exact git tree identity, never agent-certified (`AUDIT_UNCHANGED` / `AUDIT_CHANGED` / `AUDIT_NOT_RUN`); consumes no generator round; the changed-rate reports and never gates. `--self-audit`, default off. **Prepared 2026-09-13:** branch `prd/generator-self-audit-gate` (37950f4), tickets linted, dry-run verified (wave 1: #299; wave 2: #300 + #301). Source: `.kiro/specs/generator-self-audit-gate/intent.md`. |
 | 11 (#302) | Mutation survivor report | none beyond current `main` | #303–#304 | Report-only ship-gate mutation step behind `--mutation-report`: project-declared command + mutation-testing-elements JSON schema, differential scope from the change-summary builder, concurrent with guardians, flat 30-min bound, `MUTATION_REPORTED` / `MUTATION_NOT_RUN`, never blocks a ship. Survivors land in run-summary.md and the draft PR body, split new/pre-existing against a committed baseline, with adjudicated survivors marked accepted. This is the ROI instrument for the PRD 5 cleaner/hardener decision (item 8) without building the role. **Prepared 2026-09-13:** branch `prd/mutation-survivor-report` (7ed91d9), tickets linted, dry-run verified (wave 1: #303; wave 2: #304). Source: `.kiro/specs/mutation-survivor-report/intent.md`. |
-| 12 (parent to ticket) | Test-suite timing reduction | none; measurement-led | Wave A complete; later slices to ticket only from evidence | Wave A is on `main`: split the heaviest QA suite, run the fast suite with six workers, and make git-process counting opt-in. The quiet-host full suite fell to 1022.1 seconds from the roughly 1612-second planning baseline. Next work absorbs #239 (host-load sampling) and starts with process-listing seams and fixture hygiene; structural consolidation is ticketed only when a fresh profile names it. Budgets are not raised to make this PRD green. |
+| 12 (parent to ticket) | Test-suite timing reduction | none; measurement-led | Wave A complete; later slices to ticket only from evidence | Wave A is on `main`: split the heaviest QA suite, run the fast suite with six workers, and make git-process counting opt-in. The quiet-host full suite fell to 1022.1 seconds from the roughly 1612-second planning baseline. Next work absorbs #239 (host-load sampling), #250 (timing-document closeout), and #322 (one guarded sequential git-process baseline command), then starts with process-listing seams and fixture hygiene; structural consolidation is ticketed only when a fresh profile names it. Budgets are not raised to make this PRD green. |
 
 PRDs 10 and 11 are independent of each other and of PRDs 5–7's follow-up
 work; they may launch as serial self-runs in either order (§3c policy 5's
@@ -188,6 +188,24 @@ adding a provider watchdog from one stalled stream, automating host-branch
 merge-forward, or filtering self-run fixture text out of the launcher log.
 The observations stay evidence; another incident or a measured recurring
 cost must justify permanent machinery.
+
+### 2e. Post-PRD 5 operational retrospective additions (2026-09-14)
+
+These are the critical/high-importance additions accepted after PR #297
+merged. Each issue preserves the observed operator pain separately from the
+suspected cause and proposed solution; the table keeps that evidence visible
+in the roadmap so implementation does not optimize for a theory while missing
+the failure the operator actually experienced.
+
+| Issue | Observed pain to remove | Disposition | Sequence |
+|---|---|---|---|
+| #317 `afk finalize` | Post-merge closeout required hand-proving merge reachability, ordering worktree/branch deletion, recovering from Windows `Directory not empty` plus stale worktree metadata, and separately inventorying helper branches that did not match the PRD slug. | Critical direct pipeline-safety command. Consume terminal handoff evidence, default to dry-run, reuse the core Windows-aware worktree remover, and delete only explicit proven candidates. Distinct from `clean-failed` (#19/#168). | After #275; pair with #318 so successful finalization writes the durable completion fact. |
+| #318 durable PRD completion scope | “Is PRD 5 complete?” required reconstructing selected PASS slices, deferred #92, PR #297, issue states, and roadmap prose. A stale sentence could incorrectly reopen the milestone or erase deferred work. | High-priority correctness/observability work. Persist merge-confirmed selected-versus-deferred completion and expose it through status/JSON; roadmap prose cites that record. | Design with #317 and land alongside it or immediately after. |
+| #319 stable ticket/contract anchors | The QA suite split made four prepared tickets stale without changing behavior; one used moved line numbers. A stale locked #87 contract would have required stopping rather than routine repair. | High-priority extension to ADR 0049 lint/preflight: require semantic test/symbol anchors, verify them before lock/resume, and refuse rather than auto-edit a stale lock. | Before the next relaunch of a long-lived prepared PRD. |
+| #320 guardian issue reconciliation | Final review marked earlier architecture findings resolved while #290–#296 remained open, forcing manual artifact-to-issue comparison and overstating remaining defects. | High-priority guardian lifecycle work. Reconcile linked findings across rounds; close only identity-safe, explicitly resolved findings and surface unresolved ones in handoff. | Independent direct work after the PRD 5 ticket reconciliation; does not reopen PRD 5. |
+| #321 `afk explain --latest` | Several quality-loop attempts, cross-repo AFK contention, and a git-process failure had to be reconstructed from multiple large launch logs whose copied prompts/source made text search noisy. | High-priority structured diagnostic view across attempts. Report first cause, consequences, process ownership, liveness, and safe next action without transcript scraping. | After #275 provides authoritative host process ownership. |
+| #322 guarded git-process baseline recorder | Wave A measurement required four quiet-host suites run manually and sequentially, report-by-report copying, and a surgical edit that must not capture traced seconds or change any budget. Starting AFK first would invalidate the host-sensitive evidence for hours. | PRD 12 manual measurement tooling. One resumable command validates fresh reports and updates only `gitProcesses` in the named measured block. | With #239/#250 in PRD 12's next quiet-host measurement wave. |
+| #323 slim always-loaded steering | `AGENTS.md` plus `CLAUDE.md` load roughly 18 KB on every turn; live launch rules compete with duplicated historical incidents and can drift between files. | High-priority manual context-efficiency work. Retain commands and hard guardrails; move—not delete—history/rationale behind tested trigger-based links. | After the immediate lifecycle commands settle, so the compact files point at final behavior. |
 
 ---
 
@@ -414,22 +432,29 @@ GATE: PRD 1 closed + wave merged + tickets linted
        learning-proposal module is on main.
 ```
 
-Post-plan work (§2b–§2d) continues in this order:
+Post-plan work (§2b–§2e) continues in this order:
 
 1. **Complete (2026-09-14):** PRD 5's selected cleaner-only scope merged
    through PR #297. #92 remains an open, deferred hardener follow-up under
    parent #73; it is not unfinished work in the completed milestone.
 2. Land #275 before intentionally running concurrent AFK processes on one
    host; until then, one live run per host.
-3. Run PRD 9's preserve-work recovery before another stale-contract or
+3. Land #319 before relaunching another long-lived prepared PRD; it prevents a
+   harmless test move from becoming another late ticket repair or locked-
+   contract stop.
+4. Run PRD 9's preserve-work recovery before another stale-contract or
    additive re-slice incident needs a hand-built recovery.
-4. PRD 8 is unblocked because #270 is merged. PRDs 10 and 11 then launch
+5. Build #317 and #318 as one closeout/status track, then #320 as the
+   finding-lifecycle follow-up. None reopens PRD 5.
+6. PRD 8 is unblocked because #270 is merged. PRDs 10 and 11 then launch
    as serial self-runs in either order. PRD 10's flag is exercisable the
    day it merges; PRD 11's flag is exercisable on this repo only after
    operator item O1, and its attribution labels earn weight only after O2.
-5. PRD 12 Wave A is complete. Profile the merged baseline before selecting
-   Wave B; work #239 and #250 inside that measurement track, not as new
-   standalone projects. Keep #238 as a direct reporting fix.
+7. PRD 12 Wave A is complete. Use #322 to profile the merged baseline before
+   selecting Wave B; work #239 and #250 inside that measurement track, not
+   as new standalone projects. Keep #238 as a direct reporting fix.
+8. Land #321 after #275, then slim the always-loaded steering under #323
+   after the lifecycle commands and their exact operator guidance settle.
 
 What each stage banks for the runs after it:
 
@@ -500,8 +525,9 @@ The rule of thumb the debate converged on:
 | Hand-finishing stuck slices (until item 10 exists) | **Manual, documented procedure** | Verify with the full suite, merge, then edit state — and prefer waiting for `afk adopt` over fresh JSON surgery on `isSliceComplete` (`run-state.ts:416`). |
 | PRDs 2–7 | **AFK** | Multi-slice, contract-sized feature work where negotiation, lock validation, and gate evidence earn their cost. |
 | PRDs 8–11 (§2b) | **AFK** | Same rule. PRD 9 exercises the recovery path it adds; PRDs 10–11 are additionally the dogfood experiments for their own report-only instruments, so their delivery runs produce the first evidence their §6 triggers consume. |
-| PRD 12 test-suite timing reduction | **Manual**, measured waves | The suite and host are the instrument. Running the optimization through AFK would add the load being measured and make failures depend on the pipeline under repair. Wave A is complete; later waves start only from a quiet-host profile. |
-| Run-derived direct fixes (#272, #275, #284, #286) | **Manual**, isolated worktrees | Each is a focused pipeline-safety or maintainability change smaller than a contract round. They should not depend on AFK to repair AFK; PRD 5's former active-branch exclusion ended when PR #297 merged. |
+| PRD 12 test-suite timing reduction (#239, #250, #322) | **Manual**, measured waves | The suite and host are the instrument. Running the optimization through AFK would add the load being measured and make failures depend on the pipeline under repair. Wave A is complete; later waves start only from a quiet-host profile, with #322 guarding the sequential traced-process campaign. |
+| Run-derived direct fixes (#272, #275, #284, #286, #317–#321) | **Manual**, isolated worktrees | Each is focused pipeline safety, lifecycle correctness, lint, or observability work. They should not depend on AFK to repair or diagnose AFK; PRD 5's former active-branch exclusion ended when PR #297 merged. |
+| Always-loaded steering reduction (#323) | **Manual** | This is a behavior-preserving documentation refactor whose success is measured by retained operational discoverability and lower context load, not by contract negotiation. |
 | Mutation operator work O1–O4 (§2c): tool adoption + cost measurement, baseline campaign, Stage A triage sessions, survivor remediation | **Manual** | The instrument must not be built by the process it measures. Mutation results judge the pipeline's tests, so the pipeline must not generate the tests that satisfy them; "mutant killed" is a gameable criterion, so remediation is never unattended; and the cost measurement is host-sensitive work in ADR 0063's class. |
 | PRD-embedded hardening (items 2, 5, 10, 12, 13, provenance story 1) | **AFK**, as slices of their PRDs | Each is genuine feature work inside a PRD's contract, not pipeline first-aid; splitting them out would re-create the double-counting the debate removed. |
 | Guardian policy (item 20) and provider environment filtering (item 21) | **Manual, between PRDs 3 and 4** | Both changes are small. The guardian change must use PRD 3's measured evidence, and the environment change is security work that should not depend on the pipeline it constrains. Item 21 is sequenced after PRD 3 only to avoid concurrent edits to the provider dispatch files (`src/claude.ts`, `src/codex.ts`, `src/kiro.ts`) while PRD 3's run is live; nothing in it consumes PRD 3's output. |
