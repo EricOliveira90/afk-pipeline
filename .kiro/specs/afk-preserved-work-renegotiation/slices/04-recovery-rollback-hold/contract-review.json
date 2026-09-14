@@ -1,0 +1,87 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03", "B-06", "B-07", "B-08"],
+      "evidence": "\"appends exactly one `ROLLED_BACK` event for that `attemptId`\" (contract B-03); \"a refusal whose message names the `attemptId` and the `snapshotPath`\" (contract B-07); \"a fresh admission afterwards yields a different attemptId and a different snapshot directory\" (manifest B-08)",
+      "expected": "Every identifier the contract makes an observable must be a persisted field the explorer evidence shows existing, or the contract must declare adding it alongside its `sanitizeRecoveryLineage` rule, the way it already does for the three observed-fingerprint fields.",
+      "observed": "The planner's evidence is correct and the finding's premise was not. `attemptId` is the first declared member of `PersistedRecoveryLineageEvent` (`src/run-state.ts:284-286`, \"Opaque per-attempt identity; a retry never reuses one\"), is required non-blank for every state by `sanitizeRecoveryLineage` (`src/run-state.ts:1120`), and is copied forward on load (`src/run-state.ts:1144`); the interface doc comment already fixes B-08's rule (`src/run-state.ts:269-277`). The prior finding rested on the explorer evidence map's field enumeration, which omitted it. The revision took the clear condition's first option: B-03 cites `src/run-state.ts:284-286`, `:1120` and `:1144`; B-06 cites `:284-286` and `:1120`; B-07 cites `:284-286` and `:307-308` for `snapshotPath`; B-08 cites `:284-286` and `:269-277`. \"New patterns / deps / schema\" now states that no attempt-identity field is added and that none of the three declared new fields is one, so the schema declaration and the behaviors agree.",
+      "clearCondition": "Either cite the existing persisted field that carries attempt identity (with its `src/run-state.ts` line range) in B-03/B-06/B-07/B-08, or add it to the \"New patterns / deps / schema\" section and the per-state `sanitizeRecoveryLineage` rule as a declared schema change, or restate those four behaviors and their manifest observables in terms of the identity the evidence does establish (the `PENDING` event's `snapshotPath` and its position in the append-only list).",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-06", "P-04"],
+      "evidence": "\"required non-blank by `sanitizeRecoveryLineage` only when `state` is `ROLLBACK_FAILED` and required absent otherwise\" (contract B-06); observable: \"whose rollbackError, observedContractFingerprint and observedManifestFingerprint round-trip through save/load\" (manifest B-06); \"existing sanitizeRecoveryLineage tests pass unmodified and a new test loads a PENDING-only lineage with no new fields present\" (manifest P-04)",
+      "expected": "This slice changes the accepted input language of the persisted-lineage validator, so the pair must bind both halves of its regression surface: at least one newly accepted input, and the inputs the new rule must now reject. The established harness is inline tests in `src/run-state.test.ts`, so concrete rejected-input scenarios are what is required, not a fixture path.",
+      "observed": "Both halves are now bound. Contract B-06 declares the rule two-directional under ADR 0060 and names each rejection; manifest B-06's `given` adds input family (c) — a `ROLLBACK_FAILED` event missing, then blanking, each of the three fields, eight variants — and family (d) — a `PENDING` carrying `rollbackError` and a `ROLLED_BACK` carrying `observedContractFingerprint`. Its `observableResult` binds them as inline tests in `src/run-state.test.ts`, each asserting the target's whole list degrades to absent per the pre-existing consequence at `src/run-state.ts:1140-1141,1160` and that the same document loads intact once the offending field is corrected, which is what stops a rejection test passing on an unrelated malformation. Manifest P-04 carries the same (d) documents and keeps the accepted-input side; the test plan adds three scenarios that name `src/run-state.test.ts` as the harness. The all-required gate the prior review flagged as merely restated is now separated from the two new branches rather than substituting for them.",
+      "clearCondition": "Add rejected-input evidence for both new branches of the per-state rule — a `ROLLBACK_FAILED` event missing or blanking each required new field, and a `PENDING`/`ROLLED_BACK` event carrying one of the three — as observables on B-06 or P-04 in the manifest and as scenarios in the test plan, naming `src/run-state.test.ts` as the harness.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "BLOCKING",
+      "behaviorIds": ["P-01", "P-02", "P-03", "P-04", "P-05"],
+      "evidence": "manifest P-01 through P-05 each declare \"gateIds\": [\"tests\", \"acceptance:behaviors\", ...]; contract Definition of done: \"Every behavior above has at least one `it` named `[behavior:#333:B-0N]`\"; manifest P-02 observable: \"every existing [behavior:#332:B-0N] test still passes without modification\"",
+      "expected": "A behavior that declares `acceptance:behaviors` must have a test the gate's `--testNamePattern {behaviorId}` can select, so the gate produces evidence about that behavior.",
+      "observed": "The Definition of done now requires an `it` named `[behavior:#333:P-0N]` for every preservation behavior in addition to `[behavior:#333:B-0N]` for the in-scope ones, states why a `P-0N` entry with no test of its own would select zero tests and read as a pass, and states that a `P-0N` test may assert an existing `[behavior:#332:B-0N]`/`[behavior:#277:B-0N]` fact but must carry its own selectable name. Each of P-01 through P-05 names that test in its `observableResult`, and P-02 and P-05 now assert their preserved facts directly (history digest, deleted set, cleared checkpoint, empty contract-finding lineage; transition-map contents entry by entry) rather than only pointing at the older suites. The gate bindings can therefore stay as declared and still produce per-behavior evidence.",
+      "clearCondition": "Either extend the Definition of done to require an `it` named `[behavior:#333:P-0N]` for each preservation behavior, or drop `acceptance:behaviors` from P-01 through P-05 and leave them on the `tests` (and `typecheck`) gates that can actually produce their evidence.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01", "B-03"],
+      "evidence": "manifest B-01 observableResult: \"a test reading the two slice-directory files finds them byte-identical to the snapshot's copies for every one of the five admitted failure triggers\"",
+      "expected": "B-01's observable should vary only over inputs its subject actually takes.",
+      "observed": "B-01's observable is now stated purely over the restore call's own inputs — byte-identity of the two restored files against their snapshot copies plus equality of the resolved directory with `join(repoRoot, ...event.snapshotPath.split(\"/\"))` — and says explicitly that the routine takes no failure trigger, so none is swept there. The five-trigger sweep moved to B-03, whose `given` enumerates the five triggers and whose observable runs the writer once per trigger. The test plan's first scenario split accordingly into a B-01 direct-call scenario and a B-03 five-trigger scenario, so each obligation is proved under its own name.",
+      "clearCondition": "Move the five-trigger sweep to B-01's observable's owner (B-03) and state B-01's observable purely over the restore call's own inputs.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-09"],
+      "evidence": "manifest B-09 observableResult: \"the exported routine is directly unit-tested and the rollback writer contains no second byte or fingerprint comparison of the pair\"; test plan: \"when the rollback writer is read, then it calls `restoreAcceptedPairFromSnapshot` and holds no second compare of its own\"",
+      "expected": "An observable result should be something a test can decide mechanically.",
+      "observed": "B-09 is now decided behaviourally with no source-text inspection: one induced restore obstacle (the same snapshot `contract.md` removed) met through both entry points must yield the same failure identity — the direct call's failure message and observed fingerprints equal the appended `ROLLBACK_FAILED` event's `rollbackError`, `observedContractFingerprint` and `observedManifestFingerprint` — which an independent second compare inside the writer could not keep true. The contract B-09 statement and the test plan's last scenario were restated to match, and both prior source-text wordings are gone.",
+      "clearCondition": "Restate B-09's observable behaviourally — for example, that a single induced restore obstacle produces the identically-shaped failure through both entry points, so the rollback writer demonstrably routes through the shared routine.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-06",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05", "B-01"],
+      "evidence": "manifest B-05 observableResult: \"listLiveNegotiationFiles still returns an empty list\"; contract B-05: \"it writes no live negotiation file that `executeRecoveryAttempt` cleared\"",
+      "expected": "B-05's observable depends on the restored accepted pair being disjoint from the set `listLiveNegotiationFiles` reports, and the contract should cite that disjointness rather than assume it.",
+      "observed": "The cited membership is exact and verifiable: `RECOVERY_NEGOTIATION_FILENAMES` is a closed list at `src/preserve-work-recovery.ts:828-834` holding `context.md`, `contract-review.json`, `contract-response.json`, `contract-negotiation-outcome.json` and `planner-escalation.md`, and `listLiveNegotiationFiles` (`:847-860`) reports exactly that list plus the `feedback-r<N>.md` rounds matching `FEEDBACK_ROUND_FILENAME`. Neither `CONTRACT_FILENAME` nor `ACCEPTANCE_MANIFEST_FILENAME` is a member, so restoring the pair into the same slice directory cannot re-add a live negotiation file. Both contract B-05 and manifest B-05 now carry that citation, and B-05's observable additionally asserts non-membership of both restored filenames and non-match against the round pattern, so the emptiness assertion is not vacuous.",
+      "clearCondition": "Cite the membership of `listLiveNegotiationFiles` in B-05 (naming the files or the line range that fixes the set) so the disjointness B-05's observable rests on is evidenced rather than assumed.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-07",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03"],
+      "evidence": "manifest B-03 observableResult: \"It also asserts the append happened under the lock by driving it through `transactRunState` and observing the reloaded file\"",
+      "expected": "An observable's stated mechanism should be able to decide the fact it claims to decide.",
+      "observed": "Driving the writer through `transactRunState` and then reading the reloaded file observes only that the event was persisted; a writer that appended outside the lock, or that opened its own second transaction, would produce the same reloaded file. The lock obligation the contract states for B-03 (\"inside a `transactRunState` body that reloaded state under the ADR 0056 lock, rechecked the trailing event, and admitted the transition\") is real and worth pinning, but the recheck is the part with an observable consequence — a trailing event that changed between the caller's read and the transaction body must make the append refuse rather than proceed. As written, the lock clause of B-03's observable reports a pass for any implementation that persists the event at all.",
+      "clearCondition": "Restate B-03's lock assertion around the recheck's consequence — for example, that when the target's trailing event is replaced between the caller's read and the writer's transaction the append is refused and no `ROLLED_BACK` is written — or drop the lock clause from B-03's observable and leave the constraint to P-03, which already pins the append-only writer's call shape.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"source\": \"GH #333 AC1, AC2; prd.md:184-187\",\n      \"given\": \"an admitted PENDING attempt and an original failure value for each of provider failure, evaluator non-acceptance, deterministic validation refusal, lock-gate refusal and cancellation\",\n      \"when\": \"rollBackRecoveryAttempt runs and restore plus verification succeed\",\n      \"then\": \"exactly one ROLLED_BACK event for that attemptId is appended inside a transactRunState body that reloaded state under the ADR 0056 lock, rechecked the trailing event and admitted the transition through isLegalRecoveryTransition\",\n      \"observableResult\": \"the persisted lineage for the target ends on one ROLLED_BACK event citing the same attemptId, with the PENDING event still present ahead of it\",",
+        "after": "      \"source\": \"GH #333 AC1/AC2 (prd.md:184-187; src/run-state.ts:284-286, :1120, :1178-1189)\",\n      \"given\": \"the B-01 admitted attempt, and the original failure expressed as an opaque `{ trigger, message }` value, once for each of the five admitted triggers — provider failure, evaluator non-acceptance, deterministic validation refusal, lock-gate refusal, cancellation\",\n      \"when\": \"`rollBackRecoveryAttempt` (new export) runs for each trigger in turn\",\n      \"then\": \"it runs B-01/B-02 and, on verified success, appends exactly one `ROLLED_BACK` event carrying the `attemptId` copied verbatim from the trailing `PENDING` event — the existing required member of `PersistedRecoveryLineageEvent` at `src/run-state.ts:284-286`, already validated non-blank for every state at `:1120` and copied forward on load at `:1144`, so this slice adds no attempt-identity field — inside a `transactRunState` body that reloaded state under the ADR 0056 lock, rechecked the trailing event, and admitted the transition through `isLegalRecoveryTransition`\",\n      \"observableResult\": \"a test named `[behavior:#333:B-03]` runs the writer once per trigger and asserts, for each, that the target's lineage grew by exactly one event, that the new event's `state` is `ROLLED_BACK` and its `attemptId` is string-equal to the trailing `PENDING` event's `attemptId`, and that the appended value round-trips through save/load. It also asserts the append happened under the lock by driving it through `transactRunState` and observing the reloaded file\","
+      }
+    }
+  ]
+}

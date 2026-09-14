@@ -1,0 +1,211 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/preserve-work-recovery.ts",
+      "src/preserve-work-recovery.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #333 AC1 (prd.md:141-142; src/preserve-work-recovery.ts:983-986)",
+      "given": "an admitted attempt whose trailing lineage event is `PENDING`, whose snapshot directory holds the published `contract.md` and `acceptance-manifest.json`, and whose live slice-directory pair has since been reopened and overwritten",
+      "when": "`restoreAcceptedPairFromSnapshot` (new export, `src/preserve-work-recovery.ts`) is called directly for that attempt",
+      "then": "it rewrites `contract.md` and `acceptance-manifest.json` in the target's slice directory from the snapshot bytes, resolving the snapshot directory from the `PENDING` event's recorded `snapshotPath` and never re-deriving it, matching `executeRecoveryAttempt`'s existing locator rule",
+      "observableResult": "a test named `[behavior:#333:B-01]` reads the two slice-directory files after the direct call and finds each byte-identical to its snapshot copy, and asserts the resolved directory equals `join(repoRoot, ...event.snapshotPath.split(\"/\"))`. The observable varies only over the restore call's own inputs — the routine takes no failure trigger, so no trigger is swept here; the five-trigger sweep belongs to B-03",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #333 AC2; prd.md:141-142",
+      "given": "a published snapshot whose contract.md bytes were tampered with after publication",
+      "when": "restoreAcceptedPairFromSnapshot restores and then rereads the destination files",
+      "then": "verification fails because the reread fingerprints do not equal the PENDING event's contractFingerprint/manifestFingerprint, and success is reported only when both files are byte-equal to the snapshot and read back as a valid LOCKED pair",
+      "observableResult": "the routine returns a failure result naming the fingerprint mismatch, and no ROLLED_BACK event exists for the attempt",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #333 AC1/AC2 (prd.md:184-187; src/run-state.ts:284-286, :1120, :1178-1189)",
+      "given": "the B-01 admitted attempt, and the original failure expressed as an opaque `{ trigger, message }` value, once for each of the five admitted triggers — provider failure, evaluator non-acceptance, deterministic validation refusal, lock-gate refusal, cancellation",
+      "when": "`rollBackRecoveryAttempt` (new export) runs for each trigger in turn",
+      "then": "it runs B-01/B-02 and, on verified success, appends exactly one `ROLLED_BACK` event carrying the `attemptId` copied verbatim from the trailing `PENDING` event — the existing required member of `PersistedRecoveryLineageEvent` at `src/run-state.ts:284-286`, already validated non-blank for every state at `:1120` and copied forward on load at `:1144`, so this slice adds no attempt-identity field — inside a `transactRunState` body that reloaded state under the ADR 0056 lock, rechecked the trailing event, and admitted the transition through `isLegalRecoveryTransition`",
+      "observableResult": "a test named `[behavior:#333:B-03]` runs the writer once per trigger and asserts, for each, that the target's lineage grew by exactly one event, that the new event's `state` is `ROLLED_BACK` and its `attemptId` is string-equal to the trailing `PENDING` event's `attemptId`, and that the appended value round-trips through save/load. It also asserts the append happened under the lock by driving it through `transactRunState` and observing the reloaded file",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #333 AC3; ADR 0039",
+      "given": "an admitted PENDING attempt on a preserved worktree with recorded slice-branch and feature-branch heads",
+      "when": "rollBackRecoveryAttempt completes a verified rollback",
+      "then": "the caller's original failure value is returned unchanged and no branch tip, commit or worktree state changed",
+      "observableResult": "the result carries the same failure trigger and message the caller passed in, the two branch heads and the worktree's clean/dirty status are identical before and after, and the module imports no ref-mutating git helper",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors",
+        "typecheck"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #333 AC4 (prd.md:171-175; src/preserve-work-recovery.ts:828-834, :847-860)",
+      "given": "an executed attempt — every live negotiation file already copied into the published `negotiation/` history and deleted from the slice directory by `executeRecoveryAttempt`",
+      "when": "a rollback succeeds and restores the accepted pair into that same slice directory",
+      "then": "the rollback path restores the accepted pair only: it writes no live negotiation file that `executeRecoveryAttempt` cleared, and leaves every byte under the attempt's published `negotiation/` history untouched. The disjointness this rests on is fixed by the closed set `listLiveNegotiationFiles` reports — `RECOVERY_NEGOTIATION_FILENAMES` (`src/preserve-work-recovery.ts:828-834`: `context.md`, `contract-review.json`, `contract-response.json`, `contract-negotiation-outcome.json`, `planner-escalation.md`) plus every `feedback-r<N>.md` round (`:847-860`) — which contains neither `CONTRACT_FILENAME` nor `ACCEPTANCE_MANIFEST_FILENAME`",
+      "observableResult": "a test named `[behavior:#333:B-05]` asserts `listLiveNegotiationFiles(sliceDir)` still returns an empty list and a digest of the published `negotiation/` directory is unchanged, and — so the emptiness is not vacuous — asserts neither restored pair filename is a member of `RECOVERY_NEGOTIATION_FILENAMES` and neither matches the `feedback-r<N>.md` round pattern, pinning the disjointness rather than assuming it",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #333 AC5 (prd.md:143-146; ADR 0060; src/run-state.ts:284-286, :317-342, :1119-1142, :1140-1141, :1160)",
+      "given": "four families of input. (a) A forced restore failure — an unwritable destination, and separately a snapshot file removed. (b) A well-formed persisted `ROLLBACK_FAILED` event. (c) A persisted `ROLLBACK_FAILED` event that is missing `rollbackError`, and again with it present but blank, and again for each of `observedContractFingerprint` and `observedManifestFingerprint`. (d) A persisted `PENDING` event carrying `rollbackError`, and a persisted `ROLLED_BACK` event carrying `observedContractFingerprint`",
+      "when": "for (a) `rollBackRecoveryAttempt` runs; for (b), (c) and (d) the state file is saved and loaded back through `sanitizeRecoveryLineage`",
+      "then": "for (a) it appends exactly one `ROLLBACK_FAILED` event carrying the trailing `PENDING` event's `attemptId` verbatim plus the failure message and the fingerprints observed on disk (an absent file recorded as an explicit absent marker, not a blank), appends no `ROLLED_BACK`, and claims no rollback in its result. The observed facts ride three new **optional** fields — `rollbackError`, `observedContractFingerprint`, `observedManifestFingerprint` — required non-blank when `state` is `ROLLBACK_FAILED` and required absent otherwise, with no `RUN_STATE_VERSION` bump, on the `specsDir` precedent. Because that rule changes the validator's accepted input language, both halves of its regression surface are bound per ADR 0060: (b) loads unchanged, while (c) and (d) are each rejected — a rule enforced in one direction only would still pass every accepted-input test",
+      "observableResult": "a test named `[behavior:#333:B-06]` in `src/preserve-work-recovery.test.ts` asserts, for each forced failure, that the lineage grew by exactly one `ROLLBACK_FAILED` event whose `attemptId` equals the `PENDING` event's, whose `rollbackError` is the failure message, whose `observedContractFingerprint`/`observedManifestFingerprint` are the values actually read from disk (with the explicit absent marker for a missing file), that no `ROLLED_BACK` exists for the attempt, and that the event round-trips through save/load. Tests named `[behavior:#333:B-06]` in `src/run-state.test.ts` bind the rejections inline, as that file's established harness: for each of the eight (c) variants — missing and blank, for each of the three fields — and for each (d) variant, loading the file leaves the target's whole lineage list absent, taking the pre-existing degrade-to-absent consequence at `src/run-state.ts:1140-1141,1160` unchanged. Each rejection test asserts the same document loads intact once the offending field is corrected or removed, so it cannot pass because of an unrelated malformation",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #333 AC6 (prd.md:146; src/run-state.ts:284-286, :307-308)",
+      "given": "run state whose lineage for the target ends on `ROLLBACK_FAILED`, and separately state whose lineage ends on `PENDING`, on `ROLLED_BACK`, and on `COMPLETED`",
+      "when": "`recoveryDispatchRefusal(state, ghIssue)` (new export) is called",
+      "then": "it returns a refusal whose message names that event's `attemptId` and `snapshotPath` — both existing required members of `PersistedRecoveryLineageEvent` (`src/run-state.ts:284-286` and `:307-308`), read off the event and not derived — for the `ROLLBACK_FAILED` case, and `undefined` for each other case. It is exported for #334; this slice wires it into no orchestrator or dispatch call site",
+      "observableResult": "a test named `[behavior:#333:B-07]` asserts the returned message contains the exact `attemptId` and `snapshotPath` strings taken from the trailing event, and asserts `undefined` for the `PENDING`, `ROLLED_BACK` and `COMPLETED` cases. A second assertion greps the diff-visible import graph to confirm no module outside `src/preserve-work-recovery.ts` and its test file imports the export",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #333 AC7/AC8 (prd.md:130, :148; src/run-state.ts:269-277, :284-286; src/preserve-work-recovery.ts:230-264)",
+      "given": "a target whose lineage ends on `ROLLBACK_FAILED` and whose restore obstacle has since been removed",
+      "when": "`rollBackRecoveryAttempt` runs again against the same snapshot, and afterwards a fresh admission is attempted for the same target",
+      "then": "the retry restores and verifies from the same snapshot and appends `ROLLED_BACK` carrying that same event's `attemptId` — the rule `PersistedRecoveryLineageEvent`'s own doc comment already fixes (`src/run-state.ts:269-277`: every terminal event is a new record citing the same `attemptId`, nothing edits or deletes an earlier one, so a retry is always a fresh attempt ID); every other outbound transition from `ROLLBACK_FAILED` is refused by the unedited `LEGAL_RECOVERY_TRANSITIONS`, no path appends a second `PENDING` for an existing attempt, and no existing event is edited or deleted",
+      "observableResult": "a test named `[behavior:#333:B-08]` asserts the appended `ROLLED_BACK` event's `attemptId` is string-equal to the `ROLLBACK_FAILED` event's, asserts every earlier event is still present byte-for-byte at its original index in the append-only list, asserts each non-`ROLLED_BACK` outbound transition from `ROLLBACK_FAILED` is refused, and asserts a fresh admission afterwards produces an event whose `attemptId` differs from that one and whose `snapshotPath` names a different directory",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #333 AC9",
+      "given": "one induced restore obstacle — the same snapshot `contract.md` removed — reachable through both entry points",
+      "when": "the obstacle is met first by a direct `restoreAcceptedPairFromSnapshot` call and then by `rollBackRecoveryAttempt` on an equivalently seeded attempt",
+      "then": "`restoreAcceptedPairFromSnapshot` is the single exported implementation of restore-and-verify: the writer calls it rather than duplicating the compare, so #334's launch-time reconciliation has exactly one routine to call",
+      "observableResult": "a test named `[behavior:#333:B-09]` asserts behaviourally, inspecting no source text: the direct call's failure message and observed fingerprints are equal to the appended `ROLLBACK_FAILED` event's `rollbackError`, `observedContractFingerprint` and `observedManifestFingerprint`. A second, independent compare inside the writer could not keep that identity true, so one induced obstacle producing the identically-shaped failure through both entry points is the mechanical form of the single-implementation obligation",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "ADR 0039; src/preserve-work-recovery.ts:16-19",
+      "given": "every path through `src/preserve-work-recovery.ts` after this slice, including every refusal path and both new terminal-outcome paths",
+      "when": "the module's tests run",
+      "then": "no merge, reset, rebase or other ref mutation is invoked on any path",
+      "observableResult": "a test named `[behavior:#333:P-01]` — carrying its own name so the acceptance gate's `--testNamePattern P-01` selects it rather than reporting a vacuous zero-test pass — asserts the module's import list contains no ref-mutating git helper and that a spy over the git seam records no merge, reset or rebase invocation across the rollback, rollback-failure and dispatch-refusal paths",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #332; src/preserve-work-recovery.ts:968-1060",
+      "given": "an admitted attempt executed through `executeRecoveryAttempt`",
+      "when": "execution runs after this slice merges",
+      "then": "its outcome is unchanged: the published `negotiation/` history, the deletion of exactly the copied live files, and the cleared exact-stage checkpoint and contract-finding lineage",
+      "observableResult": "a test named `[behavior:#333:P-02]` — its own name, so the gate can select it — re-asserts those four facts directly (history digest, the deleted set equal to the pre-execution `listLiveNegotiationFiles` result, the target absent from `stageCheckpoints`, its contract-finding lineage empty) after this slice's exports exist, and every existing `[behavior:#332:B-0N]` test still passes without modification",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "src/run-state.ts:1178-1200",
+      "given": "the new `ROLLED_BACK` and `ROLLBACK_FAILED` writers",
+      "when": "they append",
+      "then": "`appendRecoveryLineageEvent` stays append-only and stays callable only from inside a `transactRunState` body; no `repoRoot`-shaped convenience writer is added",
+      "observableResult": "a test named `[behavior:#333:P-03]` asserts the appended list preserves every prior event at its original index, and asserts `src/run-state.ts` exports no second lineage writer taking a repo root — the module's exported names are enumerated and compared against the pre-slice set plus nothing",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #333 AC5; src/run-state.ts:1093-1164, :1140-1141, :1160",
+      "given": "a `PENDING`-only lineage written in the #277 shape with none of the three new fields present; a lineage containing a malformed event; and a `PENDING` or `ROLLED_BACK` event that carries one of the three new fields",
+      "when": "the state file is loaded",
+      "then": "`sanitizeRecoveryLineage` still loads every #277 `PENDING` event unchanged, still drops a target's whole event list when any event is malformed, and — the newly rejecting half of the same rule — also drops the list when a non-`ROLLBACK_FAILED` event carries one of the three fields, so the per-state check cannot ship enforced in the `ROLLBACK_FAILED` direction only while this behavior reads green",
+      "observableResult": "a test named `[behavior:#333:P-04]` in `src/run-state.test.ts` asserts the #277 `PENDING`-only lineage loads field for field unchanged with the three new fields absent, asserts the pre-existing all-required malformation still degrades the whole list to absent, and asserts the `PENDING`-carries-`rollbackError` and `ROLLED_BACK`-carries-`observedContractFingerprint` documents also degrade to absent while the same documents load intact once the offending field is removed. The existing `sanitizeRecoveryLineage` tests pass unmodified",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #333 AC7/AC8; prd.md:126-131; src/preserve-work-recovery.ts:230-264, :323-348, :457-468, :563-570",
+      "given": "the existing callers of `readLockedAcceptedPair`, `publishAcceptedPairSnapshot`, `admitStaleRenegotiation`, `hasOpenRecoveryAttempt` and `isLegalRecoveryTransition`",
+      "when": "the touched suites run",
+      "then": "all five keep their current signatures and results, and `LEGAL_RECOVERY_TRANSITIONS` is not edited — it already encodes `PENDING -> {ROLLED_BACK, ROLLBACK_FAILED}` and `ROLLBACK_FAILED -> ROLLED_BACK`, which is exactly what this slice needs",
+      "observableResult": "a test named `[behavior:#333:P-05]` asserts the transition map's contents entry by entry against the values `prd.md:126-131` states, and re-asserts each of the five functions' results on a seeded fixture; every existing `[behavior:#277:B-0N]` test still passes without modification",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}

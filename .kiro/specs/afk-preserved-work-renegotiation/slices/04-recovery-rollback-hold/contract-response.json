@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "Took the clear condition's first option: `attemptId` already exists as a required member of `PersistedRecoveryLineageEvent` at `src/run-state.ts:284-286` (\"Opaque per-attempt identity; a retry never reuses one\"), is already required non-blank for every state by `sanitizeRecoveryLineage` at `src/run-state.ts:1120`, and is copied forward on load at `src/run-state.ts:1144`; the doc comment at `src/run-state.ts:269-277` already fixes the rule B-08 relies on (\"Every terminal event is a *new* record citing the same `attemptId`; nothing edits or deletes an earlier one, so a retry is always a fresh attempt ID\"). The finding's Observed enumeration of that interface omits the field. B-03, B-06, B-07 and B-08 now cite the line range, B-07 also cites `snapshotPath` at `src/run-state.ts:307-308`, and \"New patterns / deps / schema\" states explicitly that no attempt-identity field is added and none of the three declared new fields is one."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "Both new branches of the per-state rule now carry rejected-input evidence. Contract B-06 declares the rule as two-directional under ADR 0060 and names each rejection; P-04 declares the second direction as its own newly rejecting half. Manifest B-06 given/when/then adds input families (c) — a `ROLLBACK_FAILED` event missing, then blanking, each of `rollbackError`, `observedContractFingerprint`, `observedManifestFingerprint`, eight variants — and (d) — a `PENDING` carrying `rollbackError` and a `ROLLED_BACK` carrying `observedContractFingerprint`; its observableResult binds them as inline tests in `src/run-state.test.ts`, each asserting the list degrades to absent per the pre-existing consequence at `src/run-state.ts:1140-1141,1160` and that the same document loads intact once the offending field is corrected, so no rejection test can pass on an unrelated malformation. Manifest P-04's observable adds the same two (d) documents. The test plan adds three scenarios naming `src/run-state.test.ts` as the harness."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "Took the clear condition's first option so the gate bindings stay unchanged: the Definition of done now requires an `it` named `[behavior:#333:P-0N]` for every preservation behavior in addition to `[behavior:#333:B-0N]` for the in-scope ones, states why (`--testNamePattern {behaviorId}` selecting zero tests reads as a pass), and states that a `P-0N` test may assert against an existing `[behavior:#332:B-0N]`/`[behavior:#277:B-0N]` fact but must carry its own `[behavior:#333:P-0N]` name to be selectable. Manifest P-01 through P-05 each name that test in their observableResult, and P-02 and P-05 now assert their preserved facts directly rather than only pointing at the older suites."
+    },
+    {
+      "findingId": "F-04",
+      "position": "CONDITION_MET",
+      "evidence": "Manifest B-01's observableResult is now stated purely over the restore call's own inputs — the two restored files byte-identical to their snapshot copies plus the locator equality — and says explicitly that the routine takes no failure trigger so none is swept there. The five-trigger sweep moved to B-03, whose given now enumerates the five triggers and whose observable runs the writer once per trigger. The test plan's first scenario split correspondingly into a B-01 direct-call scenario and a B-03 five-trigger scenario."
+    },
+    {
+      "findingId": "F-05",
+      "position": "CONDITION_MET",
+      "evidence": "B-09's observable is now behavioural and inspects no source text: one induced restore obstacle (the same snapshot `contract.md` removed) met through both entry points must produce the same failure identity — the direct `restoreAcceptedPairFromSnapshot` failure's message and observed fingerprints equal the appended `ROLLBACK_FAILED` event's `rollbackError`, `observedContractFingerprint` and `observedManifestFingerprint` — which a second independent compare inside the writer could not keep true. The contract B-09 statement and the test plan's last scenario were restated to match; the \"contains no second byte or fingerprint comparison\" and \"holds no second compare of its own\" wordings are gone."
+    },
+    {
+      "findingId": "F-06",
+      "position": "CONDITION_MET",
+      "evidence": "B-05 now cites the set's membership rather than assuming disjointness: `RECOVERY_NEGOTIATION_FILENAMES` is a closed list at `src/preserve-work-recovery.ts:828-834` (`context.md`, `contract-review.json`, `contract-response.json`, `contract-negotiation-outcome.json`, `planner-escalation.md`), and `listLiveNegotiationFiles` at `src/preserve-work-recovery.ts:847-860` reports exactly that list plus every `feedback-r<N>.md` round — neither `CONTRACT_FILENAME` nor `ACCEPTANCE_MANIFEST_FILENAME` is a member, so restoring the pair into the same slice directory cannot re-add a live negotiation file. Manifest B-05's observable additionally asserts non-membership of both restored filenames so the \"still returns an empty list\" assertion is not vacuous."
+    }
+  ]
+}
