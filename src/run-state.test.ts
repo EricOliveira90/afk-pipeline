@@ -27,7 +27,11 @@ import {
   cleanerRoundsSpent,
   recordQualityStageOutcome,
   recordQualityStageRound,
+  recoveryLineageFor,
+  appendRecoveryLineageEvent,
+  updateRunState,
   RUN_STATE_VERSION,
+  type PersistedRecoveryLineageEvent,
   type RunState,
 } from "./run-state.js";
 import { cleanerRoundsRemaining, MAX_CLEANER_ROUNDS } from "./bounds.js";
@@ -983,13 +987,14 @@ describe("RunState.appliedWaivers", () => {
 describe("[behavior:#87:B-14] persisted quality stages", () => {
   const REPO_ISSUE = "87";
 
-  it("[behavior:#87:B-14] pins the written schema at 6 and keeps 3-5 assignable", () => {
-    // 5 -> 6 for `qualityStages`, once. `RunState.version` still admits 3, 4
-    // and 5 so a caller or fixture holding an older record keeps compiling,
-    // and nothing reads one of those back out of a loaded state.
-    expect(RUN_STATE_VERSION).toBe(6);
-    const older: RunState["version"][] = [3, 4, 5, 6];
+  it("[behavior:#87:B-14] keeps 6 assignable after the v7 bump moved the written schema past it", () => {
+    // 5 -> 6 added `qualityStages`; 6 -> 7 added `recoveryLineage` (#277 B-10).
+    // `RunState.version` still admits 3 through 6 so a caller or fixture holding
+    // an older record keeps compiling, and nothing reads one of those back out
+    // of a loaded state.
+    const older: RunState["version"][] = [3, 4, 5, 6, 7];
     expect(older).toContain(RUN_STATE_VERSION);
+    expect(RUN_STATE_VERSION).toBeGreaterThanOrEqual(6);
   });
 
   it("[behavior:#87:B-14] reads a version-5 file as \"no stage ran\" and writes nothing", () => {
@@ -1256,5 +1261,262 @@ describe("cross-process run-state locking", () => {
     expect(
       readFileSync(join(repo, ".afk", "state", "conditional.json"), "utf-8"),
     ).toBe(before);
+  });
+});
+
+/**
+ * v7 is purely additive: an append-only, per-issue list of preserved-work
+ * recovery lineage events (#277 B-10). Append-only rather than a mutable summary
+ * because "is an attempt open" and "what did the attempt claim about the tree"
+ * are different questions, and a summary field can only answer the first.
+ */
+describe("[behavior:#277:B-10] persisted recovery lineage", () => {
+  const ISSUE = "277";
+
+  function lineageEvent(
+    overrides: Partial<PersistedRecoveryLineageEvent> = {},
+  ): PersistedRecoveryLineageEvent {
+    return {
+      attemptId: "attempt-1",
+      state: "PENDING",
+      target: { number: "1", ghIssue: ISSUE },
+      reason: "stale lock",
+      extensions: [],
+      provider: "claude-code",
+      sliceBranch: "afk-claude-code/demo-slice-01",
+      sliceHead: "a".repeat(40),
+      featureHead: "b".repeat(40),
+      scopeFingerprint: "c".repeat(64),
+      snapshotPath: ".kiro/specs/demo/slices/01-x/recovery-snapshots/attempt-1",
+      contractFingerprint: "d".repeat(64),
+      manifestFingerprint: "e".repeat(64),
+      recordedAt: "2026-09-14T00:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("[behavior:#277:B-10] pins the written schema at 7 and names the addition in the version block", () => {
+    expect(RUN_STATE_VERSION).toBe(7);
+    const assignable: RunState["version"][] = [3, 4, 5, 6, 7];
+    expect(assignable).toContain(RUN_STATE_VERSION);
+    // ADR 0018 asks for the change to be documented in the same running comment
+    // block, not just for the literal to move.
+    const source = readFileSync(join(process.cwd(), "src", "run-state.ts"), "utf-8");
+    const block = source.slice(
+      source.indexOf("* The schema version every writer emits"),
+      source.indexOf("export const RUN_STATE_VERSION"),
+    );
+    expect(block).toContain("v7");
+    expect(block).toContain("recoveryLineage");
+  });
+
+  it("[behavior:#277:B-10] reads a version-6 file as \"no attempt was admitted\" and writes nothing", () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const onDisk = `${JSON.stringify(
+      {
+        version: 6,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: { "277": { phase: "PASS", branch: "afk/demo-01" } },
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(statePath, onDisk);
+
+    const loaded = loadRunState(repo, "demo");
+
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
+    expect(loaded.recoveryLineage).toBeUndefined();
+    expect(recoveryLineageFor(loaded, ISSUE)).toEqual([]);
+    expect(readFileSync(statePath, "utf8")).toBe(onDisk);
+  });
+
+  it.each([
+    ["a non-object map", { recoveryLineage: [] }],
+    ["a non-array target list", { recoveryLineage: { "277": {} } }],
+    ["a blank attempt id", { recoveryLineage: { "277": [{ attemptId: "" }] } }],
+    [
+      "an unknown state",
+      { recoveryLineage: { "277": [{ attemptId: "x", state: "OPEN" }] } },
+    ],
+    [
+      "a missing target pair",
+      { recoveryLineage: { "277": [{ attemptId: "x", state: "PENDING" }] } },
+    ],
+    [
+      "a non-array extension set",
+      {
+        recoveryLineage: {
+          "277": [
+            {
+              attemptId: "x",
+              state: "PENDING",
+              target: { number: "1", ghIssue: "277" },
+              reason: "r",
+              extensions: "none",
+            },
+          ],
+        },
+      },
+    ],
+  ])(
+    "[behavior:#277:B-10] degrades %s to absent instead of throwing",
+    (_label, fields) => {
+      const adapted = adaptLoadedState(
+        { version: 6, prdSlug: "demo", featureBranch: "feat/demo", slices: {}, ...fields },
+        "demo",
+      );
+
+      expect(adapted.recoveryLineage).toBeUndefined();
+      expect(recoveryLineageFor(adapted, ISSUE)).toEqual([]);
+    },
+  );
+
+  it("[behavior:#277:B-10] round-trips a well-formed event through the focused reader", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const event = lineageEvent();
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, event);
+    });
+
+    expect(recoveryLineageFor(loadRunState(repo, "demo"), ISSUE)).toEqual([event]);
+  });
+
+  it("[behavior:#277:B-11] appends without shortening or rewriting an earlier event", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const first = lineageEvent();
+    const second = lineageEvent({ attemptId: "attempt-1", state: "COMPLETED" });
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, first);
+    });
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, second);
+    });
+
+    const events = recoveryLineageFor(loadRunState(repo, "demo"), ISSUE);
+    expect(events).toEqual([first, second]);
+    // The earlier record is byte-for-byte what it was: a terminal event is a new
+    // record citing the same attempt id, never an edit of the PENDING one.
+    expect(events[0]).toEqual(first);
+  });
+
+  it("[behavior:#277:P-04] preserves every unrelated run-state field when it appends", () => {
+    const repo = makeRepo();
+    const before: RunState = {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      specsDir: ".kiro/specs/demo",
+      scope: {
+        mode: "explicit",
+        slices: [
+          { number: "01", ghIssue: "277" },
+          { number: "02", ghIssue: "278" },
+        ],
+      },
+      slices: {
+        "277": { phase: "PASS", branch: "afk/demo-01", mergedToFeature: false },
+        "278": { phase: "ERROR", error: "boom" },
+      },
+      resume: { "277": { attempts: 2 } },
+      migrations: { pool: ["0070"], claims: { "277": ["0070"] } },
+      approvedBaselines: {
+        "277": { treeId: "t".repeat(40), commit: "c".repeat(40), artifactPath: "a.json" },
+      },
+      appliedWaivers: {
+        "278": [{ riskClass: "migration", path: "m.sql", author: "eric", reason: "ok" }],
+      },
+      finalEvaluations: {
+        "277": {
+          decision: "evaluate",
+          finalTreeId: "f".repeat(40),
+          attempts: [
+            { attempt: 1, candidateTreeId: "f".repeat(40), verdict: "PASS", outcome: "GRADED" },
+          ],
+          invalidatedCandidateTreeIds: [],
+        },
+      },
+      qualityStages: {
+        "277": [
+          {
+            stage: "cleaner",
+            enabled: true,
+            rounds: [
+              {
+                round: 1,
+                attempt: 1,
+                inputTreeId: "i".repeat(40),
+                gateIds: ["clean:format"],
+                outcome: "PASS",
+              },
+            ],
+            outcome: "PASS",
+          },
+        ],
+      },
+    };
+    saveRunState(repo, before);
+    const event = lineageEvent();
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, event);
+    });
+
+    const after = loadRunState(repo, "demo");
+    expect(after).toEqual({ ...before, recoveryLineage: { [ISSUE]: [event] } });
+  });
+
+  it("[behavior:#277:P-03] round-trips a lineage-free file unchanged apart from the version stamp", () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+
+    for (const version of [3, 4, 5, 6] as const) {
+      const document = {
+        version,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        specsDir: ".kiro/specs/demo",
+        scope: { mode: "explicit", slices: [{ number: "01", ghIssue: "277" }] },
+        slices: { "277": { phase: "PASS", branch: "afk/demo-01", mergedToFeature: true } },
+        resume: { "277": { attempts: 1 } },
+        migrations: { pool: ["0070"], claims: {} },
+      };
+      writeFileSync(statePath, `${JSON.stringify(document, null, 2)}\n`);
+
+      const loaded = loadRunState(repo, "demo");
+      expect(loaded.recoveryLineage).toBeUndefined();
+      // Field-by-field equality apart from the stamp writeRunState applies.
+      expect({ ...loaded, version }).toEqual({
+        ...document,
+        slices: document.slices,
+      });
+
+      // And a real write back through the transaction changes only the stamp.
+      updateRunState(repo, "demo", () => {});
+      const rewritten = JSON.parse(readFileSync(statePath, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+      expect(rewritten).toEqual({ ...document, version: RUN_STATE_VERSION });
+      expect(rewritten.recoveryLineage).toBeUndefined();
+    }
   });
 });

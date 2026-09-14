@@ -51,9 +51,18 @@ export interface PersistedSliceState {
  * both keyed by GitHub issue and both optional: the per-slice approved baseline
  * locator below (#91) and `appliedWaivers` (#193). v5 adds a third of the same
  * shape, `finalEvaluations` (#96 B-02/B-09). v6 adds a fourth, `qualityStages`
- * (#87 B-14). `adaptLoadedState` normalizes a v3, v4 or v5 file to it in memory,
+ * (#87 B-14). v7 adds a fifth, `recoveryLineage` (#277 B-10): the append-only
+ * preserved-work recovery attempt events, keyed by GitHub issue — additive for
+ * the same reason the four before it were, and absent on every file written
+ * before a recovery attempt was ever admitted.
+ * `adaptLoadedState` normalizes a v3, v4, v5 or v6 file to it in memory,
  * so a resumed run reads one shape, and `writeRunState` stamps it on every write
  * so a stale caller literal can never reach disk.
+ *
+ * The v7 bump is unconditional for the same reason: "no recovery attempt was
+ * admitted" and "this file predates recovery lineage" are the same fact to every
+ * reader, so a run that never renegotiates a stale pair still persists `7` with
+ * no `recoveryLineage` member (#277 B-10, P-03).
  *
  * The v6 bump is unconditional: a run that declares no `gatePolicy.clean`
  * persists version `6` with no `qualityStages` member, because "no stage ran"
@@ -64,7 +73,7 @@ export interface PersistedSliceState {
  * Exported because it is the one number a reader has to compare against, and a
  * duplicated literal is how two modules disagree about what "current" means.
  */
-export const RUN_STATE_VERSION = 6;
+export const RUN_STATE_VERSION = 7;
 
 /**
  * Where one slice's approved baseline artifact is, and which candidate it
@@ -243,15 +252,77 @@ export function cleanerRoundsSpent(
   return (record?.rounds ?? []).filter((entry) => entry.round >= 1).length;
 }
 
+/**
+ * The four states one preserved-work recovery attempt can be in (#277 B-10/B-11).
+ *
+ * Declared here rather than in `src/preserve-work-recovery.ts` because this is
+ * the persisted shape and run state is what persists it; the *transition* rule
+ * over these states is the recovery module's, so the two never disagree about
+ * which direction is legal by owning the same fact twice.
+ */
+export type RecoveryLineageState =
+  | "PENDING"
+  | "COMPLETED"
+  | "ROLLED_BACK"
+  | "ROLLBACK_FAILED";
+
+/**
+ * One recovery-attempt lineage event as persisted (#277 B-09/B-10).
+ *
+ * Append-only per event rather than a mutable per-target summary, for the reason
+ * {@link PersistedQualityStageRound} is per round: "is an attempt open" and
+ * "what did the attempt that opened claim about the tree" are different
+ * questions, and a summary field can only answer the first. Every terminal event
+ * is a *new* record citing the same `attemptId`; nothing edits or deletes an
+ * earlier one, so a retry is always a fresh attempt ID (#277 B-11).
+ *
+ * Every member is a fact the admitting process verified under the run-state lock
+ * immediately before the append, so a later reconciliation can tell "the tree is
+ * still what was admitted" from "something moved underneath it" without
+ * re-deriving anything.
+ */
+export interface PersistedRecoveryLineageEvent {
+  /** Opaque per-attempt identity; a retry never reuses one. */
+  attemptId: string;
+  state: RecoveryLineageState;
+  /** The canonical `{number, ghIssue}` pair the request resolved to. */
+  target: { number: string; ghIssue: string };
+  /** The operator's `--recovery-reason`, trimmed and otherwise verbatim. */
+  reason: string;
+  /**
+   * Scope extensions this attempt admitted. Always empty until `--extend-scope`
+   * ships (#278); present so a reader never has to tell "no extensions" from
+   * "this record predates extensions".
+   */
+  extensions: string[];
+  /** Provider name from the caller's run identity; run state persists no other. */
+  provider: string;
+  sliceBranch: string;
+  /** Slice-branch tip at admission. */
+  sliceHead: string;
+  /** Feature-branch tip at admission. */
+  featureHead: string;
+  /** SHA-256 of the canonical scope encoding (#277 B-04). */
+  scopeFingerprint: string;
+  /** Repo-relative directory holding the byte-verified accepted-pair snapshot. */
+  snapshotPath: string;
+  /** SHA-256 of the original `contract.md` bytes. */
+  contractFingerprint: string;
+  /** SHA-256 of the original `acceptance-manifest.json` bytes. */
+  manifestFingerprint: string;
+  /** ISO-8601 instant the event was appended. */
+  recordedAt: string;
+}
+
 export interface RunState {
   /**
    * Schema version. Writers emit {@link RUN_STATE_VERSION} and
    * `adaptLoadedState` returns it for every accepted file; the literals `3`,
-   * `4` and `5` stay assignable so callers and fixtures holding an older record
-   * keep compiling, and nothing reads a `3`, `4` or `5` back out of a loaded
-   * state.
+   * `4`, `5` and `6` stay assignable so callers and fixtures holding an older
+   * record keep compiling, and nothing reads a `3`, `4`, `5` or `6` back out of
+   * a loaded state.
    */
-  version: 3 | 4 | 5 | 6;
+  version: 3 | 4 | 5 | 6 | 7;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -336,6 +407,17 @@ export interface RunState {
    * v5 file loads unchanged.
    */
   qualityStages?: Record<string, PersistedQualityStage[]>;
+  /**
+   * Per-slice preserved-work recovery lineage, keyed by GitHub issue — v7's
+   * single addition (#277 B-10). Absent entries read as "no recovery attempt was
+   * ever admitted", so a v3-through-v6 file loads unchanged.
+   *
+   * Read with {@link recoveryLineageFor} and written with
+   * {@link appendRecoveryLineageEvent}; there is deliberately no whole-map
+   * setter, because an event that reached disk outside a locked recheck would be
+   * an admission nothing verified.
+   */
+  recoveryLineage?: Record<string, PersistedRecoveryLineageEvent[]>;
 }
 
 /**
@@ -990,6 +1072,133 @@ export function recordQualityStageOutcome(
   });
 }
 
+const RECOVERY_LINEAGE_STATE_VALUES: ReadonlySet<string> = new Set([
+  "PENDING",
+  "COMPLETED",
+  "ROLLED_BACK",
+  "ROLLBACK_FAILED",
+]);
+
+/**
+ * Keep only well-formed recovery-lineage events (#277 B-10).
+ *
+ * A malformed event degrades the whole target's list to absent rather than only
+ * itself, for the reason {@link sanitizeQualityStages} drops a whole entry: a
+ * dropped `PENDING` would read as "no attempt is open" and let a second
+ * admission through, which is the one outcome this record exists to prevent.
+ * Absence is safe in the other direction — it refuses nothing and loses no
+ * commits, because the snapshot on disk is what an unreferenced attempt leaves
+ * behind and it grants no authority on its own.
+ */
+function sanitizeRecoveryLineage(
+  value: unknown,
+): Record<string, PersistedRecoveryLineageEvent[]> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const nonblank = (field: unknown): field is string =>
+    typeof field === "string" && field.trim() !== "";
+  const out: Record<string, PersistedRecoveryLineageEvent[]> = {};
+  for (const [ghIssue, raw] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(raw)) continue;
+    const events: PersistedRecoveryLineageEvent[] = [];
+    let dropped = false;
+    for (const candidate of raw) {
+      if (typeof candidate !== "object" || candidate === null) {
+        dropped = true;
+        break;
+      }
+      const event = candidate as Partial<
+        Record<keyof PersistedRecoveryLineageEvent, unknown>
+      >;
+      const target = event.target as
+        | Partial<Record<"number" | "ghIssue", unknown>>
+        | undefined;
+      if (
+        !nonblank(event.attemptId) ||
+        !RECOVERY_LINEAGE_STATE_VALUES.has(event.state as string) ||
+        typeof target !== "object" ||
+        target === null ||
+        !nonblank(target.number) ||
+        !nonblank(target.ghIssue) ||
+        typeof event.reason !== "string" ||
+        event.reason.trim() === "" ||
+        !Array.isArray(event.extensions) ||
+        !event.extensions.every(nonblank) ||
+        !nonblank(event.provider) ||
+        !nonblank(event.sliceBranch) ||
+        !nonblank(event.sliceHead) ||
+        !nonblank(event.featureHead) ||
+        !nonblank(event.scopeFingerprint) ||
+        !nonblank(event.snapshotPath) ||
+        !nonblank(event.contractFingerprint) ||
+        !nonblank(event.manifestFingerprint) ||
+        !nonblank(event.recordedAt)
+      ) {
+        dropped = true;
+        break;
+      }
+      events.push({
+        attemptId: event.attemptId,
+        state: event.state as RecoveryLineageState,
+        target: { number: target.number, ghIssue: target.ghIssue },
+        reason: event.reason,
+        extensions: [...(event.extensions as string[])],
+        provider: event.provider,
+        sliceBranch: event.sliceBranch,
+        sliceHead: event.sliceHead,
+        featureHead: event.featureHead,
+        scopeFingerprint: event.scopeFingerprint,
+        snapshotPath: event.snapshotPath,
+        contractFingerprint: event.contractFingerprint,
+        manifestFingerprint: event.manifestFingerprint,
+        recordedAt: event.recordedAt,
+      });
+    }
+    if (dropped || events.length === 0) continue;
+    out[ghIssue] = events;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * One slice's recovery-lineage events, oldest first (#277 B-10). The last event
+ * is the attempt's current state: a trailing `PENDING` is an unresolved attempt,
+ * which is what refuses a second admission for the same target (#277 B-09).
+ */
+export function recoveryLineageFor(
+  state: RunState,
+  ghIssue: string,
+): readonly PersistedRecoveryLineageEvent[] {
+  return state.recoveryLineage?.[ghIssue] ?? [];
+}
+
+/**
+ * Append one recovery-lineage event to a **loaded** run state (#277 B-09/B-10).
+ *
+ * Takes the state rather than a repo root on purpose: the only legal moment to
+ * append is inside a {@link transactRunState} body that has already reloaded the
+ * file under the ADR 0056 lock and rechecked the facts the caller decided on. A
+ * `repoRoot`-shaped convenience writer would be a second path that appends
+ * without that recheck — exactly the unverified admission the protocol forbids.
+ *
+ * Append-only: existing events are copied forward untouched, so no writer can
+ * shorten or rewrite the list (#277 B-11).
+ */
+export function appendRecoveryLineageEvent(
+  state: RunState,
+  ghIssue: string,
+  event: PersistedRecoveryLineageEvent,
+): void {
+  state.version = RUN_STATE_VERSION;
+  state.recoveryLineage = {
+    ...(state.recoveryLineage ?? {}),
+    [ghIssue]: [...(state.recoveryLineage?.[ghIssue] ?? []), event],
+  };
+}
+
 /**
  * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
@@ -1002,7 +1211,9 @@ export function recordQualityStageOutcome(
  * way: a v4 file keeps its locator and its waivers and gains no final
  * evaluation, because it had none. v6 adds `qualityStages` (#87) the same way
  * again: a v5 file with no such member reads as "no stage ran" and the adapter
- * writes nothing. Throws on unknown status strings rather than
+ * writes nothing. v7 adds `recoveryLineage` (#277) the same way once more: a v6
+ * file with no such member reads as "no recovery attempt was admitted".
+ * Throws on unknown status strings rather than
  * silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
@@ -1038,6 +1249,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     appliedWaivers?: unknown;
     finalEvaluations?: unknown;
     qualityStages?: unknown;
+    recoveryLineage?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -1055,7 +1267,8 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     r.version === 3 ||
     r.version === 4 ||
     r.version === 5 ||
-    r.version === 6
+    r.version === 6 ||
+    r.version === 7
   ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
@@ -1071,6 +1284,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
     const finalEvaluations = sanitizeFinalEvaluations(r.finalEvaluations);
     const qualityStages = sanitizeQualityStages(r.qualityStages);
+    const recoveryLineage = sanitizeRecoveryLineage(r.recoveryLineage);
     return {
       version: RUN_STATE_VERSION,
       prdSlug,
@@ -1106,6 +1320,11 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       // writes nothing: "no quality stage ran" and "this file predates quality
       // stages" are the same fact to every reader (#87 B-14).
       ...(qualityStages !== undefined ? { qualityStages } : {}),
+      // v1–v6 files have no such field, so the upgrade leaves it absent and
+      // writes nothing: "no recovery attempt was admitted" and "this file
+      // predates recovery lineage" are the same fact to every reader
+      // (#277 B-10, P-03).
+      ...(recoveryLineage !== undefined ? { recoveryLineage } : {}),
     };
   }
 
