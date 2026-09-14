@@ -14,7 +14,7 @@ import {
 } from "./contract-review.js";
 import { renderPrompt } from "./prompt-template.js";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 const EXPLORER_REQUIRED_SECTIONS = [
   "Files and current behavior",
@@ -178,7 +178,18 @@ export const GENERATOR_CONTEXT_MANIFEST = {
       "gate-evidence",
     ],
   },
-  inlineSizeBudgetBytes: 65_536,
+  /**
+   * The generator's allowance is a *required-input* total since #273, not an
+   * inline-only one: assembled inline bytes plus the exact on-disk UTF-8 size
+   * of every artifact this prompt requires the round to read in full — today
+   * the locked contract pair, which still travels by reference (ADR 0068) but
+   * no longer counts as zero bytes (ADR 0069). The field keeps its name
+   * because every other role still reads it as an inline-only budget and the
+   * stricter-only override rule is shared; only the generator's accounting
+   * changed. 98,304 = 65,536 + 32,768: the pre-#273 inline allowance plus room
+   * for a pair the round has always been required to read.
+   */
+  inlineSizeBudgetBytes: 98_304,
   omittedArtifactClasses: [
     "resolved-findings",
     "passing-logs",
@@ -215,9 +226,21 @@ export interface GeneratorEnvelopeInput {
   repairSituation?: string;
   additionalArtifactIds?: readonly string[];
   inlineSizeBudgetBytes?: number;
+  /**
+   * Absolute root the worktree-relative required-read artifact ids resolve
+   * against — the slice worktree (#273 B-03). An explicit input rather than a
+   * `process.cwd()` assumption, because the orchestrator dispatches the
+   * generator from outside the worktree the pair lives in.
+   *
+   * Omitted, no required-read accounting happens and the round is bounded
+   * inline-only, the way it was before #273: the fields it would produce are
+   * *absent* from the evidence rather than zero. Both orchestrator generator
+   * seams supply it; the callers that omit it assemble no worktree at all.
+   */
+  requiredReadRoot?: string;
 }
 
-export interface GeneratorEnvelopeEvidence {
+export interface GeneratorEnvelopeEvidence extends RequiredInputEvidence {
   role: "generator";
   assembledByteSize: number;
   includedArtifactClasses: string[];
@@ -843,8 +866,39 @@ export type ContextEnvelopeRole =
   | "evaluator-final"
   | "cleaner";
 
-export interface RoleEnvelopeEvidence {
+/**
+ * Additive required-input byte accounting (#273 B-06, ADR 0069).
+ *
+ * Every field is optional and present only for an assembly that actually did
+ * required-read accounting — the generator's, given a `requiredReadRoot`. A
+ * reader that finds them absent must read them as *absent*, never as zero: an
+ * envelope assembled without the accounting counted nothing, which is a
+ * different fact from having counted zero bytes.
+ */
+export interface RequiredInputEvidence {
+  /**
+   * Assembled inline byte weight. Identical to `assembledByteSize`, named
+   * explicitly because "assembled" no longer means "everything the round is
+   * required to read" for this role.
+   */
+  inlineByteSize?: number;
+  /** Bytes of the required-in-full artifacts the prompt names by reference. */
+  requiredReferencedByteSize?: number;
+  /** `inlineByteSize + requiredReferencedByteSize` — what the budget bounds. */
+  requiredInputByteSize?: number;
+  /** The effective allowance the required-input total was asserted against. */
+  allowedByteSize?: number;
+  /** One entry per required-in-full artifact, counted exactly once. */
+  requiredReferencedArtifacts?: RequiredReferencedArtifactWeight[];
+}
+
+export interface RoleEnvelopeEvidence extends RequiredInputEvidence {
   role: PromptAssemblyRole;
+  /**
+   * The assembled *inline* prompt weight, unchanged in meaning by #273: it is
+   * what `src/logger.ts` sums into the run summary's prompt-bytes column, and
+   * the referenced weight is a separate field rather than an addition to it.
+   */
   assembledByteSize: number;
   includedArtifactClasses: string[];
   includedArtifactIds: string[];
@@ -873,6 +927,81 @@ export interface ContextArtifactReference {
    * recorded, never silent; mutually exclusive with `locator`.
    */
   locatorExemption?: string;
+  /**
+   * The prompt requires this artifact read *in full* before the round acts, so
+   * its on-disk UTF-8 size is part of the round's mandatory starting context
+   * and counts toward the role's required-input total (#273, ADR 0069).
+   *
+   * Only for artifacts AFK itself declares required-in-full — the generator's
+   * locked contract pair today. A pointer the prompt merely offers (a
+   * `repair-context` reference) is deliberately *not* marked: counting a
+   * pointer would also make its absence a hard configuration failure, which is
+   * the wrong answer for a `stuck.md` that legitimately does not exist.
+   */
+  requiredInFull?: boolean;
+}
+
+/** One required-in-full artifact and the exact bytes it weighs on disk. */
+export interface RequiredReferencedArtifactWeight {
+  artifactId: string;
+  byteSize: number;
+}
+
+/**
+ * Reads every required-in-full artifact from the worktree and returns its exact
+ * UTF-8 byte weight (#273 B-03/B-04/B-05).
+ *
+ * Fail-closed by construction: a required artifact that cannot be read refuses
+ * prompt preparation as `CONFIGURATION` naming both the artifact id and the
+ * path it was looked for at. The alternative — counting it as zero — is exactly
+ * the accounting #273 exists to end.
+ *
+ * One logical artifact contributes at most once (B-05): a repeated artifact id
+ * is counted on its first appearance, and an artifact whose content is already
+ * inlined in the prompt contributes no referenced weight, because the prompt's
+ * own bytes already carry it.
+ *
+ * `requiredReadRoot` is the absolute root the worktree-relative artifact ids
+ * resolve against, taken as an explicit input rather than assumed from
+ * `process.cwd()`: the orchestrator dispatches from outside the slice worktree.
+ */
+export function measureRequiredReferencedArtifacts(
+  roleLabel: string,
+  requiredReadRoot: string,
+  artifacts: readonly ContextArtifactReference[],
+): RequiredReferencedArtifactWeight[] {
+  const weights: RequiredReferencedArtifactWeight[] = [];
+  const counted = new Set<string>();
+  for (const artifact of artifacts) {
+    if (artifact.requiredInFull !== true) continue;
+    if (counted.has(artifact.artifactId)) continue;
+    counted.add(artifact.artifactId);
+    if (artifact.locator !== undefined) continue;
+    const path = resolve(requiredReadRoot, artifact.artifactId);
+    let content: string;
+    try {
+      content = readFileSync(path, "utf-8");
+    } catch (error) {
+      throw new ContextEnvelopeConfigurationError(
+        `${roleLabel} requires artifact "${artifact.artifactId}" (${artifact.artifactClass}) in full, ` +
+          `but it could not be read at ${path}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    }
+    weights.push({
+      artifactId: artifact.artifactId,
+      byteSize: Buffer.byteLength(content, "utf-8"),
+    });
+  }
+  return weights;
+}
+
+/** Bytes the required-in-full artifacts weigh together. */
+export function requiredReferencedByteSize(
+  weights: readonly RequiredReferencedArtifactWeight[],
+): number {
+  return weights.reduce((total, weight) => total + weight.byteSize, 0);
 }
 
 /**
@@ -1205,6 +1334,7 @@ export interface ContractEvaluatorRevisionEnvelopeInput
 export function envelopeArtifactByteBreakdown(
   prompt: string,
   artifacts: readonly ContextArtifactReference[],
+  requiredReferenced: readonly RequiredReferencedArtifactWeight[] = [],
 ): string {
   const inlined = new Map<string, number>();
   const byReference = new Set<string>();
@@ -1236,20 +1366,57 @@ export function envelopeArtifactByteBreakdown(
   if (byReference.size > 0) {
     parts.push(`by reference: ${[...byReference].sort().join(", ")}`);
   }
+  if (requiredReferenced.length > 0) {
+    parts.push(
+      `required referenced bytes by artifact: ${requiredReferenced
+        .map(({ artifactId, byteSize }) => `${artifactId} ${byteSize}`)
+        .join(", ")}`,
+    );
+  }
   return parts.join("; ");
 }
 
+/**
+ * Asserts the round fits its allowance and returns the assembled *inline* byte
+ * weight.
+ *
+ * Two accountings, chosen by whether the caller measured required-in-full
+ * artifacts at all:
+ *
+ * - `requiredReferenced` omitted — inline-only, byte-for-byte the behavior every
+ *   role had before #273 and the behavior every non-generator role keeps
+ *   (P-02). The refusal message is unchanged.
+ * - `requiredReferenced` supplied (possibly empty) — the required-input
+ *   accounting: inline bytes plus referenced bytes against the allowance, with
+ *   the refusal naming all four totals and every per-artifact weight, because
+ *   an operator reading an overflow has to be able to see which term overran
+ *   without rebuilding the round by hand (#196, ADR 0062 decision 4).
+ */
 export function assertEnvelopeBudget(
   roleLabel: string,
   prompt: string,
   allowedByteSize: number,
   artifacts: readonly ContextArtifactReference[] = [],
+  requiredReferenced?: readonly RequiredReferencedArtifactWeight[],
 ): number {
   const assembledByteSize = Buffer.byteLength(prompt, "utf-8");
-  if (assembledByteSize > allowedByteSize) {
+  if (requiredReferenced === undefined) {
+    if (assembledByteSize > allowedByteSize) {
+      throw new ContextEnvelopeConfigurationError(
+        `${roleLabel} prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes ` +
+          `(${envelopeArtifactByteBreakdown(prompt, artifacts)})`,
+      );
+    }
+    return assembledByteSize;
+  }
+  const referenced = requiredReferencedByteSize(requiredReferenced);
+  const requiredInput = assembledByteSize + referenced;
+  if (requiredInput > allowedByteSize) {
     throw new ContextEnvelopeConfigurationError(
-      `${roleLabel} prompt exceeds inline-size budget: actual ${assembledByteSize} bytes, allowed ${allowedByteSize} bytes ` +
-        `(${envelopeArtifactByteBreakdown(prompt, artifacts)})`,
+      `${roleLabel} prompt exceeds required-input budget: inline ${assembledByteSize} bytes, ` +
+        `required referenced ${referenced} bytes, required-input total ${requiredInput} bytes, ` +
+        `allowed ${allowedByteSize} bytes ` +
+        `(${envelopeArtifactByteBreakdown(prompt, artifacts, requiredReferenced)})`,
     );
   }
   return assembledByteSize;
@@ -1292,6 +1459,16 @@ export function assembleContextEnvelope(input: {
    * manifest budget is silently clamped to the manifest budget.
    */
   inlineSizeBudgetBytes?: number;
+  /**
+   * Measured weights of the artifacts this role's prompt requires read in full
+   * (#273). Present switches the budget from inline-only to required-input
+   * accounting and puts the four totals plus per-artifact weights on both the
+   * evidence and any refusal; absent leaves the inline-only accounting every
+   * role had before #273 (P-02). Measurement is the caller's — assembly does no
+   * filesystem read — so a role that has to reserve the referenced weight before
+   * sizing a block can measure once and pass the same weights here.
+   */
+  requiredReferencedArtifacts?: readonly RequiredReferencedArtifactWeight[];
   roleLabel?: string;
 }): RoleEnvelopeResult {
   validateContextEnvelopeManifest(input.manifest);
@@ -1334,16 +1511,29 @@ export function assembleContextEnvelope(input: {
     normalizedPrompt,
     orderedArtifacts,
   );
+  const required = input.requiredReferencedArtifacts;
+  const inlineByteSize = assertEnvelopeBudget(
+    input.roleLabel ?? input.manifest.role,
+    normalizedPrompt,
+    effectiveBudget,
+    orderedArtifacts,
+    required,
+  );
   return {
     prompt: normalizedPrompt,
     evidence: {
       role: input.manifest.role,
-      assembledByteSize: assertEnvelopeBudget(
-        input.roleLabel ?? input.manifest.role,
-        normalizedPrompt,
-        effectiveBudget,
-        orderedArtifacts,
-      ),
+      assembledByteSize: inlineByteSize,
+      ...(required === undefined
+        ? {}
+        : {
+            inlineByteSize,
+            requiredReferencedByteSize: requiredReferencedByteSize(required),
+            requiredInputByteSize:
+              inlineByteSize + requiredReferencedByteSize(required),
+            allowedByteSize: effectiveBudget,
+            requiredReferencedArtifacts: [...required],
+          }),
       includedArtifactClasses: orderedArtifacts.map(
         ({ artifactClass }) => artifactClass,
       ),
@@ -2081,8 +2271,16 @@ export function mergeResolutionBlockRoom(
     ...input,
     mode: "repair",
     repairSituation: withMergeResolutionSituation(input.repairSituation, ""),
-  }).prompt;
-  return budget - Buffer.byteLength(empty.replace(/\r\n?/g, "\n"), "utf-8");
+  });
+  // The required referenced weight is reserved here for the same reason the
+  // commit log reserves it (#273 B-02): room measured against inline bytes
+  // alone would hand the block bytes the required-input budget has already
+  // spent on the pair.
+  return (
+    budget -
+    Buffer.byteLength(empty.prompt.replace(/\r\n?/g, "\n"), "utf-8") -
+    (empty.evidence.requiredReferencedByteSize ?? 0)
+  );
 }
 
 export function assembleGeneratorEnvelope(
@@ -2116,6 +2314,42 @@ export function assembleGeneratorEnvelope(
     FAILURE_SET: failureSet,
   };
   const additionalArtifactIds = input.additionalArtifactIds ?? [];
+  /**
+   * The locked pair: still by reference (#269, ADR 0068), and since #273 also
+   * declared required-in-full, so its exact on-disk size is part of the round's
+   * required-input total (ADR 0069).
+   *
+   * Hoisted above the render because the repair round's commit-log room has to
+   * reserve those bytes before it can be computed (B-02), and measured exactly
+   * once so the room calculation and the budget assertion cannot disagree about
+   * what the pair weighs.
+   */
+  const requiredPairArtifacts: ContextArtifactReference[] = [
+    {
+      artifactClass: "contract-view",
+      artifactId: `${input.sliceDir}/contract.md`,
+      locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
+      requiredInFull: true,
+    },
+    {
+      artifactClass: "acceptance-manifest",
+      artifactId: `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`,
+      locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
+      requiredInFull: true,
+    },
+  ];
+  const requiredReferenced =
+    input.requiredReadRoot === undefined
+      ? undefined
+      : measureRequiredReferencedArtifacts(
+          "Generator",
+          input.requiredReadRoot,
+          requiredPairArtifacts,
+        );
+  const referencedWeight =
+    requiredReferenced === undefined
+      ? 0
+      : requiredReferencedByteSize(requiredReferenced);
   /**
    * The repair situation is sized to the room the round's other blocks leave it
    * (#230), so a repair round can never be refused for carrying too much of its
@@ -2158,7 +2392,11 @@ export function assembleGeneratorEnvelope(
             Buffer.byteLength(
               withoutCommitLog.replace(/\r\n?/g, "\n"),
               "utf-8",
-            );
+            ) -
+            // Reserved before the log is bounded (#273 B-02): the pair's bytes
+            // are mandatory starting context, so they are not room the commit
+            // log may spend.
+            referencedWeight;
           return withRepairSituationCommitLog(
             projected,
             boundRepairSituationCommitLog(commitLog, room),
@@ -2192,16 +2430,7 @@ export function assembleGeneratorEnvelope(
       locatorExemption:
         "repair-context artifacts travel by reference; the repair situation points at them rather than quoting them (#230)",
     })),
-    {
-      artifactClass: "contract-view",
-      artifactId: `${input.sliceDir}/contract.md`,
-      locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
-    },
-    {
-      artifactClass: "acceptance-manifest",
-      artifactId: `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`,
-      locatorExemption: CONTRACT_PAIR_BY_REFERENCE,
-    },
+    ...requiredPairArtifacts,
     {
       artifactClass: "verification-command",
       artifactId: "generator:test-command",
@@ -2253,6 +2482,9 @@ export function assembleGeneratorEnvelope(
     ...(input.inlineSizeBudgetBytes === undefined
       ? {}
       : { inlineSizeBudgetBytes: input.inlineSizeBudgetBytes }),
+    ...(requiredReferenced === undefined
+      ? {}
+      : { requiredReferencedArtifacts: requiredReferenced }),
     roleLabel: "Generator",
   }) as GeneratorEnvelopeResult;
 }

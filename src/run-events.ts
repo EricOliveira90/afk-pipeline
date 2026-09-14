@@ -105,11 +105,40 @@ export type RunEventPayload =
       sliceNumber: string;
       round: number;
       role: PromptAssemblyRole;
+      /**
+       * The assembled *inline* prompt weight. Unchanged in meaning by #273 —
+       * it is what `src/logger.ts` sums into the run summary's prompt-bytes
+       * column — and the required referenced weight below is a separate field
+       * rather than an addition to it.
+       */
       assembledByteSize: number;
       includedArtifactClasses: string[];
       includedArtifactIds: string[];
       omittedArtifactClasses: string[];
       contextManifestVersion: number;
+      /**
+       * Required-input byte accounting (#273 B-06, ADR 0069). All five are
+       * additive and optional: a role that does no required-read accounting,
+       * and every event journaled before #273, carries none of them, and a
+       * reader must treat absence as *absent* — never as 0. Counting nothing
+       * and counting zero bytes are different facts.
+       *
+       * - `inlineByteSize` — the same inline weight as `assembledByteSize`,
+       *   named so the total below is readable without knowing that history.
+       * - `requiredReferencedByteSize` — bytes of the artifacts the prompt
+       *   requires read in full and names by reference.
+       * - `requiredInputByteSize` — inline plus referenced; the total the
+       *   budget bounds.
+       * - `allowedByteSize` — the effective allowance it was asserted against,
+       *   after any stricter-only project override.
+       * - `requiredReferencedArtifacts` — one entry per required referenced
+       *   artifact, counted exactly once.
+       */
+      inlineByteSize?: number;
+      requiredReferencedByteSize?: number;
+      requiredInputByteSize?: number;
+      allowedByteSize?: number;
+      requiredReferencedArtifacts?: { artifactId: string; byteSize: number }[];
     }
   | {
       /**

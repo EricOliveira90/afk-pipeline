@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import type { AgentProvider } from "./agent-provider.js";
 import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
@@ -11,6 +11,9 @@ import {
   GENERATOR_CONTEXT_MANIFEST,
   MERGE_RESOLUTION_SITUATION_SECTION,
   PLANNER_CONTEXT_MANIFEST,
+  ContextEnvelopeConfigurationError,
+  assertEnvelopeBudget,
+  measureRequiredReferencedArtifacts,
   assembleContractEvaluatorInitialEnvelope,
   assembleContractEvaluatorRevisionEnvelope,
   assembleContextEnvelope,
@@ -37,7 +40,15 @@ import { boundMergeResolutionBlock } from "./merge-resolution.js";
 import type { ContractReviewFinding } from "./contract-review.js";
 import { formatContractReviewFindings } from "./contract-review.js";
 import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
-import { readFileSync, readdirSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -2033,12 +2044,13 @@ describe("generator locked pair size (#269)", () => {
     expect(pairBytes).toBeGreaterThanOrEqual(63_000);
     const result = assembleInitial();
     const otherBlockBytes = result.evidence.assembledByteSize;
-    expect(pairBytes + otherBlockBytes).toBeGreaterThan(
-      GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
-    );
+    // 65,536 as a literal, not the manifest's current value: this is the budget
+    // #269 died against, and #273 raised the manifest to 98,304 without making
+    // that history less true (ADR 0069).
+    expect(pairBytes + otherBlockBytes).toBeGreaterThan(65_536);
   });
 
-  it("fits under the 65,536-byte budget with the pair by reference", () => {
+  it("fits under the manifest budget with the pair by reference", () => {
     const result = assembleInitial();
 
     expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
@@ -2083,13 +2095,13 @@ describe("generator locked pair size (#269)", () => {
         sliceDir,
         contractView,
         acceptanceManifest: fatManifest,
-        patternsAndHarness: "P".repeat(70_000),
+        patternsAndHarness: "P".repeat(100_000),
         testCommand: "pnpm test:fast",
         migrationReservation: "NO-MIGRATIONS",
         failureSet: { findings: [], gates: [] },
       }),
     ).toThrow(
-      /inlined bytes by artifact class: patterns-and-harness 70000.*; by reference: acceptance-manifest, contract-view/,
+      /inlined bytes by artifact class: patterns-and-harness 100000.*; by reference: acceptance-manifest, contract-view/,
     );
   });
 });
@@ -2304,7 +2316,9 @@ describe("generator repair situation size (#230)", () => {
       GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
     );
     expect(stricter.evidence.assembledByteSize).toBeLessThanOrEqual(32_768);
-    expect(GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes).toBe(65_536);
+    // 98,304 since #273: the same ceiling, now denominated in required input
+    // rather than inline bytes alone (ADR 0069).
+    expect(GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes).toBe(98_304);
   });
 
   it("a quote whose file is not carried by reference stays inline", () => {
@@ -3305,5 +3319,575 @@ describe("[behavior:#87:B-12] the cleaner role contract", () => {
     expect(() =>
       renderPrompt("cleaner", { ...CLEANER_PROMPT_ARGS, TEST_COMMAND: "x" }),
     ).toThrow(/does not reference it/);
+  });
+});
+
+/**
+ * #273: the generator's budget counts required input, not inline bytes alone.
+ *
+ * ADR 0068 moved the locked pair by reference and left the 65,536-byte
+ * assertion measuring inline bytes only, so the round's mandatory reading — two
+ * files every generator prompt requires opened in full before writing — counted
+ * as zero. A pair of 63,970 bytes and a pair of 600 bytes produced the same
+ * number, which is a budget the pipeline can pass and the round cannot survive.
+ * ADR 0069 narrows that reading: the allowance is 98,304 bytes of *required
+ * input*, and the pair still travels by reference while weighing exactly what it
+ * weighs on disk.
+ */
+describe("generator required-input budget (#273)", () => {
+  const sliceDir = ".kiro/specs/budget-prd/slices/01-required-input";
+  const requiredReadRoot = mkdtempSync(
+    join(tmpdir(), "afk-required-input-budget-"),
+  );
+  const contractPath = join(requiredReadRoot, sliceDir, "contract.md");
+  const manifestPath = join(
+    requiredReadRoot,
+    sliceDir,
+    "acceptance-manifest.json",
+  );
+
+  /** Writes a pair of exactly these UTF-8 byte sizes and returns their sum. */
+  const writePair = (contractBytes: number, manifestBytes: number): number => {
+    mkdirSync(dirname(contractPath), { recursive: true });
+    writeFileSync(contractPath, "C".repeat(contractBytes));
+    writeFileSync(manifestPath, "M".repeat(manifestBytes));
+    return contractBytes + manifestBytes;
+  };
+
+  type GeneratorInput = Parameters<typeof assembleGeneratorEnvelope>[0];
+  const generatorInput = (
+    overrides: Partial<GeneratorInput> = {},
+  ): GeneratorInput => ({
+    mode: "initial",
+    sliceDir,
+    contractView: "LOCKED-CONTRACT-VIEW",
+    acceptanceManifest,
+    patternsAndHarness: "PATTERNS-AND-HARNESS",
+    testCommand: "pnpm run typecheck && pnpm test:fast",
+    migrationReservation: "New migration files: 0",
+    failureSet: { findings: [], gates: [] },
+    requiredReadRoot,
+    ...overrides,
+  });
+
+  afterAll(() => {
+    rmSync(requiredReadRoot, { recursive: true, force: true });
+  });
+
+  it("[behavior:#273:B-01] assembles at exactly 98,304 required-input bytes and refuses 98,305", () => {
+    const pairBytes = writePair(30_000, 10_000);
+    expect(GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes).toBe(98_304);
+
+    // Probe the round's fixed cost, then pad the one free block to land on the
+    // boundary exactly. The padding is ASCII, so a byte of padding is a byte of
+    // required input.
+    const probe = assembleGeneratorEnvelope(
+      generatorInput({ patternsAndHarness: "P" }),
+    );
+    expect(probe.evidence.requiredReferencedByteSize).toBe(pairBytes);
+    const padding = 98_304 - probe.evidence.requiredInputByteSize! + 1;
+    const exact = assembleGeneratorEnvelope(
+      generatorInput({ patternsAndHarness: "P".repeat(padding) }),
+    );
+
+    expect(exact.evidence.requiredInputByteSize).toBe(98_304);
+    expect(exact.evidence.allowedByteSize).toBe(98_304);
+    expect(exact.evidence.inlineByteSize).toBe(98_304 - pairBytes);
+    // The inline weight alone is far under the allowance: the pair is what the
+    // boundary is made of, which is the whole point of counting it.
+    expect(exact.evidence.inlineByteSize).toBeLessThan(65_536);
+    expect(exact.evidence.assembledByteSize).toBe(
+      exact.evidence.inlineByteSize,
+    );
+
+    const overByOne = generatorInput({
+      patternsAndHarness: "P".repeat(padding + 1),
+    });
+    expect(() => assembleGeneratorEnvelope(overByOne)).toThrow(
+      ContextEnvelopeConfigurationError,
+    );
+    expect(() => assembleGeneratorEnvelope(overByOne)).toThrow(
+      /required-input total 98305 bytes, allowed 98304 bytes/,
+    );
+  });
+
+  it("[behavior:#273:B-02] a repair round reserves the referenced weight before it bounds its commit log", () => {
+    const pairBytes = writePair(30_000, 10_000);
+    const commitEntry = (index: number): string =>
+      [
+        `commit ${String(index).padStart(40, "0")}`,
+        "Author: Generator <generator@example.com>",
+        "Date:   Sun Sep 14 09:12:50 2026 -0300",
+        "",
+        `    feat(budget): behavior B-${index} (#273)`,
+        "",
+        " src/context-envelope.ts | 42 ++++++++++++++++++++++++++++",
+        "",
+      ].join("\n");
+    const commitLog = Array.from({ length: 1_000 }, (_unused, index) =>
+      commitEntry(index),
+    ).join("");
+    const repairInput = generatorInput({
+      mode: "repair",
+      repairSituation: [
+        "Implementation round: 4 of 5.",
+        "# Commit log",
+        commitLog,
+        "# Worktree state",
+        "Your worktree was reset to your last commit.",
+      ].join("\n\n"),
+    });
+
+    // The pre-slice calculation, exactly: with no required-read root the room is
+    // measured against inline bytes alone and the pair costs nothing.
+    const { requiredReadRoot: _unused, ...preSliceInput } = repairInput;
+    const preSlice = assembleGeneratorEnvelope(preSliceInput);
+    const now = assembleGeneratorEnvelope(repairInput);
+
+    expect(now.evidence.requiredReferencedByteSize).toBe(pairBytes);
+    expect(preSlice.evidence.requiredReferencedByteSize).toBeUndefined();
+    // Both rounds bound the log — the comparison is about room, not headroom.
+    expect(preSlice.prompt).toContain("older commits omitted");
+    expect(now.prompt).toContain("older commits omitted");
+    // The reserved bytes come out of the commit log. Granularity is one whole
+    // commit entry, because the bound drops commits rather than splitting one.
+    const shrink =
+      preSlice.evidence.assembledByteSize - now.evidence.assembledByteSize;
+    expect(
+      Math.abs(shrink - pairBytes),
+      `shrank ${shrink} bytes for a ${pairBytes}-byte pair`,
+    ).toBeLessThan(Buffer.byteLength(commitEntry(0), "utf-8"));
+    // The round the reservation produced fits, totals included — which the
+    // inline-only calculation could not promise.
+    expect(now.evidence.requiredInputByteSize).toBeLessThanOrEqual(98_304);
+    expect(preSlice.evidence.assembledByteSize + pairBytes).toBeGreaterThan(
+      98_304,
+    );
+    // `git log` is newest-first, so the newest commit survives the bound.
+    expect(now.prompt).toContain(`commit ${"0".repeat(40)}`);
+    expect(now.prompt).toContain("Your worktree was reset to your last commit.");
+  });
+
+  it("[behavior:#273:B-03] the pair contributes its exact on-disk UTF-8 size and stays by reference", () => {
+    writePair(4_097, 2_049);
+    const result = assembleGeneratorEnvelope(generatorInput());
+
+    const contractBytes = Buffer.byteLength(
+      readFileSync(contractPath, "utf-8"),
+      "utf-8",
+    );
+    const manifestBytes = Buffer.byteLength(
+      readFileSync(manifestPath, "utf-8"),
+      "utf-8",
+    );
+    expect(contractBytes).toBe(4_097);
+    expect(result.evidence.requiredReferencedByteSize).toBe(
+      contractBytes + manifestBytes,
+    );
+    expect(result.evidence.requiredReferencedArtifacts).toEqual([
+      { artifactId: `${sliceDir}/contract.md`, byteSize: contractBytes },
+      {
+        artifactId: `${sliceDir}/acceptance-manifest.json`,
+        byteSize: manifestBytes,
+      },
+    ]);
+    // Counted, not copied: neither file's body is anywhere in the prompt, and
+    // both are still named at their worktree paths.
+    expect(result.prompt).not.toContain("C".repeat(64));
+    expect(result.prompt).not.toContain("M".repeat(64));
+    expect(result.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/contract.md`,
+    );
+    expect(result.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/acceptance-manifest.json`,
+    );
+
+    // The root is an explicit input, not a `process.cwd()` assumption: the
+    // orchestrator dispatches from outside the worktree the pair lives in.
+    expect(() =>
+      assembleGeneratorEnvelope(
+        generatorInput({ requiredReadRoot: join(requiredReadRoot, "nowhere") }),
+      ),
+    ).toThrow(ContextEnvelopeConfigurationError);
+  });
+
+  it("[behavior:#273:P-01] the counted pair still travels by reference, never as a locator", () => {
+    writePair(1_000, 1_000);
+    // The breakdown lists an artifact under "by reference" only when it carries
+    // no locator, so an inlined pair could not produce this line — and the
+    // required weights are reported beside it rather than instead of it.
+    let message = "";
+    try {
+      assembleGeneratorEnvelope(
+        generatorInput({ patternsAndHarness: "P".repeat(100_000) }),
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain(
+      "by reference: acceptance-manifest, contract-view",
+    );
+    expect(message).toContain(
+      `required referenced bytes by artifact: ${sliceDir}/contract.md 1000, ${sliceDir}/acceptance-manifest.json 1000`,
+    );
+    // FILE_SCOPE is still a projection of the manifest, not a copy of the file.
+    const assembled = assembleGeneratorEnvelope(generatorInput());
+    expect(assembled.prompt).toContain("- `src/feature.ts`");
+    expect(assembled.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
+  });
+
+  it("[behavior:#273:B-04] a missing required artifact refuses the round instead of counting it as zero", () => {
+    writePair(500, 500);
+    rmSync(manifestPath);
+
+    let caught: unknown;
+    try {
+      assembleGeneratorEnvelope(generatorInput());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ContextEnvelopeConfigurationError);
+    const message = (caught as Error).message;
+    // Both the artifact id and the path it was looked for at: a reader must not
+    // have to guess which root the relative id resolved against.
+    expect(message).toContain(`${sliceDir}/acceptance-manifest.json`);
+    expect(message).toContain(manifestPath);
+    expect(message).toContain("could not be read");
+
+    // A repair-context reference is a pointer the prompt offers, not an artifact
+    // it requires in full, so an absent `stuck.md` still assembles.
+    writePair(500, 500);
+    const withAbsentPointer = assembleGeneratorEnvelope(
+      generatorInput({
+        mode: "repair",
+        repairSituation: "Implementation round: 2 of 3.",
+        additionalArtifactIds: [`${sliceDir}/stuck.md`],
+      }),
+    );
+    expect(withAbsentPointer.evidence.requiredReferencedByteSize).toBe(1_000);
+    expect(withAbsentPointer.evidence.includedArtifactIds).toContain(
+      `${sliceDir}/stuck.md`,
+    );
+    expect(
+      withAbsentPointer.evidence.requiredReferencedArtifacts?.map(
+        ({ artifactId }) => artifactId,
+      ),
+    ).not.toContain(`${sliceDir}/stuck.md`);
+  });
+
+  it("[behavior:#273:P-04] a refused preparation keeps failureKind CONFIGURATION and its message prefix", () => {
+    const overflow = (): unknown => {
+      writePair(800, 800);
+      try {
+        assembleGeneratorEnvelope(
+          generatorInput({ patternsAndHarness: "P".repeat(100_000) }),
+        );
+      } catch (error) {
+        return error;
+      }
+      throw new Error("expected the overflow to refuse");
+    };
+    const missingArtifact = (): unknown => {
+      writePair(800, 800);
+      rmSync(manifestPath);
+      try {
+        assembleGeneratorEnvelope(generatorInput());
+      } catch (error) {
+        return error;
+      }
+      throw new Error("expected the missing artifact to refuse");
+    };
+
+    for (const error of [overflow(), missingArtifact()]) {
+      expect(error).toBeInstanceOf(ContextEnvelopeConfigurationError);
+      expect((error as ContextEnvelopeConfigurationError).failureKind).toBe(
+        "CONFIGURATION",
+      );
+      expect((error as Error).message.startsWith("CONFIGURATION: ")).toBe(true);
+    }
+  });
+
+  it("[behavior:#273:B-05] one logical artifact is counted at most once", () => {
+    const pairBytes = writePair(3_000, 1_500);
+    const plain = assembleGeneratorEnvelope(
+      generatorInput({
+        mode: "repair",
+        repairSituation: "Implementation round: 2 of 3.",
+      }),
+    );
+    // The same logical artifacts reached a second time, as repair-context
+    // pointers.
+    const duplicated = assembleGeneratorEnvelope(
+      generatorInput({
+        mode: "repair",
+        repairSituation: "Implementation round: 2 of 3.",
+        additionalArtifactIds: [
+          `${sliceDir}/contract.md`,
+          `${sliceDir}/acceptance-manifest.json`,
+        ],
+      }),
+    );
+    expect(plain.evidence.requiredReferencedByteSize).toBe(pairBytes);
+    expect(duplicated.evidence.requiredReferencedByteSize).toBe(pairBytes);
+    expect(duplicated.evidence.requiredReferencedArtifacts).toHaveLength(2);
+
+    // The rule at the seam that owns it: a repeated id counts on its first
+    // appearance, and content already inlined carries its bytes in the prompt
+    // rather than twice.
+    expect(
+      measureRequiredReferencedArtifacts("Generator", requiredReadRoot, [
+        {
+          artifactClass: "contract-view",
+          artifactId: `${sliceDir}/contract.md`,
+          locatorExemption: "by reference",
+          requiredInFull: true,
+        },
+        {
+          artifactClass: "contract-view",
+          artifactId: `${sliceDir}/contract.md`,
+          locatorExemption: "by reference",
+          requiredInFull: true,
+        },
+        {
+          artifactClass: "acceptance-manifest",
+          artifactId: `${sliceDir}/acceptance-manifest.json`,
+          locator: "ALREADY-INLINED",
+          requiredInFull: true,
+        },
+        {
+          artifactClass: "repair-context",
+          artifactId: `${sliceDir}/stuck.md`,
+          locatorExemption: "a pointer is not a requirement",
+        },
+      ]),
+    ).toEqual([{ artifactId: `${sliceDir}/contract.md`, byteSize: 3_000 }]);
+  });
+
+  it("[behavior:#273:B-06] the prompt-assembly event additively records the byte accounting", () => {
+    const pairBytes = writePair(2_500, 1_250);
+    const result = assembleGeneratorEnvelope(generatorInput());
+    const event = {
+      type: "prompt-assembly",
+      ghIssue: "273",
+      sliceNumber: "01",
+      round: 1,
+      ...result.evidence,
+    } satisfies RunEventPayload;
+
+    expect(event.inlineByteSize).toBe(result.evidence.assembledByteSize);
+    expect(event.requiredReferencedByteSize).toBe(pairBytes);
+    expect(event.requiredInputByteSize).toBe(
+      result.evidence.assembledByteSize + pairBytes,
+    );
+    expect(event.allowedByteSize).toBe(98_304);
+    expect(event.requiredReferencedArtifacts).toEqual([
+      { artifactId: `${sliceDir}/contract.md`, byteSize: 2_500 },
+      { artifactId: `${sliceDir}/acceptance-manifest.json`, byteSize: 1_250 },
+    ]);
+    // `assembledByteSize` keeps its meaning — the inline weight the run
+    // summary's prompt-bytes column sums — and the referenced weight is a
+    // separate field rather than an addition to it.
+    expect(event.assembledByteSize).toBe(
+      Buffer.byteLength(result.prompt, "utf-8"),
+    );
+    // Every pre-#273 field is untouched.
+    expect(event.role).toBe("generator");
+    expect(event.contextManifestVersion).toBe(
+      GENERATOR_CONTEXT_MANIFEST.version,
+    );
+    expect(event.includedArtifactClasses).toContain("contract-view");
+  });
+
+  it("[behavior:#273:P-05] an assembly that counted nothing reports the new fields as absent, never as zero", () => {
+    writePair(2_000, 1_000);
+    const { requiredReadRoot: _unused, ...noAccounting } = generatorInput();
+    const result = assembleGeneratorEnvelope(noAccounting);
+
+    expect(result.evidence.assembledByteSize).toBeGreaterThan(0);
+    for (const field of [
+      "inlineByteSize",
+      "requiredReferencedByteSize",
+      "requiredInputByteSize",
+      "allowedByteSize",
+      "requiredReferencedArtifacts",
+    ]) {
+      expect(result.evidence, field).not.toHaveProperty(field);
+    }
+  });
+
+  it("[behavior:#273:B-07] the overflow message reports all four totals and every per-artifact weight", () => {
+    const pairBytes = writePair(6_000, 3_000);
+    let message = "";
+    try {
+      assembleGeneratorEnvelope(
+        generatorInput({ patternsAndHarness: "P".repeat(120_000) }),
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    const inlineBytes = Number(/inline (\d+) bytes/.exec(message)![1]);
+
+    expect(inlineBytes).toBeGreaterThan(120_000);
+    expect(message).toContain(
+      `Generator prompt exceeds required-input budget: inline ${inlineBytes} bytes, ` +
+        `required referenced ${pairBytes} bytes, ` +
+        `required-input total ${inlineBytes + pairBytes} bytes, ` +
+        "allowed 98304 bytes",
+    );
+    expect(message).toContain(
+      `required referenced bytes by artifact: ${sliceDir}/contract.md 6000, ${sliceDir}/acceptance-manifest.json 3000`,
+    );
+    // The inlined breakdown (ADR 0062 decision 4) is extended, not replaced.
+    expect(message).toContain("patterns-and-harness 120000");
+    expect(message).toContain("template and unlocated text");
+  });
+
+  it("[behavior:#273:P-03] an overflow the commit-log room cannot absorb refuses rather than shortening a required block", () => {
+    const pairBytes = writePair(40_000, 30_000);
+    let message = "";
+    try {
+      assembleGeneratorEnvelope(
+        generatorInput({
+          mode: "repair",
+          patternsAndHarness: "P".repeat(60_000),
+          repairSituation: [
+            "Implementation round: 3 of 3.",
+            "# Commit log",
+            "commit 0000000000000000000000000000000000000000\n\n    feat: work\n",
+            "# Worktree state",
+            "REQUIRED-WORKTREE-STATE-BLOCK",
+          ].join("\n\n"),
+        }),
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("exceeds required-input budget");
+    expect(message).toContain(`required referenced ${pairBytes} bytes`);
+    // The one block that yields yielded all it had; every other required block
+    // is still accounted at full weight, and the round is refused rather than
+    // silently trimmed.
+    expect(message).toContain("patterns-and-harness 60000");
+    expect(message).toContain("repair-situation");
+  });
+
+  it("[behavior:#273:B-08] overrides stay stricter-only against 98,304 in both directions", () => {
+    writePair(5_000, 5_000);
+    const probe = assembleGeneratorEnvelope(
+      generatorInput({ inlineSizeBudgetBytes: 70_000, patternsAndHarness: "P" }),
+    );
+    expect(probe.evidence.allowedByteSize).toBe(70_000);
+    const padding = 70_000 - probe.evidence.requiredInputByteSize! + 1;
+
+    // Exactly at the stricter override, then one byte past it.
+    expect(
+      assembleGeneratorEnvelope(
+        generatorInput({
+          inlineSizeBudgetBytes: 70_000,
+          patternsAndHarness: "P".repeat(padding),
+        }),
+      ).evidence.requiredInputByteSize,
+    ).toBe(70_000);
+    expect(() =>
+      assembleGeneratorEnvelope(
+        generatorInput({
+          inlineSizeBudgetBytes: 70_000,
+          patternsAndHarness: "P".repeat(padding + 1),
+        }),
+      ),
+    ).toThrow(/required-input total 70001 bytes, allowed 70000 bytes/);
+
+    // A wider override buys nothing: the manifest is the ceiling.
+    expect(
+      assembleGeneratorEnvelope(
+        generatorInput({ inlineSizeBudgetBytes: 200_000 }),
+      ).evidence.allowedByteSize,
+    ).toBe(98_304);
+
+    // And the override narrows the repair round's room, not merely the
+    // assertion it is checked against.
+    const repairInput = generatorInput({
+      mode: "repair",
+      repairSituation: [
+        "Implementation round: 2 of 3.",
+        "# Commit log",
+        Array.from(
+          { length: 4_000 },
+          (_unused, index) =>
+            `commit ${String(index).padStart(40, "0")}\n\n    feat: work\n\n`,
+        ).join(""),
+      ].join("\n\n"),
+    });
+    const wide = assembleGeneratorEnvelope(repairInput);
+    const narrow = assembleGeneratorEnvelope({
+      ...repairInput,
+      inlineSizeBudgetBytes: 70_000,
+    });
+    expect(narrow.evidence.requiredInputByteSize).toBeLessThanOrEqual(70_000);
+    expect(narrow.evidence.assembledByteSize).toBeLessThan(
+      wide.evidence.assembledByteSize,
+    );
+  });
+
+  it("[behavior:#273:P-02] every other role keeps its declared budget and inline-only accounting", () => {
+    for (const manifest of [
+      EXPLORER_CONTEXT_MANIFEST,
+      PLANNER_CONTEXT_MANIFEST,
+      CONTRACT_EVALUATOR_CONTEXT_MANIFEST,
+      CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
+      FINAL_EVALUATOR_CONTEXT_MANIFEST,
+      CLEANER_CONTEXT_MANIFEST,
+    ]) {
+      expect(manifest.inlineSizeBudgetBytes, manifest.role).toBe(65_536);
+    }
+
+    // The accounting seam itself: omit the required weights and the assertion is
+    // inline-only, with the pre-#273 refusal message word for word. This is what
+    // every non-generator role's envelope does, so a by-reference artifact still
+    // contributes zero bytes for them.
+    const prompt = "PLANNER-PROMPT-BODY";
+    const byReference = [
+      {
+        artifactClass: "current-contract-pair",
+        artifactId: `${sliceDir}/contract.md`,
+        locatorExemption: "the pair travels by reference",
+      },
+    ];
+    expect(assertEnvelopeBudget("planner", prompt, 19, byReference)).toBe(19);
+    expect(() => assertEnvelopeBudget("planner", prompt, 18, byReference))
+      .toThrow(
+        "planner prompt exceeds inline-size budget: actual 19 bytes, allowed 18 bytes " +
+          "(no inlined artifact classes; template and unlocated text 19; " +
+          "by reference: current-contract-pair)",
+      );
+  });
+
+  it("[behavior:#273:B-09] ADR 0069 records the lower bound, the retained transport, and what AFK does not predict", () => {
+    const adr = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "docs",
+        "adr",
+        "0069-the-generator-budget-counts-required-input.md",
+      ),
+      "utf-8",
+    );
+
+    // 1. A deterministic lower bound on the round's mandatory starting context.
+    expect(adr).toMatch(/deterministic lower bound/i);
+    expect(adr).toMatch(/mandatory starting\s+context/i);
+    // 2. Authoritative contract artifacts keep by-reference transport.
+    expect(adr).toMatch(/by-reference transport/i);
+    expect(adr).toContain("CONTRACT_PAIR_BY_REFERENCE");
+    // 3. Neither tokenization nor later agent-chosen reads are predicted.
+    expect(adr).toMatch(/does not predict provider tokenization/i);
+    expect(adr).toMatch(/does not budget later agent-chosen reads/i);
+    // Narrowed, not superseded — and it names which decisions of ADR 0062.
+    expect(adr).toMatch(/ADR 0068[\s\S]*not superseded/);
+    expect(adr).toMatch(/ADR 0062 decisions 2 and 4/);
+    expect(adr).toMatch(/ADR 0062 is \*\*not superseded\*\*/);
+    expect(adr).not.toMatch(/supersedes/i);
   });
 });

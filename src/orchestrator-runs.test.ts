@@ -66,7 +66,7 @@ import {
   installCancellationSignals,
   type SignalHost,
 } from "./cancellation.js";
-import { readRunEvents } from "./run-events.js";
+import { readRunEvents, type RunEventPayload } from "./run-events.js";
 import { readStopAck, writeStopRequest } from "./stop-sentinel.js";
 import { runStatus } from "./status.js";
 import { readContractStatus } from "./artifacts.js";
@@ -2275,6 +2275,64 @@ describe("events.jsonl tee (spec #26)", () => {
         type: "prompt-assembly",
         role: "generator",
         ghIssue: RETRIED,
+      });
+    });
+
+    it("[behavior:#273:P-05] aggregates a pre-slice journal's prompt bytes unchanged, reading the absent referenced weight as absent", () => {
+      // The pre-slice field set, taken from this run's own generator event so
+      // the shape is the real one: strip #273's five additive fields and what
+      // is left is exactly what a journal written before this slice carries.
+      const assembly = lines.find(
+        (event) => event.type === "prompt-assembly" && event.role === "generator",
+      ) as Record<string, unknown>;
+      expect(assembly).toBeDefined();
+      const {
+        ts: _ts,
+        inlineByteSize: _inline,
+        requiredReferencedByteSize: referenced,
+        requiredInputByteSize: _total,
+        allowedByteSize: _allowed,
+        requiredReferencedArtifacts: _artifacts,
+        ...preSlice
+      } = assembly;
+      // This run does count the pair, which is what makes the stripped copy a
+      // faithful "before" rather than a copy of itself.
+      expect(referenced).toBeGreaterThan(0);
+      for (const field of [
+        "inlineByteSize",
+        "requiredReferencedByteSize",
+        "requiredInputByteSize",
+        "allowedByteSize",
+        "requiredReferencedArtifacts",
+      ]) {
+        expect(preSlice, field).not.toHaveProperty(field);
+      }
+
+      const replay = new Logger(repo, `${slug}-preslice`);
+      replay.restoreCompleted({
+        ghIssue: String(preSlice.ghIssue),
+        title: "Pre-slice journal",
+        branch: "merged",
+      });
+      replay.event(preSlice as unknown as RunEventPayload);
+      const summary = replay.writeSummary();
+
+      // The prompt-bytes column is the sum of `assembledByteSize`, unchanged:
+      // the absent referenced weight is not added, and — the failure mode this
+      // preserves — the absent field is not read as a 0 that would have to be
+      // added either. Both readings produce this number only because absence is
+      // absence; a writer that defaulted the field would still pass, so the
+      // stripped-event assertions above are the ones that pin it.
+      const assembled = Number(preSlice.assembledByteSize);
+      expect(summary).toContain(
+        `| ${preSlice.ghIssue} Pre-slice journal | ✅ PASS |`,
+      );
+      expect(summary).toContain(`| ${assembled} |`);
+      expect(summary).toContain(`**${assembled}**`);
+      expect(summary).not.toContain("| 0 |");
+      rmSync(join(repo, ".afk", "logs", `${slug}-preslice`), {
+        recursive: true,
+        force: true,
       });
     });
 

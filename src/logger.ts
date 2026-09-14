@@ -864,7 +864,9 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}${promptPreparationRefusalSection(
+      slices.values(),
+    )}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}
@@ -1061,6 +1063,72 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
 
     return lines.join("\n");
   }
+}
+
+/**
+ * Marks a slice's recorded `error` as a refused prompt preparation. Every
+ * `ContextEnvelopeConfigurationError` message carries this prefix, and nothing
+ * else recorded on a slice does.
+ */
+const PROMPT_PREPARATION_REFUSAL_PREFIX = "CONFIGURATION: ";
+
+/** Heading of the run-summary section {@link promptPreparationRefusalSection} writes. */
+export const PROMPT_PREPARATION_REFUSAL_SECTION =
+  "Prompt Preparation Refusals";
+
+/**
+ * The run-log entry for a refused prompt preparation (#273 B-10).
+ *
+ * Before this, a `CONFIGURATION` refusal from envelope assembly reached neither
+ * `run.log` nor `run-summary.md`: no call site logged it, and the summary's
+ * slice table renders a recorded `error` only for `AWAITING-ADJUDICATION`. The
+ * whole point of #273's byte accounting is that an operator can read which term
+ * overran, so the text has to arrive somewhere an operator reads.
+ *
+ * Returns the message *verbatim* — every total, every per-artifact weight. It
+ * is not collapsed by {@link sanitizeDetail} or bounded like a summary cell:
+ * this is the one place the refusal is reported in full, and a truncated byte
+ * breakdown is the artifact whose absence cost #269 an hour of diagnosis.
+ */
+export function renderPromptPreparationRefusal(
+  sliceTag: string,
+  message: string,
+): string {
+  return `❌ ${sliceTag}: prompt preparation refused before dispatch — ${message}`;
+}
+
+/**
+ * The run-summary section rendering every `ERROR` slice whose recorded error is
+ * a prompt-preparation refusal, in full (#273 B-10).
+ *
+ * Empty string when no slice carries one, so every other run's summary is
+ * unchanged byte-for-byte — the same rule the Applied Waivers and Advisory
+ * Gates sections follow.
+ */
+export function promptPreparationRefusalSection(
+  slices: Iterable<SliceLifecycle>,
+): string {
+  const refused = [...slices].flatMap((slice) =>
+    slice.phase === "ERROR" &&
+    slice.error.startsWith(PROMPT_PREPARATION_REFUSAL_PREFIX)
+      ? [slice]
+      : [],
+  );
+  if (refused.length === 0) return "";
+  return `
+## ${PROMPT_PREPARATION_REFUSAL_SECTION}
+
+The envelope refused to assemble, so no agent was dispatched. Each refusal is
+reproduced in full — the byte accounting is the diagnosis (#273, ADR 0069).
+
+${refused
+  .map((slice) =>
+    [`### #${slice.ghIssue} ${slice.title}`, "", "```", slice.error, "```"].join(
+      "\n",
+    ),
+  )
+  .join("\n\n")}
+`;
 }
 
 /**
