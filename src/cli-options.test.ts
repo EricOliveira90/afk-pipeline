@@ -4,6 +4,7 @@ import {
   parseMaxContractRounds,
   parseSliceSelection,
   parsePipelineRuntimeOptions,
+  parseStaleRenegotiationRequest,
 } from "./cli-options.js";
 
 describe("parseMaxContractRounds", () => {
@@ -329,5 +330,175 @@ describe("parsePipelineRuntimeOptions --resume-stuck", () => {
         "--resume-stuck", "5",
       ]),
     ).toThrow(/both name 05/);
+  });
+});
+
+/**
+ * The preserved-work recovery flags (#277).
+ *
+ * The accepted case is asserted on `parseStaleRenegotiationRequest` and the
+ * refusal on `parsePipelineRuntimeOptions`, because the parser throws the #335
+ * guard for every well-formed pair: exactly one function has an accepted return,
+ * exactly one has the refusal, and #335's change is deleting the guard.
+ */
+describe("preserved-work recovery flags", () => {
+  const WELL_FORMED = [
+    "--renegotiate-stale", "12",
+    "--recovery-reason", " stale lock ",
+  ];
+
+  it("[behavior:#277:B-01] returns a request carrying the single selector and the trimmed reason", () => {
+    expect(parseStaleRenegotiationRequest(WELL_FORMED)).toEqual({
+      selector: "12",
+      reason: "stale lock",
+    });
+  });
+
+  it("[behavior:#277:B-01] trims only — interior spacing, case and code points survive", () => {
+    const reason = "\t Contract  MISSED the Ünicode café  \n";
+    const request = parseStaleRenegotiationRequest([
+      "--renegotiate-stale", "277",
+      "--recovery-reason", reason,
+    ]);
+
+    expect(request?.reason).toBe(reason.trim());
+    // Code-point equality, not just string equality: a normalization pass would
+    // survive `toBe` on a composed source but change the code points.
+    expect([...(request?.reason ?? "")].map((c) => c.codePointAt(0))).toEqual(
+      [...reason.trim()].map((c) => c.codePointAt(0)),
+    );
+  });
+
+  it("[behavior:#277:B-01] accepts a GH issue id as the selector", () => {
+    expect(
+      parseStaleRenegotiationRequest([
+        "--renegotiate-stale", "277",
+        "--recovery-reason", "stale",
+      ])?.selector,
+    ).toBe("277");
+  });
+
+  it("[behavior:#277:B-02] returns undefined when neither flag is present", () => {
+    expect(parseStaleRenegotiationRequest([])).toBeUndefined();
+    expect(
+      parseStaleRenegotiationRequest(["--serial-lanes", "--force-restart", "7"]),
+    ).toBeUndefined();
+  });
+
+  // One row per distinguishable operator mistake. Every message is asserted
+  // distinct below, so a refusal can never be mistaken for a different one.
+  const REFUSALS = [
+    {
+      label: "B-01 comma-separated selector list",
+      args: ["--renegotiate-stale", "12,13", "--recovery-reason", "stale"],
+      pattern: /not a comma-separated list/,
+    },
+    {
+      label: "B-01 duplicated selector inside one value",
+      args: ["--renegotiate-stale", "12,12", "--recovery-reason", "stale"],
+      pattern: /names 12 more than once/,
+    },
+    {
+      label: "B-01 second occurrence of --renegotiate-stale",
+      args: [
+        "--renegotiate-stale", "12",
+        "--renegotiate-stale", "13",
+        "--recovery-reason", "stale",
+      ],
+      pattern: /--renegotiate-stale was supplied more than once/,
+    },
+    {
+      label: "B-02 missing --recovery-reason",
+      args: ["--renegotiate-stale", "12"],
+      pattern: /--renegotiate-stale requires --recovery-reason/,
+    },
+    {
+      label: "B-02 blank --recovery-reason",
+      args: ["--renegotiate-stale", "12", "--recovery-reason", "   "],
+      pattern: /requires non-blank text/,
+    },
+    {
+      label: "B-02 repeated --recovery-reason",
+      args: [
+        "--renegotiate-stale", "12",
+        "--recovery-reason", "one",
+        "--recovery-reason", "two",
+      ],
+      pattern: /--recovery-reason was supplied more than once/,
+    },
+    {
+      label: "B-02 --recovery-reason without --renegotiate-stale",
+      args: ["--recovery-reason", "stale"],
+      pattern: /--recovery-reason requires --renegotiate-stale/,
+    },
+  ] as const;
+
+  it.each(REFUSALS)(
+    "[behavior:#277:B-01] [behavior:#277:B-02] refuses $label on the shared parser and the helper alike",
+    ({ args, pattern }) => {
+      expect(() => parsePipelineRuntimeOptions(args)).toThrow(pattern);
+      expect(() => parseStaleRenegotiationRequest(args)).toThrow(pattern);
+    },
+  );
+
+  it("[behavior:#277:B-02] gives every refusal its own message — no two are equal", () => {
+    const messages = REFUSALS.map(({ args }) => {
+      try {
+        parseStaleRenegotiationRequest(args);
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      throw new Error(`${args.join(" ")} was not refused`);
+    });
+
+    expect(new Set(messages).size).toBe(REFUSALS.length);
+  });
+
+  it("[behavior:#277:B-12] throws a refusal naming #335 for the same input B-01 accepts", () => {
+    expect(parseStaleRenegotiationRequest(WELL_FORMED)).toBeDefined();
+    expect(() => parsePipelineRuntimeOptions(WELL_FORMED)).toThrow(/#335/);
+  });
+
+  it("[behavior:#277:B-12] refuses before it could reach eligibility, a snapshot or the lock", () => {
+    expect(() => parsePipelineRuntimeOptions(WELL_FORMED)).toThrow(
+      /No eligibility check, snapshot or run-state lock is attempted/,
+    );
+  });
+
+  it("[behavior:#277:P-02] leaves both new members undefined and raises nothing for a flagless list", () => {
+    const flagless = [
+      "--command-timeout-ms", "900000",
+      "--serial-lanes",
+      "--preview-verify-command", "pnpm verify",
+      "--preview-apply-command", "pnpm apply",
+    ];
+
+    const options = parsePipelineRuntimeOptions(flagless);
+
+    expect(options.renegotiateStale).toBeUndefined();
+    expect(options.recoveryReason).toBeUndefined();
+    // The whole result still equals what the same list produced before the two
+    // flags existed: the new members are absent-valued, not new behavior.
+    expect(options).toEqual({
+      ...options,
+      renegotiateStale: undefined,
+      recoveryReason: undefined,
+    });
+  });
+
+  it("[behavior:#277:P-01] keeps optionValue's and the paired preview-command messages intact", () => {
+    expect(() => parsePipelineRuntimeOptions(["--test-command"])).toThrow(
+      "--test-command requires a value",
+    );
+    expect(() =>
+      parsePipelineRuntimeOptions(["--preview-verify-command", "pnpm verify"]),
+    ).toThrow(
+      "--preview-verify-command and --preview-apply-command must be provided together",
+    );
+    // The new flags reuse the same single-token discipline rather than a second
+    // "requires a value" dialect.
+    expect(() => parsePipelineRuntimeOptions(["--renegotiate-stale"])).toThrow(
+      "--renegotiate-stale requires a value",
+    );
   });
 });
