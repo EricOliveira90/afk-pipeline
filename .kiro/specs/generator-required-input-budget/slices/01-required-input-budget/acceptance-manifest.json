@@ -1,0 +1,231 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/context-envelope.ts",
+      "src/context-envelope.test.ts",
+      "src/run-events.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/orchestrator-runs.test.ts",
+      "src/resume-integration.test.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "docs/adr/0069-the-generator-budget-counts-required-input.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #273 AC1",
+      "given": "a generator initial round whose assembled inline prompt bytes plus distinct required referenced artifact bytes total exactly 98,304",
+      "when": "assembleGeneratorEnvelope assembles the envelope, and again with one more byte of required input",
+      "then": "the 98,304-byte total assembles and reports that required-input total, while 98,305 throws ContextEnvelopeConfigurationError before dispatch",
+      "observableResult": "a unit test named for B-01 in src/context-envelope.test.ts passes at the exact boundary and expects a CONFIGURATION throw one byte over; GENERATOR_CONTEXT_MANIFEST declares 98304 and no generator path asserts 65536",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #273 AC2",
+      "given": "a generator repair round with a long repair-situation commit log and a large required referenced contract pair",
+      "when": "the repair envelope is assembled",
+      "then": "repair-evidence room is computed as the effective 98,304-byte allowance minus the fixed inline render minus the required referenced weight, the commit log is bounded to that room, and the round's required-input total never exceeds the allowance",
+      "observableResult": "a unit test named for B-02 asserts the bounded commit-log length shrinks by the referenced weight relative to the pre-slice calculation and that assembly succeeds within the total",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #273 AC3",
+      "given": "contract.md and the acceptance manifest present on disk at the slice dir with known UTF-8 sizes, and the envelope given the absolute root its worktree-relative artifact ids resolve against",
+      "when": "the generator envelope is assembled",
+      "then": "the reported required referenced weight equals the exact sum of those two files' UTF-8 byte sizes and both artifacts keep locatorExemption CONTRACT_PAIR_BY_REFERENCE",
+      "observableResult": "a unit test named for B-03 compares the reported referenced weight against Buffer.byteLength of both fixture files and asserts neither file's body appears in the rendered prompt",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #273 AC4",
+      "given": "a generator round whose required acceptance-manifest file is missing or unreadable",
+      "when": "prompt preparation assembles the envelope",
+      "then": "it throws ContextEnvelopeConfigurationError naming the artifact id and path instead of counting the artifact as zero bytes, and repair-context references remain zero-weight pointers",
+      "observableResult": "a unit test named for B-04 expects a CONFIGURATION error mentioning the artifact id and path for the deleted file, and a sibling assertion that an absent repair-context reference still assembles",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #273 AC5",
+      "given": "duplicate artifact entries for one logical required artifact, including the same content also present inline",
+      "when": "the generator envelope is assembled",
+      "then": "that artifact's byte weight is added to the required-input total exactly once",
+      "observableResult": "a unit test named for B-05 asserts the required-input total for the duplicated case equals the single-count total",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #273 AC6; PRD \"Implementation Decisions\" 6",
+      "given": "A successful generator assembly whose required referenced artifacts have known byte weights",
+      "when": "The prompt-assembly run event is journaled before dispatch as today",
+      "then": "The event additively records the assembled inline byte weight, the required referenced weight, the required-input total, the allowed total, and one { artifactId, byteSize } entry per required referenced artifact; existing fields keep their current meaning, assembledByteSize included as the inline weight summed into the run summary's prompt-bytes column, and the new fields are optional on read so absence is read as absent, never as zero (src/logger.ts:465-466); P-05 covers that read",
+      "observableResult": "A unit test named for B-06 in src/context-envelope.test.ts (event shape) plus the journaled event assertion in src/orchestrator-runs.test.ts assert the new fields and their values, and that assembledByteSize still carries the inline weight only.",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #273 AC7; PRD \"Implementation Decisions\" 6, 8",
+      "given": "a generator round whose required-input total overflows the effective budget",
+      "when": "assertEnvelopeBudget (src/context-envelope.ts:1242-1256) refuses it and envelopeArtifactByteBreakdown (src/context-envelope.ts:1205-1240) builds the breakdown",
+      "then": "the thrown ContextEnvelopeConfigurationError's message reports the inline, referenced, required-input, and allowed totals plus each required referenced artifact's weight, with no required content omitted, truncated, or summarized",
+      "observableResult": "A unit test named for B-07 in src/context-envelope.test.ts asserts on the caught error's message string: it contains all four totals as exact numbers and one weight line per required referenced artifact. This behavior stops at the thrown message; B-10 owns carrying that message into run.log and run-summary.md.",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #273 AC8",
+      "given": "a project override of generatorInlineSizeBudgetBytes below 98,304 in one case and above 98,304 in another",
+      "when": "a generator initial and repair round are assembled under each override",
+      "then": "the lower override becomes the effective required-input limit for both the assertion and the repair-room calculation, and the higher override is clamped to 98,304",
+      "observableResult": "a unit test named for B-08 refuses a round one byte over the lower override and asserts the effective allowance reported under the higher override is 98304",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #273 AC10; PRD \"Implementation Decisions\" 9",
+      "given": "the repository after this slice",
+      "when": "docs/adr/0069-the-generator-budget-counts-required-input.md is read",
+      "then": "it states that generator required-input bytes are a deterministic lower bound on mandatory starting context, that authoritative contract artifacts keep by-reference transport, and that AFK does not predict provider tokenization or budget later agent-chosen reads, and it names ADR 0068 and ADR 0062 decision 2/4 as narrowed on the inline-only budget reading rather than superseded wholesale",
+      "observableResult": "A unit test named for B-09 in src/context-envelope.test.ts — the slice's home for generator budget semantics — reads docs/adr/0069-the-generator-budget-counts-required-input.md from disk and asserts it exists and contains those three statements plus the ADR 0068 and ADR 0062 references.",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #273 'Preserve the existing by-reference transport'; ADR 0068",
+      "given": "a generator initial or repair round",
+      "when": "the envelope is assembled after this slice",
+      "then": "contract-view and acceptance-manifest still travel by reference with locatorExemption CONTRACT_PAIR_BY_REFERENCE and neither file is inlined; FILE_SCOPE remains the manifest projection",
+      "observableResult": "the existing by-reference tests in src/context-envelope.test.ts (generator locked pair size, #269) still pass unmodified in intent, and a P-01 assertion checks the two artifacts carry locatorExemption rather than locator",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #273 AC9",
+      "given": "planner, explorer, evaluator, cleaner, hardener, remediator, and guardian envelopes",
+      "when": "each is assembled at and one byte over its own declared inlineSizeBudgetBytes",
+      "then": "its pass and refuse behavior is identical to before this slice, with inline-only accounting and no required-input reading",
+      "observableResult": "a unit test named for P-02 asserts each non-generator manifest's declared budget value is unchanged and that a by-reference artifact still contributes zero bytes for those roles",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #273 'does not silently omit, truncate, or summarize required content'; PRD Implementation Decisions 7",
+      "given": "a generator round whose required contract, manifest, finding, gate-evidence, and repair content exceeds the allowance",
+      "when": "prompt preparation runs",
+      "then": "dispatch is refused rather than any required block being omitted, summarized, or truncated; only the repair situation's commit log yields, via boundRepairSituationCommitLog",
+      "observableResult": "a unit test named for P-03 asserts the overflow throws with all required blocks still intact in the attempted render and that only the commit-log section was bounded",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #273 AC4 ('fails prompt preparation as CONFIGURATION')",
+      "given": "any refused generator prompt preparation",
+      "when": "the error is raised and recorded",
+      "then": "ContextEnvelopeConfigurationError still exposes failureKind CONFIGURATION and the CONFIGURATION-prefixed message, so the existing failure-recording path classifies it exactly as today",
+      "observableResult": "a unit test named for P-04 asserts failureKind and the message prefix on both the overflow and the missing-artifact throw",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #273 AC7; PRD \"Implementation Decisions\" 6, 7",
+      "given": "A generator round whose prompt preparation is refused with B-07's CONFIGURATION message, in a run whose slice is recorded as ERROR with that message — a recording path that does not exist today, since run.log receives no logger.phase entry for it and the summary table renders a slice's error only for AWAITING-ADJUDICATION",
+      "when": "This slice's two new exported functions in src/logger.ts run: renderPromptPreparationRefusal(sliceTag, message), called at the generator assembly seams in src/orchestrator.ts through logger.phase (RunJournal.phase appends to run.log) before the error is rethrown unchanged, and promptPreparationRefusalSection(slices), included by Logger.writeSummary in the summary it writes for every ERROR slice whose error carries the CONFIGURATION: prefix",
+      "then": "run.log carries one entry holding the whole retained refusal text and run-summary.md carries a section rendering the full recorded message — every total and per-artifact referenced weight, nothing omitted, truncated, or summarized — while the thrown type, the message, and the terminal outcome the wave records stay unchanged",
+      "observableResult": "Unit tests named for B-10 in src/logger.test.ts exercise renderPromptPreparationRefusal and promptPreparationRefusalSection directly and assert each output reproduces the refusal message verbatim, including every total and per-artifact weight.",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #273 AC6; PRD \"Implementation Decisions\" 6",
+      "given": "A run directory whose journaled prompt-assembly events carry only the pre-slice field set, with no inline weight, referenced weight, required-input total, allowed total, or per-artifact referenced weights",
+      "when": "That run is resumed and its summary is written after this slice",
+      "then": "The resume decision and the run-summary prompt-bytes aggregation are unchanged from today, with the absent referenced weight read as absent rather than as zero, because B-06's fields are additive and optional on read (src/logger.ts:465-466)",
+      "observableResult": "Tests named for P-05 in src/resume-integration.test.ts and src/orchestrator-runs.test.ts replay a pre-slice journal — reusing an existing scenario's fixture rather than adding a spawned scenario — and assert the unchanged resume decision, the unchanged prompt-bytes total, and that the missing referenced weight is not aggregated as zero.",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}

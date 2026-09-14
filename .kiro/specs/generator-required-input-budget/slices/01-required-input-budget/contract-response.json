@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "round": 3,
+  "responses": [
+    {
+      "findingId": "F-04",
+      "position": "CONDITION_MET",
+      "evidence": "acceptance-manifest.json now contains a B-10 entry. Its given states that the run.log / run-summary.md recording path does not exist today (no logger.phase entry for a refused assembly; the summary table renders a slice's error only for AWAITING-ADJUDICATION); its when names renderPromptPreparationRefusal(sliceTag, message) called at both src/orchestrator.ts assembleGeneratorEnvelope seams through logger.phase (RunJournal.phase appends to run.log) and promptPreparationRefusalSection(slices) included by Logger.writeSummary for every ERROR slice whose error carries the CONFIGURATION: prefix; its then requires the full refusal text — every total and per-artifact referenced weight — in both artifacts with nothing omitted, truncated, or summarized, and the thrown type, message, and terminal outcome unchanged. observableResult names src/logger.test.ts and both functions under test. preservation is false and gateIds are typecheck, tests, acceptance:behaviors, identical to B-01 through B-09, so the acceptance:behaviors gate has a B-10 id to select. contract.md's B-10 also now labels the two call sites accurately: :5838 assembles the initial round and an ordinary repair round through a mode variable, and :8041 is the merge-resolution round's dispatchGenerator."
+    },
+    {
+      "findingId": "F-05",
+      "position": "CONDITION_MET",
+      "evidence": "acceptance-manifest.json now contains a P-05 entry with preservation true. Its given is a run directory whose journaled prompt-assembly events carry only the pre-slice field set — no inline weight, referenced weight, required-input total, allowed total, or per-artifact referenced weights. Its when is that run being resumed and its summary written after this slice. Its then states the unchanged resume decision and unchanged run-summary prompt-bytes aggregation with the absent referenced weight read as absent rather than as zero, citing the src/logger.ts:465-466 read rule B-06 preserves. Its observableResult names both declared journal-replay seams, src/resume-integration.test.ts and src/orchestrator-runs.test.ts, reusing an existing scenario's fixture rather than adding a spawned scenario, so those two fileScope paths now have a manifest behavior stating what they must assert. gateIds are typecheck, tests, acceptance:behaviors. B-06's manifest entry states the optional-on-read rule and cites P-05 for the read, so the delegation the finding traced now terminates in a gate-bound entry. No fileScope change was needed: every file involved was already declared."
+    }
+  ]
+}
