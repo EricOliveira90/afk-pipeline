@@ -23,6 +23,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Merge resolution | One scoped resolution round for a conflicted wave merge (#132, ADR 0029, 0039) | `src/merge-resolution.ts` | — |
 | Run identity | Provider-qualified state, branch, and worktree names (ADR 0002, 0053) | `src/run-identity.ts` | — |
 | Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031, 0056) | `src/run-state.ts`, `src/run-journal.ts` | `src/file-lock.ts`, `src/adoption-provenance.ts`, `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
+| Preserved-work recovery | Admission of one stale-accepted-pair renegotiation on a preserved worktree: canonical request identity, scope fingerprint, read-only eligibility, byte-verified pair snapshot, one `PENDING` lineage event under the run-state lock (#277, ADR 0018, 0039, 0055, 0056) | `src/preserve-work-recovery.ts` | — |
 | Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts`, `src/suppression-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
 | Review rails | Contract/QA lifecycle, candidate review isolation, accepted-candidate policy (PRD 1, PRD 3, PRD 4) | `src/contract-review.ts`, `src/qa-review.ts`, `src/change-summary.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
@@ -145,6 +146,5 @@ entry in `afk.config.json`. Cap: 150 lines.
   enforce it.
 - Anything two slices could contend for gets a resource key in
   `afk.config.json` before it gets a workaround.
-- Tests: prefer a unit test, then an existing spawned scenario, then a new
-  slice in an existing wave fixture — a new spawned scenario is last resort
-  (see `AGENTS.md`).
+- Tests: prefer a unit test, then an existing spawned scenario, then a new slice
+  in an existing wave fixture — a new spawned scenario is last resort (`AGENTS.md`).
