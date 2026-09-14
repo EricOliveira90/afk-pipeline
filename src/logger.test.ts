@@ -10,8 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  PROMPT_PREPARATION_REFUSAL_SECTION,
+  promptPreparationRefusalSection,
   readAdvisoryGateOutcomes,
   readQualityStageOutcomes,
+  renderPromptPreparationRefusal,
 } from "./logger.js";
 import {
   RunJournal as Logger,
@@ -1609,5 +1612,114 @@ describe("[behavior:#97:B-10] run-summary.md's per-slice quality-stage rows", ()
     const md = summaryWith("rows-absent", [POLICY]);
     expect(md).toContain("`cleaner`: enabled");
     expect(md).not.toContain("| Slice | Stage |");
+  });
+});
+
+/**
+ * #273 B-10: a refused prompt preparation is a run fact, so it has to land
+ * where run facts are read.
+ *
+ * The refusal happens before any agent is dispatched, which is exactly why it
+ * was invisible: `run.log` received no phase entry for it, and the summary table
+ * renders a slice's recorded `error` only for `AWAITING-ADJUDICATION`. The
+ * byte accounting *is* the diagnosis, so both renderings reproduce the message
+ * whole — a truncated total is the same as no total.
+ */
+describe("prompt preparation refusals (#273 B-10)", () => {
+  const REFUSAL =
+    "CONFIGURATION: Generator prompt exceeds required-input budget: inline 60321 bytes, " +
+    "required referenced 63970 bytes, required-input total 124291 bytes, allowed 98304 bytes " +
+    "(inlined bytes by artifact class: patterns-and-harness 52000, repair-situation 4200, " +
+    "file-scope 180; template and unlocated text 3941; " +
+    "by reference: acceptance-manifest, contract-view; " +
+    "required referenced bytes by artifact: " +
+    ".kiro/specs/p/slices/01-s/contract.md 41230, " +
+    ".kiro/specs/p/slices/01-s/acceptance-manifest.json 22740)";
+
+  it("[behavior:#273:B-10] renders the run.log entry with the refusal message verbatim", () => {
+    const line = renderPromptPreparationRefusal("#273 [01]", REFUSAL);
+
+    expect(line).toBe(
+      `❌ #273 [01]: prompt preparation refused before dispatch — ${REFUSAL}`,
+    );
+    // Verbatim means verbatim: every total and every per-artifact weight is
+    // still in the line a reader greps out of run.log.
+    expect(line).toContain(REFUSAL);
+    expect(line).toContain("required-input total 124291 bytes");
+    expect(line).toContain(
+      ".kiro/specs/p/slices/01-s/acceptance-manifest.json 22740",
+    );
+    expect(line).not.toContain("…");
+  });
+
+  it("[behavior:#273:B-10] renders the summary section reproducing every total and per-artifact weight", () => {
+    const section = promptPreparationRefusalSection([
+      lifecycle.error(
+        { ghIssue: "273", title: "Required input budget", branch: "afk/273" },
+        PROGRESS,
+        REFUSAL,
+      ),
+    ]);
+
+    expect(section).toContain(`## ${PROMPT_PREPARATION_REFUSAL_SECTION}`);
+    expect(section).toContain("### #273 Required input budget");
+    // Fenced and whole — the section exists so the accounting can be read, not
+    // summarized.
+    expect(section).toContain("```\n" + REFUSAL + "\n```");
+    for (const total of [
+      "inline 60321 bytes",
+      "required referenced 63970 bytes",
+      "required-input total 124291 bytes",
+      "allowed 98304 bytes",
+    ]) {
+      expect(section, total).toContain(total);
+    }
+    expect(section).toContain(".kiro/specs/p/slices/01-s/contract.md 41230");
+  });
+
+  it("[behavior:#273:B-10] appears in run-summary.md for a refused slice and nowhere else", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "refusal");
+    recordTerminal(log, id("273", "Required input budget", "afk/273"), {
+      phase: "ERROR",
+      error: REFUSAL,
+    });
+    // A slice that failed for any other reason must not be swept into the
+    // section: it says the envelope refused, and that is a claim about how the
+    // round ended, not merely that it did.
+    recordTerminal(log, id("274", "Something else", "afk/274"), {
+      phase: "ERROR",
+      error: "generator exited 1",
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain(`## ${PROMPT_PREPARATION_REFUSAL_SECTION}`);
+    expect(md).toContain(REFUSAL);
+    expect(md).toContain("### #273 Required input budget");
+    expect(md).not.toContain("### #274 Something else");
+    // The terminal outcome the wave records is untouched by the rendering.
+    expect(log.getSlice("273")?.phase).toBe("ERROR");
+  });
+
+  it("[behavior:#273:B-10] leaves a run with no refusal byte-identical", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "no-refusal");
+    recordTerminal(log, id("273", "Ordinary failure", "afk/273"), {
+      phase: "ERROR",
+      error: "generator exited 1",
+    });
+
+    expect(
+      promptPreparationRefusalSection([
+        lifecycle.error(
+          id("273", "Ordinary failure", "afk/273"),
+          PROGRESS,
+          "generator exited 1",
+        ),
+      ]),
+    ).toBe("");
+    expect(log.writeSummary()).not.toContain(
+      PROMPT_PREPARATION_REFUSAL_SECTION,
+    );
   });
 });
