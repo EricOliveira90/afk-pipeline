@@ -27,9 +27,13 @@
  *    {@link admitStaleRenegotiation} recheck re-reads it all under the lock and
  *    refuses on any drift (#277 B-08).
  *
- * The completion half — the terminal events, verified rollback, launch-time
- * reconciliation — is #332 through #335. This module ships the persisted shape
- * and the transition rule those writers must obey, and none of the writers.
+ * The completion half arrives in slices. #332 added attempt execution. #333 adds
+ * the two *unsuccessful* terminal outcomes — one restore-and-verify routine
+ * ({@link restoreAcceptedPairFromSnapshot}), one rollback writer that appends
+ * `ROLLED_BACK` or `ROLLBACK_FAILED` ({@link rollBackRecoveryAttempt}), and one
+ * fail-closed dispatch hold ({@link recoveryDispatchRefusal}) — and wires none of
+ * them into a run: the launch-time reconciliation that calls them is #334, and
+ * the `COMPLETED` outcome is #335.
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -64,6 +68,7 @@ import {
   sliceWorktreeDirForProviderName,
 } from "./run-identity.js";
 import {
+  RECOVERY_FINGERPRINT_ABSENT,
   appendRecoveryLineageEvent,
   loadRunState,
   recoveryLineageFor,
@@ -115,8 +120,16 @@ export type RecoveryRefusalCode =
   | "snapshot-publication-failed"
   /** The target's last lineage event is `PENDING`: an attempt is already open. */
   | "attempt-already-pending"
-  /** No committed `PENDING` attempt for this target: nothing to execute (#332). */
+  /**
+   * No unresolved attempt for this target: nothing to execute (#332) and nothing
+   * to roll back (#333). Execution wants a trailing `PENDING`; rollback also
+   * accepts a trailing `ROLLBACK_FAILED`, which is a retryable failed rollback.
+   */
   | "no-pending-attempt"
+  /** Restore-and-verify did not prove the accepted pair back onto disk (#333). */
+  | "rollback-verification-failed"
+  /** An attempt's last event is `ROLLBACK_FAILED`: dispatch is held (#333 B-07). */
+  | "rollback-failed-hold"
   /** The facts changed between snapshot publication and the locked recheck. */
   | "facts-changed-before-lock";
 
@@ -1056,5 +1069,418 @@ export function executeRecoveryAttempt(
     historyDir: published,
     historyLocator: relative(args.repoRoot, published).split("\\").join("/"),
     movedFiles: names,
+  };
+}
+
+/**
+ * What an attempt's own `PENDING` event says about where its snapshot is and what
+ * the pair was when it was taken (#333 B-01).
+ *
+ * A `Pick` rather than the whole event, so the restore routine's inputs are the
+ * four recorded facts it is allowed to use and no fifth: the locator is resolved
+ * from `snapshotPath` and never re-derived from a slice directory, matching
+ * {@link executeRecoveryAttempt}'s locator rule.
+ */
+export type RecoveryAttemptLocator = Pick<
+  PersistedRecoveryLineageEvent,
+  "attemptId" | "snapshotPath" | "contractFingerprint" | "manifestFingerprint"
+>;
+
+/** The two fingerprints a verification pass actually read off the slice directory. */
+export interface ObservedPairFingerprints {
+  /** {@link RECOVERY_FINGERPRINT_ABSENT} when the file could not be read. */
+  observedContractFingerprint: string;
+  observedManifestFingerprint: string;
+}
+
+export type RestoreAcceptedPairResult =
+  | ({
+      ok: true;
+      /** The directory `snapshotPath` resolved to, for the caller to report. */
+      snapshotDir: string;
+    } & ObservedPairFingerprints)
+  | ({
+      ok: false;
+      /** Why verification did not prove out; carried verbatim into `rollbackError`. */
+      message: string;
+      snapshotDir: string;
+    } & ObservedPairFingerprints);
+
+/**
+ * The fingerprint of the bytes at `path`, or the explicit absent marker.
+ *
+ * Unreadable is recorded the same way as missing, and deliberately: a destination
+ * that is a directory, or a file the process may not open, is a pair whose bytes
+ * *could not be observed*, which is the fact a human resolving the hold needs. A
+ * thrown error there would replace that fact with a stack trace.
+ */
+function observedFingerprintOf(path: string): string {
+  try {
+    return sha256(readFileSync(path, "utf-8"));
+  } catch {
+    return RECOVERY_FINGERPRINT_ABSENT;
+  }
+}
+
+function observedPairFingerprints(sliceDir: string): ObservedPairFingerprints {
+  return {
+    observedContractFingerprint: observedFingerprintOf(
+      join(sliceDir, CONTRACT_FILENAME),
+    ),
+    observedManifestFingerprint: observedFingerprintOf(
+      join(sliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+    ),
+  };
+}
+
+/**
+ * Restore the accepted pair from an attempt's snapshot and verify it (#333 B-01/B-02).
+ *
+ * The single exported implementation of restore-and-verify (#333 B-09): the
+ * rollback writer below calls this rather than duplicating the compare, and #334's
+ * launch-time reconciliation will call the same one, so "was the pair put back"
+ * has exactly one answer in the codebase.
+ *
+ * The order of the three checks is load-bearing:
+ *
+ *  1. **Byte-equality against the snapshot copies.** The destination is reread
+ *     from disk, not assumed from what was written, for the reason
+ *     {@link publishAcceptedPairSnapshot} verifies its temporary sibling:
+ *     verifying the bytes in hand proves nothing about the bytes on disk.
+ *  2. **A valid `LOCKED` pair through {@link readLockedAcceptedPair}.** Restoring
+ *     something that is not an authority to negotiate against is a failed restore
+ *     even when the copy was faithful.
+ *  3. **Fingerprint equality with the `PENDING` event.** Last because it is the
+ *     check that catches a snapshot tampered with *after* publication: the copy
+ *     matches and validates, and still is not what was accepted.
+ *
+ * Snapshot bytes are read before anything is written, so a missing snapshot file
+ * leaves the destination exactly as it was. Every failure reports the fingerprints
+ * observed on the destination, which is what the `ROLLBACK_FAILED` event records.
+ */
+export function restoreAcceptedPairFromSnapshot(args: {
+  repoRoot: string;
+  /** The target's artifact directory — where the pair is restored to. */
+  sliceDir: string;
+  /** The attempt's recorded locator and original fingerprints. */
+  attempt: RecoveryAttemptLocator;
+}): RestoreAcceptedPairResult {
+  const snapshotDir = join(
+    args.repoRoot,
+    ...args.attempt.snapshotPath.split("/"),
+  );
+  const failure = (message: string): RestoreAcceptedPairResult => ({
+    ok: false,
+    message,
+    snapshotDir,
+    ...observedPairFingerprints(args.sliceDir),
+  });
+
+  let snapshot: { contract: string; manifest: string };
+  try {
+    snapshot = {
+      contract: readFileSync(join(snapshotDir, CONTRACT_FILENAME), "utf-8"),
+      manifest: readFileSync(
+        join(snapshotDir, ACCEPTANCE_MANIFEST_FILENAME),
+        "utf-8",
+      ),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return failure(
+      `The accepted-pair snapshot for attempt ${args.attempt.attemptId} at ${snapshotDir} could not be read (${detail}); nothing was restored`,
+    );
+  }
+
+  try {
+    mkdirSync(args.sliceDir, { recursive: true });
+    writeFileSync(join(args.sliceDir, CONTRACT_FILENAME), snapshot.contract);
+    writeFileSync(
+      join(args.sliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+      snapshot.manifest,
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return failure(
+      `Writing the accepted pair for attempt ${args.attempt.attemptId} into ${args.sliceDir} failed (${detail})`,
+    );
+  }
+
+  const observed = observedPairFingerprints(args.sliceDir);
+  let restored: { contract: string; manifest: string };
+  try {
+    restored = {
+      contract: readFileSync(join(args.sliceDir, CONTRACT_FILENAME), "utf-8"),
+      manifest: readFileSync(
+        join(args.sliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+        "utf-8",
+      ),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return failure(
+      `The restored accepted pair in ${args.sliceDir} could not be reread (${detail})`,
+    );
+  }
+  for (const [name, expected, actual] of [
+    [CONTRACT_FILENAME, snapshot.contract, restored.contract],
+    [ACCEPTANCE_MANIFEST_FILENAME, snapshot.manifest, restored.manifest],
+  ] as const) {
+    if (expected !== actual) {
+      return failure(
+        `The restored ${name} in ${args.sliceDir} is not byte-identical to the snapshot copy under ${snapshotDir}`,
+      );
+    }
+  }
+
+  const pair = readLockedAcceptedPair(args.sliceDir);
+  if (pair === undefined) {
+    return failure(
+      `The pair restored into ${args.sliceDir} is not a valid LOCKED contract.md / ${ACCEPTANCE_MANIFEST_FILENAME} pair`,
+    );
+  }
+  if (
+    pair.contractFingerprint !== args.attempt.contractFingerprint ||
+    pair.manifestFingerprint !== args.attempt.manifestFingerprint
+  ) {
+    return failure(
+      `The pair restored into ${args.sliceDir} does not match the fingerprints attempt ${args.attempt.attemptId} recorded when it was admitted; the snapshot under ${snapshotDir} is not the pair that was accepted`,
+    );
+  }
+
+  return { ok: true, snapshotDir, ...observed };
+}
+
+/** Every admitted reason an attempt can end unsuccessfully (#333 B-03). */
+export type RecoveryFailureTrigger =
+  | "provider-failure"
+  | "evaluator-non-acceptance"
+  | "deterministic-validation-refusal"
+  | "lock-gate-refusal"
+  | "cancellation";
+
+/**
+ * The caller's original failure, carried through the rollback untouched.
+ *
+ * Opaque on purpose: {@link rollBackRecoveryAttempt} never branches on `trigger`,
+ * because the rollback a provider crash needs and the rollback a cancellation
+ * needs are the same rollback. The value is returned unchanged so the caller's own
+ * error path stays the one that decides what the run does next.
+ */
+export interface RecoveryFailure {
+  trigger: RecoveryFailureTrigger;
+  message: string;
+}
+
+export type RollBackRecoveryAttemptResult<F extends RecoveryFailure> =
+  | {
+      /** The pair was restored, verified, and `ROLLED_BACK` was appended. */
+      rolledBack: true;
+      /** The caller's original failure value, returned unchanged. */
+      failure: F;
+      event: PersistedRecoveryLineageEvent;
+    }
+  | {
+      rolledBack: false;
+      failure: F;
+      code: RecoveryRefusalCode;
+      message: string;
+      /** The appended `ROLLBACK_FAILED` event, absent when nothing was appended. */
+      event?: PersistedRecoveryLineageEvent;
+    };
+
+/** The trailing event a rollback is allowed to append after. */
+function rollbackableEvent(
+  state: RunState,
+  ghIssue: string,
+): PersistedRecoveryLineageEvent | undefined {
+  const events = recoveryLineageFor(state, ghIssue);
+  const last = events[events.length - 1];
+  return last?.state === "PENDING" || last?.state === "ROLLBACK_FAILED"
+    ? last
+    : undefined;
+}
+
+/**
+ * The next event, built from the trailing one so `attemptId` is copied verbatim.
+ *
+ * The three rollback-failure members are stripped before the spread rather than
+ * left to be overwritten: a `ROLLED_BACK` event appended after a failed rollback
+ * would otherwise inherit that failure's observations, and run state rejects a
+ * `ROLLED_BACK` event carrying them (#333 B-06).
+ */
+function nextRecoveryEvent(
+  trailing: PersistedRecoveryLineageEvent,
+  next:
+    | { state: "ROLLED_BACK" }
+    | ({ state: "ROLLBACK_FAILED"; rollbackError: string } & ObservedPairFingerprints),
+): PersistedRecoveryLineageEvent {
+  const {
+    rollbackError: _error,
+    observedContractFingerprint: _contract,
+    observedManifestFingerprint: _manifest,
+    ...base
+  } = trailing;
+  return {
+    ...base,
+    ...next,
+    target: { ...trailing.target },
+    extensions: [...trailing.extensions],
+    recordedAt: new Date().toISOString(),
+  };
+}
+
+export interface RollBackRecoveryAttemptArgs<F extends RecoveryFailure> {
+  repoRoot: string;
+  /** PRD slug — artifact identity. */
+  prdSlug: string;
+  /** Run slug: which run-state file this attempt was admitted in (ADR 0002). */
+  runSlug?: string;
+  /** The target's artifact directory, where the accepted pair is restored. */
+  sliceDir: string;
+  ghIssue: string;
+  /** The failure that ended the attempt, returned unchanged either way. */
+  failure: F;
+}
+
+/**
+ * Roll one admitted recovery attempt back, verified (#333 B-03/B-04/B-06).
+ *
+ * The sequence, and why it is this sequence:
+ *
+ *  1. Read run state and refuse unless the target's lineage ends on an
+ *     unresolved attempt — a `PENDING` one, or a `ROLLBACK_FAILED` one whose
+ *     obstacle has since been cleared (#333 B-08). A refusal here writes nothing.
+ *  2. Restore and verify through {@link restoreAcceptedPairFromSnapshot}, outside
+ *     the lock: it is the slow part, it touches only this attempt's own slice
+ *     directory, and the event that records its outcome is appended after it.
+ *  3. Under the ADR 0056 lock, reload, recheck that the trailing event is still
+ *     the same attempt in the same state, admit the transition through
+ *     {@link isLegalRecoveryTransition}, and append exactly one event.
+ *
+ * Nothing here touches a ref, a commit or the preserved worktree (ADR 0039): a
+ * rollback restores two artifact files and appends one record, and the unmerged
+ * work the attempt exists to preserve is never the thing being rolled back.
+ *
+ * A retry that fails again appends nothing: `ROLLBACK_FAILED -> ROLLBACK_FAILED`
+ * is not a legal transition, so the hold the first failure recorded simply stays
+ * in force rather than accumulating one record per attempt to clear it.
+ */
+export function rollBackRecoveryAttempt<F extends RecoveryFailure>(
+  args: RollBackRecoveryAttemptArgs<F>,
+): RollBackRecoveryAttemptResult<F> {
+  const runSlug = args.runSlug ?? args.prdSlug;
+  const trailing = rollbackableEvent(
+    loadRunState(args.repoRoot, runSlug),
+    args.ghIssue,
+  );
+  if (trailing === undefined) {
+    return {
+      rolledBack: false,
+      failure: args.failure,
+      code: "no-pending-attempt",
+      message: `No unresolved recovery attempt exists for #${args.ghIssue}, so there is nothing to roll back`,
+    };
+  }
+
+  const restored = restoreAcceptedPairFromSnapshot({
+    repoRoot: args.repoRoot,
+    sliceDir: args.sliceDir,
+    attempt: trailing,
+  });
+  const next: Parameters<typeof nextRecoveryEvent>[1] = restored.ok
+    ? { state: "ROLLED_BACK" }
+    : {
+        state: "ROLLBACK_FAILED",
+        rollbackError: restored.message,
+        observedContractFingerprint: restored.observedContractFingerprint,
+        observedManifestFingerprint: restored.observedManifestFingerprint,
+      };
+
+  return transactRunState<RollBackRecoveryAttemptResult<F>>(
+    args.repoRoot,
+    runSlug,
+    (locked) => {
+      const refuse = (
+        code: RecoveryRefusalCode,
+        message: string,
+      ): { changed: false; result: RollBackRecoveryAttemptResult<F> } => ({
+        changed: false,
+        result: { rolledBack: false, failure: args.failure, code, message },
+      });
+
+      const current = rollbackableEvent(locked, args.ghIssue);
+      if (
+        current === undefined ||
+        current.attemptId !== trailing.attemptId ||
+        current.state !== trailing.state
+      ) {
+        return refuse(
+          "facts-changed-before-lock",
+          `The recovery lineage for #${args.ghIssue} changed between the restore and the run-state lock; no ${next.state} event was appended for attempt ${trailing.attemptId}`,
+        );
+      }
+      if (!isLegalRecoveryTransition(current.state, next.state)) {
+        return refuse(
+          "rollback-verification-failed",
+          `${restored.ok ? "The rollback verified" : restored.message}; ${current.state} -> ${next.state} is not a legal recovery transition, so nothing was appended for attempt ${trailing.attemptId}`,
+        );
+      }
+
+      const event = nextRecoveryEvent(current, next);
+      appendRecoveryLineageEvent(locked, args.ghIssue, event);
+      return {
+        changed: true,
+        result: restored.ok
+          ? { rolledBack: true, failure: args.failure, event }
+          : {
+              rolledBack: false,
+              failure: args.failure,
+              code: "rollback-verification-failed",
+              message: restored.message,
+              event,
+            },
+      };
+    },
+  );
+}
+
+/** A held dispatch, naming the attempt a human has to resolve first (#333 B-07). */
+export interface RecoveryDispatchRefusal {
+  code: Extract<RecoveryRefusalCode, "rollback-failed-hold">;
+  message: string;
+  /** Read off the trailing event, not derived. */
+  attemptId: string;
+  snapshotPath: string;
+}
+
+/**
+ * Refuse agent dispatch while a target's rollback is unresolved (#333 B-07).
+ *
+ * Fail-closed on the *last* event rather than on "any `ROLLBACK_FAILED` in the
+ * list", because a later `ROLLED_BACK` for the same attempt is exactly the record
+ * that says the obstacle was cleared, and holding forever on a repaired attempt
+ * would make the retry #333 B-08 admits pointless.
+ *
+ * The message names the `attemptId` and the `snapshotPath` because those are the
+ * two things a human needs to fix it by hand: which attempt, and where the bytes
+ * that were accepted still are. Exported for #334's launch-time reconciliation to
+ * call; this slice wires it into no dispatch site.
+ */
+export function recoveryDispatchRefusal(
+  state: RunState,
+  ghIssue: string,
+): RecoveryDispatchRefusal | undefined {
+  const events = recoveryLineageFor(state, ghIssue);
+  const last = events[events.length - 1];
+  if (last?.state !== "ROLLBACK_FAILED") return undefined;
+  return {
+    code: "rollback-failed-hold",
+    message:
+      `Recovery attempt ${last.attemptId} for #${ghIssue} failed to roll back` +
+      ` (${last.rollbackError ?? "no reason recorded"}), so no agent is dispatched` +
+      ` for this slice; the accepted pair as admitted is still at ${last.snapshotPath}`,
+    attemptId: last.attemptId,
+    snapshotPath: last.snapshotPath,
   };
 }
