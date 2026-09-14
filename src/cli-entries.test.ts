@@ -51,4 +51,38 @@ describe("pipeline CLI entries", () => {
 
     expect(stderr).toContain("[--record-prompts]");
   }, 40_000);
+
+  it.each(ENTRIES)("#275 advertises --allow-concurrent-run in %s's usage", (entry) => {
+    const stderr = usageStderr(entry);
+
+    expect(stderr).toContain("[--allow-concurrent-run]");
+  }, 40_000);
+
+  /**
+   * The host run lease (#275, ADR 0069) is acquired by every entry through
+   * the one shared boundary, positioned after the dry-run early return and
+   * before the cancellation/crash handlers that precede `runPipeline` — so
+   * subcommands and dry runs never acquire it, and refusal happens before
+   * any run-state, branch, worktree, agent or gate side effect. A
+   * source-order check on purpose: the position of the acquisition is a
+   * property of the diff, not of any run.
+   */
+  it.each(ENTRIES)(
+    "#275 acquires the host run lease in %s after dry-run and before the pipeline handlers",
+    (entry) => {
+      const source = readFileSync(resolve("src", entry), "utf-8");
+
+      const dryRunReturn = source.indexOf("Dry run complete. No changes made.");
+      const leaseAcquire = source.indexOf("acquireHostRunLeaseOrExit({");
+      const handlers = source.indexOf("installCancellationSignals()");
+      expect(dryRunReturn).toBeGreaterThan(-1);
+      expect(leaseAcquire).toBeGreaterThan(dryRunReturn);
+      expect(handlers).toBeGreaterThan(leaseAcquire);
+      // Exactly one acquisition, parsing the flag it documents, and the
+      // explicit release at pipeline wind-down.
+      expect(source.match(/acquireHostRunLeaseOrExit\(/g)).toHaveLength(1);
+      expect(source).toContain('args[i] === "--allow-concurrent-run"');
+      expect(source).toContain("runLease.release()");
+    },
+  );
 });
