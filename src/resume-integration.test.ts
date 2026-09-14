@@ -31,11 +31,17 @@ import { RunJournal as Logger } from "./run-journal.js";
 import { buildDAG, type Slice } from "./issues-parser.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
 import {
+  emptyContractFindingLineage,
+  loadContractFindingLineage,
+} from "./contract-convergence.js";
+import { executeRecoveryAttempt } from "./preserve-work-recovery.js";
+import {
   allRunLogs,
   buildProvider,
   cleanupResumeTempDirs,
   findSliceArtifactDir,
   git,
+  makeRecoveryExecutionFixture,
   makeRepo,
   makeSlice,
   sliceLogLines,
@@ -1142,4 +1148,74 @@ describe("retried slice resume (spec #33)", () => {
     ).toContain("**Status:** LOCKED");
   }, 240_000);
 
+});
+
+/**
+ * Recovery attempt execution against the run state a real resume carries
+ * (#332 B-06). No pipeline is spawned: the state is reachable by writing it
+ * through the APIs that own each value, and the claim under test is "execution
+ * changed only two of these" (`AGENTS.md` assertion ladder).
+ */
+describe("preserved-work recovery attempt execution over persisted run state", () => {
+  it("[behavior:#332:B-06] leaves every persisted fact except the target's two negotiation controls unchanged", () => {
+    const fixture = makeRecoveryExecutionFixture();
+    const before = JSON.parse(readFileSync(fixture.statePath, "utf-8"));
+    // Guard the fixture itself: an empty `rounds` or a dropped claim would make
+    // the "unchanged" assertions below pass without measuring anything.
+    expect(before.reviewPhase.rounds).toHaveLength(1);
+    expect(before.reviewPhase.rounds[0].architect.findings).toHaveLength(1);
+    expect(before.reviewPhase.filedFindings).toHaveLength(1);
+    expect(before.migrations.claims[fixture.ghIssue]).toEqual(["125"]);
+    expect(before.resume[fixture.ghIssue].attempts).toBe(2);
+    expect(Object.keys(before.stageCheckpoints).sort()).toEqual(
+      [fixture.ghIssue, fixture.otherGhIssue].sort(),
+    );
+    expect(Object.keys(before.contractConvergence).sort()).toEqual(
+      [fixture.ghIssue, fixture.otherGhIssue].sort(),
+    );
+
+    const outcome = executeRecoveryAttempt({
+      repoRoot: fixture.repo,
+      prdSlug: fixture.slug,
+      sliceDir: fixture.sliceDir,
+      ghIssue: fixture.ghIssue,
+    });
+    expect(outcome.ok).toBe(true);
+
+    const after = JSON.parse(readFileSync(fixture.statePath, "utf-8"));
+    expect(Object.keys(after).sort()).toEqual(Object.keys(before).sort());
+    const differing = Object.keys(before).filter(
+      (key) => JSON.stringify(after[key]) !== JSON.stringify(before[key]),
+    );
+    expect(differing.sort()).toEqual(["contractConvergence", "stageCheckpoints"]);
+
+    // Field by field, so a future top-level key added to run state cannot make
+    // the diff above the only thing this test checks.
+    expect(after.resume).toEqual(before.resume);
+    expect(after.resume[fixture.ghIssue].attempts).toBe(2);
+    expect(after.slices).toEqual(before.slices);
+    expect(after.slices[fixture.otherGhIssue]).toEqual(before.slices[fixture.otherGhIssue]);
+    expect(after.migrations).toEqual(before.migrations);
+    expect(after.reviewPhase).toEqual(before.reviewPhase);
+    expect(after.reviewPhase.rounds).toHaveLength(1);
+    expect(after.scope).toEqual(before.scope);
+    expect(after.recoveryLineage).toEqual(before.recoveryLineage);
+    expect(after.featureBranch).toBe(before.featureBranch);
+
+    // The two controls: only the target's entry is gone, and only from these.
+    expect(Object.keys(after.stageCheckpoints)).toEqual([fixture.otherGhIssue]);
+    expect(after.stageCheckpoints[fixture.otherGhIssue]).toEqual(
+      before.stageCheckpoints[fixture.otherGhIssue],
+    );
+    expect(after.contractConvergence[fixture.otherGhIssue]).toEqual(
+      before.contractConvergence[fixture.otherGhIssue],
+    );
+    expect(
+      loadContractFindingLineage({
+        repoRoot: fixture.repo,
+        runSlug: fixture.runSlug,
+        ghIssue: fixture.ghIssue,
+      }),
+    ).toEqual(emptyContractFindingLineage());
+  });
 });

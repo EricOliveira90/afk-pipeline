@@ -21,6 +21,12 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  saveContractFindingLineage,
+  type ContractFindingLineage,
+} from "./contract-convergence.js";
+import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
 import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
 import { writeContractReview, writeQAReview } from "./test-support.js";
@@ -319,6 +325,306 @@ export function allRunLogs(repo: string, loggerSlug: string): string {
     if (existsSync(logPath)) out += readFileSync(logPath, "utf-8");
   }
   return out;
+}
+
+/**
+ * Everything one admitted preserved-work recovery attempt starts from (#332).
+ *
+ * An extension of this module's negotiation fixture rather than a new one: the
+ * repo, the PRD layout and the slice identity are `makeRepo`/`writePrdFixture`/
+ * `makeSlice`'s, and what is added is the state a *resumed* run carries — resume
+ * counters, a second slice's outcome, migration claims, guardian history — plus
+ * the committed `PENDING` lineage event and the two live negotiation controls.
+ *
+ * Written rather than run: no pipeline is spawned, because every fact here is
+ * reachable by writing it, and the assertion this fixture serves is "execution
+ * changed only two of these" (`AGENTS.md` assertion ladder, #332 B-06).
+ */
+export interface RecoveryExecutionFixture {
+  repo: string;
+  slug: string;
+  /** Run slug — the state file's key. The bare PRD slug for the stub provider. */
+  runSlug: string;
+  ghIssue: string;
+  /** A second in-scope slice, whose checkpoint and lineage must survive. */
+  otherGhIssue: string;
+  sliceDir: string;
+  statePath: string;
+  attemptId: string;
+  candidateTreeId: string;
+  /** Live negotiation files the fixture wrote, keyed by name. */
+  negotiationFiles: Record<string, string>;
+  /** Artifacts execution must leave byte-identical, keyed by `/`-joined path. */
+  preservedArtifacts: Record<string, string>;
+}
+
+const RECOVERY_LOCKED_CONTRACT = [
+  "# Slice Contract — recovery fixture",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "### In scope",
+  "",
+  "- [behavior:B-01] The fixture behavior, anchored so coverage validates.",
+  "",
+].join("\n");
+
+const RECOVERY_ACCEPTED_MANIFEST = `${JSON.stringify(
+  {
+    version: 2,
+    fileScope: { kind: "paths", paths: ["src/work-01.ts"] },
+    migrationCount: 0,
+    behaviors: [
+      {
+        id: "B-01",
+        source: "recovery fixture",
+        given: "a preserved worktree",
+        when: "its accepted pair is renegotiated",
+        then: "the behavior lock passes",
+        observableResult: "the slice reaches its own assertions",
+        preservation: false,
+        gateIds: ["tests"],
+      },
+    ],
+  },
+  null,
+  2,
+)}\n`;
+
+const RECOVERY_NEGOTIATION_BYTES: Record<string, string> = {
+  "context.md": "# Explorer context\n\nFACT: the accepted pair predates the discovery.\n",
+  "contract-review.json": '{"version":2,"verdict":"ACCEPT","findings":[]}\n',
+  "contract-response.json": '{"round":2,"response":"accepted"}\n',
+  "contract-negotiation-outcome.json": '{"outcome":"ACCEPTED","rounds":2}\n',
+  "planner-escalation.md": "# Planner escalation\n\nNothing was escalated.\n",
+  "feedback-r1.md": "## Evaluator feedback — round 1\n",
+  "feedback-r2.md": "## Evaluator feedback — round 2\n",
+};
+
+const RECOVERY_PRESERVED_ARTIFACTS: Record<string, string> = {
+  "reviews/contract-review-r1.json": '{"version":2,"verdict":"REVISE","findings":[]}\n',
+  "reviews/qa-review-r1.json": '{"version":2,"verdict":"FAIL"}\n',
+  "qa-report.md": "# QA Report\n\n**Verdict:** PASS\n",
+  "handoff.md": "## What shipped\n\n- B-01: src/work-01.ts\n",
+  "run-summary.md": "# Run summary\n\nThe generator wrote src/work-01.ts.\n",
+};
+
+/** A valid non-empty durable contract lineage for one slice. */
+function recoveryLineageFixture(id: string): ContractFindingLineage {
+  return {
+    version: 1,
+    extensionUsed: false,
+    revision: 1,
+    findings: {
+      [id]: {
+        stableId: id,
+        currentId: id,
+        disposition: "OPEN",
+        firstSeenRevision: 1,
+        lastSeenRevision: 1,
+        occurrences: 1,
+        finding: {
+          id,
+          severity: "BLOCKING",
+          behaviorIds: ["B-01"],
+          evidence: `"${id} evidence"`,
+          expected: `${id} expected`,
+          observed: `${id} observed`,
+          clearCondition: `${id} clears`,
+          state: "OPEN",
+          revisionCitation: null,
+        },
+      },
+    },
+  };
+}
+
+function writeRecoveryFiles(root: string, files: Record<string, string>): void {
+  for (const [name, body] of Object.entries(files)) {
+    const path = join(root, ...name.split("/"));
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, body, "utf-8");
+  }
+}
+
+export function makeRecoveryExecutionFixture(
+  opts: { slug?: string } = {},
+): RecoveryExecutionFixture {
+  const slug = opts.slug ?? "recovery-execution";
+  const repo = makeRepo();
+  const { prdDir, specsDir } = writePrdFixture(repo, slug);
+  const slice = makeSlice();
+  const otherGhIssue = "4002";
+  const sliceDir = join(prdDir, "slices", `${slice.number}-resumable`);
+  const attemptId = "attempt-fixture";
+  const candidateTreeId = "c3".repeat(20);
+  const sliceBranch = `afk/${slug}/slice-${slice.number}`;
+  const featureBranch = `feat/${slug}`;
+
+  writeRecoveryFiles(sliceDir, {
+    "contract.md": RECOVERY_LOCKED_CONTRACT,
+    "acceptance-manifest.json": RECOVERY_ACCEPTED_MANIFEST,
+    ...RECOVERY_NEGOTIATION_BYTES,
+    ...RECOVERY_PRESERVED_ARTIFACTS,
+  });
+  // The attempt's already-published pair snapshot, in the one immutable
+  // directory identity admission gave it.
+  const snapshotDir = join(sliceDir, "recovery-snapshots", attemptId);
+  writeRecoveryFiles(snapshotDir, {
+    "contract.md": RECOVERY_LOCKED_CONTRACT,
+    "acceptance-manifest.json": RECOVERY_ACCEPTED_MANIFEST,
+  });
+  const digest = (text: string): string =>
+    createHash("sha256").update(text, "utf-8").digest("hex");
+
+  const statePath = join(repo, ".afk", "state", `${slug}.json`);
+  mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+  writeFileSync(
+    statePath,
+    `${JSON.stringify(
+      {
+        version: 7,
+        prdSlug: slug,
+        featureBranch,
+        specsDir,
+        scope: {
+          mode: "explicit",
+          slices: [
+            { number: slice.number, ghIssue: slice.ghIssue },
+            { number: "02", ghIssue: otherGhIssue },
+          ],
+        },
+        slices: {
+          [slice.ghIssue]: { phase: "STUCK", branch: sliceBranch },
+          [otherGhIssue]: {
+            phase: "PASS",
+            branch: `afk/${slug}/slice-02`,
+            mergedToFeature: true,
+          },
+        },
+        resume: {
+          [slice.ghIssue]: { attempts: 2, lastDecision: "resumed on the same tree" },
+          [otherGhIssue]: { attempts: 0 },
+        },
+        migrations: {
+          pool: ["125", "126"],
+          claims: { [slice.ghIssue]: ["125"], [otherGhIssue]: ["126"] },
+        },
+        reviewPhase: {
+          sanity: { treeSha: "d4".repeat(20), ok: true },
+          architect: { headSha: "e5".repeat(20), verdict: "ACCEPT-WITH-NOTES" },
+          pm: { headSha: "e5".repeat(20), verdict: "SHIP" },
+          rounds: [
+            {
+              round: 1,
+              reviewedHeadSha: "e5".repeat(20),
+              headSha: "e5".repeat(20),
+              architect: {
+                source: "INVOKED",
+                outcome: "ACCEPT-WITH-NOTES",
+                findingsOriginRound: 1,
+                findings: [
+                  {
+                    stableId: "A-01",
+                    currentId: "A-01",
+                    title: "A guardian note",
+                    class: "clarity",
+                    clearCondition: "the note is addressed",
+                    disposition: "OPEN",
+                    reachableTrigger: null,
+                    introducedByReviewedDiff: true,
+                  },
+                ],
+              },
+              // An INVOKED record's `findingsOriginRound` must be its own round
+              // even when it carried no finding (`sanitizeGuardianRecord`), or
+              // the whole all-or-nothing ledger reads back as absent.
+              pm: {
+                source: "INVOKED",
+                outcome: "SHIP",
+                findingsOriginRound: 1,
+                findings: [],
+              },
+            },
+          ],
+          filedFindings: [
+            {
+              guardian: "architect",
+              stableId: "A-01",
+              fingerprint: "clarity|the note is addressed",
+              kind: "NOTE",
+              round: 1,
+              issue: "https://example.invalid/issues/1",
+            },
+          ],
+        },
+        recoveryLineage: {
+          [slice.ghIssue]: [
+            {
+              attemptId,
+              state: "PENDING",
+              target: { number: slice.number.replace(/^0+/, ""), ghIssue: slice.ghIssue },
+              reason: "the accepted pair predates the discovery",
+              extensions: [],
+              provider: "stub",
+              sliceBranch,
+              sliceHead: "f6".repeat(20),
+              featureHead: "a7".repeat(20),
+              scopeFingerprint: "b8".repeat(32),
+              snapshotPath: `${specsDir.split("\\").join("/")}/slices/${slice.number}-resumable/recovery-snapshots/${attemptId}`,
+              contractFingerprint: digest(RECOVERY_LOCKED_CONTRACT),
+              manifestFingerprint: digest(RECOVERY_ACCEPTED_MANIFEST),
+              recordedAt: "2026-09-14T00:00:00.000Z",
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf-8",
+  );
+
+  // Seeded through the APIs that own each value, which also normalizes the
+  // document written above — so a caller's "before" snapshot is already the
+  // loaded-and-rewritten shape and its diff measures execution alone.
+  for (const [ghIssue, treeId] of [
+    [slice.ghIssue, candidateTreeId],
+    [otherGhIssue, "d9".repeat(20)],
+  ] as const) {
+    recordExactStageCheckpoint(
+      { repoRoot: repo, prdSlug: slug, ghIssue },
+      {
+        version: 1,
+        completedStage: "deterministic-qa",
+        candidateTreeId: treeId,
+        nextPendingStage: "post-qa-deterministic",
+        round: 1,
+      },
+    );
+  }
+  saveContractFindingLineage(
+    { repoRoot: repo, runSlug: slug, ghIssue: slice.ghIssue },
+    recoveryLineageFixture("F-01"),
+  );
+  saveContractFindingLineage(
+    { repoRoot: repo, runSlug: slug, ghIssue: otherGhIssue },
+    recoveryLineageFixture("F-02"),
+  );
+
+  return {
+    repo,
+    slug,
+    runSlug: slug,
+    ghIssue: slice.ghIssue,
+    otherGhIssue,
+    sliceDir,
+    statePath,
+    attemptId,
+    candidateTreeId,
+    negotiationFiles: { ...RECOVERY_NEGOTIATION_BYTES },
+    preservedArtifacts: { ...RECOVERY_PRESERVED_ARTIFACTS },
+  };
 }
 
 /**
