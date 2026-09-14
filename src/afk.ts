@@ -24,6 +24,7 @@ import { runStatusWeb } from "./status-web.js";
 import { loadAfkManifest } from "./afk-manifest.js";
 import { installCancellationSignals } from "./cancellation.js";
 import { installCrashRecorder } from "./crash-records.js";
+import { acquireHostRunLeaseOrExit } from "./run-lease.js";
 import { runStopCli } from "./stop-command.js";
 import { runAdoptCli } from "./adopt-command.js";
 import { runEvalCli } from "./eval-command.js";
@@ -36,7 +37,7 @@ const MIGRATION_MODES: ReadonlyArray<MigrationValidation> = [
 
 function usage(): never {
   console.error(
-    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk adopt <prd-slug> <slice> --branch <branch> --reason <reason> [--adopter <name>] [--provider <name>]
+    `Usage: afk --prd-dir <path-to-prd-folder> [--dry-run] [--slices <01,02,...>] [--only-failed] [--allow-concurrent-run] [--max-contract-rounds <n>] [--migration-validation <skip|local-stack|linked>] [--command-timeout-ms <n>] [--heartbeat-interval-ms <n>] [--infrastructure-retries <n>] [--transient-retry-window-ms <n>] [--max-agent-duration-ms <n>] [--test-command <cmd>] [--min-free-disk-gb <n>] [--preflight-report-only] [--open-pr-on-override] [--guardian-round-cap <n>] [--record-prompts] [--force-restart <slice|ghIssue>[,...]] [--resume-stuck <slice|ghIssue>[,...]] [--preview-verify-command <cmd> --preview-apply-command <cmd> [--preview-lock-path <path>]]\n       afk status [--run <dir>] [--json]\n       afk status --web [--run <dir>] [--port <number>] [--no-open]\n       afk stop [<prd-slug>] [--run <dir>] [--wait-ms <n>]\n       afk clean-failed --prd-dir <path-to-prd-folder> [--dry-run]\n       afk adopt <prd-slug> <slice> --branch <branch> --reason <reason> [--adopter <name>] [--provider <name>]
        afk eval --pack <dir> [--max-calls <n>] [--out <dir>] [--dry-run]`,
   );
   process.exit(2);
@@ -112,6 +113,7 @@ async function main() {
   let migrationValidation: MigrationValidation | undefined;
   let selectedSliceNumbers: string[] | undefined;
   let onlyFailed = false;
+  let allowConcurrentRun = false;
   let maxContractRounds = DEFAULT_MAX_CONTRACT_ROUNDS;
 
   for (let i = 0; i < args.length; i++) {
@@ -121,6 +123,8 @@ async function main() {
       dryRun = true;
     } else if (args[i] === "--only-failed") {
       onlyFailed = true;
+    } else if (args[i] === "--allow-concurrent-run") {
+      allowConcurrentRun = true;
     } else if (args[i] === "--slices") {
       try {
         selectedSliceNumbers = parseSliceSelection(args[++i]);
@@ -269,6 +273,23 @@ async function main() {
     return;
   }
 
+  // One heavy AFK run per host (#275, ADR 0069): acquired after argument,
+  // PRD, and dry-run validation, before the pipeline creates run state,
+  // logs, branches, worktrees, agents or gates. Subcommands and dry runs
+  // never reach this line. A live owner refuses with the owner's identity
+  // and exits 2; a conclusively dead owner (PID gone, or reused by a
+  // different process) is recovered; anything ambiguous fails closed.
+  // `--allow-concurrent-run` proceeds with a warning instead, leaving the
+  // other owner's lease untouched. Release is registered on process exit
+  // inside, so every ordinary exit path frees it; the `finally` below
+  // frees it at pipeline wind-down on the paths that keep running.
+  const runLease = acquireHostRunLeaseOrExit({
+    provider: kiroProvider.name,
+    prdSlug,
+    prdDir,
+    allowConcurrentRun,
+  });
+
   // A stop signal fires an AbortController: in-flight agent invocations
   // are killed and unfinished slices are marked CANCELLED in run state.
   // A second signal exits hard. Which signals count — and why Windows
@@ -323,6 +344,8 @@ async function main() {
       process.exit(1);
     }
     throw err;
+  } finally {
+    runLease.release();
   }
 
   cancellation.dispose();
